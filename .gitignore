@@ -1,0 +1,9 @@
+.venv/
+.venv-tools/
+reports/
+conf/hops.yaml
+__pycache__/
+*.egg-info/
+migrations/
+.pytest_cache/
+tests/__pycache__/

@@ -1,0 +1,35 @@
+[project]
+name = "migkit"
+version = "0.1.0"
+description = "Personal database migration toolkit: setup, validate, repair, advise, watch"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+mysql = ["pymysql>=1.1"]
+mongo = ["pymongo>=4.6"]
+kafka = ["kafka-python>=2.0"]
+redis = ["redis>=5.0"]
+diff = ["reladiff"]
+dataframe = ["datacompy", "pandas"]
+pgschema = ["migra", "psycopg2-binary"]
+
+[project.scripts]
+migkit = "migkit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["migkit*"]
+
+[tool.setuptools.package-data]
+migkit = ["scripts/**/*"]
+
+[tool.pytest.ini_options]
+markers = ["docker: needs a docker daemon"]
