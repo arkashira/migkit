@@ -8,17 +8,20 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: install
         run: |
           python -m pip install -U pip
           pip install -e . faker pytest
-      - name: unit + fail-case tests (no docker)
-        run: pytest tests/test_unit.py tests/test_failcases.py -q -m "not docker"
+      - name: unit tests (no docker)
+        run: pytest tests/ -q -m "not docker"
 
   integration:
     runs-on: ubuntu-latest
@@ -28,10 +31,27 @@ jobs:
         with:
           python-version: "3.12"
       - name: install client tools
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
       - name: install
         run: |
           python -m pip install -U pip
           pip install -e ".[mysql,mongo]" faker pytest
       - name: full suite (docker available on ubuntu runners)
         run: pytest tests/ -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build + validate distribution
+        run: |
+          python -m pip install -U pip build twine
+          python -m build
+          twine check dist/*
+      - name: install the built wheel in a clean env
+        run: |
+          python -m venv /tmp/v && /tmp/v/bin/pip install dist/*.whl
+          /tmp/v/bin/migkit --help >/dev/null && echo "wheel installs and runs"

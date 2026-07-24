@@ -7,3 +7,6 @@ __pycache__/
 migrations/
 .pytest_cache/
 tests/__pycache__/
+dist/
+build/
+*.egg-info/
