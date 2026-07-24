@@ -330,6 +330,42 @@ class PostgresEngine(Engine):
         return [Result("autoinc", db, "diff", "; ".join(bad[:10]), "",
                        f"migkit sync {self.hop.name} --db {db} --kind sequences")]
 
+    def _data_fast_native(self, db, stream=None):
+        """Per-table checksum on both sides in parallel: commutative
+        sum-of-md5 as a Postgres parallel aggregate (no sort, no lock beyond
+        a plain SELECT). Emits the same OK/DIFF/ERROR lines the slice-mode
+        drilldown and counts merge consume."""
+        tables = [t for t in
+                  self._psql("src", db, self.USER_TABLES).splitlines() if t]
+        w = int(self.hop.options.get("checksum_workers", 8))
+        h = self._row_hash_expr()
+
+        def csum(side, t):
+            sch, tbl = t.split(".", 1)
+            return self._psql(side, db,
+                f"set max_parallel_workers_per_gather = {w};"
+                f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
+                f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t')
+
+        def one(t):
+            try:
+                a, b = csum("src", t), csum("dst", t)
+            except RuntimeError as e:
+                return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
+            if a == b:
+                return f"{t}: OK rows={a.split('|')[0]} checksum={a.split('|', 1)[1]}"
+            return f"{t}: DIFF src={a} dst={b}"
+
+        lines, rc = [], 0
+        with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
+            for line in pool.map(one, tables):
+                lines.append(line)
+                if stream:
+                    stream(line)
+                if ": OK" not in line:
+                    rc = 1
+        return rc, "\n".join(lines)
+
     @staticmethod
     def _parse_fast(out):
         import re as _re
@@ -380,7 +416,7 @@ class PostgresEngine(Engine):
                 for line in out.splitlines():
                     stream(line)
         else:
-            rc, out = self._script("check-data-fast.sh", db, stream=stream)
+            rc, out = self._data_fast_native(db, stream=stream)
         ev = self.hop.report_dir(db) / "data-evidence.txt"
         ev.write_text(out + "\n")
         pre = [self._counts_from_fast(db, out)] if with_counts else []
