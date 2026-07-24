@@ -158,6 +158,16 @@ class RedisEngine(Engine):
                           " copy them explicitly" if missing_big else ""))
         return res
 
+    def delta_verify(self, db, limit=20000, log=None):
+        # redis has no built-in change log to diff against; honest about it
+        # rather than faking a delta from a full scan
+        return [Result("delta", f"db{db}", "error",
+                       "redis has no native change log for O(changes) delta;"
+                       " enable keyspace notifications (config set"
+                       " notify-keyspace-events KEA) and consume __keyevent__,"
+                       " or use RIOT/redis-shake which stream changes."
+                       " Use check --deep for full-scan verification instead")]
+
     def watch_sample(self, db):
         return {"db": f"db{db}", "ts": time.time(),
                 "src_rows": self._client("src", db).dbsize(),

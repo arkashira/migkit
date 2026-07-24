@@ -350,6 +350,56 @@ class MSSQLEngine(Engine):
             "-- disable FK/triggers on target during load, then start the migration service",
         ]
 
+    def delta_verify(self, db, limit=20000, log=None):
+        """SQL Server Change Tracking (the native mechanism): CHANGETABLE
+        lists rows changed since a version; re-verify those tables and
+        advance the version only on a clean cycle. Requires CT enabled."""
+        import json
+        state = self.hop.report_dir(db) / "delta-ctver.json"
+        on = self._q("src", db, "select count(*) from"
+                     " sys.change_tracking_databases where database_id = db_id()")
+        if not on or on[0][0] != "1":
+            return [Result("delta", db, "error",
+                           "Change Tracking not enabled on source; run: alter"
+                           f" database [{db}] set change_tracking = on"
+                           " (change_retention = 2 days, auto_cleanup = on),"
+                           " then per table: alter table ... enable change_tracking")]
+        cur = self._q("src", db, "select change_tracking_current_version()")[0][0]
+        if not state.exists():
+            state.write_text(json.dumps({"ver": cur}))
+            return [Result("delta", db, "ok", f"baseline CT version {cur}")]
+        last = json.loads(state.read_text()).get("ver")
+        tabs = self._q("src", db,
+                       "select s.name+'.'+t.name from"
+                       " sys.change_tracking_tables ct"
+                       " join sys.tables t on t.object_id = ct.object_id"
+                       " join sys.schemas s on s.schema_id = t.schema_id")
+        res, clean, total = [], True, 0
+        for row in tabs:
+            tbl = row[0]
+            c = self._q("src", db,
+                        f"select count(*) from changetable(changes {tbl},"
+                        f" {last}) ct")
+            n = int(c[0][0]) if c and c[0][0].lstrip("-").isdigit() else 0
+            if n == 0:
+                continue
+            total += n
+            r = self._drilldown(db, tbl)
+            ok = r == (0, 0, 0)
+            clean = clean and ok
+            res.append(Result("delta", f"{db}.{tbl}", "ok" if ok else "diff",
+                              f"{n} rows changed since v{last}, table"
+                              f" {'verified equal' if ok else 'DIFFERS'}"))
+            if log:
+                log(f"{tbl}: {n} changed, {'ok' if ok else 'DIFF'}")
+        if clean:
+            state.write_text(json.dumps({"ver": cur}))
+        res.insert(0, Result("delta", db, "ok" if clean else "diff",
+                             f"{total} changed rows across {len(res)} tables"
+                             f" since v{last}, version"
+                             f" {'advanced' if clean else 'NOT advanced'}"))
+        return res
+
     def watch_sample(self, db):
         q = "select sum(p.rows) from sys.partitions p where p.index_id in (0,1)"
         return {"db": db, "ts": time.time(),

@@ -268,3 +268,18 @@ def test_atlas_authoritative_demotes_textual_diff():
     res2 = [Result("schema", "db", "diff", "x"),
             Result("schema", "db (atlas)", "ok", "clean")]
     assert eng2._atlas_authoritative(res2)[0].status == "diff"
+
+
+def test_delta_available_on_all_engines():
+    from migkit.engines.kafka import KafkaEngine
+    from migkit.engines.mssql import MSSQLEngine
+    from migkit.engines.redis import RedisEngine
+    for cls in (KafkaEngine, MSSQLEngine, RedisEngine):
+        assert hasattr(cls, "delta_verify"), cls
+
+
+def test_redis_delta_is_honest_about_no_changelog():
+    from migkit.engines.redis import RedisEngine
+    r = RedisEngine(_hop("redis")).delta_verify(0)
+    assert r[0].status == "error"
+    assert "no native change log" in r[0].detail

@@ -249,6 +249,60 @@ class KafkaEngine(Engine):
                     got += 1
         return f"{got}|{h.hexdigest()}"
 
+    def delta_verify(self, db, limit=20000, log=None):
+        """Offset-based delta: track each partition's end offset; the new
+        messages since the baseline are re-hashed on both sides (offsets
+        aren't preserved across clusters, so content, not offset numbers,
+        is the check). Baseline advances only on a clean cycle."""
+        import json
+
+        from kafka import TopicPartition
+        state = self.hop.report_dir(db) / "delta-offsets.json"
+
+        def ends(consumer):
+            out = {}
+            for t in self._topics(consumer):
+                for p in self._partitions(consumer, t):
+                    try:
+                        tp = TopicPartition(t, p)
+                        out[f"{t}/{p}"] = consumer.end_offsets([tp])[tp]
+                    except Exception:
+                        pass
+            return out
+
+        sc, dc = self._consumer("src"), self._consumer("dst")
+        cur = ends(sc)
+        if not state.exists():
+            state.write_text(json.dumps(cur))
+            return [Result("delta", "cluster", "ok",
+                           "baseline offsets recorded, changes tracked"
+                           " from here")]
+        prev = json.loads(state.read_text())
+        res, clean, total = [], True, 0
+        for key, s_end in cur.items():
+            n = s_end - prev.get(key, s_end)
+            if n <= 0:
+                continue
+            total += n
+            t, p = key.rsplit("/", 1)
+            tp = TopicPartition(t, int(p))
+            a = self._tail_hash(sc, tp, min(n, limit))
+            b = self._tail_hash(dc, tp, min(n, limit))
+            ok = a == b
+            clean = clean and ok
+            res.append(Result("delta", f"{t}[{p}]", "ok" if ok else "diff",
+                              f"{n} new messages, tail"
+                              f" {'matches' if ok else 'DIFFERS'}"))
+            if log:
+                log(f"{t}[{p}]: {n} new, {'ok' if ok else 'DIFF'}")
+        if clean:
+            state.write_text(json.dumps(cur))
+        res.insert(0, Result("delta", "cluster", "ok" if clean else "diff",
+                             f"{total} new messages across {len(res)}"
+                             f" partitions, offsets"
+                             f" {'advanced' if clean else 'NOT advanced'}"))
+        return res
+
     def watch_sample(self, db):
         from kafka import TopicPartition
         sc, dc = self._consumer("src"), self._consumer("dst")
