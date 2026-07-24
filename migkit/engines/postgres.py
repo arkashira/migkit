@@ -72,12 +72,21 @@ class PostgresEngine(Engine):
         super().__init__(hop)
         self._conf = None
 
+    def _d(self, side, db):
+        """Physical db name for a side: source as given, target through the
+        hop's db_map so a migration can land in a differently-named db
+        (identity when unmapped). Maintenance db 'postgres' never maps."""
+        if side == "dst" and db != "postgres":
+            return self.hop.target_db(db)
+        return db
+
     def _psql(self, side, db, sql):
         ep = self.hop.source if side == "src" else self.hop.target
         env = {"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
                "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO -c statement_timeout=0"}
         p = run(["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", db, "-X", "-At", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                 "-d", self._d(side, db), "-X", "-At", "-q", "-v",
+                 "ON_ERROR_STOP=1", "-c", sql],
                 env=env)
         return p.stdout.rstrip("\n")
 
@@ -110,7 +119,9 @@ class PostgresEngine(Engine):
                     "exclude_schema", "__*"),
                 "WORKERS": str(self.hop.options.get("checksum_workers", 8)),
                 "BIG_ROWS": str(self.hop.big_rows),
-                "SLICE": str(self.hop.slice)}
+                "SLICE": str(self.hop.slice),
+                "DB_MAP": " ".join(f"{k}:{v}"
+                                   for k, v in self.hop.db_map.items())}
 
     def _script(self, script, *args, stream=None):
         conf = self.checker_conf()
@@ -149,7 +160,8 @@ class PostgresEngine(Engine):
         if which("migra"):
             s, t = self.hop.source, self.hop.target
             surl = f"postgresql://{s.user}:{s.password}@{s.host}:{s.port}/{db}"
-            turl = f"postgresql://{t.user}:{t.password}@{t.host}:{t.port}/{db}"
+            turl = (f"postgresql://{t.user}:{t.password}"
+                    f"@{t.host}:{t.port}/{self._d('dst', db)}")
             p = subprocess.run(["migra", "--unsafe", turl, surl],
                                capture_output=True, text=True, env=tool_env())
             if p.stdout.strip():
@@ -176,7 +188,7 @@ class PostgresEngine(Engine):
         su = (f"postgres://{s.user}:{quote(s.password, safe='')}"
               f"@{s.host}:{s.port}/{db}?sslmode=prefer")
         tu = (f"postgres://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{db}?sslmode=prefer")
+              f"@{t.host}:{t.port}/{self._d('dst', db)}?sslmode=prefer")
         try:
             p = run(["atlas", "schema", "diff", "--from", tu, "--to", su,
                      "--exclude", "__*",
@@ -202,7 +214,8 @@ class PostgresEngine(Engine):
         out.parent.mkdir(parents=True, exist_ok=True)
         try:
             p = run(["liquibase", "diff",
-                     f"--url=jdbc:postgresql://{t.host}:{t.port}/{db}?sslmode=prefer",
+                     f"--url=jdbc:postgresql://{t.host}:{t.port}/"
+                     f"{self._d('dst', db)}?sslmode=prefer",
                      f"--username={t.user}", f"--password={t.password}",
                      f"--referenceUrl=jdbc:postgresql://{s.host}:{s.port}/{db}"
                      f"?sslmode=prefer",
@@ -757,7 +770,8 @@ class PostgresEngine(Engine):
         (state_dir / "dst-sequences.txt").write_text((seqs + "\n") if seqs else "")
         ep = self.hop.target
         p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", db, "--schema-only", "--no-owner", "--no-privileges"],
+                 "-d", self._d("dst", db), "--schema-only", "--no-owner",
+                 "--no-privileges"],
                 env={"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
         (state_dir / "dst-schema.sql").write_text(p.stdout)
 
@@ -1006,7 +1020,8 @@ class PostgresEngine(Engine):
                                      " -c extra_float_digits=3"})
         return subprocess.Popen(
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-             "-d", db, "-X", "-At", "-q", "-v", "ON_ERROR_STOP=1"],
+             "-d", self._d(side, db), "-X", "-At", "-q", "-v",
+             "ON_ERROR_STOP=1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=env), sql
 
@@ -1394,7 +1409,8 @@ class PostgresEngine(Engine):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env_s)
         cmds = ["-c", pre_sql] if pre_sql else []
         inp = subprocess.Popen(
-            ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user, "-d", db,
+            ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
+             "-d", self._d("dst", db),
              "-X", "-q", "-v", "ON_ERROR_STOP=1", "-1", *cmds,
              "-c", f"\\copy {qt} from stdin"],
             stdin=out.stdout, stdout=subprocess.PIPE,
@@ -1461,7 +1477,7 @@ class PostgresEngine(Engine):
         su = (f"postgres://{s.user}:{quote(s.password, safe='')}"
               f"@{s.host}:{s.port}/{db}?sslmode=prefer")
         tu = (f"postgres://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{db}?sslmode=prefer")
+              f"@{t.host}:{t.port}/{self._d('dst', db)}?sslmode=prefer")
 
         def diff(a, b):
             p = run(["atlas", "schema", "diff", "--from", a, "--to", b,
@@ -1483,7 +1499,7 @@ class PostgresEngine(Engine):
         env = tool_env({"PGPASSWORD": ep.password})
         p = subprocess.run(
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-             "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1",
+             "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",
              "-c", f"\\copy (select * from \"{sch}\".\"{tbl}\""
                    f" limit {limit}) to stdout (format csv, header)"],
             capture_output=True, text=True, env=env)

@@ -35,11 +35,19 @@ class Hop:
     slice: int = 1_000_000
     workers: int = 4
     options: dict = field(default_factory=dict)
+    db_map: dict = field(default_factory=dict)
 
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def target_db(self, db):
+        """Target database name for a source db. Migrations often land in a
+        differently-named db (e.g. cart_uat -> cart), so every dst-side
+        connection resolves through this map (identity when unmapped).
+        Local report paths stay keyed by the source name."""
+        return self.db_map.get(db, db)
 
 
 DEFAULT_PORTS = {
@@ -84,6 +92,7 @@ def load_hops(path=None):
             slice=int(raw.get("slice", 1_000_000)),
             workers=int(raw.get("workers", 4)),
             options=raw.get("options") or {},
+            db_map=raw.get("db_map") or {},
         )
     return hops
 

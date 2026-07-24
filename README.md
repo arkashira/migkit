@@ -140,7 +140,8 @@ hops:
     service: native             # playbook: aws-dms | tencent-dts | gcp-dms | native
     source: { host: src.example.com, port: 5432, user: app, password: "secret" }
     target: { host: 10.0.0.10,       port: 5432, user: app, password: "secret" }
-    databases: [appdb, orders]  # empty = discover from source
+    databases: [appdb, orders]  # source db names, empty = discover from source
+    db_map: { appdb: app_prod } # optional src->dst rename; unmapped = same name
     workers: 4
 ```
 

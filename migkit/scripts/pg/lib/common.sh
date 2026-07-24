@@ -20,8 +20,20 @@ load_hop() {
   mkdir -p "$RPT"
 }
 
+# resolve the physical db name for a side: target goes through DB_MAP
+# ("src1:dst1 src2:dst2") so a migration can land in a differently-named db
+map_db() {
+  local side="$1" db="$2" pair
+  if [ "$side" = dst ] && [ -n "${DB_MAP:-}" ]; then
+    for pair in $DB_MAP; do
+      case "$pair" in "$db:"*) echo "${pair#*:}"; return ;; esac
+    done
+  fi
+  echo "$db"
+}
+
 pg() {
-  local side="$1" db="$2"; shift 2
+  local side="$1" db; db="$(map_db "$1" "$2")"; shift 2
   local h p u w
   case "$side" in
     src) h="$SRC_HOST" p="$SRC_PORT" u="$SRC_USER" w="$SRC_PASS" ;;
@@ -32,7 +44,7 @@ pg() {
 }
 
 dump_schema() {
-  local side="$1" db="$2"
+  local side="$1" db; db="$(map_db "$1" "$2")"
   local h p u w
   case "$side" in
     src) h="$SRC_HOST" p="$SRC_PORT" u="$SRC_USER" w="$SRC_PASS" ;;

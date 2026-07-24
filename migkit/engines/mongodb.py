@@ -26,6 +26,12 @@ class MongoEngine(Engine):
             uri += "?" + extra
         return MongoClient(uri, serverSelectionTimeoutMS=15000)
 
+    def _d(self, side, db):
+        """Physical db name: source as given, target through the hop's
+        db_map (identity when unmapped) so a migration can land in a
+        differently-named database."""
+        return self.hop.target_db(db) if side == "dst" else db
+
     def databases(self):
         if self.hop.databases:
             return list(self.hop.databases)
@@ -33,7 +39,7 @@ class MongoEngine(Engine):
         return sorted(d for d in c.list_database_names() if d not in SKIP_DBS)
 
     def _shape(self, side, db):
-        d = self._client(side)[db]
+        d = self._client(side)[self._d(side, db)]
         shape = {}
         for name in sorted(d.list_collection_names()):
             idx = {}
@@ -116,7 +122,7 @@ class MongoEngine(Engine):
         return res
 
     def check_counts(self, db):
-        s, t = self._client("src")[db], self._client("dst")[db]
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
         bad = []
         names = sorted(set(s.list_collection_names()) & set(t.list_collection_names()))
         total_a = total_b = 0
@@ -134,7 +140,7 @@ class MongoEngine(Engine):
                        f" {total_a:,}=={total_b:,}")]
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
-        s, t = self._client("src")[db], self._client("dst")[db]
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
         try:
             a = s.command("dbHash")["collections"]
             b = t.command("dbHash")["collections"]
@@ -184,7 +190,7 @@ class MongoEngine(Engine):
     def _drilldown(self, db, name):
         from bson.json_util import dumps
         scope = f"{db}.{name}"
-        s, t = self._client("src")[db][name], self._client("dst")[db][name]
+        s, t = self._client("src")[db][name], self._client("dst")[self._d("dst", db)][name]
         if s.estimated_document_count() > DRILL_MAX_DOCS:
             return Result("data", scope, "diff",
                           "dbHash differs, too large for id drilldown", "",
@@ -234,7 +240,7 @@ class MongoEngine(Engine):
         (state_dir / "dst-shape.txt").write_text(repr(self._shape("dst", db)))
 
     def check_deep(self, db):
-        s, t = self._client("src")[db], self._client("dst")[db]
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
         names = sorted(set(s.list_collection_names())
                        & set(t.list_collection_names()))
 
@@ -274,7 +280,7 @@ class MongoEngine(Engine):
         from bson.json_util import dumps, loads
         state = self.hop.report_dir(db) / "delta-token.json"
         src = self._client("src")[db]
-        dst = self._client("dst")[db]
+        dst = self._client("dst")[self._d("dst", db)]
         if not state.exists():
             with src.watch() as stream:
                 stream.try_next()
@@ -365,7 +371,7 @@ class MongoEngine(Engine):
         name = action.statements[0].split()[3]
         d = self.hop.report_dir(db)
         s = self._client("src")[db][name]
-        t = self._client("dst")[db][name]
+        t = self._client("dst")[self._d("dst", db)][name]
         undo = d / "undo"
         undo.mkdir(exist_ok=True)
 
@@ -430,7 +436,7 @@ class MongoEngine(Engine):
 
         from bson.json_util import dumps, loads
         src = self._client("src")[db]
-        dst = self._client("dst")[db]
+        dst = self._client("dst")[self._d("dst", db)]
         resume = None
         if token_path.exists():
             resume = loads(token_path.read_text())
@@ -461,6 +467,6 @@ class MongoEngine(Engine):
 
     def watch_sample(self, db):
         a = self._client("src")[db].command("dbStats")
-        b = self._client("dst")[db].command("dbStats")
+        b = self._client("dst")[self._d("dst", db)].command("dbStats")
         return {"db": db, "ts": time.time(),
                 "src_rows": a.get("objects", 0), "dst_rows": b.get("objects", 0)}

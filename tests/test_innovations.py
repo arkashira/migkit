@@ -125,3 +125,48 @@ def test_standby_source_is_guarded(monkeypatch):
     r = eng.delta_verify("db")
     assert r[0].status == "error"
     assert "read replica" in r[0].detail
+
+
+def test_charset_noise_normalized():
+    """CHARACTER SET x COLLATE y and bare COLLATE y are identical; the
+    normalizer must collapse them so DTS's explicit form isn't a diff."""
+    from migkit.engines.mysql import MySQLEngine
+    src = "`order_id` varchar(20) COLLATE utf8mb4_general_ci NOT NULL"
+    dst = ("`order_id` varchar(20) CHARACTER SET utf8mb4"
+           " COLLATE utf8mb4_general_ci NOT NULL")
+    assert MySQLEngine._canon_ddl(src) == MySQLEngine._canon_ddl(dst)
+    # a REAL collation difference must still show
+    real = "`x` text COLLATE utf8mb4_unicode_ci"
+    assert MySQLEngine._canon_ddl(real) != MySQLEngine._canon_ddl(src)
+
+
+def test_db_map_resolves_target_name():
+    from migkit.config import Endpoint, Hop
+    hop = Hop(name="m", engine="postgres",
+              source=Endpoint(host="s", user="u", password="p"),
+              target=Endpoint(host="t", user="u", password="p"),
+              db_map={"cart_uat": "cart"})
+    assert hop.target_db("cart_uat") == "cart"     # mapped
+    assert hop.target_db("order_uat") == "order_uat"  # identity when unmapped
+
+
+def test_engine_side_resolution_maps_only_dst():
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.mongodb import MongoEngine
+    from migkit.engines.mysql import MySQLEngine
+    from migkit.engines.postgres import PostgresEngine
+
+    def hop(engine):
+        return Hop(name="m", engine=engine,
+                   source=Endpoint(host="s", user="u", password="p"),
+                   target=Endpoint(host="t", user="u", password="p"),
+                   db_map={"cart_uat": "cart"})
+    for cls, eng_name in ((PostgresEngine, "postgres"),
+                          (MySQLEngine, "mysql"),
+                          (MongoEngine, "mongodb")):
+        eng = cls(hop(eng_name))
+        assert eng._d("src", "cart_uat") == "cart_uat"   # source never maps
+        assert eng._d("dst", "cart_uat") == "cart"       # target maps
+        assert eng._d("dst", "other") == "other"         # unmapped identity
+    # pg must never remap the maintenance db
+    assert PostgresEngine(hop("postgres"))._d("dst", "postgres") == "postgres"

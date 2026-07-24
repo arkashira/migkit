@@ -12,7 +12,10 @@ hops:
       port: 5432
       user: root
       password: secret
-    databases: []               # empty = discover from source
+    databases: []               # source db names, empty = discover from source
+    db_map: {}                  # optional src->dst rename, e.g. {cart_uat: cart}
+                                #   config + reports stay keyed by the source
+                                #   name; only the target connection is remapped
     workers: 4
     big_rows: 5000000
     slice: 1000000

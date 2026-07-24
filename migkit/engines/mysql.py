@@ -38,6 +38,25 @@ class MySQLEngine(Engine):
         finally:
             conn.close()
 
+    def _d(self, side, db):
+        """Resolve the physical db name for a side. Source keeps the given
+        name; target goes through the hop's db_map so a migration can land
+        in a differently-named database (identity when unmapped)."""
+        return self.hop.target_db(db) if side == "dst" else db
+
+    @staticmethod
+    def _canon_ddl(text):
+        """Normalize a mysqldump so cosmetic mover artifacts don't read as
+        schema drift: strip per-table AUTO_INCREMENT counters and DEFINER
+        clauses, and collapse "CHARACTER SET x COLLATE y" to the bare
+        "COLLATE y" (a collation already implies its charset, so the two
+        forms are identical - DTS emits one, the source the other). Real
+        charset/collation differences still surface via the COLLATE name."""
+        text = re.sub(r" AUTO_INCREMENT=\d+", "", text)
+        text = re.sub(r"DEFINER=`[^`]*`@`[^`]*`", "", text)
+        text = re.sub(r"CHARACTER SET \w+ COLLATE", "COLLATE", text)
+        return text
+
     def databases(self):
         if self.hop.databases:
             return list(self.hop.databases)
@@ -49,15 +68,15 @@ class MySQLEngine(Engine):
         ep = self.hop.source if side == "src" else self.hop.target
         if not which("mysqldump"):
             raise SystemExit("mysqldump not found, run bootstrap.sh")
+        pdb = self._d(side, db)
         p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
                  f"-p{ep.password}", "--no-data", "--routines", "--triggers",
                  "--events", "--skip-comments", "--skip-dump-date",
                  "--column-statistics=0",
-                 f"--ignore-table={db}.migkit_changelog", db], check=False)
+                 f"--ignore-table={pdb}.migkit_changelog", pdb], check=False)
         if p.returncode != 0:
             raise RuntimeError(p.stderr.strip())
-        text = re.sub(r" AUTO_INCREMENT=\d+", "", p.stdout)
-        text = re.sub(r"DEFINER=`[^`]*`@`[^`]*`", "", text)
+        text = self._canon_ddl(p.stdout)
         lines = [l for l in text.splitlines()
                  if not l.startswith("--")
                  and "GTID_PURGED" not in l
@@ -113,7 +132,7 @@ class MySQLEngine(Engine):
         inv = {}
         for typ, sql in queries.items():
             a = {r[0] for r in self._q("src", sql, (db,))}
-            b = {r[0] for r in self._q("dst", sql, (db,))}
+            b = {r[0] for r in self._q("dst", sql, (self._d("dst", db),))}
             inv[typ] = {"src": len(a), "dst": len(b),
                         "missing": sorted(a - b)[:50],
                         "extra": sorted(b - a)[:50]}
@@ -140,7 +159,7 @@ class MySQLEngine(Engine):
     def snapshot_state(self, db, state_dir):
         q = ("select table_name, auto_increment from information_schema.tables"
              " where table_schema=%s and auto_increment is not null")
-        rows = self._q("dst", q, (db,), fresh=True)
+        rows = self._q("dst", q, (self._d("dst", db),), fresh=True)
         (state_dir / "dst-autoinc.txt").write_text(
             "".join(f"{t}|{v}\n" for t, v in sorted(rows)))
         (state_dir / "dst-schema.sql").write_text(self._dump_schema("dst", db))
@@ -151,7 +170,7 @@ class MySQLEngine(Engine):
         su = (f"mysql://{s.user}:{quote(s.password, safe='')}"
               f"@{s.host}:{s.port}/{db}")
         tu = (f"mysql://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{db}")
+              f"@{t.host}:{t.port}/{self._d('dst', db)}")
         try:
             p = run(["atlas", "schema", "diff", "--from", tu, "--to", su,
                      "--exclude", "migkit_changelog"],
@@ -173,7 +192,7 @@ class MySQLEngine(Engine):
         rows = self._q(side, "select table_name from information_schema.tables"
                              " where table_schema=%s and table_type='BASE TABLE'"
                              " and table_name not like 'migkit%%'"
-                             " order by 1", (db,))
+                             " order by 1", (self._d(side, db),))
         return [r[0] for r in rows]
 
     def _pk_cols(self, db, t):
@@ -208,7 +227,8 @@ class MySQLEngine(Engine):
         total_a = total_b = 0
 
         def cnt(side, t):
-            return self._q(side, f"select count(*) from `{db}`.`{t}`")[0][0]
+            return self._q(side,
+                           f"select count(*) from `{self._d(side, db)}`.`{t}`")[0][0]
 
         common = sorted(st & dt)
         with ThreadPoolExecutor(max_workers=max(2, self.hop.workers)) as pool:
@@ -230,7 +250,7 @@ class MySQLEngine(Engine):
         q = ("select table_name, auto_increment from information_schema.tables"
              " where table_schema=%s and auto_increment is not null")
         src = dict(self._q("src", q, (db,), fresh=True))
-        dst = dict(self._q("dst", q, (db,), fresh=True))
+        dst = dict(self._q("dst", q, (self._d("dst", db),), fresh=True))
         bad = [f"{t} src={v} dst={dst.get(t)}" for t, v in sorted(src.items())
                if dst.get(t) != v]
         if bad:
@@ -274,14 +294,14 @@ class MySQLEngine(Engine):
     def _checksum(self, side, db, t, expr, where=""):
         q = (f"select count(*), coalesce(bit_xor(crc32({expr})), 0),"
              f" coalesce(bit_xor(conv(substring(md5({expr}), 1, 8), 16, 10)), 0)"
-             f" from `{db}`.`{t}` {where}")
+             f" from `{self._d(side, db)}`.`{t}` {where}")
         return tuple(self._q(side, q)[0])
 
     def _reladiff_url(self, side, db):
         from urllib.parse import quote
         ep = self.hop.source if side == "src" else self.hop.target
         return (f"mysql://{ep.user}:{quote(ep.password, safe='')}"
-                f"@{ep.host}:{ep.port}/{db}")
+                f"@{ep.host}:{ep.port}/{self._d(side, db)}")
 
     def _reladiff_table(self, db, t, pks):
         cmd = ["reladiff", self._reladiff_url("src", db), t,
@@ -366,9 +386,11 @@ class MySQLEngine(Engine):
             f"cast(`{c}` as char)" for c in pks) + ")"
         src, dst = {}, {}
         for w in ranges:
-            q = f"select {pkexpr}, md5({expr}) from `{db}`.`{t}` {w}"
-            src.update(dict(self._q("src", q)))
-            dst.update(dict(self._q("dst", q)))
+            src.update(dict(self._q("src",
+                f"select {pkexpr}, md5({expr}) from `{db}`.`{t}` {w}")))
+            dst.update(dict(self._q("dst",
+                f"select {pkexpr}, md5({expr})"
+                f" from `{self._d('dst', db)}`.`{t}` {w}")))
         missing = sorted(k for k in src if k not in dst)
         extra = sorted(k for k in dst if k not in src)
         changed = sorted(k for k in src if k in dst and src[k] != dst[k])
@@ -408,7 +430,8 @@ class MySQLEngine(Engine):
             for c in cols)
         try:
             a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]
-            b = self._q("dst", f"select {expr} from `{db}`.`{t}`")[0]
+            b = self._q("dst",
+                        f"select {expr} from `{self._d('dst', db)}`.`{t}`")[0]
         except Exception:
             return []
         diff = [c for c, x, y in zip(cols, a, b) if x != y]
@@ -443,7 +466,7 @@ class MySQLEngine(Engine):
                     where = tup + " in (" + ", ".join([one] * len(chunk)) + ")"
                     args = [x for k in chunk for x in k.split("\t")]
                 q = (f"select {pkexpr}, md5({expr})"
-                     f" from `{db}`.`{t}` where {where}")
+                     f" from `{self._d(side, db)}`.`{t}` where {where}")
                 out.update({r[0]: r[1] for r in self._q(side, q, args)})
             return out
         src, dst = fetch("src"), fetch("dst")
@@ -577,6 +600,7 @@ class MySQLEngine(Engine):
 
     def check_deep(self, db):
         res = []
+        ddb = self._d("dst", db)
 
         # loads run with foreign_key_checks=0 (ours included), so orphans
         # are possible on target even though mysql normally enforces fks
@@ -586,7 +610,7 @@ class MySQLEngine(Engine):
                        " from information_schema.key_column_usage"
                        " where table_schema=%s"
                        " and referenced_table_name is not null"
-                       " order by constraint_name, ordinal_position", (db,))
+                       " order by constraint_name, ordinal_position", (ddb,))
         fks = {}
         for con, t, c, rt, rc in rows:
             fk = fks.setdefault((con, t, rt), ([], []))
@@ -597,9 +621,9 @@ class MySQLEngine(Engine):
             nn = " and ".join(f"c.`{c}` is not null" for c in cols)
             join = " and ".join(f"p.`{r}` = c.`{c}`"
                                 for c, r in zip(cols, rcols))
-            n = self._q("dst", f"select count(*) from `{db}`.`{t}` c"
+            n = self._q("dst", f"select count(*) from `{ddb}`.`{t}` c"
                                f" where {nn} and not exists"
-                               f" (select 1 from `{db}`.`{rt}` p"
+                               f" (select 1 from `{ddb}`.`{rt}` p"
                                f" where {join})")[0][0]
             if n:
                 orphans.append(f"{t}.{con}: {n} orphan rows")
@@ -616,7 +640,7 @@ class MySQLEngine(Engine):
                 " from information_schema.columns where table_schema=%s"
                 " and table_name not like 'migkit%%' order by 1")
         sc = {r[0]: r[1:] for r in self._q("src", colq, (db,))}
-        dc = {r[0]: r[1:] for r in self._q("dst", colq, (db,))}
+        dc = {r[0]: r[1:] for r in self._q("dst", colq, (ddb,))}
         drift = [f"{k}: src={sc[k]} dst={dc[k]}" for k in sorted(sc)
                  if k in dc and sc[k] != dc[k]]
         if drift:
@@ -649,15 +673,16 @@ class MySQLEngine(Engine):
                " and k2.constraint_name='PRIMARY')"
                " order by 1")
         spk = self._q("src", pkq, (db,))
-        dpk = {r[0] for r in self._q("dst", pkq, (db,))}
+        dpk = {r[0] for r in self._q("dst", pkq, (ddb,))}
         both = [(t, c) for t, c in spk if t in dpk]
 
         def maxes(side):
             out = {}
+            sdb = self._d(side, db)
             for i in range(0, len(both), 200):
                 q = " union all ".join(
                     f"select '{t}', coalesce(max(`{c}`), 0)"
-                    f" from `{db}`.`{t}`" for t, c in both[i:i + 200])
+                    f" from `{sdb}`.`{t}`" for t, c in both[i:i + 200])
                 out.update({r[0]: int(r[1]) for r in self._q(side, q)})
             return out
 
@@ -689,12 +714,13 @@ class MySQLEngine(Engine):
         if kind in ("sequences", "all"):
             q = ("select table_name, auto_increment from information_schema.tables"
                  " where table_schema=%s and auto_increment is not null")
+            ddb = self._d("dst", db)
             src = dict(self._q("src", q, (db,), fresh=True))
-            dst = dict(self._q("dst", q, (db,), fresh=True))
-            stmts = [f"alter table `{db}`.`{t}` auto_increment = {v};"
+            dst = dict(self._q("dst", q, (ddb,), fresh=True))
+            stmts = [f"alter table `{ddb}`.`{t}` auto_increment = {v};"
                      f"  -- dst now {dst.get(t, 'MISSING')}"
                      for t, v in sorted(src.items()) if dst.get(t) != v]
-            undo = [f"alter table `{db}`.`{t}` auto_increment = {dst[t]};"
+            undo = [f"alter table `{ddb}`.`{t}` auto_increment = {dst[t]};"
                     for t in sorted(src) if t in dst and dst.get(t) != src[t]]
             same = sum(1 for t, v in src.items() if dst.get(t) == v)
             if stmts:
@@ -722,7 +748,8 @@ class MySQLEngine(Engine):
                              f"h={s.host},P={s.port},u={s.user},"
                              f"p={s.password},D={db},t={t}",
                              f"h={tg.host},P={tg.port},u={tg.user},"
-                             f"p={tg.password}"], check=False, timeout=300)
+                             f"p={tg.password},D={self._d('dst', db)}"],
+                            check=False, timeout=300)
                     sql = [l for l in p.stdout.splitlines()
                            if l and not l.startswith("#")]
                     if sql:
@@ -751,6 +778,7 @@ class MySQLEngine(Engine):
 
     def _apply_rows(self, db, t, undo_dir=None):
         d = self.hop.report_dir(db)
+        ddb = self._d("dst", db)
         pks = self._pk_cols(db, t)
         cols = self._cols(db, t)
 
@@ -778,7 +806,7 @@ class MySQLEngine(Engine):
             with dconn.cursor() as cur:
                 cur.execute("set foreign_key_checks = 0")
                 for pk in touched:
-                    cur.execute(f"select {collist} from `{db}`.`{t}`"
+                    cur.execute(f"select {collist} from `{ddb}`.`{t}`"
                                 f" where {cond}", pk)
                     got = cur.fetchall()
                     entries.append({"pk": pk, "cols": cols,
@@ -796,7 +824,7 @@ class MySQLEngine(Engine):
                         cur.execute(stmt)
                 else:
                     for pk in to_delete:
-                        cur.execute(f"delete from `{db}`.`{t}`"
+                        cur.execute(f"delete from `{ddb}`.`{t}`"
                                     f" where {cond}", pk)
                     with sconn.cursor() as scur:
                         for pk in to_copy:
@@ -805,7 +833,7 @@ class MySQLEngine(Engine):
                             rows = scur.fetchall()
                             if rows:
                                 cur.executemany(
-                                    f"insert into `{db}`.`{t}` ({collist})"
+                                    f"insert into `{ddb}`.`{t}` ({collist})"
                                     f" values ({ph})", rows)
             dconn.commit()
         finally:
@@ -825,7 +853,8 @@ class MySQLEngine(Engine):
                  "--where", f"`{pks[0]}` in ({vals})",
                  f"h={s.host},P={s.port},u={s.user},p={s.password},"
                  f"D={db},t={t}",
-                 f"h={tg.host},P={tg.port},u={tg.user},p={tg.password}"],
+                 f"h={tg.host},P={tg.port},u={tg.user},p={tg.password},"
+                 f"D={self._d('dst', db)}"],
                 check=False, timeout=600)
         if p.returncode not in (0, 2):
             return None
@@ -841,6 +870,7 @@ class MySQLEngine(Engine):
         if not files:
             return 0
         n = 0
+        ddb = self._d("dst", db)
         dconn = self._conn("dst")
         try:
             with dconn.cursor() as cur:
@@ -853,13 +883,13 @@ class MySQLEngine(Engine):
                         cols = e["cols"]
                         cond = " and ".join(
                             f"cast(`{c}` as char) = %s" for c in pks)
-                        cur.execute(f"delete from `{db}`.`{t}` where {cond}",
+                        cur.execute(f"delete from `{ddb}`.`{t}` where {cond}",
                                     e["pk"])
                         if e["old"]:
                             collist = ", ".join(f"`{c}`" for c in cols)
                             ph = ", ".join(["%s"] * len(cols))
                             cur.executemany(
-                                f"insert into `{db}`.`{t}` ({collist})"
+                                f"insert into `{ddb}`.`{t}` ({collist})"
                                 f" values ({ph})", e["old"])
                         n += 1
             dconn.commit()
@@ -920,7 +950,7 @@ class MySQLEngine(Engine):
             cd = self._q("dst", "select default_character_set_name,"
                          " default_collation_name from"
                          " information_schema.schemata"
-                         " where schema_name = %s", (db,))
+                         " where schema_name = %s", (self._d("dst", db),))
             if not cd:
                 add("warn", db, "database exists on target", "missing")
             else:
@@ -958,6 +988,7 @@ class MySQLEngine(Engine):
     def move_table(self, db, sch, tbl, chunk, ck, log):
         t = tbl if tbl else sch
         key = f"{db}.{t}"
+        ddb = self._d("dst", db)
         st = ck.setdefault(key, {})
         if st.get("done"):
             log(f"{key}: done earlier, skip")
@@ -980,14 +1011,14 @@ class MySQLEngine(Engine):
                 dcur.execute("set foreign_key_checks = 0")
                 if not intpk:
                     log(f"{key}: no single int pk, single-shot copy")
-                    dcur.execute(f"truncate `{db}`.`{t}`")
+                    dcur.execute(f"truncate `{ddb}`.`{t}`")
                     scur.execute(f"select {collist} from `{db}`.`{t}`")
                     while True:
                         rows = scur.fetchmany(5000)
                         if not rows:
                             break
                         dcur.executemany(
-                            f"insert into `{db}`.`{t}` ({collist})"
+                            f"insert into `{ddb}`.`{t}` ({collist})"
                             f" values ({ph})", rows)
                     dconn.commit()
                     st["done"] = True
@@ -1000,7 +1031,7 @@ class MySQLEngine(Engine):
                 last = st.get("last", lo - 1)
                 while last < hi:
                     nxt = min(last + chunk, hi)
-                    dcur.execute(f"delete from `{db}`.`{t}`"
+                    dcur.execute(f"delete from `{ddb}`.`{t}`"
                                  f" where `{intpk}` > %s and `{intpk}` <= %s",
                                  (last, nxt))
                     scur.execute(f"select {collist} from `{db}`.`{t}`"
@@ -1011,7 +1042,7 @@ class MySQLEngine(Engine):
                         if not rows:
                             break
                         dcur.executemany(
-                            f"insert into `{db}`.`{t}` ({collist})"
+                            f"insert into `{ddb}`.`{t}` ({collist})"
                             f" values ({ph})", rows)
                     dconn.commit()
                     last = nxt
@@ -1081,7 +1112,7 @@ class MySQLEngine(Engine):
         su = (f"mysql://{s.user}:{quote(s.password, safe='')}"
               f"@{s.host}:{s.port}/{db}")
         tu = (f"mysql://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{db}")
+              f"@{t.host}:{t.port}/{self._d('dst', db)}")
 
         def diff(a, b):
             p = run(["atlas", "schema", "diff", "--from", a, "--to", b,
@@ -1097,7 +1128,8 @@ class MySQLEngine(Engine):
         import pandas as pd
         t = table.split(".", 1)[-1]
         cols = self._cols(db, t)
-        rows = self._q(side, f"select * from `{db}`.`{t}` limit {limit}")
+        rows = self._q(side,
+                       f"select * from `{self._d(side, db)}`.`{t}` limit {limit}")
         return pd.DataFrame(rows, columns=cols)
 
     def watch_sample(self, db):
@@ -1106,4 +1138,4 @@ class MySQLEngine(Engine):
              " where table_schema=%s")
         return {"db": db, "ts": time.time(),
                 "src_rows": int(self._q("src", q, (db,))[0][0]),
-                "dst_rows": int(self._q("dst", q, (db,))[0][0])}
+                "dst_rows": int(self._q("dst", q, (self._d("dst", db),))[0][0])}

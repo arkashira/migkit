@@ -2,6 +2,27 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.3.3] — 2026-07-24
+
+Different-named databases, and no more charset noise.
+
+### Added — db name mapping
+- `db_map: {src_db: dst_db}` per hop: a migration can now land in a
+  differently-named target database. Config and report paths stay keyed by
+  the source name; only the target-side connection is remapped, threaded
+  through every engine (postgres incl. the vendored pg shell via a `DB_MAP`
+  env + `map_db`, mysql, mongodb). Identity when unmapped, so existing
+  same-name hops are unchanged. Proven E2E: source `appsrc` vs target
+  `appdst` compare, diff, and repair correctly across the map.
+
+### Fixed — schema false diffs
+- mysql schema check no longer flags `CHARACTER SET x COLLATE y` vs the bare
+  `COLLATE y` as a difference. A collation already implies its charset, so
+  the two forms are identical — DTS emits one, the source the other. The
+  dump is canonicalized (`_canon_ddl`) before diffing; real charset/collation
+  changes still surface via the COLLATE name. bff/product/product-adapter go
+  from DIFF to OK; genuine `SQL SECURITY INVOKER`/missing-event diffs remain.
+
 ## [0.3.2] — 2026-07-24
 
 Zero footprint on the destination.
