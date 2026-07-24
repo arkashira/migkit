@@ -513,8 +513,7 @@ def _repair_one(hop, eng, db, kind, do_apply):
 
 
 def _sync_go(hop_name, db, tag):
-    import shutil
-    from pathlib import Path
+    from .state import get_store
 
     hop = get_hop(hop_name)
     _require_configured(hop)
@@ -522,15 +521,13 @@ def _sync_go(hop_name, db, tag):
     if not hasattr(eng, "snapshot_state"):
         raise SystemExit(f"--go not available for {hop.engine} yet,"
                          " use migkit sync --apply")
+    store = get_store(hop)
     dbs = [db] if db else eng.databases()
-    ts = time.strftime("%Y%m%d-%H%M%S") + (f"-{tag}" if tag else "")
-    backup_root = Path.home() / ".migkit-state" / hop.name
     for d in dbs:
         console.print(f"[bold]{d}[/bold]")
-        state = hop.report_dir(d) / "state" / ts
-        state.mkdir(parents=True, exist_ok=True)
-        eng.snapshot_state(d, state)
-        journal = state / "journal.jsonl"
+        point = store.new_point(d, tag)
+        eng.snapshot_state(d, point.dir)
+        journal = point.path("journal.jsonl")
 
         def log(entry):
             with journal.open("a") as f:
@@ -542,7 +539,7 @@ def _sync_go(hop_name, db, tag):
         console.print(f"  autoinc: {r.status}")
         if r.status == "diff":
             for a in eng.repair_plan(d, "sequences"):
-                (state / "undo-sequences.sql").write_text(
+                point.path("undo-sequences.sql").write_text(
                     "\n".join(a.undo) + "\n")
                 lk = _lock(hop)
                 try:
@@ -550,7 +547,7 @@ def _sync_go(hop_name, db, tag):
                 finally:
                     lk.unlink()
                 _changelog(hop, {"op": "sync", "db": d,
-                                 "kind": "sequences", "state": ts})
+                                 "kind": "sequences", "state": point.ts})
                 again = eng.check_autoinc(d)[0].status
                 log({"event": "repair-sequences", "n": len(a.statements),
                      "recheck": again})
@@ -567,15 +564,16 @@ def _sync_go(hop_name, db, tag):
                 finally:
                     lk.unlink()
                 _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
-                                 "state": ts, "note": a.note})
+                                 "state": point.ts, "note": a.note})
                 log({"event": "repair-rows", "note": a.note})
             again = eng.check_data(d)[0]
             console.print(f"  data re-check: {again.status} {again.detail}")
             log({"event": "recheck-data", "status": again.status})
-        backup_root.mkdir(parents=True, exist_ok=True)
-        shutil.make_archive(str(backup_root / f"{d}-{ts}"), "gztar", state)
-    console.print(f"\nstate: reports/{hop_name}/<db>/state/{ts}"
-                  f" + backup {backup_root}")
+        point.set_meta(op="sync", db=d)
+        ts = point.commit(time.strftime("%F %T"))
+        console.print(f"  state saved: {store.kind}:{ts}")
+    console.print(f"\nstate backend: {store.kind}"
+                  " (migkit history / rollback to use it)")
 
 
 @main.command()
@@ -1109,28 +1107,34 @@ def history(hop_name, db, show_ts):
     """Audit trail: saved rollback states and every write migkit made, read
     from the local changelog and state journals. migkit writes no bookkeeping
     into the destination, so the audit is local-only."""
+    from .state import get_store
     hop = get_hop(hop_name)
     root = hop.report_dir()
-    t = Table("state", "db", "captured", "journal")
+    store = get_store(hop)
+    eng = get_engine(hop) if hop.source.configured() else None
+    dbs = [db] if db else (eng.databases() if eng
+                           and hasattr(eng, "databases") else [])
+    t = Table("state", "db", "captured", "op", title=f"saved states"
+              f" ({store.kind})")
     found = []
-    for sdir in sorted(root.glob("*/state/*")):
-        d = sdir.parent.parent.name
-        if db and d != db:
-            continue
-        files = ", ".join(sorted(f.name for f in sdir.iterdir()
-                                 if f.name != "journal.jsonl"))
-        jl = sdir / "journal.jsonl"
-        nj = sum(1 for _ in jl.open()) if jl.exists() else 0
-        found.append(sdir)
-        t.add_row(sdir.name, d, files, str(nj))
+    for d in dbs:
+        try:
+            points = store.list(d)
+        except Exception:
+            points = []
+        for m in points:
+            found.append((d, m))
+            t.add_row(m.get("ts", "?"), d, str(m.get("created", "")),
+                      m.get("op", ""))
     if found:
         console.print(t)
     if show_ts:
-        for sdir in found:
-            if show_ts in sdir.name:
-                console.print(f"\n[bold]{sdir}[/bold]")
-                jl = sdir / "journal.jsonl"
-                if jl.exists():
+        for d, m in found:
+            if show_ts in m.get("ts", ""):
+                sdir = store.fetch(d, m["ts"])
+                jl = sdir / "journal.jsonl" if sdir else None
+                if jl and jl.exists():
+                    console.print(f"\n[bold]{d}/{m['ts']}[/bold]")
                     console.print(jl.read_text().strip())
     cl = root / "changelog.jsonl"
     if cl.exists():
@@ -1149,10 +1153,11 @@ def history(hop_name, db, show_ts):
 @click.option("--apply", "do_apply", is_flag=True)
 def rollback(hop_name, db, state_ts, do_apply):
     """Restore target sequences from a saved state, show row-level undo steps."""
+    from .state import get_store
     hop = get_hop(hop_name)
     eng = get_engine(hop)
-    root = hop.report_dir(db) / "state"
-    states = sorted(p.name for p in root.glob("*")) if root.exists() else []
+    store = get_store(hop)
+    states = sorted(m.get("ts", "") for m in store.list(db))
     if not states:
         raise SystemExit("no saved states, run migkit sync --go first")
     matches = [x for x in states if state_ts in x] if state_ts else states
@@ -1160,7 +1165,9 @@ def rollback(hop_name, db, state_ts, do_apply):
         raise SystemExit(f"no state matching '{state_ts}',"
                          f" have: {', '.join(states)}")
     ts = matches[-1]
-    state = root / ts
+    state = store.fetch(db, ts)  # pulls from s3/tar mirror if not local
+    if state is None:
+        raise SystemExit(f"state {ts} not retrievable from {store.kind}")
     stmts = []
     seqf = state / "dst-sequences.txt"
     aif = state / "dst-autoinc.txt"
