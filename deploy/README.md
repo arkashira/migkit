@@ -4,10 +4,10 @@ migkit can stand in for a managed migration service (DMS/DTS) on a trusted VM:
 full load once, then continuously verify (and repair) the incremental stream.
 
 `sync --mode`:
-- `verify` — read-only, consistent-snapshot check (exit 1 on diff)
-- `seed` — align schema -> bulk load (best mover) -> reconcile rows/sequences -> verify
-- `stream` — start/continue CDC, then delta-verify each cycle (O(changes))
-- `migrate` — full, then incremental (the DMS "full load + CDC")
+- `verify` - read-only, consistent-snapshot check (exit 1 on diff)
+- `seed` - align schema -> bulk load (best mover) -> reconcile rows/sequences -> verify
+- `stream` - start/continue CDC, then delta-verify each cycle (O(changes))
+- `migrate` - full, then incremental (the DMS "full load + CDC")
 
 Add `--go` to execute (dry-run otherwise), `--serve` to loop forever.
 

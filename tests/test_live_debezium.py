@@ -1,4 +1,4 @@
-"""Live end-to-end Debezium supervision — NOT run in the normal suite: it
+"""Live end-to-end Debezium supervision - NOT run in the normal suite: it
 pulls the ~1GB debezium/connect + redpanda images and boots a broker. Gated
 behind MIGKIT_LIVE_E2E=1 so it is ready to run in a dedicated CI job / on a VM
 with the infra, without slowing everyday testing.

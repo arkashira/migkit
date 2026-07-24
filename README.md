@@ -1,9 +1,9 @@
 # migkit
 
-> Verify, repair, and move databases across engines — without trusting the mover.
+> Verify, repair, and move databases across engines - without trusting the mover.
 
 [![engines](https://img.shields.io/badge/engines-postgres%20·%20mysql%20·%20mongodb%20·%20mssql%20·%20sqlite%20·%20redis%20·%20kafka-2a78d6)](#supported-engines)
-[![cross-engine](https://img.shields.io/badge/cross--engine-mysql→postgres-0ca30c)](#cross-engine-hetero)
+[![cross-engine](https://img.shields.io/badge/cross--engine-mysql->postgres-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-0ca30c)](LICENSE)
 [![status](https://img.shields.io/badge/status-active-0ca30c)](CHANGELOG.md)
@@ -12,12 +12,12 @@ migkit does everything *around* a database migration: it prepares the target,
 tells you exactly when to start the mover, watches the load, validates the
 result down to every row and every object, and repairs what the mover could
 not carry. The heavy data movement is done by a managed service (AWS DMS,
-Tencent DTS, GCP DMS) or by native replication — or, when the network is
+Tencent DTS, GCP DMS) or by native replication - or, when the network is
 trusted, by migkit itself with full crash-resume.
 
 The rule it is built on: **never let the mover be the judge of its own work.**
 
-[ภาษาไทย →](README.th.md) · [Changelog →](CHANGELOG.md)
+[ภาษาไทย ->](README.th.md) · [Changelog ->](CHANGELOG.md)
 
 ---
 
@@ -49,65 +49,65 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
 
 ## Features
 
-- **Layered validation** — structure (tables, columns, PK, FK, indexes,
-  defaults, views, procedures, triggers, sequences, extensions) → table
-  presence and exact row counts → auto-increment / identity / sequence values →
+- **Layered validation** - structure (tables, columns, PK, FK, indexes,
+  defaults, views, procedures, triggers, sequences, extensions) -> table
+  presence and exact row counts -> auto-increment / identity / sequence values ->
   full row-data checksums with per-primary-key drilldown. Every pass shows both
   sides' numbers.
-- **Fast at scale** — data checksums use a commutative sum-of-md5 that Postgres
+- **Fast at scale** - data checksums use a commutative sum-of-md5 that Postgres
   runs as a parallel aggregate; a 488M-row table verifies in ~10 minutes, a
   1.06B-row database in ~16, with zero sorts and no locks beyond a plain SELECT.
-- **Repair with undo** — align sequences/identity to the source value (never
+- **Repair with undo** - align sequences/identity to the source value (never
   max+1, so deleted-id gaps stay identical), or delete-and-recopy differing
   rows by primary key. Target rows are saved before any change; source is never
   written.
-- **Best-tool movers, auto-selected** — `move` drives whichever proven mover
+- **Best-tool movers, auto-selected** - `move` drives whichever proven mover
   is installed (`--via auto` is the default): parallel `pg_dump -j`/`pg_restore
-  -j`, mydumper/myloader, pgloader, mongodump/mongorestore — and generates
+  -j`, mydumper/myloader, pgloader, mongodump/mongorestore - and generates
   ready-to-run **Debezium Connect** configs (`--via debezium`) for
   platform-grade CDC. The builtin chunked copy stays the fallback and the only
   mode with per-chunk crash resume; native CDC (pg logical replication, mysql
   binlog incl. the RDS variant, mongo change streams) is one flag away.
   Whatever moves the data, migkit verifies it.
-- **No double scans** — when counts and data run together, row counts ride
+- **No double scans** - when counts and data run together, row counts ride
   along with the checksum query, so each table is scanned once, not twice.
   `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
   summaries.
-- **Consistency by design, not guesswork** — `check --consistent` checksums
+- **Consistency by design, not guesswork** - `check --consistent` checksums
   every table of a database inside one repeatable-read transaction per side;
   suspect rows are then proven in-flight or real with an **LSN fence**: wait
   until every replication consumer (your subscription *or* an opaque managed
-  mover — its slot lives on the source) confirms flushing past the source
+  mover - its slot lives on the source) confirms flushing past the source
   LSN, then re-compare. What survives two fenced rounds is a real diff.
-- **Delta verify, O(changes)** — `watch --verify --delta` keeps a logical
+- **Delta verify, O(changes)** - `watch --verify --delta` keeps a logical
   slot (pg) / binlog position (mysql) / change-stream token (mongo) and each
   cycle re-verifies **only the rows touched since the last verified point**.
   The cursor advances only after a clean verify, so crashes and diffs replay
-  the same window — idempotent by construction, cheap enough to run forever
+  the same window - idempotent by construction, cheap enough to run forever
   against billion-row databases.
-- **Column fingerprint** — when a table differs, one extra scan with one
+- **Column fingerprint** - when a table differs, one extra scan with one
   aggregate per column names *which columns* drift before any row-level
   work ("only `updated_at` differs" is a timezone bug, not data loss).
-- **Deep checks** (`check --deep`) — FK orphan scan behind NOT VALID
+- **Deep checks** (`check --deep`) - FK orphan scan behind NOT VALID
   constraints, disabled triggers, column-level type/null/default/charset
   drift, materialized-view freshness, table-grant parity, and a boundary
   check (max PK / newest `_id` both sides) that catches CDC stalls and
   rogue writers on the target.
-- **Continuous validation** — `watch --verify` re-checks on an interval and
+- **Continuous validation** - `watch --verify` re-checks on an interval and
   tells transient replication lag apart from a real diff (the
   confirm-out-of-sync idea from enterprise tools).
-- **Zero footprint on the destination** — migkit writes nothing of its own
+- **Zero footprint on the destination** - migkit writes nothing of its own
   into the target, so the target stays a faithful copy of the source and
   schema verification never trips over migkit's own objects. The audit is
   local-only: a per-hop `changelog.jsonl` ledger plus state journals.
-- **State and rollback** — tagged snapshots of target sequences and schema kept
+- **State and rollback** - tagged snapshots of target sequences and schema kept
   in two places, a `terraform-plan`-style rollback preview, and the local
   changelog ledger of every write migkit made.
-- **Composes real tools** — migra, liquibase, atlas (schema); reladiff,
+- **Composes real tools** - migra, liquibase, atlas (schema); reladiff,
   pt-table-sync (data); pgloader, sqlglot (cross-engine); datacompy
   (column-level sample diff). Nothing reinvented; each degrades gracefully if
   absent.
-- **Web dashboard** — every hop's status, tiles and reports on one
+- **Web dashboard** - every hop's status, tiles and reports on one
   auto-refreshing page.
 
 ## Quickstart
@@ -129,7 +129,7 @@ migkit report --serve                      # dashboard at localhost:8899
 
 Installs libpq, creates the main venv plus a Python 3.12 `.venv-tools` for
 reladiff, and pulls optional drivers (mysql, mongo, redis, kafka) and helpers
-(migra, datacompy). Anything that will not install is skipped with a note —
+(migra, datacompy). Anything that will not install is skipped with a note -
 every feature has a built-in fallback. Then set up a hop in `conf/hops.yaml`
 (gitignored, chmod 600):
 
@@ -178,7 +178,7 @@ The pre-0.2 command names (`hops`, `setup-target`, `repair`, `replicate`,
 | Native | postgres, mysql, mssql, mongodb, sqlite, redis, kafka |
 | Alias | mariadb, percona, tdsql, aurora-mysql/postgres, alloydb, documentdb, cosmosdb-mongo, azure-sql |
 | Generic (reladiff) | snowflake, bigquery, redshift, clickhouse, oracle, trino, duckdb, vertica, databricks |
-| Schema via liquibase (JDBC) | db2, h2, firebird, informix, sybase — drop the driver jar |
+| Schema via liquibase (JDBC) | db2, h2, firebird, informix, sybase - drop the driver jar |
 
 Managed services on any cloud (RDS/Aurora, Cloud SQL/AlloyDB, Azure Database,
 TencentDB) work over the standard wire protocol; provider quirks (DocumentDB
@@ -186,7 +186,7 @@ without dbHash, TencentDB unlogged rules) are handled by built-in fallbacks.
 
 ## Cross-engine (hetero)
 
-MySQL → PostgreSQL is verified end to end:
+MySQL -> PostgreSQL is verified end to end:
 
 ```bash
 migkit schema my2pg --convert --apply    # sqlglot/pgloader DDL transpile
@@ -196,29 +196,29 @@ migkit check  my2pg                      # reladiff cross-dialect verify
 ```
 
 The `hetero` engine is an orchestrator that reuses the per-side native engines,
-so new pairs (pg→mysql, mssql→pg) follow the same shape.
+so new pairs (pg->mysql, mssql->pg) follow the same shape.
 
 ## How it compares
 
-- **vs DMS/DTS/Veridata** — migkit validates structure + sequences + data (they
+- **vs DMS/DTS/Veridata** - migkit validates structure + sequences + data (they
   validate rows only or nothing), proves in-flight vs real diffs with an LSN
   fence instead of guessing, repairs by row with undo, and keeps
   state/rollback. Delta verify gives Veridata-style continuous validation on
   any of pg/mysql/mongo, for free.
-- **vs pt-table-checksum/pt-table-sync** — pt gets consistency from running
-  through the replication channel but only works master→replica on mysql.
+- **vs pt-table-checksum/pt-table-sync** - pt gets consistency from running
+  through the replication channel but only works master->replica on mysql.
   migkit fences on the replication position instead, which also works across
-  clusters and opaque managed movers — and when pt-table-sync *is* usable,
+  clusters and opaque managed movers - and when pt-table-sync *is* usable,
   repair drives it for statement generation.
-- **vs Debezium/pgloader/mydumper** — not competitors, employees: `move` picks
+- **vs Debezium/pgloader/mydumper** - not competitors, employees: `move` picks
   and drives whichever is installed, generates the Debezium Connect configs
-  when you want platform CDC, and wraps verification around all of them —
+  when you want platform CDC, and wraps verification around all of them -
   which none of them do on their own.
-- **vs migra/results** — migkit uses migra as one of four schema layers, and
+- **vs migra/results** - migkit uses migra as one of four schema layers, and
   adds the entire data dimension migra does not cover.
-- **vs Liquibase/Flyway** — different category (they version schema changes for
-  CI/CD). migkit adopts their best ideas — rollback, preconditions (`assess`),
-  versioned migration files (`schema --migration`) — but keeps its own audit
+- **vs Liquibase/Flyway** - different category (they version schema changes for
+  CI/CD). migkit adopts their best ideas - rollback, preconditions (`assess`),
+  versioned migration files (`schema --migration`) - but keeps its own audit
   local instead of in the target DB, and is a verification/move tool, not a
   changeset runner.
 
@@ -229,7 +229,7 @@ so new pairs (pg→mysql, mssql→pg) follow the same shape.
 - `sync`, `move` (all modes), `schema --convert` write to the target; all are
   dry-run by default and require `--apply`/`--go`.
 - The source is never written by migkit, and neither is anything on the target
-  beyond the migrated data itself — no bookkeeping tables.
+  beyond the migrated data itself - no bookkeeping tables.
 - A lock file prevents concurrent writes; every write is recorded in the local
   changelog ledger.
 - Movers are self-hosted only on a trusted network (or a cloud VM); managed
@@ -246,7 +246,7 @@ pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
 49 tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
 aliases stay invocable), mover selection and Debezium codegen, test_decoding
 parsing, end-to-end integration against throwaway Postgres containers
-(including the full delta-verify loop: touch → flag → replay → repair →
+(including the full delta-verify loop: touch -> flag -> replay -> repair ->
 advance, and the consistent-snapshot pass), exact repair-undo restore against
 a MySQL pair, Faker-generated data covering every column type, and
 failure-mode tests (bad credentials, missing state, locks, no-PK tables,
@@ -255,5 +255,5 @@ suite on Ubuntu runners.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). (Confirm before publishing if a
+MIT - see [LICENSE](LICENSE). (Confirm before publishing if a
 freemium/proprietary model is preferred instead.)

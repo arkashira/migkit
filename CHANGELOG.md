@@ -2,18 +2,18 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
-## [0.4.3] — 2026-07-24
+## [0.4.3] - 2026-07-24
 
 Complete the core domain: delta on every engine, metrics, secrets, prep.
 
 ### Added
 - **Delta verify on every engine**: kafka (per-partition offset baseline +
   tail re-hash), mssql (native Change Tracking / CHANGETABLE, version-fenced),
-  redis (honestly reports it has no native change log — use keyspace
-  notifications) — joining the existing pg/mysql/mongo O(changes) delta.
+  redis (honestly reports it has no native change log - use keyspace
+  notifications) - joining the existing pg/mysql/mongo O(changes) delta.
 - **Prometheus metrics**: `report --metrics` and a `/metrics` endpoint on the
   dashboard emit `migkit_hop_status` / `migkit_check_pass|total` /
-  `migkit_last_check_age_seconds` — alert when a hop goes red.
+  `migkit_last_check_age_seconds` - alert when a hop goes red.
 - **Secret references** in `hops.yaml`: `env:NAME` / `${NAME}` / `file:/path`
   / `vault:secret/db#key` resolve at load, so credentials need not sit in
   plaintext.
@@ -26,26 +26,26 @@ Complete the core domain: delta on every engine, metrics, secrets, prep.
   the everyday suite.
 - **`doctor --install`** + a tool registry (`migkit/tools.py`): auto-install
   every external program migkit drives (pg client, mysql client, mongo tools,
-  mydumper, pgloader, **pt-table-sync**, atlas, liquibase, ...) via brew/apt —
+  mydumper, pgloader, **pt-table-sync**, atlas, liquibase, ...) via brew/apt -
   any machine or teammate is one command from a full toolchain. `bootstrap.sh`
   force-installs them too. Tools are always separate programs (GPL ones like
   pt-table-sync/mydumper stay at arm's length, never bundled).
 - **`sync --on-conflict`**: `source-wins` (default; source is truth) or
   `keep-target` (preserve rows the target changed itself, fix only
-  missing/extra) — a conflict knob that fits a one-way reconcile.
+  missing/extra) - a conflict knob that fits a one-way reconcile.
 
-## [0.4.2] — 2026-07-24
+## [0.4.2] - 2026-07-24
 
 Debezium supervision + packaging.
 
 ### Added
-- **`move --mode cdc --via debezium --go`** no longer only generates configs —
+- **`move --mode cdc --via debezium --go`** no longer only generates configs -
   it launches the stack (`docker compose up`), waits for Kafka Connect's REST
   API, registers the source + sink connectors (PUT-updates on 409), and prints
   per-connector/task status. `--drop` tears it down. This turns CDC into
   driving Debezium (the enterprise-universal, open-source log-based CDC
   engine) at full capability, with migkit's verification layer wrapped around
-  it — compose, don't reimplement.
+  it - compose, don't reimplement.
 - pypi-ready packaging: MIT `LICENSE`, project metadata (authors, keywords,
   classifiers, urls, readme) in `pyproject.toml`.
 
@@ -55,59 +55,59 @@ Debezium supervision + packaging.
   dedicated CI job (it needs the ~1GB debezium/connect image + a running
   broker), not the default suite.
 
-## [0.4.1] — 2026-07-24
+## [0.4.1] - 2026-07-24
 
 One tool, no shell scripts.
 
 ### Changed
-- The postgres engine is now pure Python — the vendored `scripts/pg/*.sh`
+- The postgres engine is now pure Python - the vendored `scripts/pg/*.sh`
   (schema dump/diff, counts, sequences, fast checksum, per-PK drilldown with
   billion-row slicing, and the temp-PK-join row repair with undo) are all
   ported into the engine and the directory is deleted. migkit no longer
   shells out to bash anywhere; every engine is one consistent codebase.
   Equivalence proven by the full docker pg suite (integration, Faker
-  all-types, db_map, schema-repair, orchestrator) — 11 tests green.
+  all-types, db_map, schema-repair, orchestrator) - 11 tests green.
 
-## [0.4.0] — 2026-07-24
+## [0.4.0] - 2026-07-24
 
 Self-hostable migration service: run the whole flow on a VM, DMS-style.
 
 ### Added
 - **`sync --mode`** unifies the lifecycle under managed-service vocabulary,
   with verification wrapped around every step:
-  - `verify` — read-only consistent-snapshot check (exit 1 on diff)
-  - `seed` — align schema → bulk load (best installed mover) → reconcile
-    rows/sequences → consistent verify, in one command
-  - `stream` — start/continue native CDC, then delta-verify each cycle
-  - `migrate` — seed then stream (the DMS "full load + CDC")
+  - `verify` - read-only consistent-snapshot check (exit 1 on diff)
+  - `seed` - align schema -> bulk load (best installed mover) -> reconcile
+    rows/sequences -> consistent verify, in one command
+  - `stream` - start/continue native CDC, then delta-verify each cycle
+  - `migrate` - seed then stream (the DMS "full load + CDC")
   - `--serve --interval` runs the incremental verify loop forever.
 - **VM deployment** (`deploy/`): Dockerfile, docker-compose (sync service +
   dashboard), and a systemd template, so migkit can stand in for DMS/DTS on a
   trusted VM with resume checkpoints and reports on a persistent volume.
 
-## [0.3.4] — 2026-07-24
+## [0.3.4] - 2026-07-24
 
 Prod-grade robustness and schema-object repair.
 
 ### Added
-- **Connection retry/backoff**: transient failures (TLS handshake races —
+- **Connection retry/backoff**: transient failures (TLS handshake races -
   `WRONG_VERSION_NUMBER`, dropped/reset sockets, `Lost connection`, pooler
   hiccups, cross-region blips) are retried with exponential backoff instead
   of aborting a whole check. Permanent errors (auth, syntax, constraint)
   still surface immediately. Wired into `run` (pg/atlas/etc.), mysql `_q`,
   and mongo (`retryReads`).
 - **`sync --kind schema`** now actually repairs: atlas (the authoritative
-  differ) generates the DDL to align the target's objects — columns,
-  indexes, PK/FK, views, routines, triggers — to the source, applied in one
+  differ) generates the DDL to align the target's objects - columns,
+  indexes, PK/FK, views, routines, triggers - to the source, applied in one
   transaction via the native client (psql / mysql, so function bodies and
   DELIMITER work), reverse DDL saved to undo, dry-run by default. Closes the
   "make structure 100% equal" gap; data is never touched by this kind.
 
-## [0.3.3] — 2026-07-24
+## [0.3.3] - 2026-07-24
 
 Different-named databases, and no more charset noise.
 
-### Added — db name mapping
+### Added - db name mapping
 - `db_map: {src_db: dst_db}` per hop: a migration can now land in a
   differently-named target database. Config and report paths stay keyed by
   the source name; only the target-side connection is remapped, threaded
@@ -116,22 +116,22 @@ Different-named databases, and no more charset noise.
   same-name hops are unchanged. Proven E2E: source `appsrc` vs target
   `appdst` compare, diff, and repair correctly across the map.
 
-### Fixed — schema false diffs
+### Fixed - schema false diffs
 - mysql schema check no longer flags `CHARACTER SET x COLLATE y` vs the bare
   `COLLATE y` as a difference. A collation already implies its charset, so
-  the two forms are identical — DTS emits one, the source the other. The
+  the two forms are identical - DTS emits one, the source the other. The
   dump is canonicalized (`_canon_ddl`) before diffing; real charset/collation
   changes still surface via the COLLATE name. bff/product/product-adapter go
   from DIFF to OK; genuine `SQL SECURITY INVOKER`/missing-event diffs remain.
 
-## [0.3.2] — 2026-07-24
+## [0.3.2] - 2026-07-24
 
 Zero footprint on the destination.
 
 ### Changed
 - Removed the in-database audit ledger. migkit no longer creates
   `public.migkit_changelog` (pg) / `<db>.migkit_changelog` (mysql) on the
-  target — `record_ledger`/`read_ledger` are gone. The audit is now
+  target - `record_ledger`/`read_ledger` are gone. The audit is now
   local-only (per-hop `changelog.jsonl` + state journals), which was already
   written alongside it. **Why:** a verification tool must not contaminate the
   target; the ledger table made the target differ from the source and tripped
@@ -143,7 +143,7 @@ Zero footprint on the destination.
   an older version doesn't show as a diff; drop leftovers with
   `drop table public.migkit_changelog` (pg) on the target.
 
-## [0.3.1] — 2026-07-24
+## [0.3.1] - 2026-07-24
 
 Read-replica endpoint guardrail (from a live UAT outage: an app pointed at
 an Aurora reader instance got `SQLSTATE 25006 cannot execute SELECT FOR
@@ -151,7 +151,7 @@ UPDATE in a read-only transaction`).
 
 ### Added
 - `_in_recovery()` detection (postgres): every endpoint's role is now known.
-- `assess` flags endpoint role — source on a read replica = warn (fine for
+- `assess` flags endpoint role - source on a read replica = warn (fine for
   checks, but the LSN fence and logical slots need the primary), target on a
   read replica = **fail** (cannot migrate/repair into it, and apps get
   SQLSTATE 25006). This check would have caught the outage before cutover.
@@ -160,48 +160,48 @@ UPDATE in a read-only transaction`).
 ### Fixed
 - `--consistent`, delta verify and the LSN fence no longer crash when the
   source is a standby (Aurora readers reject both `pg_current_wal_lsn()` and
-  `pg_last_wal_replay_lsn()`): `src_lsn()` returns `None` → fence degrades to
+  `pg_last_wal_replay_lsn()`): `src_lsn()` returns `None` -> fence degrades to
   settle, `_fast_consistent` marks the snapshot `standby (no fence)`, and
   `delta_verify` returns a clear "point at the writer endpoint" error instead
   of an exception.
 
-## [0.3.0] — 2026-07-24
+## [0.3.0] - 2026-07-24
 
 Consistency by design, O(changes) verification, and best-tool movers.
 
-### Added — verification innovations
+### Added - verification innovations
 - `check --consistent` (postgres): every table of a database checksummed
-  inside ONE repeatable-read read-only transaction per side — zero intra-db
-  skew — with the source LSN captured in-snapshot as the fence.
+  inside ONE repeatable-read read-only transaction per side - zero intra-db
+  skew - with the source LSN captured in-snapshot as the fence.
 - **LSN-fenced convergence** replaces the sleep-settle heuristic wherever a
   replication slot is visible (our subscriptions *and* opaque managed movers
   keep their slot on the source): suspect rows are re-compared only after
   every consumer confirmed flushing past the captured LSN; two fenced rounds
   ride out hot rows; survivors are real diffs, proven, not guessed.
   Falls back to the old `settle` behaviour when no slot is visible.
-- **Delta verify** — `watch --verify --delta`: a dedicated logical slot
+- **Delta verify** - `watch --verify --delta`: a dedicated logical slot
   (pg, test_decoding), saved binlog position (mysql) or change-stream token
   (mongo) records what changed; each cycle re-verifies only those pks/ids on
-  both sides. Cursor advances only after a clean verify → crashes and diffs
+  both sides. Cursor advances only after a clean verify -> crashes and diffs
   replay the same window (idempotent); diffs write the same pk files
   `sync --apply` repairs. `--teardown` drops the slot/state.
-- **Column fingerprint** — on any table diff, one scan with one aggregate
+- **Column fingerprint** - on any table diff, one scan with one aggregate
   per column reports exactly which columns drift (pg + mysql), evidence in
   `data-<table>.columns`, before any row-level work.
 - **Render audit** (`check --deep`, pg): samples exotic-typed columns
   (enums, domains, ranges, money, tsvector, xml, interval, ...) and compares
-  their actual text rendering by pk — surfacing the cross-version rendering
+  their actual text rendering by pk - surfacing the cross-version rendering
   lies that hide inside checksums. `options.checksum: jsonb` switches the
   fast path to canonical `to_jsonb` hashing (ISO timestamps regardless of
   DateStyle).
 
-### Changed — movers drive the best tool (auto, no flags needed)
+### Changed - movers drive the best tool (auto, no flags needed)
 - `move --via auto` (default) picks the fastest installed mover per engine:
   parallel `pg_dump -Fd -j`/`pg_restore -j` (postgres), mydumper/myloader
-  (mysql), pgloader data-only load file (mysql→pg hetero),
+  (mysql), pgloader data-only load file (mysql->pg hetero),
   `mongodump | mongorestore` (mongo). Builtin chunked copy remains the
   fallback and the only per-chunk-resumable mode. Version-mismatch
-  pg_restore SET noise is tolerated — `migkit check` is the judge.
+  pg_restore SET noise is tolerated - `migkit check` is the judge.
 - `move --mode cdc --via debezium` generates ready-to-run Kafka Connect
   configs (redpanda + debezium/connect compose, source connector for
   pg/mysql, JDBC sink with upsert+delete), chmod 700, with a README of the
@@ -210,13 +210,13 @@ Consistency by design, O(changes) verification, and best-tool movers.
   tool is present (bounded by `--where` to the verified pks so the undo
   stays complete and exactly restorable); builtin delete+copy fallback.
 
-### Changed — engines that were shallow are no longer
+### Changed - engines that were shallow are no longer
 - mssql: counts merged into the checksum pass; row-level drilldown via
   canonical `FOR JSON` + SHA2_256 hashing writes the same pk evidence files;
   deep checks for disabled/untrusted (`WITH NOCHECK`) FKs and triggers,
   column drift, and max-pk boundary.
 - kafka: critical topic-config parity (cleanup.policy, retention, ...) in
-  schema; deep check for consumer-group presence and lag parity — the
+  schema; deep check for consumer-group presence and lag parity - the
   offsets-not-translated failure that breaks every kafka cutover.
 - redis: pipelined type-aware compare (two round trips per 1000 keys
   instead of one per key); deep checks for TTL drift/loss and biggest-key
@@ -228,22 +228,22 @@ Consistency by design, O(changes) verification, and best-tool movers.
   availability, and two docker E2Es: the full delta-verify loop and the
   consistent-snapshot + fingerprint pass.
 
-## [0.2.0] — 2026-07-24
+## [0.2.0] - 2026-07-24
 
-### Changed — CLI consolidated to 11 commands
+### Changed - CLI consolidated to 11 commands
 - `doctor` (absorbs `hops`), `advise`, `assess`, `schema` (absorbs
-  `setup-target`, `convert-schema` → `--convert`, `gen-migration` →
-  `--migration`), `check` (absorbs `sample-diff` → `--drill`), `move`
-  (absorbs `replicate` + `tail` → `--mode full|cdc|full+cdc`), `watch`
-  (absorbs `monitor` → `--verify`), `sync` (absorbs `repair`: dry-run plan →
-  `--apply` → `--go`), `report` (absorbs `ui` → `--serve`), `history`
+  `setup-target`, `convert-schema` -> `--convert`, `gen-migration` ->
+  `--migration`), `check` (absorbs `sample-diff` -> `--drill`), `move`
+  (absorbs `replicate` + `tail` -> `--mode full|cdc|full+cdc`), `watch`
+  (absorbs `monitor` -> `--verify`), `sync` (absorbs `repair`: dry-run plan ->
+  `--apply` -> `--go`), `report` (absorbs `ui` -> `--serve`), `history`
   (absorbs `state`), `rollback`.
 - All 11 pre-0.2 names still work as hidden aliases with their old flags,
-  verified by the CLI-surface tests — existing scripts keep running.
+  verified by the CLI-surface tests - existing scripts keep running.
 - Fix hints and playbooks now print the new spellings
   (`migkit sync … --kind sequences --apply`).
 
-### Changed — performance
+### Changed - performance
 - Counts merged into the checksum pass: when `check` runs counts + data
   together (postgres, mysql, mongodb, hetero), row counts come from the
   same query/aggregate as the checksum, so every table is scanned once,
@@ -257,7 +257,7 @@ Consistency by design, O(changes) verification, and best-tool movers.
 - Global `-q/--quiet` silences per-table chatter, progress lines and
   pass-level assess output; diffs, errors and summaries always print.
 
-### Added — deep checks (`check --deep` or `--only deep`)
+### Added - deep checks (`check --deep` or `--only deep`)
 - FK integrity: orphan scan behind NOT VALID constraints (postgres) and a
   full FK orphan scan (mysql, where loads run with `foreign_key_checks=0`).
 - Disabled triggers on target (postgres).
@@ -266,12 +266,12 @@ Consistency by design, O(changes) verification, and best-tool movers.
   patterns; evidence written to `deep-columns.diff`.
 - Materialized-view freshness (populated + row counts) and table-grant
   parity for roles present on both sides (postgres).
-- Boundary freshness: `max(pk)` (sql) / newest `_id` (mongo) both sides —
+- Boundary freshness: `max(pk)` (sql) / newest `_id` (mongo) both sides -
   flags targets AHEAD of source (rogue writer / double-apply) and reports
   lag-behind tables. Directly aimed at the "dst has more rows than src"
   investigation.
 
-### Changed — dashboard
+### Changed - dashboard
 - `report --serve` (ex-`ui`) redesigned: summary pills, engine/service
   badges, per-check tiles with pass/fail tinting, per-db status rows,
   cross-hop recent-writes feed, refined dark mode. Still read-only,
@@ -284,56 +284,56 @@ Consistency by design, O(changes) verification, and best-tool movers.
   aliases invocable), quiet flag, counts-from-checksum parsing, deep-check
   default, `--drill` argument validation.
 
-## [0.1.0] — 2026-07-23
+## [0.1.0] - 2026-07-23
 
-First working version, built and verified against live RDS → TencentDB hops
+First working version, built and verified against live RDS -> TencentDB hops
 (6 UAT databases, 1.06B rows) plus docker labs for every engine.
 
-### Added — validation
+### Added - validation
 - Layered `check`: schema, object inventory (per type), row counts,
   auto-increment/sequence values, full row-data checksums with per-PK drilldown.
-- Uniform evidence format across all engines — every `OK` prints both sides'
+- Uniform evidence format across all engines - every `OK` prints both sides'
   counts and hashes.
 - Fast Postgres data path: commutative sum-of-md5 as a parallel aggregate
   (488M rows in ~10 min); large tables drill down by PK-index slices.
-- `assess` — premigration readiness (wal_level/binlog prereqs, no-PK tables,
+- `assess` - premigration readiness (wal_level/binlog prereqs, no-PK tables,
   unlogged/invalid objects, encoding+collation, extension and account parity).
-- `monitor` — continuous re-check loop; `settle` option distinguishes in-flight
+- `monitor` - continuous re-check loop; `settle` option distinguishes in-flight
   replication from real diffs (confirm-out-of-sync).
-- `sample-diff` — column-level report on a row sample via datacompy.
+- `sample-diff` - column-level report on a row sample via datacompy.
 
-### Added — engines
+### Added - engines
 - Native: postgres, mysql, mssql, mongodb, sqlite, redis, kafka.
 - Aliases: mariadb, percona, tdsql, aurora-*, alloydb, documentdb,
   cosmosdb-mongo, azure-sql.
 - `generic` engine over reladiff (snowflake, bigquery, redshift, clickhouse,
   oracle, trino, duckdb, …); schema via liquibase JDBC for db2/h2/etc.
-- `hetero` engine — cross-engine MySQL → PostgreSQL, verified end to end.
+- `hetero` engine - cross-engine MySQL -> PostgreSQL, verified end to end.
 - Managed-cloud handling: DocumentDB client-side BSON hashing, TencentDB
   unlogged rules, multi-host replica sets, TLS CA files.
 
-### Added — movers (self-hosted, crash-resumable)
-- `move` — chunked full load with a checkpoint file.
-- `replicate` — native Postgres logical replication and MySQL binlog
+### Added - movers (self-hosted, crash-resumable)
+- `move` - chunked full load with a checkpoint file.
+- `replicate` - native Postgres logical replication and MySQL binlog
   replication (incl. RDS `rds_set_external_source` variant).
-- `tail` — MongoDB change streams and cross-engine MySQL binlog CDC, both with
+- `tail` - MongoDB change streams and cross-engine MySQL binlog CDC, both with
   a persisted resume token.
-- `convert-schema` — cross-engine DDL transpile via sqlglot/pgloader.
+- `convert-schema` - cross-engine DDL transpile via sqlglot/pgloader.
 
-### Added — repair, state, safety
-- `repair` / `sync` — align sequences to source value, delete-and-recopy
+### Added - repair, state, safety
+- `repair` / `sync` - align sequences to source value, delete-and-recopy
   differing rows by PK; dry-run by default, saves undo, idempotent on re-run.
-- `state` / `rollback` — tagged snapshots in two locations, plan-preview
+- `state` / `rollback` - tagged snapshots in two locations, plan-preview
   rollback, per-hop changelog, in-database `migkit_changelog` audit ledger.
 - Lock file to prevent concurrent writes; configured-guard on every command.
 
-### Added — tooling for versioning and output
-- `gen-migration` — Flyway-style `V__/U__` versioned SQL files from the diff.
+### Added - tooling for versioning and output
+- `gen-migration` - Flyway-style `V__/U__` versioned SQL files from the diff.
 - `advise` playbooks for aws-dms, tencent-dts, gcp-dms, native, incl. gh-ost /
   pt-online-schema-change guidance.
 - `report` HTML report and `ui` live web dashboard.
 
-### Added — quality
+### Added - quality
 - `assess` now compares account credentials: role/user password hashes between
   source and target, catching the DTS failure mode where the account name is
   carried over but the password is not (apps then cannot log in).
@@ -343,4 +343,4 @@ First working version, built and verified against live RDS → TencentDB hops
 
 ### Composed tools
 migra, liquibase, atlas, reladiff, pt-table-sync, pgloader, sqlglot, datacompy,
-python-mysql-replication — used directly, each with a graceful fallback.
+python-mysql-replication - used directly, each with a graceful fallback.

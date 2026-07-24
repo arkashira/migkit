@@ -27,15 +27,15 @@ pip -q install datacompy 2>/dev/null && echo "datacompy ok" || echo "datacompy s
 pip -q install mysql-replication 2>/dev/null && echo "mysql-replication ok (delta verify)" \
   || echo "mysql-replication skipped"
 
-# every external tool migkit drives, installed for you (separate programs —
+# every external tool migkit drives, installed for you (separate programs -
 # never bundled into migkit, so GPL tools like pt-table-sync/mydumper stay at
 # arm's length). formula:cmd pairs; each is attempted, missing ones warned.
 BREW="brew"
-command -v brew > /dev/null || { BREW=":"; echo "no brew found — install these tools manually:"; }
+command -v brew > /dev/null || { BREW=":"; echo "no brew found - install these tools manually:"; }
 ensure() {  # ensure <cmd> <brew-formula> <purpose>
   command -v "$1" > /dev/null && { echo "$1 ok"; return; }
   $BREW install "$2" > /dev/null 2>&1 && echo "$1 ok ($2)" \
-    || echo "MISSING $1 — needed for $3 — install: brew install $2"
+    || echo "MISSING $1 - needed for $3 - install: brew install $2"
 }
 ensure mysql        mysql-client              "mysql schema dump / cli"
 ensure mysqldump    mysql-client              "mysql schema dump"

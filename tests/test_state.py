@@ -1,7 +1,7 @@
 """State backend: local files and remote S3, both pluggable like terraform.
 
 Proves you can (1) capture a restore point, (2) list which points exist and
-what each one is, (3) fetch any of them back byte-for-byte — including from a
+what each one is, (3) fetch any of them back byte-for-byte - including from a
 remote S3 bucket, so state survives losing this machine.
 """
 import os

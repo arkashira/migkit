@@ -110,7 +110,7 @@ def _hops_table():
 @main.command()
 @click.option("--install", is_flag=True,
               help="auto-install every missing external tool via the platform"
-                   " package manager (brew/apt) — get a fresh machine ready")
+                   " package manager (brew/apt) - get a fresh machine ready")
 def doctor(install):
     """Configured hops, local tools, and connectivity.
 
@@ -862,7 +862,7 @@ def move(hop_name, db, table, mode, via, chunk, do_drop, go):
         for c in (f"{name}-source", f"{name}-sink"):
             console.print("  " + movers.debezium_status(c))
         _changelog(hop, {"op": "debezium-up", "db": ",".join(dbs)})
-        console.print("[green]debezium CDC running[/green] — verify the stream"
+        console.print("[green]debezium CDC running[/green] - verify the stream"
                       f" with: migkit sync {hop_name} --mode stream --serve")
         return
     if mode == "full":

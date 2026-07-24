@@ -223,7 +223,7 @@ _STATUS_CODE = {"ok": 0, "diff": 1, "error": 2, "na": 3}
 
 
 def prometheus(hops):
-    """Prometheus text-format metrics from the last check of every hop —
+    """Prometheus text-format metrics from the last check of every hop -
     scrape http://<ui>/metrics for alerting (fire when migkit_hop_status > 0)."""
     lines = [
         "# HELP migkit_hop_status Overall hop status (0 ok 1 diff 2 error 3 na)",

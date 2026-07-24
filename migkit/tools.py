@@ -8,7 +8,7 @@ import subprocess
 from .util import which
 
 # (command, brew formula, apt package, what it powers). apt package "" means
-# not in the default apt repos (needs a vendor step) — warned, not attempted.
+# not in the default apt repos (needs a vendor step) - warned, not attempted.
 TOOLS = [
     ("psql", "libpq", "postgresql-client", "postgres verify/repair"),
     ("pg_dump", "libpq", "postgresql-client", "postgres schema + move"),
@@ -48,7 +48,7 @@ def install_missing(log=print):
         pkg = formula if mgr == "brew" else apt
         if not mgr or not pkg:
             still.append((cmd, purpose))
-            log(f"MISSING {cmd} ({purpose}) — install manually")
+            log(f"MISSING {cmd} ({purpose}) - install manually")
             continue
         if pkg in seen:
             continue

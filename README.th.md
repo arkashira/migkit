@@ -1,20 +1,20 @@
 # migkit
 
-> Verify, repair, ขน database ข้าม engine — โดยไม่ต้องเชื่อตัวขน
+> Verify, repair, ขน database ข้าม engine - โดยไม่ต้องเชื่อตัวขน
 
 [![engines](https://img.shields.io/badge/engines-postgres%20·%20mysql%20·%20mongodb%20·%20mssql%20·%20sqlite%20·%20redis%20·%20kafka-2a78d6)](#3-คำสั่งทั้งหมด)
-[![cross-engine](https://img.shields.io/badge/cross--engine-mysql→postgres-0ca30c)](#)
+[![cross-engine](https://img.shields.io/badge/cross--engine-mysql->postgres-0ca30c)](#)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
 [![status](https://img.shields.io/badge/status-active-0ca30c)](CHANGELOG.md)
 
-[English README →](README.md) · [Changelog →](CHANGELOG.md)
+[English README ->](README.md) · [Changelog ->](CHANGELOG.md)
 
 ---
 
 เครื่องมือ migrate database ส่วนตัว: เตรียมปลายทาง, validate ให้ตรง 100%,
 ซ่อมส่วนที่ต่าง, และบอกจังหวะว่าเมื่อไหร่ต้องกดอะไรใน migration service
 
-หลักคิดสำคัญ: **migkit ไม่ขน data เอง** — งานขน data เป็นของ managed service
+หลักคิดสำคัญ: **migkit ไม่ขน data เอง** - งานขน data เป็นของ managed service
 (managed migration service ของ cloud หรือ native tools) หรือ native tools ที่วิ่งบน network ของ cloud
 ซึ่งเสถียรกว่าเน็ตเรา migkit ทำทุกอย่างรอบๆ การขน:
 
@@ -56,7 +56,7 @@ source .venv/bin/activate
 bootstrap ทำให้ครบ: ลง libpq (psql/pg_dump), สร้าง python venv หลัก,
 ลง lib หลัก + optional (pymysql, pymongo, redis, kafka, migra)
 และสร้าง `.venv-tools` (python 3.12 ผ่าน uv) สำหรับ reladiff แยกต่างหาก
-เพราะ reladiff ยังไม่รองรับ python 3.14 — migkit หา tools จากทั้งสอง venv
+เพราะ reladiff ยังไม่รองรับ python 3.14 - migkit หา tools จากทั้งสอง venv
 ให้อัตโนมัติ ตัวไหนลงไม่ได้จะข้ามแล้วบอก ทุก feature มี fallback ในตัว
 
 tools ภายนอกที่ลงไว้แล้วบนเครื่องนี้: mysql-client (mysqldump), sqlcmd,
@@ -109,7 +109,7 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
 
 ## 3. คำสั่งทั้งหมด
 
-ตั้งแต่ 0.2.0 เหลือ 11 คำสั่งหลัก — ชื่อเดิมทุกตัวยังใช้ได้ (เป็น hidden alias
+ตั้งแต่ 0.2.0 เหลือ 11 คำสั่งหลัก - ชื่อเดิมทุกตัวยังใช้ได้ (เป็น hidden alias
 พร้อม flag เดิมครบ) script เก่าไม่พัง:
 
 | ชื่อเดิม | ตอนนี้คือ |
@@ -130,18 +130,18 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
 
 ของใหม่ 0.3.0 (consistency แบบพิสูจน์ได้ + O(changes) + best-tool movers):
 
-- `check --consistent` — checksum ทุกตารางใน transaction repeatable-read
+- `check --consistent` - checksum ทุกตารางใน transaction repeatable-read
   เดียวต่อฝั่ง (ไม่มี skew ภายใน db) พร้อมจด src LSN ไว้เป็นรั้ว
-- **LSN fence แทน settle เดา ๆ** — row ที่สงสัยจะถูกเช็คซ้ำ "หลังจาก"
-  ทุก consumer (รวม DTS ที่ opaque — slot มันอยู่ฝั่ง source เรามองเห็น)
+- **LSN fence แทน settle เดา ๆ** - row ที่สงสัยจะถูกเช็คซ้ำ "หลังจาก"
+  ทุก consumer (รวม DTS ที่ opaque - slot มันอยู่ฝั่ง source เรามองเห็น)
   ยืนยันว่า apply เลย LSN ที่จดไว้แล้วเท่านั้น รอด 2 รอบ = diff จริง
-  พิสูจน์ได้ ไม่ใช่นั่งเทียน (ไม่มี slot ให้ดู → fallback เป็น settle เดิม)
-- `watch --verify --delta` — ตรวจต่อเนื่องด้วยต้นทุน O(changes):
+  พิสูจน์ได้ ไม่ใช่นั่งเทียน (ไม่มี slot ให้ดู -> fallback เป็น settle เดิม)
+- `watch --verify --delta` - ตรวจต่อเนื่องด้วยต้นทุน O(changes):
   slot/binlog/change-stream บอกว่าแถวไหนถูกแตะ แล้วเช็คซ้ำเฉพาะแถวนั้น
-  ทั้งสองฝั่ง cursor เลื่อนเฉพาะตอนเขียว → crash/diff แล้ว replay window
+  ทั้งสองฝั่ง cursor เลื่อนเฉพาะตอนเขียว -> crash/diff แล้ว replay window
   เดิมเสมอ (idempotent) รันค้างกับ db พันล้าน row ได้ทั้งคืน
   (`--teardown` = เก็บ slot/state)
-- **Column fingerprint** — ตารางไหน diff จะบอกเลยว่า "คอลัมน์ไหน" ต่าง
+- **Column fingerprint** - ตารางไหน diff จะบอกเลยว่า "คอลัมน์ไหน" ต่าง
   (scan เดียว aggregate ต่อคอลัมน์) ก่อนลงไปไล่ราย row
 - `move` เลือก mover เทพสุดที่ติดตั้งไว้ให้เองเป็น default (`--via auto`):
   pg_dump -j / mydumper / pgloader / mongodump, builtin = fallback ที่
@@ -149,7 +149,7 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
   พร้อมรัน สำหรับ CDC ระดับ platform
 - engine ที่เคยตื้นตอนนี้ลึก: mssql (drill ราย PK ผ่าน FOR JSON hash +
   deep: FK disabled/untrusted, column drift, boundary), kafka (topic-config
-  parity + consumer-group lag parity — แผลคลาสสิกตอนย้าย kafka), redis
+  parity + consumer-group lag parity - แผลคลาสสิกตอนย้าย kafka), redis
   (pipeline เร็วจริง + TTL drift + big keys)
 
 ### migkit doctor
@@ -158,7 +158,7 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
 
 ### migkit advise <hop>
 
-โชว์ playbook ของ service ที่ hop นั้นใช้ — บอกเป็น phase ว่าต้องทำอะไรตามลำดับ:
+โชว์ playbook ของ service ที่ hop นั้นใช้ - บอกเป็น phase ว่าต้องทำอะไรตามลำดับ:
 เตรียม source (parameter อะไรต้องเปิด), เตรียม target (ส่วนที่ migkit ทำให้),
 ตั้งค่าอะไรตอนสร้าง task (LOB mode, table prep mode, อะไรห้ามเปิด),
 ระหว่างขนดูอะไร, cutover ทำอะไรตามลำดับ, และ rollback ยังไง
@@ -167,12 +167,12 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
 migkit advise mig-a     # playbook ตาม service ที่ตั้งไว้
 ```
 
-### migkit assess <hop> — precheck ก่อนเริ่ม (แบบ managed service)
+### migkit assess <hop> - precheck ก่อนเริ่ม (แบบ managed service)
 
 ตรวจความพร้อมก่อนเปิดตัวขน ตามแนว precheck/premigration assessment:
 version ตรงไหม, CDC prerequisite (wal_level / binlog_format / retention),
 ตารางไม่มี PK, unlogged/invalid, encoding+collation, extension ครบไหม,
-เทียบ account ระหว่างสองฝั่ง — เขียว/เหลือง/แดง พร้อม exit code
+เทียบ account ระหว่างสองฝั่ง - เขียว/เหลือง/แดง พร้อม exit code
 
 ```bash
 migkit assess mig-a
@@ -180,21 +180,21 @@ migkit assess mig-a
 
 ### หน่วงเช็คซ้ำสำหรับ replication สดๆ (settle)
 
-ใส่ `options: {settle: 30}` ใน hop — เมื่อ data เจอ diff จะรอ 30 วิแล้ว
+ใส่ `options: {settle: 30}` ใน hop - เมื่อ data เจอ diff จะรอ 30 วิแล้ว
 re-verify เฉพาะ key ที่ต่าง ถ้าหายหมด = in-flight replication ไม่ใช่ diff
 จริง (แนวเดียวกับ confirm-out-of-sync ของ enterprise tools)
 
-### migkit schema <hop> — งาน schema ทั้งหมดในคำสั่งเดียว
+### migkit schema <hop> - งาน schema ทั้งหมดในคำสั่งเดียว
 
 default = พิมพ์คำสั่งเตรียม schema ปลายทางให้ครบ (pg_dump/pg_restore,
-createdb ฯลฯ) **เป็น dry-run เสมอ ไม่รันเอง** — copy ไปรันเองทีละบรรทัด
+createdb ฯลฯ) **เป็น dry-run เสมอ ไม่รันเอง** - copy ไปรันเองทีละบรรทัด
 หัวใจคือ: schema ต้องมาจาก native dump ไม่ใช่จาก migration service
 เพราะ migration tools สร้าง schema ไม่ครบ (ไม่มี index รอง, FK, default,
 sequence, trigger, view, procedure)
 
 `--migration` = แปลง schema diff ที่เจอเป็นไฟล์ `V<ts>__sync_<db>.sql`
 (ทำ target ให้ตรง source) คู่กับ `U<ts>__*.sql` (undo) commit ลง git แล้ว
-apply ด้วย psql หรือ migration runner ตัวไหนก็ได้ — ผ่าน atlas
+apply ด้วย psql หรือ migration runner ตัวไหนก็ได้ - ผ่าน atlas
 
 `--convert` = transpile DDL ข้าม engine (hetero hop, sqlglot/pgloader)
 review แล้วค่อย `--apply`
@@ -205,7 +205,7 @@ migkit schema mig-a --migration --out migrations
 migkit schema my2pg --convert --apply
 ```
 
-### migkit check --drill — column-level diff (datacompy)
+### migkit check --drill - column-level diff (datacompy)
 
 เทียบ row sample ราย column: column ไหนต่าง, match rate, ค่าตัวอย่างที่ไม่ตรง
 รายงานอ่านง่ายแบบ PROC COMPARE ของ SAS
@@ -214,7 +214,7 @@ migkit schema my2pg --convert --apply
 migkit check mig-a --drill --db appdb --table public.orders --limit 1000
 ```
 
-### migkit report --serve — web dashboard
+### migkit report --serve - web dashboard
 
 หน้าเว็บเดียวเห็นทุก hop: summary pills, badge engine/service, tiles สถานะ
 ราย check, per-db, ปุ่มเปิด report, feed การเขียนล่าสุดข้าม hop,
@@ -233,20 +233,20 @@ migkit report --serve --port 8899
 
 | ชั้น | เช็คอะไร |
 |---|---|
-| schema | table, column, PK, FK, index, default, view, procedure, trigger, sequence — ทุก object |
+| schema | table, column, PK, FK, index, default, view, procedure, trigger, sequence - ทุก object |
 | counts | ตารางครบไหม + จำนวน row เท่ากันเป๊ะทุกตาราง |
 | autoinc | ค่า sequence / auto_increment / identity ตรงกันไหม |
 | data | checksum ทุก row ทุก column, ถ้าต่างจะ drill ลงถึงระดับ PK ว่าแถวไหนหาย/เกิน/ไม่ตรง |
 
 ตั้งแต่ 0.2.0: ถ้ารัน counts+data ด้วยกัน (default) จำนวน row จะติดมากับ
-query checksum เลย — แต่ละตาราง scan รอบเดียว ไม่ใช่สองรอบ (pg/mysql/mongo/
+query checksum เลย - แต่ละตาราง scan รอบเดียว ไม่ใช่สองรอบ (pg/mysql/mongo/
 hetero) ส่วนการเช็คว่าตารางครบไหมใช้ catalog อย่างเดียว ไม่ scan
 
-ชั้นที่ 5 (opt-in): `--deep` — FK orphan (หลัง NOT VALID constraint ฝั่ง pg,
+ชั้นที่ 5 (opt-in): `--deep` - FK orphan (หลัง NOT VALID constraint ฝั่ง pg,
 scan เต็มฝั่ง mysql เพราะ load มักปิด foreign_key_checks), trigger ที่โดน
 disable ค้าง, column drift ราย column (type/null/default/precision +
 charset/collation ฝั่ง mysql, เคารพ pattern ใน `<hop>.schema-ignore`),
-matview ยังไม่ refresh, grants หาย, และ boundary check — max(pk)/newest
+matview ยังไม่ refresh, grants หาย, และ boundary check - max(pk)/newest
 `_id` สองฝั่ง จับทั้ง CDC ค้าง (dst ตามหลัง) และตัวการเขียนใส่ปลายทาง
 (dst นำหน้า = double-apply หรือมี writer แปลกปลอม อันหลังนี่แหละต้นเหตุ
 คลาสสิกของ dst มี row มากกว่า src)
@@ -269,14 +269,14 @@ migkit -q check mig-a                       # quiet: เหลือ DIFF/ERROR/
 ทุก DIFF จะพิมพ์บรรทัด `fix:` บอกคำสั่งซ่อมให้เลย
 
 เรื่อง PK กระโดด: การเทียบเป็นราย PK ดังนั้น id ที่โดนลบไป (เช่น 1..188,190,191)
-ต้องหายเหมือนกันทั้งสองฝั่งถึงจะผ่าน — ถ้าปลายทางมี 189 โผล่มาจะขึ้นเป็น extra
+ต้องหายเหมือนกันทั้งสองฝั่งถึงจะผ่าน - ถ้าปลายทางมี 189 โผล่มาจะขึ้นเป็น extra
 
 ความเร็ว: ชั้น data ใช้ checksum แบบบวกได้ (commutative sum of md5) ซึ่ง
-postgres ทำ parallel aggregate ได้เต็มเครื่อง — สูตรเดียวกับ reladiff/pg_comparator
+postgres ทำ parallel aggregate ได้เต็มเครื่อง - สูตรเดียวกับ reladiff/pg_comparator
 ของจริง: ตาราง 488M row ตรวจจบใน 9.4 นาที, ทั้ง database 1.06B row ~16 นาที
 ตารางที่ checksum ไม่ตรงเท่านั้นถึงจะ drill ลงหา PK รายแถวด้วยโหมด slice
 
-### migkit watch --verify — เทียบต่อเนื่อง ไม่ต้องรันเป็นรอบเอง
+### migkit watch --verify - เทียบต่อเนื่อง ไม่ต้องรันเป็นรอบเอง
 
 แนวเดียวกับ CDC validation ของ managed service แต่ใช้ได้ทุก engine: วน re-check เอง
 ทุก interval, พิมพ์บรรทัดเดียวต่อ db ต่อรอบ, อัพเดท report.html ให้ตลอด
@@ -292,7 +292,7 @@ migkit watch mig-a --verify --count 12                  # 12 รอบแล้�
 
 ### migkit watch <hop>
 
-ใช้ระหว่าง migration service กำลังขน — ดูว่าเชื่อมอยู่ไหม ขนไปถึงไหน เร็วแค่ไหน
+ใช้ระหว่าง migration service กำลังขน - ดูว่าเชื่อมอยู่ไหม ขนไปถึงไหน เร็วแค่ไหน
 
 ```bash
 migkit watch mig-a                # วนทุก 30 วิ กด ctrl-c หยุด
@@ -313,7 +313,7 @@ appdb: src~1,401 dst~1,410 (100%)               <- row โดยประมา�
 - ช่วง full load จะเห็น rate (rows/s) + ETA คำนวณให้
 - `caught up, check lag before cutover` = จำนวน row ตามทันแล้ว
 
-### migkit sync <hop> — ซ่อมปลายทางให้เท่าต้นทาง (รวม repair เดิม)
+### migkit sync <hop> - ซ่อมปลายทางให้เท่าต้นทาง (รวม repair เดิม)
 
 สามระดับ จากเบาไปหนัก **default คือ dry-run เสมอ**:
 
@@ -352,11 +352,11 @@ sequence ย้อนอัตโนมัติ ส่วน row-level จะ�
 
 ไฟล์ undo อยู่ที่ `reports/<hop>/<db>/undo/<timestamp>-*.sql` เอาไปรันย้อนได้เลย
 
-ส่วน schema diff ไม่มี auto-apply โดยตั้งใจ — DDL ต้อง review เอง:
+ส่วน schema diff ไม่มี auto-apply โดยตั้งใจ - DDL ต้อง review เอง:
 ดู `schema.diff` แล้ว apply จาก `schema-src.sql` หรือใช้ `migra-fix.sql`
 ที่ migra generate ให้ (ถ้าลง migra ไว้)
 
-ข้อควรระวัง: อย่า repair ตอน incremental replication ยังวิ่งแล้วคาดหวังว่าจะนิ่ง —
+ข้อควรระวัง: อย่า repair ตอน incremental replication ยังวิ่งแล้วคาดหวังว่าจะนิ่ง -
 ต้นทางยังมี write ใหม่เรื่อยๆ ค่าจะ drift ต่อ การซ่อมให้ตรง 100% เป็นงานตอน
 cutover (หยุด write แล้ว) เท่านั้น
 
@@ -505,12 +505,12 @@ migkit check events-kafka
 | kafka | offsets + tail content hash, cutover ดู MM2 heartbeat/checkpoint | - |
 | generic | **reladiff** ทุก engine ที่มันรู้จัก | - |
 
-ทุกชั้นเป็นอิสระต่อกัน — ผ่านหลายชั้นพร้อมกัน = ความมั่นใจแบบตรวจไขว้
+ทุกชั้นเป็นอิสระต่อกัน - ผ่านหลายชั้นพร้อมกัน = ความมั่นใจแบบตรวจไขว้
 ตัวไหนหายไปจากเครื่อง feature ไม่ตาย แค่ลดชั้นลง (doctor บอกว่ามีอะไรบ้าง)
 
 ## 6. ความสามารถ / ข้อจำกัด per engine
 
-- **postgres**: ครบสุด — schema ระดับ object inventory (จับ invalid index ได้),
+- **postgres**: ครบสุด - schema ระดับ object inventory (จับ invalid index ได้),
   data ผ่าน parallel sum-of-md5 (488M row ~10 นาที) + slice drilldown ราย PK,
   ซ่อมรายแถวพร้อม undo, sequence sync, state snapshot
   ตารางไม่มี PK เทียบได้แค่ checksum รวม (บอกได้ว่าต่าง แต่ drill ไม่ได้)
@@ -519,7 +519,7 @@ migkit check events-kafka
   query ในตัว), drill ราย PK -> missing/extra/changed, ซ่อมรายแถวพร้อม undo,
   auto_increment อ่านแบบสด (เลี่ยง cache ของ information_schema ใน mysql 8)
 - **mssql**: sqlcmd + catalog hash ของทุก object definition, data ใช้
-  binary_checksum (หยาบ — ยืนยันด้วย reladiff/tablediff ก่อนซ่อม), identity
+  binary_checksum (หยาบ - ยืนยันด้วย reladiff/tablediff ก่อนซ่อม), identity
   ซ่อมด้วย dbcc checkident
 - **mongodb**: index/options ตรงระดับ spec, data 2 ชั้น: dbHash ต่อ collection
   (เร็ว) แล้ว drill ราย _id ด้วย $toHashedIndexKey เมื่อไม่ตรง, ซ่อมราย
@@ -530,7 +530,7 @@ migkit check events-kafka
 - **kafka**: topics/partitions, message count ต่อ topic (end-begin offsets),
   content ท้าย partition แบบ hash (options.sample, default 200 messages),
   cutover ดู heartbeat/checkpoint ของ MirrorMaker2 ประกอบ
-- **generic**: อะไรก็ตามที่ reladiff รู้จัก — ใส่ `url` เต็มใน endpoint
+- **generic**: อะไรก็ตามที่ reladiff รู้จัก - ใส่ `url` เต็มใน endpoint
   กับ `options.tables` แล้ว check counts/data ได้เลย
 
 ## 6.1 Idempotency
@@ -547,7 +547,7 @@ Engine ต่อผ่าน wire protocol มาตรฐาน จึงใช
 (RDS/Aurora, Cloud SQL/AlloyDB, Azure Database, TencentDB) ต่างกันแค่ quirk
 ซึ่งจัดการด้วย fallback ในตัว:
 
-- **DocumentDB (AWS)**: ไม่มี dbHash และ $toHashedIndexKey — engine ตกลง
+- **DocumentDB (AWS)**: ไม่มี dbHash และ $toHashedIndexKey - engine ตกลง
   ชั้นสามอัตโนมัติ (client-side BSON hash ราย document) config:
 
 ```yaml
@@ -566,21 +566,21 @@ Engine ต่อผ่าน wire protocol มาตรฐาน จึงใช
 
 ## 7. Troubleshooting
 
-- **diff เล็กๆ โผล่ทั้งที่เพิ่งซ่อม** — ปกติ ถ้า incremental ยังวิ่ง ต้นทางมี write
+- **diff เล็กๆ โผล่ทั้งที่เพิ่งซ่อม** - ปกติ ถ้า incremental ยังวิ่ง ต้นทางมี write
   ใหม่ตลอด เช็คซ้ำเฉพาะจุด (`--db X --table Y`) ก่อนสรุป
-- **check data ตารางใหญ่ช้า** — ตาม design (hash ทุก row) 488M row ใช้ราวๆ 2-3 ชม.
+- **check data ตารางใหญ่ช้า** - ตาม design (hash ทุก row) 488M row ใช้ราวๆ 2-3 ชม.
   รันใน background/tmux แล้วดู progress เอา ปรับ `slice` ใหญ่ขึ้นได้ถ้า server แรง
-- **server ฟ้อง no space left (pgsql_tmp)** — เกิดกับ query แบบ sort ทั้งตาราง
+- **server ฟ้อง no space left (pgsql_tmp)** - เกิดกับ query แบบ sort ทั้งตาราง
   โหมด slice แก้ปัญหานี้แล้ว ถ้าเจอแปลว่าตารางนั้นหลุดไปโหมดธรรมดา (เช่น PK
-  เป็น text) — เช็คทีละตารางหรือขยาย temp ฝั่ง server
-- **doctor ฟ้อง dst FAIL** — เช็ค VPN/เส้นทาง network ไปปลายทาง แล้วดู firewall ฝั่ง cloud
+  เป็น text) - เช็คทีละตารางหรือขยาย temp ฝั่ง server
+- **doctor ฟ้อง dst FAIL** - เช็ค VPN/เส้นทาง network ไปปลายทาง แล้วดู firewall ฝั่ง cloud
 
 ## 8. กฎเหล็ก
 
 - `check` (รวม `--deep`/`--drill`) อ่านอย่างเดียว รันได้ตลอดเวลา ไม่ต้องขอใคร
-- `sync` / `schema` / `move` แตะปลายทาง — dry-run ก่อนเสมอ, `--apply`/`--go`
+- `sync` / `schema` / `move` แตะปลายทาง - dry-run ก่อนเสมอ, `--apply`/`--go`
   เฉพาะตอนตั้งใจ และห้ามรันตอน incremental วิ่งถ้าหวังผลนิ่ง
 - source ไม่ถูกเขียนโดย migkit ในทุกกรณี
 - schema ปลายทางมาจาก native dump เท่านั้น อย่าให้ migration service สร้าง
-- sequence/identity ต้อง repair ทุกครั้งหลัง full load — ไม่มี migration service
+- sequence/identity ต้อง repair ทุกครั้งหลัง full load - ไม่มี migration service
   เจ้าไหนขนมาให้
