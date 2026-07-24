@@ -89,10 +89,8 @@ def pgdump_move(hop, db, workers, go, log):
              "-d", db, "--data-only", "--disable-triggers",
              "-j", str(workers), str(outdir)], env_t, log)
     except RuntimeError as e:
-        # newer pg_dump emits SETs older servers reject (e.g.
-        # transaction_timeout); pg_restore exits 1 for those ignored
-        # statements even when every row landed - migkit check is the
-        # judge of the data, so only real failures stop us
+        # newer pg_dump emits SETs older servers reject; pg_restore exits 1
+        # on those even when all rows landed - migkit check is the judge
         if "errors ignored on restore" not in str(e):
             raise
         if log:

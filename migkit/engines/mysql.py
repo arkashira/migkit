@@ -28,9 +28,7 @@ class MySQLEngine(Engine):
             label=f"mysql connect {side}")
 
     def _q(self, side, sql, args=None, fresh=False):
-        # a fresh connection per query is retried as a unit: TLS handshake
-        # races (WRONG_VERSION_NUMBER) and dropped sockets (Lost connection)
-        # clear on the next attempt instead of failing the whole check
+        # retry the connect+query as a unit so a TLS/socket blip clears
         def once():
             conn = self._conn(side)
             try:
@@ -64,11 +62,8 @@ class MySQLEngine(Engine):
         text = re.sub(r" AUTO_INCREMENT=\d+", "", text)
         text = re.sub(r"DEFINER=`[^`]*`@`[^`]*`", "", text)
         text = re.sub(r"CHARACTER SET \w+ COLLATE", "COLLATE", text)
-        # DTS recreates routines/views with SQL SECURITY INVOKER because it
-        # cannot set an arbitrary DEFINER; the source keeps the DEFINER
-        # default (omitted). atlas already treats this as non-structural, so
-        # normalize the security clause away to agree with it. The raw dumps
-        # in schema-src.sql / schema-dst.sql still show it for auditing.
+        # DTS downgrades routines to SQL SECURITY INVOKER; atlas treats this
+        # as non-structural, so drop the clause to agree (raw dumps keep it)
         text = re.sub(r"\s*SQL SECURITY (DEFINER|INVOKER)", "", text)
         return text
 
@@ -347,8 +342,7 @@ class MySQLEngine(Engine):
         expr = self._row_expr(db, t)
         pks = self._pk_cols(db, t)
 
-        # builtin single-aggregate checksum is the fast default; set
-        # options.reladiff: true on the hop to put reladiff first again
+        # builtin checksum is the fast default; options.reladiff:true swaps in
         if pks and which("reladiff") and self.hop.options.get("reladiff",
                                                               False):
             verdict, detail, ra, rb = self._reladiff_table(db, t, pks)
@@ -420,9 +414,7 @@ class MySQLEngine(Engine):
             elif p.exists():
                 p.unlink()
         if not (missing or extra or changed):
-            # checksum flagged a difference but the per-pk pass found none:
-            # the rows settled between the two reads = in-flight CDC lag,
-            # not a real diff
+            # checksum differed but per-pk found none = in-flight CDC lag
             return Result("data", scope, "ok",
                           "checksum flicker settled (in-flight replication),"
                           " 0 rows actually differ"), len(src), len(dst)
@@ -503,9 +495,8 @@ class MySQLEngine(Engine):
             elif f.exists():
                 f.unlink()
 
-    # delta verify: read the binlog window since the saved position and
-    # re-verify only the touched pks. The position advances only after a
-    # clean verify, so crashes and diffs replay the same window.
+    # delta verify: re-check only pks touched in the binlog since the saved
+    # position, which advances only on a clean verify (idempotent)
     def delta_verify(self, db, limit=20000, log=None):
         try:
             from pymysqlreplication import BinLogStreamReader
@@ -619,8 +610,7 @@ class MySQLEngine(Engine):
         res = []
         ddb = self._d("dst", db)
 
-        # loads run with foreign_key_checks=0 (ours included), so orphans
-        # are possible on target even though mysql normally enforces fks
+        # loads run with foreign_key_checks=0, so target orphans are possible
         rows = self._q("dst",
                        "select constraint_name, table_name, column_name,"
                        " referenced_table_name, referenced_column_name"
@@ -810,8 +800,7 @@ class MySQLEngine(Engine):
                 conn.close()
             return
         if action.kind == "schema":
-            # pipe the DDL through the mysql CLI so routine/trigger bodies
-            # (internal semicolons, DELIMITER) apply correctly
+            # mysql CLI handles routine/trigger bodies (DELIMITER) correctly
             tg = self.hop.target
             ddl = "\n".join(action.statements) + "\n"
             run(["mysql", "-h", tg.host, "-P", str(tg.port), "-u", tg.user,
@@ -840,9 +829,7 @@ class MySQLEngine(Engine):
 
         undo = Path(undo_dir) if undo_dir else d / "undo"
         undo.mkdir(parents=True, exist_ok=True)
-        # complete reversible undo: for every pk repair will touch, record its
-        # pre-repair target state. absent (missing) -> restore deletes it;
-        # present (extra/changed) -> restore re-inserts the saved old row.
+        # record every touched pk's pre-repair target row so restore is exact
         sconn, dconn = self._conn("src"), self._conn("dst")
         touched = missing + extra + changed
         entries = []
@@ -858,10 +845,8 @@ class MySQLEngine(Engine):
                 (undo / f"rows-{t}.jsonl").write_text(
                     "".join(json.dumps(e, default=str) + "\n"
                             for e in entries))
-                # statement generation via pt-table-sync when possible:
-                # 15 years of charset/float/NULL edge cases, bounded by
-                # --where to exactly the pks we verified (undo stays
-                # complete). builtin delete+copy is the fallback.
+                # pt-table-sync when available (bounded to the verified pks);
+                # builtin delete+copy is the fallback
                 pt_sql = self._pt_sync_sql(db, t, pks, touched)
                 if pt_sql:
                     for stmt in pt_sql:

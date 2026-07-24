@@ -22,8 +22,7 @@ class MongoEngine(Engine):
         hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
         uri = f"mongodb://{auth}{hosts}/"
         extra = ep.options.get("uri_options", "")
-        # retryReads lets the driver transparently re-issue a read after a
-        # transient network blip (the mongo analog of our sql retry layer)
+        # retryReads = the driver re-issues a read after a network blip
         if "retryReads" not in extra:
             extra = (extra + "&retryReads=true") if extra else "retryReads=true"
         uri += "?" + extra
@@ -169,8 +168,7 @@ class MongoEngine(Engine):
                 stream(f"{name}: {r.status}")
             res.append(r)
         if with_counts:
-            # equal hashes imply equal counts, so only diffed collections
-            # pay for an exact count
+            # equal hashes imply equal counts; only diffed colls pay to count
             bad = [f"{c} missing on target" for c in sorted(sn - tn)
                    if not c.startswith("system.")]
             bad += [f"{c} extra on target" for c in sorted(tn - sn)
@@ -277,9 +275,8 @@ class MongoEngine(Engine):
                        f"newest _id checked on {n} collections,"
                        f" none ahead of source{note}")]
 
-    # delta verify: drain the change stream window since the saved resume
-    # token and re-verify only the touched _ids. The token advances only
-    # after a clean verify, so crashes and diffs replay the same window.
+    # delta verify: re-check only _ids touched since the saved change-stream
+    # token, which advances only on a clean verify (idempotent)
     def delta_verify(self, db, limit=20000, log=None):
         from bson.json_util import dumps, loads
         state = self.hop.report_dir(db) / "delta-token.json"

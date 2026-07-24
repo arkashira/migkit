@@ -400,8 +400,7 @@ class PostgresEngine(Engine):
         res = []
         rpt = self.hop.report_dir(db)
 
-        # orphans can only hide behind NOT VALID constraints (pg enforces
-        # validated ones), so scan just those
+        # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """
             select c.conname
               ||'|'||c.conrelid::regclass||'|'||c.confrelid::regclass
@@ -490,9 +489,8 @@ class PostgresEngine(Engine):
                               f"{len(sc)} columns compared, type/null/"
                               "default/precision identical"))
 
-        # render audit: exotic types are where ::text equality can lie
-        # across builds/versions; compare the actual rendering of sampled
-        # rows so the lie surfaces instead of hiding inside a checksum
+        # exotic types can render differently across builds; sample and
+        # compare their actual text so a checksum can't hide it
         exq = ("select n.nspname||'.'||c.relname||'|'||a.attname"
                " from pg_attribute a"
                " join pg_class c on c.oid = a.attrelid"
@@ -580,8 +578,7 @@ class PostgresEngine(Engine):
             if pop != "t":
                 stale.append(f"{m}: not populated on target")
                 continue
-            # count alone misses a stale mv with the same row count, so
-            # checksum the content (matviews are small derived sets)
+            # count misses a stale mv with the same size; checksum content
             q = ("select count(*)||'|'||coalesce(sum(('x'||substr("
                  "md5(t::text),1,16))::bit(64)::bigint::numeric), 0)"
                  f" from {m} t")
@@ -763,8 +760,7 @@ class PostgresEngine(Engine):
             self._psql("dst", db,
                        "\n".join(s.split("  --")[0] for s in action.statements))
         elif action.kind == "schema":
-            # psql applies the whole DDL blob in one go: handles multi-
-            # statement output and dollar-quoted function bodies correctly
+            # one psql call: multi-statement + $$-quoted bodies apply intact
             blob = "begin;\n" + "\n".join(action.statements) + "\ncommit;"
             self._psql("dst", db, blob)
         else:
@@ -814,12 +810,8 @@ class PostgresEngine(Engine):
         add("pass" if sv.split(".")[0] == dv.split(".")[0] else "warn",
             "instance", "server version match", f"src {sv} / dst {dv}")
 
-        # endpoint role: a read replica answers pg_is_in_recovery()=t and
-        # rejects every write incl. SELECT ... FOR UPDATE (SQLSTATE 25006).
-        # target on a reader = migration and repair cannot write; source on
-        # a reader = fine for checks but the LSN fence and logical slots
-        # need the primary. This is the "app pointed at the reader endpoint"
-        # class of outage, surfaced before it bites.
+        # read replica (pg_is_in_recovery=t) rejects writes incl SELECT FOR
+        # UPDATE (25006): fatal as a target, ok-for-checks as a source
         src_ro = self._in_recovery("src", "postgres")
         dst_ro = self._in_recovery("dst", "postgres")
         add("warn" if src_ro else "pass", "instance",
@@ -848,8 +840,8 @@ class PostgresEngine(Engine):
         add("pass" if lrt == "0" else "warn", "instance",
             "transactions open longer than 10 minutes", lrt)
 
-        # pg_authid carries the real password hash (pg_roles masks it as
-        # ********); needs superuser, so fall back to name-only when blocked
+        # pg_authid has the real hash (pg_roles masks it); needs superuser,
+        # fall back to name-only when blocked
         roles_q = ("select rolname||'|'||coalesce(rolpassword,'')"
                    " from pg_authid"
                    " where rolcanlogin"
@@ -882,9 +874,8 @@ class PostgresEngine(Engine):
             "login roles present on target",
             f"{len(sa)} src / {len(da)} dst"
             + (f", missing: {', '.join(miss[:5])}" if miss else ""))
-        # credential drift: role exists on both but the stored hash differs.
-        # this is the DTS failure mode where the user is carried over but the
-        # password is not, so applications cannot authenticate on the target.
+        # role on both sides but hash differs = DTS carried the user, not the
+        # password -> apps can't authenticate on target
         drift = sorted(n for n in (sa & da)
                        if src_pairs[n] and dst_pairs[n]
                        and src_pairs[n] != dst_pairs[n])
@@ -1033,11 +1024,8 @@ class PostgresEngine(Engine):
         self._write_pk_files(db, table, missing, extra, changed)
         return len(missing), len(extra), len(changed)
 
-    # --- consistency by design ---------------------------------------
-    # the settle heuristic guesses; these prove. Every consumer of the
-    # source (our subscription or an opaque mover like DTS) holds a slot
-    # on the source, so "target applied past LSN X" is observable from
-    # the source side alone.
+    # --- consistency by design: any consumer (incl. DTS) holds a slot on
+    # the source, so "target applied past LSN X" is observable there ---
 
     def _psql_script(self, side, db, sql):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -1053,8 +1041,7 @@ class PostgresEngine(Engine):
             stderr=subprocess.PIPE, text=True, env=env), sql
 
     def _row_hash_expr(self):
-        # to_jsonb canonicalizes rendering (ISO timestamps regardless of
-        # DateStyle, sorted jsonb keys); plain ::text is faster
+        # to_jsonb canonicalizes rendering (ISO timestamps); ::text is faster
         if self.hop.options.get("checksum", "text") == "jsonb":
             return "md5(to_jsonb(t)::text)"
         return "md5(t::text)"
@@ -1138,8 +1125,7 @@ class PostgresEngine(Engine):
             return False
 
     def src_lsn(self, db):
-        # WAL functions are unavailable during recovery (and Aurora readers
-        # reject the replay-lsn variant too); no source LSN => no fence
+        # WAL funcs are unavailable during recovery; no source LSN, no fence
         if self._in_recovery("src", db):
             return None
         return self._psql("src", db, "select pg_current_wal_lsn()")
@@ -1265,11 +1251,8 @@ class PostgresEngine(Engine):
             out.unlink()
         return diff
 
-    # --- delta verify: O(changes) continuous verification -------------
-    # a dedicated logical slot on the source records which rows changed;
-    # each cycle verifies only those pks on both sides. The slot is only
-    # advanced after a clean verify, so a crash or a diff replays the
-    # same window: idempotent by construction.
+    # --- delta verify: a source slot records which rows changed; each cycle
+    # verifies only those pks and advances only when clean (idempotent) ---
 
     def _delta_slot(self, db):
         import re as _re
