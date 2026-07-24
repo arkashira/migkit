@@ -22,9 +22,13 @@ class MongoEngine(Engine):
         hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
         uri = f"mongodb://{auth}{hosts}/"
         extra = ep.options.get("uri_options", "")
-        if extra:
-            uri += "?" + extra
-        return MongoClient(uri, serverSelectionTimeoutMS=15000)
+        # retryReads lets the driver transparently re-issue a read after a
+        # transient network blip (the mongo analog of our sql retry layer)
+        if "retryReads" not in extra:
+            extra = (extra + "&retryReads=true") if extra else "retryReads=true"
+        uri += "?" + extra
+        return MongoClient(uri, serverSelectionTimeoutMS=15000,
+                           connectTimeoutMS=15000)
 
     def _d(self, side, db):
         """Physical db name: source as given, target through the hop's

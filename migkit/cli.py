@@ -461,12 +461,14 @@ def _repair(hop_name, db, kind, do_apply):
         summary = hop.report_dir() / "summary.json"
         if not summary.exists():
             raise SystemExit("run migkit check first, then sync uses its diffs")
+        want = {"counts", "autoinc", "data"}
+        if kind in ("schema", "all"):
+            want.add("schema")
         dbs = sorted({r["scope"].split()[0].split(".")[0]
                       for r in json.loads(summary.read_text())
-                      if r["status"] == "diff" and r["check"] in
-                      ("counts", "autoinc", "data")})
+                      if r["status"] == "diff" and r["check"] in want})
         if not dbs:
-            console.print("nothing to repair (no data/sequence diffs last check)")
+            console.print("nothing to repair (no matching diffs last check)")
             return
         console.print(f"repairing {len(dbs)} databases with diffs:"
                       f" {', '.join(dbs)}\n")

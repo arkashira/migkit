@@ -1,6 +1,6 @@
 [project]
 name = "migkit"
-version = "0.3.3"
+version = "0.3.4"
 description = "Personal database migration toolkit: setup, validate, repair, advise, watch"
 requires-python = ">=3.10"
 dependencies = [

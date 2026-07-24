@@ -4,7 +4,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from ..util import run, which
+from ..util import run, which, with_retry
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
@@ -21,22 +21,31 @@ class MySQLEngine(Engine):
             import pymysql
         except ImportError:
             raise SystemExit("pip install 'migkit[mysql]' for mysql support")
-        return pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
-                               password=ep.password, charset="utf8mb4")
+        return with_retry(
+            lambda: pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
+                                    password=ep.password, charset="utf8mb4",
+                                    connect_timeout=15),
+            label=f"mysql connect {side}")
 
     def _q(self, side, sql, args=None, fresh=False):
-        conn = self._conn(side)
-        try:
-            with conn.cursor() as cur:
-                if fresh:
-                    try:
-                        cur.execute("set session information_schema_stats_expiry = 0")
-                    except Exception:
-                        pass
-                cur.execute(sql, args)
-                return cur.fetchall()
-        finally:
-            conn.close()
+        # a fresh connection per query is retried as a unit: TLS handshake
+        # races (WRONG_VERSION_NUMBER) and dropped sockets (Lost connection)
+        # clear on the next attempt instead of failing the whole check
+        def once():
+            conn = self._conn(side)
+            try:
+                with conn.cursor() as cur:
+                    if fresh:
+                        try:
+                            cur.execute("set session"
+                                        " information_schema_stats_expiry = 0")
+                        except Exception:
+                            pass
+                    cur.execute(sql, args)
+                    return cur.fetchall()
+            finally:
+                conn.close()
+        return with_retry(once, label=f"mysql query {side}")
 
     def _d(self, side, db):
         """Resolve the physical db name for a side. Source keeps the given
@@ -768,7 +777,26 @@ class MySQLEngine(Engine):
                     db, "rows", stmts,
                     [], f"{t}: delete extra/changed on target (saved to undo"
                         " first), reinsert from source"))
+        if kind in ("schema", "all"):
+            act = self._schema_repair_action(db)
+            if act:
+                actions.append(act)
         return actions
+
+    def _schema_repair_action(self, db):
+        """atlas-generated DDL to align the target's objects (columns,
+        indexes, PK/FK, views, routines, triggers) to the source, reverse
+        DDL as undo. Structure only; data untouched."""
+        if not which("atlas"):
+            return None
+        fwd, undo = self.migration_pair(db)
+        if not fwd:
+            return None
+        return RepairAction(db, "schema", fwd.splitlines(),
+                            (undo or "").splitlines(),
+                            "atlas-generated DDL to align target objects to"
+                            " source (review before --apply; reverse DDL"
+                            " saved to undo)")
 
     def apply(self, db, action):
         if action.kind == "sequences":
@@ -780,6 +808,14 @@ class MySQLEngine(Engine):
                 conn.commit()
             finally:
                 conn.close()
+            return
+        if action.kind == "schema":
+            # pipe the DDL through the mysql CLI so routine/trigger bodies
+            # (internal semicolons, DELIMITER) apply correctly
+            tg = self.hop.target
+            ddl = "\n".join(action.statements) + "\n"
+            run(["mysql", "-h", tg.host, "-P", str(tg.port), "-u", tg.user,
+                 f"-p{tg.password}", self._d("dst", db)], input=ddl)
             return
         t = action.statements[0].split()[3]
         self._apply_rows(db, t, getattr(self, "_undo_dir", None))

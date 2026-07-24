@@ -2,6 +2,24 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.3.4] — 2026-07-24
+
+Prod-grade robustness and schema-object repair.
+
+### Added
+- **Connection retry/backoff**: transient failures (TLS handshake races —
+  `WRONG_VERSION_NUMBER`, dropped/reset sockets, `Lost connection`, pooler
+  hiccups, cross-region blips) are retried with exponential backoff instead
+  of aborting a whole check. Permanent errors (auth, syntax, constraint)
+  still surface immediately. Wired into `run` (pg/atlas/etc.), mysql `_q`,
+  and mongo (`retryReads`).
+- **`sync --kind schema`** now actually repairs: atlas (the authoritative
+  differ) generates the DDL to align the target's objects — columns,
+  indexes, PK/FK, views, routines, triggers — to the source, applied in one
+  transaction via the native client (psql / mysql, so function bodies and
+  DELIMITER work), reverse DDL saved to undo, dry-run by default. Closes the
+  "make structure 100% equal" gap; data is never touched by this kind.
+
 ## [0.3.3] — 2026-07-24
 
 Different-named databases, and no more charset noise.

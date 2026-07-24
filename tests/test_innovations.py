@@ -174,3 +174,46 @@ def test_engine_side_resolution_maps_only_dst():
         assert eng._d("dst", "other") == "other"         # unmapped identity
     # pg must never remap the maintenance db
     assert PostgresEngine(hop("postgres"))._d("dst", "postgres") == "postgres"
+
+
+def test_transient_error_classification():
+    from migkit.util import is_transient
+    # network blips -> retry
+    assert is_transient("[SSL: WRONG_VERSION_NUMBER] wrong version number")
+    assert is_transient("(2013, 'Lost connection to MySQL server')")
+    assert is_transient("connection reset by peer")
+    assert is_transient("server closed the connection unexpectedly")
+    # permanent errors -> never retry
+    assert not is_transient("password authentication failed for user")
+    assert not is_transient("syntax error at or near")
+    assert not is_transient("duplicate key value violates unique constraint")
+
+
+def test_with_retry_permanent_vs_transient():
+    import pytest
+    from migkit.util import with_retry
+    perm = []
+
+    def permanent():
+        perm.append(1)
+        raise RuntimeError("permission denied")
+    with pytest.raises(RuntimeError):
+        with_retry(permanent, tries=4, base=0)
+    assert len(perm) == 1  # no retry on permanent
+
+    flaky = []
+
+    def recovers():
+        flaky.append(1)
+        if len(flaky) < 3:
+            raise RuntimeError("connection reset by peer")
+        return "ok"
+    assert with_retry(recovers, tries=5, base=0) == "ok"
+    assert len(flaky) == 3  # retried twice then succeeded
+
+
+def test_schema_is_a_repair_kind():
+    from migkit.engines.mysql import MySQLEngine
+    from migkit.engines.postgres import PostgresEngine
+    assert hasattr(PostgresEngine, "_schema_repair_action")
+    assert hasattr(MySQLEngine, "_schema_repair_action")
