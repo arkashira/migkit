@@ -55,6 +55,12 @@ class MySQLEngine(Engine):
         text = re.sub(r" AUTO_INCREMENT=\d+", "", text)
         text = re.sub(r"DEFINER=`[^`]*`@`[^`]*`", "", text)
         text = re.sub(r"CHARACTER SET \w+ COLLATE", "COLLATE", text)
+        # DTS recreates routines/views with SQL SECURITY INVOKER because it
+        # cannot set an arbitrary DEFINER; the source keeps the DEFINER
+        # default (omitted). atlas already treats this as non-structural, so
+        # normalize the security clause away to agree with it. The raw dumps
+        # in schema-src.sql / schema-dst.sql still show it for auditing.
+        text = re.sub(r"\s*SQL SECURITY (DEFINER|INVOKER)", "", text)
         return text
 
     def databases(self):
@@ -96,6 +102,7 @@ class MySQLEngine(Engine):
                    and not l.startswith(("+++", "---"))]
         res = []
         if not changed:
+            (d / "schema.diff").unlink(missing_ok=True)  # clear stale evidence
             res.append(Result("schema", db, "ok"))
         else:
             (d / "schema.diff").write_text("\n".join(diff))
@@ -181,6 +188,7 @@ class MySQLEngine(Engine):
             return None
         text = p.stdout.strip()
         if not text or "Schemas are synced" in text:
+            (self.hop.report_dir(db) / "atlas-fix.sql").unlink(missing_ok=True)
             return Result("schema", f"{db} (atlas)", "ok", "atlas diff clean")
         out = self.hop.report_dir(db) / "atlas-fix.sql"
         out.write_text(text + "\n")
@@ -1094,12 +1102,13 @@ class MySQLEngine(Engine):
 
     def setup_target_plan(self, db):
         s, t = self.hop.source, self.hop.target
+        tdb = self._d("dst", db)
         return [
             f"mysqldump -h {s.host} -u {s.user} -p --no-data --routines --triggers"
             f" --events {db} > {db}.schema.sql",
-            f"mysql -h {t.host} -u {t.user} -p -e 'create database `{db}`"
+            f"mysql -h {t.host} -u {t.user} -p -e 'create database `{tdb}`"
             f" character set utf8mb4'  # match source charset/collation",
-            f"mysql -h {t.host} -u {t.user} -p {db} < {db}.schema.sql",
+            f"mysql -h {t.host} -u {t.user} -p {tdb} < {db}.schema.sql",
             "-- set foreign_key_checks=0 on the load session or drop FKs until cutover",
             "-- then start the migration service full load + binlog replication into existing tables",
         ]

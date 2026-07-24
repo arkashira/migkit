@@ -138,6 +138,10 @@ def test_charset_noise_normalized():
     # a REAL collation difference must still show
     real = "`x` text COLLATE utf8mb4_unicode_ci"
     assert MySQLEngine._canon_ddl(real) != MySQLEngine._canon_ddl(src)
+    # DTS's SQL SECURITY INVOKER downgrade is a known artifact -> normalized
+    proc_src = "CREATE PROCEDURE p()\nBEGIN END"
+    proc_dst = "CREATE PROCEDURE p()\n    SQL SECURITY INVOKER\nBEGIN END"
+    assert MySQLEngine._canon_ddl(proc_src) == MySQLEngine._canon_ddl(proc_dst)
 
 
 def test_db_map_resolves_target_name():

@@ -747,14 +747,15 @@ class PostgresEngine(Engine):
 
     def setup_target_plan(self, db):
         s, t = self.hop.source, self.hop.target
+        tdb = self._d("dst", db)
         return [
             f"pg_dumpall -h {s.host} -p {s.port} -U {s.user} --globals-only"
             f" > globals.sql   # review roles, then apply on target",
             f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fc --schema-only"
             f" -f {db}.schema.dump",
-            f"createdb -h {t.host} -p {t.port} -U {t.user} {db}"
+            f"createdb -h {t.host} -p {t.port} -U {t.user} {tdb}"
             f"   # match encoding/locale with source",
-            f"pg_restore -h {t.host} -p {t.port} -U {t.user} -d {db} --no-owner"
+            f"pg_restore -h {t.host} -p {t.port} -U {t.user} -d {tdb} --no-owner"
             f" {db}.schema.dump",
             f"-- drop or disable FK constraints and triggers on target before full load,"
             f" keep PKs (script them first: they are your rollback)",
