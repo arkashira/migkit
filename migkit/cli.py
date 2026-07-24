@@ -111,7 +111,8 @@ def doctor():
     """Configured hops, local tools, and connectivity."""
     _hops_table()
     tools = ["psql", "pg_dump", "pg_restore", "mysqldump", "mysql", "sqlcmd",
-             "mongodump", "reladiff", "migra", "liquibase", "pt-table-sync"]
+             "mongodump", "mongorestore", "mydumper", "myloader", "pgloader",
+             "reladiff", "migra", "liquibase", "atlas", "pt-table-sync"]
     t = Table("tool", "status")
     for name in tools:
         path = which(name)
@@ -307,13 +308,19 @@ def _drill(hop_name, db, table, limit):
               help="column-level sample diff for one table"
                    " (needs --db and --table)")
 @click.option("--limit", default=1000, help="with --drill: sample rows")
+@click.option("--consistent", is_flag=True,
+              help="checksum every table of a db inside one repeatable-read"
+                   " transaction per side, with the src LSN captured as the"
+                   " convergence fence (postgres)")
 @click.option("--workers", default=0, help="parallel databases, default from conf")
 @click.option("--resume", is_flag=True, help="skip checks already ok in last summary")
-def check(hop_name, db, table, only, do_deep, drill, limit, workers, resume):
+def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
+          workers, resume):
     """Read-only validation of target vs source. Never writes to either side.
 
     When counts and data both run, row counts ride along with the checksum
-    query, so nothing is scanned twice."""
+    query, so nothing is scanned twice. Suspect rows are proven in-flight
+    or real via the replication fence (LSN-based) instead of guesswork."""
     if drill:
         return _drill(hop_name, db, table, limit)
     hop = get_hop(hop_name)
@@ -366,6 +373,8 @@ def check(hop_name, db, table, only, do_deep, drill, limit, workers, resume):
                     kw = {"stream": _stream(d)}
                     if merge and "counts" not in local_map[d]:
                         kw["with_counts"] = True
+                    if consistent and hasattr(eng, "_fast_consistent"):
+                        kw["consistent"] = True
                     rs = [r.__dict__ for r in fn(d, table or None, **kw)]
                 else:
                     rs = [r.__dict__ for r in fn(d)]
@@ -659,28 +668,72 @@ def _tail(hop, eng, db, go):
 @click.option("--table", default="", help="schema.table (full mode)")
 @click.option("--mode", type=click.Choice(["full", "cdc", "full+cdc"]),
               default="full",
-              help="full = resumable chunked copy, cdc = follow live changes,"
+              help="full = bulk copy, cdc = follow live changes,"
                    " full+cdc = initial load plus stream until cutover")
-@click.option("--chunk", default=500000, help="rows per resumable chunk")
+@click.option("--via", type=click.Choice(["auto", "builtin", "pgdump",
+                                          "mydumper", "pgloader",
+                                          "mongodump", "debezium"]),
+              default="auto",
+              help="which mover does the work: auto = fastest installed"
+                   " (pg_dump -j / mydumper / pgloader / mongodump),"
+                   " builtin = chunk-resumable copy,"
+                   " debezium = generate Connect configs for platform CDC")
+@click.option("--chunk", default=500000, help="rows per resumable chunk (builtin)")
 @click.option("--drop", "do_drop", is_flag=True,
               help="cdc modes: tear down replication")
 @click.option("--go", is_flag=True, help="actually run, default shows the plan")
-def move(hop_name, db, table, mode, chunk, do_drop, go):
-    """One mover for every engine. The engine picks its native mechanism:
-    postgres logical replication, mysql binlog, mongo change streams.
+def move(hop_name, db, table, mode, via, chunk, do_drop, go):
+    """One mover for every engine, driving the best installed tool.
 
-    Use only over a trusted network (or run migkit on a cloud VM).
-    Every chunk is delete+copy in one transaction and every stream keeps
-    a resume token, so a crash at any point is safe: rerun to continue."""
+    full: pg_dump/pg_restore parallel jobs, mydumper/myloader, pgloader
+    or mongodump/mongorestore when installed (--via auto), else the
+    builtin chunked copy - the only mode with per-chunk crash resume.
+    cdc: native mechanisms (pg logical replication, mysql binlog, mongo
+    change streams) or --via debezium for platform-grade Connect configs.
+
+    Use only over a trusted network (or run migkit on a cloud VM)."""
+    from . import movers
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
+    from .engines import ALIASES
+    engine = ALIASES.get(hop.engine, hop.engine)
+    if via == "debezium":
+        if mode == "full":
+            raise SystemExit("--via debezium is for cdc modes")
+        if not movers.supported(engine, via):
+            raise SystemExit(f"debezium codegen not built for {hop.engine}")
+        dbs = [db] if db else eng.databases()
+        out = movers.debezium_codegen(hop, dbs, engine)
+        console.print(f"debezium connect configs generated: {out}")
+        console.print("review credentials, then follow"
+                      f" {out}/README-debezium.md")
+        return
     if mode == "full":
+        v = movers.pick(engine, table) if via == "auto" else via
+        if v != "builtin":
+            if not movers.supported(engine, v):
+                raise SystemExit(f"--via {v} does not apply to {hop.engine}")
+            dbs = [db] if db else eng.databases()
+            lk = _lock(hop) if go else None
+            try:
+                for d in dbs:
+                    console.print(f"[bold]{d}[/bold] via {v}:")
+                    steps = movers.run_via(v, hop, d, hop.workers, go,
+                                           lambda m: chat(f"  {m}"))
+                    for s0 in steps:
+                        console.print(f"  {s0}")
+                    if go:
+                        _changelog(hop, {"op": f"move-{v}", "db": d})
+                        console.print(f"[green]{d}: {v} move complete[/green],"
+                                      " run migkit check to verify")
+            finally:
+                if lk:
+                    lk.unlink()
+            return
         return _move_full(hop, eng, db, table, chunk, go)
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
-    from .engines import ALIASES
-    engine = ALIASES.get(hop.engine, hop.engine)
     if mode == "cdc":
         if engine == "postgres" and has_repl:
             return _replicate(hop, eng, db, False, do_drop, go)
@@ -709,6 +762,58 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
         return
     raise SystemExit(f"full+cdc not available for {hop.engine},"
                      " see migkit advise")
+
+
+def _delta_loop(hop_name, db, interval, cycles, teardown):
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "delta_verify"):
+        raise SystemExit(f"delta verify not available for {hop.engine} yet"
+                         " (postgres, mysql, mongodb)")
+    dbs = [db] if db else eng.databases()
+    if teardown:
+        for d in dbs:
+            if hasattr(eng, "delta_teardown"):
+                try:
+                    eng.delta_teardown(d)
+                except Exception as e:
+                    console.print(f"{d}: [yellow]{e}[/yellow]")
+            for f in ("delta-pos.json", "delta-token.json"):
+                p = hop.report_dir(d) / f
+                if p.exists():
+                    p.unlink()
+            console.print(f"{d}: delta state removed")
+        return
+    n = 0
+    while True:
+        n += 1
+        stamp = time.strftime("%H:%M:%S")
+        all_results = []
+        for d in dbs:
+            try:
+                rs = eng.delta_verify(d, log=lambda m, d=d:
+                                      chat(f"  [{d}] {m}"))
+            except Exception as e:
+                console.print(f"{stamp} {d}: [red]delta error[/red] {e}")
+                continue
+            head = rs[0]
+            color = {"ok": "green", "diff": "yellow",
+                     "error": "red"}.get(head.status, "white")
+            console.print(f"{stamp} cycle {n} {d}:"
+                          f" [{color}]{head.status.upper()}[/{color}]"
+                          f" {head.detail}")
+            for r in rs[1:]:
+                if r.status not in ("ok", "skip"):
+                    console.print(f"    [yellow]{r.scope}: {r.detail}[/yellow]"
+                                  + (f"  fix: {r.fix_hint}" if r.fix_hint
+                                     else ""))
+            all_results.extend(r.__dict__ for r in rs)
+        (hop.report_dir() / "delta-summary.json").write_text(
+            json.dumps(all_results, indent=1, default=str))
+        if cycles and n >= cycles:
+            break
+        time.sleep(interval)
 
 
 def _monitor(hop_name, db, interval, only, cycles):
@@ -761,10 +866,20 @@ def _monitor(hop_name, db, interval, only, cycles):
 @click.option("--only", default="counts,autoinc",
               help="with --verify: checks per cycle, add data for full"
                    " checksum each cycle")
-def watch(hop_name, db, interval, count, verify, only):
+@click.option("--delta", is_flag=True,
+              help="with --verify: O(changes) mode - each cycle re-verifies"
+                   " only the rows touched since the last verified point"
+                   " (WAL slot / binlog / change stream driven)")
+@click.option("--teardown", is_flag=True,
+              help="with --delta: drop the delta slot/position and exit")
+def watch(hop_name, db, interval, count, verify, only, delta, teardown):
     """Watch a running migration load: row counts, rate, ETA, replication
     state. --verify turns it into a continuous validation loop: transient
-    diffs that heal next cycle are replication lag, persistent ones are real."""
+    diffs that heal next cycle are replication lag, persistent ones are
+    real. --verify --delta verifies only what changed, so it can run
+    forever against billion-row databases."""
+    if delta:
+        return _delta_loop(hop_name, db, interval or 60, count, teardown)
     if verify:
         return _monitor(hop_name, db, interval or 300, only, count)
     hop = get_hop(hop_name)

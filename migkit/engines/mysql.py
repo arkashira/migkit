@@ -387,11 +387,193 @@ class MySQLEngine(Engine):
             return Result("data", scope, "ok",
                           "checksum flicker settled (in-flight replication),"
                           " 0 rows actually differ"), len(src), len(dst)
-        return Result("data", scope, "diff",
-                      f"missing={len(missing)} extra={len(extra)}"
-                      f" changed={len(changed)}", str(d),
+        detail = (f"missing={len(missing)} extra={len(extra)}"
+                  f" changed={len(changed)}")
+        fp = self._column_fingerprint(db, t)
+        if fp:
+            detail += f"; drift localized to columns: {', '.join(fp[:6])}"
+        return Result("data", scope, "diff", detail, str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows"
                       " --apply"), len(src), len(dst)
+
+    def _column_fingerprint(self, db, t):
+        """One scan per side, one aggregate per column: which columns
+        actually differ before any row-level work."""
+        cols = self._cols(db, t)
+        if not cols:
+            return []
+        expr = ", ".join(
+            f"coalesce(bit_xor(conv(substring(md5(coalesce("
+            f"cast(`{c}` as char), '{NULL_TOKEN}')), 1, 8), 16, 10)), 0)"
+            for c in cols)
+        try:
+            a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]
+            b = self._q("dst", f"select {expr} from `{db}`.`{t}`")[0]
+        except Exception:
+            return []
+        diff = [c for c, x, y in zip(cols, a, b) if x != y]
+        out = self.hop.report_dir(db) / f"data-{t}.columns"
+        if diff:
+            out.write_text("columns differing between src and dst:\n"
+                           + "\n".join(diff) + "\n")
+        elif out.exists():
+            out.unlink()
+        return diff
+
+    def _compare_pks(self, db, t, keys):
+        pks = self._pk_cols(db, t)
+        if not pks:
+            return None
+        expr = self._row_expr(db, t)
+        pkexpr = ("concat_ws('\\t', "
+                  + ", ".join(f"cast(`{c}` as char)" for c in pks) + ")")
+        def fetch(side):
+            out = {}
+            klist = sorted(keys)
+            for i in range(0, len(klist), 500):
+                chunk = klist[i:i + 500]
+                if len(pks) == 1:
+                    where = (f"cast(`{pks[0]}` as char) in ("
+                             + ", ".join(["%s"] * len(chunk)) + ")")
+                    args = chunk
+                else:
+                    tup = ("(" + ", ".join(f"cast(`{c}` as char)"
+                                           for c in pks) + ")")
+                    one = "(" + ", ".join(["%s"] * len(pks)) + ")"
+                    where = tup + " in (" + ", ".join([one] * len(chunk)) + ")"
+                    args = [x for k in chunk for x in k.split("\t")]
+                q = (f"select {pkexpr}, md5({expr})"
+                     f" from `{db}`.`{t}` where {where}")
+                out.update({r[0]: r[1] for r in self._q(side, q, args)})
+            return out
+        src, dst = fetch("src"), fetch("dst")
+        missing = sorted(k for k in keys if k in src and k not in dst)
+        extra = sorted(k for k in keys if k in dst and k not in src)
+        changed = sorted(k for k in keys
+                         if k in src and k in dst and src[k] != dst[k])
+        return missing, extra, changed
+
+    def _write_pk_files(self, db, t, missing, extra, changed):
+        d = self.hop.report_dir(db)
+        for kind, rows in (("missing", missing), ("extra", extra),
+                           ("changed", changed)):
+            f = d / f"data-{t}.{kind}"
+            if rows:
+                f.write_text("\n".join(rows) + "\n")
+            elif f.exists():
+                f.unlink()
+
+    # delta verify: read the binlog window since the saved position and
+    # re-verify only the touched pks. The position advances only after a
+    # clean verify, so crashes and diffs replay the same window.
+    def delta_verify(self, db, limit=20000, log=None):
+        try:
+            from pymysqlreplication import BinLogStreamReader
+            from pymysqlreplication.row_event import (DeleteRowsEvent,
+                                                      UpdateRowsEvent,
+                                                      WriteRowsEvent)
+        except ImportError:
+            return [Result("delta", db, "error",
+                           "pip install mysql-replication for delta verify")]
+        state = self.hop.report_dir(db) / "delta-pos.json"
+        if not state.exists():
+            pos = self._q("src", "show binary log status") or \
+                self._q("src", "show master status")
+            if not pos:
+                return [Result("delta", db, "error",
+                               "cannot read binlog position on source")]
+            state.write_text(json.dumps({"log_file": pos[0][0],
+                                         "log_pos": int(pos[0][1])}))
+            return [Result("delta", db, "ok",
+                           f"baseline {pos[0][0]}:{pos[0][1]} recorded,"
+                           " changes are tracked from this point on")]
+        ck = json.loads(state.read_text())
+        s = self.hop.source
+        stream = BinLogStreamReader(
+            connection_settings={"host": s.host, "port": s.port,
+                                 "user": s.user, "passwd": s.password},
+            server_id=int(self.hop.options.get("server_id", 4379)) + 1,
+            resume_stream=True, blocking=False,
+            log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
+            only_schemas=[db],
+            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent])
+        touched = {}
+        nopk = set()
+        n = 0
+        try:
+            for ev in stream:
+                t = ev.table
+                pks = self._pk_cols(db, t)
+                if not pks:
+                    nopk.add(t)
+                    continue
+                real = self._cols(db, t)
+
+                def fix(vals):
+                    if not any(k.startswith("UNKNOWN_COL") for k in vals):
+                        return vals
+                    return {real[int(k[11:])]: v for k, v in vals.items()}
+
+                for row in ev.rows:
+                    for vals in filter(None, (row.get("values"),
+                                              row.get("after_values"),
+                                              row.get("before_values"))):
+                        v = fix(vals)
+                        if all(p in v for p in pks):
+                            touched.setdefault(t, set()).add(
+                                "\t".join(str(v[p]) for p in pks))
+                    n += 1
+                if n >= limit:
+                    break
+            end = {"log_file": stream.log_file, "log_pos": stream.log_pos}
+        finally:
+            stream.close()
+        if not touched and not nopk:
+            state.write_text(json.dumps(end))
+            return [Result("delta", db, "ok",
+                           "0 changes since last verified position")]
+        res = []
+        clean = True
+        for t, keys in sorted(touched.items()):
+            cmp = self._compare_pks(db, t, keys)
+            if cmp is None:
+                res.append(Result("delta", f"{db}.{t}", "error",
+                                  "pk lookup failed"))
+                clean = False
+                continue
+            missing, extra, changed = cmp
+            if missing or extra or changed:
+                clean = False
+                self._write_pk_files(db, t, missing, extra, changed)
+                res.append(Result(
+                    "delta", f"{db}.{t}", "diff",
+                    f"of {len(keys)} touched rows: missing={len(missing)}"
+                    f" extra={len(extra)} changed={len(changed)}",
+                    str(self.hop.report_dir(db)),
+                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+            else:
+                res.append(Result("delta", f"{db}.{t}", "ok",
+                                  f"{len(keys)} touched rows verified"
+                                  " equal on both sides"))
+            if log:
+                log(f"{t}: {len(keys)} touched, "
+                    + ("clean" if not (missing or extra or changed)
+                       else "DIFF"))
+        for t in sorted(nopk):
+            res.append(Result("delta", f"{db}.{t}", "skip",
+                              "no pk, cannot delta-verify"))
+        if clean:
+            state.write_text(json.dumps(end))
+            note = "position advanced"
+        else:
+            note = "position NOT advanced, window replays next cycle"
+        if n >= limit:
+            note += f"; window truncated at {limit} events, more pending"
+        res.insert(0, Result("delta", db, "ok" if clean else "diff",
+                             f"{sum(len(v) for v in touched.values())}"
+                             f" changed rows across {len(touched)} tables,"
+                             f" {note}"))
+        return res
 
     def check_deep(self, db):
         res = []
@@ -604,21 +786,52 @@ class MySQLEngine(Engine):
                 (undo / f"rows-{t}.jsonl").write_text(
                     "".join(json.dumps(e, default=str) + "\n"
                             for e in entries))
-                for pk in to_delete:
-                    cur.execute(f"delete from `{db}`.`{t}` where {cond}", pk)
-                with sconn.cursor() as scur:
-                    for pk in to_copy:
-                        scur.execute(f"select {collist} from `{db}`.`{t}`"
-                                     f" where {cond}", pk)
-                        rows = scur.fetchall()
-                        if rows:
-                            cur.executemany(
-                                f"insert into `{db}`.`{t}` ({collist})"
-                                f" values ({ph})", rows)
+                # statement generation via pt-table-sync when possible:
+                # 15 years of charset/float/NULL edge cases, bounded by
+                # --where to exactly the pks we verified (undo stays
+                # complete). builtin delete+copy is the fallback.
+                pt_sql = self._pt_sync_sql(db, t, pks, touched)
+                if pt_sql:
+                    for stmt in pt_sql:
+                        cur.execute(stmt)
+                else:
+                    for pk in to_delete:
+                        cur.execute(f"delete from `{db}`.`{t}`"
+                                    f" where {cond}", pk)
+                    with sconn.cursor() as scur:
+                        for pk in to_copy:
+                            scur.execute(f"select {collist} from `{db}`.`{t}`"
+                                         f" where {cond}", pk)
+                            rows = scur.fetchall()
+                            if rows:
+                                cur.executemany(
+                                    f"insert into `{db}`.`{t}` ({collist})"
+                                    f" values ({ph})", rows)
             dconn.commit()
         finally:
             sconn.close()
             dconn.close()
+
+    def _pt_sync_sql(self, db, t, pks, touched):
+        if not which("pt-table-sync") \
+                or not self.hop.options.get("pt_apply", True):
+            return None
+        if len(pks) != 1 or not touched or len(touched) > 1000:
+            return None
+        vals = ", ".join("'" + str(k[0]).replace("'", "''") + "'"
+                         for k in touched)
+        s, tg = self.hop.source, self.hop.target
+        p = run(["pt-table-sync", "--print",
+                 "--where", f"`{pks[0]}` in ({vals})",
+                 f"h={s.host},P={s.port},u={s.user},p={s.password},"
+                 f"D={db},t={t}",
+                 f"h={tg.host},P={tg.port},u={tg.user},p={tg.password}"],
+                check=False, timeout=600)
+        if p.returncode not in (0, 2):
+            return None
+        sql = [l for l in p.stdout.splitlines()
+               if l and not l.startswith("#")]
+        return sql or None
 
     def restore_rows(self, db, undo_dir):
         """Replay a complete row undo: for each touched pk, delete whatever is

@@ -2,6 +2,69 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.3.0] — 2026-07-24
+
+Consistency by design, O(changes) verification, and best-tool movers.
+
+### Added — verification innovations
+- `check --consistent` (postgres): every table of a database checksummed
+  inside ONE repeatable-read read-only transaction per side — zero intra-db
+  skew — with the source LSN captured in-snapshot as the fence.
+- **LSN-fenced convergence** replaces the sleep-settle heuristic wherever a
+  replication slot is visible (our subscriptions *and* opaque managed movers
+  keep their slot on the source): suspect rows are re-compared only after
+  every consumer confirmed flushing past the captured LSN; two fenced rounds
+  ride out hot rows; survivors are real diffs, proven, not guessed.
+  Falls back to the old `settle` behaviour when no slot is visible.
+- **Delta verify** — `watch --verify --delta`: a dedicated logical slot
+  (pg, test_decoding), saved binlog position (mysql) or change-stream token
+  (mongo) records what changed; each cycle re-verifies only those pks/ids on
+  both sides. Cursor advances only after a clean verify → crashes and diffs
+  replay the same window (idempotent); diffs write the same pk files
+  `sync --apply` repairs. `--teardown` drops the slot/state.
+- **Column fingerprint** — on any table diff, one scan with one aggregate
+  per column reports exactly which columns drift (pg + mysql), evidence in
+  `data-<table>.columns`, before any row-level work.
+- **Render audit** (`check --deep`, pg): samples exotic-typed columns
+  (enums, domains, ranges, money, tsvector, xml, interval, ...) and compares
+  their actual text rendering by pk — surfacing the cross-version rendering
+  lies that hide inside checksums. `options.checksum: jsonb` switches the
+  fast path to canonical `to_jsonb` hashing (ISO timestamps regardless of
+  DateStyle).
+
+### Changed — movers drive the best tool (auto, no flags needed)
+- `move --via auto` (default) picks the fastest installed mover per engine:
+  parallel `pg_dump -Fd -j`/`pg_restore -j` (postgres), mydumper/myloader
+  (mysql), pgloader data-only load file (mysql→pg hetero),
+  `mongodump | mongorestore` (mongo). Builtin chunked copy remains the
+  fallback and the only per-chunk-resumable mode. Version-mismatch
+  pg_restore SET noise is tolerated — `migkit check` is the judge.
+- `move --mode cdc --via debezium` generates ready-to-run Kafka Connect
+  configs (redpanda + debezium/connect compose, source connector for
+  pg/mysql, JDBC sink with upsert+delete), chmod 700, with a README of the
+  exact curls. Platform CDC without reimplementing it.
+- mysql row repair executes pt-table-sync-generated statements when the
+  tool is present (bounded by `--where` to the verified pks so the undo
+  stays complete and exactly restorable); builtin delete+copy fallback.
+
+### Changed — engines that were shallow are no longer
+- mssql: counts merged into the checksum pass; row-level drilldown via
+  canonical `FOR JSON` + SHA2_256 hashing writes the same pk evidence files;
+  deep checks for disabled/untrusted (`WITH NOCHECK`) FKs and triggers,
+  column drift, and max-pk boundary.
+- kafka: critical topic-config parity (cleanup.policy, retention, ...) in
+  schema; deep check for consumer-group presence and lag parity — the
+  offsets-not-translated failure that breaks every kafka cutover.
+- redis: pipelined type-aware compare (two round trips per 1000 keys
+  instead of one per key); deep checks for TTL drift/loss and biggest-key
+  presence on target.
+
+### Tests
+- 49 tests (was 38): + test_decoding parser, hash-expr option, mover
+  selection matrix, Debezium codegen, pt-table-sync guardrails, deep/delta
+  availability, and two docker E2Es: the full delta-verify loop and the
+  consistent-snapshot + fingerprint pass.
+
 ## [0.2.0] — 2026-07-24
 
 ### Changed — CLI consolidated to 11 commands

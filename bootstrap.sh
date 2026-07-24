@@ -25,6 +25,12 @@ pip -q install migra psycopg2-binary 2>/dev/null && echo "migra ok" \
 
 command -v atlas > /dev/null || echo "optional: brew install ariga/tap/atlas (schema diff + fix DDL for pg/mysql)"
 pip -q install datacompy 2>/dev/null && echo "datacompy ok" || echo "datacompy skipped"
+pip -q install mysql-replication 2>/dev/null && echo "mysql-replication ok (delta verify)" \
+  || echo "mysql-replication skipped"
+# best-tool movers: migkit move --via auto picks whichever of these exist
+command -v mydumper > /dev/null || echo "optional: brew install mydumper (parallel mysql move)"
+command -v pgloader > /dev/null || echo "optional: brew install pgloader (mysql->pg move)"
+command -v mongodump > /dev/null || echo "optional: brew install mongodb-database-tools (mongo move)"
 
 if [ ! -f conf/hops.yaml ]; then
   cp conf/hops.example.yaml conf/hops.yaml

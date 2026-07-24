@@ -61,14 +61,33 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   max+1, so deleted-id gaps stay identical), or delete-and-recopy differing
   rows by primary key. Target rows are saved before any change; source is never
   written.
-- **Self-hosted movers, crash-resumable** — chunked full load with a checkpoint
-  file, native Postgres logical replication, MySQL binlog replication (incl. the
-  RDS variant), MongoDB change streams with a persisted resume token, and
-  cross-engine CDC from the MySQL binlog. Every one resumes from where it died.
+- **Best-tool movers, auto-selected** — `move` drives whichever proven mover
+  is installed (`--via auto` is the default): parallel `pg_dump -j`/`pg_restore
+  -j`, mydumper/myloader, pgloader, mongodump/mongorestore — and generates
+  ready-to-run **Debezium Connect** configs (`--via debezium`) for
+  platform-grade CDC. The builtin chunked copy stays the fallback and the only
+  mode with per-chunk crash resume; native CDC (pg logical replication, mysql
+  binlog incl. the RDS variant, mongo change streams) is one flag away.
+  Whatever moves the data, migkit verifies it.
 - **No double scans** — when counts and data run together, row counts ride
   along with the checksum query, so each table is scanned once, not twice.
   `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
   summaries.
+- **Consistency by design, not guesswork** — `check --consistent` checksums
+  every table of a database inside one repeatable-read transaction per side;
+  suspect rows are then proven in-flight or real with an **LSN fence**: wait
+  until every replication consumer (your subscription *or* an opaque managed
+  mover — its slot lives on the source) confirms flushing past the source
+  LSN, then re-compare. What survives two fenced rounds is a real diff.
+- **Delta verify, O(changes)** — `watch --verify --delta` keeps a logical
+  slot (pg) / binlog position (mysql) / change-stream token (mongo) and each
+  cycle re-verifies **only the rows touched since the last verified point**.
+  The cursor advances only after a clean verify, so crashes and diffs replay
+  the same window — idempotent by construction, cheap enough to run forever
+  against billion-row databases.
+- **Column fingerprint** — when a table differs, one extra scan with one
+  aggregate per column names *which columns* drift before any row-level
+  work ("only `updated_at` differs" is a timezone bug, not data loss).
 - **Deep checks** (`check --deep`) — FK orphan scan behind NOT VALID
   constraints, disabled triggers, column-level type/null/default/charset
   drift, materialized-view freshness, table-grant parity, and a boundary
@@ -132,9 +151,9 @@ Eleven commands cover the whole lifecycle:
 | `assess` | premigration readiness (CDC prereqs, no-PK tables, encoding, accounts) |
 | `advise` | playbook for the hop's mover, phase by phase |
 | `schema` | target schema plan; `--convert` transpiles cross-engine DDL, `--migration` writes Flyway-style `V__/U__` files |
-| `check` | layered read-only validation, exit 1 on diff; `--deep` adds FK-orphan/drift/boundary checks, `--drill` gives a column-level sample diff |
-| `move` | one mover: `--mode full` resumable chunked copy, `cdc` native change streams (pg logical / mysql binlog / mongo change stream), `full+cdc` both |
-| `watch` | live load progress: counts, rate, ETA, replication state; `--verify` turns it into a continuous lag-aware re-check loop |
+| `check` | layered read-only validation, exit 1 on diff; `--consistent` = one repeatable-read txn per side + LSN fence; `--deep` adds FK-orphan/drift/render/boundary checks; `--drill` = column-level sample diff |
+| `move` | drives the best installed mover (`pg_dump -j`, mydumper, pgloader, mongodump) or the builtin resumable copy; `--mode cdc` native streams, `--via debezium` generates Connect configs |
+| `watch` | live load progress: counts, rate, ETA, replication state; `--verify` = continuous re-check loop; `--verify --delta` = O(changes) verification off the WAL/binlog/change stream |
 | `sync` | make target equal source: dry-run plan, `--apply` executes with undo, `--go` checks + repairs with rollback checkpoints |
 | `rollback` | restore any saved state, with a plan preview |
 | `history` | saved states + the in-database audit ledger + local changelog |
@@ -178,15 +197,25 @@ so new pairs (pg→mysql, mssql→pg) follow the same shape.
 ## How it compares
 
 - **vs DMS/DTS/Veridata** — migkit validates structure + sequences + data (they
-  validate rows only or nothing), repairs by row with undo, and keeps
-  state/rollback. It can also do the moving itself for homogeneous and
-  MySQL→Postgres cases.
+  validate rows only or nothing), proves in-flight vs real diffs with an LSN
+  fence instead of guessing, repairs by row with undo, and keeps
+  state/rollback. Delta verify gives Veridata-style continuous validation on
+  any of pg/mysql/mongo, for free.
+- **vs pt-table-checksum/pt-table-sync** — pt gets consistency from running
+  through the replication channel but only works master→replica on mysql.
+  migkit fences on the replication position instead, which also works across
+  clusters and opaque managed movers — and when pt-table-sync *is* usable,
+  repair drives it for statement generation.
+- **vs Debezium/pgloader/mydumper** — not competitors, employees: `move` picks
+  and drives whichever is installed, generates the Debezium Connect configs
+  when you want platform CDC, and wraps verification around all of them —
+  which none of them do on their own.
 - **vs migra/results** — migkit uses migra as one of four schema layers, and
   adds the entire data dimension migra does not cover.
 - **vs Liquibase/Flyway** — different category (they version schema changes for
   CI/CD). migkit adopts their best ideas — in-database audit ledger, rollback,
-  preconditions (`assess`), versioned migration files (`gen-migration`) — but is
-  a verification/move tool, not a changeset runner.
+  preconditions (`assess`), versioned migration files (`schema --migration`) —
+  but is a verification/move tool, not a changeset runner.
 
 ## Safety model
 
@@ -208,12 +237,15 @@ pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
 ```
 
-34 tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
-aliases stay invocable), end-to-end integration against throwaway Postgres
-containers, Faker-generated data covering every column type (jsonb, bytea,
-uuid, unicode/emoji, nulls, non-contiguous PKs), and failure-mode tests
-(bad credentials, missing state, locks, no-PK tables, credential drift). CI
-runs the no-docker subset on every push and the full suite on Ubuntu runners.
+49 tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
+aliases stay invocable), mover selection and Debezium codegen, test_decoding
+parsing, end-to-end integration against throwaway Postgres containers
+(including the full delta-verify loop: touch → flag → replay → repair →
+advance, and the consistent-snapshot pass), exact repair-undo restore against
+a MySQL pair, Faker-generated data covering every column type, and
+failure-mode tests (bad credentials, missing state, locks, no-PK tables,
+credential drift). CI runs the no-docker subset on every push and the full
+suite on Ubuntu runners.
 
 ## License
 

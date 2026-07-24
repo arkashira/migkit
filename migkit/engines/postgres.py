@@ -319,7 +319,8 @@ class PostgresEngine(Engine):
                       f"{n} tables, rows {rows_src:,}=={rows_dst:,}"
                       " (from the checksum pass, no extra scan)")
 
-    def check_data(self, db, table=None, stream=None, with_counts=False):
+    def check_data(self, db, table=None, stream=None, with_counts=False,
+                   consistent=False):
         if table:
             rc, out = self._script("check-data.sh", db, table, stream=stream)
             status = "ok" if rc == 0 else "diff"
@@ -327,40 +328,46 @@ class PostgresEngine(Engine):
                            out.splitlines()[-1] if out else "",
                            str(self._report(db)),
                            f"migkit sync {self.hop.name} --db {db} --kind rows")]
-        rc, out = self._script("check-data-fast.sh", db, stream=stream)
+        if consistent:
+            rc, out = self._fast_consistent(db)
+            if stream:
+                for line in out.splitlines():
+                    stream(line)
+        else:
+            rc, out = self._script("check-data-fast.sh", db, stream=stream)
         ev = self.hop.report_dir(db) / "data-evidence.txt"
         ev.write_text(out + "\n")
         pre = [self._counts_from_fast(db, out)] if with_counts else []
+        mode = "consistent snapshot, " if consistent else ""
         if rc == 0:
             import re as _re
             rows = sum(int(m) for m in _re.findall(r"rows=(\d+)", out))
             n = out.count(": OK")
             return pre + [Result("data", db, "ok",
-                                 f"{n} tables, {rows:,} rows, checksums equal"
-                                 f" both sides", str(ev))]
+                                 f"{mode}{n} tables, {rows:,} rows,"
+                                 f" checksums equal both sides", str(ev))]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
         for t in bad:
             self._script("check-data.sh", db, t, stream=stream)
-        settle = int(self.hop.options.get("settle", 0))
-        if bad and settle:
-            time.sleep(settle)
-            still, healed = [], []
-            for t in bad:
-                r = self.settle_recheck(db, t)
-                if r is None or any(r):
-                    still.append(t)
-                else:
-                    healed.append(t)
-            if not still:
+        if bad:
+            still, healed, how = self._resolve_inflight(db, bad, stream)
+            if not still and not err:
                 return pre + [Result("data", db, "ok",
-                                     f"all diffs were in-flight replication,"
-                                     f" settled and re-verified equal after"
-                                     f" {settle}s ({', '.join(healed)})")]
+                                     f"{mode}all diffs proven in-flight"
+                                     " replication: " + "; ".join(how),
+                                     str(ev))]
             bad = still
         detail = ""
         if bad:
             detail = f"tables differ: {', '.join(bad)} (pk-level files written)"
+            fps = []
+            for t in bad[:5]:
+                cols = self._column_fingerprint(db, t)
+                if cols:
+                    fps.append(f"{t} -> {', '.join(cols[:6])}")
+            if fps:
+                detail += "; drift localized to columns: " + "; ".join(fps)
         if err:
             detail += f" errors: {', '.join(err)}"
         return pre + [Result("data", db, "diff" if bad else "error", detail,
@@ -469,6 +476,80 @@ class PostgresEngine(Engine):
             res.append(Result("deep", f"{db} columns", "ok",
                               f"{len(sc)} columns compared, type/null/"
                               "default/precision identical"))
+
+        # render audit: exotic types are where ::text equality can lie
+        # across builds/versions; compare the actual rendering of sampled
+        # rows so the lie surfaces instead of hiding inside a checksum
+        exq = ("select n.nspname||'.'||c.relname||'|'||a.attname"
+               " from pg_attribute a"
+               " join pg_class c on c.oid = a.attrelid"
+               " join pg_namespace n on n.oid = c.relnamespace"
+               " join pg_type ty on ty.oid = a.atttypid"
+               " where c.relkind = 'r' and a.attnum > 0"
+               " and not a.attisdropped"
+               " and n.nspname not in ('pg_catalog','information_schema')"
+               " and n.nspname not like 'pg\\_%'"
+               " and n.nspname not like '\\_\\_%'"
+               " and c.relname not like 'migkit\\_%'"
+               " and (ty.typtype in ('e','c','d','r','m') or ty.typname in"
+               " ('money','point','polygon','path','circle','box','line',"
+               "'lseg','tsvector','tsquery','xml','interval','bit','varbit'))")
+        exotic = [l.split("|") for l in
+                  self._psql("src", db, exq).splitlines() if l][:20]
+
+        def _esc(v):
+            return "'" + v.replace("'", "''") + "'"
+
+        drifts = []
+        audited = 0
+        for tbl, col in exotic:
+            pks = self._pk_cols_of(db, tbl)
+            if not pks:
+                continue
+            sch2, t2 = tbl.split(".", 1)
+            pkexpr = ("concat_ws(e'\\t', "
+                      + ", ".join(f'"{p}"::text' for p in pks) + ")")
+            q = (f'select {pkexpr}||\'|\'||"{col}"::text'
+                 f' from "{sch2}"."{t2}" where "{col}" is not null limit 5')
+            try:
+                a = dict(l.split("|", 1) for l in
+                         self._psql("src", db, q).splitlines() if "|" in l)
+            except RuntimeError:
+                continue
+            if not a:
+                continue
+            audited += 1
+            if len(pks) == 1:
+                where = (f'"{pks[0]}"::text in ('
+                         + ", ".join(_esc(k) for k in a) + ")")
+            else:
+                tup = ", ".join(f'"{p}"::text' for p in pks)
+                vals = ", ".join(
+                    "(" + ", ".join(_esc(x) for x in k.split("\t")) + ")"
+                    for k in a)
+                where = f"({tup}) in ({vals})"
+            qd = (f'select {pkexpr}||\'|\'||"{col}"::text'
+                  f' from "{sch2}"."{t2}" where {where}')
+            try:
+                b = dict(l.split("|", 1) for l in
+                         self._psql("dst", db, qd).splitlines() if "|" in l)
+            except RuntimeError:
+                drifts.append(f"{tbl}.{col}: unreadable on target")
+                continue
+            for k, v in a.items():
+                if k in b and b[k] != v:
+                    drifts.append(f"{tbl}.{col}: renders differently"
+                                  f" (src {v[:40]!r} dst {b[k][:40]!r})")
+                    break
+        res.append(Result("deep", f"{db} render",
+                          "diff" if drifts else "ok",
+                          "; ".join(drifts[:5]) if drifts
+                          else (f"{audited} exotic-typed columns sampled,"
+                                " rendering identical" if audited
+                                else "no exotic-typed columns"), "",
+                          "check type definitions/versions on target;"
+                          " consider options.checksum: jsonb" if drifts
+                          else ""))
 
         mvs = [l for l in self._psql("src", db,
                "select n.nspname||'.'||c.relname from pg_class c"
@@ -810,16 +891,7 @@ class PostgresEngine(Engine):
                 add("fail", db, "assess queries", str(e).splitlines()[-1][:120])
         return items
 
-    def settle_recheck(self, db, table):
-        d = self._report(db)
-        files = {k: d / f"data-{table}.{k}"
-                 for k in ("missing", "extra", "changed")}
-        keys = set()
-        for f in files.values():
-            if f.exists():
-                keys |= set(f.read_text().splitlines())
-        if not keys or len(keys) > 20000:
-            return None
+    def _pk_cols_of(self, db, table):
         sch, tbl = table.split(".", 1)
         cols = self._psql("src", db,
             "select a.attname from pg_index i"
@@ -828,9 +900,16 @@ class PostgresEngine(Engine):
             f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
             " and i.indisprimary"
             " order by array_position(i.indkey, a.attnum)").splitlines()
-        cols = [c for c in cols if c]
+        return [c for c in cols if c]
+
+    def _compare_pks(self, db, table, keys):
+        """Row-level compare of the given pk keys (tab-joined when
+        composite). Returns (missing, extra, changed) or None when the
+        table has no pk."""
+        cols = self._pk_cols_of(db, table)
         if not cols:
             return None
+        sch, tbl = table.split(".", 1)
 
         def esc(v):
             return "'" + v.replace("'", "''") + "'"
@@ -851,7 +930,6 @@ class PostgresEngine(Engine):
                         for k in chunk)
                     where = f"({tup}) in ({vals})"
                     pk = f"concat_ws(e'\\t', {tup})"
-                sch, tbl = table.split(".", 1)
                 q = (f"select {pk}||'|'||md5(to_jsonb(t)::text)"
                      f' from "{sch}"."{tbl}" t where {where}')
                 for line in self._psql(side, db, q).splitlines():
@@ -864,14 +942,381 @@ class PostgresEngine(Engine):
         extra = sorted(k for k in keys if k in dst and k not in src)
         changed = sorted(k for k in keys
                          if k in src and k in dst and src[k] != dst[k])
+        return missing, extra, changed
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        d = self._report(db)
+        d.mkdir(parents=True, exist_ok=True)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
-            f = files[kind]
+            f = d / f"data-{table}.{kind}"
             if rows:
                 f.write_text("\n".join(rows) + "\n")
             elif f.exists():
                 f.unlink()
+
+    def settle_recheck(self, db, table):
+        d = self._report(db)
+        keys = set()
+        for k in ("missing", "extra", "changed"):
+            f = d / f"data-{table}.{k}"
+            if f.exists():
+                keys |= set(f.read_text().splitlines())
+        keys.discard("")
+        if not keys or len(keys) > 20000:
+            return None
+        cmp = self._compare_pks(db, table, keys)
+        if cmp is None:
+            return None
+        missing, extra, changed = cmp
+        self._write_pk_files(db, table, missing, extra, changed)
         return len(missing), len(extra), len(changed)
+
+    # --- consistency by design ---------------------------------------
+    # the settle heuristic guesses; these prove. Every consumer of the
+    # source (our subscription or an opaque mover like DTS) holds a slot
+    # on the source, so "target applied past LSN X" is observable from
+    # the source side alone.
+
+    def _psql_script(self, side, db, sql):
+        ep = self.hop.source if side == "src" else self.hop.target
+        env = tool_env({"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
+                        "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO"
+                                     " -c statement_timeout=0"
+                                     " -c extra_float_digits=3"})
+        return subprocess.Popen(
+            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
+             "-d", db, "-X", "-At", "-q", "-v", "ON_ERROR_STOP=1"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env), sql
+
+    def _row_hash_expr(self):
+        # to_jsonb canonicalizes rendering (ISO timestamps regardless of
+        # DateStyle, sorted jsonb keys); plain ::text is faster
+        if self.hop.options.get("checksum", "text") == "jsonb":
+            return "md5(to_jsonb(t)::text)"
+        return "md5(t::text)"
+
+    def _fast_consistent(self, db):
+        """Whole-database checksum inside ONE repeatable-read read-only
+        transaction per side: no intra-db skew (every table of a side is
+        the same instant), and the src LSN captured in-snapshot gives the
+        fence for convergence proofs."""
+        st = [l for l in self._psql("src", db,
+                                    self.USER_TABLES).splitlines() if l]
+        dt = set(l for l in self._psql("dst", db,
+                                       self.USER_TABLES).splitlines() if l)
+        both = [t for t in st if t in dt]
+        w = int(self.hop.options.get("checksum_workers", 8))
+        h = self._row_hash_expr()
+
+        def script(side):
+            lines = ["begin transaction isolation level repeatable read"
+                     " read only;",
+                     f"set local max_parallel_workers_per_gather = {w};",
+                     "select 'LSN|'||pg_current_wal_lsn();"]
+            for t in both:
+                sch, tbl = t.split(".", 1)
+                lines.append(
+                    f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
+                    f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
+                    f' from "{sch}"."{tbl}" t;')
+            lines.append("commit;")
+            return "\n".join(lines)
+
+        procs = {}
+        for side in ("src", "dst"):
+            p, sql = self._psql_script(side, db, script(side))
+            procs[side] = (p, sql)
+        outs = {}
+        for side, (p, sql) in procs.items():
+            stdout, stderr = p.communicate(sql)
+            if p.returncode:
+                return 1, f"consistent pass failed on {side}: {stderr[-300:]}"
+            outs[side] = stdout
+
+        def parse(text):
+            lsn, rows = "", {}
+            for line in text.splitlines():
+                name, _, rest = line.partition("|")
+                if name == "LSN":
+                    lsn = rest
+                elif name:
+                    rows[name] = rest
+            return lsn, rows
+
+        src_lsn, src_rows = parse(outs["src"])
+        dst_lsn, dst_rows = parse(outs["dst"])
+        out = [f"consistent snapshot: one repeatable-read txn per side,"
+               f" src lsn={src_lsn} dst lsn={dst_lsn}"]
+        rc = 0
+        for t in both:
+            a, b = src_rows.get(t, ""), dst_rows.get(t, "")
+            if a == b:
+                out.append(f"{t}: OK rows={a.split('|')[0]}"
+                           f" checksum={a.split('|', 1)[1]}")
+            else:
+                rc = 1
+                out.append(f"{t}: DIFF src={a} dst={b}")
+        for t in st:
+            if t not in dt:
+                rc = 1
+                out.append(f"{t}: ERROR missing on target")
+        return rc, "\n".join(out)
+
+    def src_lsn(self, db):
+        return self._psql("src", db, "select pg_current_wal_lsn()")
+
+    def fence_wait(self, db, lsn, timeout=300):
+        """Block until every active replication consumer of this db has
+        confirmed flushing past `lsn`. True = fence passed, False = timed
+        out, None = no slot visible (cannot fence)."""
+        if self._psql("src", db,
+                      "select count(*) from pg_replication_slots"
+                      f" where database = '{db}' and active") == "0":
+            return None
+        q = ("select coalesce(min(confirmed_flush_lsn), '0/0'::pg_lsn)"
+             f" >= '{lsn}'::pg_lsn from pg_replication_slots"
+             f" where database = '{db}' and active")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if self._psql("src", db, q) == "t":
+                return True
+            time.sleep(2)
+        return False
+
+    def fenced_recheck(self, db, table, keys):
+        """Convergence proof for suspect rows: capture src LSN, wait for
+        the fence, re-compare. Two rounds ride out rows that stay hot;
+        what survives is a real diff, not replication in flight.
+        Returns (missing, extra, changed, proof) or None if unfenceable."""
+        proof = []
+        for rnd in (1, 2):
+            lsn = self.src_lsn(db)
+            ok = self.fence_wait(db, lsn, timeout=int(
+                self.hop.options.get("fence_timeout", 300)))
+            if ok is None:
+                return None
+            proof.append(f"round {rnd}: fence lsn={lsn}"
+                         f" {'passed' if ok else 'TIMEOUT'}")
+            cmp = self._compare_pks(db, table, keys)
+            if cmp is None:
+                return None
+            missing, extra, changed = cmp
+            if not (missing or extra or changed):
+                self._write_pk_files(db, table, [], [], [])
+                return [], [], [], proof
+            keys = set(missing) | set(extra) | set(changed)
+            if not ok:
+                break
+        self._write_pk_files(db, table, missing, extra, changed)
+        return missing, extra, changed, proof
+
+    def _resolve_inflight(self, db, bad, stream=None):
+        """Split DIFF tables into real diffs vs in-flight replication,
+        deterministically when a fence is available, by sleep-settle as
+        the fallback."""
+        still, healed, how = [], [], []
+        settle = int(self.hop.options.get("settle", 0))
+        slept = False
+        for t in bad:
+            d = self._report(db)
+            keys = set()
+            for k in ("missing", "extra", "changed"):
+                f = d / f"data-{t}.{k}"
+                if f.exists():
+                    keys |= set(f.read_text().splitlines())
+            keys.discard("")
+            if not keys or len(keys) > 20000:
+                still.append(t)
+                continue
+            r = self.fenced_recheck(db, t, keys)
+            if r is not None:
+                missing, extra, changed, proof = r
+                if missing or extra or changed:
+                    still.append(t)
+                else:
+                    healed.append(t)
+                    how.append(f"{t}: {'; '.join(proof)}")
+                if stream:
+                    stream(f"{t}: fence {'REAL DIFF' if t in still else 'converged'}")
+                continue
+            if not settle:
+                still.append(t)
+                continue
+            if not slept:
+                time.sleep(settle)
+                slept = True
+            s = self.settle_recheck(db, t)
+            if s is None or any(s):
+                still.append(t)
+            else:
+                healed.append(t)
+                how.append(f"{t}: settled after {settle}s (no fence visible)")
+        return still, healed, how
+
+    def _column_fingerprint(self, db, table):
+        """One scan, one aggregate per column: which columns actually
+        differ. Localizes drift (e.g. only updated_at differs = timezone
+        rendering, not data loss) before any row-level work."""
+        sch, tbl = table.split(".", 1)
+        cols = [l for l in self._psql("src", db,
+                "select attname from pg_attribute"
+                f""" where attrelid = '"{sch}"."{tbl}"'::regclass"""
+                " and attnum > 0 and not attisdropped"
+                " and attgenerated = '' order by attnum").splitlines() if l]
+        if not cols:
+            return []
+        expr = ", ".join(
+            f"coalesce(sum(('x'||substr(md5(coalesce(\"{c}\"::text,"
+            f" chr(1))),1,16))::bit(64)::bigint::numeric), 0)"
+            for c in cols)
+        q = f'select {expr} from "{sch}"."{tbl}"'
+        try:
+            a = self._psql("src", db, q).split("|")
+            b = self._psql("dst", db, q).split("|")
+        except RuntimeError:
+            return ["(column fingerprint failed, column sets may differ)"]
+        diff = [c for c, x, y in zip(cols, a, b) if x != y]
+        out = self.hop.report_dir(db) / f"data-{table}.columns"
+        if diff:
+            out.write_text("columns differing between src and dst:\n"
+                           + "\n".join(diff) + "\n")
+        elif out.exists():
+            out.unlink()
+        return diff
+
+    # --- delta verify: O(changes) continuous verification -------------
+    # a dedicated logical slot on the source records which rows changed;
+    # each cycle verifies only those pks on both sides. The slot is only
+    # advanced after a clean verify, so a crash or a diff replays the
+    # same window: idempotent by construction.
+
+    def _delta_slot(self, db):
+        import re as _re
+        name = f"migkit_delta_{self.hop.name}_{db}"
+        return _re.sub(r"[^a-z0-9_]", "_", name.lower())[:63]
+
+    def delta_setup(self, db):
+        slot = self._delta_slot(db)
+        have = self._psql("src", db,
+                          "select 1 from pg_replication_slots"
+                          f" where slot_name = '{slot}'")
+        if have:
+            return False
+        self._psql("src", db,
+                   "select pg_create_logical_replication_slot("
+                   f"'{slot}', 'test_decoding')")
+        return True
+
+    def delta_teardown(self, db):
+        slot = self._delta_slot(db)
+        self._psql("src", db,
+                   "select pg_drop_replication_slot(slot_name)"
+                   " from pg_replication_slots"
+                   f" where slot_name = '{slot}'")
+
+    @staticmethod
+    def _parse_decoding(lines, pk_of):
+        """Parse test_decoding rows into {table: set(pk_key)}.
+        pk_of(table) -> ordered pk column list or None."""
+        import re as _re
+        field_re = _re.compile(r"(\w+)\[[^\]]*\]:('(?:[^']|'')*'|[^ ]+)")
+        head_re = _re.compile(
+            r"table ([^:]+): (INSERT|UPDATE|DELETE): (.*)")
+        touched = {}
+        nopk = set()
+        last_lsn = ""
+        for lsn, data in lines:
+            last_lsn = lsn or last_lsn
+            m = head_re.match(data)
+            if not m:
+                continue
+            table = m.group(1).replace('"', "")
+            pks = pk_of(table)
+            if not pks:
+                nopk.add(table)
+                continue
+            vals = {}
+            for col, val in field_re.findall(m.group(3)):
+                if val.startswith("'"):
+                    val = val[1:-1].replace("''", "'")
+                vals[col] = val
+            if all(p in vals for p in pks):
+                touched.setdefault(table, set()).add(
+                    "\t".join(vals[p] for p in pks))
+        return touched, nopk, last_lsn
+
+    def delta_verify(self, db, limit=20000, log=None):
+        slot = self._delta_slot(db)
+        if self.delta_setup(db):
+            return [Result("delta", db, "ok",
+                           f"slot {slot} created, changes are tracked"
+                           " from this point on")]
+        out = self._psql("src", db,
+                         "select lsn||' '||data from"
+                         f" pg_logical_slot_peek_changes('{slot}',"
+                         f" null, {limit})")
+        lines = [l.split(" ", 1) for l in out.splitlines() if " " in l]
+        pk_cache = {}
+
+        def pk_of(t):
+            if t not in pk_cache:
+                try:
+                    pk_cache[t] = self._pk_cols_of(db, t)
+                except RuntimeError:
+                    pk_cache[t] = None
+            return pk_cache[t]
+
+        touched, nopk, last_lsn = self._parse_decoding(lines, pk_of)
+        n_changes = sum(len(v) for v in touched.values())
+        if not touched and not nopk:
+            return [Result("delta", db, "ok",
+                           "0 changes since last verified point")]
+        res = []
+        clean = True
+        for t, keys in sorted(touched.items()):
+            cmp = self._compare_pks(db, t, keys)
+            if cmp is None:
+                res.append(Result("delta", f"{db}.{t}", "error",
+                                  "pk lookup failed"))
+                clean = False
+                continue
+            missing, extra, changed = cmp
+            if missing or extra or changed:
+                clean = False
+                self._write_pk_files(db, t, missing, extra, changed)
+                res.append(Result(
+                    "delta", f"{db}.{t}", "diff",
+                    f"of {len(keys)} touched rows: missing={len(missing)}"
+                    f" extra={len(extra)} changed={len(changed)}",
+                    str(self._report(db)),
+                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+            else:
+                res.append(Result("delta", f"{db}.{t}", "ok",
+                                  f"{len(keys)} touched rows verified"
+                                  " equal on both sides"))
+            if log:
+                log(f"{t}: {len(keys)} touched, "
+                    + ("clean" if not (missing or extra or changed)
+                       else "DIFF"))
+        for t in sorted(nopk):
+            res.append(Result("delta", f"{db}.{t}", "skip",
+                              "no pk, cannot delta-verify"))
+        if clean and last_lsn:
+            self._psql("src", db,
+                       "select pg_replication_slot_advance("
+                       f"'{slot}', '{last_lsn}'::pg_lsn)")
+            note = "slot advanced"
+        else:
+            note = "slot NOT advanced, window replays next cycle"
+        if len(lines) >= limit:
+            note += f"; window truncated at {limit} changes, more pending"
+        res.insert(0, Result("delta", db,
+                             "ok" if clean else "diff",
+                             f"{n_changes} changed rows across"
+                             f" {len(touched)} tables, {note}"))
+        return res
 
     def list_move_tables(self, db):
         out = self._psql("src", db,

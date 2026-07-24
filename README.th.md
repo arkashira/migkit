@@ -128,6 +128,30 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
 เติม `-q` หน้าคำสั่งไหนก็ได้ = quiet mode ตัด log รายตาราง/progress ออก
 เหลือ DIFF, ERROR และสรุป (`migkit -q check mig-a`)
 
+ของใหม่ 0.3.0 (consistency แบบพิสูจน์ได้ + O(changes) + best-tool movers):
+
+- `check --consistent` — checksum ทุกตารางใน transaction repeatable-read
+  เดียวต่อฝั่ง (ไม่มี skew ภายใน db) พร้อมจด src LSN ไว้เป็นรั้ว
+- **LSN fence แทน settle เดา ๆ** — row ที่สงสัยจะถูกเช็คซ้ำ "หลังจาก"
+  ทุก consumer (รวม DTS ที่ opaque — slot มันอยู่ฝั่ง source เรามองเห็น)
+  ยืนยันว่า apply เลย LSN ที่จดไว้แล้วเท่านั้น รอด 2 รอบ = diff จริง
+  พิสูจน์ได้ ไม่ใช่นั่งเทียน (ไม่มี slot ให้ดู → fallback เป็น settle เดิม)
+- `watch --verify --delta` — ตรวจต่อเนื่องด้วยต้นทุน O(changes):
+  slot/binlog/change-stream บอกว่าแถวไหนถูกแตะ แล้วเช็คซ้ำเฉพาะแถวนั้น
+  ทั้งสองฝั่ง cursor เลื่อนเฉพาะตอนเขียว → crash/diff แล้ว replay window
+  เดิมเสมอ (idempotent) รันค้างกับ db พันล้าน row ได้ทั้งคืน
+  (`--teardown` = เก็บ slot/state)
+- **Column fingerprint** — ตารางไหน diff จะบอกเลยว่า "คอลัมน์ไหน" ต่าง
+  (scan เดียว aggregate ต่อคอลัมน์) ก่อนลงไปไล่ราย row
+- `move` เลือก mover เทพสุดที่ติดตั้งไว้ให้เองเป็น default (`--via auto`):
+  pg_dump -j / mydumper / pgloader / mongodump, builtin = fallback ที่
+  resume ราย chunk ได้; `--via debezium` = generate Kafka Connect configs
+  พร้อมรัน สำหรับ CDC ระดับ platform
+- engine ที่เคยตื้นตอนนี้ลึก: mssql (drill ราย PK ผ่าน FOR JSON hash +
+  deep: FK disabled/untrusted, column drift, boundary), kafka (topic-config
+  parity + consumer-group lag parity — แผลคลาสสิกตอนย้าย kafka), redis
+  (pipeline เร็วจริง + TTL drift + big keys)
+
 ### migkit doctor
 
 ตาราง hop ที่ตั้งไว้ + เช็ค tools + ยิง connection ทุก hop รันก่อนเริ่มงานทุกครั้ง

@@ -3,9 +3,9 @@ import json
 import time
 from pathlib import Path
 
-CHECK_ORDER = ["schema", "counts", "autoinc", "data", "deep"]
-CHECK_LABEL = {"schema": "schema", "counts": "rows",
-               "autoinc": "autoinc", "data": "data", "deep": "deep"}
+CHECK_ORDER = ["schema", "counts", "autoinc", "data", "deep", "delta"]
+CHECK_LABEL = {"schema": "schema", "counts": "rows", "autoinc": "autoinc",
+               "data": "data", "deep": "deep", "delta": "delta"}
 
 CSS = """
 :root { color-scheme: light dark; }

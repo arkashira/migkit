@@ -267,6 +267,79 @@ class MongoEngine(Engine):
                        f"newest _id checked on {n} collections,"
                        f" none ahead of source{note}")]
 
+    # delta verify: drain the change stream window since the saved resume
+    # token and re-verify only the touched _ids. The token advances only
+    # after a clean verify, so crashes and diffs replay the same window.
+    def delta_verify(self, db, limit=20000, log=None):
+        from bson.json_util import dumps, loads
+        state = self.hop.report_dir(db) / "delta-token.json"
+        src = self._client("src")[db]
+        dst = self._client("dst")[db]
+        if not state.exists():
+            with src.watch() as stream:
+                stream.try_next()
+                state.write_text(dumps(stream.resume_token))
+            return [Result("delta", db, "ok",
+                           "resume token recorded, changes are tracked"
+                           " from this point on")]
+        token = loads(state.read_text())
+        touched = {}
+        n = 0
+        end_token = token
+        with src.watch(resume_after=token) as stream:
+            while n < limit:
+                ev = stream.try_next()
+                if ev is None:
+                    break
+                n += 1
+                end_token = ev["_id"]
+                coll = ev.get("ns", {}).get("coll")
+                key = ev.get("documentKey", {}).get("_id")
+                if coll and key is not None:
+                    touched.setdefault(coll, {})[repr(key)] = key
+        if not touched:
+            state.write_text(dumps(end_token))
+            return [Result("delta", db, "ok",
+                           "0 changes since last verified token")]
+        res = []
+        clean = True
+        for coll, ids in sorted(touched.items()):
+            bad = []
+            for _id in ids.values():
+                a = src[coll].find_one({"_id": _id})
+                b = dst[coll].find_one({"_id": _id})
+                if a != b:
+                    bad.append(_id)
+            if bad:
+                clean = False
+                d = self.hop.report_dir(db)
+                (d / f"data-{coll}.changed").write_text(
+                    "\n".join(dumps(i) for i in bad) + "\n")
+                res.append(Result(
+                    "delta", f"{db}.{coll}", "diff",
+                    f"of {len(ids)} touched docs, {len(bad)} differ",
+                    str(d),
+                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+            else:
+                res.append(Result("delta", f"{db}.{coll}", "ok",
+                                  f"{len(ids)} touched docs verified"
+                                  " equal on both sides"))
+            if log:
+                log(f"{coll}: {len(ids)} touched, "
+                    + ("clean" if not bad else "DIFF"))
+        if clean:
+            state.write_text(dumps(end_token))
+            note = "token advanced"
+        else:
+            note = "token NOT advanced, window replays next cycle"
+        if n >= limit:
+            note += f"; window truncated at {limit} events, more pending"
+        res.insert(0, Result("delta", db, "ok" if clean else "diff",
+                             f"{sum(len(v) for v in touched.values())}"
+                             f" changed docs across {len(touched)}"
+                             f" collections, {note}"))
+        return res
+
     def repair_plan(self, db, kind):
         if kind not in ("rows", "all"):
             return []

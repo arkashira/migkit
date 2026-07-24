@@ -99,31 +99,209 @@ class MSSQLEngine(Engine):
         return [Result("autoinc", db, "ok",
                        f"{len(src)} identity tables, values match")]
 
-    def check_data(self, db, table=None, stream=None):
+    counts_from_data = True
+
+    DRILL_MAX_ROWS = 2_000_000
+
+    def _pk_cols(self, db, t):
+        sch, tbl = t.split(".", 1)
+        rows = self._q("src", db,
+                       "select c.name from sys.index_columns ic"
+                       " join sys.indexes i on i.object_id=ic.object_id"
+                       " and i.index_id=ic.index_id and i.is_primary_key=1"
+                       " join sys.columns c on c.object_id=ic.object_id"
+                       " and c.column_id=ic.column_id"
+                       f" where ic.object_id=object_id('{sch}.{tbl}')"
+                       " order by ic.key_ordinal")
+        return [r[0] for r in rows]
+
+    def _drilldown(self, db, t):
+        """Row-level compare via canonical FOR JSON rendering: SQL Server
+        serializes the row itself, no hand-rolled cast rules to get wrong."""
+        pks = self._pk_cols(db, t)
+        if not pks:
+            return None
+        n = int(self._q("src", db,
+                        f"select count_big(*) from {t} with (nolock)")[0][0]
+                or 0)
+        if n > self.DRILL_MAX_ROWS:
+            return None
+        pkexpr = "+'\t'+".join(f"cast(t.{c} as varchar(100))" for c in pks)
+        q = (f"select {pkexpr}, convert(varchar(64), hashbytes('SHA2_256',"
+             " (select t.* for json path, include_null_values,"
+             " without_array_wrapper)), 2)"
+             f" from {t} t with (nolock)")
+        src = {r[0]: r[1] for r in self._q("src", db, q)}
+        dst = {r[0]: r[1] for r in self._q("dst", db, q)}
+        missing = sorted(k for k in src if k not in dst)
+        extra = sorted(k for k in dst if k not in src)
+        changed = sorted(k for k in src
+                         if k in dst and src[k] != dst[k])
+        d = self.hop.report_dir(db)
+        for kind, rows in (("missing", missing), ("extra", extra),
+                           ("changed", changed)):
+            f = d / f"data-{t}.{kind}"
+            if rows:
+                f.write_text("\n".join(rows) + "\n")
+            elif f.exists():
+                f.unlink()
+        return len(missing), len(extra), len(changed)
+
+    def check_data(self, db, table=None, stream=None, with_counts=False):
         q = ("select s.name+'.'+t.name from sys.tables t"
              " join sys.schemas s on s.schema_id=t.schema_id order by 1")
-        tables = [table] if table else [r[0] for r in self._q("src", db, q)]
+        st = [r[0] for r in self._q("src", db, q)]
+        dt = {r[0] for r in self._q("dst", db, q)}
+        tables = [table] if table else [t for t in st if t in dt]
         bad = []
+        rows_a = rows_b = 0
+        bad_counts = []
         for t in tables:
-            cq = (f"select count_big(*), isnull(sum(cast(binary_checksum(*) as bigint)),0)"
-                  f" from {t} with (nolock)")
+            cq = ("select count_big(*), isnull(sum(cast(binary_checksum(*)"
+                  f" as bigint)),0) from {t} with (nolock)")
             try:
                 a = self._q("src", db, cq)[0]
                 b = self._q("dst", db, cq)[0]
             except RuntimeError as e:
                 bad.append(f"{t} error {e}")
                 continue
+            rows_a += int(a[0] or 0)
+            rows_b += int(b[0] or 0)
+            if a[0] != b[0]:
+                bad_counts.append(f"{t} src={a[0]} dst={b[0]}")
             if stream:
                 stream(f"{t}: {'ok' if a == b else 'DIFF'}")
             if a != b:
-                bad.append(f"{t} src={a} dst={b}")
+                drill = self._drilldown(db, t)
+                if drill == (0, 0, 0):
+                    continue  # settled between the two reads = in-flight
+                if drill:
+                    m, e, c = drill
+                    bad.append(f"{t} missing={m} extra={e} changed={c}"
+                               " (pk files written)")
+                else:
+                    bad.append(f"{t} src={a} dst={b}")
+        res = []
+        if with_counts:
+            bad_counts += [f"{t} missing on target" for t in st
+                           if t not in dt]
+            if bad_counts:
+                res.append(Result("counts", db, "diff",
+                                  "; ".join(bad_counts[:10])))
+            else:
+                res.append(Result("counts", db, "ok",
+                                  f"{len(tables)} tables, rows"
+                                  f" {rows_a:,}=={rows_b:,}"
+                                  " (from the checksum pass, no extra scan)"))
         if bad:
-            return [Result("data", db, "diff", "; ".join(bad[:10]), "",
-                           "binary_checksum is coarse: confirm with reladiff"
-                           " (mssql support) or tablediff utility before repair")]
-        return [Result("data", db, "ok",
-                       f"{len(tables)} tables, counts and binary_checksum"
-                       " equal both sides")]
+            res.append(Result("data", db, "diff", "; ".join(bad[:10]), "",
+                              "pk-level diffs in data-*.missing/extra/"
+                              "changed; repair via tablediff -f fix.sql,"
+                              " review, then apply"))
+        else:
+            res.append(Result("data", db, "ok",
+                              f"{len(tables)} tables, counts and checksums"
+                              " equal both sides (binary_checksum + FOR"
+                              " JSON hash drilldown)"))
+        return res
+
+    def check_deep(self, db):
+        res = []
+        # movers load with constraints/triggers disabled and often forget
+        # to re-enable or re-validate: is_disabled and is_not_trusted are
+        # the sql server analog of postgres NOT VALID
+        rows = self._q("dst", db,
+                       "select s.name+'.'+t.name+'.'+fk.name,"
+                       " fk.is_disabled, fk.is_not_trusted"
+                       " from sys.foreign_keys fk"
+                       " join sys.tables t on t.object_id=fk.parent_object_id"
+                       " join sys.schemas s on s.schema_id=t.schema_id")
+        disabled = [r[0] for r in rows if r[1] == "1"]
+        untrusted = [r[0] for r in rows if r[1] == "0" and r[2] == "1"]
+        bad = ([f"disabled: {', '.join(disabled[:4])}"] if disabled else []) \
+            + ([f"not trusted (loaded WITH NOCHECK):"
+                f" {', '.join(untrusted[:4])}"] if untrusted else [])
+        res.append(Result("deep", f"{db} fk", "diff" if bad else "ok",
+                          "; ".join(bad) if bad
+                          else f"{len(rows)} fks enabled and trusted", "",
+                          "alter table ... with check check constraint ..."
+                          if bad else ""))
+        trg = [r[0] for r in self._q("dst", db,
+               "select s.name+'.'+t.name+'.'+tr.name from sys.triggers tr"
+               " join sys.tables t on t.object_id=tr.parent_id"
+               " join sys.schemas s on s.schema_id=t.schema_id"
+               " where tr.is_disabled=1")]
+        res.append(Result("deep", f"{db} triggers",
+                          "diff" if trg else "ok",
+                          "disabled on target: " + ", ".join(trg[:5]) if trg
+                          else "no disabled triggers on target", "",
+                          "enable trigger ... on ..." if trg else ""))
+        colq = ("select table_schema+'.'+table_name+'.'+column_name+'|'+"
+                "data_type+'|'+is_nullable+'|'+isnull(column_default,'')+'|'+"
+                "isnull(cast(character_maximum_length as varchar),'')+'|'+"
+                "isnull(cast(numeric_precision as varchar),'')+'|'+"
+                "isnull(collation_name,'')"
+                " from information_schema.columns order by 1")
+        sc = {r[0].split("|", 1)[0]: r[0] for r in self._q("src", db, colq)}
+        dc = {r[0].split("|", 1)[0]: r[0] for r in self._q("dst", db, colq)}
+        drift = [k for k in sorted(sc) if k in dc and sc[k] != dc[k]]
+        if drift:
+            out = self.hop.report_dir(db) / "deep-columns.diff"
+            out.write_text("\n".join(f"src {sc[k]}\ndst {dc[k]}"
+                                     for k in drift) + "\n")
+            res.append(Result("deep", f"{db} columns", "diff",
+                              f"{len(drift)} columns drift: "
+                              + ", ".join(drift[:4]), str(out),
+                              "align target DDL (type/null/default/"
+                              "collation)"))
+        else:
+            res.append(Result("deep", f"{db} columns", "ok",
+                              f"{len(sc)} columns compared, identical"))
+        pk_rows = self._q("src", db,
+                          "select s.name+'.'+t.name, c.name"
+                          " from sys.tables t"
+                          " join sys.schemas s on s.schema_id=t.schema_id"
+                          " join sys.index_columns ic on"
+                          " ic.object_id=t.object_id"
+                          " join sys.indexes i on i.object_id=ic.object_id"
+                          " and i.index_id=ic.index_id and i.is_primary_key=1"
+                          " join sys.columns c on c.object_id=ic.object_id"
+                          " and c.column_id=ic.column_id"
+                          " join sys.types ty on ty.user_type_id="
+                          "c.user_type_id and ty.name in"
+                          " ('int','bigint','smallint','tinyint')"
+                          " where 1=(select count(*) from sys.index_columns"
+                          " ic2 join sys.indexes i2 on"
+                          " i2.object_id=ic2.object_id and"
+                          " i2.index_id=ic2.index_id and i2.is_primary_key=1"
+                          " where ic2.object_id=t.object_id)")
+        ahead, behind, n = [], [], 0
+        for t, c in pk_rows:
+            n += 1
+            try:
+                a = int(self._q("src", db, f"select isnull(max({c}),0)"
+                                f" from {t} with (nolock)")[0][0] or 0)
+                b = int(self._q("dst", db, f"select isnull(max({c}),0)"
+                                f" from {t} with (nolock)")[0][0] or 0)
+            except RuntimeError:
+                continue
+            if b > a:
+                ahead.append(f"{t} src_max={a} dst_max={b}")
+            elif b < a:
+                behind.append(t)
+        if ahead:
+            res.append(Result("deep", f"{db} boundary", "diff",
+                              f"target max(pk) AHEAD of source on"
+                              f" {len(ahead)}: {'; '.join(ahead[:4])}", "",
+                              "writes landing on target or double-apply,"
+                              " find the writer before cutover"))
+        else:
+            note = (f"; {len(behind)} behind (replication lag)"
+                    if behind else "")
+            res.append(Result("deep", f"{db} boundary", "ok",
+                              f"max(pk) checked on {n} tables,"
+                              f" none ahead of source{note}"))
+        return res
 
     def repair_plan(self, db, kind):
         actions = []
