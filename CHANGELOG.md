@@ -2,6 +2,38 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.4.3] — 2026-07-24
+
+Complete the core domain: delta on every engine, metrics, secrets, prep.
+
+### Added
+- **Delta verify on every engine**: kafka (per-partition offset baseline +
+  tail re-hash), mssql (native Change Tracking / CHANGETABLE, version-fenced),
+  redis (honestly reports it has no native change log — use keyspace
+  notifications) — joining the existing pg/mysql/mongo O(changes) delta.
+- **Prometheus metrics**: `report --metrics` and a `/metrics` endpoint on the
+  dashboard emit `migkit_hop_status` / `migkit_check_pass|total` /
+  `migkit_last_check_age_seconds` — alert when a hop goes red.
+- **Secret references** in `hops.yaml`: `env:NAME` / `${NAME}` / `file:/path`
+  / `vault:secret/db#key` resolve at load, so credentials need not sit in
+  plaintext.
+- **atlas-authoritative schema verdict**: when atlas (the schema-aware
+  differ) is clean, the noisier textual opinions (native dump diff, migra,
+  liquibase) are demoted to informational; the precise object inventory
+  stands. Opt out with `options.schema_authority`.
+- Live Debezium E2E test + CI job, gated behind `MIGKIT_LIVE_E2E=1` /
+  `workflow_dispatch` so the heavy image pull is ready to run but never slows
+  the everyday suite.
+- **`doctor --install`** + a tool registry (`migkit/tools.py`): auto-install
+  every external program migkit drives (pg client, mysql client, mongo tools,
+  mydumper, pgloader, **pt-table-sync**, atlas, liquibase, ...) via brew/apt —
+  any machine or teammate is one command from a full toolchain. `bootstrap.sh`
+  force-installs them too. Tools are always separate programs (GPL ones like
+  pt-table-sync/mydumper stay at arm's length, never bundled).
+- **`sync --on-conflict`**: `source-wins` (default; source is truth) or
+  `keep-target` (preserve rows the target changed itself, fix only
+  missing/extra) — a conflict knob that fits a one-way reconcile.
+
 ## [0.4.2] — 2026-07-24
 
 Debezium supervision + packaging.

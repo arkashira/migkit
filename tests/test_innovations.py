@@ -283,3 +283,21 @@ def test_redis_delta_is_honest_about_no_changelog():
     r = RedisEngine(_hop("redis")).delta_verify(0)
     assert r[0].status == "error"
     assert "no native change log" in r[0].detail
+
+
+def test_on_conflict_keep_target_skips_changed():
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.mysql import MySQLEngine
+    hop = Hop(name="h", engine="mysql",
+              source=Endpoint(host="s"), target=Endpoint(host="t"),
+              options={"on_conflict": "keep-target"})
+    assert MySQLEngine(hop).hop.options["on_conflict"] == "keep-target"
+
+
+def test_tools_registry_and_install_selection(monkeypatch):
+    from migkit import tools
+    assert any(c == "pt-table-sync" for c, *_ in tools.TOOLS)
+    assert any(c == "atlas" for c, *_ in tools.TOOLS)
+    # all tools "present" -> nothing to install
+    monkeypatch.setattr(tools, "which", lambda n: "/bin/" + n)
+    assert tools.install_missing(lambda m: None) == []

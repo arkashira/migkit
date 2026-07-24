@@ -897,8 +897,13 @@ class PostgresEngine(Engine):
             f = d / f"data-{t}.{kind}"
             return f.read_text() if f.exists() else ""
 
-        copy_pks = read("missing") + read("changed")
-        del_pks = read("extra") + read("changed")
+        # on_conflict=keep-target preserves rows the target changed itself:
+        # only fix missing (insert) and extra (delete), never overwrite a
+        # differing row. source-wins (default) reconciles everything.
+        keep = self.hop.options.get("on_conflict") == "keep-target"
+        chg = "" if keep else read("changed")
+        copy_pks = read("missing") + chg
+        del_pks = read("extra") + chg
         work = Path(tempfile.mkdtemp())
         undo = d / "undo"
         undo.mkdir(parents=True, exist_ok=True)

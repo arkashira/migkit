@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:   # manual trigger for the heavy live-e2e job
 
 jobs:
   unit:
@@ -55,3 +56,22 @@ jobs:
         run: |
           python -m venv /tmp/v && /tmp/v/bin/pip install dist/*.whl
           /tmp/v/bin/migkit --help >/dev/null && echo "wheel installs and runs"
+
+  live-e2e:
+    # heavy: pulls debezium/redpanda images. Manual only (workflow_dispatch).
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          python -m pip install -U pip
+          pip install -e . faker pytest
+      - name: live debezium e2e
+        env:
+          MIGKIT_LIVE_E2E: "1"
+        run: pytest tests/test_live_debezium.py -q -s

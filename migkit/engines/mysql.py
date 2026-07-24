@@ -821,6 +821,9 @@ class MySQLEngine(Engine):
                     f.read_text().splitlines()] if f.exists() else []
 
         missing, extra, changed = read("missing"), read("extra"), read("changed")
+        # keep-target preserves target-changed rows: fix only missing/extra
+        if self.hop.options.get("on_conflict") == "keep-target":
+            changed = []
         to_delete = extra + changed
         to_copy = missing + changed
         cond = " and ".join(f"cast(`{c}` as char) = %s" for c in pks)

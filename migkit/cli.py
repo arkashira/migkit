@@ -108,16 +108,25 @@ def _hops_table():
 
 
 @main.command()
-def doctor():
-    """Configured hops, local tools, and connectivity."""
+@click.option("--install", is_flag=True,
+              help="auto-install every missing external tool via the platform"
+                   " package manager (brew/apt) — get a fresh machine ready")
+def doctor(install):
+    """Configured hops, local tools, and connectivity.
+
+    Every check/repair/move step migkit runs is a wrapper over a proven
+    external program; `--install` pulls whichever are missing so any machine
+    or teammate is one command from a full toolchain."""
+    from . import tools as _tools
     _hops_table()
-    tools = ["psql", "pg_dump", "pg_restore", "mysqldump", "mysql", "sqlcmd",
-             "mongodump", "mongorestore", "mydumper", "myloader", "pgloader",
-             "reladiff", "migra", "liquibase", "atlas", "pt-table-sync"]
-    t = Table("tool", "status")
-    for name in tools:
-        path = which(name)
-        t.add_row(name, path or "[red]missing[/red]")
+    if install:
+        still = _tools.install_missing(lambda m: console.print(f"  {m}"))
+        if still:
+            console.print("[yellow]still missing (pip/vendor): "
+                          + ", ".join(c for c, _ in still) + "[/yellow]")
+    t = Table("tool", "status", "powers")
+    for cmd, path, formula, apt, purpose in _tools.status():
+        t.add_row(cmd, path or "[red]missing[/red]", purpose)
     console.print(t)
     for name, hop in load_hops().items():
         for side, ep in (("src", hop.source), ("dst", hop.target)):
@@ -451,9 +460,10 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
                   f" {human_secs(timer.elapsed())})[/green]")
 
 
-def _repair(hop_name, db, kind, do_apply):
+def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
     hop = get_hop(hop_name)
     _require_configured(hop)
+    hop.options["on_conflict"] = on_conflict
     eng = get_engine(hop)
     if db:
         dbs = [db]
@@ -512,11 +522,12 @@ def _repair_one(hop, eng, db, kind, do_apply):
         console.print("\nre-run migkit check to confirm")
 
 
-def _sync_go(hop_name, db, tag):
+def _sync_go(hop_name, db, tag, on_conflict="source-wins"):
     from .state import get_store
 
     hop = get_hop(hop_name)
     _require_configured(hop)
+    hop.options["on_conflict"] = on_conflict
     eng = get_engine(hop)
     if not hasattr(eng, "snapshot_state"):
         raise SystemExit(f"--go not available for {hop.engine} yet,"
@@ -595,9 +606,15 @@ def _sync_go(hop_name, db, tag):
 @click.option("--serve", is_flag=True,
               help="incremental modes: run the verify loop forever (VM/service)")
 @click.option("--interval", default=60, help="--serve: seconds between cycles")
+@click.option("--on-conflict", type=click.Choice(["source-wins", "keep-target"]),
+              default="source-wins",
+              help="rows that differ: source-wins overwrites the target"
+                   " (default, source is truth); keep-target preserves them"
+                   " and fixes only missing/extra")
 @click.option("--tag", default="", help="with --go: label this state, e.g. pre-cutover")
 @click.pass_context
-def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval, tag):
+def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval,
+         on_conflict, tag):
     """Make target equal to source, or run a full DMS-style migration.
 
     Default (reconcile) shows/repairs the last check's diffs; --apply
@@ -606,10 +623,10 @@ def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval, tag):
     stand in for a managed migration service on a trusted VM."""
     if mode != "reconcile":
         return _orchestrate(ctx, hop_name, db, mode, do_apply or go,
-                            serve, interval)
+                            serve, interval, on_conflict)
     if go:
-        return _sync_go(hop_name, db, tag)
-    return _repair(hop_name, db, kind, do_apply)
+        return _sync_go(hop_name, db, tag, on_conflict)
+    return _repair(hop_name, db, kind, do_apply, on_conflict)
 
 
 def _run_check(ctx, hop_name, db, only, consistent=False):
@@ -622,7 +639,8 @@ def _run_check(ctx, hop_name, db, only, consistent=False):
         return not e.code
 
 
-def _orchestrate(ctx, hop_name, db, mode, go, serve, interval):
+def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
+                 on_conflict="source-wins"):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
@@ -637,7 +655,7 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval):
         console.print(f"[bold]seed[/bold]{tail}")
         console.print("1/4 schema: align target objects to source")
         _run_check(ctx, hop_name, db, "schema")
-        _repair(hop_name, db, "schema", go)
+        _repair(hop_name, db, "schema", go, on_conflict)
         console.print("2/4 load: bulk copy via the best installed mover")
         if go:
             movers_pick_and_run(hop, eng, db, go)
@@ -646,7 +664,7 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval):
                           f" {hop_name} --mode full --go")
         console.print("3/4 reconcile: repair residual rows + sequences")
         _run_check(ctx, hop_name, db, "counts,autoinc,data")
-        _repair(hop_name, db, "all", go)
+        _repair(hop_name, db, "all", go, on_conflict)
         console.print("4/4 verify: consistent snapshot")
         ok = _run_check(ctx, hop_name, db, "", consistent=True)
         console.print(f"[{'green' if ok else 'yellow'}]seed"
