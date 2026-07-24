@@ -2,11 +2,11 @@
 
 > Verify, repair, and move databases across engines - without trusting the mover.
 
+[![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
 [![engines](https://img.shields.io/badge/engines-postgres%20·%20mysql%20·%20mongodb%20·%20mssql%20·%20sqlite%20·%20redis%20·%20kafka-2a78d6)](#supported-engines)
-[![cross-engine](https://img.shields.io/badge/cross--engine-mysql->postgres-0ca30c)](#cross-engine-hetero)
+[![cross-engine](https://img.shields.io/badge/cross--engine-mysql_to_postgres-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-0ca30c)](LICENSE)
-[![status](https://img.shields.io/badge/status-active-0ca30c)](CHANGELOG.md)
 
 migkit does everything *around* a database migration: it prepares the target,
 tells you exactly when to start the mover, watches the load, validates the
@@ -200,27 +200,38 @@ so new pairs (pg->mysql, mssql->pg) follow the same shape.
 
 ## How it compares
 
-- **vs DMS/DTS/Veridata** - migkit validates structure + sequences + data (they
-  validate rows only or nothing), proves in-flight vs real diffs with an LSN
-  fence instead of guessing, repairs by row with undo, and keeps
-  state/rollback. Delta verify gives Veridata-style continuous validation on
-  any of pg/mysql/mongo, for free.
-- **vs pt-table-checksum/pt-table-sync** - pt gets consistency from running
-  through the replication channel but only works master->replica on mysql.
-  migkit fences on the replication position instead, which also works across
-  clusters and opaque managed movers - and when pt-table-sync *is* usable,
-  repair drives it for statement generation.
-- **vs Debezium/pgloader/mydumper** - not competitors, employees: `move` picks
-  and drives whichever is installed, generates the Debezium Connect configs
-  when you want platform CDC, and wraps verification around all of them -
-  which none of them do on their own.
-- **vs migra/results** - migkit uses migra as one of four schema layers, and
-  adds the entire data dimension migra does not cover.
-- **vs Liquibase/Flyway** - different category (they version schema changes for
-  CI/CD). migkit adopts their best ideas - rollback, preconditions (`assess`),
-  versioned migration files (`schema --migration`) - but keeps its own audit
-  local instead of in the target DB, and is a verification/move tool, not a
-  changeset runner.
+migkit does not try to out-move the movers. It drives the best of them and
+adds the layer they all skip: proving the result is correct and repairing what
+is not. The comparison below is feature-by-feature; migkit's column counts what
+you get *through* migkit, including the tools it wraps at full capability.
+
+| Capability | migkit | AWS DMS / Tencent DTS | Debezium | pt-table-sync | GoldenGate + Veridata |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Bulk load (drives best mover) | ✅ | ✅ | ❌ | 🟡 | ✅ |
+| Change data capture | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Row-level verify with proof (LSN fence) | ✅ | 🟡 | ❌ | 🟡 | ✅ |
+| Consistency fence (no false diffs) | ✅ | ❌ | ❌ | 🟡 | 🟡 |
+| Continuous delta verify, O(changes) | ✅ | ❌ | ❌ | ❌ | 🟡 |
+| Column-level diff localization | ✅ | ❌ | ❌ | ❌ | 🟡 |
+| Schema-object verify (views/routines/FK/index) | ✅ | ❌ | ❌ | ❌ | 🟡 |
+| Sequence / identity carry and verify | ✅ | ❌ | ❌ | ❌ | 🟡 |
+| Row-level repair with undo | ✅ | ❌ | ❌ | 🟡 | ✅ |
+| Schema repair (apply DDL, with undo) | ✅ | ❌ | ❌ | ❌ | 🟡 |
+| Rollback / state snapshots | ✅ | ❌ | ❌ | ❌ | 🟡 |
+| Self-hosted, no vendor lock-in | ✅ | ❌ | ✅ | ✅ | 🟡 |
+| Zero footprint on the target | ✅ | ❌ | ✅ | ✅ | 🟡 |
+| Engines | 9 + cross | cloud-scoped | 8 | mysql | oracle-centric |
+| License | free (MIT) | paid | free | free | commercial |
+
+<sub>✅ full · 🟡 partial · ❌ none. "Through migkit" = the wrapped tool driven
+under a single command, plus migkit's own verify/repair layer.</sub>
+
+The managed services move data well but validate weakly and cannot repair a
+single row or carry a sequence. Debezium and pt-table-sync are excellent at one
+job each; migkit runs them and adds the verification neither performs.
+Veridata is the closest match on verify-and-repair, and is commercial and
+Oracle-centric. migkit is the one place that combines move, provable verify,
+row-and-schema repair with undo, and rollback, across engines, for free.
 
 ## Safety model
 
