@@ -162,7 +162,7 @@ class PostgresEngine(Engine):
             at = self.check_atlas(db)
             if at:
                 res.append(at)
-        return res
+        return self._atlas_authoritative(res)
 
     def check_atlas(self, db):
         from urllib.parse import quote

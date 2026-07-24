@@ -120,7 +120,7 @@ class MySQLEngine(Engine):
             at = self._atlas(db)
             if at:
                 res.append(at)
-        return res
+        return self._atlas_authoritative(res)
 
     def check_objects(self, db):
         queries = {

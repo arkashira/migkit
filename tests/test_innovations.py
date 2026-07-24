@@ -248,3 +248,23 @@ def test_debezium_register_creates_and_updates(tmp_path, monkeypatch):
     # source POSTed; sink 409 -> PUT config
     assert ("POST", "/connectors") in calls
     assert ("PUT", "/connectors/k/config") in calls
+
+
+def test_atlas_authoritative_demotes_textual_diff():
+    from migkit.engines.base import Engine, Result
+    eng = Engine(_hop())
+    res = [
+        Result("schema", "db", "diff", "6 changed lines"),          # base
+        Result("schema", "db (migra)", "diff", "migra fix"),        # migra
+        Result("schema", "db objects", "diff", "table 5/4 missing"),  # real
+        Result("schema", "db (atlas)", "ok", "atlas diff clean"),   # authority
+    ]
+    out = {r.scope: r.status for r in eng._atlas_authoritative(res)}
+    assert out["db"] == "ok"            # base demoted
+    assert out["db (migra)"] == "ok"    # migra demoted
+    assert out["db objects"] == "diff"  # real structural diff kept
+    # opt-out keeps everything as-is
+    eng2 = Engine(_hop(options={"schema_authority": "strict"}))
+    res2 = [Result("schema", "db", "diff", "x"),
+            Result("schema", "db (atlas)", "ok", "clean")]
+    assert eng2._atlas_authoritative(res2)[0].status == "diff"
