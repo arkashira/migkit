@@ -127,7 +127,16 @@ def doctor():
                 eng = get_engine(hop)
                 dbs = eng.databases() if side == "src" else None
                 note = f"{len(dbs)} dbs" if dbs else "reachable"
-                console.print(f"{name} {side}: [green]ok[/green] ({ep.host}, {note})")
+                role = ""
+                if hasattr(eng, "_in_recovery"):
+                    try:
+                        role = (" [red]READER/read-only[/red]"
+                                if eng._in_recovery(side, "postgres")
+                                else " [dim]writer[/dim]")
+                    except Exception:
+                        role = ""
+                console.print(f"{name} {side}: [green]ok[/green]"
+                              f" ({ep.host}, {note}){role}")
             except Exception as e:
                 console.print(f"{name} {side}: [red]FAIL[/red] {e}")
 

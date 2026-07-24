@@ -772,6 +772,26 @@ class PostgresEngine(Engine):
         dv = self._psql("dst", "postgres", "show server_version")
         add("pass" if sv.split(".")[0] == dv.split(".")[0] else "warn",
             "instance", "server version match", f"src {sv} / dst {dv}")
+
+        # endpoint role: a read replica answers pg_is_in_recovery()=t and
+        # rejects every write incl. SELECT ... FOR UPDATE (SQLSTATE 25006).
+        # target on a reader = migration and repair cannot write; source on
+        # a reader = fine for checks but the LSN fence and logical slots
+        # need the primary. This is the "app pointed at the reader endpoint"
+        # class of outage, surfaced before it bites.
+        src_ro = self._in_recovery("src", "postgres")
+        dst_ro = self._in_recovery("dst", "postgres")
+        add("warn" if src_ro else "pass", "instance",
+            "source endpoint role",
+            "READ REPLICA (read-only) - ok for checks, but point at the"
+            " writer/cluster endpoint for replication and the LSN fence"
+            if src_ro else "primary / writer (writable)")
+        add("fail" if dst_ro else "pass", "instance",
+            "target endpoint is writable (not a read replica)",
+            "READ REPLICA (read-only) - cannot migrate or repair into it,"
+            " and apps get SQLSTATE 25006 on SELECT FOR UPDATE; use the"
+            " writer/cluster endpoint" if dst_ro else "primary / writer")
+
         wal = self._psql("src", "postgres", "show wal_level")
         add("pass" if wal == "logical" else "fail", "instance",
             "wal_level=logical on source (required for CDC)", wal)
@@ -1014,7 +1034,9 @@ class PostgresEngine(Engine):
             lines = ["begin transaction isolation level repeatable read"
                      " read only;",
                      f"set local max_parallel_workers_per_gather = {w};",
-                     "select 'LSN|'||pg_current_wal_lsn();"]
+                     "select 'LSN|'||case when pg_is_in_recovery() then"
+                     " 'standby (read replica, no fence)' else"
+                     " pg_current_wal_lsn()::text end;"]
             for t in both:
                 sch, tbl = t.split(".", 1)
                 lines.append(
@@ -1064,13 +1086,28 @@ class PostgresEngine(Engine):
                 out.append(f"{t}: ERROR missing on target")
         return rc, "\n".join(out)
 
+    def _in_recovery(self, side, db="postgres"):
+        """True if this endpoint is a standby / read replica (read-only).
+        Aurora and RDS readers answer pg_is_in_recovery() = t and reject
+        every write, including SELECT ... FOR UPDATE (SQLSTATE 25006)."""
+        try:
+            return self._psql(side, db, "select pg_is_in_recovery()") == "t"
+        except RuntimeError:
+            return False
+
     def src_lsn(self, db):
+        # WAL functions are unavailable during recovery (and Aurora readers
+        # reject the replay-lsn variant too); no source LSN => no fence
+        if self._in_recovery("src", db):
+            return None
         return self._psql("src", db, "select pg_current_wal_lsn()")
 
     def fence_wait(self, db, lsn, timeout=300):
         """Block until every active replication consumer of this db has
         confirmed flushing past `lsn`. True = fence passed, False = timed
-        out, None = no slot visible (cannot fence)."""
+        out, None = no slot visible / no source LSN (cannot fence)."""
+        if lsn is None:
+            return None
         if self._psql("src", db,
                       "select count(*) from pg_replication_slots"
                       f" where database = '{db}' and active") == "0":
@@ -1249,6 +1286,11 @@ class PostgresEngine(Engine):
 
     def delta_verify(self, db, limit=20000, log=None):
         slot = self._delta_slot(db)
+        if self._in_recovery("src", db):
+            return [Result("delta", db, "error",
+                           "source is a read replica (pg_is_in_recovery=t):"
+                           " logical slots live on the primary. Point the"
+                           " hop's source at the writer/cluster endpoint")]
         if self.delta_setup(db):
             return [Result("delta", db, "ok",
                            f"slot {slot} created, changes are tracked"

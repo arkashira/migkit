@@ -109,3 +109,19 @@ def test_delta_available_on_three_engines():
 def test_mssql_counts_ride_along():
     from migkit.engines.mssql import MSSQLEngine
     assert MSSQLEngine.counts_from_data
+
+
+def test_standby_source_is_guarded(monkeypatch):
+    """A read-replica source must not crash consistent/delta/fence; it must
+    degrade cleanly. This is the 'app pointed at the reader endpoint' class
+    of outage, caught by the tool instead of at runtime."""
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop())
+    monkeypatch.setattr(eng, "_in_recovery", lambda side, db="postgres": True)
+    # no source LSN -> no fence (returns None, never raises)
+    assert eng.src_lsn("db") is None
+    assert eng.fence_wait("db", None) is None
+    # delta verify returns a clean error Result, not an exception
+    r = eng.delta_verify("db")
+    assert r[0].status == "error"
+    assert "read replica" in r[0].detail

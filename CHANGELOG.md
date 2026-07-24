@@ -2,6 +2,28 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.3.1] — 2026-07-24
+
+Read-replica endpoint guardrail (from a live UAT outage: an app pointed at
+an Aurora reader instance got `SQLSTATE 25006 cannot execute SELECT FOR
+UPDATE in a read-only transaction`).
+
+### Added
+- `_in_recovery()` detection (postgres): every endpoint's role is now known.
+- `assess` flags endpoint role — source on a read replica = warn (fine for
+  checks, but the LSN fence and logical slots need the primary), target on a
+  read replica = **fail** (cannot migrate/repair into it, and apps get
+  SQLSTATE 25006). This check would have caught the outage before cutover.
+- `doctor` prints `writer` / `READER/read-only` next to each pg endpoint.
+
+### Fixed
+- `--consistent`, delta verify and the LSN fence no longer crash when the
+  source is a standby (Aurora readers reject both `pg_current_wal_lsn()` and
+  `pg_last_wal_replay_lsn()`): `src_lsn()` returns `None` → fence degrades to
+  settle, `_fast_consistent` marks the snapshot `standby (no fence)`, and
+  `delta_verify` returns a clear "point at the writer endpoint" error instead
+  of an exception.
+
 ## [0.3.0] — 2026-07-24
 
 Consistency by design, O(changes) verification, and best-tool movers.
