@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..config import REPORTS
@@ -283,18 +284,50 @@ class PostgresEngine(Engine):
                       f"{total} objects in {len(inv)} types,"
                       f" all present on target{note}")
 
+    SEQ_Q = ("select schemaname||'.'||sequencename||'|'||coalesce(last_value,0)"
+             " from pg_sequences where schemaname not like '\\_\\_%'"
+             " and sequencename not like 'migkit\\_%' order by 1")
+
     def check_counts(self, db):
-        rc, out = self._script("check-counts.sh", db)
-        status = "ok" if rc == 0 else "diff"
-        return [Result("counts", db, status, out.splitlines()[-1] if out else "",
-                       str(self._report(db) / "counts.diff"),
-                       "missing rows show up in check data, fix there")]
+        st = [t for t in self._psql("src", db, self.USER_TABLES).splitlines() if t]
+        dt = set(t for t in self._psql("dst", db,
+                                       self.USER_TABLES).splitlines() if t)
+        bad = [f"{t} missing on target" for t in st if t not in dt]
+        bad += [f"{t} extra on target"
+                for t in sorted(dt - set(st))]
+
+        def cnt(side, t):
+            sch, tbl = t.split(".", 1)
+            return int(self._psql(side, db,
+                                  f'select count(*) from "{sch}"."{tbl}"') or 0)
+
+        common = [t for t in st if t in dt]
+        total = 0
+        with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
+            futs = {t: (pool.submit(cnt, "src", t), pool.submit(cnt, "dst", t))
+                    for t in common}
+            for t in common:
+                a, b = futs[t][0].result(), futs[t][1].result()
+                total += a
+                if a != b:
+                    bad.append(f"{t} src={a} dst={b}")
+        if bad:
+            return [Result("counts", db, "diff", "; ".join(bad[:10]), "",
+                           "missing rows show up in check data, fix there")]
+        return [Result("counts", db, "ok",
+                       f"{len(common)} tables, {total:,} rows both sides")]
 
     def check_autoinc(self, db):
-        rc, out = self._script("check-sequences.sh", db)
-        status = "ok" if rc == 0 else "diff"
-        return [Result("autoinc", db, status, out.splitlines()[0] if out else "",
-                       str(self._report(db) / "sequences.diff"),
+        src = dict(l.rsplit("|", 1) for l in
+                   self._psql("src", db, self.SEQ_Q).splitlines() if l)
+        dst = dict(l.rsplit("|", 1) for l in
+                   self._psql("dst", db, self.SEQ_Q).splitlines() if l)
+        bad = [f"{n} src={v} dst={dst.get(n, 'MISSING')}"
+               for n, v in sorted(src.items()) if dst.get(n) != v]
+        if not bad:
+            return [Result("autoinc", db, "ok",
+                           f"{len(src)} sequences, values match")]
+        return [Result("autoinc", db, "diff", "; ".join(bad[:10]), "",
                        f"migkit sync {self.hop.name} --db {db} --kind sequences")]
 
     @staticmethod
