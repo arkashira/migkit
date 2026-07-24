@@ -2,6 +2,62 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.2.0] — 2026-07-24
+
+### Changed — CLI consolidated to 11 commands
+- `doctor` (absorbs `hops`), `advise`, `assess`, `schema` (absorbs
+  `setup-target`, `convert-schema` → `--convert`, `gen-migration` →
+  `--migration`), `check` (absorbs `sample-diff` → `--drill`), `move`
+  (absorbs `replicate` + `tail` → `--mode full|cdc|full+cdc`), `watch`
+  (absorbs `monitor` → `--verify`), `sync` (absorbs `repair`: dry-run plan →
+  `--apply` → `--go`), `report` (absorbs `ui` → `--serve`), `history`
+  (absorbs `state`), `rollback`.
+- All 11 pre-0.2 names still work as hidden aliases with their old flags,
+  verified by the CLI-surface tests — existing scripts keep running.
+- Fix hints and playbooks now print the new spellings
+  (`migkit sync … --kind sequences --apply`).
+
+### Changed — performance
+- Counts merged into the checksum pass: when `check` runs counts + data
+  together (postgres, mysql, mongodb, hetero), row counts come from the
+  same query/aggregate as the checksum, so every table is scanned once,
+  not twice. Table presence is compared from the catalogs (no scan).
+- MySQL data check now uses the built-in single-aggregate
+  `bit_xor(crc32/md5)` checksum first (one query per side per table);
+  reladiff moved behind `options.reladiff: true`.
+- MySQL standalone counts run in parallel across tables and sides.
+- MongoDB counts are implied by equal `dbHash`/per-id hashes; only diffed
+  collections pay for an exact `count_documents`.
+- Global `-q/--quiet` silences per-table chatter, progress lines and
+  pass-level assess output; diffs, errors and summaries always print.
+
+### Added — deep checks (`check --deep` or `--only deep`)
+- FK integrity: orphan scan behind NOT VALID constraints (postgres) and a
+  full FK orphan scan (mysql, where loads run with `foreign_key_checks=0`).
+- Disabled triggers on target (postgres).
+- Column-level drift: type / nullability / default / precision, plus
+  charset + collation per column on mysql; honours `<hop>.schema-ignore`
+  patterns; evidence written to `deep-columns.diff`.
+- Materialized-view freshness (populated + row counts) and table-grant
+  parity for roles present on both sides (postgres).
+- Boundary freshness: `max(pk)` (sql) / newest `_id` (mongo) both sides —
+  flags targets AHEAD of source (rogue writer / double-apply) and reports
+  lag-behind tables. Directly aimed at the "dst has more rows than src"
+  investigation.
+
+### Changed — dashboard
+- `report --serve` (ex-`ui`) redesigned: summary pills, engine/service
+  badges, per-check tiles with pass/fail tinting, per-db status rows,
+  cross-hop recent-writes feed, refined dark mode. Still read-only,
+  localhost-bound, zero dependencies.
+- HTML report gains a `deep` column and drops tiles for checks that
+  did not run.
+
+### Tests
+- 34 tests (was 27): + CLI surface (exactly 11 visible commands, all legacy
+  aliases invocable), quiet flag, counts-from-checksum parsing, deep-check
+  default, `--drill` argument validation.
+
 ## [0.1.0] — 2026-07-23
 
 First working version, built and verified against live RDS → TencentDB hops

@@ -2,6 +2,7 @@ import difflib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from ..util import run, which
 from .base import Engine, RepairAction, Result
@@ -12,6 +13,7 @@ NULL_TOKEN = "~null~"
 
 class MySQLEngine(Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    counts_from_data = True
 
     def _conn(self, side):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -204,17 +206,24 @@ class MySQLEngine(Engine):
                               f"extra tables on target: {sorted(dt - st)}"))
         bad = []
         total_a = total_b = 0
-        for t in sorted(st & dt):
-            a = self._q("src", f"select count(*) from `{db}`.`{t}`")[0][0]
-            b = self._q("dst", f"select count(*) from `{db}`.`{t}`")[0][0]
-            total_a += a
-            total_b += b
-            if a != b:
-                bad.append(f"{t} src={a} dst={b}")
+
+        def cnt(side, t):
+            return self._q(side, f"select count(*) from `{db}`.`{t}`")[0][0]
+
+        common = sorted(st & dt)
+        with ThreadPoolExecutor(max_workers=max(2, self.hop.workers)) as pool:
+            futs = {t: (pool.submit(cnt, "src", t), pool.submit(cnt, "dst", t))
+                    for t in common}
+            for t in common:
+                a, b = futs[t][0].result(), futs[t][1].result()
+                total_a += a
+                total_b += b
+                if a != b:
+                    bad.append(f"{t} src={a} dst={b}")
         if bad:
             res.append(Result("counts", db, "diff", "; ".join(bad)))
         return res or [Result("counts", db, "ok",
-                              f"{len(st & dt)} tables, rows"
+                              f"{len(common)} tables, rows"
                               f" {total_a:,}=={total_b:,}")]
 
     def check_autoinc(self, db):
@@ -226,22 +235,41 @@ class MySQLEngine(Engine):
                if dst.get(t) != v]
         if bad:
             return [Result("autoinc", db, "diff", "; ".join(bad), "",
-                           f"migkit repair {self.hop.name} --db {db} --kind sequences")]
+                           f"migkit sync {self.hop.name} --db {db} --kind sequences")]
         return [Result("autoinc", db, "ok",
                        f"{len(src)} counters, values match")]
 
-    def check_data(self, db, table=None, stream=None):
-        tables = [table] if table else sorted(
-            set(self._tables("src", db)) & set(self._tables("dst", db)))
+    def check_data(self, db, table=None, stream=None, with_counts=False):
+        st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
+        tables = [table] if table else sorted(st & dt)
         res = []
+        rows_a = rows_b = 0
+        bad_counts = []
         with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
             futs = {pool.submit(self._diff_table, db, t): t for t in tables}
             for fu in as_completed(futs):
-                r = fu.result()
+                r, ra, rb = fu.result()
                 if stream:
                     stream(f"{futs[fu]}: {r.status}")
                 res.append(r)
-        return sorted(res, key=lambda r: r.scope)
+                rows_a += ra
+                rows_b += rb
+                if ra != rb:
+                    bad_counts.append(f"{futs[fu]} src={ra} dst={rb}")
+        res = sorted(res, key=lambda r: r.scope)
+        if with_counts:
+            bad_counts += [f"{t} missing on target" for t in sorted(st - dt)]
+            bad_counts += [f"{t} extra on target" for t in sorted(dt - st)]
+            if bad_counts:
+                cres = Result("counts", db, "diff",
+                              "; ".join(bad_counts[:10]))
+            else:
+                cres = Result("counts", db, "ok",
+                              f"{len(tables)} tables, rows"
+                              f" {rows_a:,}=={rows_b:,}"
+                              " (from the checksum pass, no extra scan)")
+            res.insert(0, cres)
+        return res
 
     def _checksum(self, side, db, t, expr, where=""):
         q = (f"select count(*), coalesce(bit_xor(crc32({expr})), 0),"
@@ -264,27 +292,31 @@ class MySQLEngine(Engine):
         try:
             p = run(cmd, check=False, timeout=3600)
         except Exception:
-            return None
+            return None, "", 0, 0
         text = p.stdout + p.stderr
         if p.returncode != 0 or "ERROR" in text:
-            return None, ""
+            return None, "", 0, 0
         import re as _re
         m = _re.search(r"(\d+) rows in table A.*?(\d+) rows in table B",
                        text, _re.S)
-        rows = f"rows {m.group(1)}=={m.group(2)}, " if m else ""
+        ra, rb = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        rows = f"rows {ra}=={rb}, " if m else ""
         if "0 rows are different" in text and "0 rows exclusive" in text:
-            return "ok", f"{rows}hashdiff 0 differences (reladiff)"
-        return "diff", ""
+            return "ok", f"{rows}hashdiff 0 differences (reladiff)", ra, rb
+        return "diff", "", ra, rb
 
     def _diff_table(self, db, t):
         scope = f"{db}.{t}"
         expr = self._row_expr(db, t)
         pks = self._pk_cols(db, t)
 
-        if pks and which("reladiff") and self.hop.options.get("reladiff", True):
-            verdict, detail = self._reladiff_table(db, t, pks)
+        # builtin single-aggregate checksum is the fast default; set
+        # options.reladiff: true on the hop to put reladiff first again
+        if pks and which("reladiff") and self.hop.options.get("reladiff",
+                                                              False):
+            verdict, detail, ra, rb = self._reladiff_table(db, t, pks)
             if verdict == "ok":
-                return Result("data", scope, "ok", detail)
+                return Result("data", scope, "ok", detail), ra, rb
             if verdict == "diff":
                 return self._drilldown(db, t, pks, expr, [""])
 
@@ -320,11 +352,12 @@ class MySQLEngine(Engine):
         if not bad_ranges:
             return Result("data", scope, "ok",
                           f"rows {rows_a:,}=={rows_b:,}, checksum"
-                          f" {xor_a:x}=={xor_b:x} ({len(ranges)} chunks)")
+                          f" {xor_a:x}=={xor_b:x} ({len(ranges)} chunks)"), \
+                rows_a, rows_b
         if not pks:
             return Result("data", scope, "diff",
                           "checksum differs, no pk for row drilldown", "",
-                          "recopy whole table with dump/load")
+                          "recopy whole table with dump/load"), rows_a, rows_b
         return self._drilldown(db, t, pks, expr, bad_ranges)
 
     def _drilldown(self, db, t, pks, expr, ranges):
@@ -353,11 +386,121 @@ class MySQLEngine(Engine):
             # not a real diff
             return Result("data", scope, "ok",
                           "checksum flicker settled (in-flight replication),"
-                          " 0 rows actually differ")
+                          " 0 rows actually differ"), len(src), len(dst)
         return Result("data", scope, "diff",
                       f"missing={len(missing)} extra={len(extra)}"
                       f" changed={len(changed)}", str(d),
-                      f"migkit repair {self.hop.name} --db {db} --kind rows --apply")
+                      f"migkit sync {self.hop.name} --db {db} --kind rows"
+                      " --apply"), len(src), len(dst)
+
+    def check_deep(self, db):
+        res = []
+
+        # loads run with foreign_key_checks=0 (ours included), so orphans
+        # are possible on target even though mysql normally enforces fks
+        rows = self._q("dst",
+                       "select constraint_name, table_name, column_name,"
+                       " referenced_table_name, referenced_column_name"
+                       " from information_schema.key_column_usage"
+                       " where table_schema=%s"
+                       " and referenced_table_name is not null"
+                       " order by constraint_name, ordinal_position", (db,))
+        fks = {}
+        for con, t, c, rt, rc in rows:
+            fk = fks.setdefault((con, t, rt), ([], []))
+            fk[0].append(c)
+            fk[1].append(rc)
+        orphans = []
+        for (con, t, rt), (cols, rcols) in sorted(fks.items()):
+            nn = " and ".join(f"c.`{c}` is not null" for c in cols)
+            join = " and ".join(f"p.`{r}` = c.`{c}`"
+                                for c, r in zip(cols, rcols))
+            n = self._q("dst", f"select count(*) from `{db}`.`{t}` c"
+                               f" where {nn} and not exists"
+                               f" (select 1 from `{db}`.`{rt}` p"
+                               f" where {join})")[0][0]
+            if n:
+                orphans.append(f"{t}.{con}: {n} orphan rows")
+        res.append(Result("deep", f"{db} fk", "diff" if orphans else "ok",
+                          "; ".join(orphans[:5]) if orphans
+                          else f"{len(fks)} fks scanned, 0 orphan rows", "",
+                          "reload the child rows or delete orphans"
+                          if orphans else ""))
+
+        colq = ("select concat(table_name, '.', column_name), column_type,"
+                " is_nullable, coalesce(column_default, ''),"
+                " coalesce(character_set_name, ''),"
+                " coalesce(collation_name, ''), extra"
+                " from information_schema.columns where table_schema=%s"
+                " and table_name not like 'migkit%%' order by 1")
+        sc = {r[0]: r[1:] for r in self._q("src", colq, (db,))}
+        dc = {r[0]: r[1:] for r in self._q("dst", colq, (db,))}
+        drift = [f"{k}: src={sc[k]} dst={dc[k]}" for k in sorted(sc)
+                 if k in dc and sc[k] != dc[k]]
+        if drift:
+            out = self.hop.report_dir(db) / "deep-columns.diff"
+            out.write_text("\n".join(drift) + "\n")
+            res.append(Result("deep", f"{db} columns", "diff",
+                              f"{len(drift)} columns drift (type/null/"
+                              f"default/charset): "
+                              + "; ".join(d.split(":")[0] for d in drift[:4]),
+                              str(out), "align target DDL, charset drift"
+                                        " corrupts comparisons and apps"))
+        else:
+            res.append(Result("deep", f"{db} columns", "ok",
+                              f"{len(sc)} columns compared, type/null/"
+                              "default/charset/collation identical"))
+
+        pkq = ("select k.table_name, k.column_name"
+               " from information_schema.key_column_usage k"
+               " join information_schema.columns c"
+               " on c.table_schema = k.table_schema"
+               " and c.table_name = k.table_name"
+               " and c.column_name = k.column_name"
+               " where k.table_schema=%s and k.constraint_name='PRIMARY'"
+               " and c.data_type in ('tinyint','smallint','mediumint',"
+               "'int','bigint')"
+               " and 1 = (select count(*)"
+               " from information_schema.key_column_usage k2"
+               " where k2.table_schema = k.table_schema"
+               " and k2.table_name = k.table_name"
+               " and k2.constraint_name='PRIMARY')"
+               " order by 1")
+        spk = self._q("src", pkq, (db,))
+        dpk = {r[0] for r in self._q("dst", pkq, (db,))}
+        both = [(t, c) for t, c in spk if t in dpk]
+
+        def maxes(side):
+            out = {}
+            for i in range(0, len(both), 200):
+                q = " union all ".join(
+                    f"select '{t}', coalesce(max(`{c}`), 0)"
+                    f" from `{db}`.`{t}`" for t, c in both[i:i + 200])
+                out.update({r[0]: int(r[1]) for r in self._q(side, q)})
+            return out
+
+        if both:
+            am, bm = maxes("src"), maxes("dst")
+            ahead = [f"{k} src_max={am[k]} dst_max={bm[k]}"
+                     for k in sorted(am) if bm.get(k, 0) > am[k]]
+            behind = [k for k in sorted(am) if bm.get(k, 0) < am[k]]
+            if ahead:
+                res.append(Result("deep", f"{db} boundary", "diff",
+                                  f"target max(pk) AHEAD of source on"
+                                  f" {len(ahead)}: {'; '.join(ahead[:4])}",
+                                  "", "writes landing on target or"
+                                      " double-apply, find the writer"
+                                      " before cutover"))
+            else:
+                note = (f"; {len(behind)} behind (replication lag)"
+                        if behind else "")
+                res.append(Result("deep", f"{db} boundary", "ok",
+                                  f"max(pk) checked on {len(both)} tables,"
+                                  f" none ahead of source{note}"))
+        else:
+            res.append(Result("deep", f"{db} boundary", "ok",
+                              "no single-int-pk tables to boundary-check"))
+        return res
 
     def repair_plan(self, db, kind):
         actions = []
@@ -422,9 +565,9 @@ class MySQLEngine(Engine):
                 conn.close()
             return
         t = action.statements[0].split()[3]
-        self._apply_rows(db, t)
+        self._apply_rows(db, t, getattr(self, "_undo_dir", None))
 
-    def _apply_rows(self, db, t):
+    def _apply_rows(self, db, t, undo_dir=None):
         d = self.hop.report_dir(db)
         pks = self._pk_cols(db, t)
         cols = self._cols(db, t)
@@ -441,18 +584,26 @@ class MySQLEngine(Engine):
         collist = ", ".join(f"`{c}`" for c in cols)
         ph = ", ".join(["%s"] * len(cols))
 
-        undo = d / "undo"
-        undo.mkdir(exist_ok=True)
+        undo = Path(undo_dir) if undo_dir else d / "undo"
+        undo.mkdir(parents=True, exist_ok=True)
+        # complete reversible undo: for every pk repair will touch, record its
+        # pre-repair target state. absent (missing) -> restore deletes it;
+        # present (extra/changed) -> restore re-inserts the saved old row.
         sconn, dconn = self._conn("src"), self._conn("dst")
+        touched = missing + extra + changed
+        entries = []
         try:
-            with dconn.cursor() as cur, \
-                    (undo / f"{t}.rows.jsonl").open("a") as uf:
+            with dconn.cursor() as cur:
                 cur.execute("set foreign_key_checks = 0")
-                for pk in to_delete:
+                for pk in touched:
                     cur.execute(f"select {collist} from `{db}`.`{t}`"
                                 f" where {cond}", pk)
-                    for row in cur.fetchall():
-                        uf.write(json.dumps([str(v) for v in row]) + "\n")
+                    got = cur.fetchall()
+                    entries.append({"pk": pk, "cols": cols,
+                                    "old": [list(r) for r in got] or None})
+                (undo / f"rows-{t}.jsonl").write_text(
+                    "".join(json.dumps(e, default=str) + "\n"
+                            for e in entries))
                 for pk in to_delete:
                     cur.execute(f"delete from `{db}`.`{t}` where {cond}", pk)
                 with sconn.cursor() as scur:
@@ -468,6 +619,40 @@ class MySQLEngine(Engine):
         finally:
             sconn.close()
             dconn.close()
+
+    def restore_rows(self, db, undo_dir):
+        """Replay a complete row undo: for each touched pk, delete whatever is
+        there now, then re-insert the saved pre-repair row (or leave absent)."""
+        undo_dir = Path(undo_dir)
+        files = sorted(undo_dir.glob("rows-*.jsonl"))
+        if not files:
+            return 0
+        n = 0
+        dconn = self._conn("dst")
+        try:
+            with dconn.cursor() as cur:
+                cur.execute("set foreign_key_checks = 0")
+                for f in files:
+                    t = f.name[len("rows-"):-len(".jsonl")]
+                    pks = self._pk_cols(db, t)
+                    for line in f.read_text().splitlines():
+                        e = json.loads(line)
+                        cols = e["cols"]
+                        cond = " and ".join(
+                            f"cast(`{c}` as char) = %s" for c in pks)
+                        cur.execute(f"delete from `{db}`.`{t}` where {cond}",
+                                    e["pk"])
+                        if e["old"]:
+                            collist = ", ".join(f"`{c}`" for c in cols)
+                            ph = ", ".join(["%s"] * len(cols))
+                            cur.executemany(
+                                f"insert into `{db}`.`{t}` ({collist})"
+                                f" values ({ph})", e["old"])
+                        n += 1
+            dconn.commit()
+        finally:
+            dconn.close()
+        return n
 
     def assess(self):
         items = []

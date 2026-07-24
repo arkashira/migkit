@@ -22,6 +22,7 @@ class RepairAction:
 
 class Engine:
     checks = ("schema", "counts", "autoinc", "data")
+    counts_from_data = False
 
     def __init__(self, hop):
         self.hop = hop
@@ -37,6 +38,9 @@ class Engine:
 
     def check_autoinc(self, db):
         return [Result("autoinc", db, "skip", "not applicable for this engine")]
+
+    def check_deep(self, db):
+        return [Result("deep", db, "skip", "no deep checks for this engine yet")]
 
     def check_data(self, db, table=None):
         raise NotImplementedError

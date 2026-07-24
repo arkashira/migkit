@@ -58,6 +58,15 @@ select 'extension|'||extname from pg_extension
 
 class PostgresEngine(Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    counts_from_data = True
+
+    USER_TABLES = ("select n.nspname||'.'||c.relname from pg_class c"
+                   " join pg_namespace n on n.oid = c.relnamespace"
+                   " where c.relkind = 'r'"
+                   " and n.nspname not in ('pg_catalog','information_schema')"
+                   " and n.nspname not like 'pg\\_%'"
+                   " and n.nspname not like '\\_\\_%'"
+                   " and c.relname not like 'migkit\\_%' order by 1")
 
     def __init__(self, hop):
         super().__init__(hop)
@@ -273,26 +282,62 @@ class PostgresEngine(Engine):
         status = "ok" if rc == 0 else "diff"
         return [Result("autoinc", db, status, out.splitlines()[0] if out else "",
                        str(self._report(db) / "sequences.diff"),
-                       f"migkit repair {self.hop.name} --db {db} --kind sequences")]
+                       f"migkit sync {self.hop.name} --db {db} --kind sequences")]
 
-    def check_data(self, db, table=None, stream=None):
+    @staticmethod
+    def _parse_fast(out):
+        import re as _re
+        rows_src = rows_dst = n = 0
+        bad = []
+        for line in out.splitlines():
+            m = _re.match(r"(\S+): OK rows=(\d+)", line)
+            if m:
+                n += 1
+                rows_src += int(m.group(2))
+                rows_dst += int(m.group(2))
+                continue
+            m = _re.match(r"(\S+): DIFF src=(\d+)\|\S+ dst=(\d+)\|\S+", line)
+            if m:
+                n += 1
+                a, b = int(m.group(2)), int(m.group(3))
+                rows_src += a
+                rows_dst += b
+                if a != b:
+                    bad.append(f"{m.group(1)} src={a} dst={b}")
+        return n, rows_src, rows_dst, bad
+
+    def _counts_from_fast(self, db, out):
+        n, rows_src, rows_dst, bad = self._parse_fast(out)
+        st = set(self._psql("src", db, self.USER_TABLES).splitlines())
+        dt = set(self._psql("dst", db, self.USER_TABLES).splitlines())
+        bad += [f"{t} missing on target" for t in sorted(st - dt)]
+        bad += [f"{t} extra on target" for t in sorted(dt - st)]
+        if bad:
+            return Result("counts", db, "diff", "; ".join(bad[:10]), "",
+                          "missing rows show up in check data, fix there")
+        return Result("counts", db, "ok",
+                      f"{n} tables, rows {rows_src:,}=={rows_dst:,}"
+                      " (from the checksum pass, no extra scan)")
+
+    def check_data(self, db, table=None, stream=None, with_counts=False):
         if table:
             rc, out = self._script("check-data.sh", db, table, stream=stream)
             status = "ok" if rc == 0 else "diff"
             return [Result("data", f"{db} {table}", status,
                            out.splitlines()[-1] if out else "",
                            str(self._report(db)),
-                           f"migkit repair {self.hop.name} --db {db} --kind rows")]
+                           f"migkit sync {self.hop.name} --db {db} --kind rows")]
         rc, out = self._script("check-data-fast.sh", db, stream=stream)
         ev = self.hop.report_dir(db) / "data-evidence.txt"
         ev.write_text(out + "\n")
+        pre = [self._counts_from_fast(db, out)] if with_counts else []
         if rc == 0:
             import re as _re
             rows = sum(int(m) for m in _re.findall(r"rows=(\d+)", out))
             n = out.count(": OK")
-            return [Result("data", db, "ok",
-                           f"{n} tables, {rows:,} rows, checksums equal"
-                           f" both sides", str(ev))]
+            return pre + [Result("data", db, "ok",
+                                 f"{n} tables, {rows:,} rows, checksums equal"
+                                 f" both sides", str(ev))]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
         for t in bad:
@@ -308,19 +353,244 @@ class PostgresEngine(Engine):
                 else:
                     healed.append(t)
             if not still:
-                return [Result("data", db, "ok",
-                               f"all diffs were in-flight replication,"
-                               f" settled and re-verified equal after"
-                               f" {settle}s ({', '.join(healed)})")]
+                return pre + [Result("data", db, "ok",
+                                     f"all diffs were in-flight replication,"
+                                     f" settled and re-verified equal after"
+                                     f" {settle}s ({', '.join(healed)})")]
             bad = still
         detail = ""
         if bad:
             detail = f"tables differ: {', '.join(bad)} (pk-level files written)"
         if err:
             detail += f" errors: {', '.join(err)}"
-        return [Result("data", db, "diff" if bad else "error", detail,
-                       str(self._report(db)),
-                       f"migkit repair {self.hop.name} --db {db} --kind rows")]
+        return pre + [Result("data", db, "diff" if bad else "error", detail,
+                             str(self._report(db)),
+                             f"migkit sync {self.hop.name} --db {db} --kind rows")]
+
+    def _ignore_patterns(self):
+        import re as _re
+        pats = []
+        for d in (CHECKER / "conf", PGDC_ROOT / "conf"):
+            f = d / f"{self.hop.name}.schema-ignore"
+            if f.exists():
+                pats += [p for p in f.read_text().splitlines() if p.strip()]
+        return [_re.compile(p) for p in pats]
+
+    def check_deep(self, db):
+        res = []
+        rpt = self.hop.report_dir(db)
+
+        # orphans can only hide behind NOT VALID constraints (pg enforces
+        # validated ones), so scan just those
+        fks = [l.split("|") for l in self._psql("dst", db, """
+            select c.conname
+              ||'|'||c.conrelid::regclass||'|'||c.confrelid::regclass
+              ||'|'||(select string_agg(quote_ident(a.attname), ','
+                                        order by x.ord)
+                      from unnest(c.conkey) with ordinality x(attnum, ord)
+                      join pg_attribute a on a.attrelid = c.conrelid
+                       and a.attnum = x.attnum)
+              ||'|'||(select string_agg(quote_ident(a.attname), ','
+                                        order by x.ord)
+                      from unnest(c.confkey) with ordinality x(attnum, ord)
+                      join pg_attribute a on a.attrelid = c.confrelid
+                       and a.attnum = x.attnum)
+            from pg_constraint c
+            join pg_namespace n on n.oid = c.connamespace
+            where c.contype = 'f' and not c.convalidated
+              and n.nspname not like '\\_\\_%'""").splitlines() if l]
+        orphans = []
+        for name, child, parent, ckeys, pkeys in fks:
+            cc = ", ".join(f"c.{k}" for k in ckeys.split(","))
+            pc = ", ".join(f"p.{k}" for k in pkeys.split(","))
+            n = self._psql("dst", db,
+                           f"select count(*) from {child} c"
+                           f" where ({cc}) is not null and not exists"
+                           f" (select 1 from {parent} p where ({pc}) = ({cc}))")
+            if n != "0":
+                orphans.append(f"{child}.{name}: {n} orphan rows")
+        if orphans:
+            res.append(Result("deep", f"{db} fk", "diff",
+                              "; ".join(orphans[:5]), "",
+                              "fix orphans, then alter table ..."
+                              " validate constraint on target"))
+        else:
+            res.append(Result("deep", f"{db} fk", "ok",
+                              f"{len(fks)} NOT VALID fks scanned, 0 orphans;"
+                              " validate them before cutover" if fks
+                              else "all fk constraints validated, no orphans"
+                                   " possible"))
+
+        dis = [l for l in self._psql("dst", db,
+               "select n.nspname||'.'||c.relname||'.'||t.tgname"
+               " from pg_trigger t"
+               " join pg_class c on c.oid = t.tgrelid"
+               " join pg_namespace n on n.oid = c.relnamespace"
+               " where not t.tgisinternal and t.tgenabled = 'D'")
+               .splitlines() if l]
+        res.append(Result("deep", f"{db} triggers",
+                          "diff" if dis else "ok",
+                          "disabled on target: " + ", ".join(dis[:5]) if dis
+                          else "no disabled triggers on target", "",
+                          "alter table ... enable trigger before cutover"
+                          if dis else ""))
+
+        colq = ("select table_schema||'.'||table_name||'.'||column_name"
+                "||'|'||coalesce(data_type,'')||'|'||is_nullable"
+                "||'|'||coalesce(column_default,'')"
+                "||'|'||coalesce(character_maximum_length::text,'')"
+                "||'|'||coalesce(numeric_precision::text,'')"
+                "||'|'||coalesce(numeric_scale::text,'')"
+                " from information_schema.columns"
+                " where table_schema not in ('pg_catalog',"
+                "'information_schema')"
+                " and table_schema not like 'pg\\_%'"
+                " and table_schema not like '\\_\\_%'"
+                " and table_name not like 'migkit\\_%' order by 1")
+        sc = {l.split("|", 1)[0]: l for l in
+              self._psql("src", db, colq).splitlines() if l}
+        dc = {l.split("|", 1)[0]: l for l in
+              self._psql("dst", db, colq).splitlines() if l}
+        ignores = self._ignore_patterns()
+        drift = [f"src {sc[k]}\ndst {dc[k]}" for k in sorted(sc)
+                 if k in dc and sc[k] != dc[k]
+                 and not any(p.search(sc[k]) or p.search(dc[k])
+                             for p in ignores)]
+        if drift:
+            out = rpt / "deep-columns.diff"
+            out.write_text("\n\n".join(drift) + "\n")
+            heads = [d.splitlines()[0].split("|")[0][4:] for d in drift]
+            res.append(Result("deep", f"{db} columns", "diff",
+                              f"{len(drift)} columns drift"
+                              f" (type/null/default/precision):"
+                              f" {', '.join(heads[:4])}", str(out),
+                              "see deep-columns.diff, align target DDL"))
+        else:
+            res.append(Result("deep", f"{db} columns", "ok",
+                              f"{len(sc)} columns compared, type/null/"
+                              "default/precision identical"))
+
+        mvs = [l for l in self._psql("src", db,
+               "select n.nspname||'.'||c.relname from pg_class c"
+               " join pg_namespace n on n.oid = c.relnamespace"
+               " where c.relkind = 'm'"
+               " and n.nspname not like '\\_\\_%'").splitlines() if l]
+        stale = []
+        for m in mvs:
+            try:
+                pop = self._psql("dst", db, "select relispopulated"
+                                 f" from pg_class where oid = '{m}'::regclass")
+            except RuntimeError:
+                stale.append(f"{m}: missing on target")
+                continue
+            if pop != "t":
+                stale.append(f"{m}: not populated on target")
+                continue
+            # count alone misses a stale mv with the same row count, so
+            # checksum the content (matviews are small derived sets)
+            q = ("select count(*)||'|'||coalesce(sum(('x'||substr("
+                 "md5(t::text),1,16))::bit(64)::bigint::numeric), 0)"
+                 f" from {m} t")
+            a = self._psql("src", db, q)
+            b = self._psql("dst", db, q)
+            if a != b:
+                stale.append(f"{m}: rows|checksum src={a} dst={b},"
+                             " stale on target")
+        res.append(Result("deep", f"{db} matviews",
+                          "diff" if stale else "ok",
+                          "; ".join(stale[:5]) if stale
+                          else f"{len(mvs)} matviews populated and equal"
+                          if mvs else "no matviews", "",
+                          "refresh materialized view ... on target"
+                          if stale else ""))
+
+        gq = ("select grantee||'|'||table_schema||'.'||table_name"
+              "||'|'||privilege_type"
+              " from information_schema.table_privileges"
+              " where table_schema not in ('pg_catalog',"
+              "'information_schema')"
+              " and table_schema not like '\\_\\_%'"
+              " and grantee not in ('PUBLIC')"
+              " and grantee not like 'pg\\_%' and grantee not like 'rds%'"
+              " and grantee not like '%tencent%'"
+              " and table_name not like 'migkit\\_%'")
+        ga = set(self._psql("src", db, gq).splitlines()) - {""}
+        gb = set(self._psql("dst", db, gq).splitlines()) - {""}
+        droles = set(self._psql("dst", db,
+                                "select rolname from pg_roles").splitlines())
+        sroles = set(self._psql("src", db,
+                                "select rolname from pg_roles").splitlines())
+        miss = sorted(g for g in ga - gb if g.split("|")[0] in droles)
+        extra = sorted(g for g in gb - ga if g.split("|")[0] in sroles)
+        if miss or extra:
+            res.append(Result("deep", f"{db} grants", "diff",
+                              (f"{len(miss)} grants missing on target"
+                               + (": " + "; ".join(
+                                   g.replace("|", " ") for g in miss[:3])
+                                  if miss else "")
+                               + (f"; {len(extra)} extra" if extra else "")),
+                              "", "re-grant on target (pg_dump drops grants"
+                                  " with --no-privileges)"))
+        else:
+            res.append(Result("deep", f"{db} grants", "ok",
+                              f"{len(ga)} table grants match"
+                              " (roles present both sides)"))
+
+        pkq = ("select n.nspname||'|'||c.relname||'|'||a.attname"
+               " from pg_index i"
+               " join pg_class c on c.oid = i.indrelid"
+               " join pg_namespace n on n.oid = c.relnamespace"
+               " join pg_attribute a on a.attrelid = i.indrelid"
+               " and a.attnum = i.indkey[0]"
+               " where i.indisprimary and i.indnatts = 1"
+               " and a.atttypid in ('smallint'::regtype::oid,"
+               "'integer'::regtype::oid,'bigint'::regtype::oid)"
+               " and c.relkind = 'r'"
+               " and n.nspname not in ('pg_catalog','information_schema')"
+               " and n.nspname not like 'pg\\_%'"
+               " and n.nspname not like '\\_\\_%'"
+               " and c.relname not like 'migkit\\_%' order by 1")
+        spk = [l.split("|") for l in
+               self._psql("src", db, pkq).splitlines() if l]
+        dpk = {tuple(l.split("|")[:2]) for l in
+               self._psql("dst", db, pkq).splitlines() if l}
+        both = [(s, t, c) for s, t, c in spk if (s, t) in dpk]
+
+        def maxes(side, triples):
+            out = {}
+            for i in range(0, len(triples), 200):
+                parts = [f"select '{s}.{t}|'||coalesce(max(\"{c}\"), 0)"
+                         f' from "{s}"."{t}"'
+                         for s, t, c in triples[i:i + 200]]
+                for l in self._psql(side, db,
+                                    " union all ".join(parts)).splitlines():
+                    k, _, v = l.rpartition("|")
+                    out[k] = int(v)
+            return out
+
+        if both:
+            am, bm = maxes("src", both), maxes("dst", both)
+            ahead = [f"{k} src_max={am[k]} dst_max={bm[k]}"
+                     for k in sorted(am) if bm.get(k, 0) > am[k]]
+            behind = [f"{k} src_max={am[k]} dst_max={bm[k]}"
+                      for k in sorted(am) if bm.get(k, 0) < am[k]]
+            if ahead:
+                res.append(Result("deep", f"{db} boundary", "diff",
+                                  f"target max(pk) AHEAD of source on"
+                                  f" {len(ahead)}: {'; '.join(ahead[:4])}",
+                                  "", "writes landing on target or"
+                                      " double-apply, find the writer"
+                                      " before cutover"))
+            else:
+                note = (f"; {len(behind)} behind (replication lag):"
+                        f" {'; '.join(behind[:3])}" if behind else "")
+                res.append(Result("deep", f"{db} boundary", "ok",
+                                  f"max(pk) checked on {len(both)} tables,"
+                                  f" none ahead of source{note}"))
+        else:
+            res.append(Result("deep", f"{db} boundary", "ok",
+                              "no single-int-pk tables to boundary-check"))
+        return res
 
     def repair_plan(self, db, kind):
         actions = []

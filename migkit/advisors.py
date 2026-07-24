@@ -30,7 +30,7 @@ PLAYBOOKS = {
             ]),
             ("5. cutover", [
                 "stop writes on source, wait CDC latency = 0",
-                "migkit repair <hop> --kind sequences --apply  (sequence/identity values)",
+                "migkit sync <hop> --kind sequences --apply  (sequence/identity values)",
                 "re-add FK constraints and triggers on target",
                 "migkit check <hop>  (full validation, all green required)",
                 "switch application, keep DMS task stopped not deleted (rollback path)",
@@ -71,7 +71,7 @@ PLAYBOOKS = {
             ]),
             ("5. cutover", [
                 "stop writes, wait incremental lag = 0",
-                "migkit repair <hop> --kind sequences --apply  (DTS never carries these)",
+                "migkit sync <hop> --kind sequences --apply  (DTS never carries these)",
                 "re-add FK/triggers, run migkit check <hop>, all green",
                 "after cutover remove DTS leftovers on both sides:"
                 " __tencentdb__ schemas, dts_ publication, dts_ event triggers, dts_ slot",
@@ -104,7 +104,7 @@ PLAYBOOKS = {
             ]),
             ("5. cutover", [
                 "stop writes, wait delay 0, promote the Cloud SQL replica",
-                "migkit repair --kind sequences --apply, re-add FK/triggers",
+                "migkit sync --kind sequences --apply, re-add FK/triggers",
                 "migkit check <hop>, all green, switch app",
             ]),
             ("rollback", [

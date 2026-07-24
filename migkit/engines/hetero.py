@@ -16,6 +16,7 @@ class HeteroEngine(Engine):
     Data validation crosses via reladiff which speaks both dialects."""
 
     checks = ("counts", "data")
+    counts_from_data = True
 
     def __init__(self, hop):
         super().__init__(hop)
@@ -59,18 +60,33 @@ class HeteroEngine(Engine):
         return [Result("counts", db, "ok",
                        f"rows {total_a:,}=={total_b:,} across engines")]
 
-    def check_data(self, db, table=None, stream=None):
+    def check_data(self, db, table=None, stream=None, with_counts=False):
         if not which("reladiff"):
             return [Result("data", db, "error",
                            "reladiff needed for cross-engine data compare,"
                            " run bootstrap.sh")]
         res = []
         tables = [table] if table else self.my._tables("src", db)
+        total_a = total_b = 0
+        bad_counts = []
         for t in tables:
             pks = self.my._pk_cols(db, t)
             if not pks:
                 res.append(Result("data", f"{db}.{t}", "diff",
                                   "no pk, cross-engine compare needs one"))
+                if with_counts:
+                    a = self.my._q("src",
+                                   f"select count(*) from `{db}`.`{t}`")[0][0]
+                    try:
+                        b = int(self.pg._psql("dst", db,
+                                              f'select count(*) from "{t}"'))
+                    except RuntimeError:
+                        bad_counts.append(f"{t} missing on target")
+                        continue
+                    total_a += a
+                    total_b += b
+                    if a != b:
+                        bad_counts.append(f"{t} src={a} dst={b}")
                 continue
             cmd = ["reladiff", self._url("src", db), t,
                    self._url("dst", db), t, "--stats",
@@ -82,6 +98,12 @@ class HeteroEngine(Engine):
             m = re.search(r"(\d+) rows in table A.*?(\d+) rows in table B",
                           text, re.S)
             rows = f"rows {m.group(1)}=={m.group(2)}, " if m else ""
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                total_a += a
+                total_b += b
+                if a != b:
+                    bad_counts.append(f"{t} src={a} dst={b}")
             import re as _re2
             nums = [_re2.search(rf"(\d+) rows {k}", text)
                     for k in ("exclusive to table A", "exclusive to table B",
@@ -95,6 +117,15 @@ class HeteroEngine(Engine):
             res.append(Result("data", f"{db}.{t}", status,
                               f"{rows}reladiff cross-engine"
                               + ("" if ok else f": {text.strip()[-160:]}")))
+        if with_counts:
+            if bad_counts:
+                cres = Result("counts", db, "diff",
+                              "; ".join(bad_counts[:10]))
+            else:
+                cres = Result("counts", db, "ok",
+                              f"rows {total_a:,}=={total_b:,} across engines"
+                              " (from the reladiff pass, no extra scan)")
+            res.insert(0, cres)
         return res
 
     TYPE_FIX = [

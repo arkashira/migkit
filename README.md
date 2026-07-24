@@ -65,9 +65,18 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   file, native Postgres logical replication, MySQL binlog replication (incl. the
   RDS variant), MongoDB change streams with a persisted resume token, and
   cross-engine CDC from the MySQL binlog. Every one resumes from where it died.
-- **Continuous validation** — `monitor` re-checks on an interval and tells
-  transient replication lag apart from a real diff (the confirm-out-of-sync
-  idea from enterprise tools).
+- **No double scans** — when counts and data run together, row counts ride
+  along with the checksum query, so each table is scanned once, not twice.
+  `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
+  summaries.
+- **Deep checks** (`check --deep`) — FK orphan scan behind NOT VALID
+  constraints, disabled triggers, column-level type/null/default/charset
+  drift, materialized-view freshness, table-grant parity, and a boundary
+  check (max PK / newest `_id` both sides) that catches CDC stalls and
+  rogue writers on the target.
+- **Continuous validation** — `watch --verify` re-checks on an interval and
+  tells transient replication lag apart from a real diff (the
+  confirm-out-of-sync idea from enterprise tools).
 - **State and rollback** — tagged snapshots of target sequences and schema kept
   in two places, a `terraform-plan`-style rollback preview, an in-database
   audit ledger (`migkit_changelog`, like Liquibase's DATABASECHANGELOG), and a
@@ -84,10 +93,10 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
 ```bash
 cd migkit && ./bootstrap.sh && source .venv/bin/activate
 cp conf/hops.example.yaml conf/hops.yaml   # fill in endpoints
-migkit doctor                              # tools + connectivity
+migkit doctor                              # hops + tools + connectivity
 migkit assess  my-hop                      # readiness before the mover
 migkit check   my-hop                      # read-only, exit 1 on any diff
-migkit ui                                  # dashboard at localhost:8899
+migkit report --serve                      # dashboard at localhost:8899
 ```
 
 ## Install
@@ -115,30 +124,29 @@ hops:
 
 ## Commands
 
+Eleven commands cover the whole lifecycle:
+
 | Command | What it does |
 |---|---|
-| `doctor` | local tools + connectivity to every hop |
+| `doctor` | configured hops, local tools, connectivity |
 | `assess` | premigration readiness (CDC prereqs, no-PK tables, encoding, accounts) |
 | `advise` | playbook for the hop's mover, phase by phase |
-| `setup-target` | commands to build the target schema natively (dry-run) |
-| `check` | layered read-only validation, exit 1 on diff |
-| `sample-diff` | column-level diff of a row sample (datacompy) |
-| `monitor` | continuous re-check loop, lag-aware |
-| `watch` | live load progress: counts, rate, ETA, replication state |
-| `move` | resumable chunked full load |
-| `replicate` | native CDC (Postgres publication / MySQL binlog) |
-| `tail` | MongoDB / cross-engine CDC with resume token |
-| `convert-schema` | cross-engine DDL transpile (sqlglot/pgloader) |
-| `repair` | make target equal source; dry-run unless `--apply`, saves undo |
-| `sync` | check + repair in one pass with state checkpoints |
+| `schema` | target schema plan; `--convert` transpiles cross-engine DDL, `--migration` writes Flyway-style `V__/U__` files |
+| `check` | layered read-only validation, exit 1 on diff; `--deep` adds FK-orphan/drift/boundary checks, `--drill` gives a column-level sample diff |
+| `move` | one mover: `--mode full` resumable chunked copy, `cdc` native change streams (pg logical / mysql binlog / mongo change stream), `full+cdc` both |
+| `watch` | live load progress: counts, rate, ETA, replication state; `--verify` turns it into a continuous lag-aware re-check loop |
+| `sync` | make target equal source: dry-run plan, `--apply` executes with undo, `--go` checks + repairs with rollback checkpoints |
 | `rollback` | restore any saved state, with a plan preview |
-| `state` / `history` | saved states, and the in-database audit ledger |
-| `gen-migration` | Flyway-style `V__/U__` versioned files from the diff |
-| `report` / `ui` | HTML report / live web dashboard |
+| `history` | saved states + the in-database audit ledger + local changelog |
+| `report` | HTML report from the last check; `--serve` runs the live dashboard |
 
 Every check is read-only and rerunnable. Every repair is dry-run unless
 `--apply`/`--go`, saves an undo first, and converges to the same end state on
-re-run.
+re-run. Add `-q/--quiet` before any command to silence per-table chatter.
+
+The pre-0.2 command names (`hops`, `setup-target`, `repair`, `replicate`,
+`tail`, `convert-schema`, `gen-migration`, `sample-diff`, `ui`, `state`,
+`monitor`) still work as hidden aliases, so existing scripts keep running.
 
 ## Supported engines
 
@@ -158,10 +166,10 @@ without dbHash, TencentDB unlogged rules) are handled by built-in fallbacks.
 MySQL → PostgreSQL is verified end to end:
 
 ```bash
-migkit convert-schema my2pg --apply   # sqlglot/pgloader DDL transpile
-migkit move           my2pg --go      # resumable chunked copy
-migkit tail           my2pg --go      # CDC from the binlog, checkpointed
-migkit check          my2pg           # reladiff cross-dialect verify
+migkit schema my2pg --convert --apply    # sqlglot/pgloader DDL transpile
+migkit move   my2pg --go                 # resumable chunked copy
+migkit move   my2pg --mode cdc --db X --go   # CDC from the binlog, checkpointed
+migkit check  my2pg                      # reladiff cross-dialect verify
 ```
 
 The `hetero` engine is an orchestrator that reuses the per-side native engines,
@@ -182,10 +190,10 @@ so new pairs (pg→mysql, mssql→pg) follow the same shape.
 
 ## Safety model
 
-- `check`, `assess`, `sample-diff`, `monitor`, `report`, `ui`, `history` are
-  read-only and can run anytime.
-- `repair`, `sync`, `move`, `replicate`, `tail`, `convert-schema` write to the
-  target; all are dry-run by default and require `--apply`/`--go`.
+- `check` (incl. `--deep`/`--drill`), `assess`, `watch`, `report`, `history`
+  are read-only and can run anytime.
+- `sync`, `move` (all modes), `schema --convert` write to the target; all are
+  dry-run by default and require `--apply`/`--go`.
 - The source is never written by migkit.
 - A lock file prevents concurrent writes; every write is recorded in the
   changelog and the in-database ledger.
@@ -200,7 +208,8 @@ pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
 ```
 
-27 tests: pure-logic units, end-to-end integration against throwaway Postgres
+34 tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
+aliases stay invocable), end-to-end integration against throwaway Postgres
 containers, Faker-generated data covering every column type (jsonb, bytea,
 uuid, unicode/emoji, nulls, non-contiguous PKs), and failure-mode tests
 (bad credentials, missing state, locks, no-PK tables, credential drift). CI

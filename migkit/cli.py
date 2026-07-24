@@ -12,6 +12,12 @@ from .engines import get_engine
 from .util import Timer, human_int, human_secs, which
 
 console = Console(highlight=False)
+QUIET = False
+
+
+def chat(msg):
+    if not QUIET:
+        console.print(msg)
 
 
 def _lock(hop):
@@ -59,10 +65,13 @@ def _require_configured(hop):
 
 
 @click.group()
-def main():
+@click.option("-q", "--quiet", is_flag=True,
+              help="suppress per-table chatter and progress lines,"
+                   " keep diffs, errors and summaries")
+def main(quiet):
     """Database migration toolkit: prepare the target, tell you when to run
-    the mover (managed migration service or native tools), watch the load, validate everything,
-    repair what the mover cannot carry.
+    the mover (managed migration service or native tools), watch the load,
+    validate everything, repair what the mover cannot carry.
 
     \b
     engines: postgres mysql mssql mongodb redis kafka
@@ -71,22 +80,24 @@ def main():
 
     \b
     typical flow:
-      migkit doctor                 tools + connectivity
+      migkit doctor                 tools + hops + connectivity
       migkit advise HOP             playbook for the hop's mover
-      migkit setup-target HOP       target schema commands (dry-run)
+      migkit schema HOP             target schema plan (or --convert/--migration)
       migkit check HOP              read-only, layered, exit 1 on diff
-      migkit watch HOP              live progress while the mover runs
+      migkit move HOP --mode full   resumable copy (cdc / full+cdc for streams)
+      migkit watch HOP              live progress (--verify = re-check loop)
       migkit sync HOP --go          check + repair with state checkpoints
       migkit rollback HOP --db X    restore any saved state
 
     every check is read-only and rerunnable. every repair is dry-run
     unless --apply/--go, saves undo first, and converges to the same
-    end state on re-run (safe to repeat)."""
+    end state on re-run (safe to repeat). legacy command names (repair,
+    replicate, tail, setup-target, ui, state, monitor, ...) still work."""
+    global QUIET
+    QUIET = quiet
 
 
-@main.command()
-def hops():
-    """List configured hops."""
+def _hops_table():
     t = Table("hop", "engine", "source", "target", "service", "dbs")
     for name, hop in load_hops().items():
         t.add_row(name, hop.engine, hop.source.host or "-",
@@ -97,7 +108,8 @@ def hops():
 
 @main.command()
 def doctor():
-    """Check local tools and hop connectivity."""
+    """Configured hops, local tools, and connectivity."""
+    _hops_table()
     tools = ["psql", "pg_dump", "pg_restore", "mysqldump", "mysql", "sqlcmd",
              "mongodump", "reladiff", "migra", "liquibase", "pt-table-sync"]
     t = Table("tool", "status")
@@ -145,8 +157,12 @@ def assess(hop_name):
     for it in items:
         counts[it["level"]] = counts.get(it["level"], 0) + 1
         c = color.get(it["level"], "white")
-        console.print(f"[{c}]{it['level']:5s}[/{c}] {it['scope']:20s}"
-                      f" {it['item']}  {it['detail']}")
+        line = (f"[{c}]{it['level']:5s}[/{c}] {it['scope']:20s}"
+                f" {it['item']}  {it['detail']}")
+        if it["level"] == "pass":
+            chat(line)
+        else:
+            console.print(line)
     (hop.report_dir() / "assess.json").write_text(
         json.dumps(items, indent=1))
     console.print(f"\n{counts['pass']} pass, {counts['warn']} warn,"
@@ -155,11 +171,7 @@ def assess(hop_name):
         raise SystemExit(1)
 
 
-@main.command("setup-target")
-@click.argument("hop_name")
-@click.option("--db", default="", help="single database")
-def setup_target(hop_name, db):
-    """Print the commands that prepare the target before the mover runs."""
+def _setup_target(hop_name, db):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
@@ -175,19 +187,143 @@ def setup_target(hop_name, db):
                   " (see migkit advise)")
 
 
+def _convert_schema(hop_name, db, do_apply):
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "convert_ddl"):
+        raise SystemExit("--convert is for hetero hops,"
+                         " same-engine hops use migkit schema HOP")
+    for d in ([db] if db else eng.databases()):
+        stmts = eng.convert_ddl(d)
+        out = hop.report_dir(d) / "converted-schema.sql"
+        out.write_text("\n\n".join(stmts) + "\n")
+        console.print(f"[bold]{d}[/bold]: {len(stmts)} statements -> {out}")
+        for stmt in stmts[:3]:
+            chat(f"  {stmt.splitlines()[0]} ...")
+        if do_apply:
+            for stmt in stmts:
+                eng.pg._psql("dst", d, stmt)
+            _changelog(hop, {"op": "convert-schema", "db": d,
+                             "n": len(stmts)})
+            console.print(f"  [green]applied on target[/green]")
+    if not do_apply:
+        console.print("\ndry-run, review the file then add --apply")
+
+
+def _gen_migration(hop_name, db, out):
+    from pathlib import Path
+
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "migration_pair"):
+        raise SystemExit("--migration supports postgres and mysql hops")
+    outdir = Path(out)
+    outdir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d%H%M%S")
+    made = 0
+    for d in ([db] if db else eng.databases()):
+        fwd, undo = eng.migration_pair(d)
+        if fwd is None:
+            raise SystemExit("atlas not found, run bootstrap.sh")
+        if not fwd:
+            console.print(f"{d}: schemas already in sync, nothing to generate")
+            continue
+        vf = outdir / f"V{ts}__sync_{d}.sql"
+        uf = outdir / f"U{ts}__sync_{d}.sql"
+        vf.write_text(fwd + "\n")
+        uf.write_text((undo or "-- no automatic undo available") + "\n")
+        made += 1
+        console.print(f"{d}: [green]{vf}[/green] (+ undo {uf.name},"
+                      f" {len(fwd.splitlines())} lines)")
+    if made:
+        console.print("review the files, commit to git, apply when ready")
+
+
+@main.command()
+@click.argument("hop_name")
+@click.option("--db", default="", help="single database")
+@click.option("--convert", "do_convert", is_flag=True,
+              help="transpile source DDL to the target dialect (hetero hops)")
+@click.option("--migration", "do_migration", is_flag=True,
+              help="generate Flyway-style V/U files from the live schema diff")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="with --convert: execute the DDL on target")
+@click.option("--out", default="migrations",
+              help="with --migration: output directory")
+def schema(hop_name, db, do_convert, do_migration, do_apply, out):
+    """Target schema workflows: preparation plan (default), cross-engine
+    DDL conversion (--convert), versioned migration files (--migration)."""
+    if do_convert:
+        return _convert_schema(hop_name, db, do_apply)
+    if do_migration:
+        return _gen_migration(hop_name, db, out)
+    return _setup_target(hop_name, db)
+
+
+def _drill(hop_name, db, table, limit):
+    if not db or not table:
+        raise SystemExit("--drill needs --db and --table (schema.table)")
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "fetch_sample_df"):
+        raise SystemExit("--drill supports postgres and mysql hops")
+    try:
+        import datacompy
+    except ImportError:
+        raise SystemExit("pip install datacompy")
+    a = eng.fetch_sample_df("src", db, table, limit)
+    b = eng.fetch_sample_df("dst", db, table, limit)
+    t = table.split(".", 1)[-1]
+    if hasattr(eng, "_pk_cols"):
+        keys = eng._pk_cols(db, t)
+    else:
+        sch, tbl = table.split(".", 1) if "." in table else ("public", table)
+        keys = [c for c in eng._psql("src", db,
+                "select a.attname from pg_index i join pg_attribute a"
+                " on a.attrelid = i.indrelid and a.attnum = any(i.indkey)"
+                f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
+                " and i.indisprimary").splitlines() if c]
+    if not keys:
+        raise SystemExit(f"{table} has no primary key for joining")
+    cmp = datacompy.PandasCompare(a, b,
+                                  join_columns=[k.lower() for k in keys],
+                                  df1_name="source", df2_name="target")
+    console.print(cmp.report())
+
+
 @main.command()
 @click.argument("hop_name")
 @click.option("--db", default="", help="single database")
 @click.option("--table", default="", help="single table (schema.table)")
-@click.option("--only", default="", help="comma list: schema,counts,autoinc,data")
+@click.option("--only", default="",
+              help="comma list: schema,counts,autoinc,data,deep")
+@click.option("--deep", "do_deep", is_flag=True,
+              help="add deep checks: fk orphans, disabled triggers, column"
+                   " drift, matview/grants parity, boundary freshness")
+@click.option("--drill", is_flag=True,
+              help="column-level sample diff for one table"
+                   " (needs --db and --table)")
+@click.option("--limit", default=1000, help="with --drill: sample rows")
 @click.option("--workers", default=0, help="parallel databases, default from conf")
 @click.option("--resume", is_flag=True, help="skip checks already ok in last summary")
-def check(hop_name, db, table, only, workers, resume):
-    """Read-only validation of target vs source. Never writes to either side."""
+def check(hop_name, db, table, only, do_deep, drill, limit, workers, resume):
+    """Read-only validation of target vs source. Never writes to either side.
+
+    When counts and data both run, row counts ride along with the checksum
+    query, so nothing is scanned twice."""
+    if drill:
+        return _drill(hop_name, db, table, limit)
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    checks = [c for c in (only.split(",") if only else eng.checks) if c in eng.checks]
+    allowed = list(eng.checks) + ["deep"]
+    checks = [c for c in (only.split(",") if only else list(eng.checks))
+              if c in allowed]
+    if do_deep and "deep" not in checks:
+        checks.append("deep")
     dbs = [db] if db else eng.databases()
     workers = workers or hop.workers
     summary_path = hop.report_dir() / "summary.json"
@@ -196,14 +332,30 @@ def check(hop_name, db, table, only, workers, resume):
         prev = {(r["check"], r["scope"]): r["status"]
                 for r in json.loads(summary_path.read_text())}
 
+    merge = ("counts" in checks and "data" in checks and not table
+             and getattr(eng, "counts_from_data", False))
+    local_map = {}
+    for d in dbs:
+        local = list(checks)
+        if merge and prev.get(("data", d)) != "ok":
+            local.remove("counts")
+        local_map[d] = local
+
     timer = Timer()
     results = []
-    total_jobs = len(dbs) * len(checks)
+    total_jobs = sum(len(v) for v in local_map.values())
     done_jobs = 0
+
+    def _stream(d):
+        def s(line):
+            if QUIET and "DIFF" not in line and "ERROR" not in line:
+                return
+            console.print(f"  [{d}] {line}")
+        return s
 
     def run_db(d):
         out = []
-        for c in checks:
+        for c in local_map[d]:
             if prev.get((c, d)) == "ok":
                 out.append({"check": c, "scope": d, "status": "ok",
                             "detail": "resume: skipped, was ok"})
@@ -211,9 +363,10 @@ def check(hop_name, db, table, only, workers, resume):
             fn = getattr(eng, f"check_{c}")
             try:
                 if c == "data":
-                    rs = [r.__dict__ for r in
-                          fn(d, table or None,
-                             stream=lambda l, d=d: console.print(f"  [{d}] {l}"))]
+                    kw = {"stream": _stream(d)}
+                    if merge and "counts" not in local_map[d]:
+                        kw["with_counts"] = True
+                    rs = [r.__dict__ for r in fn(d, table or None, **kw)]
                 else:
                     rs = [r.__dict__ for r in fn(d)]
             except Exception as e:
@@ -222,22 +375,23 @@ def check(hop_name, db, table, only, workers, resume):
         return out
 
     console.print(f"checking {hop_name}: {len(dbs)} dbs x {checks},"
-                  f" {workers} workers")
+                  f" {workers} workers"
+                  + (" (counts merged into the checksum pass)" if merge else ""))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(run_db, d): d for d in dbs}
         for fut in as_completed(futs):
             d = futs[fut]
             rs = fut.result()
             results.extend(rs)
-            done_jobs += len(checks)
+            done_jobs += len(local_map[d])
             for r in rs:
                 color = {"ok": "green", "diff": "yellow",
                          "error": "red"}.get(r["status"], "white")
                 console.print(f"[{color}]{r['check']:8s} {r['scope']}:"
                               f" {r['status'].upper()}[/{color}] {r.get('detail', '')}")
-            console.print(f"  progress {done_jobs}/{total_jobs},"
-                          f" elapsed {human_secs(timer.elapsed())},"
-                          f" eta {timer.eta(done_jobs, total_jobs)}")
+            chat(f"  progress {done_jobs}/{total_jobs},"
+                 f" elapsed {human_secs(timer.elapsed())},"
+                 f" eta {timer.eta(done_jobs, total_jobs)}")
 
     if only and summary_path.exists():
         try:
@@ -266,30 +420,19 @@ def check(hop_name, db, table, only, workers, resume):
         if data_dbs:
             console.print("  # data / sequence diffs (re-check first: many are"
                           " transient replication lag, not real)")
-            console.print(f"  migkit repair {hop_name} --apply"
-                          f"          # all diffed dbs at once")
+            console.print(f"  migkit sync {hop_name} --apply"
+                          f"            # all diffed dbs at once")
         if schema_dbs:
             console.print("  # schema diffs -> generate reviewable DDL files,"
                           " then apply them yourself")
-            console.print(f"  migkit gen-migration {hop_name}"
+            console.print(f"  migkit schema {hop_name} --migration"
                           f"   # writes migrations/V*.sql per db")
         raise SystemExit(1)
     console.print(f"[green]all green ({len(results)} checks,"
                   f" {human_secs(timer.elapsed())})[/green]")
 
 
-@main.command()
-@click.argument("hop_name")
-@click.option("--db", default="", help="one database, or all diffed dbs if omitted")
-@click.option("--kind", default="all",
-              type=click.Choice(["sequences", "rows", "schema", "all"]))
-@click.option("--apply", "do_apply", is_flag=True,
-              help="actually execute, default is dry-run")
-def repair(hop_name, db, kind, do_apply):
-    """Make target equal to source. Dry-run by default, --apply to execute.
-
-    With no --db, repairs every database that had a diff in the last check,
-    so you never copy-paste one command per table."""
+def _repair(hop_name, db, kind, do_apply):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
@@ -298,7 +441,7 @@ def repair(hop_name, db, kind, do_apply):
     else:
         summary = hop.report_dir() / "summary.json"
         if not summary.exists():
-            raise SystemExit("run migkit check first, then repair uses its diffs")
+            raise SystemExit("run migkit check first, then sync uses its diffs")
         dbs = sorted({r["scope"].split()[0].split(".")[0]
                       for r in json.loads(summary.read_text())
                       if r["status"] == "diff" and r["check"] in
@@ -348,16 +491,336 @@ def _repair_one(hop, eng, db, kind, do_apply):
         console.print("\nre-run migkit check to confirm")
 
 
+def _sync_go(hop_name, db, tag):
+    import shutil
+    from pathlib import Path
+
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "snapshot_state"):
+        raise SystemExit(f"--go not available for {hop.engine} yet,"
+                         " use migkit sync --apply")
+    dbs = [db] if db else eng.databases()
+    ts = time.strftime("%Y%m%d-%H%M%S") + (f"-{tag}" if tag else "")
+    backup_root = Path.home() / ".migkit-state" / hop.name
+    for d in dbs:
+        console.print(f"[bold]{d}[/bold]")
+        state = hop.report_dir(d) / "state" / ts
+        state.mkdir(parents=True, exist_ok=True)
+        eng.snapshot_state(d, state)
+        journal = state / "journal.jsonl"
+
+        def log(entry):
+            with journal.open("a") as f:
+                f.write(json.dumps({"ts": time.strftime("%H:%M:%S"), **entry},
+                                   default=str) + "\n")
+
+        log({"db": d, "event": "snapshot"})
+        r = eng.check_autoinc(d)[0]
+        console.print(f"  autoinc: {r.status}")
+        if r.status == "diff":
+            for a in eng.repair_plan(d, "sequences"):
+                (state / "undo-sequences.sql").write_text(
+                    "\n".join(a.undo) + "\n")
+                lk = _lock(hop)
+                try:
+                    eng.apply(d, a)
+                finally:
+                    lk.unlink()
+                _changelog(hop, {"op": "sync", "db": d,
+                                 "kind": "sequences", "state": ts})
+                again = eng.check_autoinc(d)[0].status
+                log({"event": "repair-sequences", "n": len(a.statements),
+                     "recheck": again})
+                console.print(f"  autoinc: repaired {len(a.statements)},"
+                              f" re-check {again}")
+        r = eng.check_data(d)[0]
+        console.print(f"  data: {r.status} {r.detail}")
+        log({"event": "check-data", "status": r.status, "detail": r.detail})
+        if r.status == "diff":
+            for a in eng.repair_plan(d, "rows"):
+                lk = _lock(hop)
+                try:
+                    eng.apply(d, a)
+                finally:
+                    lk.unlink()
+                _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
+                                 "state": ts, "note": a.note})
+                log({"event": "repair-rows", "note": a.note})
+            again = eng.check_data(d)[0]
+            console.print(f"  data re-check: {again.status} {again.detail}")
+            log({"event": "recheck-data", "status": again.status})
+        backup_root.mkdir(parents=True, exist_ok=True)
+        shutil.make_archive(str(backup_root / f"{d}-{ts}"), "gztar", state)
+    console.print(f"\nstate: reports/{hop_name}/<db>/state/{ts}"
+                  f" + backup {backup_root}")
+
+
+@main.command()
+@click.argument("hop_name")
+@click.option("--db", default="", help="one database, or all diffed dbs if omitted")
+@click.option("--kind", default="all",
+              type=click.Choice(["sequences", "rows", "schema", "all"]))
+@click.option("--apply", "do_apply", is_flag=True,
+              help="execute the repair plan, default is dry-run")
+@click.option("--go", is_flag=True,
+              help="checkpointed check+repair sweep with rollback state")
+@click.option("--tag", default="", help="with --go: label this state, e.g. pre-cutover")
+def sync(hop_name, db, kind, do_apply, go, tag):
+    """Make target equal to source. Shows the repair plan (dry-run),
+    --apply executes it, --go re-checks and repairs in one pass while
+    checkpointing target state for rollback.
+
+    With no --db, repairs every database that had a diff in the last check,
+    so you never copy-paste one command per table."""
+    if go:
+        return _sync_go(hop_name, db, tag)
+    return _repair(hop_name, db, kind, do_apply)
+
+
+def _move_full(hop, eng, db, table, chunk, go):
+    if not hasattr(eng, "move_table"):
+        raise SystemExit(f"move not available for {hop.engine} yet")
+    dbs = [db] if db else eng.databases()
+    for d in dbs:
+        ck = _Checkpoint(hop.report_dir(d) / "move.json")
+        if table:
+            tables = [tuple(table.split(".", 1)) if "." in table
+                      else ("", table)]
+        else:
+            tables = eng.list_move_tables(d)
+        if not go:
+            done = sum(1 for sch, t in tables
+                       if ck.get(f"{sch}.{t}", {}).get("done"))
+            console.print(f"{d}: {len(tables)} tables, {done} already done"
+                          f" in checkpoint, chunk {chunk:,} rows")
+            for sch, t in tables[:20]:
+                st = ck.get(f"{sch}.{t}", {})
+                mark = "done" if st.get("done") else \
+                    f"resume at {st.get('last'):,}" if "last" in st else "todo"
+                console.print(f"  {sch}.{t}: {mark}")
+            continue
+        lk = _lock(hop)
+        try:
+            for sch, t in tables:
+                eng.move_table(d, sch, t, chunk, ck,
+                               lambda m: console.print(f"  {m}"))
+                _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
+        finally:
+            lk.unlink()
+        console.print(f"[green]{d}: move complete[/green],"
+                      " run migkit check to verify")
+    if not go:
+        console.print("\ndry-run, add --go to copy")
+
+
+def _replicate(hop, eng, db, copy_data, do_drop, go):
+    dbs = [db] if db else eng.databases()
+    for d in dbs:
+        sql = eng.replicate_sql(d, copy_data=copy_data)
+        console.print(f"[bold]{d}[/bold]")
+        if do_drop:
+            plan = [("dst", x) for x in sql["drop_dst"]] + \
+                   [("src", x) for x in sql["drop_src"]]
+        else:
+            plan = [("src", x) for x in sql["src"]] + \
+                   [("dst", x) for x in sql["dst"]]
+        if sql.get("note"):
+            console.print(f"  note: {sql['note']}")
+        for side, stmt in plan:
+            shown = stmt.replace(hop.source.password, "****")
+            console.print(f"  {side}: {shown}")
+            if go:
+                if hasattr(eng, "_psql"):
+                    eng._psql(side, d, stmt)
+                else:
+                    eng._q(side, stmt)
+        if go and not do_drop:
+            console.print("  " + eng._psql("dst", d, sql["status"]))
+            _changelog(hop, {"op": "replicate", "db": d})
+        if go and do_drop:
+            _changelog(hop, {"op": "replicate-drop", "db": d})
+    if not go:
+        console.print("\ndry-run, add --go to execute"
+                      " (monitor lag with: migkit watch)")
+
+
+def _tail(hop, eng, db, go):
+    if not db:
+        raise SystemExit("cdc tail needs --db")
+    eng.tail_apply(db, go, hop.report_dir(db) / "tail-token.json",
+                   lambda m: console.print(m))
+
+
+@main.command()
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--table", default="", help="schema.table (full mode)")
+@click.option("--mode", type=click.Choice(["full", "cdc", "full+cdc"]),
+              default="full",
+              help="full = resumable chunked copy, cdc = follow live changes,"
+                   " full+cdc = initial load plus stream until cutover")
+@click.option("--chunk", default=500000, help="rows per resumable chunk")
+@click.option("--drop", "do_drop", is_flag=True,
+              help="cdc modes: tear down replication")
+@click.option("--go", is_flag=True, help="actually run, default shows the plan")
+def move(hop_name, db, table, mode, chunk, do_drop, go):
+    """One mover for every engine. The engine picks its native mechanism:
+    postgres logical replication, mysql binlog, mongo change streams.
+
+    Use only over a trusted network (or run migkit on a cloud VM).
+    Every chunk is delete+copy in one transaction and every stream keeps
+    a resume token, so a crash at any point is safe: rerun to continue."""
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if mode == "full":
+        return _move_full(hop, eng, db, table, chunk, go)
+    has_repl = hasattr(eng, "replicate_sql")
+    has_tail = hasattr(eng, "tail_apply")
+    from .engines import ALIASES
+    engine = ALIASES.get(hop.engine, hop.engine)
+    if mode == "cdc":
+        if engine == "postgres" and has_repl:
+            return _replicate(hop, eng, db, False, do_drop, go)
+        if has_tail:
+            return _tail(hop, eng, db, go)
+        if has_repl:
+            return _replicate(hop, eng, db, False, do_drop, go)
+        raise SystemExit(f"cdc not available for {hop.engine},"
+                         " see migkit advise")
+    # full+cdc
+    if engine == "postgres" and has_repl:
+        # a subscription with copy_data=true is the native full+cdc
+        return _replicate(hop, eng, db, True, do_drop, go)
+    if engine == "mysql" and has_repl:
+        console.print("mysql full+cdc: binlog coordinates below are captured"
+                      " BEFORE the load, execute the replicate SQL after"
+                      " the copy finishes\n")
+        _replicate(hop, eng, db, True, False, False)
+        return _move_full(hop, eng, db, table, chunk, go)
+    if has_tail and hasattr(eng, "move_table"):
+        _move_full(hop, eng, db, table, chunk, go)
+        if go:
+            return _tail(hop, eng, db, go)
+        console.print("then: migkit move --mode cdc --db <db> --go"
+                      " to stream changes")
+        return
+    raise SystemExit(f"full+cdc not available for {hop.engine},"
+                     " see migkit advise")
+
+
+def _monitor(hop_name, db, interval, only, cycles):
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    checks = [c for c in only.split(",") if c in eng.checks]
+    dbs = [db] if db else eng.databases()
+    n = 0
+    while True:
+        n += 1
+        stamp = time.strftime("%H:%M:%S")
+        all_results = []
+        for d in dbs:
+            statuses = []
+            for c in checks:
+                try:
+                    rs = getattr(eng, f"check_{c}")(d)
+                except Exception as e:
+                    rs = []
+                    statuses.append(f"[red]{c}:ERR[/red] {e}")
+                for r in rs:
+                    all_results.append(r.__dict__)
+                bad = [r for r in rs if r.status not in ("ok", "skip")]
+                if bad:
+                    statuses.append(f"[yellow]{c}:DIFF[/yellow]"
+                                    f" {bad[0].detail[:60]}")
+                elif rs:
+                    statuses.append(f"[green]{c}:ok[/green]")
+            console.print(f"{stamp} cycle {n} {d}: " + "  ".join(statuses))
+        try:
+            from .report import write_report
+            write_report(hop, all_results)
+        except Exception:
+            pass
+        if cycles and n >= cycles:
+            break
+        time.sleep(interval)
+
+
+@main.command()
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--interval", default=0,
+              help="seconds between samples (default 30, or 300 with --verify)")
+@click.option("--count", default=0, help="samples/cycles then exit, 0 = forever")
+@click.option("--verify", is_flag=True,
+              help="re-run read-only checks each cycle instead of sampling"
+                   " row counts (continuous validation)")
+@click.option("--only", default="counts,autoinc",
+              help="with --verify: checks per cycle, add data for full"
+                   " checksum each cycle")
+def watch(hop_name, db, interval, count, verify, only):
+    """Watch a running migration load: row counts, rate, ETA, replication
+    state. --verify turns it into a continuous validation loop: transient
+    diffs that heal next cycle are replication lag, persistent ones are real."""
+    if verify:
+        return _monitor(hop_name, db, interval or 300, only, count)
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    interval = interval or 30
+    dbs = [db] if db else eng.databases()
+    last = {}
+    n = 0
+    while True:
+        n += 1
+        for d in dbs:
+            s = eng.watch_sample(d)
+            if "error" in s:
+                console.print(f"{d}: [red]{s['error']}[/red]")
+                continue
+            src, dst = s.get("src_rows", 0), s.get("dst_rows", 0)
+            line = f"{d}: src~{human_int(src)} dst~{human_int(dst)}"
+            if src:
+                line += f" ({dst * 100 // src}%)"
+            if d in last and s["ts"] > last[d]["ts"]:
+                rate = (dst - last[d]["dst_rows"]) / (s["ts"] - last[d]["ts"])
+                if rate > 0:
+                    line += (f" rate {human_int(int(rate))}/s"
+                             f" eta {human_secs((src - dst) / rate)}")
+                elif dst >= src:
+                    line += " caught up, check lag before cutover"
+            for slot in s.get("replication_slots", []):
+                line += f"\n    slot {slot}"
+            for conn in s.get("replication_conns", []):
+                line += f"\n    conn {conn}"
+            console.print(line)
+            last[d] = s
+        if count and n >= count:
+            break
+        time.sleep(interval)
+
+
 @main.command()
 @click.argument("hop_name", required=False)
 @click.option("--open", "do_open", is_flag=True, help="open in browser")
 @click.option("--refresh", is_flag=True,
               help="re-derive summary from evidence on disk (no re-check):"
                    " settled checksum flickers become OK")
-def report(hop_name, do_open, refresh):
-    """Render the HTML report from the last check run."""
+@click.option("--serve", is_flag=True,
+              help="serve the live dashboard for every hop instead of"
+                   " writing a file")
+@click.option("--port", default=8899, help="with --serve: listen port")
+def report(hop_name, do_open, refresh, serve, port):
+    """Render the HTML report from the last check run, or --serve the
+    live localhost dashboard."""
     import subprocess
 
+    if serve:
+        from .ui import serve as _serve
+        return _serve(port)
     if not hop_name:
         from .config import REPORTS
         have = [n for n in load_hops()
@@ -386,354 +849,11 @@ def report(hop_name, do_open, refresh):
 @main.command()
 @click.argument("hop_name")
 @click.option("--db", default="")
-@click.option("--go", is_flag=True,
-              help="repair while checking, default reports what it would do")
-@click.option("--tag", default="", help="label this state, e.g. pre-cutover")
-def sync(hop_name, db, go, tag):
-    """Check and repair in one pass, checkpointing target state for rollback."""
-    import shutil
-    from pathlib import Path
-
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "snapshot_state"):
-        raise SystemExit(f"sync mode not available for {hop.engine} yet,"
-                         " use check + repair")
-    dbs = [db] if db else eng.databases()
-    ts = time.strftime("%Y%m%d-%H%M%S") + (f"-{tag}" if tag else "")
-    backup_root = Path.home() / ".migkit-state" / hop.name
-    for d in dbs:
-        console.print(f"[bold]{d}[/bold]")
-        state = hop.report_dir(d) / "state" / ts
-        state.mkdir(parents=True, exist_ok=True)
-        eng.snapshot_state(d, state)
-        journal = state / "journal.jsonl"
-
-        def log(entry):
-            with journal.open("a") as f:
-                f.write(json.dumps({"ts": time.strftime("%H:%M:%S"), **entry},
-                                   default=str) + "\n")
-
-        log({"db": d, "event": "snapshot"})
-        r = eng.check_autoinc(d)[0]
-        console.print(f"  autoinc: {r.status}")
-        if r.status == "diff":
-            for a in eng.repair_plan(d, "sequences"):
-                if go:
-                    (state / "undo-sequences.sql").write_text(
-                        "\n".join(a.undo) + "\n")
-                    lk = _lock(hop)
-                    try:
-                        eng.apply(d, a)
-                    finally:
-                        lk.unlink()
-                    _changelog(hop, {"op": "sync", "db": d,
-                                     "kind": "sequences", "state": ts})
-                    again = eng.check_autoinc(d)[0].status
-                    log({"event": "repair-sequences", "n": len(a.statements),
-                         "recheck": again})
-                    console.print(f"  autoinc: repaired {len(a.statements)},"
-                                  f" re-check {again}")
-                else:
-                    console.print(f"  would repair {len(a.statements)}"
-                                  " sequences (--go)")
-        r = eng.check_data(d)[0]
-        console.print(f"  data: {r.status} {r.detail}")
-        log({"event": "check-data", "status": r.status, "detail": r.detail})
-        if r.status == "diff":
-            if go:
-                for a in eng.repair_plan(d, "rows"):
-                    lk = _lock(hop)
-                    try:
-                        eng.apply(d, a)
-                    finally:
-                        lk.unlink()
-                    _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
-                                     "state": ts, "note": a.note})
-                    log({"event": "repair-rows", "note": a.note})
-                again = eng.check_data(d)[0]
-                console.print(f"  data re-check: {again.status} {again.detail}")
-                log({"event": "recheck-data", "status": again.status})
-            else:
-                console.print("  would delete+recopy differing pks from source"
-                              " (--go), target rows saved to undo first")
-        backup_root.mkdir(parents=True, exist_ok=True)
-        shutil.make_archive(str(backup_root / f"{d}-{ts}"), "gztar", state)
-    console.print(f"\nstate: reports/{hop_name}/<db>/state/{ts}"
-                  f" + backup {backup_root}")
-    if not go:
-        console.print("dry-run, add --go to repair while checking")
-
-
-@main.command()
-@click.argument("hop_name")
-@click.option("--db", default="")
-@click.option("--table", default="", help="schema.table")
-@click.option("--chunk", default=500000, help="rows per resumable chunk")
-@click.option("--go", is_flag=True, help="actually copy, default shows plan")
-def move(hop_name, db, table, chunk, go):
-    """Resumable full load, chunk by chunk with a checkpoint file.
-
-    Use only over a trusted network (or run migkit on a cloud VM).
-    Every chunk is delete+copy in one transaction, so a crash at any
-    point is safe: rerun and it continues from the checkpoint."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "move_table"):
-        raise SystemExit(f"move not available for {hop.engine} yet")
-    dbs = [db] if db else eng.databases()
-    for d in dbs:
-        ck = _Checkpoint(hop.report_dir(d) / "move.json")
-        if table:
-            tables = [tuple(table.split(".", 1)) if "." in table
-                      else ("", table)]
-        else:
-            tables = eng.list_move_tables(d)
-        if not go:
-            done = sum(1 for sch, t in tables
-                       if ck.get(f"{sch}.{t}", {}).get("done"))
-            console.print(f"{d}: {len(tables)} tables, {done} already done"
-                          f" in checkpoint, chunk {chunk:,} rows")
-            for sch, t in tables[:20]:
-                st = ck.get(f"{sch}.{t}", {})
-                mark = "done" if st.get("done") else                     f"resume at {st.get('last'):,}" if "last" in st else "todo"
-                console.print(f"  {sch}.{t}: {mark}")
-            continue
-        lk = _lock(hop)
-        try:
-            for sch, t in tables:
-                eng.move_table(d, sch, t, chunk, ck,
-                               lambda m: console.print(f"  {m}"))
-                _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
-        finally:
-            lk.unlink()
-        console.print(f"[green]{d}: move complete[/green],"
-                      " run migkit check to verify")
-    if not go:
-        console.print("\ndry-run, add --go to copy")
-
-
-@main.command()
-@click.argument("hop_name")
-@click.option("--db", default="")
-@click.option("--no-copy-data", is_flag=True,
-              help="start CDC only, use after migkit move")
-@click.option("--drop", "do_drop", is_flag=True, help="tear down replication")
-@click.option("--go", is_flag=True, help="execute, default prints the SQL")
-def replicate(hop_name, db, no_copy_data, do_drop, go):
-    """Native postgres CDC: publication on source, subscription on target.
-
-    Zero-downtime replication powered by postgres itself. Requires
-    wal_level=logical on source (migkit assess checks it) and network
-    from target to source. Resume is built into postgres: the slot
-    keeps WAL until the subscriber catches up."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "replicate_sql"):
-        raise SystemExit(f"replicate not available for {hop.engine},"
-                         " use migkit tail (mongo) or the advise playbook")
-    dbs = [db] if db else eng.databases()
-    for d in dbs:
-        sql = eng.replicate_sql(d, copy_data=not no_copy_data)
-        console.print(f"[bold]{d}[/bold]")
-        if do_drop:
-            plan = [("dst", x) for x in sql["drop_dst"]] +                    [("src", x) for x in sql["drop_src"]]
-        else:
-            plan = [("src", x) for x in sql["src"]] +                    [("dst", x) for x in sql["dst"]]
-        if sql.get("note"):
-            console.print(f"  note: {sql['note']}")
-        for side, stmt in plan:
-            shown = stmt.replace(hop.source.password, "****")
-            console.print(f"  {side}: {shown}")
-            if go:
-                if hasattr(eng, "_psql"):
-                    eng._psql(side, d, stmt)
-                else:
-                    eng._q(side, stmt)
-        if go and not do_drop:
-            console.print("  " + eng._psql("dst", d, sql["status"]))
-            _changelog(hop, {"op": "replicate", "db": d})
-        if go and do_drop:
-            _changelog(hop, {"op": "replicate-drop", "db": d})
-    if not go:
-        console.print("\ndry-run, add --go to execute"
-                      " (monitor lag with: migkit watch)")
-
-
-@main.command()
-@click.argument("hop_name")
-@click.option("--db", required=True)
-@click.option("--go", is_flag=True, help="apply changes, default counts only")
-def tail(hop_name, db, go):
-    """Mongo CDC via change streams with a persisted resume token.
-
-    Crash-safe by design: the token is saved every batch, rerun
-    continues exactly where it stopped. Stop with ctrl-c."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "tail_apply"):
-        raise SystemExit("tail is mongodb-only, use replicate for postgres")
-    eng.tail_apply(db, go, hop.report_dir(db) / "tail-token.json",
-                   lambda m: console.print(m))
-
-
-@main.command("convert-schema")
-@click.argument("hop_name")
-@click.option("--db", default="")
-@click.option("--apply", "do_apply", is_flag=True,
-              help="execute the DDL on target, default prints it")
-def convert_schema(hop_name, db, do_apply):
-    """Cross-engine DDL conversion (hetero hops): transpile source
-    schema to the target dialect, review, then --apply."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "convert_ddl"):
-        raise SystemExit("convert-schema is for hetero hops,"
-                         " same-engine hops use setup-target")
-    for d in ([db] if db else eng.databases()):
-        stmts = eng.convert_ddl(d)
-        out = hop.report_dir(d) / "converted-schema.sql"
-        out.write_text("\n\n".join(stmts) + "\n")
-        console.print(f"[bold]{d}[/bold]: {len(stmts)} statements -> {out}")
-        for stmt in stmts[:3]:
-            console.print(f"  {stmt.splitlines()[0]} ...")
-        if do_apply:
-            for stmt in stmts:
-                eng.pg._psql("dst", d, stmt)
-            _changelog(hop, {"op": "convert-schema", "db": d,
-                             "n": len(stmts)})
-            console.print(f"  [green]applied on target[/green]")
-    if not do_apply:
-        console.print("\ndry-run, review the file then add --apply")
-
-
-@main.command()
-@click.argument("hop_name")
-@click.option("--db", default="")
-def history(hop_name, db):
-    """Audit trail of every write migkit made, read from the target
-    database itself (migkit_changelog table, like DATABASECHANGELOG)
-    plus the local changelog. Survives losing this machine."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    dbs = [db] if db else (eng.databases() if hasattr(eng, "databases")
-                           else [])
-    shown = False
-    for d in dbs:
-        if not hasattr(eng, "read_ledger"):
-            break
-        rows = eng.read_ledger(d)
-        if not rows:
-            continue
-        shown = True
-        t = Table("ran_at", "author", "op", "scope", "detail",
-                  title=f"{d} (in-database ledger)")
-        for r in rows[-30:]:
-            t.add_row(*[c[:50] for c in r])
-        console.print(t)
-    cl = hop.report_dir() / "changelog.jsonl"
-    if cl.exists():
-        console.print("\nlocal changelog (last 15):")
-        for line in cl.read_text().splitlines()[-15:]:
-            console.print(f"  {line}")
-    elif not shown:
-        console.print("no history yet, nothing has been applied")
-
-
-@main.command("gen-migration")
-@click.argument("hop_name")
-@click.option("--db", default="")
-@click.option("--out", default="migrations", help="output directory")
-def gen_migration(hop_name, db, out):
-    """Generate Flyway-style versioned files from the live schema diff:
-    V<ts>__*.sql makes target match source, U<ts>__*.sql undoes it."""
-    from pathlib import Path
-
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "migration_pair"):
-        raise SystemExit("gen-migration supports postgres and mysql hops")
-    outdir = Path(out)
-    outdir.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d%H%M%S")
-    made = 0
-    for d in ([db] if db else eng.databases()):
-        fwd, undo = eng.migration_pair(d)
-        if fwd is None:
-            raise SystemExit("atlas not found, run bootstrap.sh")
-        if not fwd:
-            console.print(f"{d}: schemas already in sync, nothing to generate")
-            continue
-        vf = outdir / f"V{ts}__sync_{d}.sql"
-        uf = outdir / f"U{ts}__sync_{d}.sql"
-        vf.write_text(fwd + "\n")
-        uf.write_text((undo or "-- no automatic undo available") + "\n")
-        made += 1
-        console.print(f"{d}: [green]{vf}[/green] (+ undo {uf.name},"
-                      f" {len(fwd.splitlines())} lines)")
-    if made:
-        console.print("review the files, commit to git, apply when ready")
-
-
-@main.command("sample-diff")
-@click.argument("hop_name")
-@click.option("--db", required=True)
-@click.option("--table", required=True, help="schema.table or table")
-@click.option("--limit", default=1000)
-def sample_diff(hop_name, db, table, limit):
-    """Column-level diff report on a row sample via datacompy:
-    which columns differ, match rates, example mismatched values."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "fetch_sample_df"):
-        raise SystemExit("sample-diff supports postgres and mysql hops")
-    try:
-        import datacompy
-    except ImportError:
-        raise SystemExit("pip install datacompy")
-    a = eng.fetch_sample_df("src", db, table, limit)
-    b = eng.fetch_sample_df("dst", db, table, limit)
-    t = table.split(".", 1)[-1]
-    if hasattr(eng, "_pk_cols"):
-        keys = eng._pk_cols(db, t)
-    else:
-        sch, tbl = table.split(".", 1) if "." in table else ("public", table)
-        keys = [c for c in eng._psql("src", db,
-                "select a.attname from pg_index i join pg_attribute a"
-                " on a.attrelid = i.indrelid and a.attnum = any(i.indkey)"
-                f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
-                " and i.indisprimary").splitlines() if c]
-    if not keys:
-        raise SystemExit(f"{table} has no primary key for joining")
-    cmp = datacompy.PandasCompare(a, b,
-                                  join_columns=[k.lower() for k in keys],
-                                  df1_name="source", df2_name="target")
-    console.print(cmp.report())
-
-
-@main.command()
-@click.option("--port", default=8899)
-def ui(port):
-    """Local web dashboard: every hop's status, tiles, per-db state and
-    reports on one auto-refreshing page. Read-only, binds localhost."""
-    from .ui import serve
-    serve(port)
-
-
-@main.command("state")
-@click.argument("hop_name")
-@click.option("--db", default="")
 @click.option("--show", "show_ts", default="", help="print one state in detail")
-def state_cmd(hop_name, db, show_ts):
-    """List saved rollback states, tags and the change log."""
+def history(hop_name, db, show_ts):
+    """Audit trail: saved rollback states, every write migkit made (from
+    the target's migkit_changelog table, like DATABASECHANGELOG) and the
+    local changelog. Survives losing this machine."""
     hop = get_hop(hop_name)
     root = hop.report_dir()
     t = Table("state", "db", "captured", "journal")
@@ -748,7 +868,8 @@ def state_cmd(hop_name, db, show_ts):
         nj = sum(1 for _ in jl.open()) if jl.exists() else 0
         found.append(sdir)
         t.add_row(sdir.name, d, files, str(nj))
-    console.print(t)
+    if found:
+        console.print(t)
     if show_ts:
         for sdir in found:
             if show_ts in sdir.name:
@@ -756,11 +877,28 @@ def state_cmd(hop_name, db, show_ts):
                 jl = sdir / "journal.jsonl"
                 if jl.exists():
                     console.print(jl.read_text().strip())
+    eng = get_engine(hop)
+    dbs = [db] if db else (eng.databases() if hasattr(eng, "databases")
+                           and hop.source.configured() else [])
+    shown = False
+    if hasattr(eng, "read_ledger"):
+        for d in dbs:
+            rows = eng.read_ledger(d)
+            if not rows:
+                continue
+            shown = True
+            lt = Table("ran_at", "author", "op", "scope", "detail",
+                       title=f"{d} (in-database ledger)")
+            for r in rows[-30:]:
+                lt.add_row(*[c[:50] for c in r])
+            console.print(lt)
     cl = root / "changelog.jsonl"
     if cl.exists():
-        console.print("\nchangelog (last 10):")
-        for line in cl.read_text().splitlines()[-10:]:
+        console.print("\nlocal changelog (last 15):")
+        for line in cl.read_text().splitlines()[-15:]:
             console.print(f"  {line}")
+    elif not shown and not found:
+        console.print("no history yet, nothing has been applied")
 
 
 @main.command()
@@ -776,7 +914,7 @@ def rollback(hop_name, db, state_ts, do_apply):
     root = hop.report_dir(db) / "state"
     states = sorted(p.name for p in root.glob("*")) if root.exists() else []
     if not states:
-        raise SystemExit("no saved states, run migkit sync first")
+        raise SystemExit("no saved states, run migkit sync --go first")
     matches = [x for x in states if state_ts in x] if state_ts else states
     if not matches:
         raise SystemExit(f"no state matching '{state_ts}',"
@@ -842,97 +980,120 @@ def rollback(hop_name, db, state_ts, do_apply):
         console.print("\ndry-run, add --apply to restore sequences")
 
 
-@main.command()
+# --- legacy command names, kept as hidden aliases ---
+
+@main.command(hidden=True)
+def hops():
+    """(alias) List configured hops - now part of migkit doctor."""
+    _hops_table()
+
+
+@main.command("setup-target", hidden=True)
 @click.argument("hop_name")
 @click.option("--db", default="")
-@click.option("--interval", default=300, help="seconds between cycles")
-@click.option("--only", default="counts,autoinc",
-              help="checks per cycle, add data for full checksum each cycle")
-@click.option("--cycles", default=0, help="stop after N cycles, 0 = forever")
+def setup_target(hop_name, db):
+    """(alias) Now: migkit schema HOP."""
+    _setup_target(hop_name, db)
+
+
+@main.command(hidden=True)
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--kind", default="all",
+              type=click.Choice(["sequences", "rows", "schema", "all"]))
+@click.option("--apply", "do_apply", is_flag=True)
+def repair(hop_name, db, kind, do_apply):
+    """(alias) Now: migkit sync HOP [--apply]."""
+    _repair(hop_name, db, kind, do_apply)
+
+
+@main.command(hidden=True)
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--no-copy-data", is_flag=True)
+@click.option("--drop", "do_drop", is_flag=True)
+@click.option("--go", is_flag=True)
+def replicate(hop_name, db, no_copy_data, do_drop, go):
+    """(alias) Now: migkit move HOP --mode cdc / full+cdc."""
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "replicate_sql"):
+        raise SystemExit(f"replicate not available for {hop.engine},"
+                         " use migkit move --mode cdc or the advise playbook")
+    _replicate(hop, eng, db, not no_copy_data, do_drop, go)
+
+
+@main.command(hidden=True)
+@click.argument("hop_name")
+@click.option("--db", required=True)
+@click.option("--go", is_flag=True)
+def tail(hop_name, db, go):
+    """(alias) Now: migkit move HOP --mode cdc --db X."""
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    if not hasattr(eng, "tail_apply"):
+        raise SystemExit("tail is for mongo/hetero hops,"
+                         " use migkit move --mode cdc")
+    _tail(hop, eng, db, go)
+
+
+@main.command("convert-schema", hidden=True)
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--apply", "do_apply", is_flag=True)
+def convert_schema(hop_name, db, do_apply):
+    """(alias) Now: migkit schema HOP --convert."""
+    _convert_schema(hop_name, db, do_apply)
+
+
+@main.command("gen-migration", hidden=True)
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--out", default="migrations")
+def gen_migration(hop_name, db, out):
+    """(alias) Now: migkit schema HOP --migration."""
+    _gen_migration(hop_name, db, out)
+
+
+@main.command("sample-diff", hidden=True)
+@click.argument("hop_name")
+@click.option("--db", required=True)
+@click.option("--table", required=True)
+@click.option("--limit", default=1000)
+def sample_diff(hop_name, db, table, limit):
+    """(alias) Now: migkit check HOP --drill --db X --table Y."""
+    _drill(hop_name, db, table, limit)
+
+
+@main.command(hidden=True)
+@click.option("--port", default=8899)
+def ui(port):
+    """(alias) Now: migkit report --serve."""
+    from .ui import serve as _serve
+    _serve(port)
+
+
+@main.command("state", hidden=True)
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--show", "show_ts", default="")
+@click.pass_context
+def state_cmd(ctx, hop_name, db, show_ts):
+    """(alias) Now: migkit history HOP."""
+    ctx.invoke(history, hop_name=hop_name, db=db, show_ts=show_ts)
+
+
+@main.command(hidden=True)
+@click.argument("hop_name")
+@click.option("--db", default="")
+@click.option("--interval", default=300)
+@click.option("--only", default="counts,autoinc")
+@click.option("--cycles", default=0)
 def monitor(hop_name, db, interval, only, cycles):
-    """Continuous validation loop while replication runs.
-
-    Same idea as managed validators but engine-agnostic: every cycle it
-    re-runs the selected read-only checks, prints one line per database,
-    and refreshes report.html. Transient diffs that heal on the next
-    cycle are replication lag; diffs that persist are real."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    checks = [c for c in only.split(",") if c in eng.checks]
-    dbs = [db] if db else eng.databases()
-    n = 0
-    while True:
-        n += 1
-        stamp = time.strftime("%H:%M:%S")
-        all_results = []
-        for d in dbs:
-            statuses = []
-            for c in checks:
-                try:
-                    rs = getattr(eng, f"check_{c}")(d)
-                except Exception as e:
-                    rs = []
-                    statuses.append(f"[red]{c}:ERR[/red] {e}")
-                for r in rs:
-                    all_results.append(r.__dict__)
-                bad = [r for r in rs if r.status not in ("ok", "skip")]
-                if bad:
-                    statuses.append(f"[yellow]{c}:DIFF[/yellow]"
-                                    f" {bad[0].detail[:60]}")
-                elif rs:
-                    statuses.append(f"[green]{c}:ok[/green]")
-            console.print(f"{stamp} cycle {n} {d}: " + "  ".join(statuses))
-        try:
-            from .report import write_report
-            write_report(hop, all_results)
-        except Exception:
-            pass
-        if cycles and n >= cycles:
-            break
-        time.sleep(interval)
-
-
-@main.command()
-@click.argument("hop_name")
-@click.option("--db", default="")
-@click.option("--interval", default=30)
-@click.option("--count", default=0, help="samples then exit, 0 = forever")
-def watch(hop_name, db, interval, count):
-    """Watch a running migration load: row counts, rate, ETA, replication state."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    dbs = [db] if db else eng.databases()
-    last = {}
-    n = 0
-    while True:
-        n += 1
-        for d in dbs:
-            s = eng.watch_sample(d)
-            if "error" in s:
-                console.print(f"{d}: [red]{s['error']}[/red]")
-                continue
-            src, dst = s.get("src_rows", 0), s.get("dst_rows", 0)
-            line = f"{d}: src~{human_int(src)} dst~{human_int(dst)}"
-            if src:
-                line += f" ({dst * 100 // src}%)"
-            if d in last and s["ts"] > last[d]["ts"]:
-                rate = (dst - last[d]["dst_rows"]) / (s["ts"] - last[d]["ts"])
-                if rate > 0:
-                    line += (f" rate {human_int(int(rate))}/s"
-                             f" eta {human_secs((src - dst) / rate)}")
-                elif dst >= src:
-                    line += " caught up, check lag before cutover"
-            for slot in s.get("replication_slots", []):
-                line += f"\n    slot {slot}"
-            for conn in s.get("replication_conns", []):
-                line += f"\n    conn {conn}"
-            console.print(line)
-            last[d] = s
-        if count and n >= count:
-            break
-        time.sleep(interval)
+    """(alias) Now: migkit watch HOP --verify."""
+    _monitor(hop_name, db, interval, only, cycles)
 
 
 if __name__ == "__main__":

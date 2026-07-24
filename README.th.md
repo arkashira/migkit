@@ -31,9 +31,9 @@
   oracle, trino, presto, duckdb, vertica, databricks
 - **schema ผ่าน liquibase (JDBC)**: db2, h2, firebird, informix, sybase ฯลฯ
   แค่วาง driver jar
-- **ข้าม engine (hetero)**: mysql -> postgres ครบสาย: `convert-schema`
-  (sqlglot/pgloader) -> `move` (resumable) -> `tail` (CDC จาก binlog
-  พร้อม checkpoint ตำแหน่ง) -> validate ด้วย reladiff ข้าม dialect
+- **ข้าม engine (hetero)**: mysql -> postgres ครบสาย: `schema --convert`
+  (sqlglot/pgloader) -> `move` (resumable) -> `move --mode cdc` (CDC จาก
+  binlog พร้อม checkpoint ตำแหน่ง) -> validate ด้วย reladiff ข้าม dialect
 
 ตั้งกี่ hop ก็ได้ (hop = ขาการย้าย 1 เส้น) engine ใหม่ = implement
 interface เดียว ~150 บรรทัด
@@ -109,13 +109,28 @@ dev+uat) ให้ระบุ `databases` เองเสมอ อย่าป
 
 ## 3. คำสั่งทั้งหมด
 
-### migkit hops
+ตั้งแต่ 0.2.0 เหลือ 11 คำสั่งหลัก — ชื่อเดิมทุกตัวยังใช้ได้ (เป็น hidden alias
+พร้อม flag เดิมครบ) script เก่าไม่พัง:
 
-ดูรายการ hop ที่ตั้งไว้ + engine + endpoint สรุปในตาราง
+| ชื่อเดิม | ตอนนี้คือ |
+|---|---|
+| `hops` | `doctor` (โชว์ตาราง hop ให้ด้วย) |
+| `setup-target` | `schema` |
+| `convert-schema` | `schema --convert` |
+| `gen-migration` | `schema --migration` |
+| `sample-diff` | `check --drill` |
+| `repair` | `sync` (dry-run) / `sync --apply` |
+| `replicate` / `tail` | `move --mode cdc` หรือ `--mode full+cdc` |
+| `monitor` | `watch --verify` |
+| `state` | `history` |
+| `ui` | `report --serve` |
+
+เติม `-q` หน้าคำสั่งไหนก็ได้ = quiet mode ตัด log รายตาราง/progress ออก
+เหลือ DIFF, ERROR และสรุป (`migkit -q check mig-a`)
 
 ### migkit doctor
 
-เช็ค tools + ยิง connection ทุก hop รันก่อนเริ่มงานทุกครั้ง
+ตาราง hop ที่ตั้งไว้ + เช็ค tools + ยิง connection ทุก hop รันก่อนเริ่มงานทุกครั้ง
 
 ### migkit advise <hop>
 
@@ -145,41 +160,45 @@ migkit assess mig-a
 re-verify เฉพาะ key ที่ต่าง ถ้าหายหมด = in-flight replication ไม่ใช่ diff
 จริง (แนวเดียวกับ confirm-out-of-sync ของ enterprise tools)
 
-### migkit gen-migration <hop> — ออกไฟล์ versioned แบบ Flyway
+### migkit schema <hop> — งาน schema ทั้งหมดในคำสั่งเดียว
 
-แปลง schema diff ที่เจอเป็นไฟล์ `V<ts>__sync_<db>.sql` (ทำ target ให้ตรง
-source) คู่กับ `U<ts>__*.sql` (undo) commit ลง git แล้ว apply ด้วย psql
-หรือ migration runner ตัวไหนก็ได้ — ผ่าน atlas
+default = พิมพ์คำสั่งเตรียม schema ปลายทางให้ครบ (pg_dump/pg_restore,
+createdb ฯลฯ) **เป็น dry-run เสมอ ไม่รันเอง** — copy ไปรันเองทีละบรรทัด
+หัวใจคือ: schema ต้องมาจาก native dump ไม่ใช่จาก migration service
+เพราะ migration tools สร้าง schema ไม่ครบ (ไม่มี index รอง, FK, default,
+sequence, trigger, view, procedure)
+
+`--migration` = แปลง schema diff ที่เจอเป็นไฟล์ `V<ts>__sync_<db>.sql`
+(ทำ target ให้ตรง source) คู่กับ `U<ts>__*.sql` (undo) commit ลง git แล้ว
+apply ด้วย psql หรือ migration runner ตัวไหนก็ได้ — ผ่าน atlas
+
+`--convert` = transpile DDL ข้าม engine (hetero hop, sqlglot/pgloader)
+review แล้วค่อย `--apply`
 
 ```bash
-migkit gen-migration mig-a --out migrations
+migkit schema mig-a                         # แผนเตรียมปลายทาง (dry-run)
+migkit schema mig-a --migration --out migrations
+migkit schema my2pg --convert --apply
 ```
 
-### migkit sample-diff <hop> --table T — column-level diff (datacompy)
+### migkit check --drill — column-level diff (datacompy)
 
 เทียบ row sample ราย column: column ไหนต่าง, match rate, ค่าตัวอย่างที่ไม่ตรง
 รายงานอ่านง่ายแบบ PROC COMPARE ของ SAS
 
 ```bash
-migkit sample-diff mig-a --db appdb --table public.orders --limit 1000
+migkit check mig-a --drill --db appdb --table public.orders --limit 1000
 ```
 
-### migkit ui — web dashboard
+### migkit report --serve — web dashboard
 
-หน้าเว็บเดียวเห็นทุก hop: tiles สถานะ, per-db, ปุ่มเปิด report,
-last write จาก changelog, auto-refresh 10 วิ (bind localhost อ่านอย่างเดียว)
+หน้าเว็บเดียวเห็นทุก hop: summary pills, badge engine/service, tiles สถานะ
+ราย check, per-db, ปุ่มเปิด report, feed การเขียนล่าสุดข้าม hop,
+auto-refresh 10 วิ (bind localhost อ่านอย่างเดียว)
 
 ```bash
-migkit ui --port 8899
+migkit report --serve --port 8899
 ```
-
-### migkit setup-target <hop> [--db X]
-
-พิมพ์คำสั่งเตรียม schema ปลายทางให้ครบ (pg_dump/pg_restore, createdb ฯลฯ)
-**เป็น dry-run เสมอ ไม่รันเอง** — copy ไปรันเองทีละบรรทัด
-หัวใจคือ: schema ต้องมาจาก native dump ไม่ใช่จาก migration service
-เพราะ migration tools สร้าง schema ไม่ครบ (ไม่มี index รอง, FK, default,
-sequence, trigger, view, procedure)
 
 ### migkit check <hop>
 
@@ -195,15 +214,30 @@ sequence, trigger, view, procedure)
 | autoinc | ค่า sequence / auto_increment / identity ตรงกันไหม |
 | data | checksum ทุก row ทุก column, ถ้าต่างจะ drill ลงถึงระดับ PK ว่าแถวไหนหาย/เกิน/ไม่ตรง |
 
+ตั้งแต่ 0.2.0: ถ้ารัน counts+data ด้วยกัน (default) จำนวน row จะติดมากับ
+query checksum เลย — แต่ละตาราง scan รอบเดียว ไม่ใช่สองรอบ (pg/mysql/mongo/
+hetero) ส่วนการเช็คว่าตารางครบไหมใช้ catalog อย่างเดียว ไม่ scan
+
+ชั้นที่ 5 (opt-in): `--deep` — FK orphan (หลัง NOT VALID constraint ฝั่ง pg,
+scan เต็มฝั่ง mysql เพราะ load มักปิด foreign_key_checks), trigger ที่โดน
+disable ค้าง, column drift ราย column (type/null/default/precision +
+charset/collation ฝั่ง mysql, เคารพ pattern ใน `<hop>.schema-ignore`),
+matview ยังไม่ refresh, grants หาย, และ boundary check — max(pk)/newest
+`_id` สองฝั่ง จับทั้ง CDC ค้าง (dst ตามหลัง) และตัวการเขียนใส่ปลายทาง
+(dst นำหน้า = double-apply หรือมี writer แปลกปลอม อันหลังนี่แหละต้นเหตุ
+คลาสสิกของ dst มี row มากกว่า src)
+
 options:
 
 ```bash
 migkit check mig-a                          # ครบทุก db ทุกชั้น
 migkit check mig-a --only schema,counts     # เลือกชั้น
-migkit check mig-a --db appdb               # db เดียว
+migkit check mig-a --deep                   # เพิ่มชั้น deep
+migkit check mig-a --only deep --db appdb   # deep อย่างเดียว db เดียว
 migkit check mig-a --db appdb --table public.orders
 migkit check mig-a --workers 6              # ขนาน 6 db
 migkit check mig-a --resume                 # ข้ามอันที่เขียวรอบก่อน
+migkit -q check mig-a                       # quiet: เหลือ DIFF/ERROR/สรุป
 ```
 
 การอ่านผล: เขียว OK / เหลือง DIFF / แดง ERROR มี progress + ETA ระหว่างรัน
@@ -218,16 +252,16 @@ postgres ทำ parallel aggregate ได้เต็มเครื่อง �
 ของจริง: ตาราง 488M row ตรวจจบใน 9.4 นาที, ทั้ง database 1.06B row ~16 นาที
 ตารางที่ checksum ไม่ตรงเท่านั้นถึงจะ drill ลงหา PK รายแถวด้วยโหมด slice
 
-### migkit monitor <hop> — เทียบต่อเนื่อง ไม่ต้องรันเป็นรอบเอง
+### migkit watch --verify — เทียบต่อเนื่อง ไม่ต้องรันเป็นรอบเอง
 
 แนวเดียวกับ CDC validation ของ managed service แต่ใช้ได้ทุก engine: วน re-check เอง
 ทุก interval, พิมพ์บรรทัดเดียวต่อ db ต่อรอบ, อัพเดท report.html ให้ตลอด
 diff ที่หายไปในรอบถัดไป = replication lag, diff ที่ค้าง = ของจริง
 
 ```bash
-migkit monitor mig-a --interval 300                 # counts+autoinc ทุก 5 นาที
-migkit monitor mig-a --only counts,autoinc,data     # รวม checksum เต็มทุกรอบ
-migkit monitor mig-a --cycles 12                    # 12 รอบแล้วหยุด
+migkit watch mig-a --verify                             # counts+autoinc ทุก 5 นาที
+migkit watch mig-a --verify --only counts,autoinc,data  # รวม checksum เต็มทุกรอบ
+migkit watch mig-a --verify --count 12                  # 12 รอบแล้วหยุด
 ```
 
 รันค้างใน tmux ระหว่างการขน data = เฝ้าตลอดคืนได้
@@ -255,21 +289,24 @@ appdb: src~1,401 dst~1,410 (100%)               <- row โดยประมา�
 - ช่วง full load จะเห็น rate (rows/s) + ETA คำนวณให้
 - `caught up, check lag before cutover` = จำนวน row ตามทันแล้ว
 
-### migkit sync <hop> [--db X] [--go]
+### migkit sync <hop> — ซ่อมปลายทางให้เท่าต้นทาง (รวม repair เดิม)
 
-โหมดทำงานจริง: เช็คแล้วแก้ในรอบเดียว ก่อนแตะอะไรจะ checkpoint state ของปลายทาง
-ไว้ก่อนเสมอ (ค่า sequence ทุกตัว + schema dump) เก็บ 2 ที่กันไฟล์หาย:
-`reports/<hop>/<db>/state/<timestamp>/` และ tar สำรองที่ `~/.migkit-state/`
-ทุก action ลง journal.jsonl พร้อมผล re-check หลังแก้
+สามระดับ จากเบาไปหนัก **default คือ dry-run เสมอ**:
 
 ```bash
-migkit sync mig-a            # dry-run: บอกว่าจะแก้อะไร ไม่แตะ
-migkit sync mig-a --go       # แก้จริง: ซ่อม -> เช็คซ้ำ -> journal
+migkit sync mig-a --db appdb --kind sequences          # ดูแผนก่อน (dry-run)
+migkit sync mig-a --db appdb --kind sequences --apply  # ทำจริง + เซฟ undo
+migkit sync mig-a --go                                 # เช็ค+ซ่อมรอบเดียว มี checkpoint
 ```
 
-ลำดับใน sync: snapshot -> เช็ค autoinc (แก้ถ้า diff) -> เช็ค data แบบ fast
-(แก้รายแถวถ้า diff, row เดิมของปลายทางถูก copy เก็บเป็น undo ก่อนลบเสมอ)
--> เช็คซ้ำจนเขียว
+- ไม่ใส่ flag = โชว์แผนซ่อมจาก diff รอบ check ล่าสุด (ไม่ใส่ `--db` =
+  ทุก db ที่มี diff ไม่ต้อง copy-paste ทีละตาราง)
+- `--apply` = รันแผนนั้นจริง ค่าเดิมของปลายทางถูกเซฟเป็น undo ก่อนทุกครั้ง
+- `--go` = โหมด cutover: checkpoint state ปลายทางก่อน (ค่า sequence ทุกตัว +
+  schema dump เก็บ 2 ที่: `reports/<hop>/<db>/state/<ts>/` + tar ที่
+  `~/.migkit-state/`) แล้ว snapshot -> เช็ค autoinc (แก้ถ้า diff) -> เช็ค
+  data แบบ fast (แก้รายแถวถ้า diff) -> เช็คซ้ำจนเขียว ทุก action ลง
+  journal.jsonl
 
 ### migkit rollback <hop> --db X [--state TS] [--apply]
 
@@ -282,16 +319,6 @@ migkit rollback mig-a --db appdb --state 20260723-073539 --apply
 
 sequence ย้อนอัตโนมัติ ส่วน row-level จะโชว์ manifest (ไฟล์ undo ที่ fix-data
 เซฟ row เดิมไว้ก่อนลบ) ให้รันตาม
-
-### migkit repair <hop> --db X [--kind ...] [--apply]
-
-ทำปลายทางให้เท่าต้นทาง **default คือ dry-run เสมอ** โชว์ว่าจะรันอะไรแต่ไม่ทำ
-ต้องเติม `--apply` ถึงจะทำจริง
-
-```bash
-migkit repair mig-a --db appdb --kind sequences        # ดูก่อน (dry-run)
-migkit repair mig-a --db appdb --kind sequences --apply    # ทำจริง
-```
 
 | kind | ทำอะไร | rollback |
 |---|---|---|
@@ -338,7 +365,7 @@ reports/pgdc/<hop>/<db>/                       รายละเอียดฝ
 ```
 1. migkit doctor                        เช็คเครื่องมือ + connection
 2. migkit advise <hop>                  อ่าน playbook ของ service ที่ใช้
-3. migkit setup-target <hop>            เตรียม schema ปลายทาง (รันคำสั่งเอง)
+3. migkit schema <hop>                  เตรียม schema ปลายทาง (รันคำสั่งเอง)
    - drop/disable FK + trigger ปลายทาง เก็บ DDL ไว้ (เดี๋ยวใส่คืนตอน cutover)
 4. migkit check <hop> --only schema     ต้องเขียวก่อนเปิดตัวขน data
 5. เปิด migration service ตาม advise              โหมด data-only, full load + incremental
@@ -346,7 +373,7 @@ reports/pgdc/<hop>/<db>/                       รายละเอียดฝ
 7. ระหว่างนี้ freeze DDL ที่ source     logical replication ไม่ส่ง DDL
 --- cutover window ---
 8. หยุด write ที่ source, รอ lag = 0 (ดูจาก watch)
-9. migkit repair <hop> --db X --kind sequences --apply    ทุก db
+9. migkit sync <hop> --db X --kind sequences --apply     ทุก db
 10. ใส่ FK + trigger คืนที่ปลายทาง
 11. migkit check <hop>                  ต้องเขียวหมดทุกชั้น
 12. สลับ app ไปปลายทาง
@@ -526,9 +553,9 @@ Engine ต่อผ่าน wire protocol มาตรฐาน จึงใช
 
 ## 8. กฎเหล็ก
 
-- `check` อ่านอย่างเดียว รันได้ตลอดเวลา ไม่ต้องขอใคร
-- `repair` / `setup-target` แตะปลายทาง — dry-run ก่อนเสมอ, `--apply` เฉพาะตอน
-  ตั้งใจ และห้ามรันตอน incremental วิ่งถ้าหวังผลนิ่ง
+- `check` (รวม `--deep`/`--drill`) อ่านอย่างเดียว รันได้ตลอดเวลา ไม่ต้องขอใคร
+- `sync` / `schema` / `move` แตะปลายทาง — dry-run ก่อนเสมอ, `--apply`/`--go`
+  เฉพาะตอนตั้งใจ และห้ามรันตอน incremental วิ่งถ้าหวังผลนิ่ง
 - source ไม่ถูกเขียนโดย migkit ในทุกกรณี
 - schema ปลายทางมาจาก native dump เท่านั้น อย่าให้ migration service สร้าง
 - sequence/identity ต้อง repair ทุกครั้งหลัง full load — ไม่มี migration service

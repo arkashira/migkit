@@ -81,7 +81,7 @@ class SQLiteEngine(Engine):
                if b.get(t) != v]
         if bad:
             return [Result("autoinc", db, "diff", "; ".join(bad), "",
-                           f"migkit repair {self.hop.name} --db {db}"
+                           f"migkit sync {self.hop.name} --db {db}"
                            " --kind sequences")]
         return [Result("autoinc", db, "ok",
                        f"{len(a)} counters, values match")]

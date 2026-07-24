@@ -8,6 +8,7 @@ DRILL_MAX_DOCS = 5_000_000
 
 class MongoEngine(Engine):
     checks = ("schema", "counts", "data")
+    counts_from_data = True
 
     def _client(self, side):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -132,15 +133,16 @@ class MongoEngine(Engine):
                        f"{len(names)} collections, docs"
                        f" {total_a:,}=={total_b:,}")]
 
-    def check_data(self, db, table=None, stream=None):
+    def check_data(self, db, table=None, stream=None, with_counts=False):
         s, t = self._client("src")[db], self._client("dst")[db]
         try:
             a = s.command("dbHash")["collections"]
             b = t.command("dbHash")["collections"]
         except Exception:
             a = b = None
-        names = [table] if table else sorted(
-            set(s.list_collection_names()) & set(t.list_collection_names()))
+        sn = set(s.list_collection_names())
+        tn = set(t.list_collection_names())
+        names = [table] if table else sorted(sn & tn)
         res = []
         for name in names:
             if name.startswith("system."):
@@ -156,6 +158,27 @@ class MongoEngine(Engine):
             if stream:
                 stream(f"{name}: {r.status}")
             res.append(r)
+        if with_counts:
+            # equal hashes imply equal counts, so only diffed collections
+            # pay for an exact count
+            bad = [f"{c} missing on target" for c in sorted(sn - tn)
+                   if not c.startswith("system.")]
+            bad += [f"{c} extra on target" for c in sorted(tn - sn)
+                    if not c.startswith("system.")]
+            for r in res:
+                if r.check == "data" and r.status != "ok":
+                    name = r.scope.split(".", 1)[1]
+                    ca = s[name].count_documents({})
+                    cb = t[name].count_documents({})
+                    if ca != cb:
+                        bad.append(f"{name} src={ca} dst={cb}")
+            if bad:
+                cres = Result("counts", db, "diff", "; ".join(bad[:10]))
+            else:
+                cres = Result("counts", db, "ok",
+                              f"{len(names)} collections, equality implied"
+                              " by data hash (no extra count scan)")
+            res.insert(0, cres)
         return res
 
     def _drilldown(self, db, name):
@@ -195,7 +218,7 @@ class MongoEngine(Engine):
         return Result("data", scope, "diff",
                       f"missing={len(missing)} extra={len(extra)}"
                       f" changed={len(changed)}", str(d),
-                      f"migkit repair {self.hop.name} --db {db} --kind rows --apply")
+                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
 
     def _client_hashes(self, coll):
         import hashlib
@@ -209,6 +232,40 @@ class MongoEngine(Engine):
 
     def snapshot_state(self, db, state_dir):
         (state_dir / "dst-shape.txt").write_text(repr(self._shape("dst", db)))
+
+    def check_deep(self, db):
+        s, t = self._client("src")[db], self._client("dst")[db]
+        names = sorted(set(s.list_collection_names())
+                       & set(t.list_collection_names()))
+
+        def newest(coll):
+            d = coll.find_one(sort=[("_id", -1)], projection={"_id": 1})
+            return d["_id"] if d else None
+
+        ahead, behind = [], []
+        n = 0
+        for name in names:
+            if name.startswith("system."):
+                continue
+            n += 1
+            na, nb = newest(s[name]), newest(t[name])
+            try:
+                if nb is not None and (na is None or nb > na):
+                    ahead.append(name)
+                elif na is not None and (nb is None or nb < na):
+                    behind.append(name)
+            except TypeError:
+                continue
+        if ahead:
+            return [Result("deep", f"{db} boundary", "diff",
+                           f"target newest _id AHEAD of source on:"
+                           f" {', '.join(ahead[:5])}", "",
+                           "writes landing on target or double-apply,"
+                           " find the writer before cutover")]
+        note = f"; {len(behind)} behind (replication lag)" if behind else ""
+        return [Result("deep", f"{db} boundary", "ok",
+                       f"newest _id checked on {n} collections,"
+                       f" none ahead of source{note}")]
 
     def repair_plan(self, db, kind):
         if kind not in ("rows", "all"):

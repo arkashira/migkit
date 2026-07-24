@@ -1,6 +1,6 @@
 [project]
 name = "migkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Personal database migration toolkit: setup, validate, repair, advise, watch"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,6 +16,7 @@ kafka = ["kafka-python>=2.0"]
 redis = ["redis>=5.0"]
 diff = ["reladiff"]
 dataframe = ["datacompy", "pandas"]
+s3 = ["boto3"]
 pgschema = ["migra", "psycopg2-binary"]
 
 [project.scripts]

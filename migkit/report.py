@@ -3,9 +3,9 @@ import json
 import time
 from pathlib import Path
 
-CHECK_ORDER = ["schema", "counts", "autoinc", "data"]
+CHECK_ORDER = ["schema", "counts", "autoinc", "data", "deep"]
 CHECK_LABEL = {"schema": "schema", "counts": "rows",
-               "autoinc": "autoinc", "data": "data"}
+               "autoinc": "autoinc", "data": "data", "deep": "deep"}
 
 CSS = """
 :root { color-scheme: light dark; }
@@ -28,8 +28,8 @@ h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
   border-radius: 6px; margin-bottom: 16px; font-weight: 650; font-size: 15px; }
 .banner.pass { background: #e7f6e7; border: 1px solid #0ca30c; }
 .banner.fail { background: #fdeeee; border: 1px solid #d03b3b; }
-.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
-  margin-bottom: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit,
+  minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .tile { background: #fcfcfb; border: 1px solid #e4e3df; border-radius: 6px;
   padding: 14px 16px; }
 .tile .n { font-size: 24px; font-weight: 600; }
@@ -174,8 +174,10 @@ def render(hop, results, generated=None):
                 worst = "diff"
         return worst
 
+    ran = [c for c in CHECK_ORDER
+           if any(matrix.get((d, c)) for d in dbs)]
     tiles = []
-    for c in CHECK_ORDER:
+    for c in ran:
         total = sum(1 for d in dbs if matrix.get((d, c)))
         passed = sum(1 for d in dbs if cell_status(d, c) == "ok"
                      and matrix.get((d, c)))
@@ -191,7 +193,7 @@ def render(hop, results, generated=None):
     for d in dbs:
         cells = "".join(
             f"<td>{_chip(cell_status(d, c)) if matrix.get((d, c)) else '-'}</td>"
-            for c in CHECK_ORDER)
+            for c in ran)
         rows.append(f'<tr><td class="db">{html.escape(d)}</td>{cells}</tr>')
 
     findings = [r for r in results if r["status"] not in ("ok", "skip")]
@@ -236,7 +238,7 @@ def render(hop, results, generated=None):
 <div class="tiles">{"".join(tiles)}</div>
 <div class="card"><h2>status</h2>
 <table><thead><tr><th>db</th>
-{"".join(f"<th>{CHECK_LABEL[c].lower()}</th>" for c in CHECK_ORDER)}
+{"".join(f"<th>{CHECK_LABEL[c].lower()}</th>" for c in ran)}
 </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 {objects_html}
 <div class="card"><h2>issues</h2>{"".join(cards)}</div>
