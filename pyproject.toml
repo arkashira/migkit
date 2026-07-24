@@ -1,13 +1,32 @@
 [project]
 name = "migkit"
-version = "0.4.1"
-description = "Personal database migration toolkit: setup, validate, repair, advise, watch"
+version = "0.4.2"
+description = "Verify, repair, and move databases across engines — without trusting the mover."
+readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "arkashira" }]
+keywords = ["database", "migration", "cdc", "replication", "verification",
+            "postgres", "mysql", "mongodb", "dms", "reconciliation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "click>=8.1",
     "pyyaml>=6.0",
     "rich>=13.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/arkashira/migkit"
+Repository = "https://github.com/arkashira/migkit"
+Changelog = "https://github.com/arkashira/migkit/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
 mysql = ["pymysql>=1.1"]

@@ -217,3 +217,34 @@ def test_schema_is_a_repair_kind():
     from migkit.engines.postgres import PostgresEngine
     assert hasattr(PostgresEngine, "_schema_repair_action")
     assert hasattr(MySQLEngine, "_schema_repair_action")
+
+
+def test_debezium_status_parses(monkeypatch):
+    from migkit import movers
+    monkeypatch.setattr(movers, "_connect_api", lambda m, p, **k: (200, {
+        "connector": {"state": "RUNNING"},
+        "tasks": [{"state": "RUNNING"}, {"state": "FAILED"}]}))
+    s = movers.debezium_status("migkit-h-source")
+    assert "connector=RUNNING" in s and "RUNNING,FAILED" in s
+
+
+def test_debezium_register_creates_and_updates(tmp_path, monkeypatch):
+    import json
+    import urllib.error
+    from migkit import movers
+    (tmp_path / "source-connector.json").write_text(json.dumps(
+        {"name": "s", "config": {"x": "1"}}))
+    (tmp_path / "sink-connector.json").write_text(json.dumps(
+        {"name": "k", "config": {"y": "2"}}))
+    calls = []
+
+    def fake_api(method, path, body=None, port=8083):
+        calls.append((method, path))
+        if method == "POST" and path == "/connectors" and body["name"] == "k":
+            raise urllib.error.HTTPError(path, 409, "exists", {}, None)
+        return 201, {}
+    monkeypatch.setattr(movers, "_connect_api", fake_api)
+    movers.debezium_register(tmp_path)
+    # source POSTed; sink 409 -> PUT config
+    assert ("POST", "/connectors") in calls
+    assert ("PUT", "/connectors/k/config") in calls

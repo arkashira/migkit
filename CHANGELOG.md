@@ -2,6 +2,27 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.4.2] — 2026-07-24
+
+Debezium supervision + packaging.
+
+### Added
+- **`move --mode cdc --via debezium --go`** no longer only generates configs —
+  it launches the stack (`docker compose up`), waits for Kafka Connect's REST
+  API, registers the source + sink connectors (PUT-updates on 409), and prints
+  per-connector/task status. `--drop` tears it down. This turns CDC into
+  driving Debezium (the enterprise-universal, open-source log-based CDC
+  engine) at full capability, with migkit's verification layer wrapped around
+  it — compose, don't reimplement.
+- pypi-ready packaging: MIT `LICENSE`, project metadata (authors, keywords,
+  classifiers, urls, readme) in `pyproject.toml`.
+
+### Note
+- The Debezium supervision logic is unit-tested (status parsing, connector
+  register/update); the full live pipeline is exercised manually / in a
+  dedicated CI job (it needs the ~1GB debezium/connect image + a running
+  broker), not the default suite.
+
 ## [0.4.1] — 2026-07-24
 
 One tool, no shell scripts.

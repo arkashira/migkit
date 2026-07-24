@@ -825,8 +825,29 @@ def move(hop_name, db, table, mode, via, chunk, do_drop, go):
         dbs = [db] if db else eng.databases()
         out = movers.debezium_codegen(hop, dbs, engine)
         console.print(f"debezium connect configs generated: {out}")
-        console.print("review credentials, then follow"
-                      f" {out}/README-debezium.md")
+        name = f"migkit-{hop.name}"
+        if do_drop:
+            if go:
+                movers.debezium_down(out, lambda m: console.print(f"  {m}"))
+                console.print("[green]debezium stack torn down[/green]")
+            else:
+                console.print(f"would run: docker compose -f {out}"
+                              "/docker-compose.yml down -v")
+            return
+        if not go:
+            console.print("review credentials, then --go to launch"
+                          " (or follow README-debezium.md by hand)")
+            return
+        console.print("launching redpanda + kafka connect ...")
+        movers.debezium_up(out, lambda m: chat(f"  {m}"))
+        if not movers.debezium_wait(log=lambda m: chat(f"  {m}")):
+            raise SystemExit("Kafka Connect did not come up (see docker logs)")
+        movers.debezium_register(out, log=lambda m: console.print(f"  {m}"))
+        for c in (f"{name}-source", f"{name}-sink"):
+            console.print("  " + movers.debezium_status(c))
+        _changelog(hop, {"op": "debezium-up", "db": ",".join(dbs)})
+        console.print("[green]debezium CDC running[/green] — verify the stream"
+                      f" with: migkit sync {hop_name} --mode stream --serve")
         return
     if mode == "full":
         v = movers.pick(engine, table) if via == "auto" else via

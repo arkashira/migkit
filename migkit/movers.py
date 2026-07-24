@@ -283,6 +283,76 @@ replication slot / binlog user on the source.
     return out
 
 
+def _connect_api(method, path, body=None, port=8083, timeout=15):
+    import json as _json
+    import urllib.request
+    data = _json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"http://localhost:{port}{path}", data=data, method=method,
+        headers={"Content-Type": "application/json",
+                 "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        return r.status, (_json.loads(raw) if raw else None)
+
+
+def debezium_up(out, log=None):
+    _sh(["docker", "compose", "-f", str(out / "docker-compose.yml"),
+         "up", "-d"], log=log)
+
+
+def debezium_down(out, log=None):
+    _sh(["docker", "compose", "-f", str(out / "docker-compose.yml"),
+         "down", "-v"], log=log)
+
+
+def debezium_wait(port=8083, timeout=180, log=None):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            code, _ = _connect_api("GET", "/", port=port, timeout=5)
+            if code == 200:
+                return True
+        except Exception:
+            pass
+        if log:
+            log("waiting for Kafka Connect REST on :%d ..." % port)
+        time.sleep(4)
+    return False
+
+
+def debezium_register(out, port=8083, log=None):
+    import json as _json
+    import urllib.error
+    for f in ("source-connector.json", "sink-connector.json"):
+        cfg = _json.loads((out / f).read_text())
+        name = cfg["name"]
+        try:
+            _connect_api("POST", "/connectors", cfg, port)
+            if log:
+                log(f"registered {name}")
+        except urllib.error.HTTPError as e:
+            if e.code == 409:  # already exists -> update config
+                _connect_api("PUT", f"/connectors/{name}/config",
+                             cfg["config"], port)
+                if log:
+                    log(f"updated {name}")
+            else:
+                raise
+
+
+def debezium_status(name, port=8083):
+    """Summarize a connector + its tasks: RUNNING/FAILED per component."""
+    try:
+        _, body = _connect_api("GET", f"/connectors/{name}/status", port=port)
+    except Exception as e:
+        return f"{name}: unreachable ({str(e).splitlines()[-1][:50]})"
+    conn = body.get("connector", {}).get("state", "?")
+    tasks = [t.get("state", "?") for t in body.get("tasks", [])]
+    return f"{name}: connector={conn} tasks={','.join(tasks) or 'none'}"
+
+
 def run_via(via, hop, db, workers, go, log):
     fn = {"pgdump": pgdump_move, "mydumper": mydumper_move,
           "pgloader": pgloader_move, "mongodump": mongodump_move}[via]

@@ -5,7 +5,7 @@
 [![engines](https://img.shields.io/badge/engines-postgres%20·%20mysql%20·%20mongodb%20·%20mssql%20·%20sqlite%20·%20redis%20·%20kafka-2a78d6)](#supported-engines)
 [![cross-engine](https://img.shields.io/badge/cross--engine-mysql→postgres-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
-[![license](https://img.shields.io/badge/license-internal-52514e)](#license)
+[![license](https://img.shields.io/badge/license-MIT-0ca30c)](LICENSE)
 [![status](https://img.shields.io/badge/status-active-0ca30c)](CHANGELOG.md)
 
 migkit does everything *around* a database migration: it prepares the target,
@@ -255,5 +255,5 @@ suite on Ubuntu runners.
 
 ## License
 
-Internal / personal tooling. Not for redistribution without the author's
-consent.
+MIT — see [LICENSE](LICENSE). (Confirm before publishing if a
+freemium/proprietary model is preferred instead.)
