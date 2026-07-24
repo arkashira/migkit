@@ -1065,12 +1065,19 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
 @click.option("--serve", is_flag=True,
               help="serve the live dashboard for every hop instead of"
                    " writing a file")
+@click.option("--metrics", is_flag=True,
+              help="print Prometheus metrics for every hop and exit"
+                   " (the dashboard also exposes them at /metrics)")
 @click.option("--port", default=8899, help="with --serve: listen port")
-def report(hop_name, do_open, refresh, serve, port):
+def report(hop_name, do_open, refresh, serve, metrics, port):
     """Render the HTML report from the last check run, or --serve the
-    live localhost dashboard."""
+    live localhost dashboard (with a Prometheus /metrics endpoint)."""
     import subprocess
 
+    if metrics:
+        from .ui import prometheus
+        print(prometheus(load_hops()), end="")
+        return
     if serve:
         from .ui import serve as _serve
         return _serve(port)

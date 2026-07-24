@@ -219,6 +219,38 @@ def _hop_data(name, hop):
     return out
 
 
+_STATUS_CODE = {"ok": 0, "diff": 1, "error": 2, "na": 3}
+
+
+def prometheus(hops):
+    """Prometheus text-format metrics from the last check of every hop —
+    scrape http://<ui>/metrics for alerting (fire when migkit_hop_status > 0)."""
+    lines = [
+        "# HELP migkit_hop_status Overall hop status (0 ok 1 diff 2 error 3 na)",
+        "# TYPE migkit_hop_status gauge",
+        "# HELP migkit_check_pass Passing databases per check",
+        "# TYPE migkit_check_pass gauge",
+        "# HELP migkit_check_total Databases per check",
+        "# TYPE migkit_check_total gauge",
+        "# HELP migkit_last_check_age_seconds Age of the last check",
+        "# TYPE migkit_last_check_age_seconds gauge",
+    ]
+    for name, hop in hops.items():
+        d = _hop_data(name, hop)
+        lbl = f'hop="{name}",engine="{hop.engine}"'
+        lines.append(f'migkit_hop_status{{{lbl}}}'
+                     f' {_STATUS_CODE.get(d["status"], 3)}')
+        for check, st in d.get("checks", {}).items():
+            cl = f'{lbl},check="{check}"'
+            lines.append(f'migkit_check_pass{{{cl}}} {st["pass"]}')
+            lines.append(f'migkit_check_total{{{cl}}} {st["total"]}')
+        summary = REPORTS / name / "summary.json"
+        if summary.exists():
+            lines.append(f'migkit_last_check_age_seconds{{{lbl}}}'
+                         f' {int(time.time() - summary.stat().st_mtime)}')
+    return "\n".join(lines) + "\n"
+
+
 def _activity(hops):
     entries = []
     for name in hops:
@@ -256,6 +288,9 @@ class Handler(BaseHTTPRequestHandler):
                     "hops": [_hop_data(n, h) for n, h in hops.items()],
                     "activity": _activity(hops)}
             return self._send(200, "application/json", json.dumps(data))
+        if self.path == "/metrics":
+            return self._send(200, "text/plain; version=0.0.4",
+                              prometheus(load_hops()))
         if self.path.startswith("/report/"):
             name = self.path[len("/report/"):].split("/")[0].split("?")[0]
             f = REPORTS / name / "report.html"

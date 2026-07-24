@@ -130,3 +130,24 @@ def test_endpoint_resolves_password_secret(monkeypatch):
     ep = _endpoint("postgres", {"host": "h", "user": "u",
                                 "password": "env:PGPW"})
     assert ep.password == "fromenv"
+
+
+def test_prometheus_metrics_format(tmp_path, monkeypatch):
+    import json as _json
+    import migkit.config as cfg
+    import migkit.ui as ui
+    from migkit.config import Endpoint, Hop
+    cfg.REPORTS = tmp_path
+    ui.REPORTS = tmp_path
+    hop = Hop(name="h", engine="postgres",
+              source=Endpoint(host="s"), target=Endpoint(host="t"))
+    monkeypatch.setattr(ui, "load_hops", lambda: {"h": hop})
+    (tmp_path / "h").mkdir()
+    (tmp_path / "h" / "summary.json").write_text(_json.dumps([
+        {"check": "data", "scope": "db1", "status": "ok"},
+        {"check": "data", "scope": "db2", "status": "diff"}]))
+    out = ui.prometheus({"h": hop})
+    assert 'migkit_hop_status{hop="h",engine="postgres"} 1' in out
+    assert 'migkit_check_pass{hop="h",engine="postgres",check="data"} 1' in out
+    assert 'migkit_check_total{hop="h",engine="postgres",check="data"} 2' in out
+    assert "# TYPE migkit_hop_status gauge" in out
