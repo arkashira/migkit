@@ -2,6 +2,19 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.4.1] — 2026-07-24
+
+One tool, no shell scripts.
+
+### Changed
+- The postgres engine is now pure Python — the vendored `scripts/pg/*.sh`
+  (schema dump/diff, counts, sequences, fast checksum, per-PK drilldown with
+  billion-row slicing, and the temp-PK-join row repair with undo) are all
+  ported into the engine and the directory is deleted. migkit no longer
+  shells out to bash anywhere; every engine is one consistent codebase.
+  Equivalence proven by the full docker pg suite (integration, Faker
+  all-types, db_map, schema-repair, orchestrator) — 11 tests green.
+
 ## [0.4.0] — 2026-07-24
 
 Self-hostable migration service: run the whole flow on a VM, DMS-style.

@@ -10,9 +10,6 @@ from ..config import REPORTS
 from ..util import run, tool_env, which
 from .base import Engine, RepairAction, Result
 
-CHECKER = Path(os.environ.get("PG_DIFF_CHECKER",
-                              Path(__file__).resolve().parent.parent
-                              / "scripts" / "pg"))
 PGDC_ROOT = REPORTS / "pgdc"
 
 INVENTORY_SQL = """
@@ -69,10 +66,6 @@ class PostgresEngine(Engine):
                    " and n.nspname not like '\\_\\_%'"
                    " and c.relname not like 'migkit\\_%' order by 1")
 
-    def __init__(self, hop):
-        super().__init__(hop)
-        self._conf = None
-
     def _d(self, side, db):
         """Physical db name for a side: source as given, target through the
         hop's db_map so a migration can land in a differently-named db
@@ -91,55 +84,6 @@ class PostgresEngine(Engine):
                 env=env)
         return p.stdout.rstrip("\n")
 
-    def checker_conf(self):
-        if self._conf:
-            return self._conf
-        s, t = self.hop.source, self.hop.target
-        conf_dir = PGDC_ROOT / "conf"
-        conf_dir.mkdir(parents=True, exist_ok=True)
-        name = self.hop.name
-        body = (
-            f"SRC_HOST={s.host}\nSRC_PORT={s.port}\nSRC_USER={s.user}\n"
-            f"SRC_PASS='{s.password}'\n"
-            f"DST_HOST={t.host}\nDST_PORT={t.port}\nDST_USER={t.user}\n"
-            f"DST_PASS='{t.password}'\n"
-            f"DBS='{' '.join(self.hop.databases)}'\n"
-            f"CHUNK=50000\nDRILL_MAX_ROWS=2000000\n"
-        )
-        path = conf_dir / f"{name}.conf"
-        path.write_text(body)
-        path.chmod(0o600)
-        self._conf = name
-        return name
-
-    def _env(self):
-        return {"PGDC_CONF_DIR": str(PGDC_ROOT / "conf"),
-                "PGDC_REPORT_DIR": str(PGDC_ROOT),
-                "PGDC_NOISE_PREFIX": self.hop.options.get("noise_prefix", ""),
-                "PGDC_EXCLUDE_SCHEMA": self.hop.options.get(
-                    "exclude_schema", "__*"),
-                "WORKERS": str(self.hop.options.get("checksum_workers", 8)),
-                "BIG_ROWS": str(self.hop.big_rows),
-                "SLICE": str(self.hop.slice),
-                "DB_MAP": " ".join(f"{k}:{v}"
-                                   for k, v in self.hop.db_map.items())}
-
-    def _script(self, script, *args, stream=None):
-        conf = self.checker_conf()
-        cmd = [str(CHECKER / script), conf, *args]
-        env = tool_env(self._env())
-        if stream:
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True, env=env)
-            lines = []
-            for line in p.stdout:
-                line = line.rstrip("\n")
-                lines.append(line)
-                stream(line)
-            p.wait()
-            return p.returncode, "\n".join(lines)
-        p = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        return p.returncode, (p.stdout + p.stderr).strip()
 
     def databases(self):
         if self.hop.databases:
@@ -152,11 +96,48 @@ class PostgresEngine(Engine):
     def _report(self, db):
         return PGDC_ROOT / self.hop.name / db
 
+    def _dump_schema_native(self, side, db):
+        ep = self.hop.source if side == "src" else self.hop.target
+        p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
+                 "-d", self._d(side, db), "--schema-only", "--no-owner",
+                 "--no-privileges", "--no-security-labels", "--no-tablespaces",
+                 "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
+                 "--exclude-table", "*.migkit_changelog*"],
+                env={"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
+        noise = self.hop.options.get("noise_prefix", "")
+        keep = []
+        for l in p.stdout.splitlines():
+            if (l.startswith(("--", "SET ", "\\restrict", "\\unrestrict",
+                              "SELECT pg_catalog.set_config")) or not l.strip()):
+                continue
+            if noise and (f"EVENT TRIGGER {noise}" in l
+                          or f"PUBLICATION {noise}" in l):
+                continue
+            keep.append(l)
+        pats = self._ignore_patterns()
+        if pats:
+            keep = [l for l in keep if not any(pt.search(l) for pt in pats)]
+        return "\n".join(keep)
+
     def check_schema(self, db):
-        rc, out = self._script("check-schema.sh", db)
-        line = out.splitlines()[-1] if out else ""
-        status = "ok" if rc == 0 else "diff"
-        res = [Result("schema", db, status, line, str(self._report(db) / "schema.diff"),
+        import difflib
+        src = self._dump_schema_native("src", db)
+        dst = self._dump_schema_native("dst", db)
+        d = self._report(db)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "schema-src.sql").write_text(src + "\n")
+        (d / "schema-dst.sql").write_text(dst + "\n")
+        changed = [l for l in difflib.unified_diff(
+                       src.splitlines(), dst.splitlines(), "src", "dst",
+                       lineterm="")
+                   if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+        if changed:
+            (d / "schema.diff").write_text("\n".join(changed) + "\n")
+            status, line = "diff", f"{len(changed)} changed lines"
+        else:
+            (d / "schema.diff").unlink(missing_ok=True)
+            status, line = "ok", "schema identical (native pg_dump diff)"
+        res = [Result("schema", db, status, line, str(d / "schema.diff"),
                       "review diff, apply missing DDL from schema-src.sql")]
         if which("migra"):
             s, t = self.hop.source, self.hop.target
@@ -401,13 +382,59 @@ class PostgresEngine(Engine):
                       f"{n} tables, rows {rows_src:,}=={rows_dst:,}"
                       " (from the checksum pass, no extra scan)")
 
+    def _drilldown_native(self, db, table):
+        """Find the differing pks of one table (whole-table for normal
+        sizes, PK-index slices for big single-int-pk tables so pgsql_tmp
+        never fills). Writes data-<table>.missing/.extra/.changed."""
+        cols = self._pk_cols_of(db, table)
+        if not cols:
+            return None
+        sch, tbl = table.split(".", 1)
+        qt = f'"{sch}"."{tbl}"'
+        pkexpr = "concat_ws(e'\\t', " + ", ".join(
+            f'"{c}"::text' for c in cols) + ")"
+
+        def fetch(side, where=""):
+            out = {}
+            for l in self._psql(side, db,
+                                f"select {pkexpr}||'|'||md5(to_jsonb(t)::text)"
+                                f" from {qt} t {where}").splitlines():
+                k, _, hsh = l.rpartition("|")
+                out[k] = hsh
+            return out
+
+        n = int(self._psql("src", db, f"select count(*) from {qt}") or 0)
+        intpk = self._int_pk(db, sch, tbl)
+        missing, extra, changed = [], [], []
+        if n > self.hop.slice and intpk:
+            mm = self._psql("src", db,
+                            f'select coalesce(min("{intpk}"),0)||\'|\'||'
+                            f'coalesce(max("{intpk}"),0) from {qt}')
+            lo, hi = (int(x) for x in mm.split("|"))
+            step = max(1, (hi - lo) // max(1, n // self.hop.slice) + 1)
+            for a in range(lo, hi + 1, step):
+                w = f'where "{intpk}" >= {a} and "{intpk}" < {a + step}'
+                s, dd = fetch("src", w), fetch("dst", w)
+                missing += [k for k in s if k not in dd]
+                extra += [k for k in dd if k not in s]
+                changed += [k for k in s if k in dd and s[k] != dd[k]]
+        else:
+            s, dd = fetch("src"), fetch("dst")
+            missing = [k for k in s if k not in dd]
+            extra = [k for k in dd if k not in s]
+            changed = [k for k in s if k in dd and s[k] != dd[k]]
+        self._write_pk_files(db, table, sorted(missing), sorted(extra),
+                             sorted(changed))
+        return len(missing), len(extra), len(changed)
+
     def check_data(self, db, table=None, stream=None, with_counts=False,
                    consistent=False):
         if table:
-            rc, out = self._script("check-data.sh", db, table, stream=stream)
-            status = "ok" if rc == 0 else "diff"
-            return [Result("data", f"{db} {table}", status,
-                           out.splitlines()[-1] if out else "",
+            r = self._drilldown_native(db, table)
+            status = "ok" if r and not any(r) else "diff" if r else "error"
+            detail = (f"missing={r[0]} extra={r[1]} changed={r[2]}"
+                      if r else "no primary key for row-level compare")
+            return [Result("data", f"{db} {table}", status, detail,
                            str(self._report(db)),
                            f"migkit sync {self.hop.name} --db {db} --kind rows")]
         if consistent:
@@ -431,7 +458,7 @@ class PostgresEngine(Engine):
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
         for t in bad:
-            self._script("check-data.sh", db, t, stream=stream)
+            self._drilldown_native(db, t)
         if bad:
             still, healed, how = self._resolve_inflight(db, bad, stream)
             if not still and not err:
@@ -458,8 +485,9 @@ class PostgresEngine(Engine):
 
     def _ignore_patterns(self):
         import re as _re
+        from ..config import CONF
         pats = []
-        for d in (CHECKER / "conf", PGDC_ROOT / "conf"):
+        for d in (Path(CONF).parent, PGDC_ROOT / "conf"):
             f = d / f"{self.hop.name}.schema-ignore"
             if f.exists():
                 pats += [p for p in f.read_text().splitlines() if p.strip()]
@@ -797,10 +825,9 @@ class PostgresEngine(Engine):
                     if n:
                         counts.append(f"{kind_}={n}")
                 actions.append(RepairAction(
-                    db, "rows",
-                    [f"{CHECKER / 'fix-data.sh'} {self.hop.name} {db} {t}"],
-                    [], f"{t}: {', '.join(counts) or 'no pk files'},"
-                        " deleted rows saved to undo before recopy"))
+                    db, "rows", [f"resync-rows {t}"], [],
+                    f"{t}: {', '.join(counts) or 'no pk files'},"
+                    " deleted rows saved to undo before recopy"))
         if kind in ("schema", "all"):
             act = self._schema_repair_action(db)
             if act:
@@ -833,8 +860,77 @@ class PostgresEngine(Engine):
             blob = "begin;\n" + "\n".join(action.statements) + "\ncommit;"
             self._psql("dst", db, blob)
         else:
-            for cmd in action.statements:
-                run(cmd, env=self._env())
+            for stmt in action.statements:
+                self._repair_rows_native(db, stmt.split(" ", 1)[1])
+
+    def _psql_run(self, side, db, script):
+        """Run a multi-statement psql script from stdin so client-side
+        \\copy works (needed for the temp-pk join repair)."""
+        ep = self.hop.source if side == "src" else self.hop.target
+        env = tool_env({"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
+                        "PGOPTIONS": "-c statement_timeout=0"})
+        p = subprocess.run(
+            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
+             "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
+            input=script, capture_output=True, text=True, env=env)
+        if p.returncode:
+            raise RuntimeError((p.stdout + p.stderr)[-400:])
+        return p.stdout
+
+    def _repair_rows_native(self, db, t):
+        """Set-based row repair: pull the rows to (re)copy from source into a
+        temp file via a temp-pk join, save the target rows they overwrite as
+        undo, delete extra/changed on target, then copy the source rows in.
+        session_replication_role=replica keeps FKs/triggers quiet, with a
+        fallback when the target refuses it."""
+        d = self._report(db)
+        sch, tbl = t.split(".", 1)
+        qt = f'"{sch}"."{tbl}"'
+        pks = self._pk_cols_of(db, t)
+        if not pks:
+            return
+        cols_decl = ", ".join(f"c{i + 1} text" for i in range(len(pks)))
+        cond = " and ".join(f't."{pks[i]}"::text = p.c{i + 1}'
+                            for i in range(len(pks)))
+
+        def read(kind):
+            f = d / f"data-{t}.{kind}"
+            return f.read_text() if f.exists() else ""
+
+        copy_pks = read("missing") + read("changed")
+        del_pks = read("extra") + read("changed")
+        work = Path(tempfile.mkdtemp())
+        undo = d / "undo"
+        undo.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        try:
+            (work / "copy.pks").write_text(copy_pks)
+            (work / "del.pks").write_text(del_pks)
+            if copy_pks.strip():
+                self._psql_run("src", db,
+                    f"create temp table _pk ({cols_decl});\n"
+                    f"\\copy _pk from '{work}/copy.pks'\n"
+                    f"\\copy (select t.* from {qt} t join _pk p on {cond})"
+                    f" to '{work}/rows.out'\n")
+            body = (f"create temp table _pk ({cols_decl});\n"
+                    f"\\copy _pk from '{work}/del.pks'\n"
+                    f"\\copy (select t.* from {qt} t join _pk p on {cond})"
+                    f" to '{undo}/{ts}-{tbl}.rows'\n"
+                    f"delete from {qt} t using _pk p where {cond};\n")
+            if (work / "rows.out").exists():
+                body += f"\\copy {qt} from '{work}/rows.out'\n"
+            try:
+                self._psql_run("dst", db,
+                               "set session_replication_role = replica;\n" + body)
+            except RuntimeError as e:
+                if "session_replication_role" not in str(e):
+                    raise
+                self._psql_run("dst", db, body)
+            with (undo / "manifest.txt").open("a") as m:
+                m.write(f"{ts} {t}: re-copy {undo}/{ts}-{tbl}.rows to undo\n")
+        finally:
+            import shutil as _sh
+            _sh.rmtree(work, ignore_errors=True)
 
     def setup_target_plan(self, db):
         s, t = self.hop.source, self.hop.target

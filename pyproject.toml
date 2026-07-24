@@ -1,6 +1,6 @@
 [project]
 name = "migkit"
-version = "0.4.0"
+version = "0.4.1"
 description = "Personal database migration toolkit: setup, validate, repair, advise, watch"
 requires-python = ">=3.10"
 dependencies = [
@@ -28,9 +28,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["migkit*"]
-
-[tool.setuptools.package-data]
-migkit = ["scripts/**/*"]
 
 [tool.pytest.ini_options]
 markers = ["docker: needs a docker daemon"]
