@@ -104,3 +104,29 @@ def test_mysql_ddl_type_mapping():
     assert "DOUBLE PRECISION PRECISION" not in sql
     assert "IDENTITY" in sql
     assert "BOOLEAN" in sql
+
+
+def test_secret_env_and_file_resolution(tmp_path, monkeypatch):
+    from migkit.config import _secret
+    monkeypatch.setenv("MIGKIT_PW", "s3cret")
+    assert _secret("env:MIGKIT_PW") == "s3cret"
+    assert _secret("${MIGKIT_PW}") == "s3cret"
+    f = tmp_path / "pw"
+    f.write_text("filepw\n")
+    assert _secret(f"file:{f}") == "filepw"
+    assert _secret("plain-value") == "plain-value"
+
+
+def test_secret_missing_env_errors():
+    import pytest
+    from migkit.config import _secret
+    with pytest.raises(SystemExit):
+        _secret("env:DEFINITELY_NOT_SET_MIGKIT")
+
+
+def test_endpoint_resolves_password_secret(monkeypatch):
+    from migkit.config import _endpoint
+    monkeypatch.setenv("PGPW", "fromenv")
+    ep = _endpoint("postgres", {"host": "h", "user": "u",
+                                "password": "env:PGPW"})
+    assert ep.password == "fromenv"

@@ -56,6 +56,48 @@ DEFAULT_PORTS = {
 }
 
 
+def _secret(val):
+    """Resolve a secret reference so credentials need not sit in plaintext:
+      env:NAME / ${NAME}   -> environment variable
+      file:/path           -> file contents (trimmed; Docker/K8s secrets)
+      vault:secret/db#key  -> Vault KV via VAULT_ADDR/VAULT_TOKEN (or the
+                              vault CLI), read at load time
+    A plain string is returned unchanged."""
+    if not isinstance(val, str):
+        return val
+    if val.startswith("env:") or (val.startswith("${") and val.endswith("}")):
+        name = val[4:] if val.startswith("env:") else val[2:-1]
+        v = os.environ.get(name)
+        if v is None:
+            raise SystemExit(f"secret env var '{name}' is not set")
+        return v
+    if val.startswith("file:"):
+        p = Path(val[5:]).expanduser()
+        if not p.exists():
+            raise SystemExit(f"secret file '{p}' not found")
+        return p.read_text().strip()
+    if val.startswith("vault:"):
+        return _vault_read(val[6:])
+    return val
+
+
+def _vault_read(ref):
+    path, _, key = ref.partition("#")
+    key = key or "value"
+    import json as _json
+    import shutil
+    import subprocess
+    if shutil.which("vault"):
+        p = subprocess.run(["vault", "kv", "get", "-format=json", path],
+                           capture_output=True, text=True)
+        if p.returncode == 0:
+            data = _json.loads(p.stdout)["data"]["data"]
+            if key in data:
+                return data[key]
+    raise SystemExit(f"could not read vault secret '{ref}'"
+                     " (need vault CLI + VAULT_ADDR/VAULT_TOKEN)")
+
+
 def _endpoint(engine, raw):
     raw = raw or {}
     extra = {k: v for k, v in raw.items()
@@ -64,10 +106,10 @@ def _endpoint(engine, raw):
     if isinstance(nested, dict):
         extra.update(nested)
     return Endpoint(
-        host=raw.get("host", ""),
+        host=_secret(raw.get("host", "")),
         port=int(raw.get("port") or DEFAULT_PORTS.get(engine, 0)),
-        user=raw.get("user", ""),
-        password=str(raw.get("password", "")),
+        user=_secret(raw.get("user", "")),
+        password=str(_secret(raw.get("password", ""))),
         options=extra,
     )
 

@@ -6,7 +6,9 @@ hops:
       host: source.example.com
       port: 5432
       user: postgres
-      password: secret
+      # secrets need not be plaintext — use a reference resolved at load:
+      #   env:NAME / ${NAME}   file:/run/secrets/pw   vault:secret/db#password
+      password: env:MIGKIT_SRC_PASSWORD
     target:
       host: 10.0.0.1
       port: 5432
