@@ -36,11 +36,12 @@ def _lock(hop):
 
 
 def _changelog(hop, entry, eng=None):
+    # audit is local-only: migkit never writes bookkeeping into the
+    # destination, so the target stays a faithful copy of the source and
+    # schema verification never trips over our own table
     with (hop.report_dir() / "changelog.jsonl").open("a") as f:
         f.write(json.dumps({"at": time.strftime("%F %T"), **entry},
                            default=str) + "\n")
-    if eng is not None and hasattr(eng, "record_ledger") and entry.get("db"):
-        eng.record_ledger(entry["db"], entry)
 
 
 class _Checkpoint(dict):
@@ -975,9 +976,9 @@ def report(hop_name, do_open, refresh, serve, port):
 @click.option("--db", default="")
 @click.option("--show", "show_ts", default="", help="print one state in detail")
 def history(hop_name, db, show_ts):
-    """Audit trail: saved rollback states, every write migkit made (from
-    the target's migkit_changelog table, like DATABASECHANGELOG) and the
-    local changelog. Survives losing this machine."""
+    """Audit trail: saved rollback states and every write migkit made, read
+    from the local changelog and state journals. migkit writes no bookkeeping
+    into the destination, so the audit is local-only."""
     hop = get_hop(hop_name)
     root = hop.report_dir()
     t = Table("state", "db", "captured", "journal")
@@ -1001,27 +1002,12 @@ def history(hop_name, db, show_ts):
                 jl = sdir / "journal.jsonl"
                 if jl.exists():
                     console.print(jl.read_text().strip())
-    eng = get_engine(hop)
-    dbs = [db] if db else (eng.databases() if hasattr(eng, "databases")
-                           and hop.source.configured() else [])
-    shown = False
-    if hasattr(eng, "read_ledger"):
-        for d in dbs:
-            rows = eng.read_ledger(d)
-            if not rows:
-                continue
-            shown = True
-            lt = Table("ran_at", "author", "op", "scope", "detail",
-                       title=f"{d} (in-database ledger)")
-            for r in rows[-30:]:
-                lt.add_row(*[c[:50] for c in r])
-            console.print(lt)
     cl = root / "changelog.jsonl"
     if cl.exists():
         console.print("\nlocal changelog (last 15):")
         for line in cl.read_text().splitlines()[-15:]:
             console.print(f"  {line}")
-    elif not shown and not found:
+    elif not found:
         console.print("no history yet, nothing has been applied")
 
 

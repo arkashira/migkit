@@ -2,6 +2,25 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.3.2] — 2026-07-24
+
+Zero footprint on the destination.
+
+### Changed
+- Removed the in-database audit ledger. migkit no longer creates
+  `public.migkit_changelog` (pg) / `<db>.migkit_changelog` (mysql) on the
+  target — `record_ledger`/`read_ledger` are gone. The audit is now
+  local-only (per-hop `changelog.jsonl` + state journals), which was already
+  written alongside it. **Why:** a verification tool must not contaminate the
+  target; the ledger table made the target differ from the source and tripped
+  migkit's own schema check (surfaced by a real cart_uat run where the only
+  schema diff was migkit's own table, flagged by migra/liquibase/pk-inventory
+  because their exclusion of it was incomplete).
+- `history` reads the local changelog and state journals only.
+- The `*.migkit_changelog` exclusion filters stay in place so a table left by
+  an older version doesn't show as a diff; drop leftovers with
+  `drop table public.migkit_changelog` (pg) on the target.
+
 ## [0.3.1] — 2026-07-24
 
 Read-replica endpoint guardrail (from a live UAT outage: an app pointed at

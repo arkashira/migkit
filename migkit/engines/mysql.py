@@ -1100,37 +1100,6 @@ class MySQLEngine(Engine):
         rows = self._q(side, f"select * from `{db}`.`{t}` limit {limit}")
         return pd.DataFrame(rows, columns=cols)
 
-    def record_ledger(self, db, entry):
-        try:
-            conn = self._conn("dst")
-            with conn.cursor() as cur:
-                cur.execute(f"create table if not exists `{db}`.migkit_changelog"
-                            " (id bigint auto_increment primary key,"
-                            " ran_at datetime default current_timestamp,"
-                            " author varchar(64), op varchar(64),"
-                            " scope varchar(255), detail text, undo_ref text)")
-                cur.execute(f"insert into `{db}`.migkit_changelog"
-                            " (author, op, scope, detail, undo_ref)"
-                            " values (%s, %s, %s, %s, %s)",
-                            (entry.get("author", "migkit"), entry.get("op"),
-                             entry.get("scope") or entry.get("db"),
-                             entry.get("detail") or entry.get("note"),
-                             entry.get("undo_ref")))
-            conn.commit()
-            conn.close()
-            return True
-        except Exception:
-            return False
-
-    def read_ledger(self, db):
-        try:
-            rows = self._q("dst", f"select ran_at, author, op, scope, detail"
-                           f" from `{db}`.migkit_changelog order by id")
-            return [[str(r[0]), r[1] or "", r[2] or "", r[3] or "", r[4] or ""]
-                    for r in rows]
-        except Exception:
-            return []
-
     def watch_sample(self, db):
         import time
         q = ("select coalesce(sum(table_rows), 0) from information_schema.tables"

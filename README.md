@@ -96,10 +96,13 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
 - **Continuous validation** — `watch --verify` re-checks on an interval and
   tells transient replication lag apart from a real diff (the
   confirm-out-of-sync idea from enterprise tools).
+- **Zero footprint on the destination** — migkit writes nothing of its own
+  into the target, so the target stays a faithful copy of the source and
+  schema verification never trips over migkit's own objects. The audit is
+  local-only: a per-hop `changelog.jsonl` ledger plus state journals.
 - **State and rollback** — tagged snapshots of target sequences and schema kept
-  in two places, a `terraform-plan`-style rollback preview, an in-database
-  audit ledger (`migkit_changelog`, like Liquibase's DATABASECHANGELOG), and a
-  per-hop changelog.
+  in two places, a `terraform-plan`-style rollback preview, and the local
+  changelog ledger of every write migkit made.
 - **Composes real tools** — migra, liquibase, atlas (schema); reladiff,
   pt-table-sync (data); pgloader, sqlglot (cross-engine); datacompy
   (column-level sample diff). Nothing reinvented; each degrades gracefully if
@@ -156,7 +159,7 @@ Eleven commands cover the whole lifecycle:
 | `watch` | live load progress: counts, rate, ETA, replication state; `--verify` = continuous re-check loop; `--verify --delta` = O(changes) verification off the WAL/binlog/change stream |
 | `sync` | make target equal source: dry-run plan, `--apply` executes with undo, `--go` checks + repairs with rollback checkpoints |
 | `rollback` | restore any saved state, with a plan preview |
-| `history` | saved states + the in-database audit ledger + local changelog |
+| `history` | saved rollback states + the local changelog ledger |
 | `report` | HTML report from the last check; `--serve` runs the live dashboard |
 
 Every check is read-only and rerunnable. Every repair is dry-run unless
@@ -213,9 +216,10 @@ so new pairs (pg→mysql, mssql→pg) follow the same shape.
 - **vs migra/results** — migkit uses migra as one of four schema layers, and
   adds the entire data dimension migra does not cover.
 - **vs Liquibase/Flyway** — different category (they version schema changes for
-  CI/CD). migkit adopts their best ideas — in-database audit ledger, rollback,
-  preconditions (`assess`), versioned migration files (`schema --migration`) —
-  but is a verification/move tool, not a changeset runner.
+  CI/CD). migkit adopts their best ideas — rollback, preconditions (`assess`),
+  versioned migration files (`schema --migration`) — but keeps its own audit
+  local instead of in the target DB, and is a verification/move tool, not a
+  changeset runner.
 
 ## Safety model
 
@@ -223,9 +227,10 @@ so new pairs (pg→mysql, mssql→pg) follow the same shape.
   are read-only and can run anytime.
 - `sync`, `move` (all modes), `schema --convert` write to the target; all are
   dry-run by default and require `--apply`/`--go`.
-- The source is never written by migkit.
-- A lock file prevents concurrent writes; every write is recorded in the
-  changelog and the in-database ledger.
+- The source is never written by migkit, and neither is anything on the target
+  beyond the migrated data itself — no bookkeeping tables.
+- A lock file prevents concurrent writes; every write is recorded in the local
+  changelog ledger.
 - Movers are self-hosted only on a trusted network (or a cloud VM); managed
   services remain the recommended path over long-haul links.
 
