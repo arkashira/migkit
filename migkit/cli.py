@@ -583,21 +583,128 @@ def _sync_go(hop_name, db, tag):
 @click.option("--db", default="", help="one database, or all diffed dbs if omitted")
 @click.option("--kind", default="all",
               type=click.Choice(["sequences", "rows", "schema", "all"]))
+@click.option("--mode", type=click.Choice(
+    ["reconcile", "verify", "seed", "stream", "migrate"]),
+    default="reconcile",
+    help="run a whole flow: verify (read-only assurance), seed (schema +"
+         " initial load + reconcile), stream (follow live changes + delta"
+         " verify), migrate (seed then stream). default reconcile = repair"
+         " the last check's diffs")
 @click.option("--apply", "do_apply", is_flag=True,
               help="execute the repair plan, default is dry-run")
 @click.option("--go", is_flag=True,
               help="checkpointed check+repair sweep with rollback state")
+@click.option("--serve", is_flag=True,
+              help="incremental modes: run the verify loop forever (VM/service)")
+@click.option("--interval", default=60, help="--serve: seconds between cycles")
 @click.option("--tag", default="", help="with --go: label this state, e.g. pre-cutover")
-def sync(hop_name, db, kind, do_apply, go, tag):
-    """Make target equal to source. Shows the repair plan (dry-run),
-    --apply executes it, --go re-checks and repairs in one pass while
-    checkpointing target state for rollback.
+@click.pass_context
+def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval, tag):
+    """Make target equal to source, or run a full DMS-style migration.
 
-    With no --db, repairs every database that had a diff in the last check,
-    so you never copy-paste one command per table."""
+    Default (reconcile) shows/repairs the last check's diffs; --apply
+    executes, --go checkpoints for rollback. --mode runs the whole flow
+    end to end with verification wrapped around every step, so migkit can
+    stand in for a managed migration service on a trusted VM."""
+    if mode != "reconcile":
+        return _orchestrate(ctx, hop_name, db, mode, do_apply or go,
+                            serve, interval)
     if go:
         return _sync_go(hop_name, db, tag)
     return _repair(hop_name, db, kind, do_apply)
+
+
+def _run_check(ctx, hop_name, db, only, consistent=False):
+    """Invoke check, returning True when green (check exits 1 on diff)."""
+    try:
+        ctx.invoke(check, hop_name=hop_name, db=db, only=only,
+                   consistent=consistent)
+        return True
+    except SystemExit as e:
+        return not e.code
+
+
+def _orchestrate(ctx, hop_name, db, mode, go, serve, interval):
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    tail = "  (dry-run; add --apply/--go to execute)" if not go else ""
+
+    if mode == "verify":
+        console.print("[bold]verify[/bold]: read-only, consistent snapshot")
+        ok = _run_check(ctx, hop_name, db, "", consistent=True)
+        raise SystemExit(0 if ok else 1)
+
+    if mode in ("seed", "migrate"):
+        console.print(f"[bold]seed[/bold]{tail}")
+        console.print("1/4 schema: align target objects to source")
+        _run_check(ctx, hop_name, db, "schema")
+        _repair(hop_name, db, "schema", go)
+        console.print("2/4 load: bulk copy via the best installed mover")
+        if go:
+            movers_pick_and_run(hop, eng, db, go)
+        else:
+            console.print("   would run: migkit move"
+                          f" {hop_name} --mode full --go")
+        console.print("3/4 reconcile: repair residual rows + sequences")
+        _run_check(ctx, hop_name, db, "counts,autoinc,data")
+        _repair(hop_name, db, "all", go)
+        console.print("4/4 verify: consistent snapshot")
+        ok = _run_check(ctx, hop_name, db, "", consistent=True)
+        console.print(f"[{'green' if ok else 'yellow'}]seed"
+                      f" {'GREEN' if ok else 'has residual diffs'}[/]")
+        if mode == "seed":
+            raise SystemExit(0 if ok else 1)
+
+    if mode in ("stream", "migrate"):
+        console.print(f"[bold]stream[/bold]{tail}")
+        from .engines import ALIASES
+        engine = ALIASES.get(hop.engine, hop.engine)
+        if go:
+            if engine == "postgres" and hasattr(eng, "replicate_sql"):
+                _replicate(hop, eng, db, True, False, True)
+            elif hasattr(eng, "tail_apply") and db:
+                _tail(hop, eng, db, True)
+            else:
+                console.print("   CDC start skipped: use migkit move --mode"
+                              " cdc (or --via debezium) for this engine")
+        else:
+            console.print("   would start CDC: migkit move"
+                          f" {hop_name} --mode cdc --go")
+        if not hasattr(eng, "delta_verify"):
+            console.print("   delta verify not available for this engine")
+            return
+        n = 0
+        while True:
+            n += 1
+            for d in ([db] if db else eng.databases()):
+                try:
+                    rs = eng.delta_verify(d)
+                    head = rs[0]
+                    c = {"ok": "green", "diff": "yellow",
+                         "error": "red"}.get(head.status, "white")
+                    console.print(f"  cycle {n} {d}:"
+                                  f" [{c}]{head.status.upper()}[/] {head.detail}")
+                except Exception as e:
+                    console.print(f"  cycle {n} {d}: [red]error[/] {e}")
+            if not serve:
+                break
+            time.sleep(interval)
+
+
+def movers_pick_and_run(hop, eng, db, go):
+    from . import movers
+    from .engines import ALIASES
+    engine = ALIASES.get(hop.engine, hop.engine)
+    via = movers.pick(engine)
+    for d in ([db] if db else eng.databases()):
+        if via == "builtin":
+            _move_full(hop, eng, d, "", 500000, go)
+        else:
+            for line in movers.run_via(via, hop, d, hop.workers, go,
+                                       lambda m: chat(f"   {m}")):
+                chat(f"   {line}")
+            _changelog(hop, {"op": f"move-{via}", "db": d})
 
 
 def _move_full(hop, eng, db, table, chunk, go):

@@ -1,0 +1,19 @@
+# incremental sync as a long-lived service: full load once, then verify the
+# CDC stream forever. Mount conf/ (hops.yaml, chmod 600) and state/ (resume
+# checkpoints + reports survive restarts).
+services:
+  migkit-sync:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    restart: unless-stopped
+    volumes:
+      - ./conf:/conf:ro
+      - migkit-state:/state
+    command: ["sync", "my-hop", "--mode", "migrate", "--go",
+              "--serve", "--interval", "60"]
+  migkit-ui:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    restart: unless-stopped
+    ports: ["8899:8899"]
+    volumes: [ "migkit-state:/state" ]
+    command: ["report", "--serve", "--port", "8899"]
+volumes: { migkit-state: {} }

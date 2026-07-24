@@ -1,0 +1,18 @@
+# systemd template: systemctl enable --now migkit-sync@my-hop
+# runs incremental verify-and-repair as a service, restarts on failure
+[Unit]
+Description=migkit sync (%i) - self-hosted migration verify+repair
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=migkit
+Environment=MIGKIT_CONF=/etc/migkit/hops.yaml
+Environment=MIGKIT_REPORTS=/var/lib/migkit/reports
+ExecStart=/opt/migkit/.venv/bin/migkit sync %i --mode migrate --go --serve --interval 60
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

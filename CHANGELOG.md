@@ -2,6 +2,23 @@
 
 All notable changes to migkit. Dates are the working session, not release tags.
 
+## [0.4.0] — 2026-07-24
+
+Self-hostable migration service: run the whole flow on a VM, DMS-style.
+
+### Added
+- **`sync --mode`** unifies the lifecycle under managed-service vocabulary,
+  with verification wrapped around every step:
+  - `verify` — read-only consistent-snapshot check (exit 1 on diff)
+  - `seed` — align schema → bulk load (best installed mover) → reconcile
+    rows/sequences → consistent verify, in one command
+  - `stream` — start/continue native CDC, then delta-verify each cycle
+  - `migrate` — seed then stream (the DMS "full load + CDC")
+  - `--serve --interval` runs the incremental verify loop forever.
+- **VM deployment** (`deploy/`): Dockerfile, docker-compose (sync service +
+  dashboard), and a systemd template, so migkit can stand in for DMS/DTS on a
+  trusted VM with resume checkpoints and reports on a persistent volume.
+
 ## [0.3.4] — 2026-07-24
 
 Prod-grade robustness and schema-object repair.
