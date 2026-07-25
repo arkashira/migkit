@@ -76,6 +76,8 @@ do $$ declare r record; begin
   loop execute 'drop table if exists public.'||quote_ident(r.tablename)||' cascade'; end loop;
   for r in select sequencename from pg_sequences where schemaname = 'public'
   loop execute 'drop sequence if exists public.'||quote_ident(r.sequencename)||' cascade'; end loop;
+  for r in select extname from pg_extension where extname <> 'plpgsql'
+  loop execute 'drop extension if exists '||quote_ident(r.extname)||' cascade'; end loop;
 end $$;
 """
 

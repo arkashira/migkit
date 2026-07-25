@@ -346,8 +346,13 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     _require_configured(hop)
     eng = get_engine(hop)
     allowed = list(eng.checks) + ["deep"]
-    checks = [c for c in (only.split(",") if only else list(eng.checks))
-              if c in allowed]
+    # smart by default: with no --only, run the full battery including the
+    # deep checks (fk orphans, sequence collisions, drift, boundary). --only
+    # narrows for a fast targeted pass; --deep stays as a no-op alias.
+    if only:
+        checks = [c for c in only.split(",") if c in allowed]
+    else:
+        checks = list(eng.checks) + ["deep"]
     if do_deep and "deep" not in checks:
         checks.append("deep")
     dbs = [db] if db else eng.databases()
@@ -1010,6 +1015,29 @@ def _monitor(hop_name, db, interval, only, cycles):
         time.sleep(interval)
 
 
+def _cutover_verdict(prev, cur, stable_cycles):
+    """Decide, from two consecutive watch samples, whether it is safe to cut
+    over. The trap is a source that looks caught up while a queue/worker keeps
+    writing to it; name the hot tables instead of greenlighting a flip. A
+    green verdict still asks for one consistent check to certify."""
+    src, dst = cur.get("src_rows", 0), cur.get("dst_rows", 0)
+    pt = (prev or {}).get("src_tables") or {}
+    hot = [f"{t} +{c - pt[t]}" for t, c in (cur.get("src_tables") or {}).items()
+           if t in pt and c > pt[t]]
+    if hot:
+        return ("NOT SAFE", "yellow",
+                "source still HOT (writers active): " + ", ".join(hot[:4])
+                + " - pause them to converge")
+    if dst >= src and src > 0 and stable_cycles >= 2:
+        return ("SAFE TO CUT OVER", "green",
+                f"source stable {stable_cycles} cycles and dst>=src; run"
+                " 'check --consistent' to certify, then flip")
+    if dst >= src and src > 0:
+        return ("converging", "cyan",
+                "dst caught up; waiting for source to settle before verdict")
+    return None
+
+
 @main.command()
 @click.argument("hop_name")
 @click.option("--db", default="")
@@ -1044,6 +1072,7 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
     interval = interval or 30
     dbs = [db] if db else eng.databases()
     last = {}
+    stable = {}
     n = 0
     while True:
         n += 1
@@ -1056,17 +1085,27 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
             line = f"{d}: src~{human_int(src)} dst~{human_int(dst)}"
             if src:
                 line += f" ({dst * 100 // src}%)"
-            if d in last and s["ts"] > last[d]["ts"]:
-                rate = (dst - last[d]["dst_rows"]) / (s["ts"] - last[d]["ts"])
+            prev = last.get(d)
+            if prev and s["ts"] > prev["ts"]:
+                rate = (dst - prev["dst_rows"]) / (s["ts"] - prev["ts"])
                 if rate > 0:
                     line += (f" rate {human_int(int(rate))}/s"
                              f" eta {human_secs((src - dst) / rate)}")
-                elif dst >= src:
-                    line += " caught up, check lag before cutover"
+            # source hot = it grew (aggregate or any table) since last cycle
+            grew = bool(prev) and (
+                src > prev.get("src_rows", 0)
+                or any(c > (prev.get("src_tables") or {}).get(t, 0)
+                       for t, c in (s.get("src_tables") or {}).items()
+                       if t in (prev.get("src_tables") or {})))
+            stable[d] = 0 if grew else stable.get(d, 0) + 1
             for slot in s.get("replication_slots", []):
                 line += f"\n    slot {slot}"
             for conn in s.get("replication_conns", []):
                 line += f"\n    conn {conn}"
+            v = _cutover_verdict(prev, s, stable[d])
+            if v:
+                label, style, detail = v
+                line += f"\n    [{style}]{label}[/{style}]: {detail}"
             console.print(line)
             last[d] = s
         if count and n >= count:

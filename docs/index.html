@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>migkit - usage reference</title>
+<meta name="description" content="migkit: verify, repair, and move databases across engines - without trusting the mover. Usage reference and the silent-corruption checks it runs on its own.">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#111721; --ink:#d6dee8; --mut:#8b98a8; --line:#222c39;
+    --acc:#4aa3ff; --ok:#39b96a; --warn:#e0a93b; --no:#e5534b; --code:#0a0e14;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,pre,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  code{background:#182130;color:#c8d3e0;padding:.1em .4em;border-radius:4px;font-size:.9em}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
+  pre code{background:none;padding:0;color:#cbd6e4}
+  .layout{display:flex;max-width:1180px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;width:240px;height:100vh;
+    overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
+  nav .brand{font-weight:700;font-size:19px;color:#fff;letter-spacing:.2px}
+  nav .tag{color:var(--mut);font-size:12px;margin:4px 0 20px}
+  nav a{display:block;color:var(--mut);padding:4px 0;font-size:13.5px}
+  nav a:hover{color:var(--ink);text-decoration:none}
+  nav .grp{color:#5f6c7d;text-transform:uppercase;font-size:10.5px;
+    letter-spacing:.9px;margin:16px 0 4px}
+  main{flex:1;min-width:0;padding:34px 40px 120px;max-width:900px}
+  h1{font-size:30px;margin:.2em 0 .1em;color:#fff}
+  h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;color:#fff;
+    border-top:1px solid var(--line)}
+  h3{font-size:16px;margin:1.6em 0 .4em;color:#e8eef6}
+  .lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
+  .rule{background:#141b26;border-left:3px solid var(--acc);border-radius:0 8px 8px 0;
+    padding:12px 16px;margin:18px 0;color:#e8eef6}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#161d28;color:#e8eef6;font-weight:600}
+  td.c,th.c{text-align:center}
+  .y{color:var(--ok);font-weight:700}
+  .p{color:var(--warn);font-weight:700}
+  .n{color:var(--no);font-weight:700}
+  .pill{display:inline-block;background:#182130;border:1px solid var(--line);
+    color:var(--mut);border-radius:20px;padding:2px 10px;font-size:12px;margin:2px 4px 2px 0}
+  .opt{color:#8fd0ff}
+  footer{color:#5f6c7d;font-size:12.5px;border-top:1px solid var(--line);
+    margin-top:40px;padding-top:16px}
+  .badges span{margin-right:8px}
+  @media(max-width:820px){nav{display:none}main{padding:24px 18px 80px}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <div class="brand">migkit</div>
+  <div class="tag">the migration verifier</div>
+  <a href="#overview">Overview</a>
+  <a href="#install">Install</a>
+  <a href="#configure">Configure a hop</a>
+  <div class="grp">Commands</div>
+  <a href="#commands">All commands</a>
+  <a href="#check">check</a>
+  <a href="#assess">assess</a>
+  <a href="#watch">watch</a>
+  <a href="#sync">sync</a>
+  <a href="#move">move</a>
+  <div class="grp">What it catches</div>
+  <a href="#detects">Silent-corruption checks</a>
+  <a href="#compare">How it compares</a>
+  <div class="grp">Operating</div>
+  <a href="#cutover">Cutover runbook</a>
+  <a href="#safety">Safety model</a>
+  <a href="#engines">Engines</a>
+</nav>
+
+<main>
+  <h1>migkit</h1>
+  <p class="lede">Verify, repair, and move databases across engines - without
+  trusting the mover.</p>
+  <div class="badges">
+    <span class="pill">postgres</span><span class="pill">mysql</span>
+    <span class="pill">mongodb</span><span class="pill">mssql</span>
+    <span class="pill">sqlite</span><span class="pill">redis</span>
+    <span class="pill">kafka</span><span class="pill">+ cross-engine</span>
+  </div>
+
+  <h2 id="overview">Overview</h2>
+  <p>Managed movers (AWS DMS, Tencent/Alibaba DTS, GCP DMS) and CDC engines move
+  rows well, then leave the target broken in ways a row count never reveals:
+  sequences that collide on the first insert, columns silently truncated,
+  timestamps shifted by a timezone, text mangled by an encoding downgrade,
+  partitions rerouted, constraints left untrusted. They only compare rows -
+  never structure - and cannot repair a single row or roll back.</p>
+  <div class="rule"><b>The rule migkit is built on:</b> never let the mover be the
+  judge of its own work.</div>
+  <p>migkit does everything <em>around</em> the move: it prepares the target,
+  tells you exactly when to cut over, watches the load, validates the result down
+  to every row and every object, and repairs what the mover could not carry.
+  One command - <code>migkit check</code> - introspects the connection
+  and runs every check that applies. You choose nothing.</p>
+
+  <h2 id="install">Install</h2>
+<pre><code>git clone https://github.com/arkashira/migkit
+cd migkit &amp;&amp; ./bootstrap.sh &amp;&amp; source .venv/bin/activate</code></pre>
+  <p><code>bootstrap.sh</code> creates the venv, installs libpq, pulls optional
+  drivers (mysql, mongo, redis, kafka) and the tools migkit drives
+  (pg_dump/mydumper/pgloader, atlas, reladiff). Anything that will not install is
+  skipped - every feature has a built-in fallback. Run
+  <code>migkit doctor --install</code> to fill gaps on another machine.</p>
+
+  <h2 id="configure">Configure a hop</h2>
+  <p>A <em>hop</em> is a source-&gt;target pair in <code>conf/hops.yaml</code>
+  (gitignored, chmod 600):</p>
+<pre><code>hops:
+  my-hop:
+    engine: postgres            # postgres | mysql | mssql | mongodb | sqlite | redis | kafka
+    source: { host: src.example.com, port: 5432, user: app, password: "env:SRC_PW" }
+    target: { host: 10.0.0.10,       port: 5432, user: app, password: "vault:kv/db#pw" }
+    databases: [appdb, orders]  # empty = discover from source
+    db_map: { appdb: app_prod } # optional src-&gt;dst rename
+    workers: 4</code></pre>
+  <p>Passwords resolve from <code>env:</code>, <code>file:</code>, or
+  <code>vault:</code> references - never plaintext in the file.</p>
+
+  <h2 id="commands">Commands</h2>
+  <p>Eleven commands cover the whole lifecycle. Every check is read-only and
+  rerunnable; every repair is dry-run unless <code>--apply</code>/<code>--go</code>,
+  saves an undo first, and converges to the same end state on re-run.</p>
+  <table>
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td><code>doctor</code></td><td>configured hops, local tools, connectivity; <code>--install</code> installs missing tools</td></tr>
+    <tr><td><code>assess</code></td><td>pre-migration readiness &amp; source health: CDC prereqs, no-PK tables, encoding, replication-slot bloat, long transactions, read-replica endpoints</td></tr>
+    <tr><td><code>advise</code></td><td>playbook for the hop's mover, phase by phase</td></tr>
+    <tr><td><code>schema</code></td><td>target schema plan; <code>--convert</code> transpiles cross-engine DDL; <code>--migration</code> writes Flyway-style files</td></tr>
+    <tr><td><code>check</code></td><td>layered read-only validation, exit 1 on any diff (see below)</td></tr>
+    <tr><td><code>move</code></td><td>drives the best installed mover, or the built-in resumable copy; <code>--mode cdc</code> / <code>--via debezium</code></td></tr>
+    <tr><td><code>watch</code></td><td>live load progress + the safe-to-cut-over verdict; <code>--verify</code> continuous re-check; <code>--delta</code> O(changes)</td></tr>
+    <tr><td><code>sync</code></td><td>make target equal source: dry-run plan, <code>--apply</code> executes with undo, <code>--go</code> checkpoints for rollback</td></tr>
+    <tr><td><code>rollback</code></td><td>restore any saved state, with a plan preview</td></tr>
+    <tr><td><code>history</code></td><td>saved rollback states + the local changelog ledger</td></tr>
+    <tr><td><code>report</code></td><td>HTML report from the last check; <code>--serve</code> = live dashboard + Prometheus <code>/metrics</code></td></tr>
+  </table>
+
+  <h3 id="check">check</h3>
+  <p><b>Synopsis</b></p>
+<pre><code>migkit check HOP [--db DB] [--table SCHEMA.TABLE] [--only LIST]
+                 [--consistent] [--drill] [--workers N]</code></pre>
+  <p>With no <code>--only</code>, <code>check</code> runs the <em>full battery</em>
+  - schema, counts, sequences, row-data checksums, and every deep check that
+  applies to the hop. It is smart by default; the flags below only narrow or
+  deepen it.</p>
+  <table>
+    <tr><th>Option</th><th>Effect</th></tr>
+    <tr><td class="opt">--consistent</td><td>checksum every table inside one repeatable-read transaction per side, with the source LSN captured as a convergence fence (real diff vs in-flight)</td></tr>
+    <tr><td class="opt">--only LIST</td><td>narrow to a fast subset, e.g. <code>--only counts,data</code></td></tr>
+    <tr><td class="opt">--table T</td><td>one table; with <code>--drill</code>, column-level sample diff</td></tr>
+    <tr><td class="opt">--db DB</td><td>one database instead of all</td></tr>
+  </table>
+  <p><b>Example</b></p>
+<pre><code>migkit check my-hop --consistent
+# exit 0 = every row, sequence, object and deep check matched
+# exit 1 = a diff; the report names which table, row, and column</code></pre>
+
+  <h3 id="assess">assess</h3>
+<pre><code>migkit assess HOP</code></pre>
+  <p>Source-side readiness and operational health before you start the mover:
+  server-version match, writable/read-replica endpoint role,
+  <code>wal_level</code>, no-PK tables, and the replication health that can take
+  the source down mid-migration - slot bloat, abandoned slots, WAL/binlog
+  retention, and long-running transactions.</p>
+
+  <h3 id="watch">watch</h3>
+<pre><code>migkit watch HOP [--verify] [--delta] [--interval S] [--count N]</code></pre>
+  <p>Default: live counts, rate, ETA, replication state - and a
+  <b>cutover verdict</b>. It names the source tables still being written (a
+  queue/worker that the maintenance page did not stop) and only prints
+  <code>SAFE TO CUT OVER</code> once the source is stable and the target has
+  caught up.</p>
+  <table>
+    <tr><td class="opt">--verify</td><td>re-run the read-only checks each cycle (continuous validation); transient lag heals, real diffs persist</td></tr>
+    <tr><td class="opt">--delta</td><td>with <code>--verify</code>: re-verify only the rows touched since the last verified point (WAL slot / binlog / change stream). Idempotent; runs forever on billion-row DBs.</td></tr>
+  </table>
+
+  <h3 id="sync">sync</h3>
+<pre><code>migkit sync HOP [--db DB] [--kind sequences|rows|schema|all]
+                [--apply] [--go] [--on-conflict source-wins|keep-target]
+                [--mode verify|seed|stream|migrate] [--serve]</code></pre>
+  <p>Default reconciles the last check's diffs (dry-run; <code>--apply</code> to
+  execute, <code>--go</code> to checkpoint for rollback). Sequence repair sets
+  <code>GREATEST(source, max(pk))</code> - safe by construction - and
+  <em>refuses</em> to bump when the target is ahead of the source (a writer landed
+  there). <code>--mode</code> runs the whole flow end to end so migkit can stand
+  in for a managed service on a trusted VM.</p>
+
+  <h3 id="move">move</h3>
+<pre><code>migkit move HOP [--via auto|pg_dump|mydumper|pgloader|mongodump|debezium|builtin]
+                [--mode full|cdc] [--go]</code></pre>
+  <p><code>--via auto</code> (default) drives whichever proven mover is installed;
+  the built-in chunked copy is the crash-resumable fallback.
+  <code>--via debezium</code> generates and supervises Connect configs for
+  platform-grade CDC. Whatever moves the data, migkit verifies it.</p>
+
+  <h2 id="detects">Silent-corruption checks</h2>
+  <p>The reason migkit exists. Each of these is a failure class where the mover
+  reports success while the data is quietly wrong - drawn from real DMS / DTS
+  / GoldenGate post-mortems. <code>check</code> auto-discovers which apply to your
+  hop and runs them; you do not pass a flag.</p>
+  <table>
+    <tr><th>Check</th><th>What it catches</th></tr>
+    <tr><td>sequence / identity collision</td><td><code>nextval &lt;= max(pk)</code> -&gt; the first insert after cutover duplicate-keys. Repair to <code>GREATEST(src,max)</code>, is_called-aware.</td></tr>
+    <tr><td>type-narrowing</td><td>target varchar shorter, numeric scale/precision smaller, integer narrower, unsigned-&gt;signed - silent truncation / overflow</td></tr>
+    <tr><td>charset corruption</td><td>utf8mb4 4-byte truncation, latin1-&gt;utf8 double-encode mojibake, U+FFFD replacement-char excess, charset downgrade</td></tr>
+    <tr><td>uniform timezone offset</td><td>every row of a timestamp column shifted by the same constant = a tz-conversion bug, not row corruption</td></tr>
+    <tr><td>collation unique-collapse</td><td>distinct source rows collide under a case/accent-insensitive target collation (data loss); glibc/ICU version drift corrupting btree unique indexes</td></tr>
+    <tr><td>partition routing</td><td>rows stranded in the default / MAXVALUE partition, missing bounds, changed partition key</td></tr>
+    <tr><td>generated columns</td><td>stored value != its expression, expression drift, generated-on-one-side-plain-on-other</td></tr>
+    <tr><td>RLS partial-dump</td><td>row-level-security tables read as a filtered subset by a non-owner; RLS enabled with zero policies (default-deny lockout)</td></tr>
+    <tr><td>NULL vs empty-string</td><td>Oracle <code>''</code>=NULL flips <code>IS NULL</code> semantics and unique behaviour</td></tr>
+    <tr><td>no-PK tables</td><td>CDC silently drops their UPDATE/DELETE; unverifiable by key</td></tr>
+    <tr><td>constraints</td><td>FK orphans behind NOT VALID, untrusted / unvalidated CHECKs, deferrable-flag drift</td></tr>
+    <tr><td>parity gaps</td><td>extensions, table &amp; sequence grants, materialized-view freshness, column drift</td></tr>
+    <tr><td>float drift</td><td>FLOAT/DOUBLE compared with a relative tolerance - catches real precision loss without false-flagging a faithful copy</td></tr>
+    <tr><td>replication health</td><td>slot bloat / abandoned slot filling the source disk, long-running transaction blocking CDC (in <code>assess</code>)</td></tr>
+  </table>
+  <p style="color:var(--mut);font-size:13px">Postgres and MySQL carry the full
+  set; MongoDB and MSSQL have the base layer with the smart set landing engine by
+  engine.</p>
+
+  <h2 id="compare">How it compares</h2>
+  <p>migkit does not out-move the movers - it drives the best of them and adds
+  the layer they all skip. "Through migkit" counts the wrapped tool at full
+  capability plus migkit's own verify/repair.</p>
+  <table>
+    <tr><th>Capability</th><th class="c">migkit</th><th class="c">DMS / DTS</th><th class="c">Debezium</th><th class="c">pt-sync</th><th class="c">GoldenGate +&nbsp;Veridata</th></tr>
+    <tr><td>Bulk load (drives best mover)</td><td class="c y">&#10003;</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c p">~</td><td class="c y">&#10003;</td></tr>
+    <tr><td>Change data capture</td><td class="c y">&#10003;</td><td class="c y">&#10003;</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c y">&#10003;</td></tr>
+    <tr><td>Row verify with proof (LSN fence)</td><td class="c y">&#10003;</td><td class="c p">~</td><td class="c n">&#10007;</td><td class="c p">~</td><td class="c y">&#10003;</td></tr>
+    <tr><td>Consistency fence (no false diffs)</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td><td class="c p">~</td></tr>
+    <tr><td>Delta verify, O(changes)</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td></tr>
+    <tr><td>Column-level diff localization</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td></tr>
+    <tr><td>Schema-object verify</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td></tr>
+    <tr><td>Silent-corruption detectors (14 classes)</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td></tr>
+    <tr><td>Sequence carry &amp; collision guard</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td></tr>
+    <tr><td>Row + schema repair with undo</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td><td class="c y">&#10003;</td></tr>
+    <tr><td>Rollback / state snapshots</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td></tr>
+    <tr><td>Safe-to-cut-over verdict + hot-writer</td><td class="c y">&#10003;</td><td class="c p">~</td><td class="c n">&#10007;</td><td class="c n">&#10007;</td><td class="c p">~</td></tr>
+    <tr><td>Self-hosted, no lock-in</td><td class="c y">&#10003;</td><td class="c n">&#10007;</td><td class="c y">&#10003;</td><td class="c y">&#10003;</td><td class="c p">~</td></tr>
+    <tr><td>License</td><td class="c">free (MIT)</td><td class="c">paid</td><td class="c">free</td><td class="c">free</td><td class="c">commercial</td></tr>
+  </table>
+  <p style="color:var(--mut);font-size:13px"><span class="y">&#10003;</span> full
+  / <span class="p">~</span> partial &middot;
+  <span class="n">&#10007;</span> none. Veridata is the closest match on
+  verify-and-repair, and is commercial and Oracle-centric.</p>
+
+  <h2 id="cutover">Cutover runbook</h2>
+<pre><code># 1. before the move: readiness + source health
+migkit assess my-hop
+
+# 2. the managed mover (DMS/DTS) does the bulk load + CDC, OR:
+migkit move my-hop --go
+
+# 3. watch until it names the source quiet and the target caught up
+migkit watch my-hop --verify --delta        # -> SAFE TO CUT OVER
+
+# 4. quiesce writes, then the final fenced verdict
+migkit check my-hop --consistent            # every row, object, sequence
+migkit sync  my-hop --kind sequences --apply  # align counters, safely
+
+# 5. green -> flip. red -> the report names exactly what and where.</code></pre>
+
+  <h2 id="safety">Safety model</h2>
+  <ul>
+    <li><code>check</code>, <code>assess</code>, <code>watch</code>,
+      <code>report</code>, <code>history</code> are read-only and run anytime.</li>
+    <li><code>sync</code>, <code>move</code>, <code>schema --convert</code> write to
+      the target - all dry-run by default, requiring
+      <code>--apply</code>/<code>--go</code>, each saving an undo first.</li>
+    <li>The source is never written. Nothing of migkit's own is written into the
+      target - it stays a faithful copy; the audit ledger is local-only.</li>
+    <li>A lock file prevents concurrent writes; every write is recorded.</li>
+  </ul>
+
+  <h2 id="engines">Engines</h2>
+  <p><b>Native:</b> postgres, mysql, mssql, mongodb, sqlite, redis, kafka.
+  <b>Aliases:</b> mariadb, percona, aurora, alloydb, documentdb, azure-sql, tdsql.
+  <b>Generic (reladiff):</b> snowflake, bigquery, redshift, clickhouse, oracle,
+  duckdb, trino. <b>Cross-engine:</b> MySQL-&gt;PostgreSQL verified end to end.</p>
+
+  <footer>
+    migkit - verify, repair, and move databases across engines.
+    Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migkit</a>.
+    MIT-licensed.
+  </footer>
+</main>
+</div>
+</body>
+</html>

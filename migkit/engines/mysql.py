@@ -45,6 +45,24 @@ class MySQLEngine(Engine):
                 conn.close()
         return with_retry(once, label=f"mysql query {side}")
 
+    def _rows_utc(self, side, sql):
+        """Read with the session time_zone pinned to +00:00 so UNIX_TIMESTAMP
+        on a DATETIME is comparable across sides regardless of server tz -
+        the mysql equivalent of the postgres UTC pin used for tz-shift audit."""
+        def once():
+            conn = self._conn(side)
+            try:
+                with conn.cursor() as cur:
+                    try:
+                        cur.execute("set time_zone = '+00:00'")
+                    except Exception:
+                        pass
+                    cur.execute(sql)
+                    return cur.fetchall()
+            finally:
+                conn.close()
+        return with_retry(once, label=f"mysql utc {side}")
+
     def _d(self, side, db):
         """Resolve the physical db name for a side. Source keeps the given
         name; target goes through the hop's db_map so a migration can land
@@ -259,17 +277,53 @@ class MySQLEngine(Engine):
                               f" {total_a:,}=={total_b:,}")]
 
     def check_autoinc(self, db):
+        """usable = will AUTO_INCREMENT collide with an existing row on the
+        next insert (the DMS trap - InnoDB 8 usually clamps it up, but a
+        pre-8.0 restart, tablespace import, or a stray id=0 row can leave it
+        behind); parity = does the counter match the source."""
+        ddb = self._d("dst", db)
         q = ("select table_name, auto_increment from information_schema.tables"
              " where table_schema=%s and auto_increment is not null")
         src = dict(self._q("src", q, (db,), fresh=True))
-        dst = dict(self._q("dst", q, (self._d("dst", db),), fresh=True))
-        bad = [f"{t} src={v} dst={dst.get(t)}" for t, v in sorted(src.items())
-               if dst.get(t) != v]
-        if bad:
-            return [Result("autoinc", db, "diff", "; ".join(bad), "",
-                           f"migkit sync {self.hop.name} --db {db} --kind sequences")]
-        return [Result("autoinc", db, "ok",
-                       f"{len(src)} counters, values match")]
+        dst = dict(self._q("dst", q, (ddb,), fresh=True))
+        acol = dict(self._q("dst",
+                            "select table_name, column_name"
+                            " from information_schema.columns"
+                            " where table_schema=%s and extra like %s",
+                            (ddb, "%auto_increment%"), fresh=True))
+        collide = []
+        for t, nextv in sorted(dst.items()):
+            col = acol.get(t)
+            if not col or nextv is None:
+                continue
+            mx = self._q("dst", f"select coalesce(max(`{col}`),0)"
+                                f" from `{ddb}`.`{t}`", fresh=True)[0][0]
+            if int(mx) > 0 and int(nextv) <= int(mx):
+                collide.append(f"{t}: auto_increment={nextv}"
+                               f" <= max({col})={mx}")
+        res = []
+        if collide:
+            res.append(Result("autoinc", f"{db} usable", "diff",
+                              "AUTO_INCREMENT will collide on next insert: "
+                              + "; ".join(collide[:8]), "",
+                              f"migkit sync {self.hop.name} --db {db}"
+                              " --kind sequences"))
+        else:
+            res.append(Result("autoinc", f"{db} usable", "ok",
+                              f"{len(acol)} auto_increment tables clear their"
+                              " column max, no collision" if acol
+                              else "no auto_increment tables"))
+        parity = [f"{t} src={v} dst={dst.get(t)}"
+                  for t, v in sorted(src.items()) if dst.get(t) != v]
+        if parity:
+            res.append(Result("autoinc", f"{db} parity", "diff",
+                              "; ".join(parity[:8]), "",
+                              f"migkit sync {self.hop.name} --db {db}"
+                              " --kind sequences"))
+        else:
+            res.append(Result("autoinc", f"{db} parity", "ok",
+                              f"{len(src)} counters match source"))
+        return res
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
         st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
@@ -610,6 +664,29 @@ class MySQLEngine(Engine):
         res = []
         ddb = self._d("dst", db)
 
+        # no pk/unique = CDC drops its updates/deletes and it can't be verified
+        # or repaired by key (the same trap postgres has, without the InnoDB
+        # guardrails). Check the source tables that are about to be migrated.
+        nopk = [r[0] for r in self._q("src",
+                "select t.table_name from information_schema.tables t"
+                " where t.table_schema=%s and t.table_type='BASE TABLE'"
+                " and t.table_name not like 'migkit%%'"
+                " and not exists (select 1 from"
+                " information_schema.table_constraints tc"
+                " where tc.table_schema=t.table_schema"
+                " and tc.table_name=t.table_name"
+                " and tc.constraint_type in ('PRIMARY KEY','UNIQUE'))", (db,))]
+        if nopk:
+            res.append(Result("deep", f"{db} keys", "diff",
+                              f"{len(nopk)} tables have no pk/unique (CDC drops"
+                              " their updates/deletes, unverifiable by key): "
+                              + ", ".join(nopk[:5]), "",
+                              "add a primary key or unique index before"
+                              " migrating"))
+        else:
+            res.append(Result("deep", f"{db} keys", "ok",
+                              "every table has a pk or unique index"))
+
         # loads run with foreign_key_checks=0, so target orphans are possible
         rows = self._q("dst",
                        "select constraint_name, table_name, column_name,"
@@ -663,6 +740,276 @@ class MySQLEngine(Engine):
             res.append(Result("deep", f"{db} columns", "ok",
                               f"{len(sc)} columns compared, type/null/"
                               "default/charset/collation identical"))
+
+        # narrowing = silent truncation/overflow: a target column shorter than
+        # the source (fewer chars, less decimal scale/precision, smaller int,
+        # or unsigned turned signed) quietly cuts or wraps values.
+        CHAR_T = ("char", "varchar", "tinytext", "text", "mediumtext",
+                  "longtext")
+        INTW = {"tinyint": 1, "smallint": 2, "mediumint": 3, "int": 4,
+                "bigint": 8}
+        nq = ("select concat(table_name,'.',column_name), data_type,"
+              " coalesce(character_maximum_length,0),"
+              " coalesce(numeric_precision,0), coalesce(numeric_scale,0),"
+              " column_type from information_schema.columns"
+              " where table_schema=%s and table_name not like 'migkit%%'")
+        scn = {r[0]: r[1:] for r in self._q("src", nq, (db,))}
+        dcn = {r[0]: r[1:] for r in self._q("dst", nq, (ddb,))}
+        narrow = []
+        for k in sorted(scn):
+            if k not in dcn:
+                continue
+            st, scm, spr, ssc, sct = scn[k]
+            dt, dcm, dpr, dsc, dct = dcn[k]
+            why = None
+            if st in CHAR_T and scm and dcm and int(dcm) < int(scm):
+                why = f"char {scm} -> {dcm}"
+            elif st == "decimal" and ssc and int(dsc) < int(ssc):
+                why = f"decimal scale {ssc} -> {dsc} (rounds)"
+            elif st == "decimal" and spr and int(dpr) < int(spr):
+                why = f"decimal precision {spr} -> {dpr} (overflow)"
+            elif INTW.get(st, 0) > INTW.get(dt, 99):
+                why = f"{st} -> {dt} (overflow)"
+            elif "unsigned" in sct and "unsigned" not in dct \
+                    and st in INTW:
+                why = f"unsigned -> signed ({sct} -> {dct})"
+            if why:
+                narrow.append(f"{k}: {why}")
+        if narrow:
+            res.append(Result("deep", f"{db} narrowing", "diff",
+                              f"{len(narrow)} target columns NARROWER than"
+                              " source (silent truncation/overflow risk): "
+                              + "; ".join(narrow[:6]), "",
+                              "widen the target column to match source before"
+                              " loading, or values are cut/rounded/overflowed"))
+        else:
+            res.append(Result("deep", f"{db} narrowing", "ok",
+                              "no target column narrower than source"))
+
+        # a constant per-row offset on a datetime/timestamp column is a tz
+        # conversion bug (mover applied a non-UTC session), not row corruption.
+        # Both sides read with time_zone pinned to +00:00, so a faithful copy
+        # compares as delta 0 and a systematic shift shows the same delta.
+        tcols = self._q("src",
+                        "select table_name, column_name"
+                        " from information_schema.columns where table_schema=%s"
+                        " and data_type in ('datetime','timestamp')"
+                        " and table_name not like 'migkit%%'", (db,))
+        shifts = []
+        for t, col in tcols[:10]:
+            pk = self._pk_cols(db, t)
+            if len(pk) != 1:
+                continue
+            p = pk[0]
+
+            def rows(side, dbn):
+                q = (f"select `{p}`, unix_timestamp(`{col}`)"
+                     f" from `{dbn}`.`{t}` where `{col}` is not null"
+                     f" order by `{p}` limit 200")
+                return {str(r[0]): r[1] for r in self._rows_utc(side, q)
+                        if r[1] is not None}
+            sm, dm = rows("src", db), rows("dst", ddb)
+            deltas = [float(dm[k]) - float(sm[k]) for k in sm if k in dm]
+            if len(deltas) < 3:
+                continue
+            avg = sum(deltas) / len(deltas)
+            if max(deltas) - min(deltas) < 1 and abs(avg) >= 1:
+                secs = round(avg)
+                shifts.append(f"{t}.{col}: every row shifted"
+                              f" {secs}s (~{secs / 3600:.1f}h)")
+        if shifts:
+            res.append(Result("deep", f"{db} timeshift", "diff",
+                              "uniform timezone offset (systematic, not"
+                              " row-level corruption): " + "; ".join(shifts[:5]),
+                              "", "target stored a non-UTC wall clock; re-load"
+                              " with the source session timezone"))
+        else:
+            res.append(Result("deep", f"{db} timeshift", "ok",
+                              "no uniform timestamp offset detected"))
+
+        # charset corruption: a text column downgraded from utf8mb4 to a
+        # narrower charset (utf8mb3/latin1) on the target truncates or drops
+        # 4-byte characters (emoji, astral CJK), and a lossy transcode leaves
+        # U+FFFD replacement characters - both silent.
+        csq = ("select table_name, column_name, character_set_name"
+               " from information_schema.columns where table_schema=%s"
+               " and character_set_name is not null"
+               " and table_name not like 'migkit%%'")
+        scs = {(r[0], r[1]): r[2] for r in self._q("src", csq, (db,))}
+        dcs = {(r[0], r[1]): r[2] for r in self._q("dst", csq, (ddb,))}
+        WIDTH = {"utf8mb4": 4, "utf8mb3": 3, "utf8": 3, "latin1": 1,
+                 "latin2": 1, "ascii": 1}
+        csbad = []
+        for k, s2 in sorted(scs.items()):
+            d2 = dcs.get(k)
+            if d2 and d2 != s2:
+                note = f"{k[0]}.{k[1]}: charset {s2} -> {d2}"
+                if WIDTH.get(d2, 9) < WIDTH.get(s2, 0):
+                    note += " (DOWNGRADE, drops/truncates multibyte chars)"
+                csbad.append(note)
+        tcols = self._q("src",
+                        "select distinct table_name, column_name"
+                        " from information_schema.columns where table_schema=%s"
+                        " and data_type in ('char','varchar','text','tinytext',"
+                        "'mediumtext','longtext') and table_name not like"
+                        " 'migkit%%'", (db,))
+        for t, col in tcols[:30]:
+            q = ("select coalesce(sum(char_length(convert(`{c}` using utf8mb4))"
+                 " - char_length(replace(convert(`{c}` using utf8mb4),"
+                 " _utf8mb4 0xEFBFBD, ''))),0) from `{d}`.`{t}`")
+            try:
+                sv = int(self._q("src", q.format(c=col, d=db, t=t))[0][0])
+                dv = int(self._q("dst", q.format(c=col, d=ddb, t=t))[0][0])
+            except Exception:
+                continue
+            if dv > sv:
+                csbad.append(f"{t}.{col}: {dv - sv} extra U+FFFD replacement"
+                             " chars on target")
+        if csbad:
+            res.append(Result("deep", f"{db} charset", "diff",
+                              "; ".join(csbad[:6]), "",
+                              "keep the target column utf8mb4 and re-load the"
+                              " affected rows over a utf8mb4 connection"))
+        else:
+            res.append(Result("deep", f"{db} charset", "ok",
+                              "text column charsets match, no replacement-char"
+                              " excess"))
+
+        # partitioned tables (mysql): a missing partition sends rows to the
+        # MAXVALUE catch-all, a changed method/expression reroutes them.
+        def _parts(side, dbn):
+            out = {}
+            for t, meth, expr, desc in self._q(side,
+                    "select table_name, partition_method,"
+                    " coalesce(partition_expression,''), partition_description"
+                    " from information_schema.partitions where table_schema=%s"
+                    " and partition_name is not null", (dbn,)):
+                e = out.setdefault(t, {"m": meth, "e": expr, "b": set()})
+                e["b"].add(desc)
+            return out
+        sp, dp = _parts("src", db), _parts("dst", ddb)
+        pbad = []
+        for t, si in sorted(sp.items()):
+            di = dp.get(t)
+            if not di:
+                pbad.append(f"{t}: partitioned on source, not on target")
+                continue
+            if (si["m"], si["e"]) != (di["m"], di["e"]):
+                pbad.append(f"{t}: partition scheme differs"
+                            f" src({si['m']} {si['e']}) dst({di['m']} {di['e']})")
+                continue
+            miss = si["b"] - di["b"]
+            if miss:
+                pbad.append(f"{t}: {len(miss)} partition bound(s) missing on"
+                            f" target: {', '.join(sorted(miss)[:2])}")
+            if "MAXVALUE" in di["b"]:
+                mv = self._q("dst", "select partition_name from"
+                             " information_schema.partitions where"
+                             " table_schema=%s and table_name=%s and"
+                             " partition_description='MAXVALUE'", (ddb, t))
+                if mv:
+                    n = self._q("dst", f"select count(*) from `{ddb}`.`{t}`"
+                                f" partition (`{mv[0][0]}`)")[0][0]
+                    if n > 0:
+                        pbad.append(f"{t}: {n} rows stranded in MAXVALUE"
+                                    f" partition ({mv[0][0]})")
+        if not sp:
+            res.append(Result("deep", f"{db} partitions", "ok",
+                              "no partitioned tables"))
+        elif pbad:
+            res.append(Result("deep", f"{db} partitions", "diff",
+                              "; ".join(pbad[:6]), "",
+                              "recreate the missing partitions and move rows"
+                              " out of MAXVALUE before cutover"))
+        else:
+            res.append(Result("deep", f"{db} partitions", "ok",
+                              f"{len(sp)} partitioned tables, schemes and"
+                              " bounds match"))
+
+        # generated/computed columns (mysql)
+        genq = ("select table_name, column_name, extra,"
+                " coalesce(generation_expression,'')"
+                " from information_schema.columns where table_schema=%s"
+                " and generation_expression <> '' and generation_expression"
+                " is not null and table_name not like 'migkit%%'")
+        sg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", genq, (db,))}
+        dg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", genq, (ddb,))}
+
+        def _n(e):
+            return re.sub(r"\s+", "", e).lower()
+        gbad = []
+        for k, (extra, expr) in sorted(sg.items()):
+            t, col = k
+            if k not in dg:
+                gbad.append(f"{t}.{col}: generated on source,"
+                            " plain/missing on target")
+                continue
+            if _n(expr) != _n(dg[k][1]):
+                gbad.append(f"{t}.{col}: generation expression differs")
+                continue
+            if "STORED" in (extra or "").upper():
+                try:
+                    n = self._q("dst", f"select count(*) from `{ddb}`.`{t}`"
+                                f" where not (`{col}` <=> ({dg[k][1]}))")[0][0]
+                    if n > 0:
+                        gbad.append(f"{t}.{col}: {n} rows where the stored"
+                                    " value != its expression")
+                except Exception:
+                    pass
+        for k in sorted(dg):
+            if k not in sg:
+                gbad.append(f"{k[0]}.{k[1]}: generated on target but plain"
+                            " on source")
+        res.append(Result("deep", f"{db} generated",
+                          "diff" if gbad else "ok",
+                          "; ".join(gbad[:6]) if gbad
+                          else (f"{len(sg)} generated columns match"
+                                if sg else "no generated columns"), "",
+                          "align the generation expression/storage and"
+                          " re-derive the column" if gbad else ""))
+
+        # collation unique-collapse (mysql): a unique/pk text column on a
+        # case/accent-insensitive target collation collapses distinct source
+        # rows into duplicates on load.
+        uqq = ("select k.table_name, k.column_name, c.collation_name"
+               " from information_schema.table_constraints tc"
+               " join information_schema.key_column_usage k"
+               "  on k.table_schema=tc.table_schema"
+               "  and k.table_name=tc.table_name"
+               "  and k.constraint_name=tc.constraint_name"
+               " join information_schema.columns c"
+               "  on c.table_schema=k.table_schema"
+               "  and c.table_name=k.table_name"
+               "  and c.column_name=k.column_name"
+               " where tc.table_schema=%s and tc.constraint_type"
+               "  in ('PRIMARY KEY','UNIQUE')"
+               "  and c.data_type in ('char','varchar','text')"
+               "  and c.collation_name is not null")
+        su = {(r[0], r[1]): r[2] for r in self._q("src", uqq, (db,))}
+        dcu = {(r[0], r[1]): r[2] for r in self._q("dst", uqq, (ddb,))}
+        cbad = []
+        for k, scoll in sorted(su.items()):
+            dcoll = dcu.get(k)
+            if not dcoll or dcoll == scoll:
+                continue
+            t, col = k
+            detail = f"{t}.{col}: unique-key collation src({scoll}) != dst({dcoll})"
+            try:
+                n = self._q("src", f"select count(*) from (select 1 from"
+                            f" `{db}`.`{t}` group by `{col}` collate {dcoll}"
+                            f" having count(*) > 1) x")[0][0]
+                if n > 0:
+                    detail += (f"; {n} source groups COLLAPSE to duplicates"
+                               " under the target collation (data loss)")
+            except Exception:
+                detail += "; collapse untestable (collation not on source)"
+            cbad.append(detail)
+        res.append(Result("deep", f"{db} collation",
+                          "diff" if cbad else "ok",
+                          "; ".join(cbad[:6]) if cbad
+                          else "unique-key collations match", "",
+                          "match the unique-key collation to source (or dedup"
+                          " first)" if cbad else ""))
 
         pkq = ("select k.table_name, k.column_name"
                " from information_schema.key_column_usage k"
@@ -957,6 +1304,17 @@ class MySQLEngine(Engine):
             ok = False
         add("pass" if ok else "warn", "instance",
             "binlog retention at least 24h", ret)
+
+        # a long-running open transaction pins InnoDB purge and stalls CDC
+        # (the target lags for as long as it stays open); flag by age
+        lrt = self._q("src",
+                      "select count(*), coalesce(max(timestampdiff(second,"
+                      " trx_started, now())),0)"
+                      " from information_schema.innodb_trx")
+        n, age = (lrt[0][0], int(lrt[0][1])) if lrt else (0, 0)
+        add("pass" if age < 900 else "warn" if age < 3600 else "fail",
+            "instance", "long-running transactions blocking CDC/purge",
+            f"{n} open, oldest {age}s" if n else "none")
         for db in self.databases():
             rows = self._q("src",
                 "select t.table_name from information_schema.tables t"

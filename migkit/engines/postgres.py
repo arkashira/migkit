@@ -269,6 +269,78 @@ class PostgresEngine(Engine):
              " from pg_sequences where schemaname not like '\\_\\_%'"
              " and sequencename not like 'migkit\\_%' order by 1")
 
+    # map every serial/identity sequence to the column it feeds, via the
+    # dependency catalog, so we can prove nextval clears that column's max.
+    SEQ_OWNED_Q = (
+        "select sn.nspname||'.'||s.relname||'|'||ns.nspname||'|'||t.relname"
+        "||'|'||a.attname"
+        " from pg_class s"
+        " join pg_namespace sn on sn.oid = s.relnamespace"
+        " join pg_depend d on d.objid = s.oid"
+        "  and d.classid = 'pg_class'::regclass"
+        "  and d.refclassid = 'pg_class'::regclass and d.deptype in ('a','i')"
+        " join pg_class t on t.oid = d.refobjid"
+        " join pg_namespace ns on ns.oid = t.relnamespace"
+        " join pg_attribute a on a.attrelid = d.refobjid"
+        "  and a.attnum = d.refobjsubid"
+        " where s.relkind = 'S' and sn.nspname not like '\\_\\_%'"
+        " and s.relname not like 'migkit\\_%'")
+
+    def _seq_owned(self, side, db):
+        """seqkey (schema.sequence) -> (schema, table, column) it feeds."""
+        owned = {}
+        for l in self._psql(side, db, self.SEQ_OWNED_Q).splitlines():
+            p = l.split("|")
+            if len(p) == 4:
+                owned[p[0]] = (p[1], p[2], p[3])
+        return owned
+
+    def _seq_col_max(self, side, db, owned):
+        """seqkey -> max(owned column) on `side`, so we know the floor the
+        sequence must clear to avoid a duplicate-key collision on insert."""
+        if not owned:
+            return {}
+        parts = [f"select '{k}|'||coalesce(max(\"{c}\"),0)"
+                 f' from "{s}"."{t}"' for k, (s, t, c) in owned.items()]
+        out = {}
+        for i in range(0, len(parts), 200):
+            chunk = " union all ".join(parts[i:i + 200])
+            for l in self._psql(side, db, chunk).splitlines():
+                if "|" in l:
+                    key, _, v = l.rpartition("|")
+                    out[key] = int(v)
+        return out
+
+    def _seq_next(self, side, db, owned):
+        """seqkey -> the value nextval() would return WITHOUT consuming it.
+        A never-called sequence returns last_value itself; once called it
+        returns last_value + increment. Getting this right is the difference
+        between last_value==max (safe, nextval clears it) and a real
+        collision, so we read is_called rather than assume."""
+        if not owned:
+            return {}
+        inc = {}
+        for l in self._psql(side, db,
+                            "select schemaname||'.'||sequencename||'|'"
+                            "||increment_by from pg_sequences").splitlines():
+            if "|" in l:
+                k, _, v = l.rpartition("|")
+                inc[k] = int(v)
+        parts = []
+        for k in owned:
+            sch, name = k.split(".", 1)
+            parts.append(f"select '{k}'||e'\\t'||last_value||e'\\t'||is_called"
+                         f' from "{sch}"."{name}"')
+        out = {}
+        for i in range(0, len(parts), 200):
+            chunk = " union all ".join(parts[i:i + 200])
+            for l in self._psql(side, db, chunk).splitlines():
+                p = l.split("\t")
+                if len(p) == 3:
+                    last, called = int(p[1]), p[2] in ("t", "true")
+                    out[p[0]] = last + inc.get(p[0], 1) if called else last
+        return out
+
     def check_counts(self, db):
         st = [t for t in self._psql("src", db, self.USER_TABLES).splitlines() if t]
         dt = set(t for t in self._psql("dst", db,
@@ -299,17 +371,47 @@ class PostgresEngine(Engine):
                        f"{len(common)} tables, {total:,} rows both sides")]
 
     def check_autoinc(self, db):
+        """Two verdicts per database. USABLE is the one that matters at
+        cutover: every serial/identity sequence on the target must sit above
+        its column's max, or the first insert duplicate-keys (the single most
+        common migration outage). PARITY is the softer 1-to-1 check that the
+        target continues from the same value the source stopped at."""
         src = dict(l.rsplit("|", 1) for l in
                    self._psql("src", db, self.SEQ_Q).splitlines() if l)
         dst = dict(l.rsplit("|", 1) for l in
                    self._psql("dst", db, self.SEQ_Q).splitlines() if l)
-        bad = [f"{n} src={v} dst={dst.get(n, 'MISSING')}"
-               for n, v in sorted(src.items()) if dst.get(n) != v]
-        if not bad:
-            return [Result("autoinc", db, "ok",
-                           f"{len(src)} sequences, values match")]
-        return [Result("autoinc", db, "diff", "; ".join(bad[:10]), "",
-                       f"migkit sync {self.hop.name} --db {db} --kind sequences")]
+        owned = self._seq_owned("dst", db)
+        dmax = self._seq_col_max("dst", db, owned)
+        dnext = self._seq_next("dst", db, owned)
+        collide = []
+        for k, (s, t, c) in sorted(owned.items()):
+            nxt = dnext.get(k, 0)
+            mx = dmax.get(k, 0)
+            if mx > 0 and nxt <= mx:
+                collide.append(f"{k}: nextval={nxt} <= max({t}.{c})={mx}")
+        res = []
+        if collide:
+            res.append(Result("autoinc", f"{db} usable", "diff",
+                              "sequences WILL collide on next insert: "
+                              + "; ".join(collide[:8]), "",
+                              f"migkit sync {self.hop.name} --db {db} --kind"
+                              " sequences --apply  (fix BEFORE cutover)"))
+        else:
+            res.append(Result("autoinc", f"{db} usable", "ok",
+                              f"{len(owned)} owned sequences all clear their"
+                              " column max, no collision"
+                              if owned else "no owned sequences"))
+        parity = [f"{n} src={v} dst={dst.get(n, 'MISSING')}"
+                  for n, v in sorted(src.items()) if dst.get(n) != v]
+        if parity:
+            res.append(Result("autoinc", f"{db} parity", "diff",
+                              "; ".join(parity[:8]), "",
+                              f"migkit sync {self.hop.name} --db {db} --kind"
+                              " sequences --apply"))
+        else:
+            res.append(Result("autoinc", f"{db} parity", "ok",
+                              f"{len(src)} sequences match source last_value"))
+        return res
 
     def _data_fast_native(self, db, stream=None):
         """Per-table checksum on both sides in parallel: commutative
@@ -497,6 +599,32 @@ class PostgresEngine(Engine):
         res = []
         rpt = self.hop.report_dir(db)
 
+        # a table with no pk/unique is the quiet trap: DMS and GoldenGate drop
+        # its UPDATE/DELETE during CDC and duplicate it on full+CDC, and it
+        # can't be verified or repaired by key. Surface it before it bites.
+        nopk = [l for l in self._psql("src", db,
+                "select n.nspname||'.'||c.relname from pg_class c"
+                " join pg_namespace n on n.oid = c.relnamespace"
+                " where c.relkind = 'r'"
+                " and n.nspname not in ('pg_catalog','information_schema')"
+                " and n.nspname not like 'pg\\_%'"
+                " and n.nspname not like '\\_\\_%'"
+                " and c.relname not like 'migkit\\_%'"
+                " and not exists (select 1 from pg_index i"
+                "  where i.indrelid = c.oid"
+                "  and (i.indisprimary or i.indisunique))"
+                " order by 1").splitlines() if l]
+        if nopk:
+            res.append(Result("deep", f"{db} keys", "diff",
+                              f"{len(nopk)} tables have no pk/unique"
+                              " (CDC drops their updates/deletes, dups on"
+                              f" reload, unverifiable): {', '.join(nopk[:5])}",
+                              "", "add a primary key or unique index, or set"
+                                  " replica identity full, before migrating"))
+        else:
+            res.append(Result("deep", f"{db} keys", "ok",
+                              "every table has a pk or unique index"))
+
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """
             select c.conname
@@ -536,6 +664,94 @@ class PostgresEngine(Engine):
                               " validate them before cutover" if fks
                               else "all fk constraints validated, no orphans"
                                    " possible"))
+
+        # NOT VALID check constraints enforce new writes but never scanned the
+        # existing rows, and the planner distrusts them - a load-time speed
+        # hack left unfinished. The fk orphan scan above covers foreign keys;
+        # check constraints are the blind spot.
+        nvc = [l for l in self._psql("dst", db,
+               "select conrelid::regclass::text||'.'||conname"
+               " from pg_constraint c"
+               " join pg_namespace n on n.oid = c.connamespace"
+               " where c.contype = 'c' and not c.convalidated"
+               " and n.nspname not like '\\_\\_%'").splitlines() if l]
+        if nvc:
+            res.append(Result("deep", f"{db} checks", "diff",
+                              f"{len(nvc)} check constraints NOT VALIDATED"
+                              " (existing rows unchecked, planner distrusts): "
+                              + "; ".join(nvc[:5]), "",
+                              "alter table ... validate constraint ... on"
+                              " target after confirming no violations"))
+        else:
+            res.append(Result("deep", f"{db} checks", "ok",
+                              "all check constraints validated"))
+
+        # some tooling drops DEFERRABLE / INITIALLY DEFERRED when copying a
+        # schema; code that relies on deferred checks (bulk reorder inside one
+        # transaction) then fails with a constraint violation that never
+        # happened on the source. Diff the deferral flags per constraint.
+        dfq = ("select conrelid::regclass::text||'.'||conname||'|'"
+               "||condeferrable||'|'||condeferred from pg_constraint c"
+               " join pg_namespace n on n.oid = c.connamespace"
+               " where c.contype in ('p','u','f','c') and c.conrelid <> 0"
+               " and n.nspname not in ('pg_catalog','information_schema')"
+               " and n.nspname not like 'pg\\_%'"
+               " and n.nspname not like '\\_\\_%'")
+        sdf = {l.split("|", 1)[0]: l.split("|", 1)[1] for l in
+               self._psql("src", db, dfq).splitlines() if "|" in l}
+        ddf = {l.split("|", 1)[0]: l.split("|", 1)[1] for l in
+               self._psql("dst", db, dfq).splitlines() if "|" in l}
+        defer = [f"{k}: src deferrable/deferred={sdf[k]} dst={ddf[k]}"
+                 for k in sorted(sdf) if k in ddf and sdf[k] != ddf[k]]
+        if defer:
+            res.append(Result("deep", f"{db} deferrable", "diff",
+                              f"{len(defer)} constraints changed deferral: "
+                              + "; ".join(defer[:5]), "",
+                              "alter table ... alter constraint ... deferrable"
+                              " initially deferred to match source"))
+        else:
+            res.append(Result("deep", f"{db} deferrable", "ok",
+                              "constraint deferral flags match"))
+
+        # row-level security is a silent-data-loss trap: a non-owner /
+        # non-BYPASSRLS role (which a dump or even migkit itself may connect
+        # as) sees only policy-permitted rows, so counts and checksums can be
+        # a filtered subset with no error. And RLS enabled with zero policies
+        # is default-deny - the table looks empty to everyone but the owner.
+        rls = [l.split("|") for l in self._psql("src", db,
+               "select n.nspname||'.'||c.relname||'|'||"
+               "(select count(*) from pg_policies p"
+               " where p.schemaname = n.nspname and p.tablename = c.relname)"
+               " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+               " where c.relkind = 'r' and c.relrowsecurity"
+               " and n.nspname not in ('pg_catalog','information_schema')"
+               " and n.nspname not like 'pg\\_%'"
+               " and n.nspname not like '\\_\\_%'").splitlines() if l]
+        if rls:
+            bypass = self._psql("src", db,
+                                "select case when rolsuper or rolbypassrls"
+                                " then 'y' else 'n' end from pg_roles"
+                                " where rolname = current_user") == "y"
+            deny = [r[0] for r in rls if r[1] == "0"]
+            msgs = []
+            if deny:
+                msgs.append(f"{len(deny)} RLS tables have ZERO policies"
+                            " (default-deny, read as empty by non-owners): "
+                            + ", ".join(deny[:4]))
+            if not bypass:
+                msgs.append("migkit's source role is subject to RLS on"
+                            f" {len(rls)} tables - counts/checksums there may"
+                            " be a filtered subset, not the full data")
+            res.append(Result("deep", f"{db} rls", "diff" if msgs else "ok",
+                              "; ".join(msgs) if msgs
+                              else f"{len(rls)} RLS tables, all have policies"
+                                   " and migkit reads with a bypass role", "",
+                              "verify RLS tables with an owner/BYPASSRLS role;"
+                              " recreate missing policies on target"
+                              if msgs else ""))
+        else:
+            res.append(Result("deep", f"{db} rls", "ok",
+                              "no row-level security in use"))
 
         dis = [l for l in self._psql("dst", db,
                "select n.nspname||'.'||c.relname||'.'||t.tgname"
@@ -585,6 +801,433 @@ class PostgresEngine(Engine):
             res.append(Result("deep", f"{db} columns", "ok",
                               f"{len(sc)} columns compared, type/null/"
                               "default/precision identical"))
+
+        # narrowing is the dangerous subset of drift: a target column that
+        # holds fewer characters, less numeric scale/precision, or a smaller
+        # integer than the source silently truncates, rounds, or overflows
+        # values (DMS caps unlimited text at varchar(8000); scale loss eats
+        # money). Called out on its own, at higher severity than cosmetic drift.
+        CHAR_T = ("character varying", "character", "text")
+        INTW = {"smallint": 2, "integer": 4, "bigint": 8}
+        narrow = []
+        for k in sorted(sc):
+            if k not in dc:
+                continue
+            sp, dp = sc[k].split("|"), dc[k].split("|")
+            if len(sp) < 7 or len(dp) < 7:
+                continue
+            st, dt = sp[1], dp[1]
+            scm, dcm, spr, ssc = sp[4], dp[4], sp[5], sp[6]
+            dpr, dsc = dp[5], dp[6]
+            why = None
+            if st in CHAR_T and dcm and (not scm or int(dcm) < int(scm)):
+                why = f"char {scm or 'unlimited'} -> {dcm}"
+            elif st in ("numeric", "decimal") and ssc and dsc \
+                    and int(dsc) < int(ssc):
+                why = f"numeric scale {ssc} -> {dsc} (rounds)"
+            elif st in ("numeric", "decimal") and spr and dpr \
+                    and int(dpr) < int(spr):
+                why = f"numeric precision {spr} -> {dpr} (overflow)"
+            elif INTW.get(st, 0) > INTW.get(dt, 99):
+                why = f"{st} -> {dt} (overflow)"
+            if why:
+                narrow.append(f"{k}: {why}")
+        if narrow:
+            res.append(Result("deep", f"{db} narrowing", "diff",
+                              f"{len(narrow)} target columns NARROWER than"
+                              " source (silent truncation/overflow risk): "
+                              + "; ".join(narrow[:6]), "",
+                              "widen the target column to match source before"
+                              " loading, or values are cut/rounded/overflowed"))
+        else:
+            res.append(Result("deep", f"{db} narrowing", "ok",
+                              "no target column narrower than source"))
+
+        # a constant, per-row offset on a timestamp column is the fingerprint
+        # of a timezone conversion bug (a mover applying a non-UTC session),
+        # not random corruption. Both sides are read with TimeZone=UTC pinned,
+        # so a correct instant compares as delta 0; a systematic shift shows
+        # the same non-zero delta on every sampled row.
+        tsq = ("select n.nspname||'.'||c.relname||'|'||a.attname"
+               " from pg_attribute a"
+               " join pg_class c on c.oid = a.attrelid"
+               " join pg_namespace n on n.oid = c.relnamespace"
+               " join pg_type ty on ty.oid = a.atttypid"
+               " where c.relkind = 'r' and a.attnum > 0"
+               " and not a.attisdropped"
+               " and ty.typname in ('timestamp','timestamptz')"
+               " and n.nspname not in ('pg_catalog','information_schema')"
+               " and n.nspname not like 'pg\\_%'"
+               " and n.nspname not like '\\_\\_%'"
+               " and c.relname not like 'migkit\\_%' order by 1")
+        shifts = []
+        for tc in [l for l in self._psql("src", db, tsq).splitlines() if l][:10]:
+            tbl, col = tc.split("|", 1)
+            pks = self._pk_cols_of(db, tbl)
+            if len(pks) != 1:
+                continue
+            sch2, t2 = tbl.split(".", 1)
+            pk = pks[0]
+            q = (f'select "{pk}"::text||e\'\\t\'||extract(epoch from "{col}")'
+                 f' from "{sch2}"."{t2}" where "{col}" is not null'
+                 f' order by "{pk}" limit 200')
+            try:
+                sm = dict(l.split("\t") for l in
+                          self._psql("src", db, q).splitlines() if "\t" in l)
+                dm = dict(l.split("\t") for l in
+                          self._psql("dst", db, q).splitlines() if "\t" in l)
+            except (RuntimeError, ValueError):
+                continue
+            deltas = [float(dm[k]) - float(sm[k]) for k in sm if k in dm]
+            if len(deltas) < 3:
+                continue
+            avg = sum(deltas) / len(deltas)
+            if max(deltas) - min(deltas) < 1 and abs(avg) >= 1:
+                secs = round(avg)
+                shifts.append(f"{tbl}.{col}: every row shifted"
+                              f" {secs}s (~{secs / 3600:.1f}h)")
+        if shifts:
+            res.append(Result("deep", f"{db} timeshift", "diff",
+                              "uniform timezone offset (systematic, not"
+                              " row-level corruption): " + "; ".join(shifts[:5]),
+                              "", "target stored a non-UTC wall clock; re-load"
+                              " with the source session timezone or convert"
+                              " the column"))
+        else:
+            res.append(Result("deep", f"{db} timeshift", "ok",
+                              "no uniform timestamp offset detected"))
+
+        # NULL vs empty-string: Oracle stores '' as NULL, Postgres keeps them
+        # distinct, so a migration can silently flip IS NULL semantics and
+        # unique behavior. Per text column, compare the null-count and the
+        # empty-count on each side; a swap is the fingerprint (and it survives
+        # a row checksum only because both are "present").
+        txtq = ("select n.nspname||'.'||c.relname||'|'||a.attname"
+                " from pg_attribute a"
+                " join pg_class c on c.oid = a.attrelid"
+                " join pg_namespace n on n.oid = c.relnamespace"
+                " join pg_type ty on ty.oid = a.atttypid"
+                " where c.relkind = 'r' and a.attnum > 0"
+                " and not a.attisdropped"
+                " and ty.typname in ('text','varchar','bpchar')"
+                " and n.nspname not in ('pg_catalog','information_schema')"
+                " and n.nspname not like 'pg\\_%'"
+                " and n.nspname not like '\\_\\_%'"
+                " and c.relname not like 'migkit\\_%' order by 1")
+        neq = []
+        for tc in [l for l in self._psql("src", db, txtq).splitlines() if l][:30]:
+            tbl, col = tc.split("|", 1)
+            sch2, t2 = tbl.split(".", 1)
+            q = (f'select count(*) filter (where "{col}" is null)||\'|\'||'
+                 f'count(*) filter (where "{col}" = \'\') from "{sch2}"."{t2}"')
+            try:
+                sv, dv = self._psql("src", db, q), self._psql("dst", db, q)
+            except RuntimeError:
+                continue
+            if sv != dv and "|" in sv and "|" in dv:
+                neq.append(f"{tbl}.{col}: src null/empty={sv} dst={dv}")
+        if neq:
+            res.append(Result("deep", f"{db} nullempty", "diff",
+                              f"{len(neq)} text columns differ in NULL vs"
+                              " empty-string split (semantic flip): "
+                              + "; ".join(neq[:5]), "",
+                              "normalize with NULLIF(col,'') / COALESCE per"
+                              " column intent; decide which side is canonical"))
+        else:
+            res.append(Result("deep", f"{db} nullempty", "ok",
+                              "NULL vs empty-string consistent on text columns"))
+
+        # charset corruption: a lossy transcode on load leaves U+FFFD
+        # replacement characters, so any excess on the target over the source
+        # is silent damage; and a SQL_ASCII target validates nothing, letting
+        # bad bytes through. (utf8mb4/latin1 traps are mysql-specific.)
+        enc = []
+        se = self._psql("src", db, "select pg_encoding_to_char(encoding)"
+                        " from pg_database where datname = current_database()")
+        de = self._psql("dst", db, "select pg_encoding_to_char(encoding)"
+                        " from pg_database where datname = current_database()")
+        if de == "SQL_ASCII" and se != "SQL_ASCII":
+            enc.append(f"target database is SQL_ASCII (no encoding"
+                       f" validation); source is {se}")
+        elif se != de:
+            enc.append(f"server_encoding differs: src={se} dst={de}")
+        for tc in [l for l in self._psql("src", db, txtq).splitlines() if l][:30]:
+            tbl, col = tc.split("|", 1)
+            sch2, t2 = tbl.split(".", 1)
+            q = ('select coalesce(sum(char_length("' + col + '")'
+                 ' - char_length(replace("' + col + '", U&\'\\FFFD\','
+                 " ''))),0) from \"" + sch2 + '"."' + t2 + '"')
+            try:
+                sv = int(self._psql("src", db, q) or 0)
+                dv = int(self._psql("dst", db, q) or 0)
+            except (RuntimeError, ValueError):
+                continue
+            if dv > sv:
+                enc.append(f"{tbl}.{col}: {dv - sv} extra U+FFFD replacement"
+                           " chars on target")
+        if enc:
+            res.append(Result("deep", f"{db} encoding", "diff",
+                              "; ".join(enc[:6]), "",
+                              "re-load affected rows with a non-lossy client"
+                              " encoding; never use a SQL_ASCII target"))
+        else:
+            res.append(Result("deep", f"{db} encoding", "ok",
+                              "encodings match, no replacement-char excess"))
+
+        # partitioned tables: a mover can land rows in the DEFAULT catch-all
+        # partition, miss a partition bound entirely, or even change the
+        # partition key - all of which reroute or strand data silently.
+        parts = [l.split("|", 1) for l in self._psql("src", db,
+                 "select c.relnamespace::regnamespace||'.'||c.relname"
+                 "||'|'||pg_get_partkeydef(c.oid)"
+                 " from pg_partitioned_table p"
+                 " join pg_class c on c.oid = p.partrelid"
+                 " where c.relnamespace::regnamespace::text not like 'pg\\_%'"
+                 " and c.relnamespace::regnamespace::text not like"
+                 " '\\_\\_%'").splitlines() if "|" in l]
+        pbad = []
+        for tbl, keydef in parts:
+            dkey = self._psql("dst", db,
+                              f"select pg_get_partkeydef('{tbl}'::regclass)")
+            if not dkey:
+                pbad.append(f"{tbl}: not partitioned on target (was {keydef})")
+                continue
+            if dkey != keydef:
+                pbad.append(f"{tbl}: partition key differs"
+                            f" src({keydef}) dst({dkey})")
+                continue
+            bq = ("select coalesce(pg_get_expr(ch.relpartbound, ch.oid),'')"
+                  " from pg_inherits i join pg_class ch on ch.oid = i.inhrelid"
+                  f" where i.inhparent = '{tbl}'::regclass")
+            sb = set(self._psql("src", db, bq).splitlines()) - {""}
+            dbnd = set(self._psql("dst", db, bq).splitlines()) - {""}
+            miss = sb - dbnd
+            if miss:
+                pbad.append(f"{tbl}: {len(miss)} partition bound(s) missing on"
+                            f" target: {', '.join(sorted(miss)[:2])}")
+            dflt = self._psql("dst", db,
+                              "select c.relnamespace::regnamespace||'.'"
+                              "||c.relname from pg_inherits i"
+                              " join pg_class c on c.oid = i.inhrelid"
+                              f" where i.inhparent = '{tbl}'::regclass"
+                              " and pg_get_expr(c.relpartbound, c.oid)"
+                              " = 'DEFAULT'")
+            if dflt:
+                n = self._psql("dst", db, f"select count(*) from {dflt}")
+                if n and int(n) > 0:
+                    pbad.append(f"{tbl}: {n} rows stranded in default"
+                                f" partition ({dflt})")
+        if not parts:
+            res.append(Result("deep", f"{db} partitions", "ok",
+                              "no partitioned tables"))
+        elif pbad:
+            res.append(Result("deep", f"{db} partitions", "diff",
+                              "; ".join(pbad[:6]), "",
+                              "recreate the missing partitions and move rows"
+                              " out of the default before cutover"))
+        else:
+            res.append(Result("deep", f"{db} partitions", "ok",
+                              f"{len(parts)} partitioned tables, schemes and"
+                              " bounds match, default empty"))
+
+        # generated columns: a bulk load can write a literal into a stored
+        # generated column (so it no longer equals its expression), the
+        # expression can drift, or a column generated on the source can arrive
+        # plain on the target (then a mover happily inserts rotting literals).
+        import re as _re
+        genq = ("select c.relnamespace::regnamespace||'.'||c.relname"
+                "||'|'||a.attname||'|'||a.attgenerated::text"
+                "||'|'||coalesce(pg_get_expr(d.adbin, d.adrelid),'')"
+                " from pg_attribute a"
+                " join pg_class c on c.oid = a.attrelid"
+                " left join pg_attrdef d on d.adrelid = a.attrelid"
+                "  and d.adnum = a.attnum"
+                " where a.attnum > 0 and not a.attisdropped"
+                "  and a.attgenerated <> '' and c.relkind = 'r'"
+                " and c.relnamespace::regnamespace::text"
+                "  not in ('pg_catalog','information_schema')"
+                " and c.relnamespace::regnamespace::text not like 'pg\\_%'"
+                " and c.relnamespace::regnamespace::text not like '\\_\\_%'")
+
+        def _genmap(side):
+            out = {}
+            for l in self._psql(side, db, genq).splitlines():
+                p = l.split("|", 3)
+                if len(p) == 4:
+                    out[p[0] + "|" + p[1]] = (p[2], p[3])
+            return out
+
+        def _norm(e):
+            return _re.sub(r"\s+", "", e).lower()
+        sg, dg = _genmap("src"), _genmap("dst")
+        gbad = []
+        for k, (gen, expr) in sorted(sg.items()):
+            tbl, col = k.split("|")
+            if k not in dg:
+                gbad.append(f"{tbl}.{col}: generated on source,"
+                            " plain/missing on target")
+                continue
+            dexpr = dg[k][1]
+            if _norm(expr) != _norm(dexpr):
+                gbad.append(f"{tbl}.{col}: generation expression differs")
+                continue
+            if gen == "s":
+                sch2, t2 = tbl.split(".", 1)
+                try:
+                    n = self._psql("dst", db, f'select count(*) from'
+                                   f' "{sch2}"."{t2}" where "{col}"'
+                                   f" is distinct from ({dexpr})")
+                    if n and int(n) > 0:
+                        gbad.append(f"{tbl}.{col}: {n} rows where the stored"
+                                    " value != its expression")
+                except (RuntimeError, ValueError):
+                    pass
+        for k in sorted(dg):
+            if k not in sg:
+                tbl, col = k.split("|")
+                gbad.append(f"{tbl}.{col}: generated on target but plain on"
+                            " source")
+        if gbad:
+            res.append(Result("deep", f"{db} generated", "diff",
+                              "; ".join(gbad[:6]), "",
+                              "align the generation expression / storage on"
+                              " target and re-derive the column"))
+        else:
+            res.append(Result("deep", f"{db} generated", "ok",
+                              f"{len(sg)} generated columns match"
+                              if sg else "no generated columns"))
+
+        # collation: a unique/pk text column whose target collation is
+        # case/accent-insensitive (or just different) can COLLAPSE distinct
+        # source rows into duplicates on load - silent data loss. And a
+        # glibc/ICU version drift silently corrupts existing btree unique
+        # indexes (wrong results, duplicate admission).
+        uq = ("select c.relnamespace::regnamespace||'.'||c.relname"
+              "||'|'||a.attname||'|'||coalesce(co.collname::text,'default')"
+              " from pg_constraint con"
+              " join pg_class c on c.oid = con.conrelid"
+              " join pg_attribute a on a.attrelid = con.conrelid"
+              "  and a.attnum = con.conkey[1]"
+              " left join pg_collation co on co.oid = a.attcollation"
+              " where con.contype in ('p','u')"
+              " and array_length(con.conkey,1) = 1"
+              " and a.atttypid in ('text'::regtype,'varchar'::regtype,"
+              "'bpchar'::regtype)"
+              " and c.relnamespace::regnamespace::text"
+              "  not in ('pg_catalog','information_schema')"
+              " and c.relnamespace::regnamespace::text not like 'pg\\_%'"
+              " and c.relnamespace::regnamespace::text not like '\\_\\_%'")
+
+        def _uqmap(side):
+            out = {}
+            for l in self._psql(side, db, uq).splitlines():
+                p = l.split("|")
+                if len(p) == 3:
+                    out[p[0] + "|" + p[1]] = p[2]
+            return out
+        su, du = _uqmap("src"), _uqmap("dst")
+        cbad = []
+        for k, scoll in sorted(su.items()):
+            dcoll = du.get(k)
+            if not dcoll or dcoll == scoll:
+                continue
+            tbl, col = k.split("|")
+            sch2, t2 = tbl.split(".", 1)
+            detail = (f"{tbl}.{col}: unique-key collation src({scoll})"
+                      f" != dst({dcoll})")
+            if dcoll != "default":
+                try:
+                    n = self._psql("src", db,
+                                   f'select count(*) from (select 1 from'
+                                   f' "{sch2}"."{t2}" group by "{col}"'
+                                   f' collate "{dcoll}" having count(*) > 1) x')
+                    if n and int(n) > 0:
+                        detail += (f"; {n} source groups COLLAPSE to duplicates"
+                                   " under the target collation (data loss)")
+                except RuntimeError:
+                    detail += "; collapse untestable (collation not on source)"
+            cbad.append(detail)
+        try:
+            v = self._psql("dst", db,
+                           "select count(*) from pg_depend d"
+                           " where d.refclassid = 'pg_collation'::regclass"
+                           " and d.refobjversion <> ''"
+                           " and d.refobjversion <>"
+                           " pg_collation_actual_version(d.refobjid)")
+            if v and int(v) > 0:
+                cbad.append(f"{v} target objects built under a stale collation"
+                            " version (glibc/ICU drift) - unique indexes may be"
+                            " corrupt; reindex then refresh collation version")
+        except RuntimeError:
+            pass
+        if cbad:
+            res.append(Result("deep", f"{db} collation", "diff",
+                              "; ".join(cbad[:6]), "",
+                              "match the unique-key collation to source (or"
+                              " dedup first); reindex on version drift"))
+        else:
+            res.append(Result("deep", f"{db} collation", "ok",
+                              "unique-key collations match, no version drift"))
+
+        # float columns: FLOAT/DOUBLE are IEEE approximations, so a mover that
+        # changes precision (float4->float8 widening, a text round-trip) drifts
+        # them. Compare per-row with a relative tolerance, so genuine drift is
+        # caught without false-flagging a bit-identical copy. This is a
+        # diagnostic layer; the row checksum stays exact.
+        tol = float(self.hop.options.get("float_tolerance", 1e-9))
+        fcols = [l for l in self._psql("src", db,
+                 "select n.nspname||'.'||c.relname||'|'||a.attname"
+                 " from pg_attribute a join pg_class c on c.oid = a.attrelid"
+                 " join pg_namespace n on n.oid = c.relnamespace"
+                 " join pg_type ty on ty.oid = a.atttypid"
+                 " where c.relkind = 'r' and a.attnum > 0"
+                 " and not a.attisdropped and ty.typname in ('float4','float8')"
+                 " and n.nspname not in ('pg_catalog','information_schema')"
+                 " and n.nspname not like 'pg\\_%'"
+                 " and n.nspname not like '\\_\\_%'"
+                 " and c.relname not like 'migkit\\_%'").splitlines() if l]
+        fbad = []
+        for tc in fcols[:10]:
+            tbl, col = tc.split("|", 1)
+            pks = self._pk_cols_of(db, tbl)
+            if len(pks) != 1:
+                continue
+            sch2, t2 = tbl.split(".", 1)
+            pk = pks[0]
+            q = (f'select "{pk}"::text||e\'\\t\'||"{col}" from "{sch2}"."{t2}"'
+                 f' where "{col}" is not null order by "{pk}" limit 500')
+            try:
+                sm = dict(l.split("\t") for l in
+                          self._psql("src", db, q).splitlines() if "\t" in l)
+                dm = dict(l.split("\t") for l in
+                          self._psql("dst", db, q).splitlines() if "\t" in l)
+            except (RuntimeError, ValueError):
+                continue
+            worst, nd = 0.0, 0
+            for k in sm:
+                if k not in dm:
+                    continue
+                try:
+                    a, b = float(sm[k]), float(dm[k])
+                except ValueError:
+                    continue
+                d = abs(a - b)
+                if d > tol * max(abs(a), abs(b), 1.0):
+                    nd += 1
+                    worst = max(worst, d)
+            if nd:
+                fbad.append(f"{tbl}.{col}: {nd} values drift beyond tolerance"
+                            f" (max {worst:g})")
+        if fbad:
+            res.append(Result("deep", f"{db} float", "diff",
+                              "; ".join(fbad[:5]), "",
+                              "float precision changed on target (widening or"
+                              " round-trip); use numeric for exact columns, or"
+                              " set options.float_tolerance to accept it"))
+        else:
+            res.append(Result("deep", f"{db} float", "ok",
+                              "float columns within tolerance"
+                              if fcols else "no float columns"))
 
         # exotic types can render differently across builds; sample and
         # compare their actual text so a checksum can't hide it
@@ -724,6 +1367,62 @@ class PostgresEngine(Engine):
                               f"{len(ga)} table grants match"
                               " (roles present both sides)"))
 
+        # a SERIAL/identity column depends on a sequence with its OWN acl; the
+        # classic trap is granting the table but not its sequence, so the app's
+        # inserts fail with "permission denied for sequence". Table grants
+        # above miss it entirely - diff sequence grants separately.
+        sgq = ("select pg_get_userbyid(a.grantee)||'|'||n.nspname||'.'"
+               "||c.relname||'|'||a.privilege_type from pg_class c"
+               " join pg_namespace n on n.oid = c.relnamespace"
+               " cross join lateral aclexplode(c.relacl) a"
+               " where c.relkind = 'S'"
+               " and n.nspname not in ('pg_catalog','information_schema')"
+               " and n.nspname not like 'pg\\_%'"
+               " and n.nspname not like '\\_\\_%'"
+               " and c.relname not like 'migkit\\_%'")
+        sga = set(self._psql("src", db, sgq).splitlines()) - {""}
+        sgb = set(self._psql("dst", db, sgq).splitlines()) - {""}
+        smiss = sorted(g for g in sga - sgb if g.split("|")[0] in droles)
+        if smiss:
+            res.append(Result("deep", f"{db} seq-grants", "diff",
+                              f"{len(smiss)} sequence grants missing on target"
+                              " (inserts will hit 'permission denied for"
+                              " sequence'): "
+                              + "; ".join(g.replace("|", " ")
+                                          for g in smiss[:4]), "",
+                              "grant usage/select/update on the sequence to the"
+                              " app role on target"))
+        else:
+            res.append(Result("deep", f"{db} seq-grants", "ok",
+                              f"{len(sga)} sequence grants match"
+                              if sga else "no explicit sequence grants"))
+
+        # a missing or version-mismatched extension breaks its functions and
+        # can fail the restore outright; the mover copies data, not CREATE
+        # EXTENSION. Diff the installed set (plpgsql is always present).
+        exq = ("select extname||' '||extversion from pg_extension"
+               " where extname <> 'plpgsql'")
+        se = set(self._psql("src", db, exq).splitlines()) - {""}
+        de = set(self._psql("dst", db, exq).splitlines()) - {""}
+        dn = {e.split(" ")[0] for e in de}
+        miss = sorted(e.split(" ")[0] for e in se if e.split(" ")[0] not in dn)
+        vers = sorted(e for e in se if e.split(" ")[0] in dn and e not in de)
+        if miss or vers:
+            det = []
+            if miss:
+                det.append(f"{len(miss)} missing on target: "
+                           + ", ".join(miss[:5]))
+            if vers:
+                det.append("version mismatch: " + ", ".join(vers[:3]))
+            res.append(Result("deep", f"{db} extensions", "diff",
+                              "; ".join(det), "",
+                              "create extension ... on target (and install its"
+                              " shared library) before the app depends on it"))
+        else:
+            res.append(Result("deep", f"{db} extensions", "ok",
+                              f"{len(se)} extensions match" if se
+                              else "no non-default extensions"))
+
         pkq = ("select n.nspname||'|'||c.relname||'|'||a.attname"
                " from pg_index i"
                " join pg_class c on c.oid = i.indrelid"
@@ -791,22 +1490,38 @@ class PostgresEngine(Engine):
                        self._psql("src", db, q).splitlines() if l)
             dst = dict(l.rsplit("|", 1) for l in
                        self._psql("dst", db, q).splitlines() if l)
-            stmts, undo = [], []
+            owned = self._seq_owned("dst", db)
+            dmax = self._seq_col_max("dst", db, owned)
+            stmts, undo, refuse = [], [], []
             for name, v in sorted(src.items()):
                 cur = dst.get(name)
-                if v == "0" or cur == v:
+                mx = dmax.get(name, 0)
+                sv = int(v or 0)
+                # target column already past source last_value = someone
+                # wrote to the target; do not paper over it, surface the writer
+                if name in owned and mx > sv:
+                    refuse.append(f"{name}: target max={mx} > source"
+                                  f" last={sv} (writes landed on target?)")
                     continue
-                stmts.append(f"select setval('{name}', {v}, true);"
-                             f"  -- dst now {cur if cur is not None else 'MISSING'}")
+                # GREATEST(source, target max) can never sit below a live row,
+                # so nextval is guaranteed to clear the column with no gap
+                target = max(sv, mx)
+                if target == 0 or (cur is not None and int(cur) == target):
+                    continue
+                stmts.append(f"select setval('{name}', {target}, true);"
+                             f"  -- src={sv} dstmax={mx}"
+                             f" dst now {cur if cur is not None else 'MISSING'}")
                 if cur == "0":
                     undo.append(f"select setval('{name}', 1, false);")
                 elif cur is not None:
                     undo.append(f"select setval('{name}', {cur}, true);")
             same = sum(1 for n, v in src.items() if dst.get(n) == v)
-            if stmts:
-                actions.append(RepairAction(
-                    db, "sequences", stmts, undo,
-                    f"{len(stmts)} sequences differ, {same} already equal"))
+            note = f"{len(stmts)} sequences set, {same} already equal"
+            if refuse:
+                note += (f"; REFUSED {len(refuse)} (target ahead of source): "
+                         + "; ".join(refuse[:4]))
+            if stmts or refuse:
+                actions.append(RepairAction(db, "sequences", stmts, undo, note))
         if kind in ("rows", "all"):
             rpt = self._report(db)
             tables = set()
@@ -1003,6 +1718,40 @@ class PostgresEngine(Engine):
                            "current_setting('max_replication_slots')||' max'"
                            " from pg_replication_slots")
         add("pass", "instance", "replication slots", slots)
+
+        # a lagging or abandoned slot pins WAL and can silently fill the source
+        # disk (source outage mid-migration). wal_status is pg13+, so probe it
+        # and fall back cleanly on older majors.
+        try:
+            rows = [l for l in self._psql("src", "postgres",
+                    "select slot_name||'|'||active||'|'"
+                    "||coalesce(wal_status,'?')||'|'||coalesce("
+                    "pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(),"
+                    " restart_lsn)),'?') from pg_replication_slots"
+                    ).splitlines() if l]
+            for r in rows:
+                name, active, status, retained = r.split("|")
+                if status == "lost":
+                    add("fail", "instance", f"replication slot '{name}'",
+                        f"WAL LOST - replication broken, retained {retained}")
+                elif active in ("f", "false"):
+                    add("warn", "instance", f"replication slot '{name}'",
+                        "INACTIVE (no consumer) - pins WAL, retained"
+                        f" {retained}; drop it if abandoned")
+                elif status in ("unreserved", "extended"):
+                    add("warn", "instance", f"replication slot '{name}'",
+                        f"wal_status {status}, retained {retained} -"
+                        " approaching the retention limit")
+            if rows:
+                mk = self._psql("src", "postgres",
+                                "show max_slot_wal_keep_size")
+                if mk.strip() in ("-1", "-1B"):
+                    add("warn", "instance", "max_slot_wal_keep_size",
+                        "-1 (unbounded): an inactive slot can fill the disk;"
+                        " set a limit so a stalled consumer can't take the"
+                        " source down")
+        except RuntimeError:
+            pass
         lrt = self._psql("src", "postgres",
                          "select count(*) from pg_stat_activity where"
                          " xact_start is not null"
@@ -1697,6 +2446,17 @@ class PostgresEngine(Engine):
         except RuntimeError as e:
             sample["error"] = str(e).splitlines()[-1]
             return sample
+        try:
+            # per-table live counts on the source so a cutover verdict can
+            # name which tables a queue/worker is still writing to
+            rows = self._psql("src", db,
+                              "select schemaname||'.'||relname||'|'||n_live_tup"
+                              " from pg_stat_user_tables"
+                              " where schemaname not like '\\_\\_%'").splitlines()
+            sample["src_tables"] = {l.rsplit("|", 1)[0]: int(l.rsplit("|", 1)[1])
+                                    for l in rows if "|" in l}
+        except (RuntimeError, ValueError):
+            pass
         try:
             slots = self._psql("src", db,
                                "select slot_name||' active='||active||' lag='||"

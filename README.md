@@ -17,7 +17,7 @@ trusted, by migkit itself with full crash-resume.
 
 The rule it is built on: **never let the mover be the judge of its own work.**
 
-[ภาษาไทย ->](README.th.md) · [Changelog ->](CHANGELOG.md)
+[Docs / usage reference ->](https://migkit.axentx.cloud/) · [ภาษาไทย ->](README.th.md) · [Changelog ->](CHANGELOG.md)
 
 ---
 
@@ -207,24 +207,52 @@ you get *through* migkit, including the tools it wraps at full capability.
 
 | Capability | migkit | AWS DMS / Tencent DTS | Debezium | pt-table-sync | GoldenGate + Veridata |
 |---|:--:|:--:|:--:|:--:|:--:|
-| Bulk load (drives best mover) | ✅ | ✅ | ❌ | 🟡 | ✅ |
-| Change data capture | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Row-level verify with proof (LSN fence) | ✅ | 🟡 | ❌ | 🟡 | ✅ |
-| Consistency fence (no false diffs) | ✅ | ❌ | ❌ | 🟡 | 🟡 |
-| Continuous delta verify, O(changes) | ✅ | ❌ | ❌ | ❌ | 🟡 |
-| Column-level diff localization | ✅ | ❌ | ❌ | ❌ | 🟡 |
-| Schema-object verify (views/routines/FK/index) | ✅ | ❌ | ❌ | ❌ | 🟡 |
-| Sequence / identity carry and verify | ✅ | ❌ | ❌ | ❌ | 🟡 |
-| Row-level repair with undo | ✅ | ❌ | ❌ | 🟡 | ✅ |
-| Schema repair (apply DDL, with undo) | ✅ | ❌ | ❌ | ❌ | 🟡 |
-| Rollback / state snapshots | ✅ | ❌ | ❌ | ❌ | 🟡 |
-| Self-hosted, no vendor lock-in | ✅ | ❌ | ✅ | ✅ | 🟡 |
-| Zero footprint on the target | ✅ | ❌ | ✅ | ✅ | 🟡 |
+| Bulk load (drives best mover) | ✓ | ✓ | ✗ | ~ | ✓ |
+| Change data capture | ✓ | ✓ | ✓ | ✗ | ✓ |
+| Row-level verify with proof (LSN fence) | ✓ | ~ | ✗ | ~ | ✓ |
+| Consistency fence (no false diffs) | ✓ | ✗ | ✗ | ~ | ~ |
+| Continuous delta verify, O(changes) | ✓ | ✗ | ✗ | ✗ | ~ |
+| Column-level diff localization | ✓ | ✗ | ✗ | ✗ | ~ |
+| Schema-object verify (views/routines/FK/index) | ✓ | ✗ | ✗ | ✗ | ~ |
+| Sequence / identity carry and verify | ✓ | ✗ | ✗ | ✗ | ~ |
+| Row-level repair with undo | ✓ | ✗ | ✗ | ~ | ✓ |
+| Schema repair (apply DDL, with undo) | ✓ | ✗ | ✗ | ✗ | ~ |
+| Rollback / state snapshots | ✓ | ✗ | ✗ | ✗ | ~ |
+| Self-hosted, no vendor lock-in | ✓ | ✗ | ✓ | ✓ | ~ |
+| Zero footprint on the target | ✓ | ✗ | ✓ | ✓ | ~ |
 | Engines | 9 + cross | cloud-scoped | 8 | mysql | oracle-centric |
 | License | free (MIT) | paid | free | free | commercial |
 
-<sub>✅ full · 🟡 partial · ❌ none. "Through migkit" = the wrapped tool driven
+<sub>✓ full · ~ partial · ✗ none. "Through migkit" = the wrapped tool driven
 under a single command, plus migkit's own verify/repair layer.</sub>
+
+### Silent-corruption detection
+
+The movers report success while the data is quietly wrong. These are the
+failure classes migkit detects on its own - `check` auto-discovers what applies
+to the hop and runs every relevant one, no flags to choose. Sourced from
+real-world DMS/DTS/GoldenGate post-mortems, not guesses.
+
+| Silent failure (data looks "present", is wrong) | migkit | DMS/DTS | Veridata | data-diff | pt-sync |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Sequence / identity collision (`nextval ≤ max(pk)`) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Type-narrowing / silent truncation (varchar, scale, int) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Charset corruption (utf8mb4 cut, latin1 mojibake, U+FFFD) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Uniform timezone offset (systematic, not row noise) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Collation unique-collapse + glibc/ICU version drift | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Partition routing (rows stranded in default/MAXVALUE) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Generated/computed column drift (stored ≠ expression) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| RLS partial-dump / default-deny lockout | ✓ | ✗ | ✗ | ✗ | ✗ |
+| NULL vs empty-string flip (Oracle `''`=NULL) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| No-PK table (CDC drops updates/deletes) | ✓ | ✗ | ~ | ✗ | ✗ |
+| NOT VALID / untrusted constraints + FK orphans | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Deferrable-constraint drift | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Extensions + sequence-level grant parity | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Replication slot bloat / abandoned slot / long-txn | ✓ | ~ | ✗ | ✗ | ✗ |
+
+<sub>Postgres and MySQL have the full set; MongoDB/MSSQL have the base layer
+with the smart set landing engine by engine. Full usage reference:
+<b><a href="https://migkit.axentx.cloud/">migkit.axentx.cloud</a></b>.</sub>
 
 The managed services move data well but validate weakly and cannot repair a
 single row or carry a sequence. Debezium and pt-table-sync are excellent at one
@@ -254,7 +282,7 @@ pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
 ```
 
-49 tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
+100+ tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
 aliases stay invocable), mover selection and Debezium codegen, test_decoding
 parsing, end-to-end integration against throwaway Postgres containers
 (including the full delta-verify loop: touch -> flag -> replay -> repair ->
