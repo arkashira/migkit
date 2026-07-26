@@ -250,6 +250,7 @@ class MongoEngine(Engine):
             d = coll.find_one(sort=[("_id", -1)], projection={"_id": 1})
             return d["_id"] if d else None
 
+        res = []
         ahead, behind = [], []
         n = 0
         for name in names:
@@ -265,15 +266,205 @@ class MongoEngine(Engine):
             except TypeError:
                 continue
         if ahead:
-            return [Result("deep", f"{db} boundary", "diff",
-                           f"target newest _id AHEAD of source on:"
-                           f" {', '.join(ahead[:5])}", "",
-                           "writes landing on target or double-apply,"
-                           " find the writer before cutover")]
-        note = f"; {len(behind)} behind (replication lag)" if behind else ""
-        return [Result("deep", f"{db} boundary", "ok",
-                       f"newest _id checked on {n} collections,"
-                       f" none ahead of source{note}")]
+            res.append(Result("deep", f"{db} boundary", "diff",
+                              f"target newest _id AHEAD of source on:"
+                              f" {', '.join(ahead[:5])}", "",
+                              "writes landing on target or double-apply,"
+                              " find the writer before cutover"))
+        else:
+            note = f"; {len(behind)} behind (replication lag)" if behind else ""
+            res.append(Result("deep", f"{db} boundary", "ok",
+                              f"newest _id checked on {n} collections,"
+                              f" none ahead of source{note}"))
+
+        # BSON type fidelity: a migration through mongoexport/mongoimport or a
+        # careless mover silently changes a field's type - Decimal128 -> double
+        # loses precision, Int64 -> Int32 overflows, ObjectId -> string breaks
+        # _id equality, Date -> Timestamp shifts meaning. Compare the dominant
+        # BSON type per field on each side (sampled, top-level fields).
+        def field_types(coll):
+            pipe = [
+                {"$limit": 5000},
+                {"$project": {"kv": {"$objectToArray": "$$ROOT"}}},
+                {"$unwind": "$kv"},
+                {"$group": {"_id": {"f": "$kv.k", "t": {"$type": "$kv.v"}},
+                            "n": {"$sum": 1}}},
+            ]
+            hist = {}
+            for row in coll.aggregate(pipe, allowDiskUse=True):
+                hist.setdefault(row["_id"]["f"], {})[row["_id"]["t"]] = row["n"]
+            return {f: max(d, key=d.get) for f, d in hist.items()}
+
+        bad = []
+        for name in names:
+            if name.startswith("system."):
+                continue
+            sf, df = field_types(s[name]), field_types(t[name])
+            for f, sty in sorted(sf.items()):
+                dty = df.get(f)
+                if dty and dty != sty:
+                    bad.append(f"{name}.{f}: {sty} -> {dty}")
+        res.append(Result("deep", f"{db} bson-types", "diff" if bad else "ok",
+                          "; ".join(bad[:6]) if bad
+                          else f"field BSON types match across {n} collections",
+                          "", "re-migrate preserving types ($toDecimal/$toLong)"
+                          " or add a $jsonSchema validator" if bad else ""))
+
+        # null vs missing: {f: null} and an absent field are distinct in mongo,
+        # but a migration can flip one into the other - breaking $exists queries
+        # and sparse/partial-index membership. Doc counts stay equal either way,
+        # so compare the explicit-null and absent buckets per field.
+        nm = []
+        for name in names:
+            if name.startswith("system."):
+                continue
+            sc, tc = s[name], t[name]
+            fields = (set(field_types(sc)) | set(field_types(tc))) - {"_id"}
+            for f in sorted(fields)[:40]:
+                sn = sc.count_documents({f: {"$type": "null"}})
+                dn = tc.count_documents({f: {"$type": "null"}})
+                sa = sc.count_documents({f: {"$exists": False}})
+                da = tc.count_documents({f: {"$exists": False}})
+                if sn != dn or sa != da:
+                    nm.append(f"{name}.{f}: src null/absent={sn}/{sa}"
+                              f" dst={dn}/{da}")
+        res.append(Result("deep", f"{db} null-missing", "diff" if nm else "ok",
+                          "; ".join(nm[:6]) if nm
+                          else "explicit-null vs absent consistent", "",
+                          "preserve explicit null vs absent per field on load"
+                          if nm else ""))
+
+        # capped collection: a smaller size (or lost capped flag) on the target
+        # silently rolls old docs off the head FIFO - history vanishes, no error.
+        sopts = {c["name"]: c.get("options", {}) for c in s.list_collections()}
+        topts = {c["name"]: c.get("options", {}) for c in t.list_collections()}
+        cap = []
+        for name in names:
+            so, to = sopts.get(name, {}), topts.get(name, {})
+            if not so.get("capped") and not to.get("capped"):
+                continue
+            if bool(so.get("capped")) != bool(to.get("capped")):
+                cap.append(f"{name}: capped {bool(so.get('capped'))} ->"
+                           f" {bool(to.get('capped'))}")
+            elif so.get("size") and to.get("size") and to["size"] < so["size"]:
+                cap.append(f"{name}: capped size {so['size']} -> {to['size']}"
+                           " (rolls old docs off the head)")
+        res.append(Result("deep", f"{db} capped", "diff" if cap else "ok",
+                          "; ".join(cap[:5]) if cap
+                          else "capped collections match", "",
+                          "recreate the capped collection with size >= source"
+                          if cap else ""))
+
+        # index parity for the attributes that silently lose or delete data:
+        # a dropped `unique` admits duplicates, a changed `expireAfterSeconds`
+        # (TTL) either stops expiry or starts deleting, a `partialFilterExpression`
+        # change moves what the index covers. And a unique index that lands on a
+        # case/accent-insensitive collation on the target COLLAPSES distinct
+        # source values into duplicates on load - silent data loss.
+        def indexes(coll):
+            return {ix["name"]: ix for ix in coll.list_indexes()}
+        ixbad = []
+        for name in names:
+            if name.startswith("system."):
+                continue
+            si, di = indexes(s[name]), indexes(t[name])
+            for ixn, spec in si.items():
+                if ixn == "_id_":
+                    continue
+                d = di.get(ixn)
+                if not d:
+                    ixbad.append(f"{name}.{ixn}: index missing on target")
+                    continue
+                if bool(spec.get("unique")) != bool(d.get("unique")):
+                    ixbad.append(f"{name}.{ixn}: unique"
+                                 f" {bool(spec.get('unique'))} ->"
+                                 f" {bool(d.get('unique'))}")
+                if spec.get("expireAfterSeconds") != d.get("expireAfterSeconds"):
+                    ixbad.append(f"{name}.{ixn}: TTL"
+                                 f" {spec.get('expireAfterSeconds')} ->"
+                                 f" {d.get('expireAfterSeconds')}")
+                if spec.get("partialFilterExpression") != \
+                        d.get("partialFilterExpression"):
+                    ixbad.append(f"{name}.{ixn}: partial filter differs")
+                ss = (spec.get("collation") or {}).get("strength")
+                ds = (d.get("collation") or {}).get("strength")
+                if ss != ds:
+                    ixbad.append(f"{name}.{ixn}: collation strength"
+                                 f" {ss} -> {ds}")
+            # collapse: a unique index on a ci/ai collation on the target
+            for ixn, d in di.items():
+                if ixn == "_id_" or not d.get("unique"):
+                    continue
+                strength = (d.get("collation") or {}).get("strength")
+                if strength is None or strength > 2:
+                    continue
+                keys = list((d.get("key") or {}).keys())
+                if len(keys) != 1:
+                    continue
+                f = keys[0]
+                try:
+                    r = list(s[name].aggregate([
+                        {"$group": {"_id": {"$toLower": f"${f}"},
+                                    "n": {"$sum": 1}}},
+                        {"$match": {"n": {"$gt": 1}}},
+                        {"$count": "c"}]))
+                    c = r[0]["c"] if r else 0
+                except Exception:
+                    c = 0
+                if c > 0:
+                    ixbad.append(f"{name}.{f}: {c} source groups COLLAPSE"
+                                 " under the target's case-insensitive unique"
+                                 " index (data loss)")
+        res.append(Result("deep", f"{db} indexes", "diff" if ixbad else "ok",
+                          "; ".join(ixbad[:6]) if ixbad
+                          else "index unique/TTL/partial/collation match", "",
+                          "recreate the target index with the source's"
+                          " options (match collation to avoid collapse)"
+                          if ixbad else ""))
+
+        # sharded cluster: an interrupted moveChunk leaves orphaned docs, a
+        # merge/reshard with a non-_id shard key can duplicate _id across
+        # shards, and a running balancer makes counts a moving target. On a
+        # standalone / replica-set this is a clean skip, not a false OK.
+        def mongos(side):
+            try:
+                return self._client(side).admin.command(
+                    "hello").get("msg") == "isdbgrid"
+            except Exception:
+                return False
+        if not mongos("src") and not mongos("dst"):
+            res.append(Result("deep", f"{db} sharding", "ok",
+                              "not a sharded cluster (standalone/replica-set)"))
+        else:
+            sh = []
+            try:
+                if self._client("dst").admin.command(
+                        "balancerStatus").get("inBalancerRound"):
+                    sh.append("balancer running on target - counts/orphans are"
+                              " a moving target; sh.stopBalancer() before"
+                              " verify")
+            except Exception:
+                pass
+            for name in names:
+                if name.startswith("system."):
+                    continue
+                try:
+                    r = list(t[name].aggregate(
+                        [{"$group": {"_id": "$_id", "n": {"$sum": 1}}},
+                         {"$match": {"n": {"$gt": 1}}}, {"$count": "c"}],
+                        allowDiskUse=True))
+                    if r and r[0]["c"] > 0:
+                        sh.append(f"{name}: {r[0]['c']} duplicate _id across"
+                                  " shards (merge/reshard collision)")
+                except Exception:
+                    continue
+            res.append(Result("deep", f"{db} sharding",
+                              "diff" if sh else "ok",
+                              "; ".join(sh[:5]) if sh
+                              else "sharded: no dup _id, balancer idle", "",
+                              "cleanupOrphaned / dedupe and stop the balancer"
+                              " before cutover" if sh else ""))
+        return res
 
     # delta verify: re-check only _ids touched since the saved change-stream
     # token, which advances only on a clean verify (idempotent)
@@ -293,17 +484,37 @@ class MongoEngine(Engine):
         touched = {}
         n = 0
         end_token = token
-        with src.watch(resume_after=token) as stream:
-            while n < limit:
-                ev = stream.try_next()
-                if ev is None:
-                    break
-                n += 1
-                end_token = ev["_id"]
-                coll = ev.get("ns", {}).get("coll")
-                key = ev.get("documentKey", {}).get("_id")
-                if coll and key is not None:
-                    touched.setdefault(coll, {})[repr(key)] = key
+        # if the saved token has fallen off the oplog window, resuming from a
+        # fresh token would silently SKIP every change in the gap and report
+        # "in sync". Detect ChangeStreamHistoryLost (code 286), drop the token,
+        # and demand a full re-baseline instead of a false green.
+        from pymongo.errors import OperationFailure
+        try:
+            with src.watch(resume_after=token) as stream:
+                while n < limit:
+                    ev = stream.try_next()
+                    if ev is None:
+                        break
+                    n += 1
+                    end_token = ev["_id"]
+                    coll = ev.get("ns", {}).get("coll")
+                    key = ev.get("documentKey", {}).get("_id")
+                    if coll and key is not None:
+                        touched.setdefault(coll, {})[repr(key)] = key
+        except OperationFailure as e:
+            msg = str(e).lower()
+            if getattr(e, "code", None) == 286 \
+                    or "no longer be in the oplog" in msg \
+                    or "changestreamhistorylost" in msg:
+                state.unlink(missing_ok=True)
+                return [Result("delta", db, "diff",
+                               "change-stream token expired (oplog window"
+                               " exceeded) - the gap since the last verified"
+                               " point cannot be replayed, so 'in sync' would"
+                               " be a lie", "",
+                               "run a full check to re-baseline; grow the"
+                               " oplog to cover the migration window")]
+            raise
         if not touched:
             state.write_text(dumps(end_token))
             return [Result("delta", db, "ok",

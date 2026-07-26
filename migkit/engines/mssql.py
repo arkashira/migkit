@@ -86,18 +86,54 @@ class MSSQLEngine(Engine):
                        f"{len(src)} tables, rows {total:,} both sides")]
 
     def check_autoinc(self, db):
-        q = ("select s.name+'.'+t.name, cast(ident_current(s.name+'.'+t.name) as bigint)"
-             " from sys.tables t join sys.schemas s on s.schema_id=t.schema_id"
-             " where objectproperty(t.object_id,'TableHasIdentity')=1 order by 1")
-        src = dict(self._q("src", db, q))
-        dst = dict(self._q("dst", db, q))
-        bad = [f"{t} src={v} dst={dst.get(t)}" for t, v in sorted(src.items())
-               if dst.get(t) != v]
-        if bad:
-            return [Result("autoinc", db, "diff", "; ".join(bad), "",
-                           f"migkit sync {self.hop.name} --db {db} --kind sequences")]
-        return [Result("autoinc", db, "ok",
-                       f"{len(src)} identity tables, values match")]
+        """usable = will IDENTITY collide on the next insert (a load that used
+        IDENTITY_INSERT without a follow-up DBCC CHECKIDENT RESEED leaves the
+        seed behind max(col); SQL Server does not auto-clamp it); parity = the
+        seed matches the source."""
+        q = ("select s.name+'.'+t.name, c.name,"
+             " cast(isnull(ic.last_value,0) as bigint)"
+             " from sys.identity_columns ic"
+             " join sys.tables t on t.object_id=ic.object_id"
+             " join sys.schemas s on s.schema_id=t.schema_id"
+             " join sys.columns c on c.object_id=ic.object_id"
+             " and c.column_id=ic.column_id order by 1")
+        src = {r[0]: r[2] for r in self._q("src", db, q)}
+        drows = self._q("dst", db, q)
+        dcol = {r[0]: r[1] for r in drows}
+        dcur = {r[0]: r[2] for r in drows}
+        collide = []
+        for tbl, col in sorted(dcol.items()):
+            try:
+                mx = int(self._q("dst", db, f"select isnull(max([{col}]),0)"
+                                 f" from {tbl} with (nolock)")[0][0] or 0)
+            except (RuntimeError, IndexError, ValueError):
+                continue
+            cur = int(dcur.get(tbl, 0) or 0)
+            if mx > 0 and cur < mx:
+                collide.append(f"{tbl}: IDENT_CURRENT={cur} < max({col})={mx}")
+        res = []
+        if collide:
+            res.append(Result("autoinc", f"{db} usable", "diff",
+                              "IDENTITY will collide on next insert: "
+                              + "; ".join(collide[:8]), "",
+                              f"migkit sync {self.hop.name} --db {db} --kind"
+                              " sequences  (DBCC CHECKIDENT RESEED)"))
+        else:
+            res.append(Result("autoinc", f"{db} usable", "ok",
+                              f"{len(dcol)} identity tables clear their column"
+                              " max, no collision" if dcol
+                              else "no identity tables"))
+        parity = [f"{t} src={v} dst={dcur.get(t)}"
+                  for t, v in sorted(src.items()) if dcur.get(t) != v]
+        if parity:
+            res.append(Result("autoinc", f"{db} parity", "diff",
+                              "; ".join(parity[:8]), "",
+                              f"migkit sync {self.hop.name} --db {db} --kind"
+                              " sequences"))
+        else:
+            res.append(Result("autoinc", f"{db} parity", "ok",
+                              f"{len(src)} identity seeds match source"))
+        return res
 
     counts_from_data = True
 
@@ -207,6 +243,24 @@ class MSSQLEngine(Engine):
 
     def check_deep(self, db):
         res = []
+        # no pk/unique = CDC drops its updates/deletes and it can't be verified
+        # or repaired by key (same trap as the other engines)
+        nopk = [r[0] for r in self._q("src", db,
+                "select s.name+'.'+t.name from sys.tables t"
+                " join sys.schemas s on s.schema_id=t.schema_id"
+                " where not exists (select 1 from sys.indexes i"
+                " where i.object_id=t.object_id"
+                " and (i.is_primary_key=1 or i.is_unique=1))")]
+        if nopk:
+            res.append(Result("deep", f"{db} keys", "diff",
+                              f"{len(nopk)} tables have no pk/unique (CDC drops"
+                              " their updates/deletes, unverifiable by key): "
+                              + ", ".join(nopk[:5]), "",
+                              "add a primary key or unique index before"
+                              " migrating"))
+        else:
+            res.append(Result("deep", f"{db} keys", "ok",
+                              "every table has a pk or unique index"))
         # movers load with constraints/triggers disabled and often forget
         # to re-enable or re-validate: is_disabled and is_not_trusted are
         # the sql server analog of postgres NOT VALID
