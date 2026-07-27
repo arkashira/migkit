@@ -341,10 +341,17 @@ class PostgresEngine(Engine):
                     out[p[0]] = last + inc.get(p[0], 1) if called else last
         return out
 
+    def _keep_tbl(self, db, t):
+        """False if the 'schema.table' is excluded for this db, so it is
+        neither verified nor repaired (protects target-owned tables)."""
+        sch, _, tbl = t.partition(".")
+        return not self.hop.excluded(db, sch, tbl)
+
     def check_counts(self, db):
-        st = [t for t in self._psql("src", db, self.USER_TABLES).splitlines() if t]
-        dt = set(t for t in self._psql("dst", db,
-                                       self.USER_TABLES).splitlines() if t)
+        st = [t for t in self._psql("src", db, self.USER_TABLES).splitlines()
+              if t and self._keep_tbl(db, t)]
+        dt = set(t for t in self._psql("dst", db, self.USER_TABLES).splitlines()
+                 if t and self._keep_tbl(db, t))
         bad = [f"{t} missing on target" for t in st if t not in dt]
         bad += [f"{t} extra on target"
                 for t in sorted(dt - set(st))]
@@ -419,7 +426,8 @@ class PostgresEngine(Engine):
         a plain SELECT). Emits the same OK/DIFF/ERROR lines the slice-mode
         drilldown and counts merge consume."""
         tables = [t for t in
-                  self._psql("src", db, self.USER_TABLES).splitlines() if t]
+                  self._psql("src", db, self.USER_TABLES).splitlines()
+                  if t and self._keep_tbl(db, t)]
         w = int(self.hop.options.get("checksum_workers", 8))
         h = self._row_hash_expr()
 
@@ -1533,6 +1541,8 @@ class PostgresEngine(Engine):
                 for f in rpt.glob("data-*.changed"):
                     tables.add(f.name[len("data-"):-len(".changed")])
             for t in sorted(tables):
+                if not self._keep_tbl(db, t):
+                    continue
                 counts = []
                 for kind_ in ("missing", "extra", "changed"):
                     f = rpt / f"data-{t}.{kind_}"

@@ -127,7 +127,9 @@ class MongoEngine(Engine):
     def check_counts(self, db):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
         bad = []
-        names = sorted(set(s.list_collection_names()) & set(t.list_collection_names()))
+        names = sorted(c for c in
+                       set(s.list_collection_names()) & set(t.list_collection_names())
+                       if not self.hop.excluded(db, c))
         total_a = total_b = 0
         for name in names:
             a = s[name].count_documents({})
@@ -151,7 +153,8 @@ class MongoEngine(Engine):
             a = b = None
         sn = set(s.list_collection_names())
         tn = set(t.list_collection_names())
-        names = [table] if table else sorted(sn & tn)
+        names = [table] if table else sorted(c for c in sn & tn
+                                             if not self.hop.excluded(db, c))
         res = []
         for name in names:
             if name.startswith("system."):
@@ -567,6 +570,8 @@ class MongoEngine(Engine):
                         for f in d.glob(f"data-*.{k}")})
         actions = []
         for name in names:
+            if self.hop.excluded(db, name):
+                continue
             counts = []
             for k in ("missing", "extra", "changed"):
                 f = d / f"data-{name}.{k}"

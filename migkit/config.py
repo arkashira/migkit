@@ -49,6 +49,21 @@ class Hop:
         Local report paths stay keyed by the source name."""
         return self.db_map.get(db, db)
 
+    def excluded(self, *parts):
+        """True if an object matches any `exclude` pattern, so migkit neither
+        verifies nor repairs it. Pass the dotted name parts, e.g. (db, schema,
+        table) for postgres or (db, table) for mysql/mongo. A pattern matches
+        the full dotted id or any right-anchored suffix of it, with shell
+        wildcards, so 'pick_dispatch_queue', 'public.pick_dispatch_queue' and
+        'oms_mkp_uat.public.pick_dispatch_queue' all exclude the same table,
+        and 'oms_mkp_uat.public.*' excludes a whole schema. This protects
+        target-owned tables (rows written on the target, not the source) from
+        being deleted by a reconcile."""
+        from fnmatch import fnmatch
+        parts = [str(p) for p in parts if p not in (None, "")]
+        cands = {".".join(parts[i:]) for i in range(len(parts))}
+        return any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands)
+
 
 DEFAULT_PORTS = {
     "postgres": 5432, "mysql": 3306, "mssql": 1433,

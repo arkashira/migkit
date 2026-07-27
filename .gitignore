@@ -2,6 +2,7 @@
 .venv-tools/
 reports/
 conf/hops.yaml
+conf/hops.yaml.bak.*
 __pycache__/
 *.egg-info/
 migrations/

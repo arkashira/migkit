@@ -223,7 +223,7 @@ class MySQLEngine(Engine):
                              " where table_schema=%s and table_type='BASE TABLE'"
                              " and table_name not like 'migkit%%'"
                              " order by 1", (self._d(side, db),))
-        return [r[0] for r in rows]
+        return [r[0] for r in rows if not self.hop.excluded(db, r[0])]
 
     def _pk_cols(self, db, t):
         rows = self._q("src",
