@@ -241,7 +241,7 @@ class MongoEngine(Engine):
             out[repr(doc["_id"])] = (doc["_id"], h)
         return out
 
-    def snapshot_state(self, db, state_dir):
+    def snapshot_state(self, db, state_dir, kind="all"):
         (state_dir / "dst-shape.txt").write_text(repr(self._shape("dst", db)))
 
     def check_deep(self, db):

@@ -527,7 +527,7 @@ def _repair_one(hop, eng, db, kind, do_apply):
         console.print("\nre-run migkit check to confirm")
 
 
-def _sync_go(hop_name, db, tag, on_conflict="source-wins"):
+def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
     from .state import get_store
 
     hop = get_hop(hop_name)
@@ -542,7 +542,7 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins"):
     for d in dbs:
         console.print(f"[bold]{d}[/bold]")
         point = store.new_point(d, tag)
-        eng.snapshot_state(d, point.dir)
+        eng.snapshot_state(d, point.dir, kind)
         journal = point.path("journal.jsonl")
 
         def log(entry):
@@ -551,40 +551,42 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins"):
                                    default=str) + "\n")
 
         log({"db": d, "event": "snapshot"})
-        r = eng.check_autoinc(d)[0]
-        console.print(f"  autoinc: {r.status}")
-        if r.status == "diff":
-            for a in eng.repair_plan(d, "sequences"):
-                point.path("undo-sequences.sql").write_text(
-                    "\n".join(a.undo) + "\n")
-                lk = _lock(hop)
-                try:
-                    eng.apply(d, a)
-                finally:
-                    lk.unlink()
-                _changelog(hop, {"op": "sync", "db": d,
-                                 "kind": "sequences", "state": point.ts})
-                again = eng.check_autoinc(d)[0].status
-                log({"event": "repair-sequences", "n": len(a.statements),
-                     "recheck": again})
-                console.print(f"  autoinc: repaired {len(a.statements)},"
-                              f" re-check {again}")
-        r = eng.check_data(d)[0]
-        console.print(f"  data: {r.status} {r.detail}")
-        log({"event": "check-data", "status": r.status, "detail": r.detail})
-        if r.status == "diff":
-            for a in eng.repair_plan(d, "rows"):
-                lk = _lock(hop)
-                try:
-                    eng.apply(d, a)
-                finally:
-                    lk.unlink()
-                _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
-                                 "state": point.ts, "note": a.note})
-                log({"event": "repair-rows", "note": a.note})
-            again = eng.check_data(d)[0]
-            console.print(f"  data re-check: {again.status} {again.detail}")
-            log({"event": "recheck-data", "status": again.status})
+        if kind in ("sequences", "all"):
+            r = eng.check_autoinc(d)[0]
+            console.print(f"  autoinc: {r.status}")
+            if r.status == "diff":
+                for a in eng.repair_plan(d, "sequences"):
+                    point.path("undo-sequences.sql").write_text(
+                        "\n".join(a.undo) + "\n")
+                    lk = _lock(hop)
+                    try:
+                        eng.apply(d, a)
+                    finally:
+                        lk.unlink()
+                    _changelog(hop, {"op": "sync", "db": d,
+                                     "kind": "sequences", "state": point.ts})
+                    again = eng.check_autoinc(d)[0].status
+                    log({"event": "repair-sequences", "n": len(a.statements),
+                         "recheck": again})
+                    console.print(f"  autoinc: repaired {len(a.statements)},"
+                                  f" re-check {again}")
+        if kind in ("rows", "all"):
+            r = eng.check_data(d)[0]
+            console.print(f"  data: {r.status} {r.detail}")
+            log({"event": "check-data", "status": r.status, "detail": r.detail})
+            if r.status == "diff":
+                for a in eng.repair_plan(d, "rows"):
+                    lk = _lock(hop)
+                    try:
+                        eng.apply(d, a)
+                    finally:
+                        lk.unlink()
+                    _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
+                                     "state": point.ts, "note": a.note})
+                    log({"event": "repair-rows", "note": a.note})
+                again = eng.check_data(d)[0]
+                console.print(f"  data re-check: {again.status} {again.detail}")
+                log({"event": "recheck-data", "status": again.status})
         point.set_meta(op="sync", db=d)
         ts = point.commit(time.strftime("%F %T"))
         console.print(f"  state saved: {store.kind}:{ts}")
@@ -630,7 +632,7 @@ def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval,
         return _orchestrate(ctx, hop_name, db, mode, do_apply or go,
                             serve, interval, on_conflict)
     if go:
-        return _sync_go(hop_name, db, tag, on_conflict)
+        return _sync_go(hop_name, db, tag, on_conflict, kind)
     return _repair(hop_name, db, kind, do_apply, on_conflict)
 
 

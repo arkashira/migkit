@@ -1679,13 +1679,18 @@ class PostgresEngine(Engine):
             f"-- then start the migration service in data-only mode into existing tables",
         ]
 
-    def snapshot_state(self, db, state_dir):
+    def snapshot_state(self, db, state_dir, kind="all"):
         seqs = self._psql("dst", db,
                           "select schemaname||'.'||sequencename||'|'||"
                           "coalesce(last_value,1)||'|'||(last_value is not null)"
                           " from pg_sequences"
                           " where schemaname not like '\\_\\_%'")
         (state_dir / "dst-sequences.txt").write_text((seqs + "\n") if seqs else "")
+        # a sequence-only repair rolls back from the sequence snapshot alone;
+        # skip the schema dump, which is slow (and can stall) on big partitioned
+        # databases and buys nothing here.
+        if kind == "sequences":
+            return
         ep = self.hop.target
         p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
                  "-d", self._d("dst", db), "--schema-only", "--no-owner",

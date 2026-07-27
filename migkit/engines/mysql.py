@@ -185,12 +185,15 @@ class MySQLEngine(Engine):
                       f"{total} objects in {len(inv)} types,"
                       " all present on target")
 
-    def snapshot_state(self, db, state_dir):
+    def snapshot_state(self, db, state_dir, kind="all"):
         q = ("select table_name, auto_increment from information_schema.tables"
              " where table_schema=%s and auto_increment is not null")
         rows = self._q("dst", q, (self._d("dst", db),), fresh=True)
         (state_dir / "dst-autoinc.txt").write_text(
             "".join(f"{t}|{v}\n" for t, v in sorted(rows)))
+        # sequence-only repair rolls back from the auto_increment snapshot alone
+        if kind == "sequences":
+            return
         (state_dir / "dst-schema.sql").write_text(self._dump_schema("dst", db))
 
     def _atlas(self, db):
