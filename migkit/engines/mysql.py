@@ -279,6 +279,24 @@ class MySQLEngine(Engine):
                               f"{len(common)} tables, rows"
                               f" {total_a:,}=={total_b:,}")]
 
+    PARAM_CRITICAL = ("time_zone", "system_time_zone", "character_set_server",
+                      "character_set_database", "collation_server",
+                      "collation_database", "collation_connection", "sql_mode",
+                      "lower_case_table_names", "default_storage_engine",
+                      "transaction_isolation", "explicit_defaults_for_timestamp",
+                      "character_set_connection", "character_set_client",
+                      "character_set_results", "max_allowed_packet",
+                      "group_concat_max_len", "version")
+
+    def check_params(self, db):
+        def pull(side):
+            return {r[0]: str(r[1]) for r in
+                    self._q(side, "show global variables")}
+        return self._param_result(
+            db, pull("src"), pull("dst"), self.PARAM_CRITICAL,
+            "align the behavior-critical variables on the target parameter"
+            " group before cutover")
+
     def check_autoinc(self, db):
         """usable = will AUTO_INCREMENT collide with an existing row on the
         next insert (the DMS trap - InnoDB 8 usually clamps it up, but a
@@ -565,8 +583,15 @@ class MySQLEngine(Engine):
                            "pip install mysql-replication for delta verify")]
         state = self.hop.report_dir(db) / "delta-pos.json"
         if not state.exists():
-            pos = self._q("src", "show binary log status") or \
-                self._q("src", "show master status")
+            pos = None
+            for q in ("show binary log status",   # mysql 8.4+
+                      "show master status"):      # mysql 8.0 / aurora / txsql
+                try:
+                    pos = self._q("src", q)
+                except Exception:
+                    pos = None
+                if pos:
+                    break
             if not pos:
                 return [Result("delta", db, "error",
                                "cannot read binlog position on source")]
@@ -1450,7 +1475,14 @@ class MySQLEngine(Engine):
 
     def replicate_sql(self, db, copy_data=True):
         s, t = self.hop.source, self.hop.target
-        pos = self._q("src", "show binary log status") or             self._q("src", "show master status")
+        pos = None
+        for _q_ in ("show binary log status", "show master status"):
+            try:
+                pos = self._q("src", _q_)
+            except Exception:
+                pos = None
+            if pos:
+                break
         coords = f"file {pos[0][0]} pos {pos[0][1]}" if pos else "unknown"
         gtid = self._q("src", "show variables like 'gtid_mode'")
         gtid_on = gtid and gtid[0][1] == "ON"
