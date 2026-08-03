@@ -144,6 +144,17 @@ class MongoEngine(Engine):
                        f"{len(names)} collections, docs"
                        f" {total_a:,}=={total_b:,}")]
 
+    def check_params(self, db):
+        def pull(side):
+            try:
+                res = self._client(side).admin.command({"getParameter": "*"})
+            except Exception as e:
+                return {"_error": str(e).splitlines()[-1][:80]}
+            return {k: v for k, v in res.items() if k != "ok"}
+        return self._param_result(
+            db, pull("src"), pull("dst"), ("featureCompatibilityVersion",),
+            "align server parameters / feature compatibility version on target")
+
     def check_data(self, db, table=None, stream=None, with_counts=False):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
         try:

@@ -42,6 +42,41 @@ class Engine:
     def check_deep(self, db):
         return [Result("deep", db, "skip", "no deep checks for this engine yet")]
 
+    def check_params(self, db):
+        return [Result("params", db, "skip",
+                       "no parameter comparison for this engine yet")]
+
+    def _param_result(self, db, src, dst, critical, hint):
+        """Dump every server setting from both sides to params.json (same shape
+        as objects.json), then flag mismatches. Only behavior-critical settings
+        (timezone, encoding, collation, sql_mode, ...) fail the check; the many
+        instance-specific ones that always differ on managed databases (memory,
+        paths, limits) are counted but stay ok. The full list is on disk."""
+        import json
+        names = sorted(set(src) | set(dst))
+        inv = {n: {"src": src.get(n), "dst": dst.get(n)} for n in names}
+        out = self.hop.report_dir(db) / "params.json"
+        out.write_text(json.dumps(inv, indent=1, default=str))
+        crit_lc = {c.lower() for c in critical}
+        diff = [n for n in names if src.get(n) != dst.get(n)]
+        crit = [n for n in diff if n.lower() in crit_lc]
+        if not diff:
+            return [Result("params", f"{db} params", "ok",
+                           f"{len(names)} settings, all equal both sides",
+                           str(out))]
+        if crit:
+            shown = "; ".join(f"{n} src={src.get(n)} dst={dst.get(n)}"
+                              for n in crit[:12])
+            extra = len(diff) - len(crit)
+            tail = f" (+{extra} non-critical, see params.json)" if extra else ""
+            return [Result("params", f"{db} params", "diff",
+                           f"{len(crit)} behavior-critical settings differ: "
+                           + shown + tail, str(out), hint)]
+        return [Result("params", f"{db} params", "ok",
+                       f"{len(diff)} of {len(names)} settings differ but none"
+                       " behavior-critical (memory/paths/limits, see"
+                       " params.json)", str(out))]
+
     def _atlas_authoritative(self, res):
         """atlas is schema-aware and the authoritative differ; when it says
         clean, demote the noisier textual opinions (native dump diff, migra,

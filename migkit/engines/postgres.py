@@ -265,6 +265,28 @@ class PostgresEngine(Engine):
                       f"{total} objects in {len(inv)} types,"
                       f" all present on target{note}")
 
+    PARAM_CRITICAL = ("TimeZone", "client_encoding", "server_encoding",
+                      "lc_collate", "lc_ctype", "lc_monetary", "lc_numeric",
+                      "lc_time", "DateStyle", "IntervalStyle",
+                      "standard_conforming_strings", "bytea_output",
+                      "default_transaction_isolation", "extra_float_digits",
+                      "wal_level", "integer_datetimes", "backslash_quote",
+                      "check_function_bodies", "array_nulls", "search_path",
+                      "default_text_search_config")
+
+    def check_params(self, db):
+        q = ("select name||chr(31)||coalesce(setting,'') from pg_settings"
+             " order by name")
+
+        def pull(side):
+            return dict(l.split("\x1f", 1) for l in
+                        self._psql(side, db, q).splitlines() if "\x1f" in l)
+
+        return self._param_result(
+            db, pull("src"), pull("dst"), self.PARAM_CRITICAL,
+            "align the behavior-critical GUCs on the target parameter group"
+            " before cutover")
+
     SEQ_Q = ("select schemaname||'.'||sequencename||'|'||coalesce(last_value,0)"
              " from pg_sequences where schemaname not like '\\_\\_%'"
              " and sequencename not like 'migkit\\_%' order by 1")

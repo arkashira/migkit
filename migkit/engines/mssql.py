@@ -26,6 +26,17 @@ class MSSQLEngine(Engine):
                        " ('master','tempdb','model','msdb') order by 1")
         return [r[0] for r in rows]
 
+    def check_params(self, db):
+        def pull(side):
+            rows = self._q(side, "master",
+                           "select name, cast(value_in_use as varchar(64))"
+                           " from sys.configurations order by name")
+            return {r[0].strip(): r[1].strip() for r in rows if len(r) >= 2}
+        return self._param_result(
+            db, pull("src"), pull("dst"), (),
+            "align sp_configure / server settings on the target"
+            " (server collation compared separately)")
+
     def _objects(self, side, db):
         rows = self._q(side, db,
                        "select s.name+'.'+o.name, o.type_desc,"
