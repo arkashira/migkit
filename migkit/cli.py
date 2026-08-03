@@ -319,7 +319,7 @@ def _drill(hop_name, db, table, limit):
 @click.option("--db", default="", help="single database")
 @click.option("--table", default="", help="single table (schema.table)")
 @click.option("--only", default="",
-              help="comma list: schema,counts,autoinc,data,deep")
+              help="comma list: schema,counts,autoinc,data,deep,params")
 @click.option("--deep", "do_deep", is_flag=True,
               help="add deep checks: fk orphans, disabled triggers, column"
                    " drift, matview/grants parity, boundary freshness")
@@ -345,7 +345,7 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    allowed = list(eng.checks) + ["deep"]
+    allowed = list(eng.checks) + ["deep", "params"]
     # smart by default: with no --only, run the full battery including the
     # deep checks (fk orphans, sequence collisions, drift, boundary). --only
     # narrows for a fast targeted pass; --deep stays as a no-op alias.
@@ -1407,6 +1407,32 @@ def state_cmd(ctx, hop_name, db, show_ts):
 def monitor(hop_name, db, interval, only, cycles):
     """(alias) Now: migkit watch HOP --verify."""
     _monitor(hop_name, db, interval, only, cycles)
+
+
+@main.command("users")
+@click.argument("hop_name")
+@click.argument("mode", type=click.Choice(["test", "create", "verify", "rollback"]))
+@click.option("--apply", "do_apply", is_flag=True,
+              help="execute on the target (default is dry-run)")
+@click.option("--passwords", "pw_file", default="",
+              help="yaml file `role: password` for postgres create (managed "
+                   "sources lock password hashes; mysql needs no file - the "
+                   "hash is copied so the password stays identical)")
+def users_cmd(hop_name, mode, do_apply, pw_file):
+    """Sync logins source -> target keeping the same password.
+
+    test    compare users (read-only), write users.json to the report dir
+    create  make the missing users on the target (dry-run unless --apply);
+            mysql copies the password hash = same password, grants replayed
+            from the source; postgres reads passwords from --passwords
+    verify  re-compare; exit 0 only when no gap remains
+    rollback drop only the users this command created (dry-run unless --apply)
+
+    Cloud system accounts (AWS_*, rds*, tencent*) are excluded on both sides.
+    Never touches the source.
+    """
+    from .users import run as _users_run
+    _users_run(hop_name, mode, do_apply, pw_file)
 
 
 if __name__ == "__main__":
