@@ -9,7 +9,9 @@ warnings.filterwarnings("ignore")
 
 OUT = os.environ.get("COMPARE_OUT", "reports")  # relative to migkit/ cwd
 os.makedirs(OUT, exist_ok=True)
-HOP_NAME = sys.argv[1] if len(sys.argv) > 1 else "mongo-to-tencent"
+if len(sys.argv) < 2:
+    raise SystemExit(f"usage: {sys.argv[0]} <hop> [db ...]   (hop names come from conf/hops.yaml)")
+HOP_NAME = sys.argv[1]
 H = yaml.safe_load(open(os.environ.get("MIGKIT_CONF", "conf/hops.yaml")))["hops"][HOP_NAME]
 DB = (H.get("databases") or ["oss"])[0]
 CONTENT_CAP = 120_000   # full content hash only up to this size; larger -> count + id-set only (fast, still proves doc set)

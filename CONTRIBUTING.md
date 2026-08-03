@@ -48,3 +48,16 @@ pointed at.
 
 Use the issue templates. For anything security-sensitive, see
 [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## No organisation-specific values in the source
+
+migkit is a generic tool: hostnames, IPs, account ids, cluster names and
+credentials belong to the operator, not to the repo. They live in
+`conf/hops.yaml`, which is gitignored.
+
+```bash
+git config core.hooksPath .githooks     # once per clone - blocks such commits
+python tools/check_no_secrets.py        # scan the tracked tree any time
+python tools/check_no_secrets.py --staged
+```
+Docs may use obvious placeholders: `example.com`, `10.0.0.x`, `<host>`, `CHANGE_ME`.

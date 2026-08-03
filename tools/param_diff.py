@@ -191,6 +191,15 @@ def load_cache(path):
     dst = {k: v["dst"] for k, v in raw.items() if isinstance(v, dict) and v.get("dst") is not None}
     return src, dst, raw
 
+def _first_hop(engine):
+    """hop ตัวแรกใน hops.yaml ที่ engine ตรง - ไม่ผูกกับชื่อ hop ขององค์กรใด"""
+    for name, h in HOPS.items():
+        if h.get("engine") == engine:
+            return name
+    raise SystemExit(f"no {engine} hop in the config; set "
+                     f"{engine.upper()}_HOP=<hop name>")
+
+
 def _hop_labels(hop):
     """source/target label ของ hop จาก hops.yaml (ไม่ hardcode endpoint ของใคร)"""
     h = HOPS.get(hop, {})
@@ -215,7 +224,7 @@ def _first_params_cache(hop, db=""):
 # ============================ POSTGRES ============================
 def do_pg():
     # params are server-level, so any database of the hop captures the same two servers.
-    hop = os.environ.get("PG_HOP", "rds-to-tencent")
+    hop = os.environ.get("PG_HOP") or _first_hop("postgres")
     db = os.environ.get("PG_DB", "")
     path = _first_params_cache(hop, db)
     print(f"[pg] reading cache {path} …")
@@ -226,7 +235,7 @@ def do_pg():
 
 # ============================ MYSQL ============================
 def do_mysql():
-    hop = os.environ.get("MYSQL_HOP", "mysql-to-tencent")
+    hop = os.environ.get("MYSQL_HOP") or _first_hop("mysql")
     db = os.environ.get("MYSQL_DB", "")
     path = _first_params_cache(hop, db)
     print(f"[mysql] reading cache {path} …")

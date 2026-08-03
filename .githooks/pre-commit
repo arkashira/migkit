@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# migkit is meant to be shared: no real endpoint, IP, account id or credential
+# may enter the source. Real values belong in conf/hops.yaml (gitignored).
+# enable once per clone:  git config core.hooksPath .githooks
+py=".venv/bin/python"; [ -x "$py" ] || py=python3
+"$py" tools/check_no_secrets.py --staged || {
+  echo
+  echo "commit blocked. Move those values into conf/hops.yaml (gitignored),"
+  echo "or use a placeholder (example.com / 10.0.0.x / CHANGE_ME) in docs."
+  exit 1
+}
