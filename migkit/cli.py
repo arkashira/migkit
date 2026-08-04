@@ -10,6 +10,7 @@ from . import advisors
 from .config import get_hop, load_hops
 from .engines import get_engine
 from .util import Timer, human_int, human_secs, which
+from . import __version__
 
 console = Console(highlight=False)
 QUIET = False
@@ -66,6 +67,7 @@ def _require_configured(hop):
 
 
 @click.group()
+@click.version_option(__version__, "-V", "--version", prog_name="migkit")
 @click.option("-q", "--quiet", is_flag=True,
               help="suppress per-table chatter and progress lines,"
                    " keep diffs, errors and summaries")

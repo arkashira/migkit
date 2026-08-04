@@ -21,8 +21,56 @@ The rule it is built on: **never let the mover be the judge of its own work.**
 
 ---
 
+## Proven on a real migration
+
+A cross-cloud UAT failback, run end to end on 2026-08-04: three engines moved
+back from one cloud to another on a snapshot base with CDC replaying the delta
+from a recorded position. **363 checks across 23 databases**, and every number
+below is measured, not estimated.
+
+| what | result |
+|---|---|
+| CDC latency, write on source to read on target | 2.1 s postgres, 6.4 s mysql, 7.9 s mongo |
+| mover's own row-by-row validation | 384 tables, 0 failed records |
+| tables the mover could not validate (no usable key) | 12, all proven equal here by whole-table checksum |
+| grants replayed with saved undo | 1,164, ending at 0 missing |
+| NOT VALID constraints validated | 20 of 20, 0 rows in violation |
+| logins reconciled | 0 missing on all three engines |
+| snapshot of 880 GB | 287 s |
+
+### What it caught that the mover did not
+
+- **An identity counter below the highest id already used.** Two tables would
+  have rejected the first insert after the switch with a duplicate key. The
+  mover reported the tables as fully validated.
+- **15 rows referencing parents that do not exist**, left by a load that ran
+  with foreign key checks off.
+- **A whole month of data present on one side only.** The monthly partitions
+  for three earlier months matched exactly; the current month held 264 rows on
+  one side and none on the other. Reconciling toward the "source" would have
+  deleted four days of real data. Surfaced as a question for the team rather
+  than repaired automatically, which is the point of the quiesce gate.
+- **Permission parity that reads as broken when it is not.** The usual
+  `information_schema` view only shows grants whose grantee the connected user
+  belongs to, so group grants look missing on a target reached with an
+  application user. Reading the raw ACL gives the true count.
+- **A replication slot nobody was reading**, holding WAL on a shared source
+  with no retention cap - a slow way to fill someone else's disk.
+
+### What it could not do, stated plainly
+
+MongoDB passwords cannot cross to DocumentDB. They are stored as SCRAM, the
+only way to move the original is to copy the whole `admin.system.users`
+document, and DocumentDB blocks that collection - verified, it reads back zero
+documents. Accounts must be created with a fresh password, so those passwords
+have to be prepared before the switch. PostgreSQL and MySQL do not have this
+problem: the stored hash is copied and users keep the password they had.
+
+---
+
 ## Table of contents
 
+- [Proven on a real migration](#proven-on-a-real-migration)
 - [Why](#why)
 - [Features](#features)
 - [Quickstart](#quickstart)

@@ -1,5 +1,47 @@
 # Changelog
 
+The notable changes, grouped by area. Generated from the commits by
+`tools/gen_changelog.py` when a release is tagged.
+
+## v0.2.0 - 2026-08-04
+
+### Added
+- users command - sync logins with the same password (test/create/verify/rollback) (61ecfe5)
+- honor hop.exclude in check and repair across pg/mysql/mongo (cd0e094)
+- mongo smart deep-checks, mssql identity-collision + no-PK, OSS community files (d061b11)
+- silent-corruption deep checks (pg+mysql), cutover verdict, usage docs (a952c32)
+
+### Fixed
+- --go honors --kind (sequence-only skips schema snapshot and data scan) (3c04f4d)
+
+### Security
+- block organisation-specific values in the source; tools take the hop name instead of defaulting to one (fc9ef40)
+
+### Tests
+- resolve the migkit binary instead of hardcoding a local venv path (bc32035)
+- mark every docker-backed module so the no-docker run really excludes them (380cea7)
+
+### Maintenance
+- guard job, test and build artifacts, tag-driven release with generated notes (9698a37)
+- add CODEOWNERS and pull request template (e4ea041)
+
+### Config
+- resolve hops.yaml and reports from the working directory so an installed copy runs anywhere (49ec4b3)
+
+### MySQL
+- delta verify on 8.0 + behavior-critical params (a76c4a5)
+
+### Params
+- behavior-critical parameter check across engines (+docs, tests) (d551a24)
+
+### Tools
+- spot check, grants apply, sequence ACL fix, MIGKIT_CONF support (6392594)
+
+### Users
+- mongodb support, connection resilience, no-pk and constraint checks (3f7e135)
+
+Full comparison: v0.1.0...v0.2.0
+
 The notable changes, grouped by area. This project is pre-1.0; releases are
 cut from `master` and versions are tagged as features stabilize.
 

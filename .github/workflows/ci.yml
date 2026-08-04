@@ -18,6 +18,14 @@ jobs:
           python-version: "3.12"
       - name: nothing organisation-specific in the source
         run: python tools/check_no_secrets.py
+      - name: the version is the same everywhere it is written
+        run: |
+          PY=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          PKG=$(python -c "import re;print(re.search(r'\"([^\"]+)\"', open('migkit/__init__.py').read()).group(1))")
+          CL=$(grep -m1 -oE '^## v[0-9][^ ]*' CHANGELOG.md | tr -d '#v ' || true)
+          echo "  pyproject=$PY  package=$PKG  changelog=$CL"
+          [ "$PY" = "$PKG" ] || { echo "pyproject and migkit/__init__.py disagree"; exit 1; }
+          [ -z "$CL" ] || [ "$CL" = "$PY" ] || { echo "CHANGELOG top entry is $CL, not $PY"; exit 1; }
       - name: no plaintext credential committed
         run: |
           if git grep -nIE "(password|passwd|secret[_-]?key|token)[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9/+=_-]{12,}" \
