@@ -15,10 +15,17 @@ def grants(cfg, db):
     c = psycopg2.connect(host=cfg["host"], port=cfg["port"], user=cfg["user"],
                          password=cfg["password"], dbname=db, connect_timeout=15)
     c.autocommit = True; cur = c.cursor()
-    cur.execute("""select grantee,table_name,privilege_type from information_schema.role_table_grants
-                   where table_schema='public' and grantee<>'PUBLIC'""")
+    # raw ACL, not information_schema.role_table_grants: that view only shows
+    # grants whose grantee the connected user is a member of, so a plain user on
+    # the target cannot see group_* grants and they look missing when they exist
+    cur.execute("""select pg_get_userbyid(a.grantee), c.relname, a.privilege_type
+                   from pg_class c
+                   join pg_namespace n on n.oid = c.relnamespace,
+                        aclexplode(c.relacl) a
+                   where c.relkind in ('r','p','v','m','f') and n.nspname='public'
+                     and pg_get_userbyid(a.grantee) <> 'PUBLIC'""")
     tg = set(cur.fetchall())
-    # role_usage_grants เห็นเฉพาะ USAGE; SELECT/UPDATE บน sequence ต้องอ่านจาก relacl
+    # role_usage_grants only exposes USAGE; SELECT/UPDATE come from relacl
     cur.execute("""select pg_get_userbyid(a.grantee), c.relname, a.privilege_type
                    from pg_class c
                    join pg_namespace n on n.oid = c.relnamespace,
@@ -40,9 +47,21 @@ def main(hop_name, gen, only_db):
     if gen: os.makedirs(OUT, exist_ok=True)
     jout = {"check": "grants", "hop": hop_name,
             "generated": datetime.date.today().isoformat(), "databases": {}}
+    # the mover's own bookkeeping tables exist on one side only, so their
+    # grants can never apply and do not mean an app permission is missing
+    noise = (hop.get("options") or {}).get("noise_prefix", "")
+    # cloud-provider roles exist on their own side only, set in config.conf
+    ignore = {r.strip() for r in os.environ.get("GRANTS_IGNORE_ROLES", "").split(",") if r.strip()}
+    ignore |= {r.strip() for r in ((hop.get("options") or {}).get("ignore_roles") or "").split(",") if r.strip()}
+
+    def _app(rows):
+        return {r for r in rows
+                if not (noise and r[1].startswith(noise)) and r[0] not in ignore}
+
     for db in dbs:
         stg, ssg, _ = grants(hop["source"], db)
         dtg, dsg, droles = grants(hop["target"], db)
+        stg, ssg, dtg, dsg = _app(stg), _app(ssg), _app(dtg), _app(dsg)
         mtg = sorted(stg - dtg); msg = sorted(ssg - dsg)
         gtees = sorted(set(g for g, _, _ in mtg) | set(g for g, _, _ in msg))
         can = [g for g in gtees if g in droles]; need = [g for g in gtees if g not in droles]

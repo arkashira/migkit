@@ -333,8 +333,10 @@ def _drill(hop_name, db, table, limit):
                    " convergence fence (postgres)")
 @click.option("--workers", default=0, help="parallel databases, default from conf")
 @click.option("--resume", is_flag=True, help="skip checks already ok in last summary")
+@click.option("--exclude", default="", help="comma list of db or db.schema.table"
+                                            " patterns to skip, added to the hop's")
 def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
-          workers, resume):
+          workers, resume, exclude):
     """Read-only validation of target vs source. Never writes to either side.
 
     When counts and data both run, row counts ride along with the checksum
@@ -344,6 +346,8 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
         return _drill(hop_name, db, table, limit)
     hop = get_hop(hop_name)
     _require_configured(hop)
+    if exclude:
+        hop.exclude = list(hop.exclude) + [p.strip() for p in exclude.split(",") if p.strip()]
     eng = get_engine(hop)
     allowed = list(eng.checks) + ["deep", "params"]
     # smart by default: with no --only, run the full battery including the
@@ -1411,17 +1415,22 @@ def monitor(hop_name, db, interval, only, cycles):
 
 @main.command("users")
 @click.argument("hop_name")
-@click.argument("mode", type=click.Choice(["test", "create", "verify", "rollback"]))
+@click.argument("mode", type=click.Choice(["test", "create", "verify", "setpw",
+                                          "rollback"]))
 @click.option("--apply", "do_apply", is_flag=True,
               help="execute on the target (default is dry-run)")
 @click.option("--passwords", "pw_file", default="",
-              help="yaml file `role: password` for postgres create (managed "
-                   "sources lock password hashes; mysql needs no file - the "
-                   "hash is copied so the password stays identical)")
+              help="yaml file `role: password` for postgres create and for "
+                   "mongo setpw (managed sources lock password hashes; mysql "
+                   "needs no file - the hash is copied so the password stays "
+                   "identical)")
 def users_cmd(hop_name, mode, do_apply, pw_file):
     """Sync logins source -> target keeping the same password.
 
     test    compare users (read-only), write users.json to the report dir
+    setpw   mongo only: set the real passwords on users that already exist on
+            the target, from --passwords (mongo credentials cannot be copied:
+            SCRAM is one-way and DocumentDB blocks writes to system.users)
     create  make the missing users on the target (dry-run unless --apply);
             mysql copies the password hash = same password, grants replayed
             from the source; postgres reads passwords from --passwords

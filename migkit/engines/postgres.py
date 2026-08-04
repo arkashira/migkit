@@ -74,12 +74,25 @@ class PostgresEngine(Engine):
             return self.hop.target_db(db)
         return db
 
+    def _dsn(self, side, db):
+        """dbname plus keepalive settings.
+
+        libpq leaves the keepalive idle time at the OS default (two hours on
+        macOS). A long query over a cross-cloud link that loses its tunnel
+        would therefore hang for hours instead of failing. Probing sooner
+        turns it into an error the retry can handle."""
+        import os
+        idle = os.environ.get("MIGKIT_KEEPALIVE_IDLE", "60")
+        return (f"dbname={self._d(side, db)} keepalives=1"
+                f" keepalives_idle={idle} keepalives_interval=10"
+                f" keepalives_count=5")
+
     def _psql(self, side, db, sql):
         ep = self.hop.source if side == "src" else self.hop.target
         env = {"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
                "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO -c statement_timeout=0"}
         p = run(["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", self._d(side, db), "-X", "-At", "-q", "-v",
+                 "-d", self._dsn(side, db), "-X", "-At", "-q", "-v",
                  "ON_ERROR_STOP=1", "-c", sql],
                 env=env)
         return p.stdout.rstrip("\n")
@@ -91,7 +104,7 @@ class PostgresEngine(Engine):
         out = self._psql("src", "postgres",
                          "select datname from pg_database where not datistemplate"
                          " and datname not in ('postgres','rdsadmin') order by 1")
-        return [l for l in out.splitlines() if l]
+        return [l for l in out.splitlines() if l and not self.hop.excluded(l)]
 
     def _report(self, db):
         return PGDC_ROOT / self.hop.name / db
@@ -365,8 +378,14 @@ class PostgresEngine(Engine):
 
     def _keep_tbl(self, db, t):
         """False if the 'schema.table' is excluded for this db, so it is
-        neither verified nor repaired (protects target-owned tables)."""
+        neither verified nor repaired (protects target-owned tables).
+
+        ตารางที่ตัวขนข้อมูลสร้างไว้ใช้เอง (noise_prefix) ก็ตัดออกด้วย มันมีอยู่
+        ฝั่งเดียวเสมอโดยธรรมชาติ นับเป็นความต่างทุกครั้งทั้งที่ไม่ใช่ข้อมูลของแอป"""
         sch, _, tbl = t.partition(".")
+        noise = self.hop.options.get("noise_prefix", "")
+        if noise and tbl.startswith(noise):
+            return False
         return not self.hop.excluded(db, sch, tbl)
 
     def check_counts(self, db):
@@ -1365,22 +1384,39 @@ class PostgresEngine(Engine):
                           "refresh materialized view ... on target"
                           if stale else ""))
 
-        gq = ("select grantee||'|'||table_schema||'.'||table_name"
-              "||'|'||privilege_type"
-              " from information_schema.table_privileges"
-              " where table_schema not in ('pg_catalog',"
-              "'information_schema')"
-              " and table_schema not like '\\_\\_%'"
-              " and grantee not in ('PUBLIC')"
-              " and grantee not like 'pg\\_%' and grantee not like 'rds%'"
-              " and grantee not like '%tencent%'"
-              " and table_name not like 'migkit\\_%'")
+        # raw relacl, not information_schema.table_privileges: that view hides
+        # grants whose grantee the connected user is not a member of, which
+        # reads as missing on a target reached with a plain application user
+        ign = "','".join(r.strip() for r in os.environ.get(
+            "GRANTS_IGNORE_ROLES", "root,rdsadmin").split(",") if r.strip())
+        gq = ("select pg_get_userbyid(a.grantee)||'|'||n.nspname||'.'||c.relname"
+              "||'|'||a.privilege_type"
+              " from pg_class c"
+              " join pg_namespace n on n.oid = c.relnamespace,"
+              " aclexplode(c.relacl) a"
+              " where c.relkind in ('r','p','v','m','f')"
+              " and n.nspname not in ('pg_catalog','information_schema')"
+              " and n.nspname not like '\\_\\_%'"
+              " and pg_get_userbyid(a.grantee) <> 'PUBLIC'"
+              " and pg_get_userbyid(a.grantee) not like 'pg\\_%'"
+              " and pg_get_userbyid(a.grantee) not like 'rds%'"
+              " and pg_get_userbyid(a.grantee) not like '%tencent%'"
+              f" and pg_get_userbyid(a.grantee) not in ('{ign}')"
+              " and c.relname not like 'migkit\\_%'")
         ga = set(self._psql("src", db, gq).splitlines()) - {""}
         gb = set(self._psql("dst", db, gq).splitlines()) - {""}
         droles = set(self._psql("dst", db,
                                 "select rolname from pg_roles").splitlines())
         sroles = set(self._psql("src", db,
                                 "select rolname from pg_roles").splitlines())
+        noise = self.hop.options.get("noise_prefix", "")
+
+        def _app(rows):
+            if not noise:
+                return rows
+            return {g for g in rows
+                    if not g.split("|")[1].partition(".")[2].startswith(noise)}
+        ga, gb = _app(ga), _app(gb)
         miss = sorted(g for g in ga - gb if g.split("|")[0] in droles)
         extra = sorted(g for g in gb - ga if g.split("|")[0] in sroles)
         if miss or extra:
@@ -1409,9 +1445,11 @@ class PostgresEngine(Engine):
                " and n.nspname not in ('pg_catalog','information_schema')"
                " and n.nspname not like 'pg\\_%'"
                " and n.nspname not like '\\_\\_%'"
+               " and pg_get_userbyid(a.grantee) <> 'PUBLIC'"
+               f" and pg_get_userbyid(a.grantee) not in ('{ign}')"
                " and c.relname not like 'migkit\\_%'")
-        sga = set(self._psql("src", db, sgq).splitlines()) - {""}
-        sgb = set(self._psql("dst", db, sgq).splitlines()) - {""}
+        sga = _app(set(self._psql("src", db, sgq).splitlines()) - {""})
+        sgb = _app(set(self._psql("dst", db, sgq).splitlines()) - {""})
         smiss = sorted(g for g in sga - sgb if g.split("|")[0] in droles)
         if smiss:
             res.append(Result("deep", f"{db} seq-grants", "diff",

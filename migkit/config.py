@@ -158,4 +158,10 @@ def get_hop(name):
     hops = load_hops()
     if name not in hops:
         raise SystemExit(f"unknown hop {name}, have: {', '.join(hops) or 'none'}")
-    return hops[name]
+    hop = hops[name]
+    # MIGKIT_EXCLUDE lets a caller skip databases/tables without editing hops.yaml,
+    # so the run's config file stays the single place the operator changes.
+    env = os.environ.get("MIGKIT_EXCLUDE", "")
+    if env:
+        hop.exclude = list(hop.exclude) + [p.strip() for p in env.split(",") if p.strip()]
+    return hop

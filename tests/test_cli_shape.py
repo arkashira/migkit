@@ -1,18 +1,18 @@
-"""CLI surface tests: exactly 11 visible commands, legacy names stay
-invocable as hidden aliases, quiet flag, deep/counts-merge plumbing.
+"""CLI surface tests: the visible command set, legacy names stay invocable as
+hidden aliases, quiet flag, deep/counts-merge plumbing.
 No database or docker needed."""
 from click.testing import CliRunner
 
 from migkit.cli import main
 
 VISIBLE = {"doctor", "advise", "assess", "schema", "check", "move",
-           "watch", "sync", "report", "history", "rollback"}
+           "watch", "sync", "report", "history", "rollback", "users"}
 LEGACY = {"hops", "setup-target", "repair", "replicate", "tail",
           "convert-schema", "gen-migration", "sample-diff", "ui",
           "state", "monitor"}
 
 
-def test_visible_commands_are_the_eleven():
+def test_visible_commands_match_the_documented_set():
     listed = {n for n, c in main.commands.items() if not c.hidden}
     assert listed == VISIBLE
 

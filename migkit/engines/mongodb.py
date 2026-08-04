@@ -39,7 +39,8 @@ class MongoEngine(Engine):
         if self.hop.databases:
             return list(self.hop.databases)
         c = self._client("src")
-        return sorted(d for d in c.list_database_names() if d not in SKIP_DBS)
+        return sorted(d for d in c.list_database_names()
+                      if d not in SKIP_DBS and not self.hop.excluded(d))
 
     def _shape(self, side, db):
         d = self._client(side)[self._d(side, db)]

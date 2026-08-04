@@ -41,6 +41,28 @@ def is_transient(err):
     return any(p in e for p in TRANSIENT)
 
 
+def keepalive(sock, idle=60, interval=10, count=5):
+    """Make a dead peer show up as an error instead of an endless wait.
+
+    A long scan over a cross-cloud link can sit on a socket for many minutes.
+    If the far end or the tunnel goes away in the meantime nothing is ever
+    sent, so the OS never notices and the process waits for good. Probing
+    while idle turns that into a normal connection error the retry can handle.
+    """
+    if sock is None:
+        return
+    import socket as _s
+    try:
+        sock.setsockopt(_s.SOL_SOCKET, _s.SO_KEEPALIVE, 1)
+        for name, val in (("TCP_KEEPIDLE", idle), ("TCP_KEEPALIVE", idle),
+                          ("TCP_KEEPINTVL", interval), ("TCP_KEEPCNT", count)):
+            opt = getattr(_s, name, None)
+            if opt is not None:
+                sock.setsockopt(_s.IPPROTO_TCP, opt, val)
+    except OSError:
+        pass
+
+
 def with_retry(fn, tries=4, base=0.8, label="", log=None):
     """Run fn(), retrying transient connection failures with exponential
     backoff. Permanent errors (auth, syntax, constraint) raise at once."""

@@ -15,6 +15,7 @@ rollback drops only users listed in that record.
 import json
 import datetime
 import hashlib
+import os
 
 from .config import get_hop
 
@@ -40,18 +41,41 @@ def _pg_sysrole(r):
     return r in PG_SYS or r.startswith("tencentdb") or r.startswith("rds")
 
 
+def _retry(fn, tries=4, wait=5):
+    """Cross-cloud links drop a connection now and then, usually while a checksum
+    run is saturating the same tunnel. One timeout must not cost the whole users
+    step, so try again before giving up."""
+    import time
+    last = None
+    for n in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            if n < tries - 1:
+                print(f"   ต่อไม่ได้ ({str(e).strip().splitlines()[-1][:70]}) "
+                      f"ลองใหม่ {n + 2}/{tries} ใน {wait}s")
+                time.sleep(wait)
+    raise last
+
+
 def _mysql_conn(ep):
     import pymysql
-    return pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
-                           password=ep.password, connect_timeout=15, autocommit=True)
+    return _retry(lambda: pymysql.connect(
+        host=ep.host, port=ep.port, user=ep.user,
+        password=ep.password, connect_timeout=15, autocommit=True))
 
 
 def _pg_conn(ep):
     import psycopg2
-    c = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                         password=ep.password, dbname="postgres", connect_timeout=15)
-    c.autocommit = True
-    return c
+
+    def _open():
+        c = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+                             password=ep.password, dbname="postgres",
+                             connect_timeout=15)
+        c.autocommit = True
+        return c
+    return _retry(_open)
 
 
 def _mysql_users(ep):
@@ -112,8 +136,14 @@ def compare(hop, say=print):
         s = _pg_roles(hop.source)
         t = _pg_roles(hop.target)
         skeys, tkeys, pw = set(s), set(t), []
+    elif eng in ("mongodb", "mongo"):
+        s = _mongo_users(hop.source)
+        t = _mongo_users(hop.target)
+        skeys = {f"{d}.{u}" for d, u in s}
+        tkeys = {f"{d}.{u}" for d, u in t}
+        pw = []
     else:
-        raise SystemExit("users: mysql / postgres only (mongo needs the plaintext to recreate)")
+        raise SystemExit(f"users: ยังไม่รองรับ engine {eng}")
     missing = sorted(skeys - tkeys)
     extra = sorted(tkeys - skeys)
     out = {"check": "users", "hop": hop.name, "engine": eng,
@@ -126,7 +156,17 @@ def compare(hop, say=print):
     say(f"hop={hop.name} engine={eng}  source={len(skeys)} target={len(tkeys)}")
     say(f"  missing on target ({len(missing)}): {missing}")
     say(f"  extra on target ({len(extra)}): {extra}")
-    if eng == "mysql":
+    if eng in ("mongodb", "mongo"):
+        # only roles the source has and the target lacks; a target superset
+        # is not a gap
+        rd = sorted(f"{d}.{u}" for (d, u) in s
+                    if (d, u) in t and _mongo_role_gap(s[(d, u)], t[(d, u)]))
+        out["roles_differ"] = rd
+        out["result"] = "pass" if not missing and not rd else "gap"
+        say(f"  roles differ ({len(rd)}): {rd}")
+        say("  หมายเหตุ: ลอกรหัสจากต้นทางไม่ได้ (SCRAM + DocumentDB ปิด system.users)"
+            " -> create จะตั้งรหัสใหม่ให้")
+    elif eng == "mysql":
         say(f"  password differs ({len(pw)}): {pw}")
     else:
         sh = _pg_hashes(hop.source)
@@ -143,6 +183,122 @@ def compare(hop, say=print):
     json.dump(out, open(jf, "w"), indent=2, ensure_ascii=False)
     say(f"  json: {jf}")
     return out, s
+
+
+# --- mongodb ---------------------------------------------------------------
+# provider-created accounts that exist on one side only, not app accounts
+MONGO_SYS = ("mongouser", "rwuser", "serviceadmin", "__system")
+# roles that already cover every other role
+MONGO_SUPER_ROLES = {"root", "__system"}
+# provider-specific roles the target cannot create and does not need
+MONGO_VENDOR_ROLES = {"index_stats", "restoreoplog", "readAnyDatabase_tencent"}
+
+
+def _mongo_role_gap(src_roles, dst_roles):
+    """role ที่ต้นทางมีแต่ปลายทางยังไม่มีจริงๆ
+
+    ตัด role เฉพาะของผู้ให้บริการทิ้ง และถ้าปลายทางมี root อยู่แล้วก็ครอบหมด
+    ไม่งั้นจะไล่ปิดช่องว่างที่ปิดไม่ได้ไปเรื่อยๆ"""
+    if any(r in MONGO_SUPER_ROLES for r, _ in dst_roles):
+        return set()
+    ignore = MONGO_VENDOR_ROLES | {
+        x.strip() for x in os.environ.get("MONGO_IGNORE_ROLES", "").split(",")
+        if x.strip()}
+    return {(r, d) for r, d in set(src_roles) - set(dst_roles) if r not in ignore}
+
+
+def _mongo_sysuser(name):
+    n = str(name)
+    if n in MONGO_SYS or n.startswith(("cmgo-", "dds-", "mongo-")):
+        return True
+    extra = os.environ.get("MONGO_IGNORE_USERS", "")
+    return n in {x.strip() for x in extra.split(",") if x.strip()}
+
+
+def _mongo_client(ep):
+    from urllib.parse import quote
+    from pymongo import MongoClient
+    # replica sets use options.hosts, single servers use host+port
+    hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
+    opts = ep.options.get("uri_options", "") or ""
+    uri = (f"mongodb://{quote(str(ep.user))}:{quote(str(ep.password))}"
+           f"@{hosts}/?{opts}")
+    return _retry(lambda: MongoClient(uri, serverSelectionTimeoutMS=15000))
+
+
+def _mongo_users(ep):
+    """(db, user) -> roles
+
+    usersInfo ต้องมีสิทธิ์ viewUser ซึ่งบางผู้ให้บริการไม่ให้ แต่ยอมให้อ่าน
+    admin.system.users ตรงๆ ได้ ลองทั้งสองทางเพื่อให้ใช้ได้ทั้งสองฝั่ง"""
+    c = _mongo_client(ep)
+    out = {}
+    try:
+        for x in c.admin.command("usersInfo", {"forAllDBs": True})["users"]:
+            out[(x["db"], x["user"])] = sorted(
+                (r["role"], r["db"]) for r in x.get("roles", []))
+    except Exception:
+        for d in c.admin["system.users"].find():
+            out[(d.get("db"), d.get("user"))] = sorted(
+                (r["role"], r["db"]) for r in d.get("roles", []))
+    c.close()
+    return {k: v for k, v in out.items() if not _mongo_sysuser(k[1])}
+
+
+def _mongo_create(hop, missing, role_diff, src, passwords, apply, say):
+    """สร้าง user ที่ขาดบนปลายทาง
+
+    ลอกรหัสเดิมมาไม่ได้: ต้นทางเก็บเป็น SCRAM (แฮชทางเดียว) และ DocumentDB
+    ไม่ยอมให้เขียน system.users ตรงๆ จึงต้องตั้งรหัสใหม่ตอนสร้าง
+    รหัสมาจาก (1) ไฟล์ที่ส่งมาด้วย --passwords (2) ตัวแปร MONGO_PW_<user>
+    (3) สุ่มให้แล้วเขียนลงไฟล์ที่ไม่ขึ้น git เพื่อให้เอาไปตั้งใน secret ต่อ"""
+    import secrets as _s
+    made, secretsmap, skipped = [], {}, []
+    c = _mongo_client(hop.target) if apply else None
+    for db, user in missing:
+        pw = (passwords or {}).get(user) or os.environ.get(f"MONGO_PW_{user}", "")
+        if not pw:
+            pw = _s.token_urlsafe(18)
+            secretsmap[user] = pw
+        roles = [{"role": r, "db": d} for r, d in src[(db, user)]]
+        if not apply:
+            say(f"   would create {db}.{user} roles={[r['role'] for r in roles]}")
+            made.append({"db": db, "user": user, "roles": roles})
+            continue
+        try:
+            c[db].command("createUser", user, pwd=pw, roles=roles)
+            say(f"   created {db}.{user} roles={[r['role'] for r in roles]}")
+            made.append({"db": db, "user": user, "roles": roles})
+        except Exception as e:
+            skipped.append(f"{db}.{user}: {str(e)[:80]}")
+            say(f"   FAILED {db}.{user}: {str(e)[:90]}")
+    tgt_now = _mongo_users(hop.target)
+    for db, user in role_diff:
+        gap = _mongo_role_gap(src[(db, user)], tgt_now.get((db, user), []))
+        want = [{"role": r, "db": d} for r, d in sorted(gap)]
+        if not want:
+            continue
+        if not apply:
+            say(f"   would grant {db}.{user} -> {[r['role'] for r in want]}")
+            continue
+        try:
+            c[db].command("grantRolesToUser", user, roles=want)
+            say(f"   granted {db}.{user} {[r['role'] for r in want]}")
+        except Exception as e:
+            skipped.append(f"{db}.{user} roles: {str(e)[:80]}")
+            say(f"   FAILED roles {db}.{user}: {str(e)[:90]}")
+    if c:
+        c.close()
+    if secretsmap:
+        f = hop.report_dir() / "mongo-new-passwords.txt"
+        f.write_text("\n".join(f"{u}\t{p}" for u, p in secretsmap.items()) + "\n")
+        try:
+            os.chmod(f, 0o600)
+        except OSError:
+            pass
+        say(f"   ตั้งรหัสใหม่ให้ {len(secretsmap)} บัญชี (ลอกของเดิมไม่ได้)")
+        say(f"   รหัสอยู่ที่ {f} - เอาไปใส่ใน secret ของแอปแล้วลบไฟล์ทิ้ง")
+    return made, skipped
 
 
 def _plan(hop, out, s, passwords):
@@ -211,6 +367,28 @@ def _plan(hop, out, s, passwords):
 
 
 def create(hop, apply=False, passwords=None, say=print):
+    if hop.engine in ("mongodb", "mongo"):
+        out, s = compare(hop, say)
+        t = _mongo_users(hop.target)
+        missing = [k for k in s if k not in t]
+        role_diff = [k for k in s if k in t and _mongo_role_gap(s[k], t[k])]
+        if not missing and not role_diff:
+            say("  ไม่มีอะไรต้องสร้าง users และ role ตรงกันแล้ว")
+            return
+        say(f">> mongo: สร้าง {len(missing)} บัญชี, แก้ role {len(role_diff)} บัญชี"
+            + ("" if apply else "  (ยังไม่ลงมือ ใส่ --apply)"))
+        made, skipped = _mongo_create(hop, missing, role_diff, s, passwords, apply, say)
+        if not apply:
+            say("  (ซ้อมเท่านั้น ยังไม่ได้สร้างอะไร จึงไม่บันทึกลงประวัติ)")
+            return
+        rec = hop.report_dir() / "user-sync-created.json"
+        prev = json.loads(rec.read_text()) if rec.exists() else []
+        prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                     "engine": "mongodb", "created": made, "skipped": skipped})
+        json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+        say(f"  บันทึกไว้ที่ {rec} (ใช้ย้อนกลับด้วย users {hop.name} rollback)")
+        return
+
     passwords = passwords or {}
     out, s = compare(hop, say)
     if not out["missing_on_target"]:
@@ -260,7 +438,70 @@ def create(hop, apply=False, passwords=None, say=print):
     say(f"next: migkit users {hop.name} verify")
 
 
+def mongo_setpw(hop, passwords, apply=False, say=print):
+    """ตั้งรหัสทับให้ user ที่มีอยู่แล้วบนปลายทาง
+
+    ใช้ตอนได้รหัสตัวจริงมาจาก secret store ทีหลัง เพราะรหัสของ MongoDB ลอกข้าม
+    ไป DocumentDB ไม่ได้ ตอนสร้างจึงต้องตั้งชั่วคราวไว้ก่อน"""
+    if not passwords:
+        say("  ต้องส่งไฟล์รหัสมาด้วย: --passwords <file.yaml> (user: password)")
+        return 1
+    have = _mongo_users(hop.target)
+    names = {u for _, u in have}
+    c = _mongo_client(hop.target) if apply else None
+    done = miss = 0
+    for user, pw in passwords.items():
+        if user not in names:
+            say(f"   ข้าม {user}: ไม่มีบัญชีนี้บนปลายทาง")
+            miss += 1
+            continue
+        db = next(d for d, u in have if u == user)
+        if not apply:
+            say(f"   would set password: {db}.{user}")
+            done += 1
+            continue
+        try:
+            c[db].command("updateUser", user, pwd=str(pw))
+            say(f"   ตั้งรหัสแล้ว {db}.{user}")
+            done += 1
+        except Exception as e:
+            miss += 1
+            say(f"   FAILED {db}.{user}: {str(e)[:90]}")
+    if c:
+        c.close()
+    say(f"  ตั้งได้ {done} บัญชี ไม่ได้ {miss} บัญชี"
+        + ("" if apply else "  (ซ้อมเท่านั้น ใส่ --apply)"))
+    return 1 if miss else 0
+
+
+def _mongo_rollback(hop, apply, say):
+    rec = hop.report_dir() / "user-sync-created.json"
+    if not rec.exists():
+        say("  ไม่มีบันทึกว่าเคยสร้างอะไรไว้ ไม่ต้องย้อน")
+        return
+    entries = [e for e in json.loads(rec.read_text())
+               if e.get("engine") == "mongodb"]
+    users = [(u["db"], u["user"]) for e in entries for u in e.get("created", [])]
+    if not users:
+        say("  ไม่มี user ของ mongo ที่เราสร้างไว้")
+        return
+    c = _mongo_client(hop.target) if apply else None
+    for db, user in users:
+        if not apply:
+            say(f"   would drop {db}.{user}")
+            continue
+        try:
+            c[db].command("dropUser", user)
+            say(f"   dropped {db}.{user}")
+        except Exception as e:
+            say(f"   FAILED drop {db}.{user}: {str(e)[:80]}")
+    if c:
+        c.close()
+
+
 def rollback(hop, apply=False, say=print):
+    if hop.engine in ("mongodb", "mongo"):
+        return _mongo_rollback(hop, apply, say)
     rf = hop.report_dir() / "user-sync-created.json"
     if not rf.exists():
         say(f"no created-record at {rf} - nothing this tool created here")
@@ -328,6 +569,10 @@ def run(hop_name, mode, apply=False, pw_file="", say=print):
         passwords = _y.safe_load(open(pw_file)) or {}
     if mode == "create":
         create(hop, apply, passwords, say)
+    elif mode == "setpw":
+        if hop.engine not in ("mongodb", "mongo"):
+            raise SystemExit("setpw: mongodb เท่านั้น (engine อื่นลอก hash ได้อยู่แล้ว)")
+        raise SystemExit(mongo_setpw(hop, passwords, apply, say))
     elif mode == "rollback":
         rollback(hop, apply, say)
     else:

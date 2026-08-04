@@ -4,7 +4,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from ..util import run, which, with_retry
+from ..util import keepalive as _keepalive, run, which, with_retry
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
@@ -21,11 +21,20 @@ class MySQLEngine(Engine):
             import pymysql
         except ImportError:
             raise SystemExit("pip install 'migkit[mysql]' for mysql support")
-        return with_retry(
-            lambda: pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
-                                    password=ep.password, charset="utf8mb4",
-                                    connect_timeout=15),
-            label=f"mysql connect {side}")
+        # read_timeout + TCP keepalive: without them a network blip on a
+        # cross-cloud link leaves the socket open forever and a long scan
+        # (count on a hundred-GB table) hangs the whole run with no error.
+        import os
+        rt = int(os.environ.get("MIGKIT_READ_TIMEOUT", "3600"))
+
+        def _open():
+            c = pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
+                                password=ep.password, charset="utf8mb4",
+                                connect_timeout=15,
+                                read_timeout=rt, write_timeout=rt)
+            _keepalive(getattr(c, "_sock", None))
+            return c
+        return with_retry(_open, label=f"mysql connect {side}")
 
     def _q(self, side, sql, args=None, fresh=False):
         # retry the connect+query as a unit so a TLS/socket blip clears
@@ -90,7 +99,8 @@ class MySQLEngine(Engine):
             return list(self.hop.databases)
         rows = self._q("src", "show databases")
         return sorted(r[0] for r in rows if r[0] not in SKIP_DBS
-                      and not r[0].startswith("__"))
+                      and not r[0].startswith("__")
+                      and not self.hop.excluded(r[0]))
 
     def _dump_schema(self, side, db):
         ep = self.hop.source if side == "src" else self.hop.target
