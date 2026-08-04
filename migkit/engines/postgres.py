@@ -1560,8 +1560,14 @@ class PostgresEngine(Engine):
                        self._psql("dst", db, q).splitlines() if l)
             owned = self._seq_owned("dst", db)
             dmax = self._seq_col_max("dst", db, owned)
+            noise = self.hop.options.get("noise_prefix", "")
             stmts, undo, refuse = [], [], []
             for name, v in sorted(src.items()):
+                # the mover's own bookkeeping sequences exist on one side only
+                # by design; setting them on the target would fail or create
+                # objects the application never asked for
+                if noise and name.rpartition(".")[2].startswith(noise):
+                    continue
                 cur = dst.get(name)
                 mx = dmax.get(name, 0)
                 sv = int(v or 0)

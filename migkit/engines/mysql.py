@@ -1109,16 +1109,30 @@ class MySQLEngine(Engine):
             ddb = self._d("dst", db)
             src = dict(self._q("src", q, (db,), fresh=True))
             dst = dict(self._q("dst", q, (ddb,), fresh=True))
-            stmts = [f"alter table `{ddb}`.`{t}` auto_increment = {v};"
-                     f"  -- dst now {dst.get(t, 'MISSING')}"
-                     for t, v in sorted(src.items()) if dst.get(t) != v]
-            undo = [f"alter table `{ddb}`.`{t}` auto_increment = {dst[t]};"
-                    for t in sorted(src) if t in dst and dst.get(t) != src[t]]
-            same = sum(1 for t, v in src.items() if dst.get(t) == v)
-            if stmts:
-                actions.append(RepairAction(
-                    db, "sequences", stmts, undo,
-                    f"{len(stmts)} counters differ, {same} already equal"))
+            stmts, undo, refuse = [], [], []
+            for tbl, sv in sorted(src.items()):
+                dv = dst.get(tbl)
+                if dv == sv:
+                    continue
+                if dv is None:
+                    refuse.append(f"{tbl}: not on target")
+                    continue
+                # only ever raise. Lowering a counter is how the next insert
+                # collides with a row that already exists, and a target that is
+                # ahead is normal while changes are still being applied.
+                if dv > sv:
+                    refuse.append(f"{tbl}: target {dv} > source {sv}")
+                    continue
+                stmts.append(f"alter table `{ddb}`.`{tbl}` auto_increment = {sv};"
+                             f"  -- dst now {dv}")
+                undo.append(f"alter table `{ddb}`.`{tbl}` auto_increment = {dv};")
+            same = sum(1 for tbl, v in src.items() if dst.get(tbl) == v)
+            note = f"{len(stmts)} counters raised, {same} already equal"
+            if refuse:
+                note += (f"; left alone {len(refuse)} (target not behind): "
+                         + "; ".join(refuse[:4]))
+            if stmts or refuse:
+                actions.append(RepairAction(db, "sequences", stmts, undo, note))
         if kind in ("rows", "all"):
             d = self.hop.report_dir(db)
             tables = sorted({f.name.split(".")[0][len("data-"):]
