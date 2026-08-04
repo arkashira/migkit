@@ -3,6 +3,8 @@ import socket
 import subprocess
 import time
 
+from pathlib import Path
+
 import pytest
 
 
@@ -39,6 +41,28 @@ def _mk_docker_mark():
 
 
 needs_docker = _mk_docker_mark()
+
+
+def migkit_bin():
+    """The migkit executable to drive in a subprocess.
+
+    Not a hardcoded .venv path: that exists on a developer machine and nowhere
+    else, so the suite passed locally while CI failed on every run. Prefer the
+    console script on PATH, then the one next to the running interpreter, and
+    fall back to a repo-local venv for the case where neither is installed.
+    """
+    import shutil
+    import sys
+    found = shutil.which("migkit")
+    if found:
+        return found
+    here = Path(sys.executable).parent / "migkit"
+    if here.exists():
+        return str(here)
+    return str(Path(__file__).resolve().parents[1] / ".venv" / "bin" / "migkit")
+
+
+MIGKIT = migkit_bin()
 
 
 @pytest.fixture(scope="session")

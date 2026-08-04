@@ -20,6 +20,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,6 +28,12 @@ jobs:
           python-version: "3.12"
       - name: nothing organisation-specific in the source
         run: python tools/check_no_secrets.py
+      - name: docker buildx
+        uses: docker/setup-buildx-action@v3
+      - name: pull the database images up front
+        run: |
+          for img in postgres:16 mysql:8 mongo:7; do docker pull -q "$img" & done
+          wait
       - name: install client tools
         run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
       - name: install

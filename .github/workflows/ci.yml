@@ -55,18 +55,30 @@ jobs:
   integration:
     needs: guard
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: docker buildx
+        uses: docker/setup-buildx-action@v3
+      - name: pull the database images up front
+        # pulling inside a test counts against that test's own patience, and a
+        # slow registry then looks like a broken test. Fetch them once, here.
+        run: |
+          for img in postgres:16 mysql:8 mongo:7; do
+            docker pull -q "$img" &
+          done
+          wait
+          docker image ls --format '  {{.Repository}}:{{.Tag}} {{.Size}}'
       - name: install client tools
         run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
       - name: install
         run: |
           python -m pip install -U pip
           pip install -e ".[mysql,mongo]" faker pytest
-      - name: full suite (docker available on ubuntu runners)
+      - name: full suite
         run: pytest tests/ -q --junitxml=junit-integration.xml
       - name: keep the results
         if: always()
@@ -75,6 +87,14 @@ jobs:
           name: test-results-integration
           path: junit-integration.xml
           retention-days: 30
+      - name: what the containers said, when something failed
+        if: failure()
+        run: |
+          docker ps -a --format '  {{.Names}} {{.Image}} {{.Status}}'
+          for c in $(docker ps -aq); do
+            echo "--- $(docker inspect -f '{{.Name}}' "$c") ---"
+            docker logs --tail 40 "$c" 2>&1 || true
+          done
 
   package:
     needs: guard

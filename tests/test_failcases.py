@@ -9,7 +9,7 @@ import textwrap
 import pytest
 
 from migkit.config import Endpoint, Hop, load_hops
-from tests.conftest import needs_docker, psql
+from tests.conftest import needs_docker, psql, MIGKIT
 
 
 def _base():
@@ -20,7 +20,7 @@ def _run(conf, *args):
     env = dict(os.environ, MIGKIT_CONF=str(conf),
                MIGKIT_REPORTS=str(conf.parent / "reports"))
     return subprocess.run(
-        [os.path.join(_base(), ".venv", "bin", "migkit"), *args],
+        [MIGKIT, *args],
         capture_output=True, text=True, env=env)
 
 
