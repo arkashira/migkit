@@ -20,7 +20,9 @@ def _docker():
         return False
 
 
-pytestmark = pytest.mark.skipif(not _docker(), reason="docker not available")
+from tests.conftest import needs_docker
+
+pytestmark = needs_docker
 
 SRC, DST = "migkit-test-mongo-src", "migkit-test-mongo-dst"
 SRC_PORT, DST_PORT = 47017, 47018

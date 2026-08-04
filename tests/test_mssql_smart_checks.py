@@ -30,8 +30,10 @@ def _have_image():
     return "mcr.microsoft.com/mssql/server" in r.stdout
 
 
+from tests.conftest import needs_docker
+
 pytestmark = [
-    pytest.mark.skipif(not _docker(), reason="docker not available"),
+    needs_docker,
     pytest.mark.skipif(not shutil.which("sqlcmd"), reason="sqlcmd not installed"),
     pytest.mark.skipif(not _have_image(),
                        reason="mssql image not pulled (amd64, ~1.5GB)"),
