@@ -5,8 +5,46 @@ from pathlib import Path
 import yaml
 
 BASE = Path(__file__).resolve().parent.parent
-CONF = Path(os.environ.get("MIGKIT_CONF", BASE / "conf" / "hops.yaml"))
-REPORTS = Path(os.environ.get("MIGKIT_REPORTS", BASE / "reports"))
+
+
+def _find(env, name, default_dir):
+    """Where a runtime file lives, for a copy installed anywhere.
+
+    Resolved against the place the work is happening, not the place the code
+    was installed to. Installed with pip, BASE is site-packages, and looking
+    for the config there would mean editing files inside an installed package.
+    Order: the explicit variable, the working directory, the user's config
+    directory, then the source tree for a checkout run in place.
+    """
+    override = os.environ.get(env)
+    if override:
+        return Path(override).expanduser()
+    here = Path.cwd() / default_dir / name
+    if here.exists():
+        return here
+    user = Path(os.environ.get("XDG_CONFIG_HOME",
+                               Path.home() / ".config")) / "migkit" / name
+    if user.exists():
+        return user
+    return BASE / default_dir / name
+
+
+def _reports_root():
+    """Where reports get written.
+
+    An installed copy must not write inside its own package directory, so an
+    installed run puts them under the working directory. A source checkout
+    keeps them at the repo root, which is where they have always been.
+    """
+    override = os.environ.get("MIGKIT_REPORTS")
+    if override:
+        return Path(override).expanduser()
+    installed = "site-packages" in BASE.parts or "dist-packages" in BASE.parts
+    return (Path.cwd() if installed else BASE) / "reports"
+
+
+CONF = _find("MIGKIT_CONF", "hops.yaml", "conf")
+REPORTS = _reports_root()
 
 
 @dataclass

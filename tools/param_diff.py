@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LEGACY/UAT report generator: labels and cached report paths are baked in from the
 UAT run. For a reproducible parameter check on any env use:
-    .venv/bin/migkit check <hop> --only params
+    migkit check <hop> --only params
 
 Standalone param parity: dump ALL settings both sides, classify, write per-engine text.
 Not part of migkit. Reads creds from conf/hops.yaml. Read-only (SELECT / SHOW / getParameter).
