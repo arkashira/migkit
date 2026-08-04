@@ -7,9 +7,30 @@ on:
   workflow_dispatch:   # manual trigger for the heavy live-e2e job
 
 jobs:
+  guard:
+    # cheapest job and the one whose failure means do not merge: the source has
+    # to stay free of anything specific to whoever happens to be running it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: nothing organisation-specific in the source
+        run: python tools/check_no_secrets.py
+      - name: no plaintext credential committed
+        run: |
+          if git grep -nIE "(password|passwd|secret[_-]?key|token)[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9/+=_-]{12,}" \
+               -- ':!tests' ':!*.md' ':!docs' > /tmp/hits; then
+            echo "possible credential in the source:"; cat /tmp/hits; exit 1
+          fi
+          echo "clean"
+
   unit:
+    needs: guard
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.12"]
     steps:
@@ -20,11 +41,19 @@ jobs:
       - name: install
         run: |
           python -m pip install -U pip
-          pip install -e . faker pytest
+          pip install -e ".[mysql,mongo]" faker pytest
       - name: unit tests (no docker)
-        run: pytest tests/ -q -m "not docker"
+        run: pytest tests/ -q -m "not docker" --junitxml=junit-${{ matrix.python }}.xml
+      - name: keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-py${{ matrix.python }}
+          path: junit-*.xml
+          retention-days: 30
 
   integration:
+    needs: guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,9 +67,17 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[mysql,mongo]" faker pytest
       - name: full suite (docker available on ubuntu runners)
-        run: pytest tests/ -q
+        run: pytest tests/ -q --junitxml=junit-integration.xml
+      - name: keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-integration
+          path: junit-integration.xml
+          retention-days: 30
 
   package:
+    needs: guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +93,12 @@ jobs:
         run: |
           python -m venv /tmp/v && /tmp/v/bin/pip install dist/*.whl
           /tmp/v/bin/migkit --help >/dev/null && echo "wheel installs and runs"
+      - name: keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          retention-days: 30
 
   live-e2e:
     # heavy: pulls debezium/redpanda images. Manual only (workflow_dispatch).

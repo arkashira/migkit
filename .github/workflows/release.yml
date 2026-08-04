@@ -1,0 +1,111 @@
+name: release
+
+# Cutting a release is one command: push a tag.
+#   git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+# Everything after that happens here: the guard runs again, the full suite runs,
+# the distribution is built and installed clean, the notes are generated from
+# the commits, and the release is published with the artifacts attached.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: nothing organisation-specific in the source
+        run: python tools/check_no_secrets.py
+      - name: install client tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
+      - name: install
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[mysql,mongo]" faker pytest
+      - name: full suite
+        run: pytest tests/ -q --junitxml=junit-release.xml
+      - name: keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-test-results
+          path: junit-release.xml
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the notes need the whole history and every tag
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: work out the tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: the tag must match the version in pyproject
+        run: |
+          PYVER=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$PYVER" != "${{ steps.tag.outputs.version }}" ]; then
+            echo "tag says ${{ steps.tag.outputs.version }} but pyproject says $PYVER"
+            echo "bump the version in pyproject.toml, then retag"
+            exit 1
+          fi
+          echo "version $PYVER matches the tag"
+      - name: build + validate distribution
+        run: |
+          python -m pip install -U pip build twine
+          python -m build
+          twine check dist/*
+      - name: install the built wheel in a clean env and run it
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install "dist/migkit-${{ steps.tag.outputs.version }}-py3-none-any.whl"
+          /tmp/v/bin/migkit --help >/dev/null
+          /tmp/v/bin/migkit --version 2>/dev/null || true
+          echo "wheel installs and runs"
+      - name: release notes from the commits
+        run: python tools/gen_changelog.py "${{ steps.tag.outputs.tag }}" > RELEASE_NOTES.md
+      - name: checksums
+        run: |
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: |
+            dist/*
+            RELEASE_NOTES.md
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+      - name: publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
