@@ -14,6 +14,7 @@ Buckets per engine:
 import sys, os, yaml, datetime
 
 CONF = yaml.safe_load(open(os.environ.get("MIGKIT_CONF", "conf/hops.yaml")))["hops"]
+HOPS = CONF
 OUT = os.environ.get("COMPARE_OUT", "reports")  # relative to migkit/ cwd
 os.makedirs(OUT, exist_ok=True)
 
@@ -122,11 +123,12 @@ def write_report(engine, path, hop, srcdesc, dstdesc, src, dst, crit, safe, extr
     A_val, A_pres, B, C_val, C_only_src, C_only_dst = classify(src, dst, crit, safe)
     L = []
     W = L.append
-    W(f"PARAM PARITY — {engine}   (AWS source  vs  Tencent target)")
+    s_name, d_name = _side_names(hop)
+    W(f"PARAM PARITY - {engine}   ({s_name} source  vs  {d_name} target)")
     W("="*72)
     W(f"hop:      {hop}")
-    W(f"AWS  src: {srcdesc}   ({len(src)} settings)")
-    W(f"TC   dst: {dstdesc}   ({len(dst)} settings)")
+    W(f"{s_name:<8} src: {srcdesc}   ({len(src)} settings)")
+    W(f"{d_name:<8} dst: {dstdesc}   ({len(dst)} settings)")
     W(f"dumped:   {datetime.date.today().isoformat()}   (values live from both servers)")
     if extra_note: W(f"note:     {extra_note}")
     W("")
@@ -143,14 +145,14 @@ def write_report(engine, path, hop, srcdesc, dstdesc, src, dst, crit, safe, extr
         W("  (none — no behavior-critical parameter differs harmfully)")
     for n, sv, dv, (what, impact) in A_val:
         W(f"\n  {n}")
-        W(f"      AWS (src):     {norm(sv)!r}")
-        W(f"      Tencent (dst): {norm(dv)!r}")
+        W(f"      {s_name} (src): {norm(sv)!r}")
+        W(f"      {d_name} (dst): {norm(dv)!r}")
         W(f"      what it is:    {what}")
         W(f"      if it differs: {impact}")
     for n, sv, dv, (what, impact), side in A_pres:
         W(f"\n  {n}   (present only on {side})")
-        W(f"      AWS (src):     {norm(sv) if sv!='ABSENT' else 'ABSENT'}")
-        W(f"      Tencent (dst): {norm(dv) if dv!='ABSENT' else 'ABSENT'}")
+        W(f"      {s_name} (src): {norm(sv) if sv!='ABSENT' else 'ABSENT'}")
+        W(f"      {d_name} (dst): {norm(dv) if dv!='ABSENT' else 'ABSENT'}")
         W(f"      what it is:    {what}")
         W(f"      if it differs: {impact}")
     W("")
@@ -160,21 +162,21 @@ def write_report(engine, path, hop, srcdesc, dstdesc, src, dst, crit, safe, extr
     if not B: W("  (none)")
     for n, sv, dv, reason in B:
         W(f"\n  {n}")
-        W(f"      AWS (src):     {norm(sv)!r}")
-        W(f"      Tencent (dst): {norm(dv)!r}")
+        W(f"      {s_name} (src): {norm(sv)!r}")
+        W(f"      {d_name} (dst): {norm(dv)!r}")
         W(f"      safe because:  {reason}")
     W("")
     W("-"*72)
     W(f"(C) FILTERED OUT — not behavior-critical")
     W("-"*72)
     W(f"  value differs but harmless : {len(C_val)}")
-    W(f"  present only on AWS        : {len(C_only_src)}")
-    W(f"  present only on Tencent    : {len(C_only_dst)}")
+    W(f"  present only on {s_name:<10}: {len(C_only_src)}")
+    W(f"  present only on {d_name:<10}: {len(C_only_dst)}")
     if C_only_src:
-        W("\n  [present only on AWS, harmless]")
+        W(f"\n  [present only on {s_name}, harmless]")
         W("    " + ", ".join(C_only_src))
     if C_only_dst:
-        W("\n  [present only on Tencent, harmless]")
+        W(f"\n  [present only on {d_name}, harmless]")
         W("    " + ", ".join(C_only_dst))
     W("")
     open(path, "w").write("\n".join(L) + "\n")
@@ -207,6 +209,22 @@ def _hop_labels(hop):
         d = h.get(side, {}) or {}
         return f"{d.get('host') or d.get('hosts', '?')} ({h.get('engine', '?')})"
     return lab("source"), lab("target")
+
+
+def _side_names(hop):
+    """Short name for each side, taken from the hop name.
+
+    The direction has to come from the config: the same report is produced for
+    the way out and the way back, and a header that always names one of them
+    would be wrong half the time."""
+    parts = str(hop).replace("_", "-").split("-to-")
+    if len(parts) == 2:
+        clean = lambda s: s.strip("-").split("-")[0].upper()
+        return clean(parts[0]), clean(parts[1])
+    bits = [b for b in str(hop).split("-") if b]
+    if len(bits) >= 2:
+        return bits[0].upper(), bits[1].upper()
+    return "SRC", "DST"
 
 
 def _first_params_cache(hop, db=""):
@@ -264,7 +282,7 @@ def do_mongo():
     tp = {k for k, v in raw.items() if isinstance(v, dict) and v.get("dst") is not None}
     sp = list(sp); tp = list(tp)
     L = []; W = L.append
-    W("PARAM PARITY — MongoDB   (AWS DocumentDB source  vs  Tencent MongoDB target)")
+    W("PARAM PARITY - MongoDB")
     W("="*72)
     W("hop:      mongo-to-tencent")
     W(f"AWS  src: DocumentDB, engine reports version {sver}   FCV={sfcv}")
