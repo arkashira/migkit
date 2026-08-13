@@ -1099,7 +1099,129 @@ class MySQLEngine(Engine):
         else:
             res.append(Result("deep", f"{db} boundary", "ok",
                               "no single-int-pk tables to boundary-check"))
+
+        res += self._check_grants(db)
         return res
+
+    # privileges live in the grant tables, not in the schema, so neither a
+    # dump/restore nor a CDC stream carries them: the data arrives and the
+    # permissions do not. The symptom is an app that connects fine and then
+    # cannot read its own tables, which nothing else here would catch.
+    def _check_grants(self, db):
+        ddb = self._d("dst", db)
+        src, serr = self._grants_for_db("src", db)
+        dst, derr = self._grants_for_db("dst", ddb)
+        # an account that cannot read the grant tables must say so - reporting
+        # a match nobody was able to look at is worse than reporting nothing.
+        # warn, not skip: skip counts as ok everywhere downstream, so an
+        # unreadable grant table would leave the run green.
+        if serr or derr:
+            where = "source" if serr else "target"
+            return [Result("deep", f"{db} grants", "warn",
+                           f"could not read privileges on {where}:"
+                           f" {serr or derr}", "",
+                           "grant SELECT on mysql.* to the checking account,"
+                           " or check privileges by hand")]
+
+        # comparing users that exist on one side only just restates the users
+        # check; what is worth knowing here is whether the users that DO exist
+        # on both sides carry the same rights on this database
+        shared = sorted(set(src) & set(dst))
+        miss, extra = [], []
+        for who in shared:
+            for g in sorted(src[who] - dst[who]):
+                miss.append(f"{who}: {g}")
+            for g in sorted(dst[who] - src[who]):
+                extra.append(f"{who}: {g}")
+        only_src = sorted(set(src) - set(dst))
+        total = sum(len(v) for v in src.values())
+
+        if miss or extra:
+            parts = []
+            if miss:
+                parts.append(f"{len(miss)} grants missing on target: "
+                             + "; ".join(miss[:3]))
+            if extra:
+                parts.append(f"{len(extra)} grants on target that the source"
+                             " does not give: " + "; ".join(extra[:3]))
+            if only_src:
+                parts.append(f"{len(only_src)} users grant on this db at source"
+                             " but do not exist on target: "
+                             + ", ".join(only_src[:3]))
+            return [Result("deep", f"{db} grants", "diff", "; ".join(parts), "",
+                           "create the users first - migkit users create"
+                           " replays their GRANTs from the source")]
+        if only_src:
+            return [Result("deep", f"{db} grants", "diff",
+                           f"{len(only_src)} users hold grants on this db at"
+                           f" source but do not exist on target:"
+                           f" {', '.join(only_src)}", "",
+                           "migkit users create <hop> --apply")]
+        return [Result("deep", f"{db} grants", "ok",
+                       f"{total} grants match on {len(shared)} users"
+                       if shared else "no non-system user grants this database")]
+
+    def _grants_for_db(self, side, dbn):
+        """{user@host -> set(privileges)} granted ON this database.
+
+        Read through SHOW GRANTS because that is what `migkit users create`
+        replays when it builds the users, so the check and the repair agree on
+        what a grant is. information_schema.*_PRIVILEGES would be one query
+        instead of N, but it is filtered to what the connected account happens
+        to be able to see - the same trap the postgres side avoids by reading
+        relacl rather than information_schema.
+        """
+        import os
+        from ..users import MYSQL_SYS
+        # same knob the postgres side reads, so one setting covers both engines
+        ign = MYSQL_SYS | {r.strip() for r in os.environ.get(
+            "GRANTS_IGNORE_ROLES", "").split(",") if r.strip()}
+        try:
+            users = [(u, h) for u, h in self._q(
+                side, "select user, host from mysql.user")
+                if u not in ign and not u.startswith("AWS_")]
+        except Exception as e:
+            return {}, f"{type(e).__name__}: {str(e)[:70]}"
+
+        # `db`.* and `db`.`tbl`, with or without the backticks MySQL prints
+        # depending on version, and never `dbase` when we asked for `db`
+        pat = re.compile(r"\sON\s+`?" + re.escape(dbn) + r"`?\s*\.", re.I)
+        out = {}
+        for u, h in users:
+            try:
+                rows = self._q(side, "show grants for %s@%s", (u, h))
+            except Exception:
+                # a user that was dropped mid-scan, or one this account may not
+                # inspect: skip the user, do not fail the whole check
+                continue
+            privs = {self._canon_grant(r[0], dbn) for r in rows
+                     if pat.search(r[0]) and not r[0].startswith("GRANT PROXY")}
+            if privs:
+                out[f"{u}@{h}"] = privs
+        return out, ""
+
+    @staticmethod
+    def _canon_grant(text, dbn):
+        """Same grant, same string on both sides.
+
+        Two servers print the identical privilege set differently: spacing,
+        backtick style, and an IDENTIFIED BY tail on older versions. Without
+        this every user reads as a diff on a pair of servers that agree.
+
+        The database name is replaced by a marker because a hop may map the
+        database to a different name on the target - otherwise every single
+        grant would differ for the one reason we already know about.
+
+        Deliberately NOT uppercased: on Linux MySQL table names are
+        case-sensitive, so folding case here would let CatalogProduct and
+        catalogproduct compare equal. SHOW GRANTS already prints privilege
+        keywords in upper case, so there is nothing left to normalise.
+        """
+        t = re.sub(r"\s+", " ", text.strip()).replace("`", "")
+        t = re.sub(r"\s+IDENTIFIED BY.*$", "", t, flags=re.I)
+        t = re.sub(r"(\sON\s+)" + re.escape(dbn) + r"(\s*\.)",
+                   r"\1<db>\2", t, flags=re.I)
+        return t.rstrip(";")
 
     def repair_plan(self, db, kind):
         actions = []
