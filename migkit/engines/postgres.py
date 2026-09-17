@@ -636,13 +636,29 @@ class PostgresEngine(Engine):
                   if t and self._keep_tbl(db, t)]
         w = int(self.hop.options.get("checksum_workers", 8))
 
+        # The key hash rides along in the same scan. The row is already being
+        # read, and hashing a primary key is far cheaper than hashing a whole
+        # row, so the extra aggregate costs close to nothing - and it is what
+        # turns "this table differs" into "rows were modified" or "rows are
+        # missing" without a second pass.
+        keyexpr = {}
+
+        def _agg(h, kh):
+            s = (f"count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
+                 "::bit(64)::bigint::numeric), 0)")
+            if kh:
+                s += (f"||'|'||coalesce(sum(('x'||substr({kh},1,16))"
+                      "::bit(64)::bigint::numeric), 0)")
+            return s
+
         def csum(side, t):
             sch, tbl = t.split(".", 1)
             h = self._row_hash_expr(side, db, t)
+            if t not in keyexpr:
+                keyexpr[t] = self._key_hash_expr("src", db, t)
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather = {w};"
-                f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
-                f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t')
+                f' select {_agg(h, keyexpr[t])} from "{sch}"."{tbl}" t')
 
         # A checksum is only a SELECT, which is why nothing used to stop this
         # loop from saturating a small instance that was serving traffic.
@@ -710,6 +726,20 @@ class PostgresEngine(Engine):
             return (f"{t}: OK rows={rows} checksum={total}"
                     f" chunks={len(ranges)} chunk_rows={chunk:,}{resumed}")
 
+        def _kind(a, b):
+            """Name the shape of a difference from the three aggregates."""
+            pa, pb = a.split("|"), b.split("|")
+            if len(pa) < 3 or len(pb) < 3:
+                return ""       # no primary key, so no key hash to reason with
+            ca, cb = int(pa[0]), int(pb[0])
+            if pa[2] != pb[2]:
+                if ca != cb:
+                    n = abs(ca - cb)
+                    return (f" kind=rows-{'missing' if ca > cb else 'extra'}"
+                            f" by={n}")
+                return " kind=rows-replaced"
+            return " kind=values-changed"
+
         def one(t):
             if t in big:
                 return one_chunked(t, big[t][1])
@@ -719,8 +749,9 @@ class PostgresEngine(Engine):
                 except RuntimeError as e:
                     return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
             if a == b:
-                return f"{t}: OK rows={a.split('|')[0]} checksum={a.split('|', 1)[1]}"
-            return f"{t}: DIFF src={a} dst={b}"
+                return (f"{t}: OK rows={a.split('|')[0]}"
+                        f" checksum={a.split('|')[1]}")
+            return f"{t}: DIFF src={a} dst={b}{_kind(a, b)}"
 
         lines, rc = [], 0
         with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
@@ -2298,6 +2329,44 @@ class PostgresEngine(Engine):
              "ON_ERROR_STOP=1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=env), sql
+
+    PK_COLS_SQL = (
+        "select a.attname from pg_index i"
+        " join pg_class c on c.oid = i.indrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " join pg_attribute a on a.attrelid = c.oid"
+        "   and a.attnum = any(i.indkey)"
+        " where i.indisprimary and n.nspname = %s and c.relname = %s"
+        " order by a.attnum")
+
+    def _key_hash_expr(self, side, db, table):
+        """Expression hashing only the primary key of one row, or None.
+
+        A single row hash says "this table differs" and nothing else, so
+        finding out what kind of difference it is costs another pass. Hashing
+        the key separately in the same scan answers that for free:
+
+          keys equal, values differ   -> rows were modified in place
+          keys differ, counts equal   -> rows were replaced
+          counts differ               -> rows are missing or extra
+
+        Those three lead to completely different remedies, and knowing which
+        one it is before drilling down is the point. It does not replace the
+        drilldown - that is still how you learn *which* rows - it removes the
+        need for one in order to learn *what happened*.
+        """
+        sch, tbl = table.split(".", 1)
+        try:
+            out = self._psql(side, db, self.PK_COLS_SQL.replace("%s", "{}")
+                             .format(f"'{sch}'", f"'{tbl}'"))
+        except Exception:
+            return None
+        cols = [c for c in out.splitlines() if c]
+        if not cols:
+            return None
+        parts = " || chr(2) || ".join(
+            f'coalesce(t."{c}"::text, chr(1))' for c in cols)
+        return f"md5({parts})"
 
     def _row_hash_expr(self, side=None, db=None, table=None):
         """Expression that hashes one row of `t`.

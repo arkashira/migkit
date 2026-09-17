@@ -6,6 +6,15 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- A difference now says what shape it is, in the first pass. The primary key
+  is hashed alongside the row in the same scan - the row is being read anyway,
+  and a key hash costs far less than a row hash - so a differing table is
+  reported as `values-changed`, `rows-replaced`, or `rows-missing` /
+  `rows-extra` with a count, instead of only "this table differs". Those three
+  lead to different remedies, and a row count alone cannot tell an edit from a
+  swapped key. A table with no primary key claims no kind rather than guessing
+  one. This does not replace the drilldown - that is still how you learn which
+  rows - it removes needing one to learn what happened.
 - MongoDB's ranged comparison is proven to resume across processes: a real
   mid-collection failure is induced, the checkpoint the dead run left is
   inspected, and the next run reports how many ranges it skipped while still
