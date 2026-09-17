@@ -579,6 +579,43 @@ class PostgresEngine(Engine):
         return Health(busy_ratio=busy if busy >= 0 else None,
                       lag_seconds=lag if lag >= 0 else None)
 
+    # A table worth checkpointing. Below this a single aggregate finishes in
+    # seconds, and splitting it would cost more in round trips than a restart
+    # would ever save.
+    CHUNK_MIN_ROWS = 5_000_000
+    CHUNK_ROWS = 2_000_000
+
+    BIG_TABLES_SQL = (
+        "select n.nspname||'.'||c.relname, coalesce(s.n_live_tup, 0), a.attname"
+        " from pg_class c"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " left join pg_stat_user_tables s on s.relid = c.oid"
+        " join pg_index i on i.indrelid = c.oid and i.indisprimary"
+        " join pg_attribute a on a.attrelid = c.oid"
+        "   and a.attnum = i.indkey[0]"
+        " where c.relkind = 'r' and i.indnatts = 1"
+        "   and a.atttypid in ('int2'::regtype,'int4'::regtype,'int8'::regtype)"
+        "   and n.nspname not in ('pg_catalog','information_schema')")
+
+    def _chunkable(self, db):
+        """table -> (estimated rows, single integer primary-key column).
+
+        Restricted to one-column integer keys on purpose: range predicates on
+        those are index-only and cheap to reason about. A composite or text key
+        can still be checksummed, just in one pass.
+        """
+        out = {}
+        try:
+            for line in self._psql("src", db, self.BIG_TABLES_SQL).splitlines():
+                if not line:
+                    continue
+                name, est, col = line.split("|")
+                if int(est) >= self.CHUNK_MIN_ROWS:
+                    out[name] = (int(est), col)
+        except Exception:
+            pass    # no estimates = no chunking, never a failure
+        return out
+
     def _data_fast_native(self, db, stream=None):
         """Per-table checksum on both sides in parallel: commutative
         sum-of-md5 as a Postgres parallel aggregate (no sort, no lock beyond
@@ -600,10 +637,64 @@ class PostgresEngine(Engine):
         # A checksum is only a SELECT, which is why nothing used to stop this
         # loop from saturating a small instance that was serving traffic.
         from ..throttle import Throttle
+        from .. import checkpoint as _cp
         gate = Throttle(self.hop.workers,
                         probe=lambda: self._health("src", db))
+        big = self._chunkable(db)
+        cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+
+        def csum_range(side, t, col, lo, hi):
+            sch, tbl = t.split(".", 1)
+            h = self._row_hash_expr(side, db, t)
+            pred = _cp.where(f'"{col}"', lo, hi)
+            return self._psql(side, db,
+                f"set max_parallel_workers_per_gather = {w};"
+                f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
+                f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t'
+                + (f" where {pred}" if pred else ""))
+
+        def one_chunked(t, col):
+            """Same answer as one pass, but restartable.
+
+            The checksum is a commutative sum over numeric, so the per-range
+            sums add up to the whole-table value exactly. Completed ranges are
+            persisted, and a rerun only pays for what it still owes.
+            """
+            sch, tbl = t.split(".", 1)
+            try:
+                bounds = self._psql("src", db,
+                    f'select coalesce(min("{col}"),0)||chr(124)||'
+                    f'coalesce(max("{col}"),0) from "{sch}"."{tbl}"').strip()
+                lo, hi = (int(x) for x in bounds.split("|"))
+            except Exception as e:
+                return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
+            ranges = _cp.plan_ranges(lo, hi, self.CHUNK_ROWS)
+            expr = self._row_hash_expr("src", db, t)
+            todo = cp.begin(t, expr, ranges)
+            done_before = cp.resumed(t)
+            for rlo, rhi in todo:
+                with gate.unit():
+                    try:
+                        a = csum_range("src", t, col, rlo, rhi)
+                        b = csum_range("dst", t, col, rlo, rhi)
+                    except RuntimeError as e:
+                        # partials already recorded survive for the next run
+                        return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
+                if a != b:
+                    cp.clear(t)
+                    pred = _cp.where(col, rlo, rhi) or "whole table"
+                    return f"{t}: DIFF src={a} dst={b} where {pred}"
+                cp.record(t, rlo, rhi, *a.split("|", 1))
+            rows, total = cp.total(t)
+            cp.clear(t)
+            resumed = (f" resumed={done_before}/{len(ranges)}"
+                       if done_before else "")
+            return (f"{t}: OK rows={rows} checksum={total}"
+                    f" chunks={len(ranges)}{resumed}")
 
         def one(t):
+            if t in big:
+                return one_chunked(t, big[t][1])
             with gate.unit():
                 try:
                     a, b = csum("src", t), csum("dst", t)

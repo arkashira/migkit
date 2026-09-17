@@ -73,6 +73,11 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   along with the checksum query, so each table is scanned once, not twice.
   `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
   summaries.
+- **A long verify survives being interrupted** - big tables are checksummed
+  in primary-key ranges whose sums add up to exactly the whole-table value, so
+  a run that dies at 90% resumes instead of starting over, and a difference is
+  reported against the key range it lives in. Partials are fingerprinted, so a
+  table that changed underneath them is re-verified rather than half-trusted.
 - **Never the heaviest thing on the server** - `check` reads the database's
   own load (active sessions against its limit, replication lag) and its own
   query latency, then sleeps and narrows concurrency while the server is

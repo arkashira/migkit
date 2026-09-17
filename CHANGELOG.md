@@ -6,6 +6,17 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- A large-table verify is restartable. The data checksum is a commutative sum
+  over `numeric`, so the per-primary-key-range sums add up to exactly the
+  whole-table value - which makes partial progress meaningful rather than just
+  a position marker. Tables past a size threshold with a single integer
+  primary key are checksummed in ranges, each completed range is persisted,
+  and a rerun only pays for what it still owes. Proven against Postgres: the
+  chunked total equals the single-pass total. Partials carry a fingerprint of
+  the checksum expression and the range boundaries, so a resumed run can never
+  add work from two different table states. Side benefit: a difference now
+  names the key range it is in, not just the table. No flag - the decision
+  comes from the table's own row estimate.
 - The verifier throttles itself. A full-table checksum is only a SELECT, so
   nothing used to stop `check` from running `workers` threads against a small
   instance that was serving traffic - which is how a two-vCPU Aurora instance
