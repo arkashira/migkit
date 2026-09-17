@@ -427,9 +427,27 @@ class MySQLEngine(Engine):
             res.insert(0, cres)
         return res
 
-    def _checksum(self, side, db, t, expr, where=""):
-        q = (f"select count(*), coalesce(bit_xor(crc32({expr})), 0),"
-             f" coalesce(bit_xor(conv(substring(md5({expr}), 1, 8), 16, 10)), 0)"
+    def _key_expr(self, db, t):
+        """Expression hashing only the primary key, or None without one.
+
+        Rides along in the same scan as the row hash: the row is already being
+        read and hashing a key costs far less than hashing a whole row, which
+        is what makes naming the shape of a difference effectively free.
+        """
+        pks = self._pk_cols(db, t)
+        if not pks:
+            return None
+        return "concat_ws('\\x02', " + ", ".join(
+            f"coalesce(cast(`{c}` as char), '\\x01')" for c in pks) + ")"
+
+    def _checksum(self, side, db, t, expr, where="", key_expr=None):
+        cols = ["count(*)", "coalesce(bit_xor(crc32(" + expr + ")), 0)",
+                "coalesce(bit_xor(conv(substring(md5(" + expr + "), 1, 8),"
+                " 16, 10)), 0)"]
+        if key_expr:
+            cols.append("coalesce(bit_xor(conv(substring(md5(" + key_expr
+                        + "), 1, 8), 16, 10)), 0)")
+        q = (f"select {', '.join(cols)}"
              f" from `{self._d(side, db)}`.`{t}` {where}")
         return tuple(self._q(side, q)[0])
 
@@ -495,6 +513,8 @@ class MySQLEngine(Engine):
                     chunk = cp.chunk_for(scope, max(1, self.hop.slice))
                     pk_ranges = _cp.plan_ranges(int(mm[0]), int(mm[1]), chunk)
 
+        key_expr = self._key_expr(db, t)
+
         def clause(lo, hi):
             w = _cp.where(f"`{col}`", lo, hi) if col else ""
             return f"where {w}" if w else ""
@@ -505,19 +525,26 @@ class MySQLEngine(Engine):
         todo = cp.begin(scope, expr, pk_ranges) if col else pk_ranges
         done_before = cp.resumed(scope) if col else 0
 
-        bad_ranges = []
+        bad_ranges, kinds = [], set()
         rows_a = rows_b = xor_a = xor_b = 0
         with ThreadPoolExecutor(max_workers=4) as pool:
             futs = {}
             for lo, hi in todo:
                 w = clause(lo, hi)
-                fa = pool.submit(self._checksum, "src", db, t, expr, w)
-                fb = pool.submit(self._checksum, "dst", db, t, expr, w)
+                fa = pool.submit(self._checksum, "src", db, t, expr, w,
+                                 key_expr)
+                fb = pool.submit(self._checksum, "dst", db, t, expr, w,
+                                 key_expr)
                 futs[(lo, hi)] = (fa, fb)
             for (lo, hi), (fa, fb) in futs.items():
                 ra, rb = fa.result(), fb.result()
                 if ra != rb:
                     bad_ranges.append(clause(lo, hi))
+                    if key_expr and len(ra) > 3:
+                        from ..verdict import difference_kind
+                        k = difference_kind(ra[0], ra[3], rb[0], rb[3])
+                        if k:
+                            kinds.add(k)
                     if col:
                         cp.clear(scope)
                     continue
@@ -545,7 +572,10 @@ class MySQLEngine(Engine):
             return Result("data", scope, "diff",
                           "checksum differs, no pk for row drilldown", "",
                           "recopy whole table with dump/load"), rows_a, rows_b
-        return self._drilldown(db, t, pks, expr, bad_ranges)
+        r, ra, rb = self._drilldown(db, t, pks, expr, bad_ranges)
+        if kinds and r.status != "ok":
+            r.detail += " kind=" + ",".join(sorted(kinds))
+        return r, ra, rb
 
     def _drilldown(self, db, t, pks, expr, ranges):
         scope = f"{db}.{t}"

@@ -22,6 +22,33 @@ from .engines.base import STATUSES
 FORMAT_VERSION = 1
 
 
+def difference_kind(count_a, key_a, count_b, key_b):
+    """Name the shape of a difference from counts and primary-key hashes.
+
+    Engine-independent on purpose. PostgreSQL sums per-row md5 as numeric and
+    MySQL folds it with BIT_XOR, but the *reasoning* is the same in both, and
+    the last time this kind of logic existed twice the two copies drifted -
+    one of them planned key ranges from `min(pk)` and silently skipped every
+    row below it.
+
+    Either key hash may be None, for a table with no primary key: then there
+    is nothing to reason with and the honest answer is no answer.
+
+        keys differ, counts differ  -> rows are missing or extra
+        keys differ, counts equal   -> rows were replaced
+        keys equal                  -> values were edited in place
+    """
+    if key_a is None or key_b is None:
+        return ""
+    if str(key_a) != str(key_b):
+        if count_a != count_b:
+            n = abs(int(count_a) - int(count_b))
+            side = "missing" if int(count_a) > int(count_b) else "extra"
+            return f"rows-{side} by={n}"
+        return "rows-replaced"
+    return "values-changed"
+
+
 def _counts(records, key):
     out = {}
     for r in records:

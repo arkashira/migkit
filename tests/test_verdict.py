@@ -108,3 +108,34 @@ def test_unchanged_since_detects_a_repeat_run(tmp_path):
     assert verdict.unchanged_since(hop, records) is True
     moved = [dict(records[0], detail="src=9 dst=9", status="ok")]
     assert verdict.unchanged_since(hop, moved) is False
+
+
+# ---- the shared difference-shape classifier ----
+
+def test_difference_kind_names_each_shape():
+    from migkit.verdict import difference_kind
+    # same keys, different values
+    assert difference_kind(10, "K", 10, "K") == "values-changed"
+    # different keys, same count
+    assert difference_kind(10, "K", 10, "J") == "rows-replaced"
+    # different keys, source has more
+    assert difference_kind(10, "K", 8, "J") == "rows-missing by=2"
+    # different keys, target has more
+    assert difference_kind(8, "K", 10, "J") == "rows-extra by=2"
+
+
+def test_difference_kind_refuses_to_guess_without_a_key():
+    """A table with no primary key gives no key hash, and inventing a verdict
+    from counts alone would be a guess dressed as a finding."""
+    from migkit.verdict import difference_kind
+    assert difference_kind(10, None, 8, None) == ""
+    assert difference_kind(10, "K", 8, None) == ""
+    assert difference_kind(10, None, 8, "J") == ""
+
+
+def test_difference_kind_compares_hashes_as_text_across_engines():
+    """PostgreSQL returns a numeric sum and MySQL a BIT_XOR integer; both
+    arrive as whatever the driver produced, so the comparison is on text."""
+    from migkit.verdict import difference_kind
+    assert difference_kind(5, 123, 5, "123") == "values-changed"
+    assert difference_kind(5, 123, 5, 124) == "rows-replaced"

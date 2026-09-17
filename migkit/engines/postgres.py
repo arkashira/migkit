@@ -727,18 +727,11 @@ class PostgresEngine(Engine):
                     f" chunks={len(ranges)} chunk_rows={chunk:,}{resumed}")
 
         def _kind(a, b):
-            """Name the shape of a difference from the three aggregates."""
+            from ..verdict import difference_kind
             pa, pb = a.split("|"), b.split("|")
-            if len(pa) < 3 or len(pb) < 3:
-                return ""       # no primary key, so no key hash to reason with
-            ca, cb = int(pa[0]), int(pb[0])
-            if pa[2] != pb[2]:
-                if ca != cb:
-                    n = abs(ca - cb)
-                    return (f" kind=rows-{'missing' if ca > cb else 'extra'}"
-                            f" by={n}")
-                return " kind=rows-replaced"
-            return " kind=values-changed"
+            k = difference_kind(pa[0], pa[2] if len(pa) > 2 else None,
+                                pb[0], pb[2] if len(pb) > 2 else None)
+            return f" kind={k}" if k else ""
 
         def one(t):
             if t in big:

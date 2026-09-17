@@ -6,8 +6,9 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
-- A difference now says what shape it is, in the first pass. The primary key
-  is hashed alongside the row in the same scan - the row is being read anyway,
+- A difference now says what shape it is, in the first pass, on PostgreSQL
+  and MySQL alike. The primary key is hashed alongside the row in the same
+  scan - the row is being read anyway,
   and a key hash costs far less than a row hash - so a differing table is
   reported as `values-changed`, `rows-replaced`, or `rows-missing` /
   `rows-extra` with a count, instead of only "this table differs". Those three
@@ -15,6 +16,11 @@ cut from `master` and versions are tagged as features stabilize.
   swapped key. A table with no primary key claims no kind rather than guessing
   one. This does not replace the drilldown - that is still how you learn which
   rows - it removes needing one to learn what happened.
+  The reasoning lives in one place (`verdict.difference_kind`) rather than
+  once per engine. PostgreSQL sums per-row md5 as numeric and MySQL folds it
+  with BIT_XOR, but the logic is identical, and the last time this shape of
+  logic existed twice the copies drifted - one planned key ranges from
+  `min(pk)` and silently skipped every row below it.
 - MongoDB's ranged comparison is proven to resume across processes: a real
   mid-collection failure is induced, the checkpoint the dead run left is
   inspected, and the next run reports how many ranges it skipped while still
