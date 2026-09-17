@@ -231,6 +231,13 @@ class PostgresEngine(Engine):
         path = d / "structural-fix.sql"
         path.write_text(sql)
         drops = len(self._DESTRUCTIVE.findall(sql))
+        # What it will lock, next to what it will change. The target of a
+        # repair is often still serving an application, and handing over DDL
+        # without saying what it blocks is how a verification becomes an
+        # outage.
+        from .. import locks as _locks
+        lock_text, lock_counts = _locks.report(sql)
+        (d / "structural-fix.locks.txt").write_text(lock_text)
         tot = meta["totals"]
         detail = (f"{tot['added']} to add, {tot['removed']} to remove,"
                   f" {tot['modified']} to change"
@@ -238,10 +245,14 @@ class PostgresEngine(Engine):
         if drops:
             detail += (f"; {drops} of the generated statements remove an"
                        " object - read those before applying")
+        lock_line = _locks.summary(lock_counts)
+        if lock_line:
+            detail += f"; {lock_line}"
         return Result("schema", f"{db} (structural)", "diff", detail,
                       str(path),
-                      "statements are in dependency order; review the"
-                      " removals, then apply structural-fix.sql on the target")
+                      "statements are in dependency order; read"
+                      " structural-fix.locks.txt for what each one blocks,"
+                      " review the removals, then apply on the target")
 
     def check_atlas(self, db):
         from urllib.parse import quote

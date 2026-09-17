@@ -73,6 +73,11 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   along with the checksum query, so each table is scanned once, not twice.
   `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
   summaries.
+- **Repair DDL says what it locks** - the generated fix is accompanied by a
+  per-statement lock classification, flagging what blocks writes and what
+  blocks everything, with the safer form named where one exists. Verified
+  against a live server, and deliberately one-sided: it may over-warn, never
+  under-warn.
 - **A long verify survives being interrupted** - big tables are checksummed
   in primary-key ranges whose sums add up to exactly the whole-table value, so
   a run that dies at 90% resumes instead of starting over, and a difference is

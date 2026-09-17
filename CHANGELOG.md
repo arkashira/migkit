@@ -6,6 +6,23 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- Repair DDL now says what it will lock. `check` writes
+  `structural-fix.locks.txt` next to `structural-fix.sql`, classifying every
+  generated statement by the lock it takes, flagging the ones that block
+  writes or block everything, and naming the safer form where one exists
+  (`CREATE INDEX CONCURRENTLY`; `ADD CONSTRAINT ... NOT VALID` then
+  `VALIDATE CONSTRAINT`; a validated `CHECK (col IS NOT NULL)` before
+  `SET NOT NULL`). The count appears in the check's own verdict line.
+  This closes an asymmetry: the check throttles itself while *reading* the
+  target, then handed over DDL for *writing* to that same live target with
+  nothing said about what it would block.
+  The classification is verified against a live PostgreSQL rather than
+  asserted - each statement is executed in a transaction, `pg_locks` is read
+  for our own backend, and the transaction rolled back. The guarantee tested
+  is one-sided: the static verdict may be heavier than reality, never
+  lighter, because a false alarm costs a re-read and the opposite costs an
+  outage. That measurement corrected one rule (`COMMENT ON` takes
+  ShareUpdateExclusiveLock, not the trivial lock its harmlessness suggests).
 - MongoDB collections are compared by id in `_id` ranges, so migkit no longer
   gives up past five million documents and sends the operator to another tool.
   The old code built a dict of every id and hash for both sides at once; a
