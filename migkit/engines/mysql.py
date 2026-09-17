@@ -1171,8 +1171,141 @@ class MySQLEngine(Engine):
             res.append(Result("deep", f"{db} boundary", "ok",
                               "no single-int-pk tables to boundary-check"))
 
+        res += self._deep_nullempty(db, ddb)
+        res += self._deep_float(db, ddb)
+        res += self._deep_unenforced_checks(db, ddb)
         res += self._check_grants(db)
         return res
+
+    # ---- checks PostgreSQL already had and MySQL did not ----
+
+    TEXTY = ("char", "varchar", "text", "tinytext", "mediumtext", "longtext")
+    FLOATY = ("float", "double")
+
+    def _text_columns(self, db, limit=30):
+        q = ("select table_name, column_name from information_schema.columns"
+             " where table_schema=%s and data_type in ("
+             + ",".join(["%s"] * len(self.TEXTY)) + ")"
+             " and table_name not like 'migkit%%' order by 1,2")
+        return self._q("src", q, (db,) + self.TEXTY)[:limit]
+
+    def _deep_nullempty(self, db, ddb):
+        """NULL and '' are different values that a mover happily swaps.
+
+        Both sides still hold "something" in the column, so a row checksum
+        can be equal on one engine's reading and not another's - and the
+        application's `IS NULL` and `= ''` branches diverge. Comparing the
+        two counts per column is what catches it.
+        """
+        bad = []
+        for tbl, col in self._text_columns(db):
+            q = (f"select sum(`{col}` is null), sum(`{col}` = '')"
+                 f" from `%s`.`{tbl}`")
+            try:
+                sv = self._q("src", q % db)[0]
+                dv = self._q("dst", q % ddb)[0]
+            except Exception:
+                continue
+            s = (int(sv[0] or 0), int(sv[1] or 0))
+            d = (int(dv[0] or 0), int(dv[1] or 0))
+            if s != d:
+                bad.append(f"{tbl}.{col}: src null/empty={s[0]}|{s[1]}"
+                           f" dst={d[0]}|{d[1]}")
+        if bad:
+            return [Result("deep", f"{db} nullempty", "diff",
+                           f"{len(bad)} text columns differ in NULL vs"
+                           " empty-string split (semantic flip): "
+                           + "; ".join(bad[:5]), "",
+                           "normalize with NULLIF(col,'') / COALESCE per"
+                           " column intent; decide which side is canonical")]
+        return [Result("deep", f"{db} nullempty", "ok",
+                       "NULL vs empty-string consistent on text columns")]
+
+    def _deep_float(self, db, ddb):
+        """FLOAT and DOUBLE are approximations, so a checksum over them is
+        the wrong instrument: identical values can hash differently and real
+        drift can hash the same. Compare the aggregate with a tolerance
+        instead, which is what the value actually supports."""
+        q = ("select table_name, column_name from information_schema.columns"
+             " where table_schema=%s and data_type in (%s, %s)"
+             " and table_name not like 'migkit%%' order by 1,2")
+        cols = self._q("src", q, (db,) + self.FLOATY)[:30]
+        bad = []
+        for tbl, col in cols:
+            agg = (f"select count(`{col}`), coalesce(sum(`{col}`),0),"
+                   f" coalesce(max(abs(`{col}`)),0) from `%s`.`{tbl}`")
+            try:
+                sn, ss, smax = self._q("src", agg % db)[0]
+                dn, ds, dmax = self._q("dst", agg % ddb)[0]
+            except Exception:
+                continue
+            if int(sn or 0) != int(dn or 0):
+                bad.append(f"{tbl}.{col}: non-null count src={sn} dst={dn}")
+                continue
+            ss, ds = float(ss or 0), float(ds or 0)
+            # relative tolerance against the magnitude actually present, so
+            # the test is meaningful for both tiny and huge columns
+            scale = max(abs(ss), abs(ds), float(smax or 0), float(dmax or 0), 1.0)
+            if abs(ss - ds) > scale * 1e-9:
+                bad.append(f"{tbl}.{col}: sum src={ss!r} dst={ds!r}")
+        if bad:
+            return [Result("deep", f"{db} float", "diff",
+                           f"{len(bad)} float/double columns drift beyond"
+                           " tolerance: " + "; ".join(bad[:5]), "",
+                           "a mover that changed the column's precision will"
+                           " do this; compare the column definitions first")]
+        return [Result("deep", f"{db} float", "ok",
+                       f"{len(cols)} float/double columns within tolerance"
+                       if cols else "no float/double columns")]
+
+    def _deep_unenforced_checks(self, db, ddb):
+        """MySQL's version of PostgreSQL's NOT VALID.
+
+        A CHECK constraint declared `NOT ENFORCED` is in the catalog and in
+        every schema diff, and enforces nothing. Counting constraints finds
+        both sides equal; only reading `ENFORCED` shows that the target is
+        accepting rows the source would reject.
+        """
+        q = ("select tc.table_name, tc.constraint_name, cc.check_clause,"
+             " tc.enforced from information_schema.table_constraints tc"
+             " join information_schema.check_constraints cc"
+             "   on cc.constraint_schema = tc.constraint_schema"
+             "  and cc.constraint_name = tc.constraint_name"
+             " where tc.constraint_schema=%s and tc.constraint_type='CHECK'"
+             " and tc.table_name not like 'migkit%%'")
+        try:
+            src = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", q, (db,))}
+            dst = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", q, (ddb,))}
+        except Exception as e:
+            # MySQL 5.7 parses CHECK and discards it; there is no catalog to
+            # read, and saying so is more use than a silent pass
+            return [Result("deep", f"{db} checks", "skip",
+                           f"CHECK constraint catalog unavailable:"
+                           f" {str(e).splitlines()[0][:70]}")]
+        bad = []
+        for k, (clause, enforced) in sorted(src.items()):
+            if k not in dst:
+                bad.append(f"{k[0]}.{k[1]} missing on target")
+                continue
+            dclause, denforced = dst[k]
+            if str(denforced).upper() == "NO" and str(enforced).upper() == "YES":
+                bad.append(f"{k[0]}.{k[1]} NOT ENFORCED on target"
+                           " (enforced on source)")
+            elif re.sub(r"\s+", "", str(clause or "")) != \
+                    re.sub(r"\s+", "", str(dclause or "")):
+                bad.append(f"{k[0]}.{k[1]} clause differs")
+        unenforced_both = [k for k, (_, e) in src.items()
+                           if str(e).upper() == "NO" and k in dst]
+        if bad:
+            return [Result("deep", f"{db} checks", "diff",
+                           f"{len(bad)} CHECK constraints differ: "
+                           + "; ".join(bad[:5]), "",
+                           "ALTER TABLE ... ALTER CHECK <name> ENFORCED after"
+                           " confirming the existing rows satisfy it")]
+        note = (f"; {len(unenforced_both)} NOT ENFORCED on both sides"
+                if unenforced_both else "")
+        return [Result("deep", f"{db} checks", "ok",
+                       f"{len(src)} CHECK constraints match{note}")]
 
     # privileges live in the grant tables, not in the schema, so neither a
     # dump/restore nor a CDC stream carries them: the data arrives and the

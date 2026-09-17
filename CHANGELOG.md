@@ -6,6 +6,22 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- Three checks MySQL was missing and PostgreSQL already had, taking MySQL from
+  11 deep sub-checks to 14. They land on the same canonical categories with no
+  extra mapping, so MySQL and PostgreSQL findings now aggregate together.
+  - **NULL vs empty string** (`value.null-empty`) - a mover that swaps them
+    leaves "something" in the column either way, so the row still looks
+    present while the application's `IS NULL` and `= ''` branches diverge.
+  - **FLOAT/DOUBLE drift** (`value.precision`) - a checksum is the wrong
+    instrument for an approximation: equal values can hash differently and
+    real drift can hash the same. Compared as an aggregate with a tolerance
+    relative to the magnitude actually in the column.
+  - **CHECK NOT ENFORCED** (`structure.unvalidated-constraints`) - MySQL's
+    analogue of PostgreSQL's NOT VALID. The constraint is in the catalog and
+    in every schema diff while enforcing nothing, so counting constraints
+    finds both sides equal. On MySQL 5.7, where CHECK is parsed and discarded
+    with no catalog to read, the check reports `skip` and says why rather than
+    passing silently.
 - MySQL verifies big tables in resumable ranges too, through the same range
   planner PostgreSQL uses. Porting it fixed a real gap in the MySQL code it
   replaced: those ranges started at `min(pk)` on the source, so any target row
