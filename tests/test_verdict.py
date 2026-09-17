@@ -139,3 +139,26 @@ def test_difference_kind_compares_hashes_as_text_across_engines():
     from migkit.verdict import difference_kind
     assert difference_kind(5, 123, 5, "123") == "values-changed"
     assert difference_kind(5, 123, 5, 124) == "rows-replaced"
+
+
+def test_counted_and_inferred_kinds_use_the_same_words():
+    """A MongoDB rows-missing and a MySQL rows-missing have to mean the same
+    thing, or aggregating findings across engines is meaningless."""
+    from migkit.verdict import difference_kind, difference_kind_from_counts
+    # inferred from hashes (SQL engines)
+    assert difference_kind(10, "K", 8, "J") == "rows-missing by=2"
+    assert difference_kind(10, "K", 10, "J") == "rows-replaced"
+    assert difference_kind(10, "K", 10, "K") == "values-changed"
+    # counted directly (MongoDB)
+    assert difference_kind_from_counts(2, 0, 0) == "rows-missing by=2"
+    assert difference_kind_from_counts(3, 3, 0) == "rows-replaced"
+    assert difference_kind_from_counts(0, 0, 4) == "values-changed"
+    assert difference_kind_from_counts(0, 0, 0) == ""
+
+
+def test_counted_kind_reports_both_sides_when_they_are_unequal():
+    """Two missing and five extra is not a replacement, and flattening it to
+    one label would lose the fact."""
+    from migkit.verdict import difference_kind_from_counts
+    assert difference_kind_from_counts(2, 5, 0) == \
+        "rows-missing by=2,rows-extra by=5"

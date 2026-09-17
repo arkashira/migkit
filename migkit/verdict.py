@@ -49,6 +49,30 @@ def difference_kind(count_a, key_a, count_b, key_b):
     return "values-changed"
 
 
+def difference_kind_from_counts(missing, extra, changed):
+    """The same vocabulary, for an engine that counts instead of inferring.
+
+    MongoDB compares by `_id` set, so it *knows* how many documents are
+    missing, extra and changed; the SQL engines infer the shape from key and
+    row hashes. Two genuinely different situations, deliberately sharing one
+    module so the words cannot drift apart - a MySQL `rows-missing` and a
+    MongoDB `rows-missing` have to mean the same thing to be worth
+    aggregating.
+    """
+    missing, extra, changed = int(missing), int(extra), int(changed)
+    if missing and extra:
+        if missing == extra:
+            return "rows-replaced"
+        return f"rows-missing by={missing},rows-extra by={extra}"
+    if missing:
+        return f"rows-missing by={missing}"
+    if extra:
+        return f"rows-extra by={extra}"
+    if changed:
+        return "values-changed"
+    return ""
+
+
 def _counts(records, key):
     out = {}
     for r in records:

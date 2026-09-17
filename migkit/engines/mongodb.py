@@ -1,6 +1,7 @@
 import time
 
 from .base import Engine, RepairAction, Result
+from ..verdict import difference_kind_from_counts
 
 SKIP_DBS = {"admin", "local", "config"}
 # Target documents per comparison range. Ranges keep the memory
@@ -403,17 +404,21 @@ class MongoEngine(Engine):
             return Result("data", scope, "ok",
                           f"docs {checked:,} compared by id hash,"
                           f" {len(ranges)} ranges{resumed}")
-        for kind, ids in found.items():
-            p = d / f"data-{name}.{kind}"
+        for bucket, ids in found.items():
+            p = d / f"data-{name}.{bucket}"
             if ids:
                 p.write_text("\n".join(dumps(i) for i in ids) + "\n")
             elif p.exists():
                 p.unlink()
+        kind = difference_kind_from_counts(len(found["missing"]),
+                                           len(found["extra"]),
+                                           len(found["changed"]))
         return Result("data", scope, "diff",
                       f"missing={len(found['missing'])}"
                       f" extra={len(found['extra'])}"
                       f" changed={len(found['changed'])}"
-                      f" over {len(ranges)} ranges", str(d),
+                      f" over {len(ranges)} ranges"
+                      + (f" kind={kind}" if kind else ""), str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
 
     def _client_hashes(self, coll, flt=None):
