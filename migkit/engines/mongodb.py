@@ -823,19 +823,108 @@ class MongoEngine(Engine):
             add("warn", "instance", "source is DocumentDB",
                 "no dbHash or hashed-index aggregation,"
                 " client-side hashing is used (slower)")
-        for db in self.databases():
-            shape = self._shape("src", db)
-            capped = [n for n, v in shape.items() if "capped" in v["options"]]
-            add("pass" if not capped else "warn", db,
-                "capped collections (size-bound, verify caps match)",
-                ", ".join(capped) or "none")
-            ttl = [f"{n}.{ix}" for n, v in shape.items()
-                   for ix, spec in v["indexes"].items()
-                   if "expireAfterSeconds" in spec]
-            add("pass" if not ttl else "warn", db,
-                "TTL indexes (target TTL deletes docs during sync,"
-                " keep disabled until cutover)", ", ".join(ttl) or "none")
+        inv = self._handwork()
+        items += inv.rows() + inv.summary()
         return items
+
+    def _handwork(self):
+        """Inventory the work the move will not do, per `migkit.handwork`.
+
+        Views are absent on purpose: `_shape` records a collection's type, so
+        the schema check already reports a view that arrived as a collection.
+        What is listed here is what an insert-by-insert copy silently gets
+        wrong rather than fails on - a capped collection that lands uncapped
+        and grows without a bound, a time-series collection that lands as an
+        ordinary one holding the same documents.
+        """
+        from .. import handwork
+        inv = handwork.Inventory()
+        src = self._client("src")
+        try:
+            sharded_cluster = src.admin.command("hello").get("msg") == "isdbgrid"
+            cluster_known = True
+        except Exception as e:
+            sharded_cluster, cluster_known = False, False
+            reason = str(e)[:100]
+        for db in self.databases():
+            try:
+                d = src[self._d("src", db)]
+                colls = d.command("listCollections")["cursor"]["firstBatch"]
+            except Exception as e:
+                inv.unknown("target-prereq", db,
+                            f"cannot list collections: {str(e)[:100]}")
+                continue
+            # system.views and system.buckets.* are the server's own
+            # bookkeeping; naming them would be work nobody can do
+            colls = [c for c in colls
+                     if not c["name"].startswith("system.")]
+
+            # created capped or not at all: an insert-by-insert copy into a
+            # collection that does not exist yet creates an ordinary one, and
+            # the size bound is gone without any error
+            inv.add("target-prereq", db, "capped collections",
+                    [f"{c['name']} ({c['options']['capped'] and 'capped'},"
+                     f" size {c['options'].get('size', '?')})"
+                     for c in colls if c.get("options", {}).get("capped")])
+            # same shape of failure: the timeField is only settable at
+            # creation, so the documents land in a plain collection
+            inv.add("target-prereq", db, "time-series collections",
+                    [f"{c['name']} (timeField"
+                     f" {c['options']['timeseries'].get('timeField')})"
+                     for c in colls if c.get("type") == "timeseries"])
+            # a default collation changes how every index and sort compares
+            # strings, and it too is only settable at creation
+            inv.add("target-prereq", db,
+                    "collections with a non-simple default collation",
+                    [f"{c['name']} ({c['options']['collation'].get('locale')})"
+                     for c in colls
+                     if c.get("options", {}).get("collation")])
+
+            if cluster_known:
+                shards = []
+                if sharded_cluster:
+                    try:
+                        ns = src["config"]["collections"].find(
+                            {"_id": {"$regex": f"^{db}\\."}, "dropped":
+                             {"$ne": True}})
+                        shards = [f"{c['_id']} (key {dict(c['key'])})"
+                                  for c in ns]
+                    except Exception as e:
+                        inv.unknown("target-prereq", db,
+                                    f"cannot read config.collections:"
+                                    f" {str(e)[:100]}")
+                        shards = None
+                if shards is not None:
+                    # the shard key has to be chosen and applied before any
+                    # data lands; resharding afterwards is a separate project
+                    inv.add("target-prereq", db, "sharded collections",
+                            shards)
+            else:
+                inv.unknown("target-prereq", db,
+                            f"cannot tell whether this is a sharded cluster:"
+                            f" {reason}")
+
+            # Per collection, not per database: a view has no indexes and
+            # raises when asked for them, and one such failure used to turn
+            # every TTL index in the database into "unknown" - losing real
+            # findings to a collection that never had any.
+            ttl = []
+            for c in colls:
+                if c.get("type") == "view":
+                    continue
+                try:
+                    ttl += [f"{c['name']}.{ix['name']}"
+                            for ix in d[c["name"]].list_indexes()
+                            if "expireAfterSeconds" in ix]
+                except Exception as e:
+                    inv.unknown("decide-then-apply", db,
+                                f"cannot list indexes on {c['name']}:"
+                                f" {str(e)[:80]}")
+            # a TTL index on the target deletes documents while the sync is
+            # still running - the same hazard as an enabled MySQL event
+            inv.add("decide-then-apply", db,
+                    "TTL indexes that must stay disabled until cutover", ttl)
+        return inv
 
     def setup_target_plan(self, db):
         return [

@@ -2169,47 +2169,25 @@ class PostgresEngine(Engine):
                 else f"password differs for: {', '.join(drift[:5])}"
                      " -> reset on target or apps cannot log in")
 
-        avail = set(self._psql("dst", "postgres",
-                               "select name from pg_available_extensions")
-                    .splitlines())
+        try:
+            avail = set(self._psql("dst", "postgres",
+                                   "select name from pg_available_extensions")
+                        .splitlines()) - {""}
+        except RuntimeError:
+            # an empty set here must not read as "nothing is missing"; the
+            # inventory turns it into unknown rather than a clean answer
+            avail = set()
         for db in self.databases():
             try:
                 exts = set(self._psql("src", db,
                                       "select extname from pg_extension")
                            .splitlines())
-                gap = sorted(exts - avail)
-                add("pass" if not gap else "fail", db,
-                    "extensions available on target",
-                    ", ".join(gap) if gap else f"{len(exts)} ok")
-                nopk = self._psql("src", db, """
-                    select coalesce(string_agg(n.nspname||'.'||c.relname, ', '
-                      order by c.relname), '')
-                    from pg_class c
-                    join pg_namespace n on n.oid = c.relnamespace
-                    where c.relkind = 'r'
-                      and n.nspname not in ('pg_catalog','information_schema')
-                      and n.nspname not like 'pg\\_%'
-                      and n.nspname not like '\\_\\_%'
-                      and not exists (select 1 from pg_index i
-                        where i.indrelid = c.oid and i.indisprimary)""")
-                add("pass" if not nopk else "warn", db,
-                    "tables without primary key (no CDC updates,"
-                    " checksum-only verify)", nopk or "none")
-                unlogged = self._psql("src", db,
-                    "select count(*) from pg_class c"
-                    " join pg_namespace n on n.oid = c.relnamespace"
-                    " where c.relkind = 'r' and c.relpersistence = 'u'"
-                    " and n.nspname not in ('pg_catalog','information_schema')"
-                    " and n.nspname not like 'pg\\_%'"
-                    " and n.nspname not like '\\_\\_%'")
-                add("pass" if unlogged == "0" else "warn", db,
-                    "unlogged tables (no WAL, movers skip their changes)",
-                    unlogged)
-                inv = self._psql("src", db,
-                                 "select count(*) from pg_index"
-                                 " where not indisvalid")
-                add("pass" if inv == "0" else "warn", db,
-                    "invalid indexes on source", inv)
+                add("pass", db, "extensions on source", f"{len(exts)}")
+                invalid = self._psql("src", db,
+                                     "select count(*) from pg_index"
+                                     " where not indisvalid")
+                add("pass" if invalid == "0" else "warn", db,
+                    "invalid indexes on source", invalid)
                 enc_q = ("select pg_encoding_to_char(encoding)||' '||datcollate"
                          f" from pg_database where datname = '{db}'")
                 se = self._psql("src", "postgres", enc_q)
@@ -2224,7 +2202,104 @@ class PostgresEngine(Engine):
                         "encoding and collation match", f"src {se} / dst {de}")
             except RuntimeError as e:
                 add("fail", db, "assess queries", str(e).splitlines()[-1][:120])
+        hw = self._handwork(avail)
+        items += hw.rows() + hw.summary()
         return items
+
+    def _handwork(self, avail):
+        """Inventory the work the move will not do, per `migkit.handwork`.
+
+        Functions, views and constraints are absent on purpose: the structural
+        check diffs them and emits DDL for them, so they are carried. What is
+        listed here is what no amount of DDL fixes - contents that live outside
+        any table, objects the WAL stream never mentions, and things that have
+        to exist on the target before anything is loaded into it.
+        """
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            USER_SCHEMA = ("n.nspname not in"
+                           " ('pg_catalog','information_schema')"
+                           " and n.nspname not like 'pg\\_%'"
+                           " and n.nspname not like '\\_\\_%'")
+            try:
+                exts = set(self._psql("src", db,
+                                      "select extname from pg_extension")
+                           .splitlines()) - {""}
+                inv.add("target-prereq", db,
+                        "extensions not installable on the target",
+                        sorted(exts - avail) if avail else [])
+                if not avail:
+                    inv.unknown("target-prereq", db,
+                                "could not read pg_available_extensions on"
+                                " the target")
+
+                # No primary key means logical replication has no REPLICA
+                # IDENTITY to match an UPDATE or DELETE against, so those
+                # changes are dropped - and migkit cannot name a differing
+                # row either, only the whole table.
+                nopk = [l for l in self._psql("src", db, f"""
+                    select n.nspname||'.'||c.relname
+                    from pg_class c
+                    join pg_namespace n on n.oid = c.relnamespace
+                    where c.relkind = 'r' and {USER_SCHEMA}
+                      and not exists (select 1 from pg_index i
+                        where i.indrelid = c.oid and i.indisprimary)
+                      and c.relreplident not in ('f','i')
+                    order by 1""").splitlines() if l]
+                inv.add("no-row-key", db, "tables", nopk)
+
+                # Unlogged tables produce no WAL at all, so a WAL-based mover
+                # cannot see a single row of them.
+                unlogged = [l for l in self._psql("src", db, f"""
+                    select n.nspname||'.'||c.relname from pg_class c
+                    join pg_namespace n on n.oid = c.relnamespace
+                    where c.relkind = 'r' and c.relpersistence = 'u'
+                      and {USER_SCHEMA} order by 1""").splitlines() if l]
+                inv.add("not-carried", db, "unlogged tables", unlogged)
+
+                # A matview's definition is carried by the structural fix; its
+                # contents are not, and it is readable-but-stale until
+                # someone refreshes it.
+                mviews = [l for l in self._psql("src", db, f"""
+                    select n.nspname||'.'||c.relname from pg_class c
+                    join pg_namespace n on n.oid = c.relnamespace
+                    where c.relkind = 'm' and {USER_SCHEMA}
+                    order by 1""").splitlines() if l]
+                inv.add("not-carried", db,
+                        "materialized views needing REFRESH", mviews)
+
+                # Large objects live outside every table, so a table-by-table
+                # mover never touches them.
+                los = self._psql("src", db,
+                                 "select count(*) from"
+                                 " pg_largeobject_metadata").strip()
+                inv.add("not-carried", db, "large objects",
+                        [f"{los} in pg_largeobject"] if los not in
+                        ("0", "") else [])
+
+                # A user mapping's password is not readable by anyone but its
+                # owner, so it cannot be copied even in principle.
+                fdw = [l for l in self._psql("src", db,
+                       "select srvname||' -> '||usename from pg_user_mappings"
+                       ).splitlines() if l]
+                inv.add("target-prereq", db,
+                        "foreign server user mappings (passwords are not"
+                        " readable, so they cannot be copied)", fdw)
+
+                # An untrusted language needs its runtime installed on the
+                # target host; no DDL can supply it.
+                langs = [l for l in self._psql("src", db,
+                         "select lanname from pg_language"
+                         " where lanispl and not lanpltrusted"
+                         ).splitlines() if l]
+                inv.add("target-prereq", db,
+                        "untrusted procedural languages", langs)
+            except RuntimeError as e:
+                inv.unknown("no-row-key", db,
+                            f"catalogue query failed:"
+                            f" {str(e).splitlines()[-1][:100]}")
+        return inv
 
     def _pk_cols_of(self, db, table):
         sch, tbl = table.split(".", 1)

@@ -1724,23 +1724,6 @@ class MySQLEngine(Engine):
             "instance", "long-running transactions blocking CDC/purge",
             f"{n} open, oldest {age}s" if n else "none")
         for db in self.databases():
-            rows = self._q("src",
-                "select t.table_name from information_schema.tables t"
-                " left join information_schema.key_column_usage k"
-                " on k.table_schema = t.table_schema"
-                " and k.table_name = t.table_name"
-                " and k.constraint_name = 'PRIMARY'"
-                " where t.table_schema = %s and t.table_type = 'BASE TABLE'"
-                " and k.column_name is null group by t.table_name", (db,))
-            nopk = ", ".join(r[0] for r in rows)
-            add("pass" if not nopk else "warn", db,
-                "tables without primary key", nopk or "none")
-            eng_rows = self._q("src",
-                "select count(*) from information_schema.tables"
-                " where table_schema = %s and table_type = 'BASE TABLE'"
-                " and engine <> 'InnoDB'", (db,))
-            add("pass" if eng_rows[0][0] == 0 else "warn", db,
-                "non-InnoDB tables", eng_rows[0][0])
             cs = self._q("src", "select default_character_set_name,"
                          " default_collation_name from"
                          " information_schema.schemata"
@@ -1778,7 +1761,103 @@ class MySQLEngine(Engine):
         except Exception:
             add("warn", "instance", "cannot read mysql.user",
                 "grant select on mysql.user to compare accounts")
+        inv = self._handwork()
+        items += inv.rows() + inv.summary()
         return items
+
+    def _handwork(self):
+        """Inventory the work the move will not do, per `migkit.handwork`.
+
+        Only things migkit genuinely leaves behind belong here. Routines,
+        triggers and views are absent on purpose: the structural check dumps
+        them with `--routines --triggers` and diffs them, so they are carried.
+        Events are not - measured against MySQL 8, a `--no-data --routines
+        --triggers` dump contains no CREATE EVENT at all, and adding `--events`
+        is what makes them appear.
+        """
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            try:
+                # Row-based replication finds the row to update through a
+                # primary key or a unique NOT NULL index; with neither it
+                # scans the table per row, and migkit has no key to name a
+                # differing row by either.
+                rows = self._q("src",
+                    "select t.table_name from information_schema.tables t"
+                    " where t.table_schema = %s"
+                    " and t.table_type = 'BASE TABLE'"
+                    " and not exists (select 1 from information_schema"
+                    ".statistics s where s.table_schema = t.table_schema"
+                    " and s.table_name = t.table_name and s.non_unique = 0"
+                    " and s.nullable <> 'YES')", (db,))
+                inv.add("no-row-key", db, "tables", [r[0] for r in rows])
+
+                eng = self._q("src",
+                    "select table_name, engine from information_schema.tables"
+                    " where table_schema = %s and table_type = 'BASE TABLE'"
+                    " and engine is not null and engine <> 'InnoDB'", (db,))
+                # MEMORY empties on restart and MyISAM has no transactions, so
+                # neither can be handed over by a consistent snapshot
+                inv.add("not-carried", db, "non-InnoDB tables",
+                        [f"{r[0]} ({r[1]})" for r in eng])
+
+                ev = self._q("src",
+                    "select event_name, status from information_schema.events"
+                    " where event_schema = %s", (db,))
+                inv.add("not-carried", db, "scheduled events",
+                        [r[0] for r in ev])
+                if ev:
+                    # an event enabled on the target rewrites rows while the
+                    # sync is still running - the same hazard as a TTL index
+                    inv.add("decide-then-apply", db,
+                            "events that must stay disabled until cutover",
+                            [r[0] for r in ev if str(r[1]).upper() == "ENABLED"])
+            except Exception as e:
+                inv.unknown("no-row-key", db, f"catalogue query failed: {e}")
+        self._definer_handwork(inv)
+        return inv
+
+    def _definer_handwork(self, inv):
+        """Definers that will not exist on the target.
+
+        A view or routine keeps the `DEFINER=user@host` it was created with.
+        Recreating it against a target where that account is missing succeeds
+        - and then fails at the moment something uses it, which is usually
+        after cutover.
+        """
+        for db in self.databases():
+            try:
+                rows = self._q("src",
+                    "select definer, 'routine', routine_name from"
+                    " information_schema.routines where routine_schema = %s"
+                    " union all select definer, 'view', table_name from"
+                    " information_schema.views where table_schema = %s"
+                    " union all select definer, 'trigger', trigger_name from"
+                    " information_schema.triggers where trigger_schema = %s"
+                    " union all select definer, 'event', event_name from"
+                    " information_schema.events where event_schema = %s",
+                    (db, db, db, db))
+            except Exception as e:
+                inv.unknown("target-prereq", db,
+                            f"cannot read object definers: {e}")
+                continue
+            if not rows:
+                continue
+            try:
+                have = {f"{u}@{h}" for u, h in
+                        self._q("dst", "select user, host from mysql.user")}
+            except Exception as e:
+                inv.unknown("target-prereq", db,
+                            f"cannot read mysql.user on the target to check"
+                            f" definers: {e}")
+                continue
+            missing = sorted({f"{kind} {name} (definer {d})"
+                              for d, kind, name in rows
+                              if str(d).replace("`", "") not in have})
+            inv.add("target-prereq", db,
+                    "accounts named as DEFINER but absent on the target",
+                    missing)
 
     def list_move_tables(self, db):
         return [("", t) for t in self._tables("src", db)]
