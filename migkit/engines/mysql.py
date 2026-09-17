@@ -475,39 +475,71 @@ class MySQLEngine(Engine):
             if verdict == "diff":
                 return self._drilldown(db, t, pks, expr, [""])
 
-        ranges = [""]
+        # Ranges come from the shared planner rather than being built here, so
+        # both engines get the same guarantee: the ranges cover the whole
+        # keyspace, open at both ends. The version that used to live here
+        # started at min(pk) on the source, which silently skipped any target
+        # row with a smaller key - exactly the kind of difference worth
+        # catching.
+        from .. import checkpoint as _cp
+        pk_ranges, col = [(None, None)], None
         if len(pks) == 1:
             n = self._q("src", f"select count(*) from `{db}`.`{t}`")[0][0]
             if n > self.hop.slice:
                 mm = self._q("src", f"select min(`{pks[0]}`), max(`{pks[0]}`)"
                                     f" from `{db}`.`{t}`")[0]
                 if mm[0] is not None and str(mm[0]).lstrip("-").isdigit():
-                    lo, hi = int(mm[0]), int(mm[1])
-                    parts = max(2, n // self.hop.slice + 1)
-                    step = max(1, (hi - lo + 1) // parts + 1)
-                    ranges = [f"where `{pks[0]}` >= {a} and `{pks[0]}` < {a + step}"
-                              for a in range(lo, hi + 1, step)]
+                    col = pks[0]
+                    cp_path = str(self.hop.report_dir(db) / "checkpoint.json")
+                    cp = _cp.Checkpoint(cp_path)
+                    chunk = cp.chunk_for(scope, max(1, self.hop.slice))
+                    pk_ranges = _cp.plan_ranges(int(mm[0]), int(mm[1]), chunk)
+
+        def clause(lo, hi):
+            w = _cp.where(f"`{col}`", lo, hi) if col else ""
+            return f"where {w}" if w else ""
+
+        ranges = [clause(lo, hi) for lo, hi in pk_ranges]
+        cp = (_cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+              if col else _cp.Checkpoint(None))
+        todo = cp.begin(scope, expr, pk_ranges) if col else pk_ranges
+        done_before = cp.resumed(scope) if col else 0
 
         bad_ranges = []
         rows_a = rows_b = xor_a = xor_b = 0
         with ThreadPoolExecutor(max_workers=4) as pool:
             futs = {}
-            for w in ranges:
+            for lo, hi in todo:
+                w = clause(lo, hi)
                 fa = pool.submit(self._checksum, "src", db, t, expr, w)
                 fb = pool.submit(self._checksum, "dst", db, t, expr, w)
-                futs[w] = (fa, fb)
-            for w, (fa, fb) in futs.items():
+                futs[(lo, hi)] = (fa, fb)
+            for (lo, hi), (fa, fb) in futs.items():
                 ra, rb = fa.result(), fb.result()
-                rows_a += ra[0]
-                rows_b += rb[0]
-                xor_a ^= int(ra[2] or 0)
-                xor_b ^= int(rb[2] or 0)
                 if ra != rb:
-                    bad_ranges.append(w)
+                    bad_ranges.append(clause(lo, hi))
+                    if col:
+                        cp.clear(scope)
+                    continue
+                if col:
+                    cp.record(scope, lo, hi, ra[0], int(ra[2] or 0))
+                else:
+                    rows_a += ra[0]
+                    rows_b += rb[0]
+                    xor_a ^= int(ra[2] or 0)
+                    xor_b ^= int(rb[2] or 0)
         if not bad_ranges:
+            if col:
+                rows_a, xor_s = cp.total(scope, combine="xor")
+                rows_b, xor_a = rows_a, int(xor_s)
+                xor_b = xor_a
+                cp.clear(scope)
+            resumed = (f", resumed {done_before}/{len(pk_ranges)}"
+                       if done_before else "")
             return Result("data", scope, "ok",
                           f"rows {rows_a:,}=={rows_b:,}, checksum"
-                          f" {xor_a:x}=={xor_b:x} ({len(ranges)} chunks)"), \
+                          f" {xor_a:x}=={xor_b:x}"
+                          f" ({len(pk_ranges)} chunks{resumed})"), \
                 rows_a, rows_b
         if not pks:
             return Result("data", scope, "diff",

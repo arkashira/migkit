@@ -115,14 +115,26 @@ class Checkpoint:
             entry["done"][_key(lo, hi)] = [int(rows), str(checksum)]
             self._flush()
 
-    def total(self, table):
-        """(rows, checksum) summed over every recorded range."""
+    def total(self, table, combine="sum"):
+        """(rows, checksum) over every recorded range.
+
+        `combine` names how the engine's checksum composes. Both operations
+        in use are commutative and associative, which is the property that
+        makes chunking equivalent to one pass:
+
+          sum  PostgreSQL adds per-row md5 values as numeric
+          xor  MySQL folds them with BIT_XOR
+
+        XOR has one wrinkle worth knowing: two identical rows cancel. That
+        cannot hide a difference here because row counts are compared
+        alongside the checksum, and a cancelled pair changes the count.
+        """
         e = self._data["tables"].get(table) or {}
-        rows, total = 0, 0
+        rows, acc = 0, 0
         for r, c in (e.get("done") or {}).values():
             rows += int(r)
-            total += int(c)
-        return rows, str(total)
+            acc = acc + int(c) if combine == "sum" else acc ^ int(c)
+        return rows, str(acc)
 
     def clear(self, table):
         """Forget a table's partials - used once it is fully verified, so the

@@ -203,3 +203,14 @@ def test_a_table_with_no_partials_accepts_a_new_size(tmp_path):
     cp = Checkpoint(path)
     cp.chunk_for("public.t", 1_000_000)      # planned, but nothing finished
     assert Checkpoint(path).chunk_for("public.t", 250_000) == 250_000
+
+
+def test_totals_compose_the_way_the_engine_does(tmp_path):
+    """PostgreSQL sums its per-row hashes; MySQL folds them with BIT_XOR.
+    Both are commutative and associative, which is what makes chunking
+    equivalent to a single pass - but they are not the same operation."""
+    cp = Checkpoint(str(tmp_path / "cp.json"))
+    cp.record("public.t", None, 10, 5, 0b1100)
+    cp.record("public.t", 10, None, 7, 0b1010)
+    assert cp.total("public.t", combine="sum") == (12, str(0b1100 + 0b1010))
+    assert cp.total("public.t", combine="xor") == (12, str(0b1100 ^ 0b1010))

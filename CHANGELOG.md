@@ -6,6 +6,14 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- MySQL verifies big tables in resumable ranges too, through the same range
+  planner PostgreSQL uses. Porting it fixed a real gap in the MySQL code it
+  replaced: those ranges started at `min(pk)` on the source, so any target row
+  with a smaller key fell outside every range and was never compared. The
+  shared planner is open at both ends, so that class of difference cannot hide
+  on either engine. Proven against MySQL that the BIT_XOR-folded chunk totals
+  equal the single-pass value - the same property as the PostgreSQL sum, but
+  different algebra, so both are tested against a real server.
 - MySQL throttles itself too, on `Threads_running` against `max_connections`
   plus its own query latency. The protection was PostgreSQL-only when it
   landed, which made it a property of one engine rather than of migkit.
