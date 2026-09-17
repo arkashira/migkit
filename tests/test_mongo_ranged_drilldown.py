@@ -181,3 +181,48 @@ def test_a_plan_that_misses_documents_is_rejected(pair, tmp_path):
     # a deliberately broken plan: one ObjectId-typed range only
     broken = [("objectId", None, ObjectId("0" * 24))]
     assert eng._coverage_ok(src.t, broken, total) is False
+
+
+def test_a_crash_partway_resumes_and_still_counts_everything(
+        pair, tmp_path, monkeypatch):
+    """Crash it for real rather than hand-writing a checkpoint.
+
+    A test that fabricates the checkpoint proves the reader works; making the
+    run die mid-collection proves the writer and the reader agree, which is
+    the part that breaks.
+    """
+    from migkit.engines import mongodb
+    from migkit.engines.mongodb import MongoEngine
+    _, _, total = _seed()
+    monkeypatch.setattr(mongodb, "DRILL_RANGE_DOCS", 100)
+    eng = _engine(tmp_path)
+    plan = eng._id_plan(eng._client("src")["shop"]["t"], total)
+    assert len(plan) > 3, plan
+
+    real = MongoEngine._range_hashes
+    calls = {"n": 0}
+
+    def flaky(self, coll, flt):
+        calls["n"] += 1
+        # two ranges is two calls per range (source and target)
+        if calls["n"] > 4:
+            raise RuntimeError("connection reset")
+        return real(self, coll, flt)
+
+    monkeypatch.setattr(MongoEngine, "_range_hashes", flaky)
+    with pytest.raises(RuntimeError):
+        eng._drilldown("shop", "t")
+
+    # what the dead process left behind
+    import json
+    left = json.loads((tmp_path / "checkpoint.json").read_text())
+    done = (left["tables"].get("shop.t") or {}).get("done") or {}
+    assert done, "a crash left nothing to resume from"
+    partial = len(done)
+
+    monkeypatch.setattr(MongoEngine, "_range_hashes", real)
+    r = _engine(tmp_path)._drilldown("shop", "t")
+    assert r.status == "ok", r.detail
+    assert f"resumed {partial}/{len(plan)}" in r.detail, r.detail
+    # and the resumed total still accounts for every document
+    assert f"docs {total:,}" in r.detail, r.detail

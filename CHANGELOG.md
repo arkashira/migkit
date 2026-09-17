@@ -6,6 +6,11 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- MongoDB's ranged comparison is proven to resume across processes: a real
+  mid-collection failure is induced, the checkpoint the dead run left is
+  inspected, and the next run reports how many ranges it skipped while still
+  accounting for every document. Fabricating a checkpoint would only have
+  proven the reader works; crashing it proves the writer and reader agree.
 - Repair DDL now says what it will lock. `check` writes
   `structural-fix.locks.txt` next to `structural-fix.sql`, classifying every
   generated statement by the lock it takes, flagging the ones that block
