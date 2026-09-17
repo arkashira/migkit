@@ -535,13 +535,21 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     from . import verdict as _verdict
     was_same = _verdict.unchanged_since(hop, results)
     summary_path.write_text(json.dumps(results, indent=1, default=str))
-    verdict_path, env = _verdict.write(hop, results, engine=eng.__class__.__name__)
+    verdict_path, env = _verdict.write(
+        hop, results, engine=eng.__class__.__name__,
+        load=getattr(eng, "_last_throttle", None))
     from .report import write_report
     report_path = write_report(hop, results)
     bad = [r for r in results if r["status"] not in ("ok", "skip")]
     console.print(f"\nverdict: {env['status']}"
                   + (" (identical to the previous run)" if was_same else "")
                   + f"  {verdict_path}")
+    if env.get("load"):
+        ld = env["load"]
+        console.print(f"[yellow]the server was under load: backed off"
+                      f" {ld['waits']}x ({ld['waited_seconds']}s), concurrency"
+                      f" {ld['concurrency_from']} -> {ld['concurrency_to']}"
+                      "[/yellow]")
     console.print(f"report: {report_path}")
     if bad:
         console.print(f"[yellow]{len(bad)} problems, summary: {summary_path}[/yellow]")

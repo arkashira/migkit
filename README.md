@@ -73,6 +73,12 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   along with the checksum query, so each table is scanned once, not twice.
   `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
   summaries.
+- **Never the heaviest thing on the server** - `check` reads the database's
+  own load (active sessions against its limit, replication lag) and its own
+  query latency, then sleeps and narrows concurrency while the server is
+  struggling. Nothing to configure and no safe-concurrency to guess; a busy
+  database is still verified, just more slowly, and `verdict.json` records
+  that it was throttled and why.
 - **Consistency by design, not guesswork** - `check --consistent` checksums
   every table of a database inside one repeatable-read transaction per side;
   suspect rows are then proven in-flight or real with an **LSN fence**: wait

@@ -553,6 +553,32 @@ class PostgresEngine(Engine):
                               f"{len(src)} sequences match source last_value"))
         return res
 
+    HEALTH_SQL = (
+        "select (select count(*) from pg_stat_activity where state='active')"
+        "::float / greatest(current_setting('max_connections')::float, 1)"
+        " || '|' || coalesce((select max(extract(epoch from replay_lag))"
+        " from pg_stat_replication), -1)"
+        " || '|' || coalesce(extract(epoch from"
+        " now() - pg_last_xact_replay_timestamp()), -1)")
+
+    def _health(self, side, db):
+        """What this side says about its own load, for the throttle.
+
+        Cheap on purpose - two catalog reads, no table access. Anything the
+        provider hides comes back as None rather than as "fine": a managed
+        database that will not show us its replication state must not be
+        mistaken for one that is idle.
+        """
+        from ..throttle import Health
+        try:
+            raw = self._psql(side, db, self.HEALTH_SQL).strip()
+            busy, send_lag, replay_lag = (float(x) for x in raw.split("|"))
+        except Exception:
+            return None
+        lag = max(send_lag, replay_lag)
+        return Health(busy_ratio=busy if busy >= 0 else None,
+                      lag_seconds=lag if lag >= 0 else None)
+
     def _data_fast_native(self, db, stream=None):
         """Per-table checksum on both sides in parallel: commutative
         sum-of-md5 as a Postgres parallel aggregate (no sort, no lock beyond
@@ -571,11 +597,18 @@ class PostgresEngine(Engine):
                 f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
                 f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t')
 
+        # A checksum is only a SELECT, which is why nothing used to stop this
+        # loop from saturating a small instance that was serving traffic.
+        from ..throttle import Throttle
+        gate = Throttle(self.hop.workers,
+                        probe=lambda: self._health("src", db))
+
         def one(t):
-            try:
-                a, b = csum("src", t), csum("dst", t)
-            except RuntimeError as e:
-                return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
+            with gate.unit():
+                try:
+                    a, b = csum("src", t), csum("dst", t)
+                except RuntimeError as e:
+                    return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
             if a == b:
                 return f"{t}: OK rows={a.split('|')[0]} checksum={a.split('|', 1)[1]}"
             return f"{t}: DIFF src={a} dst={b}"
@@ -588,6 +621,12 @@ class PostgresEngine(Engine):
                     stream(line)
                 if ": OK" not in line:
                     rc = 1
+        note = gate.line()
+        if note:
+            lines.append(f"# {note}")
+            if stream:
+                stream(f"# {note}")
+        self._last_throttle = gate.summary()
         return rc, "\n".join(lines)
 
     @staticmethod

@@ -6,6 +6,18 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- The verifier throttles itself. A full-table checksum is only a SELECT, so
+  nothing used to stop `check` from running `workers` threads against a small
+  instance that was serving traffic - which is how a two-vCPU Aurora instance
+  got pegged and restarted twice during a real UAT run. It now reads the
+  server's own load (active sessions against the configured maximum,
+  replication lag) plus its own query latency, and both sleeps and *narrows*
+  concurrency when any of them says the database is struggling. No flag: the
+  signal comes from the database. A permanently busy server still gets
+  verified - the wait per unit of work is bounded, after which it proceeds at
+  minimum concurrency and records that it did. Whatever it did appears in
+  `verdict.json` under `load`, because a run that silently took three times
+  longer is its own kind of failure.
 - One result shape across every engine: `check` writes `verdict.json` with an
   engine-independent `category` per finding, so the same failure carries the
   same name whether it came from PostgreSQL, MySQL or MongoDB. Includes a

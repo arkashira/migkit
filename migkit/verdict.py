@@ -44,8 +44,13 @@ def fingerprint(records):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def summarize(hop, records, engine=None):
-    """Build the normalized envelope for one check run."""
+def summarize(hop, records, engine=None, load=None):
+    """Build the normalized envelope for one check run.
+
+    `load` is what the throttle did, when it did anything: a run that took
+    three times as long because the server was busy should say so, not just
+    be slow.
+    """
     totals = {s: 0 for s in STATUSES}
     for r in records:
         st = r.get("status", "unknown")
@@ -70,6 +75,7 @@ def summarize(hop, records, engine=None):
         "totals": totals,
         "by_category": _counts(records, "category"),
         "fingerprint": fingerprint(records),
+        **({"load": load} if load else {}),
         "findings": [
             {"category": r.get("category", ""),
              "check": r.get("check", ""),
@@ -84,9 +90,9 @@ def summarize(hop, records, engine=None):
     }
 
 
-def write(hop, records, engine=None):
+def write(hop, records, engine=None, load=None):
     """Write verdict.json for this hop and return (path, envelope)."""
-    env = summarize(hop, records, engine)
+    env = summarize(hop, records, engine, load)
     p = hop.report_dir() / "verdict.json"
     p.write_text(json.dumps(env, indent=1, sort_keys=True, default=str))
     return p, env
