@@ -139,3 +139,67 @@ def test_no_path_means_no_file_but_still_works_in_memory():
     cp = Checkpoint(None)
     cp.record("public.t", 1, 2, 5, 7)
     assert cp.total("public.t") == (5, "7")
+
+
+# ---- adaptive chunk sizing ----
+
+def test_rate_starts_conservative_and_learns():
+    from migkit.checkpoint import DEFAULT_ROWS_PER_SECOND, Rate
+    r = Rate()
+    assert r.value == DEFAULT_ROWS_PER_SECOND
+    r.observe(1_000_000, 1.0)                 # this server is quick
+    assert r.value == 1_000_000               # first sample replaces the guess
+    r.observe(100_000, 1.0)                   # then it gets busy
+    assert 100_000 < r.value < 1_000_000      # moves, but is not whipsawed
+
+
+def test_rate_ignores_nonsense_samples():
+    from migkit.checkpoint import Rate
+    r = Rate()
+    before = r.value
+    for rows, secs in ((0, 1.0), (100, 0.0), (-5, 1.0), (100, -1.0)):
+        r.observe(rows, secs)
+    assert r.value == before and r.samples == 0
+
+
+def test_chunk_size_targets_a_runtime_and_stays_within_bounds():
+    from migkit.checkpoint import MAX_CHUNK, MIN_CHUNK, Rate
+    r = Rate(500_000)
+    assert r.chunk_rows(target_seconds=10.0) == 5_000_000
+    # a crawling server does not get split into millions of tiny queries
+    assert Rate(1).chunk_rows() == MIN_CHUNK
+    # and if the bounds are ever set inconsistently the ceiling still holds,
+    # because staying restartable matters more than avoiding small queries
+    import migkit.checkpoint as _c
+    old = _c.MAX_CHUNK
+    try:
+        _c.MAX_CHUNK = 1000
+        assert Rate(1).chunk_rows() == 1000
+    finally:
+        _c.MAX_CHUNK = old
+    # and a very fast one does not collapse back into a single query, which is
+    # what made a long verify unrestartable in the first place
+    assert Rate(10**9).chunk_rows() == MAX_CHUNK
+
+
+def test_a_table_with_partials_keeps_the_size_it_was_planned_with(tmp_path):
+    """Adapting the size mid-table would change the range boundaries, which
+    discards every partial - an adaptive size must not defeat resume."""
+    path = str(tmp_path / "cp.json")
+    cp = Checkpoint(path)
+    assert cp.chunk_for("public.t", 1_000_000) == 1_000_000
+    ranges = plan_ranges(1, 5_000_000, 1_000_000)
+    cp.begin("public.t", EXPR, ranges)
+    cp.record("public.t", *ranges[0], 10, 1)
+
+    resumed = Checkpoint(path)
+    # the rate learned something different this run; the plan does not move
+    assert resumed.chunk_for("public.t", 250_000) == 1_000_000
+    assert resumed.begin("public.t", EXPR, ranges) == ranges[1:]
+
+
+def test_a_table_with_no_partials_accepts_a_new_size(tmp_path):
+    path = str(tmp_path / "cp.json")
+    cp = Checkpoint(path)
+    cp.chunk_for("public.t", 1_000_000)      # planned, but nothing finished
+    assert Checkpoint(path).chunk_for("public.t", 250_000) == 250_000

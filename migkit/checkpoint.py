@@ -70,6 +70,21 @@ class Checkpoint:
 
     # ---- resume decisions ----
 
+    def chunk_for(self, table, proposed):
+        """Chunk size to use for this table.
+
+        A table with partials keeps the size it was planned with: re-chunking
+        would change the range boundaries, which invalidates every partial and
+        would make an adaptive size defeat resumability instead of helping it.
+        """
+        with self._lock:
+            entry = self._data["tables"].get(table)
+            if entry and entry.get("done") and entry.get("chunk"):
+                return int(entry["chunk"])
+            self._data["tables"].setdefault(
+                table, {"fingerprint": "", "done": {}})["chunk"] = int(proposed)
+            return int(proposed)
+
     def begin(self, table, expr, ranges):
         """Register the plan for a table; returns the ranges still to do.
 
@@ -80,7 +95,8 @@ class Checkpoint:
         with self._lock:
             entry = self._data["tables"].get(table)
             if not entry or entry.get("fingerprint") != fp:
-                entry = {"fingerprint": fp, "done": {}}
+                entry = {"fingerprint": fp, "done": {},
+                         "chunk": (entry or {}).get("chunk")}
                 self._data["tables"][table] = entry
             done = entry["done"]
         return [(lo, hi) for lo, hi in ranges if _key(lo, hi) not in done]
@@ -130,6 +146,48 @@ class Checkpoint:
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
+
+
+# What one chunk should take. Long enough that per-query overhead is noise,
+# short enough that a crash loses little and a cancel is responsive. Percona's
+# pt-table-checksum sizes chunks to a target runtime for the same reasons.
+TARGET_SECONDS = 10.0
+# Bounds on the learned size. The floor stops a slow table from being split
+# into millions of tiny queries; the ceiling stops a fast one from becoming a
+# single query again, which is what made a long verify unrestartable.
+MIN_CHUNK, MAX_CHUNK = 50_000, 20_000_000
+# Assumed rate before anything has been measured. Deliberately low: guessing
+# small costs a few extra round trips, guessing large costs a ten-minute query
+# against a database someone is using.
+DEFAULT_ROWS_PER_SECOND = 200_000
+
+
+class Rate:
+    """Rows per second, learned from the chunks that have already run.
+
+    Kept per run rather than persisted: the number describes the machine, the
+    network and how busy the server is right now, none of which survive until
+    the next run in a form worth trusting.
+    """
+
+    def __init__(self, rows_per_second=DEFAULT_ROWS_PER_SECOND):
+        self.value = float(rows_per_second)
+        self.samples = 0
+
+    def observe(self, rows, seconds):
+        if rows <= 0 or seconds <= 0:
+            return
+        seen = rows / seconds
+        # exponential moving average: react to a server that has got busier
+        # without letting one unlucky chunk redefine the plan
+        self.value = seen if self.samples == 0 else self.value * 0.7 + seen * 0.3
+        self.samples += 1
+
+    def chunk_rows(self, target_seconds=TARGET_SECONDS):
+        # the ceiling is applied last on purpose: "never one giant query" is
+        # the guarantee that makes a long verify restartable, so it wins over
+        # the floor if the two are ever set inconsistently
+        return min(MAX_CHUNK, max(MIN_CHUNK, int(self.value * target_seconds)))
 
 
 def plan_ranges(lo, hi, chunk):

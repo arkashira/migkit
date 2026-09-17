@@ -6,6 +6,16 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- Chunk size is measured, not configured. How many rows a chunk should cover
+  depends on row width, indexes and how busy the server is - none of which
+  anyone can supply usefully as a number. migkit learns rows-per-second from
+  the chunks it has already run and sizes the next table to a target runtime,
+  clamped so a slow server is not split into millions of tiny queries and a
+  fast one does not collapse back into the single giant query that made a long
+  verify unrestartable. A table that already has partial progress keeps the
+  size it was planned with, because re-chunking would change the range
+  boundaries and discard every partial - an adaptive size must not defeat
+  resume.
 - A large-table verify is restartable. The data checksum is a commutative sum
   over `numeric`, so the per-primary-key-range sums add up to exactly the
   whole-table value - which makes partial progress meaningful rather than just

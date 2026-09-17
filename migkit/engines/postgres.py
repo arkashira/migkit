@@ -583,7 +583,6 @@ class PostgresEngine(Engine):
     # seconds, and splitting it would cost more in round trips than a restart
     # would ever save.
     CHUNK_MIN_ROWS = 5_000_000
-    CHUNK_ROWS = 2_000_000
 
     BIG_TABLES_SQL = (
         "select n.nspname||'.'||c.relname, coalesce(s.n_live_tup, 0), a.attname"
@@ -642,6 +641,10 @@ class PostgresEngine(Engine):
                         probe=lambda: self._health("src", db))
         big = self._chunkable(db)
         cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+        # How many rows one chunk should cover is not a number anyone can
+        # supply usefully - it depends on the row width, the indexes and how
+        # busy the server is. Measure it instead.
+        rate = _cp.Rate()
 
         def csum_range(side, t, col, lo, hi):
             sch, tbl = t.split(".", 1)
@@ -668,18 +671,22 @@ class PostgresEngine(Engine):
                 lo, hi = (int(x) for x in bounds.split("|"))
             except Exception as e:
                 return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
-            ranges = _cp.plan_ranges(lo, hi, self.CHUNK_ROWS)
+            chunk = cp.chunk_for(t, rate.chunk_rows())
+            ranges = _cp.plan_ranges(lo, hi, chunk)
             expr = self._row_hash_expr("src", db, t)
             todo = cp.begin(t, expr, ranges)
             done_before = cp.resumed(t)
             for rlo, rhi in todo:
                 with gate.unit():
+                    started = time.monotonic()
                     try:
                         a = csum_range("src", t, col, rlo, rhi)
                         b = csum_range("dst", t, col, rlo, rhi)
                     except RuntimeError as e:
                         # partials already recorded survive for the next run
                         return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
+                    rate.observe(int(a.split("|")[0]),
+                                 time.monotonic() - started)
                 if a != b:
                     cp.clear(t)
                     pred = _cp.where(col, rlo, rhi) or "whole table"
@@ -690,7 +697,7 @@ class PostgresEngine(Engine):
             resumed = (f" resumed={done_before}/{len(ranges)}"
                        if done_before else "")
             return (f"{t}: OK rows={rows} checksum={total}"
-                    f" chunks={len(ranges)}{resumed}")
+                    f" chunks={len(ranges)} chunk_rows={chunk:,}{resumed}")
 
         def one(t):
             if t in big:

@@ -7,6 +7,7 @@ arithmetic, not about Python.
 """
 import json
 
+from migkit import checkpoint as cp_module
 from tests.conftest import needs_docker, psql
 
 pytestmark = needs_docker
@@ -49,7 +50,7 @@ def test_chunked_total_equals_single_pass(pg_pair, tmp_path, monkeypatch):
 
     # and again in ranges small enough to force several of them
     monkeypatch.setattr(PostgresEngine, "CHUNK_MIN_ROWS", 1000)
-    monkeypatch.setattr(PostgresEngine, "CHUNK_ROWS", 4000)
+    monkeypatch.setattr(cp_module, "MAX_CHUNK", 4000)
     rc, chunked = eng._data_fast_native("postgres")
     assert rc == 0, chunked
     line = [l for l in chunked.splitlines() if l.startswith("public.big:")][0]
@@ -77,7 +78,7 @@ def test_a_crash_resumes_instead_of_restarting(pg_pair, tmp_path, monkeypatch):
     monkeypatch.setattr(hop, "report_dir", lambda db=None: tmp_path,
                         raising=False)
     monkeypatch.setattr(PostgresEngine, "CHUNK_MIN_ROWS", 1000)
-    monkeypatch.setattr(PostgresEngine, "CHUNK_ROWS", 3000)
+    monkeypatch.setattr(cp_module, "MAX_CHUNK", 3000)
     eng = PostgresEngine(hop)
 
     # stop the first range from ever being asked for again: do it by hand,
@@ -86,7 +87,7 @@ def test_a_crash_resumes_instead_of_restarting(pg_pair, tmp_path, monkeypatch):
     bounds = psql(pg_pair["src"],
                   "select min(id)||'|'||max(id) from public.big").stdout.strip()
     lo, hi = (int(x) for x in bounds.split("|"))
-    ranges = cp_mod.plan_ranges(lo, hi, 3000)
+    ranges = cp_mod.plan_ranges(lo, hi, 3000)  # matches MAX_CHUNK
     expr = eng._row_hash_expr("src", "postgres", "public.big")
     cp = cp_mod.Checkpoint(str(tmp_path / "checkpoint.json"))
     cp.begin("public.big", expr, ranges)
@@ -125,7 +126,7 @@ def test_a_chunk_level_difference_is_localised(pg_pair, tmp_path, monkeypatch):
     monkeypatch.setattr(hop, "report_dir", lambda db=None: tmp_path,
                         raising=False)
     monkeypatch.setattr(PostgresEngine, "CHUNK_MIN_ROWS", 1000)
-    monkeypatch.setattr(PostgresEngine, "CHUNK_ROWS", 2000)
+    monkeypatch.setattr(cp_module, "MAX_CHUNK", 2000)
     eng = PostgresEngine(hop)
 
     rc, out = eng._data_fast_native("postgres")
