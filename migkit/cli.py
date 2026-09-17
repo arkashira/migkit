@@ -452,11 +452,17 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
             return bool(db) and not r.get("scope", "").startswith(db)
 
         results = [r for r in prev_all if keep(r)] + results
+    from . import verdict as _verdict
+    was_same = _verdict.unchanged_since(hop, results)
     summary_path.write_text(json.dumps(results, indent=1, default=str))
+    verdict_path, env = _verdict.write(hop, results, engine=eng.__class__.__name__)
     from .report import write_report
     report_path = write_report(hop, results)
     bad = [r for r in results if r["status"] not in ("ok", "skip")]
-    console.print(f"\nreport: {report_path}")
+    console.print(f"\nverdict: {env['status']}"
+                  + (" (identical to the previous run)" if was_same else "")
+                  + f"  {verdict_path}")
+    console.print(f"report: {report_path}")
     if bad:
         console.print(f"[yellow]{len(bad)} problems, summary: {summary_path}[/yellow]")
         data_dbs = sorted({r["scope"].split()[0].split(".")[0] for r in bad

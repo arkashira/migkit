@@ -28,6 +28,7 @@ The rule it is built on: **never let the mover be the judge of its own work.**
 - [Quickstart](#quickstart)
 - [Install](#install)
 - [Commands](#commands)
+- [One result shape](#one-result-shape)
 - [Supported engines](#supported-engines)
 - [Cross-engine (hetero)](#cross-engine-hetero)
 - [How it compares](#how-it-compares)
@@ -103,10 +104,13 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
 - **State and rollback** - tagged snapshots of target sequences and schema kept
   in two places, a `terraform-plan`-style rollback preview, and the local
   changelog ledger of every write migkit made.
-- **Composes real tools** - migra, liquibase, atlas (schema); reladiff,
-  pt-table-sync (data); pgloader, sqlglot (cross-engine); datacompy
-  (column-level sample diff). Nothing reinvented; each degrades gracefully if
-  absent.
+- **Nothing reinvented** - schema comparison, cross-engine row diffing, DDL
+  transpiling, row repair and column-level sampling are each done by a proven
+  implementation that migkit drives and normalizes. Which one is an
+  implementation detail: `migkit doctor` reports capabilities, not program
+  names, and every capability degrades to a built-in fallback rather than
+  disappearing. Third-party components are credited in
+  [NOTICE](NOTICE).
 - **Web dashboard** - every hop's status, tiles and reports on one
   auto-refreshing page.
 
@@ -115,7 +119,7 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
 ```bash
 cd migkit && ./bootstrap.sh && source .venv/bin/activate
 cp conf/hops.example.yaml conf/hops.yaml   # fill in endpoints
-migkit doctor                              # hops + tools + connectivity
+migkit doctor                              # hops + capabilities + connectivity
 migkit assess  my-hop                      # readiness before the mover
 migkit check   my-hop                      # read-only, exit 1 on any diff
 migkit report --serve                      # dashboard at localhost:8899
@@ -180,14 +184,50 @@ The pre-0.2 command names (`hops`, `setup-target`, `repair`, `replicate`,
 `tail`, `convert-schema`, `gen-migration`, `sample-diff`, `ui`, `state`,
 `monitor`) still work as hidden aliases, so existing scripts keep running.
 
+## One result shape
+
+Every engine words its own checks differently: PostgreSQL reports `encoding`
+where MySQL reports `charset`, and MongoDB reports `null-missing` where
+PostgreSQL reports `nullempty`. Those are the same two failures. `check`
+writes `verdict.json`, in which they carry the same name on every engine, so a
+report can be read - and aggregated across hops - without knowing which
+engine produced it.
+
+```json
+{
+  "format_version": 1,
+  "tool": "migkit",
+  "hop": "prod-cutover",
+  "status": "different",
+  "has_differences": true,
+  "totals": {"ok": 231, "warn": 0, "diff": 3, "error": 0, "skip": 0},
+  "by_category": {"access.sequence-grants": {"diff": 1}},
+  "fingerprint": "9f2c...",
+  "findings": [{"category": "identity.sequence-collision", "...": "..."}]
+}
+```
+
+- `status` is one of `same`, `different`, `error`, `incomplete`
+- `category` is engine-independent and stable: `value.charset`,
+  `value.collation`, `value.null-empty`, `value.timezone`, `value.precision`,
+  `identity.sequence-collision`, `access.sequence-grants`,
+  `structure.partitions`, `movement.target-ahead`, `parity.row-count`, and so
+  on. Categories are only renamed with a `format_version` bump.
+- `findings` holds what is not `ok`, so an empty list means a clean run
+- `fingerprint` covers the verdicts, not the wording, so a repeated check
+  reports "identical to the previous run" instead of making you diff two
+  reports by eye
+
+`summary.json` is still written unchanged next to it.
+
 ## Supported engines
 
 | Tier | Engines |
 |---|---|
 | Native | postgres, mysql, mssql, mongodb, sqlite, redis, kafka |
 | Alias | mariadb, percona, tdsql, aurora-mysql/postgres, alloydb, documentdb, cosmosdb-mongo, azure-sql |
-| Generic (reladiff) | snowflake, bigquery, redshift, clickhouse, oracle, trino, duckdb, vertica, databricks |
-| Schema via liquibase (JDBC) | db2, h2, firebird, informix, sybase - drop the driver jar |
+| Row comparison | snowflake, bigquery, redshift, clickhouse, oracle, trino, duckdb, vertica, databricks |
+| Schema comparison (JDBC) | db2, h2, firebird, informix, sybase - drop the driver jar |
 
 Managed services on any cloud (RDS/Aurora, Cloud SQL/AlloyDB, Azure Database,
 TencentDB) work over the standard wire protocol; provider quirks (DocumentDB
@@ -198,10 +238,10 @@ without dbHash, TencentDB unlogged rules) are handled by built-in fallbacks.
 MySQL -> PostgreSQL is verified end to end:
 
 ```bash
-migkit schema my2pg --convert --apply    # sqlglot/pgloader DDL transpile
+migkit schema my2pg --convert --apply    # transpile the DDL and apply it
 migkit move   my2pg --go                 # resumable chunked copy
 migkit move   my2pg --mode cdc --db X --go   # CDC from the binlog, checkpointed
-migkit check  my2pg                      # reladiff cross-dialect verify
+migkit check  my2pg                      # cross-dialect row verify
 ```
 
 The `hetero` engine is an orchestrator that reuses the per-side native engines,

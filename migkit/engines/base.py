@@ -1,5 +1,77 @@
 from dataclasses import dataclass, field
 
+# Engine-independent name for what a finding is about.
+#
+# Every engine words its own checks differently - postgres calls it `encoding`,
+# mysql calls it `charset`, mongo calls it `null-missing` where postgres says
+# `nullempty`. They are the same three failures. Without a shared name, a
+# report can only be read by someone who already knows which engine produced
+# it, and nothing downstream can aggregate across hops.
+#
+# The mapping is keyed on the last word of the scope, falling back to the check
+# family. Categories are stable: they are what external consumers match on, so
+# they are renamed only with a format_version bump.
+CATEGORIES = {
+    # values that arrived wrong while looking present
+    "charset": "value.charset",
+    "encoding": "value.charset",
+    "collation": "value.collation",
+    "narrowing": "value.narrowing",
+    "float": "value.precision",
+    "nullempty": "value.null-empty",
+    "null-missing": "value.null-empty",
+    "timeshift": "value.timezone",
+    "generated": "value.generated",
+    "render": "value.rendering",
+    "bson-types": "value.type-drift",
+    # structure and constraints
+    "objects": "structure.objects",
+    "columns": "structure.columns",
+    "keys": "structure.keys",
+    "fk": "structure.foreign-keys",
+    "checks": "structure.unvalidated-constraints",
+    "deferrable": "structure.deferrable",
+    "partitions": "structure.partitions",
+    "matviews": "structure.materialized-views",
+    "triggers": "structure.triggers",
+    "indexes": "structure.indexes",
+    "rls": "structure.row-security",
+    "extensions": "structure.extensions",
+    "capped": "structure.collection-options",
+    "sharding": "structure.sharding",
+    "(atlas)": "structure.schema-diff",
+    "(liquibase)": "structure.schema-diff",
+    "(structural)": "structure.schema-diff",
+    # identity and access
+    "usable": "identity.sequence-collision",
+    "parity": "identity.sequence-parity",
+    "grants": "access.table-grants",
+    "seq-grants": "access.sequence-grants",
+    # how the data moved
+    "boundary": "movement.target-ahead",
+}
+# used when the scope carries no recognised sub-check name
+CATEGORY_BY_CHECK = {
+    "counts": "parity.row-count",
+    "data": "parity.row-content",
+    "delta": "parity.row-content",
+    "autoinc": "identity.sequence-parity",
+    "params": "config.behaviour",
+    "schema": "structure.objects",
+    "deep": "structure.objects",
+}
+# statuses, narrowest to widest. `warn` sits between ok and diff: something
+# worth reading that is not itself a mismatch.
+STATUSES = ("ok", "skip", "warn", "diff", "error")
+
+
+def categorize(check, scope):
+    """Canonical category for a (check, scope) pair. Never raises."""
+    last = str(scope).split()[-1] if str(scope).strip() else ""
+    return (CATEGORIES.get(last)
+            or CATEGORY_BY_CHECK.get(check)
+            or f"{check}.unclassified")
+
 
 @dataclass
 class Result:
@@ -9,6 +81,11 @@ class Result:
     detail: str = ""
     report: str = ""
     fix_hint: str = ""
+    category: str = ""
+
+    def __post_init__(self):
+        if not self.category:
+            self.category = categorize(self.check, self.scope)
 
 
 @dataclass

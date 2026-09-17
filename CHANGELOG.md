@@ -6,6 +6,12 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- One result shape across every engine: `check` writes `verdict.json` with an
+  engine-independent `category` per finding, so the same failure carries the
+  same name whether it came from PostgreSQL, MySQL or MongoDB. Includes a
+  run-level `status`, per-category counts, and a `fingerprint` over the
+  verdicts (not the wording) so a repeated check can say "identical to the
+  previous run". `summary.json` is unchanged.
 - Layered check: schema, object inventory, row counts, sequence/identity
   values, and full row-data checksums with per-primary-key drilldown. Every
   pass reports both sides' counts and hashes.
