@@ -6,6 +6,13 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- MongoDB throttles its scans too, so load-awareness is now a property of
+  migkit rather than of one engine. `connections.active` against the
+  connection ceiling is the direct analogue of active sessions against
+  max_connections; operations waiting in `globalLock.currentQueue` are folded
+  into the same number, because work piling up *is* the server being at its
+  limit. A standalone deployment reports replication lag as unknown rather
+  than as zero - unknown and fine are different answers.
 - Three checks MySQL was missing and PostgreSQL already had, taking MySQL from
   11 deep sub-checks to 14. They land on the same canonical categories with no
   extra mapping, so MySQL and PostgreSQL findings now aggregate together.

@@ -79,9 +79,10 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   reported against the key range it lives in. Partials are fingerprinted, so a
   table that changed underneath them is re-verified rather than half-trusted.
 - **Never the heaviest thing on the server** - `check` reads the database's
-  own load (active sessions against its limit, replication lag) and its own
-  query latency, then sleeps and narrows concurrency while the server is
-  struggling. Nothing to configure and no safe-concurrency to guess; a busy
+  own load (active sessions against its limit, queued operations, replication
+  lag) and its own query latency, then sleeps and narrows concurrency while
+  the server is struggling. PostgreSQL, MySQL and MongoDB each report it in
+  their own terms; a signal a provider hides reads as unknown, never as idle. Nothing to configure and no safe-concurrency to guess; a busy
   database is still verified, just more slowly, and `verdict.json` records
   that it was throttled and why.
 - **Consistency by design, not guesswork** - `check --consistent` checksums

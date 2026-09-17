@@ -156,6 +156,46 @@ class MongoEngine(Engine):
             db, pull("src"), pull("dst"), ("featureCompatibilityVersion",),
             "align server parameters / feature compatibility version on target")
 
+    def _health(self, side):
+        """What this deployment says about its own load, for the throttle.
+
+        `connections.active` against the connection ceiling is the direct
+        analogue of active sessions against max_connections. Operations
+        waiting in `globalLock.currentQueue` are folded into the same number:
+        work piling up *is* the server being at its limit, which is what
+        busy_ratio means, and keeping the shared Health contract to two
+        fields is worth more than a third signal only one engine reports.
+        """
+        from ..throttle import BUSY_RATIO, Health
+        try:
+            st = self._client(side).admin.command("serverStatus")
+        except Exception:
+            return None
+        busy = None
+        conn = st.get("connections") or {}
+        ceiling = (conn.get("current") or 0) + (conn.get("available") or 0)
+        if ceiling:
+            busy = (conn.get("active") or 0) / ceiling
+        queued = (((st.get("globalLock") or {}).get("currentQueue") or {})
+                  .get("total") or 0)
+        if queued:
+            busy = max(busy or 0.0, BUSY_RATIO)
+        lag = None
+        try:
+            rs = self._client(side).admin.command("replSetGetStatus")
+            members = rs.get("members") or []
+            primary = next((m for m in members if m.get("stateStr") == "PRIMARY"),
+                           None)
+            if primary:
+                times = [m.get("optimeDate") for m in members
+                         if m.get("optimeDate") and m.get("stateStr")
+                         in ("PRIMARY", "SECONDARY")]
+                if len(times) > 1:
+                    lag = (max(times) - min(times)).total_seconds()
+        except Exception:
+            pass    # standalone, or the command is not permitted: lag unknown
+        return Health(busy_ratio=busy, lag_seconds=lag)
+
     def check_data(self, db, table=None, stream=None, with_counts=False):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
         try:
@@ -167,6 +207,11 @@ class MongoEngine(Engine):
         tn = set(t.list_collection_names())
         names = [table] if table else sorted(c for c in sn & tn
                                              if not self.hop.excluded(db, c))
+        # dbHash and the id drilldown are both full scans, so the same rule
+        # as the other engines applies: stop adding load to a deployment that
+        # is already struggling.
+        from ..throttle import Throttle
+        gate = Throttle(1, probe=lambda: self._health("src"))
         res = []
         for name in names:
             if name.startswith("system."):
@@ -178,10 +223,15 @@ class MongoEngine(Engine):
                 res.append(Result("data", f"{db}.{name}", "ok",
                                   f"dbHash {a.get(name)} both sides"))
                 continue
-            r = self._drilldown(db, name)
+            with gate.unit():
+                r = self._drilldown(db, name)
             if stream:
                 stream(f"{name}: {r.status}")
             res.append(r)
+        self._last_throttle = gate.summary()
+        note = gate.line()
+        if note and stream:
+            stream(f"# {note}")
         if with_counts:
             # equal hashes imply equal counts; only diffed colls pay to count
             bad = [f"{c} missing on target" for c in sorted(sn - tn)
