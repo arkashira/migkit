@@ -356,14 +356,49 @@ class MySQLEngine(Engine):
                               f"{len(src)} counters match source"))
         return res
 
+    def _health(self, side):
+        """What this side says about its own load, for the throttle.
+
+        `Threads_running` against `max_connections` is the cheapest honest
+        load signal MySQL offers. Anything unreadable comes back as None
+        rather than as "fine", so a server that hides a signal is not
+        mistaken for an idle one.
+        """
+        from ..throttle import Health
+        try:
+            running = float(self._q(
+                side, "show global status like 'Threads_running'")[0][1])
+            limit = float(self._q(
+                side, "show global variables like 'max_connections'")[0][1])
+            busy = running / max(limit, 1.0)
+        except Exception:
+            return None
+        # Replication lag needs the column names, which `_q` does not return,
+        # and `performance_schema.replication_applier_status_by_worker` is the
+        # modern source for it. Left as busy-ratio only rather than reaching
+        # for a cursor description that this helper does not expose: a partial
+        # signal is fine here, because lag is None on an unreplicated server
+        # anyway and the latency signal covers what this misses.
+        return Health(busy_ratio=busy)
+
     def check_data(self, db, table=None, stream=None, with_counts=False):
         st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
         tables = [table] if table else sorted(st & dt)
         res = []
         rows_a = rows_b = 0
         bad_counts = []
+        # Same reason as the PostgreSQL path: a checksum is only a SELECT, so
+        # nothing else stops this loop from being the heaviest thing on a
+        # server that is also serving an application.
+        from ..throttle import Throttle
+        gate = Throttle(self.hop.workers, probe=lambda: self._health("src"))
+
+        def guarded(d, tbl):
+            with gate.unit():
+                return self._diff_table(d, tbl)
+
         with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
-            futs = {pool.submit(self._diff_table, db, t): t for t in tables}
+            futs = {pool.submit(guarded, db, t): t for t in tables}
             for fu in as_completed(futs):
                 r, ra, rb = fu.result()
                 if stream:
@@ -374,6 +409,10 @@ class MySQLEngine(Engine):
                 if ra != rb:
                     bad_counts.append(f"{futs[fu]} src={ra} dst={rb}")
         res = sorted(res, key=lambda r: r.scope)
+        self._last_throttle = gate.summary()
+        note = gate.line()
+        if note and stream:
+            stream(f"# {note}")
         if with_counts:
             bad_counts += [f"{t} missing on target" for t in sorted(st - dt)]
             bad_counts += [f"{t} extra on target" for t in sorted(dt - st)]

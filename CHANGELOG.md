@@ -6,6 +6,9 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- MySQL throttles itself too, on `Threads_running` against `max_connections`
+  plus its own query latency. The protection was PostgreSQL-only when it
+  landed, which made it a property of one engine rather than of migkit.
 - Chunk size is measured, not configured. How many rows a chunk should cover
   depends on row width, indexes and how busy the server is - none of which
   anyone can supply usefully as a number. migkit learns rows-per-second from
