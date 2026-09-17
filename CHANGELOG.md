@@ -6,6 +6,19 @@ cut from `master` and versions are tagged as features stabilize.
 ## Unreleased
 
 ### Verification
+- MongoDB collections are compared by id in `_id` ranges, so migkit no longer
+  gives up past five million documents and sends the operator to another tool.
+  The old code built a dict of every id and hash for both sides at once; a
+  range at a time makes the memory cost proportional to the range and makes
+  the comparison restartable.
+  The partitioning has a trap worth recording: MongoDB's *sort* order spans
+  BSON types but its *query* comparison operators are type-bracketed, so
+  `{_id: {$lt: someObjectId}}` matches no integer and no string however the
+  values sort. One ordered list of boundaries across a mixed-type `_id`
+  therefore leaves whole types outside every range - the first version of this
+  compared 600 of 680 documents and called them identical. The keyspace is now
+  partitioned per BSON type, and a plan is only used after counting that it
+  accounts for every document; anything else degrades to a single pass.
 - MongoDB throttles its scans too, so load-awareness is now a property of
   migkit rather than of one engine. `connections.active` against the
   connection ceiling is the direct analogue of active sessions against

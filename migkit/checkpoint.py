@@ -222,6 +222,39 @@ def plan_ranges(lo, hi, chunk):
     return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
 
+def plan_from_boundaries(bounds):
+    """Ranges from an ordered list of boundary values.
+
+    The arithmetic split in `plan_ranges` assumes an integer key, which both
+    SQL engines have and MongoDB does not: an `_id` may be an ObjectId, a
+    string, an integer, or a mix of all three in one collection. The answer is
+    the same one MongoDB's own verifier uses - partition along the `_id` index
+    rather than computing positions - so the boundaries are read from the data
+    and passed through here.
+
+    Same guarantee as the arithmetic version: open at both ends, contiguous,
+    no gaps and no overlap, so no key can fall between two ranges.
+    """
+    b = list(bounds)
+    edges = [None] + b + [None]
+    return [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+
+
+def mongo_filter(lo, hi):
+    """`_id` predicate for one range, in MongoDB's comparison order.
+
+    Mongo compares across BSON types by a canonical type order, and `$lt` and
+    `$gte` respect it - so a mixed-type `_id` partitions correctly as long as
+    both sides are given the same boundaries.
+    """
+    cond = {}
+    if lo is not None:
+        cond["$gte"] = lo
+    if hi is not None:
+        cond["$lt"] = hi
+    return {"_id": cond} if cond else {}
+
+
 def where(column, lo, hi):
     """SQL predicate for one range. Quoting is the caller's business."""
     if lo is None and hi is None:

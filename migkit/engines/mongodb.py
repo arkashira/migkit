@@ -3,7 +3,9 @@ import time
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"admin", "local", "config"}
-DRILL_MAX_DOCS = 5_000_000
+# Target documents per comparison range. Ranges keep the memory
+# cost proportional to the range rather than to the collection.
+DRILL_RANGE_DOCS = 200_000
 
 
 class MongoEngine(Engine):
@@ -254,51 +256,179 @@ class MongoEngine(Engine):
             res.insert(0, cres)
         return res
 
+    def _id_plan(self, coll, docs):
+        """Ranges that split this collection by `_id`, one BSON type at a time.
+
+        The trap here cost a rewrite and is worth stating plainly: MongoDB's
+        *sort* order spans BSON types, but its *query* comparison operators
+        are type-bracketed. `{_id: {$lt: someObjectId}}` therefore matches no
+        integer and no string, however the values sort. A single ordered list
+        of boundaries taken across a mixed-type `_id` leaves every document of
+        the other types outside every range - and a verifier that quietly
+        skips 12% of a collection while reporting "identical" is worse than
+        one that refuses to split at all.
+
+        So the keyspace is partitioned per type: the types present are read
+        first, and each gets its own boundaries and its own open-ended first
+        and last range. `_coverage_ok` then checks the plan actually accounts
+        for every document before it is trusted.
+        """
+        from .. import checkpoint as _cp
+        want = max(1, min(512, -(-docs // DRILL_RANGE_DOCS)))
+        if want < 2:
+            return [(None, None, None)]
+        try:
+            types = [r["_id"] for r in coll.aggregate(
+                [{"$group": {"_id": {"$type": "$_id"}}},
+                 {"$sort": {"_id": 1}}], allowDiskUse=True)]
+        except Exception:
+            return [(None, None, None)]
+        if not types:
+            return [(None, None, None)]
+        plan = []
+        for ty in types:
+            flt = {"_id": {"$type": ty}}
+            try:
+                n = coll.count_documents(flt)
+                per = max(2, -(-want * n // max(docs, 1))) if n else 0
+                if n and per >= 2:
+                    out = list(coll.aggregate(
+                        [{"$match": flt},
+                         {"$bucketAuto": {"groupBy": "$_id",
+                                          "buckets": min(per, 512)}}],
+                        allowDiskUse=True))
+                    bounds = [x["_id"]["min"] for x in out][1:]
+                else:
+                    bounds = []
+            except Exception:
+                bounds = []
+            # each type carries its own open ends, and the $type match is what
+            # keeps one type's boundaries from being asked about another's docs
+            plan += [(ty, lo, hi) for lo, hi in _cp.plan_from_boundaries(bounds)]
+        return plan
+
+    def _coverage_ok(self, coll, plan, docs):
+        """Do these ranges actually account for every document?
+
+        A plan is only worth using if it does. Cheap to verify - one indexed
+        count per range - and it turns a silent hole into a fallback.
+        """
+        # Only the genuinely universal range is trusted without counting.
+        # "One range must cover everything" is true for (None, None, None) and
+        # false for any single range that carries a type or a bound, which is
+        # a shortcut worth not taking.
+        if plan == [(None, None, None)]:
+            return True
+        try:
+            seen = sum(coll.count_documents(self._range_filter(ty, lo, hi))
+                       for ty, lo, hi in plan)
+        except Exception:
+            return False
+        return seen == coll.count_documents({})
+
+    @staticmethod
+    def _range_filter(ty, lo, hi):
+        from .. import checkpoint as _cp
+        f = dict(_cp.mongo_filter(lo, hi))
+        cond = dict(f.get("_id") or {})
+        if ty is not None:
+            cond["$type"] = ty
+        return {"_id": cond} if cond else {}
+
+    def _range_hashes(self, coll, flt):
+        pipe = ([{"$match": flt}] if flt else []) + [
+            {"$project": {"h": {"$toHashedIndexKey": "$$ROOT"}}}]
+        try:
+            return {repr(d["_id"]): (d["_id"], d["h"])
+                    for d in coll.aggregate(pipe, allowDiskUse=True)}
+        except Exception:
+            return self._client_hashes(coll, flt)
+
     def _drilldown(self, db, name):
+        """Compare every document by id, one `_id` range at a time.
+
+        This used to build a dict of every id and hash for both sides at once,
+        which is why it refused to run past five million documents and sent
+        the operator to another tool. Working a range at a time makes the
+        memory cost proportional to the range instead of the collection, and
+        makes the comparison restartable: completed ranges are recorded, so a
+        rerun only pays for what it still owes.
+
+        Comparing per range is sound because `_id` is unique - a document
+        falls in exactly one range, and both sides are given the same
+        boundaries, so nothing can be missing on one side merely for being
+        looked at in a different range.
+        """
         from bson.json_util import dumps
+
+        from .. import checkpoint as _cp
         scope = f"{db}.{name}"
         s, t = self._client("src")[db][name], self._client("dst")[self._d("dst", db)][name]
-        if s.estimated_document_count() > DRILL_MAX_DOCS:
-            return Result("data", scope, "diff",
-                          "dbHash differs, too large for id drilldown", "",
-                          "recopy with mongodump | mongorestore --drop, or"
-                          " run mongodb-labs migration-verifier")
-        pipe = [{"$project": {"h": {"$toHashedIndexKey": "$$ROOT"}}}]
-        try:
-            src = {repr(d["_id"]): (d["_id"], d["h"])
-                   for d in s.aggregate(pipe, allowDiskUse=True)}
-            dst = {repr(d["_id"]): (d["_id"], d["h"])
-                   for d in t.aggregate(pipe, allowDiskUse=True)}
-        except Exception:
-            src = self._client_hashes(s)
-            dst = self._client_hashes(t)
-        missing = [src[k][0] for k in src if k not in dst]
-        extra = [dst[k][0] for k in dst if k not in src]
-        changed = [src[k][0] for k in src
-                   if k in dst and src[k][1] != dst[k][1]]
-        if not (missing or extra or changed):
-            return Result("data", scope, "ok",
-                          f"docs {len(src):,}=={len(dst):,},"
-                          f" per-id hash equal")
+        docs = s.count_documents({})
+        ranges = self._id_plan(s, docs)
+        if not self._coverage_ok(s, ranges, docs):
+            # better one slow pass than a fast answer about part of the data
+            ranges = [(None, None, None)]
+        cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+        # The checkpoint identifies a range by text, and a range here is
+        # (type, lo, hi) - so key and value are kept as an explicit pair
+        # rather than squeezing three things into two and hoping.
+        keyed = [((f"{ty}|{lo}", f"{hi}"), (ty, lo, hi)) for ty, lo, hi in ranges]
+        by_key = dict(keyed)
+        todo_keys = cp.begin(scope, "toHashedIndexKey", [k for k, _ in keyed])
+        todo = [by_key[k] for k in todo_keys]
+        done_before = cp.resumed(scope)
+
         d = self.hop.report_dir(db)
-        for kind, ids in (("missing", missing), ("extra", extra),
-                          ("changed", changed)):
+        found = {"missing": [], "extra": [], "changed": []}
+        for ty, lo, hi in todo:
+            flt = self._range_filter(ty, lo, hi)
+            src = self._range_hashes(s, flt)
+            dst = self._range_hashes(t, flt)
+            found["missing"] += [src[k][0] for k in src if k not in dst]
+            found["extra"] += [dst[k][0] for k in dst if k not in src]
+            found["changed"] += [src[k][0] for k in src
+                                 if k in dst and src[k][1] != dst[k][1]]
+            if any(found.values()):
+                # a difference makes the stored partials useless: the next run
+                # must re-read this collection rather than trust a half-total
+                cp.clear(scope)
+            else:
+                cp.record(scope, f"{ty}|{lo}", f"{hi}", len(src), 0)
+        checked = cp.total(scope)[0] if not any(found.values()) else 0
+        if not any(found.values()):
+            cp.clear(scope)
+            resumed = (f", resumed {done_before}/{len(ranges)}"
+                       if done_before else "")
+            return Result("data", scope, "ok",
+                          f"docs {checked:,} compared by id hash,"
+                          f" {len(ranges)} ranges{resumed}")
+        for kind, ids in found.items():
             p = d / f"data-{name}.{kind}"
             if ids:
                 p.write_text("\n".join(dumps(i) for i in ids) + "\n")
             elif p.exists():
                 p.unlink()
         return Result("data", scope, "diff",
-                      f"missing={len(missing)} extra={len(extra)}"
-                      f" changed={len(changed)}", str(d),
+                      f"missing={len(found['missing'])}"
+                      f" extra={len(found['extra'])}"
+                      f" changed={len(found['changed'])}"
+                      f" over {len(ranges)} ranges", str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
 
-    def _client_hashes(self, coll):
+    def _client_hashes(self, coll, flt=None):
+        """Hash documents locally when the server has no hashing operator.
+
+        Honours the same range filter as the server-side path, so the
+        fallback is restartable and bounded in memory too - a fallback that
+        reads the whole collection would reintroduce exactly the limit the
+        ranges exist to remove.
+        """
         import hashlib
 
         import bson
         out = {}
-        for doc in coll.find(sort=[("_id", 1)]):
+        for doc in coll.find(flt or {}, sort=[("_id", 1)]):
             h = hashlib.md5(bson.encode(doc)).hexdigest()
             out[repr(doc["_id"])] = (doc["_id"], h)
         return out

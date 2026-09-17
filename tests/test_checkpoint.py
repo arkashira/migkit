@@ -214,3 +214,42 @@ def test_totals_compose_the_way_the_engine_does(tmp_path):
     cp.record("public.t", 10, None, 7, 0b1010)
     assert cp.total("public.t", combine="sum") == (12, str(0b1100 + 0b1010))
     assert cp.total("public.t", combine="xor") == (12, str(0b1100 ^ 0b1010))
+
+
+# ---- boundary-based ranges, for keys that are not integers ----
+
+def test_boundaries_give_the_same_coverage_guarantee_as_arithmetic():
+    from migkit.checkpoint import plan_from_boundaries
+    r = plan_from_boundaries(["b", "m", "t"])
+    assert r == [(None, "b"), ("b", "m"), ("m", "t"), ("t", None)]
+    assert r[0][0] is None and r[-1][1] is None          # open at both ends
+    assert all(r[i][1] == r[i + 1][0] for i in range(len(r) - 1))
+
+
+def test_no_boundaries_means_one_whole_range():
+    from migkit.checkpoint import plan_from_boundaries
+    assert plan_from_boundaries([]) == [(None, None)]
+
+
+def test_mongo_filter_covers_each_shape():
+    from bson import ObjectId
+    from migkit.checkpoint import mongo_filter
+    a, b = ObjectId(), ObjectId()
+    assert mongo_filter(None, None) == {}
+    assert mongo_filter(a, None) == {"_id": {"$gte": a}}
+    assert mongo_filter(None, b) == {"_id": {"$lt": b}}
+    assert mongo_filter(a, b) == {"_id": {"$gte": a, "$lt": b}}
+
+
+def test_boundary_ranges_checkpoint_like_any_other(tmp_path):
+    """The checkpoint stores range keys as text, so a non-integer boundary
+    has to round-trip too."""
+    from bson import ObjectId
+    from migkit.checkpoint import plan_from_boundaries
+    oid = ObjectId()
+    ranges = plan_from_boundaries([oid])
+    path = str(tmp_path / "cp.json")
+    cp = Checkpoint(path)
+    cp.begin("shop.t", EXPR, ranges)
+    cp.record("shop.t", *ranges[0], 4, 11)
+    assert Checkpoint(path).begin("shop.t", EXPR, ranges) == ranges[1:]
