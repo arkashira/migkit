@@ -6,7 +6,7 @@ import os
 import subprocess
 import textwrap
 
-from tests.conftest import needs_docker, psql
+from tests.conftest import needs_docker, psql, migkit_cmd
 
 pytestmark = needs_docker
 
@@ -17,9 +17,8 @@ _ROLE = ("do $$ begin if not exists (select from pg_roles"
 def _migkit(conf, *args):
     env = dict(os.environ, MIGKIT_CONF=str(conf),
                MIGKIT_REPORTS=str(conf.parent / "reports"))
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return subprocess.run(
-        [os.path.join(base, ".venv", "bin", "migkit"), *args],
+        migkit_cmd() + list(args),
         capture_output=True, text=True, env=env)
 
 

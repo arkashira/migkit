@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Bring a fresh machine to a full migkit toolchain, or fail saying why.
+# Contributor setup. Installing migkit does not need this script:
 #
-# Nothing here is optional or best-effort: a partial install that "mostly
-# works" is how a migration discovers a missing driver at cutover instead of
-# on the laptop.
+#   uv tool install migkit      # or pipx install migkit
+#
+# This creates a development virtualenv in the checkout and installs the test
+# extra, so `pytest` works. Nothing here is best-effort: a partial install
+# that "mostly works" is how a migration finds a missing driver at cutover
+# instead of on the laptop.
 set -euo pipefail
 cd "$(dirname "$0")"
 

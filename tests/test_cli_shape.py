@@ -6,7 +6,8 @@ from click.testing import CliRunner
 from migkit.cli import main
 
 VISIBLE = {"doctor", "advise", "assess", "schema", "check", "move",
-           "watch", "sync", "report", "history", "rollback", "users"}
+           "watch", "sync", "report", "history", "rollback", "users",
+           "init"}
 LEGACY = {"hops", "setup-target", "repair", "replicate", "tail",
           "convert-schema", "gen-migration", "sample-diff", "ui",
           "state", "monitor"}
@@ -60,6 +61,9 @@ def test_check_drill_requires_db_and_table(tmp_path):
     import os
     import subprocess
     import textwrap
+
+    from tests.conftest import migkit_cmd
+
     conf = tmp_path / "hops.yaml"
     conf.write_text(textwrap.dedent("""
         hops:
@@ -68,11 +72,9 @@ def test_check_drill_requires_db_and_table(tmp_path):
             source: {host: h, user: u, password: p}
             target: {host: h, user: u, password: p}
     """))
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = dict(os.environ, MIGKIT_CONF=str(conf),
                MIGKIT_REPORTS=str(tmp_path / "reports"))
-    r = subprocess.run([os.path.join(base, ".venv", "bin", "migkit"),
-                        "check", "t", "--drill"],
+    r = subprocess.run(migkit_cmd() + ["check", "t", "--drill"],
                        capture_output=True, text=True, env=env)
     assert r.returncode != 0
     assert "--db and --table" in (r.stdout + r.stderr)

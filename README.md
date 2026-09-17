@@ -62,14 +62,13 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   max+1, so deleted-id gaps stay identical), or delete-and-recopy differing
   rows by primary key. Target rows are saved before any change; source is never
   written.
-- **Best-tool movers, auto-selected** - `move` drives whichever proven mover
-  is installed (`--via auto` is the default): parallel `pg_dump -j`/`pg_restore
-  -j`, mydumper/myloader, pgloader, mongodump/mongorestore. The builtin
-  chunked copy stays the fallback and the only mode with per-chunk crash
-  resume; native CDC (pg logical replication, mysql binlog incl. the RDS
-  variant, mongo change streams) is one flag away, and where an engine has
-  none, `move --mode cdc` stands up migkit's own streaming pipeline instead.
-  Whatever moves the data, migkit verifies it.
+- **One move command, no choices to make** - `move` uses the fastest bulk
+  path installed for the engine and falls back to a chunked copy that resumes
+  after a crash; a single table always takes the resumable path. `--mode cdc`
+  follows the engine's native change feed, or stands up migkit's own streaming
+  pipeline where the engine has none. You never tell migkit which tool to use:
+  it knows, and `migkit doctor` tells you what this machine can do. Whatever
+  moves the data, migkit verifies it.
 - **No double scans** - when counts and data run together, row counts ride
   along with the checksum query, so each table is scanned once, not twice.
   `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
@@ -117,34 +116,47 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
 ## Quickstart
 
 ```bash
-cd migkit && ./bootstrap.sh && source .venv/bin/activate
-cp conf/hops.example.yaml conf/hops.yaml   # fill in endpoints
-migkit doctor                              # hops + capabilities + connectivity
-migkit assess  my-hop                      # readiness before the mover
-migkit check   my-hop                      # read-only, exit 1 on any diff
-migkit report --serve                      # dashboard at localhost:8899
+uv tool install migkit   # or: pipx install migkit
+migkit doctor            # what this machine can do (no config needed)
+migkit init              # starter hops.yaml, then fill in the endpoints
+migkit assess  my-hop    # readiness before anything moves
+migkit check   my-hop    # read-only, exit 1 on any difference
+migkit report --serve    # dashboard at localhost:8899
 ```
 
 ## Install
 
 ```bash
-pip install -e .
+uv tool install migkit     # or: pipx install migkit
 ```
 
-That is the whole Python side: every engine and every comparison library is a
-hard dependency, so a fresh machine gets all of them or the install fails
-loudly. There are no per-engine extras to remember and nothing to add later.
+Either one puts `migkit` on your PATH in its own isolated environment. Plain
+`pip install migkit` works too if you would rather manage the environment
+yourself.
+
+There are no extras to choose. Every engine driver and every comparison
+library is a hard dependency, so the install either gives you all of them or
+fails telling you why - a missing driver should not be something you discover
+at cutover.
 
 Some capabilities also need a command-line program from the platform (parallel
-dump/restore, cross-engine load, schema DDL). `migkit doctor` reports what this
-machine can do, and `migkit doctor --install` fills in the rest:
+dump/restore, cross-engine load, schema DDL). Nothing is required to start:
 
 ```bash
 migkit doctor            # capabilities: ready / reduced / unavailable
 migkit doctor --install  # install what is missing via brew or apt
 ```
 
-Then set up a hop in `conf/hops.yaml` (gitignored, chmod 600):
+`doctor` runs before you have configured anything - that is what it is for.
+When you are ready:
+
+```bash
+migkit init              # writes ~/.config/migkit/hops.yaml, mode 600
+```
+
+migkit finds that file on its own. `MIGKIT_CONF=/path/to/hops.yaml` overrides
+it, and a `conf/hops.yaml` in the working directory takes precedence, so a
+project can keep its hops beside its code. The file looks like this:
 
 ```yaml
 hops:
@@ -169,7 +181,7 @@ Eleven commands cover the whole lifecycle:
 | `advise` | playbook for the hop's mover, phase by phase |
 | `schema` | target schema plan; `--convert` transpiles cross-engine DDL, `--migration` writes Flyway-style `V__/U__` files |
 | `check` | layered read-only validation, exit 1 on diff; `--consistent` = one repeatable-read txn per side + LSN fence; `--deep` adds FK-orphan/drift/render/boundary checks; `--drill` = column-level sample diff |
-| `move` | drives the best installed mover (`pg_dump -j`, mydumper, pgloader, mongodump) or the builtin resumable copy; `--mode cdc` streams changes, natively or through migkit's own pipeline |
+| `move` | moves the data; migkit picks the fastest available path and falls back to a crash-resumable copy. `--mode cdc` streams changes, natively or through migkit's own pipeline |
 | `watch` | live load progress: counts, rate, ETA, replication state; `--verify` = continuous re-check loop; `--verify --delta` = O(changes) verification off the WAL/binlog/change stream |
 | `sync` | make target equal source: dry-run plan, `--apply` executes with undo, `--go` checks + repairs with rollback checkpoints |
 | `rollback` | restore any saved state, with a plan preview |

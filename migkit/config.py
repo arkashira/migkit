@@ -26,7 +26,18 @@ def _find(env, name, default_dir):
                                Path.home() / ".config")) / "migkit" / name
     if user.exists():
         return user
-    return BASE / default_dir / name
+    in_place = BASE / default_dir / name
+    if in_place.exists():
+        return in_place
+    # Nothing yet. Point at the user's config directory rather than at
+    # site-packages: an installed copy must never ask anyone to create files
+    # inside the installed package.
+    return user
+
+
+def user_config_path(name="hops.yaml"):
+    return (Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            / "migkit" / name)
 
 
 def _reports_root():
@@ -170,7 +181,10 @@ def _endpoint(engine, raw):
 def load_hops(path=None):
     path = Path(path or CONF)
     if not path.exists():
-        raise SystemExit(f"missing config {path}, copy conf/hops.example.yaml")
+        raise SystemExit(
+            f"no hop configuration yet ({path} does not exist).\n"
+            "  create one:  migkit init\n"
+            "  or point at an existing file:  MIGKIT_CONF=/path/to/hops.yaml")
     data = yaml.safe_load(path.read_text()) or {}
     hops = {}
     for name, raw in (data.get("hops") or {}).items():

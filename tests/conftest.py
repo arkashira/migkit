@@ -93,3 +93,22 @@ def clean_pg(request):
     for p in (ports["src"], ports["dst"]):
         psql(p, _WIPE)
     yield
+
+
+def migkit_cmd():
+    """How to invoke the CLI under test.
+
+    Not `<repo>/.venv/bin/migkit`: that only exists in a checkout that happens
+    to have a venv at that path, which is the assumption migkit is trying to
+    stop making. Use the console script belonging to the interpreter running
+    the tests, and fall back to running the module.
+    """
+    import sys
+    import sysconfig
+    from pathlib import Path
+    for d in (sysconfig.get_path("scripts"), str(Path(sys.executable).parent)):
+        if d:
+            exe = Path(d) / "migkit"
+            if exe.exists():
+                return [str(exe)]
+    return [sys.executable, "-m", "migkit.cli"]

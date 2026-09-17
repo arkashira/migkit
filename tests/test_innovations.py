@@ -1,5 +1,7 @@
 """Unit tests for the 0.3.0 verification/mover innovations - parsers and
 selection logic only, no database needed."""
+import pytest
+
 import migkit.movers as movers
 from migkit.config import Endpoint, Hop
 from migkit.engines.postgres import PostgresEngine
@@ -50,6 +52,24 @@ def test_movers_pick_prefers_installed(monkeypatch):
     assert movers.pick("postgres", table="x.y") == "builtin"
     monkeypatch.setattr(movers, "which", lambda n: None)
     assert movers.pick("postgres") == "builtin"
+
+
+def test_mover_choice_is_not_a_user_decision(monkeypatch):
+    from migkit import movers
+    monkeypatch.setattr(movers, "which", lambda n: "/bin/" + n)
+    monkeypatch.delenv("MIGKIT_MOVER", raising=False)
+    # no flag, no argument: migkit decides from what is installed
+    assert movers.chosen("postgres") == "pgdump"
+    # the debugging override is an env var, kept off the command surface
+    monkeypatch.setenv("MIGKIT_MOVER", "builtin")
+    assert movers.chosen("postgres") == "builtin"
+    # and it still refuses nonsense rather than silently ignoring it
+    monkeypatch.setenv("MIGKIT_MOVER", "nope")
+    with pytest.raises(SystemExit):
+        movers.chosen("postgres")
+    monkeypatch.setenv("MIGKIT_MOVER", "mydumper")
+    with pytest.raises(SystemExit):
+        movers.chosen("postgres")
 
 
 def test_movers_supported_matrix():

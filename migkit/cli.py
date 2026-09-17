@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import click
@@ -100,13 +101,90 @@ def main(quiet):
     QUIET = quiet
 
 
-def _hops_table():
+def _hops_table(required=True):
+    """Print the hop table.
+
+    `required=False` for `doctor`: that is what you run *before* you have a
+    configuration, so a missing one is a note, not a failure. Asking for the
+    hop list directly still fails, because there is nothing to list.
+    """
+    try:
+        hops = load_hops()
+    except SystemExit as e:
+        if required:
+            raise
+        console.print(f"[yellow]{e}[/yellow]\n")
+        return
+    if not hops:
+        console.print("[yellow]no hops configured yet - migkit init"
+                      "[/yellow]\n")
+        return
     t = Table("hop", "engine", "source", "target", "service", "dbs")
-    for name, hop in load_hops().items():
+    for name, hop in hops.items():
         t.add_row(name, hop.engine, hop.source.host or "-",
                   hop.target.host or "(not set)", hop.service or "-",
                   ",".join(map(str, hop.databases)) or "auto")
     console.print(t)
+
+
+STARTER_CONFIG = """\
+# migkit hops. A hop is one source -> target pair.
+# This file holds passwords: keep it chmod 600 and out of version control.
+#
+#   migkit doctor          what this machine can do, and whether hops connect
+#   migkit assess  my-hop  readiness before anything moves
+#   migkit check   my-hop  read-only comparison, exit 1 on any difference
+hops:
+  my-hop:
+    # postgres | mysql | mssql | mongodb | sqlite | redis | kafka
+    engine: postgres
+    # playbook only, does not change what migkit does:
+    # aws-dms | tencent-dts | gcp-dms | native
+    service: native
+    source:
+      host: source.example.com
+      port: 5432
+      user: app
+      password: "CHANGE_ME"
+    target:
+      host: target.example.com
+      port: 5432
+      user: app
+      password: "CHANGE_ME"
+    # source database names; leave empty to discover them from the source
+    databases: []
+    # optional source -> target rename; unlisted names stay the same
+    db_map: {}
+    workers: 4
+"""
+
+
+@main.command()
+@click.option("--here", is_flag=True,
+              help="write ./conf/hops.yaml in this directory instead of the"
+                   " user config directory")
+@click.option("--force", is_flag=True, help="overwrite an existing file")
+def init(here, force):
+    """Write a starter hop configuration.
+
+    Installed from a package there is no checkout to copy an example out of,
+    so migkit writes the template itself. Mode 600, because the next thing
+    that goes in it is a password.
+    """
+    from .config import user_config_path
+    path = (Path.cwd() / "conf" / "hops.yaml") if here else user_config_path()
+    if path.exists() and not force:
+        raise SystemExit(f"{path} already exists (use --force to overwrite)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(STARTER_CONFIG)
+    path.chmod(0o600)
+    console.print(f"wrote {path} (mode 600)")
+    console.print("\nedit the endpoints, then:")
+    console.print("  migkit doctor            # capabilities + connectivity")
+    console.print("  migkit check my-hop      # read-only comparison")
+    if not here:
+        console.print(f"\nmigkit finds this file automatically."
+                      " Override with MIGKIT_CONF=/path/to/hops.yaml")
 
 
 @main.command()
@@ -114,13 +192,15 @@ def _hops_table():
               help="auto-install every missing external tool via the platform"
                    " package manager (brew/apt) - get a fresh machine ready")
 def doctor(install):
-    """Configured hops, local tools, and connectivity.
+    """What this machine can do, and whether the configured hops connect.
+
+    Safe to run before anything is configured - that is the point of it.
 
     Every check/repair/move step migkit runs is a wrapper over a proven
     external program; `--install` pulls whichever are missing so any machine
     or teammate is one command from a full toolchain."""
     from . import tools as _tools
-    _hops_table()
+    _hops_table(required=False)
     if install:
         _tools.install_missing(lambda m: console.print(f"  {m}"))
     t = Table("capability", "what it does", "status")
@@ -879,27 +959,23 @@ def _stream(hop, eng, db, do_drop, go, engine):
               default="full",
               help="full = bulk copy, cdc = follow live changes,"
                    " full+cdc = initial load plus stream until cutover")
-@click.option("--via", type=click.Choice(["auto", "builtin", "pgdump",
-                                          "mydumper", "pgloader",
-                                          "mongodump"]),
-              default="auto",
-              help="which mover does the work in full mode: auto = fastest"
-                   " installed (pg_dump -j / mydumper / pgloader / mongodump),"
-                   " builtin = chunk-resumable copy")
-@click.option("--chunk", default=500000, help="rows per resumable chunk (builtin)")
+@click.option("--chunk", default=500000,
+              help="rows per resumable chunk, when a resumable copy is used")
 @click.option("--drop", "do_drop", is_flag=True,
               help="cdc modes: tear down replication")
 @click.option("--go", is_flag=True, help="actually run, default shows the plan")
-def move(hop_name, db, table, mode, via, chunk, do_drop, go):
-    """One mover for every engine, driving the best installed tool.
+def move(hop_name, db, table, mode, chunk, do_drop, go):
+    """Move data for this hop. migkit picks how.
 
-    full: pg_dump/pg_restore parallel jobs, mydumper/myloader, pgloader
-    or mongodump/mongorestore when installed (--via auto), else the
-    builtin chunked copy - the only mode with per-chunk crash resume.
-    cdc: native mechanisms (pg logical replication, mysql binlog, mongo
-    change streams); when an engine has none, migkit stands up its own
-    managed streaming pipeline instead. Either way the commands are the
-    same and migkit owns the lifecycle.
+    full: the fastest bulk path available for the engine, falling back to a
+    chunked copy that resumes after a crash. A single table always takes the
+    resumable path - restartability matters more than raw speed there.
+    cdc: the engine's native change feed where it has one, otherwise migkit
+    stands up its own streaming pipeline.
+
+    There is nothing to choose: the same command does the right thing on every
+    engine, and `migkit doctor` says what this machine can do. Whatever moves
+    the data, migkit verifies it.
 
     Use only over a trusted network (or run migkit on a cloud VM)."""
     from . import movers
@@ -909,23 +985,21 @@ def move(hop_name, db, table, mode, via, chunk, do_drop, go):
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     if mode == "full":
-        v = movers.pick(engine, table) if via == "auto" else via
+        v = movers.chosen(engine, table)
         if v != "builtin":
-            if not movers.supported(engine, v):
-                raise SystemExit(f"--via {v} does not apply to {hop.engine}")
             dbs = [db] if db else eng.databases()
             lk = _lock(hop) if go else None
             try:
                 for d in dbs:
-                    console.print(f"[bold]{d}[/bold] via {v}:")
+                    console.print(f"[bold]{d}[/bold] bulk copy:")
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     for s0 in steps:
                         console.print(f"  {s0}")
                     if go:
                         _changelog(hop, {"op": f"move-{v}", "db": d})
-                        console.print(f"[green]{d}: {v} move complete[/green],"
-                                      " run migkit check to verify")
+                        console.print(f"[green]{d}: bulk copy complete"
+                                      "[/green], run migkit check to verify")
             finally:
                 if lk:
                     lk.unlink()

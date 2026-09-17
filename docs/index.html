@@ -198,10 +198,9 @@ cd migkit &amp;&amp; ./bootstrap.sh &amp;&amp; source .venv/bin/activate</code><
   in for a managed service on a trusted VM.</p>
 
   <h3 id="move">move</h3>
-<pre><code>migkit move HOP [--via auto|pg_dump|mydumper|pgloader|mongodump|builtin]
-                [--mode full|cdc] [--go]</code></pre>
-  <p><code>--via auto</code> (default) drives whichever proven mover is installed;
-  the built-in chunked copy is the crash-resumable fallback.
+<pre><code>migkit move HOP [--mode full|cdc|full+cdc] [--db DB] [--go]</code></pre>
+  <p>migkit picks the path: the fastest bulk tool installed for the engine,
+  falling back to a crash-resumable chunked copy. There is no tool to choose.
   <code>--mode cdc</code> follows live changes: the engine's native mechanism
   where there is one, otherwise migkit stands up and supervises its own
   streaming pipeline. Whatever moves the data, migkit verifies it.</p>

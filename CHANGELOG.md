@@ -40,15 +40,34 @@ cut from `master` and versions are tagged as features stabilize.
   verified keys; a built-in path is the fallback.
 
 ### Movers and CDC
-- `move --via auto` drives the fastest installed tool: parallel
-  pg_dump/pg_restore, mydumper/myloader, pgloader, or mongodump/mongorestore,
-  with a resumable built-in copy as the fallback.
+- `move` has no tool to choose. It uses the fastest bulk path installed for
+  the engine (parallel dump/restore, parallel MySQL load, cross-engine load,
+  collection dump/restore) and falls back to a resumable chunked copy; a
+  single table always takes the resumable path. `MIGKIT_MOVER` forces one for
+  debugging - an environment variable, so it stays off the command surface.
 - `move --mode cdc --go` follows live changes with the engine's native
   mechanism (logical replication, binlog, change streams). Where an engine has
   none, migkit writes, launches, registers and supervises its own streaming
   pipeline instead - same command, no extra flag, and nothing about the
   runtime underneath is a user-facing choice. Third-party components are
   credited in NOTICE.
+
+### Install and packaging
+- `pip install migkit` / `uv tool install migkit` / `pipx install migkit` give
+  a working `migkit` on PATH with no checkout, no virtualenv to activate and
+  no `PYTHONPATH`. Verified from a built wheel into an empty environment.
+- `doctor` runs with no configuration at all - reporting what the machine can
+  do is the step before there is a config. Asking for the hop list directly
+  still fails, because there is nothing to list.
+- `migkit init` writes a starter `~/.config/migkit/hops.yaml` at mode 600. The
+  config is found there, or in `./conf/hops.yaml`, or via `MIGKIT_CONF`; an
+  installed copy never asks anyone to write inside site-packages.
+- The version lives in `migkit.__version__` only; `pyproject.toml` reads it
+  from there so the two cannot drift.
+- Tests invoke the CLI belonging to the interpreter running them instead of a
+  hardcoded `<repo>/.venv/bin/migkit`.
+- `packaging/` holds the Homebrew formula and the two credentialed steps
+  (PyPI upload, tap) that are left.
 
 ### Orchestration and operation
 - `sync --mode verify | seed | stream | migrate` runs the whole flow with a

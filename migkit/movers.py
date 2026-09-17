@@ -19,8 +19,8 @@ VIAS = ("auto", "builtin", "pgdump", "mydumper", "pgloader", "mongodump")
 
 
 def pick(engine, table=""):
-    """--via auto: fastest installed tool for whole-db moves, builtin for
-    single tables (chunk resume matters more than raw speed there)."""
+    """Fastest installed tool for whole-db moves, builtin for single tables
+    (chunk resume matters more than raw speed there)."""
     if table:
         return "builtin"
     if engine == "postgres" and which("pg_dump") and which("pg_restore"):
@@ -34,6 +34,28 @@ def pick(engine, table=""):
     return "builtin"
 
 
+def chosen(engine, table=""):
+    """Which mover to use. Not a user-facing decision.
+
+    Picking the fastest installed tool for an engine is knowledge migkit
+    already has; making the operator supply it just moves migkit's homework
+    onto them, and gets it wrong when the machine changes. MIGKIT_MOVER
+    overrides it for debugging - deliberately an environment variable and not
+    a flag, so it stays out of the command surface.
+    """
+    import os
+    forced = os.environ.get("MIGKIT_MOVER", "").strip()
+    if forced:
+        if forced not in VIAS:
+            raise SystemExit(f"MIGKIT_MOVER={forced} is not one of"
+                             f" {', '.join(VIAS)}")
+        if forced != "builtin" and not supported(engine, forced):
+            raise SystemExit(f"MIGKIT_MOVER={forced} does not apply to"
+                             f" a {engine} hop")
+        return forced
+    return pick(engine, table)
+
+
 def supported(engine, via):
     return {"pgdump": engine == "postgres",
             "mydumper": engine == "mysql",
@@ -43,7 +65,7 @@ def supported(engine, via):
 
 def stream_supported(engine):
     """Internal: can migkit stand up its managed streaming pipeline for this
-    engine. Not a --via choice; `move --mode cdc` falls back to it on its own
+    engine. Never an operator choice; `move --mode cdc` falls back to it
     when the engine has no native CDC path."""
     return engine in ("postgres", "mysql", "hetero")
 
@@ -373,6 +395,6 @@ def run_via(via, hop, db, workers, go, log):
              "mongodump": ("mongodump", "mongorestore")}[via]
     missing = [t for t in tools if not which(t)]
     if missing:
-        raise SystemExit(f"--via {via} needs {', '.join(missing)}"
-                         " installed (see bootstrap.sh)")
+        raise SystemExit(f"the {via} bulk path needs {', '.join(missing)}"
+                         " installed - run: migkit doctor --install")
     return fn(hop, db, workers, go, log)
