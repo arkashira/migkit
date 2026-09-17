@@ -18,9 +18,9 @@ def _docker():
         return False
 
 
-from tests.conftest import needs_docker
-
-pytestmark = needs_docker
+pytestmark = [pytest.mark.docker,
+              pytest.mark.skipif(not _docker(),
+                                 reason="docker not available")]
 
 SRC, DST = "migkit-test-mysqlsmart-src", "migkit-test-mysqlsmart-dst"
 SRC_PORT, DST_PORT = 13400, 13401

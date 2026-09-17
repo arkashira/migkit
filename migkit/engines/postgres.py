@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -52,6 +53,20 @@ where con.contype in ('p','f','u','c')
 union all
 select 'extension|'||extname from pg_extension
 """
+
+
+def _seq_buffer():
+    """Head-room to add above the highest known id, from SEQUENCE_BUFFER.
+
+    Zero (the default) reseeds to exactly the highest id in use, which is
+    correct when the source is quiet. Anything above zero trades a gap in the
+    id space for tolerance of rows that arrive a moment later.
+    """
+    try:
+        n = int(os.environ.get("SEQUENCE_BUFFER", "0") or 0)
+    except ValueError:
+        return 0
+    return max(0, n)
 
 
 class PostgresEngine(Engine):
@@ -117,14 +132,14 @@ class PostgresEngine(Engine):
                  "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
                  "--exclude-table", "*.migkit_changelog*"],
                 env={"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
-        noise = self.hop.options.get("noise_prefix", "")
+        noise = self._noise()
         keep = []
         for l in p.stdout.splitlines():
             if (l.startswith(("--", "SET ", "\\restrict", "\\unrestrict",
                               "SELECT pg_catalog.set_config")) or not l.strip()):
                 continue
-            if noise and (f"EVENT TRIGGER {noise}" in l
-                          or f"PUBLICATION {noise}" in l):
+            if any(f"EVENT TRIGGER {n}" in l or f"PUBLICATION {n}" in l
+                   for n in noise):
                 continue
             keep.append(l)
         pats = self._ignore_patterns()
@@ -152,20 +167,7 @@ class PostgresEngine(Engine):
             status, line = "ok", "schema identical (native pg_dump diff)"
         res = [Result("schema", db, status, line, str(d / "schema.diff"),
                       "review diff, apply missing DDL from schema-src.sql")]
-        if which("migra"):
-            s, t = self.hop.source, self.hop.target
-            surl = f"postgresql://{s.user}:{s.password}@{s.host}:{s.port}/{db}"
-            turl = (f"postgresql://{t.user}:{t.password}"
-                    f"@{t.host}:{t.port}/{self._d('dst', db)}")
-            p = subprocess.run(["migra", "--unsafe", turl, surl],
-                               capture_output=True, text=True, env=tool_env())
-            if p.stdout.strip():
-                path = self._report(db) / "migra-fix.sql"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(p.stdout)
-                res.append(Result("schema", f"{db} (migra)", "diff",
-                                  "migra generated fix DDL", str(path),
-                                  "review then apply migra-fix.sql on target"))
+        res.append(self.check_structural_diff(db))
         res.append(self.check_objects(db))
         if which("liquibase") and self.hop.options.get("liquibase", True):
             lb = self.check_liquibase(db)
@@ -176,6 +178,70 @@ class PostgresEngine(Engine):
             if at:
                 res.append(at)
         return self._atlas_authoritative(res)
+
+    # Statements that remove something. The differ emits these happily; only
+    # the operator can say whether dropping an object the source no longer has
+    # is the intent or an accident, so they are counted and surfaced, never
+    # silently included in a "just apply this" recommendation.
+    _DESTRUCTIVE = re.compile(
+        r"^\s*(drop\s|alter\s+table\s+.*\s+drop\s|truncate\s)", re.I | re.M)
+
+    def check_structural_diff(self, db):
+        """Object-by-object schema comparison, in-process.
+
+        This runs as a library call rather than a subprocess on purpose. The
+        previous differ was invoked as a program and its output read from
+        stdout: when it stopped working on modern Python it produced no output
+        and no error, so the check quietly vanished from every report instead
+        of failing. An exception here is reported as an error, which is the
+        behaviour we want from a thing whose job is to notice problems.
+        """
+        s, t = self.hop.source, self.hop.target
+        surl = f"postgresql://{s.user}:{s.password}@{s.host}:{s.port}/{db}"
+        turl = (f"postgresql://{t.user}:{t.password}"
+                f"@{t.host}:{t.port}/{self._d('dst', db)}")
+        d = self._report(db)
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            import results as _results
+            from results.dbdiff import Migration
+        except Exception as e:
+            return Result("schema", f"{db} (structural)", "error",
+                          f"structural differ unavailable: {e}", "",
+                          "reinstall migkit; this check must not be skipped")
+        try:
+            # from target to source: what the target needs in order to match
+            m = Migration(_results.db(turl), _results.db(surl))
+            m.add_all_changes_ordered(privileges=True)
+            sql = m.sql
+            meta = m.result_metadata(options={"privileges": True})
+        except Exception as e:
+            return Result("schema", f"{db} (structural)", "error",
+                          f"structural diff failed: {str(e).splitlines()[0][:160]}",
+                          "", "check connectivity and permissions on both sides")
+        (d / "structural-diff.json").write_text(json.dumps(meta, indent=1,
+                                                           sort_keys=True))
+        if not sql.strip():
+            return Result("schema", f"{db} (structural)", "ok",
+                          f"{meta['totals']['added'] + meta['totals']['removed']}"
+                          " object differences, none structural"
+                          if any(meta["totals"].values()) else
+                          "every object identical, both sides",
+                          str(d / "structural-diff.json"))
+        path = d / "structural-fix.sql"
+        path.write_text(sql)
+        drops = len(self._DESTRUCTIVE.findall(sql))
+        tot = meta["totals"]
+        detail = (f"{tot['added']} to add, {tot['removed']} to remove,"
+                  f" {tot['modified']} to change"
+                  f" across {len(meta['object_counts'])} object types")
+        if drops:
+            detail += (f"; {drops} of the generated statements remove an"
+                       " object - read those before applying")
+        return Result("schema", f"{db} (structural)", "diff", detail,
+                      str(path),
+                      "statements are in dependency order; review the"
+                      " removals, then apply structural-fix.sql on the target")
 
     def check_atlas(self, db):
         from urllib.parse import quote
@@ -222,13 +288,13 @@ class PostgresEngine(Engine):
         if p.returncode != 0:
             return None
         out.write_text(p.stdout)
-        noise = self.hop.options.get("noise_prefix", "")
+        noise = self._noise()
         bad = [l.strip() for l in p.stdout.splitlines()
                if (l.startswith("Missing") or l.startswith("Unexpected")
                    or l.startswith("Changed"))
                and not l.rstrip().endswith("NONE")
                and "__" not in l and "migkit_changelog" not in l
-               and (not noise or noise not in l)]
+               and not any(n in l for n in noise)]
         if bad:
             return Result("schema", f"{db} (liquibase)", "diff",
                           "; ".join(bad[:6]), str(out),
@@ -376,14 +442,27 @@ class PostgresEngine(Engine):
                     out[p[0]] = last + inc.get(p[0], 1) if called else last
         return out
 
+    def _noise(self):
+        """Prefixes of objects the movers create for their own bookkeeping.
+
+        A leg can carry leftovers from more than one mover - DTS writes dts_*,
+        DMS writes awsdms_* - so the option is a comma-separated list and every
+        caller matches against the whole tuple. Returns () when unset, which
+        makes `startswith(())` false and every `any()` below empty.
+        """
+        return tuple(p.strip() for p in
+                     self.hop.options.get("noise_prefix", "").split(",")
+                     if p.strip())
+
     def _keep_tbl(self, db, t):
         """False if the 'schema.table' is excluded for this db, so it is
         neither verified nor repaired (protects target-owned tables).
 
-        ตารางที่ตัวขนข้อมูลสร้างไว้ใช้เอง (noise_prefix) ก็ตัดออกด้วย มันมีอยู่
-        ฝั่งเดียวเสมอโดยธรรมชาติ นับเป็นความต่างทุกครั้งทั้งที่ไม่ใช่ข้อมูลของแอป"""
+        Tables the mover keeps for itself (noise_prefix) are excluded too: they
+        exist on one side by nature and would count as a difference every time
+        while holding no application data."""
         sch, _, tbl = t.partition(".")
-        noise = self.hop.options.get("noise_prefix", "")
+        noise = self._noise()
         if noise and tbl.startswith(noise):
             return False
         return not self.hop.excluded(db, sch, tbl)
@@ -428,7 +507,20 @@ class PostgresEngine(Engine):
                    self._psql("src", db, self.SEQ_Q).splitlines() if l)
         dst = dict(l.rsplit("|", 1) for l in
                    self._psql("dst", db, self.SEQ_Q).splitlines() if l)
+        # A mover's own bookkeeping tables carry sequences of their own -
+        # awsdms_heartbeat_hb_key_seq lives on whichever side that mover writes
+        # to and cannot exist on the other. Reporting those as MISSING buries
+        # the sequences that do matter under noise nobody can act on.
+        noise = self._noise()
+        if noise:
+            def app(d):
+                return {n: v for n, v in d.items()
+                        if not n.rsplit(".", 1)[-1].startswith(noise)}
+            src, dst = app(src), app(dst)
         owned = self._seq_owned("dst", db)
+        if noise:
+            owned = {k: v for k, v in owned.items()
+                     if not k.rsplit(".", 1)[-1].startswith(noise)}
         dmax = self._seq_col_max("dst", db, owned)
         dnext = self._seq_next("dst", db, owned)
         collide = []
@@ -470,10 +562,10 @@ class PostgresEngine(Engine):
                   self._psql("src", db, self.USER_TABLES).splitlines()
                   if t and self._keep_tbl(db, t)]
         w = int(self.hop.options.get("checksum_workers", 8))
-        h = self._row_hash_expr()
 
         def csum(side, t):
             sch, tbl = t.split(".", 1)
+            h = self._row_hash_expr(side, db, t)
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather = {w};"
                 f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
@@ -1409,7 +1501,7 @@ class PostgresEngine(Engine):
                                 "select rolname from pg_roles").splitlines())
         sroles = set(self._psql("src", db,
                                 "select rolname from pg_roles").splitlines())
-        noise = self.hop.options.get("noise_prefix", "")
+        noise = self._noise()
 
         def _app(rows):
             if not noise:
@@ -1560,7 +1652,10 @@ class PostgresEngine(Engine):
                        self._psql("dst", db, q).splitlines() if l)
             owned = self._seq_owned("dst", db)
             dmax = self._seq_col_max("dst", db, owned)
-            noise = self.hop.options.get("noise_prefix", "")
+            # The same column max on the source: a target sitting above its own
+            # sequence is only suspicious when the source does not do it too.
+            smax = self._seq_col_max("src", db, owned)
+            noise = self._noise()
             stmts, undo, refuse = [], [], []
             for name, v in sorted(src.items()):
                 # the mover's own bookkeeping sequences exist on one side only
@@ -1573,18 +1668,34 @@ class PostgresEngine(Engine):
                 sv = int(v or 0)
                 # target column already past source last_value = someone
                 # wrote to the target; do not paper over it, surface the writer
-                if name in owned and mx > sv:
-                    refuse.append(f"{name}: target max={mx} > source"
-                                  f" last={sv} (writes landed on target?)")
+                # It means nothing, though, when the source column sits just
+                # as far past its own sequence: that is an id space the
+                # application assigns itself, and refusing there leaves the
+                # target sequence unset while the source carries a value - a
+                # difference we introduced rather than one we found.
+                if name in owned and mx > sv and mx > smax.get(name, 0):
+                    refuse.append(f"{name}: target max={mx} > source last={sv}"
+                                  f" and > source max={smax.get(name, 0)}"
+                                  f" (writes landed on target?)")
                     continue
                 # GREATEST(source, target max) can never sit below a live row,
                 # so nextval is guaranteed to clear the column with no gap
                 target = max(sv, mx)
+                # A buffer is head-room for rows that land after this was read:
+                # CDC still draining, or a write between the count and the set.
+                # It costs a gap in the id space and nothing else, but it does
+                # hide the fact that the leg was not actually quiet - so it is
+                # off unless asked for, and the reason is written into the
+                # statement rather than left for someone to work out later.
+                buf = _seq_buffer()
+                if target and buf:
+                    target += buf
                 if target == 0 or (cur is not None and int(cur) == target):
                     continue
                 stmts.append(f"select setval('{name}', {target}, true);"
                              f"  -- src={sv} dstmax={mx}"
-                             f" dst now {cur if cur is not None else 'MISSING'}")
+                             + (f" +buffer {buf}" if buf else "")
+                             + f" dst now {cur if cur is not None else 'MISSING'}")
                 if cur == "0":
                     undo.append(f"select setval('{name}', 1, false);")
                 elif cur is not None:
@@ -2040,11 +2151,52 @@ class PostgresEngine(Engine):
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=env), sql
 
-    def _row_hash_expr(self):
-        # to_jsonb canonicalizes rendering (ISO timestamps); ::text is faster
-        if self.hop.options.get("checksum", "text") == "jsonb":
-            return "md5(to_jsonb(t)::text)"
-        return "md5(t::text)"
+    def _row_hash_expr(self, side=None, db=None, table=None):
+        """Expression that hashes one row of `t`.
+
+        `t::text` renders a PostGIS geometry as hex EWKB, and that encoding is
+        not stable across PostGIS patch releases - two servers holding the
+        identical shape produce different bytes, so the checksum reports a
+        difference that ST_AsText says is not there. Where the table has
+        geometry or geography columns the row is rebuilt with those columns as
+        canonical text, which compares the shape rather than its encoding.
+        """
+        jsonb = self.hop.options.get("checksum", "text") == "jsonb"
+        cols = self._geom_cols(side, db, table) if table else None
+        if cols:
+            rebuilt = ", ".join(
+                (f'ST_AsEWKT(t."{c}")' if kind == "geometry"
+                 else f'ST_AsEWKT(t."{c}"::geometry)') if kind else f't."{c}"'
+                for c, kind in cols)
+            inner = f"ROW({rebuilt})"
+            return f"md5(to_jsonb({inner})::text)" if jsonb else f"md5({inner}::text)"
+        return "md5(to_jsonb(t)::text)" if jsonb else "md5(t::text)"
+
+    def _geom_cols(self, side, db, table):
+        """[(column, 'geometry'|'geography'|None)] when the table has any
+        PostGIS column, else None so callers keep the cheap whole-row cast."""
+        if not (side and db and table):
+            return None
+        key = (side, db, table)
+        cache = getattr(self, "_geom_cache", None)
+        if cache is None:
+            cache = self._geom_cache = {}
+        if key in cache:
+            return cache[key]
+        sch, _, tbl = table.partition(".")
+        rows = self._psql(side, db,
+            "select a.attname||'|'||coalesce(t.typname,'') "
+            "from pg_attribute a "
+            "join pg_class c on c.oid = a.attrelid "
+            "join pg_namespace n on n.oid = c.relnamespace "
+            "left join pg_type t on t.oid = a.atttypid "
+            f"where n.nspname = '{sch}' and c.relname = '{tbl}' "
+            "and a.attnum > 0 and not a.attisdropped order by a.attnum").splitlines()
+        parsed = [(r.split("|")[0], r.split("|")[1]) for r in rows if r]
+        out = [(c, ty if ty in ("geometry", "geography") else None)
+               for c, ty in parsed]
+        cache[key] = out if any(k for _, k in out) else None
+        return cache[key]
 
     def _fast_consistent(self, db):
         """Whole-database checksum inside ONE repeatable-read read-only

@@ -1,6 +1,6 @@
 [project]
 name = "migkit"
-version = "0.2.0"
+version = "0.1.0"
 description = "Verify, repair, and move databases across engines - without trusting the mover."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,10 +17,33 @@ classifiers = [
     "Topic :: Database",
     "Topic :: System :: Systems Administration",
 ]
+# Everything migkit imports is a hard dependency. An engine that is installed
+# but cannot connect is a clear error; an engine that vanishes because someone
+# forgot an extra is a support ticket on someone else's machine. Install size
+# is the cheaper of the two.
 dependencies = [
     "click>=8.1",
     "pyyaml>=6.0",
     "rich>=13.0",
+    # engine drivers - one per supported engine, all required
+    "psycopg2-binary>=2.9",
+    "pymysql>=1.1",
+    "mysql-replication>=1.0",
+    "pymongo>=4.6",
+    "redis>=5.0",
+    "kafka-python>=2.0",
+    # comparison and schema libraries driven by check/schema
+    "reladiff",
+    "datacompy",
+    "pandas",
+    "sqlglot",
+    # PostgreSQL structural diff. psycopg3 is pulled with the binary wrapper
+    # on purpose: `results` asks only for psycopg[pool], which installs
+    # without a libpq wrapper and then fails at import.
+    "results",
+    "psycopg[binary,pool]",
+    # cloud metadata for managed-service hops
+    "boto3",
 ]
 
 [project.urls]
@@ -29,14 +52,17 @@ Repository = "https://github.com/arkashira/migkit"
 Changelog = "https://github.com/arkashira/migkit/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
-mysql = ["pymysql>=1.1"]
-mongo = ["pymongo>=4.6"]
-kafka = ["kafka-python>=2.0"]
-redis = ["redis>=5.0"]
-diff = ["reladiff"]
-dataframe = ["datacompy", "pandas"]
-s3 = ["boto3"]
-pgschema = ["migra", "psycopg2-binary"]
+# These were once the way to opt into an engine. They are all in the base
+# install now; the names stay so existing install commands keep working.
+mysql = []
+mongo = []
+kafka = []
+redis = []
+diff = []
+dataframe = []
+s3 = []
+pgschema = []
+dev = ["pytest", "faker"]
 
 [project.scripts]
 migkit = "migkit.cli:main"

@@ -26,5 +26,6 @@ State (`/state` or `/var/lib/migkit`) holds resume checkpoints and reports, so
 a restart continues where it stopped. The source is only ever read; the target
 gets the migrated data and nothing else.
 
-For platform-grade CDC, generate Debezium configs with
-`migkit move <hop> --mode cdc --via debezium` and let migkit verify the stream.
+For continuous CDC, run `migkit move <hop> --mode cdc --go` and let migkit
+verify the stream. Where an engine has no native change feed, migkit stands
+up and supervises its own streaming pipeline behind the same command.

@@ -172,34 +172,34 @@ def main(hop_name, n_tables, n_rows):
               open(jf, "w"), indent=2, ensure_ascii=False, default=str)
 
     L = []
-    L.append(f"ผลตรวจ mysql spot check ({hop['source'].get('host','?')} -> {hop['target'].get('host','?')}) - {today}")
-    L.append("สุ่ม records เทียบรายแถว และเช็ค system time")
+    L.append(f"mysql spot check ({hop['source'].get('host','?')} -> {hop['target'].get('host','?')}) - {today}")
+    L.append("sampled records compared row by row, plus a system time check")
     L.append("")
     L.append("1) system time")
-    L.append(f"  ฝั่งต้นทาง  now() = {tc['source']['now']}  utc_timestamp() = {tc['source']['utc']}  (tz={tc['source']['tz']})")
-    L.append(f"  ฝั่งปลายทาง now() = {tc['target']['now']}  utc_timestamp() = {tc['target']['utc']}  (tz={tc['target']['tz']})")
-    L.append(f"  - now() กับ utc_timestamp() ห่างกัน {tc['source']['now_minus_utc_sec']:+}s / {tc['target']['now_minus_utc_sec']:+}s"
-             f" = เวลาที่ใช้จริง{'เป็น UTC ทั้งคู่' if tc['result']=='pass' else 'ไม่ตรงกัน ต้องตรวจ'}")
-    L.append(f"  - นาฬิกาสองเครื่องห่างกัน {tc['clock_delta_sec']:+} วินาที (รวมช่วงยิง query {tc['query_gap_sec']}s)")
-    L.append(f"  - สรุป: {'เวลาตรงกัน ไม่มี shift' if tc['result']=='pass' else 'มีปัญหา ตรวจค่า tz ด่วน'}")
+    L.append(f"  source  now() = {tc['source']['now']}  utc_timestamp() = {tc['source']['utc']}  (tz={tc['source']['tz']})")
+    L.append(f"  target  now() = {tc['target']['now']}  utc_timestamp() = {tc['target']['utc']}  (tz={tc['target']['tz']})")
+    L.append(f"  - now() vs utc_timestamp() differ by {tc['source']['now_minus_utc_sec']:+}s / {tc['target']['now_minus_utc_sec']:+}s"
+             f" = {'both run on UTC' if tc['result']=='pass' else 'mismatched, needs checking'}")
+    L.append(f"  - the two clocks differ by {tc['clock_delta_sec']:+}s (including a {tc['query_gap_sec']}s query gap)")
+    L.append(f"  - verdict: {'clocks agree, no shift' if tc['result']=='pass' else 'a problem, check tz now'}")
     L.append("")
     L.append("2) random records")
-    L.append(f"  สุ่มแถวจริงจาก {len(results)} ตาราง ดึงทั้งแถวจากสองฝั่งด้วย primary key เดียวกัน")
-    L.append(f"  เทียบทุกคอลัมน์ รวม {tot} แถว")
+    L.append(f"  sampled real rows from {len(results)} tables, fetching both sides by the same primary key")
+    L.append(f"  every column compared across {tot} rows")
     L.append("")
     for t in results:
         good = sum(1 for r in t["sampled"] if r["result"] == "identical")
         bad = [r for r in t["sampled"] if r["result"] != "identical"]
-        line = f"  {t['table']:34} {good}/{len(t['sampled'])} แถวตรง"
+        line = f"  {t['table']:34} {good}/{len(t['sampled'])} rows match"
         if bad:
-            line += "  มีปัญหา: " + "; ".join(f"{r['pk']}={r['result']}" for r in bad)
+            line += "  problems: " + "; ".join(f"{r['pk']}={r['result']}" for r in bad)
         L.append(line)
     L.append("")
     if verdict == "pass":
-        L.append(f"  รวม {tot}/{tot} แถว ตรงกันทุกคอลัมน์ ไม่มีแถวหาย")
-        L.append("  ค่า timestamp ในแถวตรงกันถึงระดับ microsecond")
+        L.append(f"  all {tot}/{tot} rows match on every column, none missing")
+        L.append("  timestamps match to the microsecond")
     else:
-        L.append(f"  พบปัญหา: diff={diff} missing={miss} - ดูรายละเอียดใน {jf}")
+        L.append(f"  problems: diff={diff} missing={miss} - details in {jf}")
     tf = f"{OUT}/spot-check-{hop_name}.txt"
     open(tf, "w").write("\n".join(L) + "\n")
     print(f"files: {tf}  {jf}")

@@ -66,9 +66,9 @@ def side(which):
 def kv(sv, dv):
     return {"src": sv, "dst": dv, "match": (sv == dv)}
 
-print(f"[mongo:{DB}] source (DocumentDB)…")
+print(f"[mongo:{DB}] source (DocumentDB)...")
 sinfo, scolls = side("src")
-print(f"[mongo:{DB}] target (TC mongo)…")
+print(f"[mongo:{DB}] target (TC mongo)...")
 dinfo, dcolls = side("dst")
 
 names = sorted(set(scolls) | set(dcolls))
@@ -96,7 +96,7 @@ doc = {
     "target": f"Tencent Mongo {H['target']['hosts']} (v{dinfo['version']}, FCV {dinfo['fcv']})",
     "note": "DocDB and Tencent Mongo are different engines; id_checksum proves the same document set "
             "migrated (order-independent). content_checksum is best-effort (extended-JSON canonical); "
-            "a content diff can be BSON-serialization, not data loss — confirm a sample if it triggers.",
+            "a content diff can be BSON-serialization, not data loss - confirm a sample if it triggers.",
     "summary": {"collections": len(names), "count_diff": cnt_diff, "idset_diff": idset_diff,
                 "content_diff": content_diff, "index_diff": idx_diff},
     "server": {"src": sinfo, "dst": dinfo},

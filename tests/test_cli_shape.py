@@ -1,10 +1,9 @@
-"""CLI surface tests: the visible command set, legacy names stay invocable as
-hidden aliases, quiet flag, deep/counts-merge plumbing.
+"""CLI surface tests: exactly 11 visible commands, legacy names stay
+invocable as hidden aliases, quiet flag, deep/counts-merge plumbing.
 No database or docker needed."""
 from click.testing import CliRunner
 
 from migkit.cli import main
-from tests.conftest import MIGKIT
 
 VISIBLE = {"doctor", "advise", "assess", "schema", "check", "move",
            "watch", "sync", "report", "history", "rollback", "users"}
@@ -13,7 +12,7 @@ LEGACY = {"hops", "setup-target", "repair", "replicate", "tail",
           "state", "monitor"}
 
 
-def test_visible_commands_match_the_documented_set():
+def test_visible_commands_are_the_documented_set():
     listed = {n for n, c in main.commands.items() if not c.hidden}
     assert listed == VISIBLE
 
@@ -72,7 +71,7 @@ def test_check_drill_requires_db_and_table(tmp_path):
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = dict(os.environ, MIGKIT_CONF=str(conf),
                MIGKIT_REPORTS=str(tmp_path / "reports"))
-    r = subprocess.run([MIGKIT,
+    r = subprocess.run([os.path.join(base, ".venv", "bin", "migkit"),
                         "check", "t", "--drill"],
                        capture_output=True, text=True, env=env)
     assert r.returncode != 0

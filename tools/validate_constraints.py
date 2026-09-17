@@ -45,7 +45,7 @@ def pending(cur):
 def main(hop_name, apply, only_db):
     hop = HOPS[hop_name]
     if hop["engine"] != "postgres":
-        print("validate_constraints: postgres เท่านั้น")
+        print("validate_constraints: postgres only")
         return 0
     dbs = [only_db] if only_db else (hop.get("databases") or [])
     total = done = failed = 0
@@ -55,33 +55,33 @@ def main(hop_name, apply, only_db):
         rows = pending(cur)
         total += len(rows)
         if not rows:
-            print(f"{db}: constraint ทุกตัว validate แล้ว")
+            print(f"{db}: every constraint is already validated")
             c.close()
             continue
         kind = {"c": "check", "f": "foreign key"}
-        print(f"{db}: ยังไม่ validate {len(rows)} ตัว")
+        print(f"{db}: {len(rows)} not validated yet")
         for schema, table, name, ctype, size in rows:
             gb = size / 1024 ** 3
-            label = f"{table}.{name} ({kind.get(ctype, ctype)}, ตาราง {gb:.1f} GB)"
+            label = f"{table}.{name} ({kind.get(ctype, ctype)}, table {gb:.1f} GB)"
             if not apply:
-                print(f"   จะสั่ง: alter table {table} validate constraint \"{name}\""
+                print(f"   would run: alter table {table} validate constraint \"{name}\""
                       f"   [{gb:.1f} GB]")
                 continue
             t0 = time.time()
             try:
                 cur.execute(f'alter table {table} validate constraint "{name}"')
-                print(f"   validate แล้ว {label} ใช้ {time.time() - t0:.1f} วิ")
+                print(f"   validated {label} in {time.time() - t0:.1f}s")
                 done += 1
             except Exception as e:
                 failed += 1
-                print(f"   ไม่ผ่าน {label}: {str(e).strip().splitlines()[0][:110]}")
-                print("      แปลว่ามีแถวเดิมที่ผิดกติกาจริง ต้องแก้ข้อมูลก่อน")
+                print(f"   failed {label}: {str(e).strip().splitlines()[0][:110]}")
+                print("      means existing rows genuinely violate it; fix the data first")
         c.close()
     if not apply:
-        print(f"\nรวม {total} ตัวที่ยังไม่ validate (ยังไม่ลงมือ ใส่ --apply)")
-        print("ย้อนกลับ: ไม่ต้อง - VALIDATE ไม่แก้ข้อมูล แค่ติดธงว่าตรวจแล้ว")
+        print(f"\n{total} not validated (nothing done; add --apply)")
+        print("Undo: not needed - VALIDATE changes no data, it only sets the checked flag")
     else:
-        print(f"\nสำเร็จ {done} ตัว ไม่ผ่าน {failed} ตัว")
+        print(f"\n{done} succeeded, {failed} failed")
     return 1 if failed else 0
 
 

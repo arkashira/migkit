@@ -17,6 +17,9 @@ class HeteroEngine(Engine):
 
     checks = ("counts", "data")
     counts_from_data = True
+    # the in-process binlog tail below needs this driver; without it
+    # `move --mode cdc` uses migkit's streaming pipeline instead
+    tail_requires = "pymysqlreplication"
 
     def __init__(self, hop):
         super().__init__(hop)
@@ -166,8 +169,8 @@ class HeteroEngine(Engine):
                     "   # sqlglot DDL conversion, review then --apply")
         plan.append(f"migkit move <hop> --db {db} --go"
                     "   # resumable chunked data copy")
-        plan.append("cross-engine CDC needs debezium or a managed"
-                    " migration service, see migkit advise")
+        plan.append("cross-engine CDC: migkit move <hop> --mode cdc --go"
+                    "   # migkit stands up the streaming pipeline")
         return plan
 
     def list_move_tables(self, db):

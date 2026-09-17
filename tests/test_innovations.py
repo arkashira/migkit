@@ -55,20 +55,20 @@ def test_movers_pick_prefers_installed(monkeypatch):
 def test_movers_supported_matrix():
     assert movers.supported("postgres", "pgdump")
     assert not movers.supported("mysql", "pgdump")
-    assert movers.supported("hetero", "debezium")
-    assert not movers.supported("mongodb", "debezium")
+    assert movers.stream_supported("hetero")
+    assert not movers.stream_supported("mongodb")
     assert movers.supported("postgres", "builtin")
 
 
-def test_debezium_codegen_writes_configs(tmp_path):
+def test_stream_codegen_writes_configs(tmp_path):
     import json
     import migkit.config as cfg
     cfg.REPORTS = tmp_path / "reports"
     hop = _hop("mysql")
-    out = movers.debezium_codegen(hop, ["shop"], "mysql")
+    out = movers.stream_codegen(hop, ["shop"], "mysql")
     files = {f.name for f in out.iterdir()}
     assert {"docker-compose.yml", "source-connector.json",
-            "sink-connector.json", "README-debezium.md"} <= files
+            "sink-connector.json", "README.md"} <= files
     src = json.loads((out / "source-connector.json").read_text())
     assert "MySqlConnector" in src["config"]["connector.class"]
     assert src["config"]["database.hostname"] == "s"
@@ -219,16 +219,16 @@ def test_schema_is_a_repair_kind():
     assert hasattr(MySQLEngine, "_schema_repair_action")
 
 
-def test_debezium_status_parses(monkeypatch):
+def test_stream_status_parses(monkeypatch):
     from migkit import movers
     monkeypatch.setattr(movers, "_connect_api", lambda m, p, **k: (200, {
         "connector": {"state": "RUNNING"},
         "tasks": [{"state": "RUNNING"}, {"state": "FAILED"}]}))
-    s = movers.debezium_status("migkit-h-source")
+    s = movers.stream_status("migkit-h-source")
     assert "connector=RUNNING" in s and "RUNNING,FAILED" in s
 
 
-def test_debezium_register_creates_and_updates(tmp_path, monkeypatch):
+def test_stream_register_creates_and_updates(tmp_path, monkeypatch):
     import json
     import urllib.error
     from migkit import movers
@@ -244,7 +244,7 @@ def test_debezium_register_creates_and_updates(tmp_path, monkeypatch):
             raise urllib.error.HTTPError(path, 409, "exists", {}, None)
         return 201, {}
     monkeypatch.setattr(movers, "_connect_api", fake_api)
-    movers.debezium_register(tmp_path)
+    movers.stream_register(tmp_path)
     # source POSTed; sink 409 -> PUT config
     assert ("POST", "/connectors") in calls
     assert ("PUT", "/connectors/k/config") in calls
@@ -254,15 +254,18 @@ def test_atlas_authoritative_demotes_textual_diff():
     from migkit.engines.base import Engine, Result
     eng = Engine(_hop())
     res = [
-        Result("schema", "db", "diff", "6 changed lines"),          # base
-        Result("schema", "db (migra)", "diff", "migra fix"),        # migra
-        Result("schema", "db objects", "diff", "table 5/4 missing"),  # real
-        Result("schema", "db (atlas)", "ok", "atlas diff clean"),   # authority
+        Result("schema", "db", "diff", "6 changed lines"),            # textual
+        Result("schema", "db (liquibase)", "diff", "Missing table"),  # textual
+        Result("schema", "db (structural)", "diff", "2 to add"),      # object-aware
+        Result("schema", "db objects", "diff", "table 5/4 missing"),  # object-aware
+        Result("schema", "db (atlas)", "ok", "atlas diff clean"),     # authority
     ]
     out = {r.scope: r.status for r in eng._atlas_authoritative(res)}
-    assert out["db"] == "ok"            # base demoted
-    assert out["db (migra)"] == "ok"    # migra demoted
-    assert out["db objects"] == "diff"  # real structural diff kept
+    assert out["db"] == "ok"                   # line-diff demoted
+    assert out["db (liquibase)"] == "ok"       # textual opinion demoted
+    # object-aware opinions are never demoted: they compare objects, not text
+    assert out["db (structural)"] == "diff"
+    assert out["db objects"] == "diff"
     # opt-out keeps everything as-is
     eng2 = Engine(_hop(options={"schema_authority": "strict"}))
     res2 = [Result("schema", "db", "diff", "x"),
@@ -294,10 +297,31 @@ def test_on_conflict_keep_target_skips_changed():
     assert MySQLEngine(hop).hop.options["on_conflict"] == "keep-target"
 
 
-def test_tools_registry_and_install_selection(monkeypatch):
+def test_capabilities_and_install_selection(monkeypatch):
     from migkit import tools
-    assert any(c == "pt-table-sync" for c, *_ in tools.TOOLS)
-    assert any(c == "atlas" for c, *_ in tools.TOOLS)
-    # all tools "present" -> nothing to install
+    assert "pt-table-sync" in tools.PROGRAMS
+    assert "atlas" in tools.PROGRAMS
+    # every program present -> every capability ready, nothing left to install
     monkeypatch.setattr(tools, "which", lambda n: "/bin/" + n)
+    assert {st for _, _, st, _ in tools.capabilities()} == {"ready"}
     assert tools.install_missing(lambda m: None) == []
+
+
+def test_capabilities_degrade_without_programs(monkeypatch):
+    from migkit import tools
+    monkeypatch.setattr(tools, "which", lambda n: None)
+    states = {n: st for n, _, st, _ in tools.capabilities()}
+    # a capability with a hard requirement goes unavailable
+    assert states["PostgreSQL: bulk move"] == "unavailable"
+    # one with only an optional faster path degrades instead of disappearing
+    assert states["PostgreSQL: schema diff and DDL repair"] == "reduced"
+    # one migkit provides itself stays ready with nothing installed
+    assert states["Any engine: row-level diff"] == "ready"
+
+
+def test_install_hint_names_programs_not_capabilities(monkeypatch):
+    from migkit import tools
+    monkeypatch.setattr(tools.shutil, "which",
+                        lambda n: "/bin/brew" if n == "brew" else None)
+    monkeypatch.setattr(tools.platform, "system", lambda: "Darwin")
+    assert "brew install" in tools.install_hint(["mydumper"])

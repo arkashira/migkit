@@ -48,8 +48,12 @@ def main(hop_name, gen, only_db):
     jout = {"check": "grants", "hop": hop_name,
             "generated": datetime.date.today().isoformat(), "databases": {}}
     # the mover's own bookkeeping tables exist on one side only, so their
-    # grants can never apply and do not mean an app permission is missing
-    noise = (hop.get("options") or {}).get("noise_prefix", "")
+    # grants can never apply and do not mean an app permission is missing.
+    # A leg can carry leftovers from more than one mover - DTS writes dts_*,
+    # DMS writes awsdms_* - so the prefix is a comma-separated list.
+    noise = tuple(p.strip() for p in
+                  (hop.get("options") or {}).get("noise_prefix", "").split(",")
+                  if p.strip())
     # cloud-provider roles exist on their own side only, set in config.conf
     ignore = {r.strip() for r in os.environ.get("GRANTS_IGNORE_ROLES", "").split(",") if r.strip()}
     ignore |= {r.strip() for r in ((hop.get("options") or {}).get("ignore_roles") or "").split(",") if r.strip()}

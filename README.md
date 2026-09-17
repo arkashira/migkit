@@ -3,7 +3,7 @@
 > Verify, repair, and move databases across engines - without trusting the mover.
 
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
-[![engines](https://img.shields.io/badge/engines-postgres%20·%20mysql%20·%20mongodb%20·%20mssql%20·%20sqlite%20·%20redis%20·%20kafka-2a78d6)](#supported-engines)
+[![engines](https://img.shields.io/badge/engines-postgres,%20mysql,%20mongodb,%20mssql,%20sqlite,%20redis,%20kafka-2a78d6)](#supported-engines)
 [![cross-engine](https://img.shields.io/badge/cross--engine-mysql_to_postgres-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-0ca30c)](LICENSE)
@@ -17,60 +17,12 @@ trusted, by migkit itself with full crash-resume.
 
 The rule it is built on: **never let the mover be the judge of its own work.**
 
-[Docs / usage reference ->](https://migkit.axentx.cloud/) · [ภาษาไทย ->](README.th.md) · [Changelog ->](CHANGELOG.md)
-
----
-
-## Proven on a real migration
-
-A cross-cloud UAT failback, run end to end on 2026-08-04: three engines moved
-back from one cloud to another on a snapshot base with CDC replaying the delta
-from a recorded position. **363 checks across 23 databases**, and every number
-below is measured, not estimated.
-
-| what | result |
-|---|---|
-| CDC latency, write on source to read on target | 2.1 s postgres, 6.4 s mysql, 7.9 s mongo |
-| mover's own row-by-row validation | 384 tables, 0 failed records |
-| tables the mover could not validate (no usable key) | 12, all proven equal here by whole-table checksum |
-| grants replayed with saved undo | 1,164, ending at 0 missing |
-| NOT VALID constraints validated | 20 of 20, 0 rows in violation |
-| logins reconciled | 0 missing on all three engines |
-| snapshot of 880 GB | 287 s |
-
-### What it caught that the mover did not
-
-- **An identity counter below the highest id already used.** Two tables would
-  have rejected the first insert after the switch with a duplicate key. The
-  mover reported the tables as fully validated.
-- **15 rows referencing parents that do not exist**, left by a load that ran
-  with foreign key checks off.
-- **A whole month of data present on one side only.** The monthly partitions
-  for three earlier months matched exactly; the current month held 264 rows on
-  one side and none on the other. Reconciling toward the "source" would have
-  deleted four days of real data. Surfaced as a question for the team rather
-  than repaired automatically, which is the point of the quiesce gate.
-- **Permission parity that reads as broken when it is not.** The usual
-  `information_schema` view only shows grants whose grantee the connected user
-  belongs to, so group grants look missing on a target reached with an
-  application user. Reading the raw ACL gives the true count.
-- **A replication slot nobody was reading**, holding WAL on a shared source
-  with no retention cap - a slow way to fill someone else's disk.
-
-### What it could not do, stated plainly
-
-MongoDB passwords cannot cross to DocumentDB. They are stored as SCRAM, the
-only way to move the original is to copy the whole `admin.system.users`
-document, and DocumentDB blocks that collection - verified, it reads back zero
-documents. Accounts must be created with a fresh password, so those passwords
-have to be prepared before the switch. PostgreSQL and MySQL do not have this
-problem: the stored hash is copied and users keep the password they had.
+[Docs / usage reference ->](https://migkit.axentx.cloud/) | [Changelog ->](CHANGELOG.md)
 
 ---
 
 ## Table of contents
 
-- [Proven on a real migration](#proven-on-a-real-migration)
 - [Why](#why)
 - [Features](#features)
 - [Quickstart](#quickstart)
@@ -111,11 +63,11 @@ across all engines. Every `OK` prints the counts and hashes of both sides, so
   written.
 - **Best-tool movers, auto-selected** - `move` drives whichever proven mover
   is installed (`--via auto` is the default): parallel `pg_dump -j`/`pg_restore
-  -j`, mydumper/myloader, pgloader, mongodump/mongorestore - and generates
-  ready-to-run **Debezium Connect** configs (`--via debezium`) for
-  platform-grade CDC. The builtin chunked copy stays the fallback and the only
-  mode with per-chunk crash resume; native CDC (pg logical replication, mysql
-  binlog incl. the RDS variant, mongo change streams) is one flag away.
+  -j`, mydumper/myloader, pgloader, mongodump/mongorestore. The builtin
+  chunked copy stays the fallback and the only mode with per-chunk crash
+  resume; native CDC (pg logical replication, mysql binlog incl. the RDS
+  variant, mongo change streams) is one flag away, and where an engine has
+  none, `move --mode cdc` stands up migkit's own streaming pipeline instead.
   Whatever moves the data, migkit verifies it.
 - **No double scans** - when counts and data run together, row counts ride
   along with the checksum query, so each table is scanned once, not twice.
@@ -172,14 +124,23 @@ migkit report --serve                      # dashboard at localhost:8899
 ## Install
 
 ```bash
-./bootstrap.sh
+pip install -e .
 ```
 
-Installs libpq, creates the main venv plus a Python 3.12 `.venv-tools` for
-reladiff, and pulls optional drivers (mysql, mongo, redis, kafka) and helpers
-(migra, datacompy). Anything that will not install is skipped with a note -
-every feature has a built-in fallback. Then set up a hop in `conf/hops.yaml`
-(gitignored, chmod 600):
+That is the whole Python side: every engine and every comparison library is a
+hard dependency, so a fresh machine gets all of them or the install fails
+loudly. There are no per-engine extras to remember and nothing to add later.
+
+Some capabilities also need a command-line program from the platform (parallel
+dump/restore, cross-engine load, schema DDL). `migkit doctor` reports what this
+machine can do, and `migkit doctor --install` fills in the rest:
+
+```bash
+migkit doctor            # capabilities: ready / reduced / unavailable
+migkit doctor --install  # install what is missing via brew or apt
+```
+
+Then set up a hop in `conf/hops.yaml` (gitignored, chmod 600):
 
 ```yaml
 hops:
@@ -204,7 +165,7 @@ Eleven commands cover the whole lifecycle:
 | `advise` | playbook for the hop's mover, phase by phase |
 | `schema` | target schema plan; `--convert` transpiles cross-engine DDL, `--migration` writes Flyway-style `V__/U__` files |
 | `check` | layered read-only validation, exit 1 on diff; `--consistent` = one repeatable-read txn per side + LSN fence; `--deep` adds FK-orphan/drift/render/boundary checks; `--drill` = column-level sample diff |
-| `move` | drives the best installed mover (`pg_dump -j`, mydumper, pgloader, mongodump) or the builtin resumable copy; `--mode cdc` native streams, `--via debezium` generates Connect configs |
+| `move` | drives the best installed mover (`pg_dump -j`, mydumper, pgloader, mongodump) or the builtin resumable copy; `--mode cdc` streams changes, natively or through migkit's own pipeline |
 | `watch` | live load progress: counts, rate, ETA, replication state; `--verify` = continuous re-check loop; `--verify --delta` = O(changes) verification off the WAL/binlog/change stream |
 | `sync` | make target equal source: dry-run plan, `--apply` executes with undo, `--go` checks + repairs with rollback checkpoints |
 | `rollback` | restore any saved state, with a plan preview |
@@ -255,24 +216,24 @@ you get *through* migkit, including the tools it wraps at full capability.
 
 | Capability | migkit | AWS DMS / Tencent DTS | Debezium | pt-table-sync | GoldenGate + Veridata |
 |---|:--:|:--:|:--:|:--:|:--:|
-| Bulk load (drives best mover) | ✓ | ✓ | ✗ | ~ | ✓ |
-| Change data capture | ✓ | ✓ | ✓ | ✗ | ✓ |
-| Row-level verify with proof (LSN fence) | ✓ | ~ | ✗ | ~ | ✓ |
-| Consistency fence (no false diffs) | ✓ | ✗ | ✗ | ~ | ~ |
-| Continuous delta verify, O(changes) | ✓ | ✗ | ✗ | ✗ | ~ |
-| Column-level diff localization | ✓ | ✗ | ✗ | ✗ | ~ |
-| Schema-object verify (views/routines/FK/index) | ✓ | ✗ | ✗ | ✗ | ~ |
-| Sequence / identity carry and verify | ✓ | ✗ | ✗ | ✗ | ~ |
-| Row-level repair with undo | ✓ | ✗ | ✗ | ~ | ✓ |
-| Schema repair (apply DDL, with undo) | ✓ | ✗ | ✗ | ✗ | ~ |
-| Rollback / state snapshots | ✓ | ✗ | ✗ | ✗ | ~ |
-| Self-hosted, no vendor lock-in | ✓ | ✗ | ✓ | ✓ | ~ |
-| Zero footprint on the target | ✓ | ✗ | ✓ | ✓ | ~ |
+| Bulk load (drives best mover) | yes | yes | no | partial | yes |
+| Change data capture | yes | yes | yes | no | yes |
+| Row-level verify with proof (LSN fence) | yes | partial | no | partial | yes |
+| Consistency fence (no false diffs) | yes | no | no | partial | partial |
+| Continuous delta verify, O(changes) | yes | no | no | no | partial |
+| Column-level diff localization | yes | no | no | no | partial |
+| Schema-object verify (views/routines/FK/index) | yes | no | no | no | partial |
+| Sequence / identity carry and verify | yes | no | no | no | partial |
+| Row-level repair with undo | yes | no | no | partial | yes |
+| Schema repair (apply DDL, with undo) | yes | no | no | no | partial |
+| Rollback / state snapshots | yes | no | no | no | partial |
+| Self-hosted, no vendor lock-in | yes | no | yes | yes | partial |
+| Zero footprint on the target | yes | no | yes | yes | partial |
 | Engines | 9 + cross | cloud-scoped | 8 | mysql | oracle-centric |
 | License | free (MIT) | paid | free | free | commercial |
 
-<sub>✓ full · ~ partial · ✗ none. "Through migkit" = the wrapped tool driven
-under a single command, plus migkit's own verify/repair layer.</sub>
+<sub>"Through migkit" = the wrapped tool driven under a single command,
+plus migkit's own verify/repair layer.</sub>
 
 ### Silent-corruption detection
 
@@ -283,20 +244,20 @@ real-world DMS/DTS/GoldenGate post-mortems, not guesses.
 
 | Silent failure (data looks "present", is wrong) | migkit | DMS/DTS | Veridata | data-diff | pt-sync |
 |---|:--:|:--:|:--:|:--:|:--:|
-| Sequence / identity collision (`nextval ≤ max(pk)`) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Type-narrowing / silent truncation (varchar, scale, int) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Charset corruption (utf8mb4 cut, latin1 mojibake, U+FFFD) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Uniform timezone offset (systematic, not row noise) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Collation unique-collapse + glibc/ICU version drift | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Partition routing (rows stranded in default/MAXVALUE) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Generated/computed column drift (stored ≠ expression) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| RLS partial-dump / default-deny lockout | ✓ | ✗ | ✗ | ✗ | ✗ |
-| NULL vs empty-string flip (Oracle `''`=NULL) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| No-PK table (CDC drops updates/deletes) | ✓ | ✗ | ~ | ✗ | ✗ |
-| NOT VALID / untrusted constraints + FK orphans | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Deferrable-constraint drift | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Extensions + sequence-level grant parity | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Replication slot bloat / abandoned slot / long-txn | ✓ | ~ | ✗ | ✗ | ✗ |
+| Sequence / identity collision (`nextval <= max(pk)`) | yes | no | no | no | no |
+| Type-narrowing / silent truncation (varchar, scale, int) | yes | no | no | no | no |
+| Charset corruption (utf8mb4 cut, latin1 mojibake, U+FFFD) | yes | no | no | no | no |
+| Uniform timezone offset (systematic, not row noise) | yes | no | no | no | no |
+| Collation unique-collapse + glibc/ICU version drift | yes | no | no | no | no |
+| Partition routing (rows stranded in default/MAXVALUE) | yes | no | no | no | no |
+| Generated/computed column drift (stored != expression) | yes | no | no | no | no |
+| RLS partial-dump / default-deny lockout | yes | no | no | no | no |
+| NULL vs empty-string flip (Oracle `''`=NULL) | yes | no | no | no | no |
+| No-PK table (CDC drops updates/deletes) | yes | no | partial | no | no |
+| NOT VALID / untrusted constraints + FK orphans | yes | no | no | no | no |
+| Deferrable-constraint drift | yes | no | no | no | no |
+| Extensions + sequence-level grant parity | yes | no | no | no | no |
+| Replication slot bloat / abandoned slot / long-txn | yes | partial | no | no | no |
 
 <sub>Postgres and MySQL have the full set; MongoDB/MSSQL have the base layer
 with the smart set landing engine by engine. Full usage reference:
@@ -304,7 +265,7 @@ with the smart set landing engine by engine. Full usage reference:
 
 The managed services move data well but validate weakly and cannot repair a
 single row or carry a sequence. Debezium and pt-table-sync are excellent at one
-job each; migkit runs them and adds the verification neither performs.
+job each; migkit adds the verification neither performs.
 Veridata is the closest match on verify-and-repair, and is commercial and
 Oracle-centric. migkit is the one place that combines move, provable verify,
 row-and-schema repair with undo, and rollback, across engines, for free.
@@ -325,13 +286,13 @@ row-and-schema repair with undo, and rollback, across engines, for free.
 ## Testing
 
 ```bash
-pip install -e . faker pytest
+pip install -e ".[dev]"
 pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
 ```
 
 100+ tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
-aliases stay invocable), mover selection and Debezium codegen, test_decoding
+aliases stay invocable), mover and pipeline selection, test_decoding
 parsing, end-to-end integration against throwaway Postgres containers
 (including the full delta-verify loop: touch -> flag -> replay -> repair ->
 advance, and the consistent-snapshot pass), exact repair-undo restore against

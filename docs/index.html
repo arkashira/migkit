@@ -138,7 +138,7 @@ cd migkit &amp;&amp; ./bootstrap.sh &amp;&amp; source .venv/bin/activate</code><
     <tr><td><code>advise</code></td><td>playbook for the hop's mover, phase by phase</td></tr>
     <tr><td><code>schema</code></td><td>target schema plan; <code>--convert</code> transpiles cross-engine DDL; <code>--migration</code> writes Flyway-style files</td></tr>
     <tr><td><code>check</code></td><td>layered read-only validation, exit 1 on any diff (see below)</td></tr>
-    <tr><td><code>move</code></td><td>drives the best installed mover, or the built-in resumable copy; <code>--mode cdc</code> / <code>--via debezium</code></td></tr>
+    <tr><td><code>move</code></td><td>drives the best installed mover, or the built-in resumable copy; <code>--mode cdc</code> streams changes</td></tr>
     <tr><td><code>watch</code></td><td>live load progress + the safe-to-cut-over verdict; <code>--verify</code> continuous re-check; <code>--delta</code> O(changes)</td></tr>
     <tr><td><code>sync</code></td><td>make target equal source: dry-run plan, <code>--apply</code> executes with undo, <code>--go</code> checkpoints for rollback</td></tr>
     <tr><td><code>rollback</code></td><td>restore any saved state, with a plan preview</td></tr>
@@ -198,12 +198,13 @@ cd migkit &amp;&amp; ./bootstrap.sh &amp;&amp; source .venv/bin/activate</code><
   in for a managed service on a trusted VM.</p>
 
   <h3 id="move">move</h3>
-<pre><code>migkit move HOP [--via auto|pg_dump|mydumper|pgloader|mongodump|debezium|builtin]
+<pre><code>migkit move HOP [--via auto|pg_dump|mydumper|pgloader|mongodump|builtin]
                 [--mode full|cdc] [--go]</code></pre>
   <p><code>--via auto</code> (default) drives whichever proven mover is installed;
   the built-in chunked copy is the crash-resumable fallback.
-  <code>--via debezium</code> generates and supervises Connect configs for
-  platform-grade CDC. Whatever moves the data, migkit verifies it.</p>
+  <code>--mode cdc</code> follows live changes: the engine's native mechanism
+  where there is one, otherwise migkit stands up and supervises its own
+  streaming pipeline. Whatever moves the data, migkit verifies it.</p>
 
   <h2 id="detects">Silent-corruption checks</h2>
   <p>The reason migkit exists. Each of these is a failure class where the mover

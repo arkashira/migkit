@@ -139,10 +139,10 @@ def write_report(engine, path, hop, srcdesc, dstdesc, src, dst, crit, safe, extr
     W("are in (B) with the reason.")
     W("")
     W("-"*72)
-    W(f"(A) DIFFERENCES THAT MATTER — verify/fix before cutover   [{len(A_val)+len(A_pres)}]")
+    W(f"(A) DIFFERENCES THAT MATTER - verify/fix before cutover   [{len(A_val)+len(A_pres)}]")
     W("-"*72)
     if not A_val and not A_pres:
-        W("  (none — no behavior-critical parameter differs harmfully)")
+        W("  (none - no behavior-critical parameter differs harmfully)")
     for n, sv, dv, (what, impact) in A_val:
         W(f"\n  {n}")
         W(f"      {s_name} (src): {norm(sv)!r}")
@@ -157,7 +157,7 @@ def write_report(engine, path, hop, srcdesc, dstdesc, src, dst, crit, safe, extr
         W(f"      if it differs: {impact}")
     W("")
     W("-"*72)
-    W(f"(B) DIFFERS BUT SAFE TO IGNORE — with reason   [{len(B)}]")
+    W(f"(B) DIFFERS BUT SAFE TO IGNORE - with reason   [{len(B)}]")
     W("-"*72)
     if not B: W("  (none)")
     for n, sv, dv, reason in B:
@@ -167,7 +167,7 @@ def write_report(engine, path, hop, srcdesc, dstdesc, src, dst, crit, safe, extr
         W(f"      safe because:  {reason}")
     W("")
     W("-"*72)
-    W(f"(C) FILTERED OUT — not behavior-critical")
+    W(f"(C) FILTERED OUT - not behavior-critical")
     W("-"*72)
     W(f"  value differs but harmless : {len(C_val)}")
     W(f"  present only on {s_name:<10}: {len(C_only_src)}")
@@ -194,7 +194,7 @@ def load_cache(path):
     return src, dst, raw
 
 def _first_hop(engine):
-    """hop ตัวแรกใน hops.yaml ที่ engine ตรง - ไม่ผูกกับชื่อ hop ขององค์กรใด"""
+    """First hop in hops.yaml matching the engine; not tied to any org's hop names."""
     for name, h in HOPS.items():
         if h.get("engine") == engine:
             return name
@@ -203,7 +203,7 @@ def _first_hop(engine):
 
 
 def _hop_labels(hop):
-    """source/target label ของ hop จาก hops.yaml (ไม่ hardcode endpoint ของใคร)"""
+    """source/target labels for a hop, read from hops.yaml rather than hardcoded."""
     h = HOPS.get(hop, {})
     def lab(side):
         d = h.get(side, {}) or {}
@@ -228,7 +228,7 @@ def _side_names(hop):
 
 
 def _first_params_cache(hop, db=""):
-    """reports/<hop>/<db>/params.json - ถ้าไม่ระบุ db ใช้ตัวแรกที่มี"""
+    """reports/<hop>/<db>/params.json; with no db given, use the first available."""
     base = os.path.join("reports", hop)
     if db:
         return os.path.join(base, db, "params.json")
@@ -245,7 +245,7 @@ def do_pg():
     hop = os.environ.get("PG_HOP") or _first_hop("postgres")
     db = os.environ.get("PG_DB", "")
     path = _first_params_cache(hop, db)
-    print(f"[pg] reading cache {path} …")
+    print(f"[pg] reading cache {path} ...")
     src, dst, _ = load_cache(path)
     s_label, d_label = _hop_labels(hop)
     write_report("PostgreSQL", f"{OUT}/param-diff-pg.txt", hop,
@@ -256,7 +256,7 @@ def do_mysql():
     hop = os.environ.get("MYSQL_HOP") or _first_hop("mysql")
     db = os.environ.get("MYSQL_DB", "")
     path = _first_params_cache(hop, db)
-    print(f"[mysql] reading cache {path} …")
+    print(f"[mysql] reading cache {path} ...")
     src, dst, _ = load_cache(path)
     s_label, d_label = _hop_labels(hop)
     write_report("MySQL", f"{OUT}/param-diff-mysql.txt", hop,
@@ -266,7 +266,7 @@ def do_mysql():
 def do_mongo():
     # oss/params.json = 2026-07-27 17:55. DocDB source does NOT expose getParameter('*')
     # (all src values are null), which itself proves a server-param table is not comparable.
-    print("[mongo] reading cache reports/mongo-to-tencent/oss/params.json …")
+    print("[mongo] reading cache reports/mongo-to-tencent/oss/params.json ...")
     _, _, raw = load_cache("reports/mongo-to-tencent/oss/params.json")
     def gv(side, key, default="n/a"):
         v = raw.get(key, {})
@@ -329,7 +329,7 @@ def do_mongo():
     W("  Engine version string (DocumentDB 5.0-compatible vs Tencent Mongo %s):" % tver)
     W("      different engines; the number does not imply the same internals.")
     W("  Server getParameter tables: not compared (no meaningful shared keys).")
-    W("      DocDB getParameter('*') exposed keys=%d, Tencent keys=%d — DocumentDB" % (len(sp), len(tp)))
+    W("      DocDB getParameter('*') exposed keys=%d, Tencent keys=%d - DocumentDB" % (len(sp), len(tp)))
     W("      returns none of them, so there is nothing that maps to data behavior.")
     W("")
     W("Note: Mongo dates are stored in UTC and the zone is applied at query time,")

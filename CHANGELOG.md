@@ -1,47 +1,5 @@
 # Changelog
 
-The notable changes, grouped by area. Generated from the commits by
-`tools/gen_changelog.py` when a release is tagged.
-
-## v0.2.0 - 2026-08-04
-
-### Added
-- users command - sync logins with the same password (test/create/verify/rollback) (61ecfe5)
-- honor hop.exclude in check and repair across pg/mysql/mongo (cd0e094)
-- mongo smart deep-checks, mssql identity-collision + no-PK, OSS community files (d061b11)
-- silent-corruption deep checks (pg+mysql), cutover verdict, usage docs (a952c32)
-
-### Fixed
-- --go honors --kind (sequence-only skips schema snapshot and data scan) (3c04f4d)
-
-### Security
-- block organisation-specific values in the source; tools take the hop name instead of defaulting to one (fc9ef40)
-
-### Tests
-- resolve the migkit binary instead of hardcoding a local venv path (bc32035)
-- mark every docker-backed module so the no-docker run really excludes them (380cea7)
-
-### Maintenance
-- guard job, test and build artifacts, tag-driven release with generated notes (9698a37)
-- add CODEOWNERS and pull request template (e4ea041)
-
-### Config
-- resolve hops.yaml and reports from the working directory so an installed copy runs anywhere (49ec4b3)
-
-### MySQL
-- delta verify on 8.0 + behavior-critical params (a76c4a5)
-
-### Params
-- behavior-critical parameter check across engines (+docs, tests) (d551a24)
-
-### Tools
-- spot check, grants apply, sequence ACL fix, MIGKIT_CONF support (6392594)
-
-### Users
-- mongodb support, connection resilience, no-pk and constraint checks (3f7e135)
-
-Full comparison: v0.1.0...v0.2.0
-
 The notable changes, grouped by area. This project is pre-1.0; releases are
 cut from `master` and versions are tagged as features stabilize.
 
@@ -57,7 +15,7 @@ cut from `master` and versions are tagged as features stabilize.
   replication consumer (including opaque managed movers) confirms flushing
   past the captured LSN. Falls back to a settle delay when no slot is visible.
 - Delta verify (`watch --verify --delta`, `sync --mode stream`): re-verify
-  only the rows changed since the last verified point, on every engine —
+  only the rows changed since the last verified point, on every engine -
   logical slot (postgres), binlog position (mysql), change-stream token
   (mongo), offset baseline (kafka), Change Tracking (mssql). The cursor
   advances only on a clean cycle, so it is idempotent under crashes.
@@ -79,9 +37,12 @@ cut from `master` and versions are tagged as features stabilize.
 - `move --via auto` drives the fastest installed tool: parallel
   pg_dump/pg_restore, mydumper/myloader, pgloader, or mongodump/mongorestore,
   with a resumable built-in copy as the fallback.
-- `move --mode cdc --via debezium --go` generates the Connect configuration,
-  launches the stack, registers the connectors, and reports their status;
-  native logical replication / binlog / change streams remain available.
+- `move --mode cdc --go` follows live changes with the engine's native
+  mechanism (logical replication, binlog, change streams). Where an engine has
+  none, migkit writes, launches, registers and supervises its own streaming
+  pipeline instead - same command, no extra flag, and nothing about the
+  runtime underneath is a user-facing choice. Third-party components are
+  credited in NOTICE.
 
 ### Orchestration and operation
 - `sync --mode verify | seed | stream | migrate` runs the whole flow with a

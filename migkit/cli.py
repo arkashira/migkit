@@ -122,14 +122,22 @@ def doctor(install):
     from . import tools as _tools
     _hops_table()
     if install:
-        still = _tools.install_missing(lambda m: console.print(f"  {m}"))
-        if still:
-            console.print("[yellow]still missing (pip/vendor): "
-                          + ", ".join(c for c, _ in still) + "[/yellow]")
-    t = Table("tool", "status", "powers")
-    for cmd, path, formula, apt, purpose in _tools.status():
-        t.add_row(cmd, path or "[red]missing[/red]", purpose)
+        _tools.install_missing(lambda m: console.print(f"  {m}"))
+    t = Table("capability", "what it does", "status")
+    mark = {"ready": "[green]ready[/green]",
+            "reduced": "[yellow]reduced[/yellow]",
+            "unavailable": "[red]unavailable[/red]"}
+    short = []
+    for name, what, state, missing in _tools.capabilities():
+        t.add_row(name, what, mark[state])
+        if state != "ready":
+            short += missing
     console.print(t)
+    if short:
+        console.print("\nto enable everything on this machine:")
+        console.print("  " + _tools.install_hint(short))
+        console.print("  or let migkit do it: [bold]migkit doctor --install"
+                      "[/bold]")
     for name, hop in load_hops().items():
         for side, ep in (("src", hop.source), ("dst", hop.target)):
             if not ep.configured():
@@ -695,8 +703,8 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
             elif hasattr(eng, "tail_apply") and db:
                 _tail(hop, eng, db, True)
             else:
-                console.print("   CDC start skipped: use migkit move --mode"
-                              " cdc (or --via debezium) for this engine")
+                console.print("   CDC start skipped: use migkit move"
+                              " --mode cdc for this engine")
         else:
             console.print("   would start CDC: migkit move"
                           f" {hop_name} --mode cdc --go")
@@ -810,6 +818,53 @@ def _tail(hop, eng, db, go):
                    lambda m: console.print(m))
 
 
+def _tail_ready(eng):
+    """The in-process change tail needs an optional driver on some engines.
+    When it is missing, migkit uses its own streaming pipeline rather than
+    telling the operator to go and pip install something."""
+    mod = getattr(eng, "tail_requires", "")
+    if not mod:
+        return True
+    import importlib.util
+    return importlib.util.find_spec(mod) is not None
+
+
+def _stream(hop, eng, db, do_drop, go, engine):
+    """migkit's own streaming pipeline, used when the engine has no native
+    CDC path. Nothing about the runtime underneath is a user-facing choice:
+    migkit writes it, starts it, registers the connectors and tears it down."""
+    from . import movers
+    dbs = [db] if db else eng.databases()
+    out = movers.stream_codegen(hop, dbs, engine)
+    name = f"migkit-{hop.name}"
+    if do_drop:
+        if not go:
+            console.print(f"would tear down the streaming pipeline for"
+                          f" {hop.name} (dry-run, add --go)")
+            return
+        movers.stream_down(out, lambda m: chat(f"  {m}"))
+        _changelog(hop, {"op": "stream-down", "db": ",".join(dbs)})
+        console.print("[green]streaming pipeline torn down[/green]")
+        return
+    console.print(f"streaming pipeline prepared: {out}")
+    if not go:
+        console.print("dry-run, add --go to start it")
+        return
+    console.print("starting the streaming pipeline ...")
+    movers.stream_up(out, lambda m: chat(f"  {m}"))
+    if not movers.stream_wait(log=lambda m: chat(f"  {m}")):
+        raise SystemExit("the streaming pipeline did not come up"
+                         f" (logs: docker compose -f {out}/docker-compose.yml"
+                         " logs)")
+    movers.stream_register(out, log=lambda m: console.print(f"  {m}"))
+    for c in (f"{name}-source", f"{name}-sink"):
+        console.print("  " + movers.stream_status(c))
+    _changelog(hop, {"op": "stream-up", "db": ",".join(dbs)})
+    console.print(f"[green]cdc streaming[/green] - progress: migkit watch"
+                  f" {hop.name}   verify: migkit watch {hop.name}"
+                  " --verify --delta")
+
+
 @main.command()
 @click.argument("hop_name")
 @click.option("--db", default="")
@@ -820,12 +875,11 @@ def _tail(hop, eng, db, go):
                    " full+cdc = initial load plus stream until cutover")
 @click.option("--via", type=click.Choice(["auto", "builtin", "pgdump",
                                           "mydumper", "pgloader",
-                                          "mongodump", "debezium"]),
+                                          "mongodump"]),
               default="auto",
-              help="which mover does the work: auto = fastest installed"
-                   " (pg_dump -j / mydumper / pgloader / mongodump),"
-                   " builtin = chunk-resumable copy,"
-                   " debezium = generate Connect configs for platform CDC")
+              help="which mover does the work in full mode: auto = fastest"
+                   " installed (pg_dump -j / mydumper / pgloader / mongodump),"
+                   " builtin = chunk-resumable copy")
 @click.option("--chunk", default=500000, help="rows per resumable chunk (builtin)")
 @click.option("--drop", "do_drop", is_flag=True,
               help="cdc modes: tear down replication")
@@ -837,7 +891,9 @@ def move(hop_name, db, table, mode, via, chunk, do_drop, go):
     or mongodump/mongorestore when installed (--via auto), else the
     builtin chunked copy - the only mode with per-chunk crash resume.
     cdc: native mechanisms (pg logical replication, mysql binlog, mongo
-    change streams) or --via debezium for platform-grade Connect configs.
+    change streams); when an engine has none, migkit stands up its own
+    managed streaming pipeline instead. Either way the commands are the
+    same and migkit owns the lifecycle.
 
     Use only over a trusted network (or run migkit on a cloud VM)."""
     from . import movers
@@ -846,38 +902,6 @@ def move(hop_name, db, table, mode, via, chunk, do_drop, go):
     eng = get_engine(hop)
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
-    if via == "debezium":
-        if mode == "full":
-            raise SystemExit("--via debezium is for cdc modes")
-        if not movers.supported(engine, via):
-            raise SystemExit(f"debezium codegen not built for {hop.engine}")
-        dbs = [db] if db else eng.databases()
-        out = movers.debezium_codegen(hop, dbs, engine)
-        console.print(f"debezium connect configs generated: {out}")
-        name = f"migkit-{hop.name}"
-        if do_drop:
-            if go:
-                movers.debezium_down(out, lambda m: console.print(f"  {m}"))
-                console.print("[green]debezium stack torn down[/green]")
-            else:
-                console.print(f"would run: docker compose -f {out}"
-                              "/docker-compose.yml down -v")
-            return
-        if not go:
-            console.print("review credentials, then --go to launch"
-                          " (or follow README-debezium.md by hand)")
-            return
-        console.print("launching redpanda + kafka connect ...")
-        movers.debezium_up(out, lambda m: chat(f"  {m}"))
-        if not movers.debezium_wait(log=lambda m: chat(f"  {m}")):
-            raise SystemExit("Kafka Connect did not come up (see docker logs)")
-        movers.debezium_register(out, log=lambda m: console.print(f"  {m}"))
-        for c in (f"{name}-source", f"{name}-sink"):
-            console.print("  " + movers.debezium_status(c))
-        _changelog(hop, {"op": "debezium-up", "db": ",".join(dbs)})
-        console.print("[green]debezium CDC running[/green] - verify the stream"
-                      f" with: migkit sync {hop_name} --mode stream --serve")
-        return
     if mode == "full":
         v = movers.pick(engine, table) if via == "auto" else via
         if v != "builtin":
@@ -906,10 +930,16 @@ def move(hop_name, db, table, mode, via, chunk, do_drop, go):
     if mode == "cdc":
         if engine == "postgres" and has_repl:
             return _replicate(hop, eng, db, False, do_drop, go)
-        if has_tail:
+        if has_tail and _tail_ready(eng):
             return _tail(hop, eng, db, go)
         if has_repl:
             return _replicate(hop, eng, db, False, do_drop, go)
+        if movers.stream_supported(engine):
+            if has_tail:
+                console.print("[yellow]native change tail needs a driver this"
+                              " machine does not have - using migkit's"
+                              " streaming pipeline instead[/yellow]")
+            return _stream(hop, eng, db, do_drop, go, engine)
         raise SystemExit(f"cdc not available for {hop.engine},"
                          " see migkit advise")
     # full+cdc

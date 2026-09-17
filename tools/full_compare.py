@@ -112,9 +112,9 @@ def merge_kv(sd, dd, db, kind):
     return res
 
 def build(db):
-    print(f"[{db}] source (tunnel)…")
+    print(f"[{db}] source (tunnel)...")
     s = side(SRC, db, True)
-    print(f"[{db}] target (.34)…")
+    print(f"[{db}] target (.34)...")
     d = side(DST, db, True)
     rc = merge_kv(s["counts"], d["counts"], db, "counts")
     dc = merge_kv(s["checksums"], d["checksums"], db, "checksums")

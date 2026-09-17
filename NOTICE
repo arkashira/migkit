@@ -1,0 +1,30 @@
+migkit
+Copyright (c) 2026 arkashira
+Licensed under the MIT License (see LICENSE).
+
+Third-party components
+----------------------
+
+migkit drives external programs rather than reimplementing them. They are not
+bundled or redistributed here - migkit invokes them when present, or pins them
+in a generated docker-compose file that pulls the published image at run time.
+Each remains under its own licence, held by its own authors.
+
+Invoked as local programs when installed:
+  pg_dump, pg_restore, psql            PostgreSQL Global Development Group
+  mydumper, myloader                   MySQL Data Dumper project
+  pgloader                             Dimitri Fontaine
+  mongodump, mongorestore, mongosh     MongoDB, Inc.
+  atlas                                Ariga
+  liquibase                            Liquibase
+  reladiff, datacompy, sqlglot, migra  respective authors
+
+Pulled as container images by the generated streaming pipeline
+(migkit/movers.py, stream_codegen):
+  Debezium Connect      Apache License 2.0   https://debezium.io
+  Redpanda              Business Source Licence / Redpanda Community Licence
+                                             https://redpanda.com
+
+The streaming pipeline is an internal implementation detail: it is selected by
+migkit, not by the operator, and the command surface does not expose it. This
+file exists so the components are still credited and their licences traceable.

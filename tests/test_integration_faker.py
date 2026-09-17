@@ -8,7 +8,7 @@ import tempfile
 import textwrap
 
 from tests import datagen
-from tests.conftest import needs_docker, psql, MIGKIT
+from tests.conftest import needs_docker, psql
 
 pytestmark = needs_docker
 
@@ -18,7 +18,7 @@ def _migkit(conf, *args):
                MIGKIT_REPORTS=str(conf.parent / "reports"))
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return subprocess.run(
-        [MIGKIT, *args],
+        [os.path.join(base, ".venv", "bin", "migkit"), *args],
         capture_output=True, text=True, env=env)
 
 

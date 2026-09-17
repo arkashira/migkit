@@ -29,7 +29,7 @@ create table people (
 
 def _row(i):
     unicode_note = fake.random_element([
-        fake.text(80), "emoji 🚀🔥 test", "ไทย unicode ทดสอบ",
+        fake.text(80), "emoji 🚀🔥 test", "thai unicode sample \u0e17\u0e14\u0e2a\u0e2d\u0e1a",
         "quote ' and \" and \\ backslash", None, "",
         "null-ish \x00 nope",
     ])

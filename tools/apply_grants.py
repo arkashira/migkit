@@ -22,7 +22,7 @@ def main(hop_name):
     files = sorted(glob.glob(os.path.join("reports", "grants", hop_name, "grants-*.sql")))
     files = [f for f in files if not f.endswith("-undo.sql")]
     if not files:
-        print("  no grant files - run ./repair.sh grants <hop> first"); return 1
+        print("  no grant files - run ./change.sh grants <hop> first"); return 1
     total = failed = 0
     for f in files:
         db = os.path.basename(f)[len("grants-"):-len(".sql")]
@@ -32,14 +32,24 @@ def main(hop_name):
         try:
             if hop["engine"] == "postgres":
                 import psycopg2
+                # connect_timeout only covers reaching the server. A link that
+                # breaks AFTER the connection is up - a path-MTU change on a VPN
+                # is enough - leaves the socket waiting on a reply that never
+                # arrives, and a run of thousands of statements hangs there with
+                # no output. keepalives make the kernel notice, and
+                # statement_timeout bounds any single statement.
                 cn = psycopg2.connect(host=tgt["host"], port=tgt.get("port", 5432),
                                       user=tgt["user"], password=tgt["password"],
-                                      dbname=db, connect_timeout=10)
+                                      dbname=db, connect_timeout=10,
+                                      keepalives=1, keepalives_idle=20,
+                                      keepalives_interval=10, keepalives_count=3,
+                                      options="-c statement_timeout=60000")
             else:
                 import pymysql
                 cn = pymysql.connect(host=tgt["host"], port=tgt.get("port", 3306),
                                      user=tgt["user"], password=tgt["password"],
-                                     database=db, connect_timeout=10)
+                                     database=db, connect_timeout=10,
+                                     read_timeout=120, write_timeout=120)
             cn.autocommit = True
             cur = cn.cursor()
         except Exception as e:

@@ -1,13 +1,34 @@
 import shutil
 import subprocess
+import sys
+import sysconfig
 import time
 
 from pathlib import Path
 
 _BASE = Path(__file__).resolve().parent.parent
-TOOL_PATHS = [str(_BASE / ".venv-tools" / "bin"), str(_BASE / ".venv" / "bin"),
-              "/opt/homebrew/opt/libpq/bin", "/opt/homebrew/opt/mysql-client/bin",
-              "/opt/homebrew/bin", "/usr/local/bin"]
+
+
+def _own_script_dirs():
+    """Where console scripts installed alongside migkit live - a venv's bin,
+    a container's /usr/local/bin, wherever. sys.executable is NOT resolved:
+    in a venv it is a symlink to the base interpreter, and following it would
+    point at the wrong bin directory."""
+    dirs = [sysconfig.get_path("scripts"), str(Path(sys.executable).parent)]
+    seen, out = set(), []
+    for d in dirs:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+# migkit's own environment first, then a source checkout's venv (developing in
+# place), then the paths Homebrew keeps off the default PATH.
+TOOL_PATHS = _own_script_dirs() + [
+    str(_BASE / ".venv" / "bin"),
+    "/opt/homebrew/opt/libpq/bin", "/opt/homebrew/opt/mysql-client/bin",
+    "/opt/homebrew/bin", "/usr/local/bin"]
 
 
 def tool_env(extra=None):
