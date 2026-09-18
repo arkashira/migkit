@@ -36,6 +36,27 @@ class MySQLEngine(Engine):
             return c
         return with_retry(_open, label=f"mysql connect {side}")
 
+    CANON_ENGINE = "mysql"
+
+    def neutral_tables(self, side, db):
+        return self._tables(side, db)
+
+    def neutral_columns(self, side, db, table):
+        rows = self._q(side, "select column_name, column_type"
+                             " from information_schema.columns"
+                             " where table_schema=%s and table_name=%s"
+                             " order by ordinal_position",
+                       (self._d(side, db), table))
+        return [(r[0], r[1]) for r in rows]
+
+    def neutral_digest(self, side, db, table, columns):
+        from .. import canon
+        row = canon.row_expr("mysql", columns)
+        r = self._q(side, f"select count(*),"
+                          f" {canon.digest_expr('mysql', row)}"
+                          f" from `{self._d(side, db)}`.`{table}`")
+        return (int(r[0][0]), str(r[0][1]))
+
     def _brand_probes(self):
         """`version()` and `@@version_comment` per side, in one round trip.
 

@@ -324,3 +324,39 @@ class Engine:
     def _assess_extra(self):
         """Whatever else this engine knows to look at before a migration."""
         return []
+
+    # ---- the cross-engine contract -------------------------------------
+    #
+    # Three questions, answered the same way by every engine that can answer
+    # them, so a comparison between two different engines is written once
+    # rather than once per pair. `migkit.canon` supplies the rendering; this
+    # is how an engine is asked to apply it.
+    #
+    # An engine that cannot take part raises from these rather than returning
+    # something empty: "this pair cannot be compared" is a sentence in the
+    # report, and an empty table list would read as "compared, nothing wrong".
+
+    # Which rendering family in `migkit.canon` this engine speaks, or "".
+    CANON_ENGINE = ""
+
+    def _no_canon(self, what):
+        return NotImplementedError(
+            f"{type(self).__name__} cannot {what} for a cross-engine"
+            " comparison yet - the pair is unsupported, not clean")
+
+    def neutral_tables(self, side, db):
+        """Table identifiers this engine's other neutral methods accept."""
+        raise self._no_canon("list tables")
+
+    def neutral_columns(self, side, db, table):
+        """[(column name, declared type)] in the order the server reports."""
+        raise self._no_canon("describe columns")
+
+    def neutral_digest(self, side, db, table, columns):
+        """(row count, digest) over `[(name, canon class)]`.
+
+        Computed inside the server: only the two numbers cross the network,
+        whatever the size of the table. That is the whole reason the
+        rendering had to be pinned down first.
+        """
+        raise self._no_canon("digest a table")

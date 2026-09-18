@@ -113,6 +113,36 @@ class PostgresEngine(Engine):
                 env=env)
         return p.stdout.rstrip("\n")
 
+    CANON_ENGINE = "postgres"
+
+    def neutral_tables(self, side, db):
+        out = self._psql(side, self._d(side, db),
+                         "select schemaname||'.'||tablename from pg_tables"
+                         " where schemaname not in"
+                         " ('pg_catalog','information_schema') order by 1")
+        return [l for l in out.splitlines() if l]
+
+    def neutral_columns(self, side, db, table):
+        sch, _, tbl = table.partition(".")
+        out = self._psql(side, self._d(side, db),
+                         "select column_name||chr(31)||data_type"
+                         " from information_schema.columns"
+                         f" where table_schema='{sch}'"
+                         f" and table_name='{tbl}'"
+                         " order by ordinal_position")
+        return [tuple(l.split("\x1f", 1)) for l in out.splitlines() if l]
+
+    def neutral_digest(self, side, db, table, columns):
+        from .. import canon
+        sch, _, tbl = table.partition(".")
+        row = canon.row_expr("postgres", columns)
+        got = self._psql(side, self._d(side, db),
+                         "select count(*)::text||chr(31)||"
+                         f"{canon.digest_expr('postgres', row)}::text"
+                         f' from "{sch}"."{tbl}"').strip()
+        n, _, d = got.partition("\x1f")
+        return (int(n), d)
+
     def _brand_probes(self):
         """The version banner and the reported server_version, per side.
 
