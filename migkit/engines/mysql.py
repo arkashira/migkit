@@ -2543,8 +2543,8 @@ class MySQLEngine(Engine):
             if pos:
                 break
         coords = f"file {pos[0][0]} pos {pos[0][1]}" if pos else "unknown"
-        gtid = self._q("src", "show variables like 'gtid_mode'")
-        gtid_on = gtid and gtid[0][1] == "ON"
+        brand = self._brands()[0].name
+        gtid_on, gtid_note = self._gtid_state(brand)
         src_cmds = [
             "create user if not exists 'migkit_repl'@'%'"
             " identified by 'CHANGE_ME';",
@@ -2558,6 +2558,21 @@ class MySQLEngine(Engine):
                 + " 0);",
                 "call mysql.rds_start_replication;",
             ]
+        elif brand == "mariadb":
+            # MariaDB has never had `CHANGE REPLICATION SOURCE TO` - measured
+            # on 11.8, it is ERROR 1064, a syntax error rather than a
+            # difference in behaviour. Its own form is `CHANGE MASTER TO`
+            # with `MASTER_USE_GTID`, which MySQL 8 rejects with the same
+            # error, so the two are not interchangeable in either direction.
+            auto = ("MASTER_USE_GTID = current_pos" if gtid_on else
+                    (f"MASTER_LOG_FILE = '{pos[0][0]}',"
+                     f" MASTER_LOG_POS = {pos[0][1]}" if pos else ""))
+            dst_cmds = [
+                f"change master to MASTER_HOST = '{s.host}',"
+                f" MASTER_PORT = {s.port}, MASTER_USER = 'migkit_repl',"
+                f" MASTER_PASSWORD = 'CHANGE_ME', {auto};",
+                "start slave;",
+            ]
         else:
             auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else                 (f"SOURCE_LOG_FILE = '{pos[0][0]}',"
                  f" SOURCE_LOG_POS = {pos[0][1]}" if pos else "")
@@ -2565,16 +2580,47 @@ class MySQLEngine(Engine):
                 f"change replication source to SOURCE_HOST = '{s.host}',"
                 f" SOURCE_PORT = {s.port}, SOURCE_USER = 'migkit_repl',"
                 f" SOURCE_PASSWORD = 'CHANGE_ME',"
+                # MySQL 8 only: MariaDB has no such option
                 f" GET_SOURCE_PUBLIC_KEY = 1, {auto};",
                 "start replica;",
             ]
+        stop = ["stop slave;", "reset slave all;"] if brand == "mariadb" \
+            else ["stop replica;", "reset replica all;"]
         return {"src": src_cmds, "dst": dst_cmds,
                 "drop_src": ["drop user if exists 'migkit_repl'@'%';"],
-                "drop_dst": ["stop replica;", "reset replica all;"],
-                "status": "show replica status",
-                "note": f"binlog now at {coords},"
-                        f" gtid {'ON' if gtid_on else 'OFF'},"
+                "drop_dst": stop,
+                "status": ("show slave status" if brand == "mariadb"
+                           else "show replica status"),
+                "note": f"written for {brand}; binlog now at {coords},"
+                        f" {gtid_note},"
                         " run move first then replicate from these coords"}
+
+    def _gtid_state(self, brand):
+        """(whether to replicate by GTID, what to say about it).
+
+        MySQL has a `gtid_mode` variable that is ON or OFF. **MariaDB has no
+        such variable at all** - measured, `show variables like 'gtid_mode'`
+        returns zero rows there rather than a row saying OFF. Reading that
+        empty result as falsy is how the plan silently decided GTID was off
+        and fell back to file-and-position coordinates, on a server where
+        GTID is always available once the binary log is on.
+        """
+        if brand == "mariadb":
+            got = self._q("src", "select @@gtid_binlog_pos,"
+                                 " @@gtid_current_pos")
+            binlog_pos = str(got[0][0]) if got else ""
+            return (True,
+                    "gtid available (MariaDB has no gtid_mode to switch;"
+                    f" gtid_binlog_pos is {binlog_pos or 'empty so far'})")
+        got = self._q("src", "show variables like 'gtid_mode'")
+        if not got:
+            return (False,
+                    "gtid_mode is not a variable on this server and migkit"
+                    " does not know this brand's equivalent - treating GTID"
+                    " as unavailable, which is the safe direction but may"
+                    " not be the true one")
+        on = str(got[0][1]).upper() == "ON"
+        return (on, f"gtid {'ON' if on else 'OFF'}")
 
     def setup_target_plan(self, db):
         s, t = self.hop.source, self.hop.target
