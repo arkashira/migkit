@@ -354,8 +354,13 @@ migkit rollback <hop> --state pre-cutover --apply
 `migkit check --consistent` writes nothing to the source. That is what makes
 the safest cutover order — freeze, prove, switch — possible at all.
 
-Grants are currently **detected and named but not applied automatically**. The
-check prints each missing grant; you run them.
+Grants are applied by the same `--kind schema` run, because a GRANT is DDL -
+there is no separate word to learn. Each one gets a REVOKE saved as its undo.
+
+Extra grants on the target are reported but **not** revoked. Removing a
+privilege somebody added on purpose is a different decision from restoring one
+the migration dropped, and doing both under one word would hide the second
+inside the first.
 
 ---
 
