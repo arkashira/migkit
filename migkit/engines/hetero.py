@@ -52,6 +52,10 @@ class HeteroEngine(Engine):
         # refuse anything else rather than pretending
         self.my = self.src_engine if self.src_name == "mysql" else None
         self.pg = self.dst_engine if self.dst_name == "postgres" else None
+        # only a MySQL source needs the binlog driver; saying otherwise sent
+        # the CLI down its fallback path for pairs that never wanted it
+        if self.src_engine.CANON_ENGINE != "mysql":
+            self.tail_requires = ""
 
     def _mysql_to_postgres_only(self, what):
         if self.my is None or self.pg is None:
@@ -422,6 +426,28 @@ class HeteroEngine(Engine):
             out.append(row)
         return out, n
 
+    def _flatten_changes(self, changes):
+        """The same decision, for change records rather than rows.
+
+        One rule, two shapes: a full load carries a list of values and a tail
+        carries a mapping, and both have to make the same call about a target
+        that cannot store "not there".
+        """
+        from .. import canon
+        if self.dst_engine.EXPRESSES_ABSENT:
+            return changes, 0
+        n = 0
+        out = []
+        for change in changes:
+            values = change.get("values") or {}
+            if any(v is canon.ABSENT for v in values.values()):
+                n += sum(1 for v in values.values() if v is canon.ABSENT)
+                change = dict(change)
+                change["values"] = {k: (None if v is canon.ABSENT else v)
+                                    for k, v in values.items()}
+            out.append(change)
+        return out, n
+
     def _can_compare_neutrally(self):
         return bool(self.src_engine.CANON_ENGINE
                     and self.dst_engine.CANON_ENGINE)
@@ -664,100 +690,67 @@ class HeteroEngine(Engine):
         ck.save()
 
     def tail_apply(self, db, go, token_path, log):
-        self._mysql_to_postgres_only("tailing changes")
+        """Carry changes from one engine's log into the other, until stopped.
+
+        The hand-written version of this read a MySQL binlog and wrote
+        PostgreSQL INSERT statements, and could only ever do that one pair.
+        This asks the source for `canon.change` records and hands them to the
+        target's applier, so it works for every pair where the source has a
+        change log at all - and refuses, naming the pair, where it does not.
+
+        **Applied first, token saved second.** A crash between the two
+        replays changes that were already applied, which the appliers are
+        idempotent for. Saving the token first would skip them instead, and a
+        skipped change is a row that silently never arrives.
+        """
         import json as _json
-        try:
-            from pymysqlreplication import BinLogStreamReader
-            from pymysqlreplication.row_event import (DeleteRowsEvent,
-                                                      UpdateRowsEvent,
-                                                      WriteRowsEvent)
-        except ImportError:
-            raise SystemExit("pip install mysql-replication for hetero tail")
-        s = self.hop.source
-        try:
-            self.my._q("src", "set global binlog_row_metadata = 'FULL'")
-            self.my._q("src", "set global binlog_row_image = 'FULL'")
-        except Exception:
-            log("note: cannot set binlog_row_metadata=FULL"
-                " (managed mysql: set it in the parameter group)")
-        ck = {}
+        import time as _time
+        from .base import Engine
+        if type(self.src_engine).neutral_changes is Engine.neutral_changes:
+            raise SystemExit(
+                f"{self.src_name} has no change log migkit can read, so"
+                " there is nothing to tail. Re-run `migkit move` for a fresh"
+                " full load instead, and verify it with `migkit check`")
+        # `neutral_apply` lives on the base class on purpose - the loop is
+        # the same everywhere and only the two statements differ - so asking
+        # whether *that* was overridden answers the wrong question
+        if type(self.dst_engine)._apply_upsert is Engine._apply_upsert:
+            raise SystemExit(
+                f"{self.dst_name} cannot apply changes yet - it has no"
+                " statement for writing one row by its key")
+
+        token = None
         if token_path.exists():
-            ck = _json.loads(token_path.read_text())
-            log(f"resuming from {ck.get('log_file')}:{ck.get('log_pos')}")
-        else:
-            pos = self.my._q("src", "show binary log status") or                 self.my._q("src", "show master status")
-            if pos:
-                ck = {"log_file": pos[0][0], "log_pos": int(pos[0][1])}
-                log(f"starting from current position"
-                    f" {ck['log_file']}:{ck['log_pos']}")
-        stream = BinLogStreamReader(
-            connection_settings={"host": s.host, "port": s.port,
-                                 "user": s.user, "passwd": s.password},
-            server_id=self.hop.options.get("server_id", 4379),
-            blocking=True, resume_stream=True,
-            log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
-            only_schemas=[db],
-            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent])
-
-        def esc(v):
-            if v is None:
-                return "null"
-            if isinstance(v, (int, float)):
-                return str(v)
-            return "'" + str(v).replace("'", "''") + "'"
-
-        n = 0
-        log("tailing binlog, ctrl-c to stop"
-            + ("" if go else " (count-only, add --go to apply)"))
+            try:
+                token = _json.loads(token_path.read_text()).get("token")
+            except Exception:
+                token = None
+        log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
+            + ("" if go else " (count-only, add --go to apply)")
+            + (f", resuming from {str(token)[:40]}" if token else ""))
+        seen = 0
         try:
-            for ev in stream:
-                t = ev.table
-                pks = self.my._pk_cols(db, t)
-                if not pks:
-                    continue
-                def fix(vals):
-                    return self.my.binlog_names(db, t, vals)
-
-                stmts = []
-                for row in ev.rows:
-                    if isinstance(ev, WriteRowsEvent):
-                        vals = fix(row["values"])
-                        cols = list(vals)
-                        sets = ", ".join(f'"{c}" = excluded."{c}"'
-                                         for c in cols if c not in pks)
-                        stmts.append(
-                            f'insert into "{t}" ('
-                            + ", ".join(f'"{c}"' for c in cols)
-                            + ") values ("
-                            + ", ".join(esc(vals[c]) for c in cols)
-                            + f') on conflict ({", ".join(chr(34)+p+chr(34) for p in pks)})'
-                            + (f" do update set {sets}" if sets
-                               else " do nothing"))
-                    elif isinstance(ev, UpdateRowsEvent):
-                        vals = fix(row["after_values"])
-                        before = fix(row["before_values"])
-                        cols = list(vals)
-                        sets = ", ".join(f'"{c}" = {esc(vals[c])}'
-                                         for c in cols if c not in pks)
-                        cond = " and ".join(
-                            f'"{p}" = {esc(before[p])}' for p in pks)
-                        stmts.append(f'update "{t}" set {sets} where {cond}')
-                    elif isinstance(ev, DeleteRowsEvent):
-                        dv = fix(row["values"])
-                        cond = " and ".join(
-                            f'"{p}" = {esc(dv[p])}' for p in pks)
-                        stmts.append(f'delete from "{t}" where {cond}')
-                if go and stmts:
-                    self.pg._psql("dst", db, ";\n".join(stmts))
-                n += len(ev.rows)
-                token_path.write_text(_json.dumps(
-                    {"log_file": stream.log_file,
-                     "log_pos": stream.log_pos}))
-                log(f"{n} row events applied,"
-                    f" at {stream.log_file}:{stream.log_pos}")
+            while True:
+                changes, token = self.src_engine.neutral_changes(
+                    "src", db, token, limit=1000)
+                if changes:
+                    changes, flattened = self._flatten_changes(changes)
+                    if flattened:
+                        log(f"{flattened} values were not there on the"
+                            f" source and landed as NULL - {self.dst_name}"
+                            " cannot store the difference")
+                    if go:
+                        self.dst_engine.neutral_apply("dst", db, changes)
+                    seen += len(changes)
+                    if go:
+                        token_path.parent.mkdir(parents=True, exist_ok=True)
+                        token_path.write_text(_json.dumps({"token": token}))
+                    log(f"{seen} changes"
+                        + ("" if go else " seen (nothing applied)"))
+                else:
+                    _time.sleep(1)
         except KeyboardInterrupt:
-            log(f"stopped at {stream.log_file}:{stream.log_pos},"
-                " rerun to resume")
+            log(f"stopped after {seen} changes; rerun to resume")
 
     def watch_sample(self, db):
         import time
