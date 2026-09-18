@@ -825,6 +825,52 @@ class MongoEngine(Engine):
                 " client-side hashing is used (slower)")
         inv = self._handwork()
         items += inv.rows() + inv.summary()
+        items += self._mover_leftovers()
+        return items
+
+    def _mover_leftovers(self):
+        """What a mover added to the source and did not take away.
+
+        MongoDB has no replication slot to pin storage the way PostgreSQL
+        does, so nothing here is urgent - but a leftover database or
+        collection is still evidence of which mover touched this deployment,
+        and that matters when two of them ran and only one is admitted to.
+
+        `system.*` is the server's own bookkeeping, never a mover's, so it is
+        excluded before anything is matched.
+        """
+        from .. import leftovers as _lo
+        found, items = [], []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "source leftovers",
+                          "item": item, "detail": str(detail)})
+        src = self._client("src")
+        try:
+            dbs = [d for d in src.list_database_names() if d not in SKIP_DBS]
+        except Exception as e:
+            add("warn", "cannot list databases on the source",
+                f"{str(e)[:90]} - unknown, not clean")
+            return items
+        for name in dbs:
+            found.append(("database", name))
+        for db in dbs:
+            try:
+                for coll in src[db].list_collection_names():
+                    if not coll.startswith("system."):
+                        found.append(("collection", coll))
+            except Exception as e:
+                add("warn", f"cannot list collections in {db}",
+                    f"{str(e)[:90]} - unknown, not clean")
+        by = _lo.group(found)
+        if not by:
+            add("pass", "no mover artifacts left in the source",
+                f"{len(found)} objects examined")
+            return items
+        add("warn", f"{_lo.total(by)} mover artifacts left in the source",
+            _lo.describe(by) + ". Drop them once every leg that used them is"
+            " finished - they are on the source, so nothing on the target"
+            " tells you they are there")
         return items
 
     def _handwork(self):
