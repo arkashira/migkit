@@ -24,6 +24,7 @@ The rule it is built on: **never let the mover be the judge of its own work.**
 ## Table of contents
 
 - [Why](#why)
+- [Case study: what a "consistent" report does not cover](docs/case-study-what-a-consistent-report-does-not-cover.md)
 - [Features](#features)
 - [Quickstart](#quickstart)
 - [Install](#install)
@@ -47,6 +48,10 @@ never structure; and they cannot repair a single differing row or roll back.
 migkit closes every one of those gaps with a uniform, evidence-first workflow
 across all engines. Every `OK` prints the counts and hashes of both sides, so
 "equal" is something you can see, not something you trust.
+
+Worked example, with real findings from migrations a managed service had
+already reported as consistent:
+[what a "consistent" report does not cover](docs/case-study-what-a-consistent-report-does-not-cover.md).
 
 ## Features
 
