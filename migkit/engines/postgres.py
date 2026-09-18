@@ -1023,19 +1023,15 @@ class PostgresEngine(Engine):
         # existing rows, and the planner distrusts them - a load-time speed
         # hack left unfinished. The fk orphan scan above covers foreign keys;
         # check constraints are the blind spot.
-        nvc = [l for l in self._psql("dst", db,
-               "select conrelid::regclass::text||'.'||conname"
-               " from pg_constraint c"
-               " join pg_namespace n on n.oid = c.connamespace"
-               " where c.contype = 'c' and not c.convalidated"
-               " and n.nspname not like '\\_\\_%'").splitlines() if l]
+        nv = self._unvalidated_checks(db)
+        nvc = [f"{tbl}.{name}" for tbl, name, _ in nv]
         if nvc:
             res.append(Result("deep", f"{db} checks", "diff",
                               f"{len(nvc)} check constraints NOT VALIDATED"
                               " (existing rows unchecked, planner distrusts): "
                               + "; ".join(nvc[:5]), "",
-                              "alter table ... validate constraint ... on"
-                              " target after confirming no violations"))
+                              "migkit sync --kind schema --apply validates"
+                              " them; it fails loudly if a row violates one"))
         else:
             res.append(Result("deep", f"{db} checks", "ok",
                               "all check constraints validated"))
@@ -1833,6 +1829,55 @@ class PostgresEngine(Engine):
            and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
         order by 1"""
 
+    def _unvalidated_checks(self, db):
+        """[(table, constraint, definition)] left NOT VALID on the target.
+
+        One computation for the check and the repair. The definition comes
+        along because it is the only way back: PostgreSQL has no statement
+        that un-validates a constraint, so the undo has to drop it and add it
+        again exactly as it was - and `pg_get_constraintdef` includes the
+        NOT VALID, so the recreated constraint is the same object in the same
+        state.
+        """
+        rows = self._psql("dst", self._d("dst", db), """
+            select conrelid::regclass::text||chr(31)||conname||chr(31)
+                   ||pg_get_constraintdef(c.oid)
+              from pg_constraint c
+              join pg_namespace n on n.oid = c.connamespace
+             where c.contype = 'c' and not c.convalidated
+               and n.nspname not like '\\_\\_%'
+             order by 1""").splitlines()
+        return [tuple(r.split("\x1f", 2)) for r in rows if r.count("\x1f") == 2]
+
+    def _constraint_repair(self, db):
+        """Finish the validation the load skipped.
+
+        A NOT VALID check constraint enforces new writes and was never checked
+        against the rows already there, so the planner will not use it and
+        nobody knows whether the existing data satisfies it. Validating scans
+        the table under ShareUpdateExclusiveLock - no reads or writes are
+        blocked, which `structural-fix.locks.txt` says for itself.
+
+        Measured: if a row violates the constraint, PostgreSQL refuses with
+        `check constraint "..." of relation "..." is violated by some row` and
+        changes nothing. So this needs no pre-scan of its own - the server
+        already performs one, and failing is the correct outcome.
+        """
+        nv = self._unvalidated_checks(db)
+        if not nv:
+            return None
+        stmts, undo = [], []
+        for tbl, name, definition in nv:
+            stmts.append(f'ALTER TABLE {tbl} VALIDATE CONSTRAINT "{name}";')
+            # no statement un-validates a constraint, so the way back is to
+            # put the original one back exactly as it was
+            undo.append(f'ALTER TABLE {tbl} DROP CONSTRAINT "{name}";')
+            undo.append(f'ALTER TABLE {tbl} ADD CONSTRAINT "{name}"'
+                        f' {definition};')
+        return RepairAction(db, "constraints", stmts, undo,
+                            f"{len(nv)} check constraints the load left"
+                            " unvalidated")
+
     def _grant_gaps(self, db):
         """(missing, extra, missing_sequence, n_seen, n_seq_seen), or None.
 
@@ -2076,6 +2121,9 @@ class PostgresEngine(Engine):
             g = self._grant_repair(db)
             if g:
                 actions.append(g)
+            c = self._constraint_repair(db)
+            if c:
+                actions.append(c)
             act = self._schema_repair_action(db)
             if act:
                 actions.append(act)
@@ -2102,7 +2150,7 @@ class PostgresEngine(Engine):
         if action.kind == "sequences":
             self._psql("dst", db,
                        "\n".join(s.split("  --")[0] for s in action.statements))
-        elif action.kind in ("schema", "grants"):
+        elif action.kind in ("schema", "grants", "constraints"):
             # one psql call: multi-statement + $$-quoted bodies apply intact,
             # and a grant set lands all-or-nothing
             blob = "begin;\n" + "\n".join(action.statements) + "\ncommit;"

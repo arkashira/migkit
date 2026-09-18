@@ -1588,6 +1588,42 @@ class MySQLEngine(Engine):
                    r"\1<db>\2", t, flags=re.I)
         return t.rstrip(";")
 
+    def _constraint_repair(self, db):
+        """Turn NOT ENFORCED check constraints back on.
+
+        MySQL's counterpart to PostgreSQL's NOT VALID, and the inverse is
+        exact - `ALTER CHECK ... NOT ENFORCED` puts it back as it was, which
+        is more than the PostgreSQL side can say.
+
+        Measured: enforcing a constraint that existing rows violate fails with
+        `ERROR 3819 Check constraint '...' is violated` and changes nothing,
+        so no pre-scan is needed here either.
+        """
+        ddb = self._d("dst", db)
+        q = ("select tc.table_name, tc.constraint_name, tc.enforced"
+             " from information_schema.table_constraints tc"
+             " where tc.constraint_schema=%s and tc.constraint_type='CHECK'"
+             " and tc.table_name not like 'migkit%%'")
+        try:
+            src = {(r[0], r[1]): str(r[2]).upper()
+                   for r in self._q("src", q, (db,))}
+            dst = {(r[0], r[1]): str(r[2]).upper()
+                   for r in self._q("dst", q, (ddb,))}
+        except Exception:
+            # MySQL 5.7 parses CHECK and discards it - no catalog to read
+            return None
+        turn_on = [k for k, v in sorted(dst.items())
+                   if v == "NO" and src.get(k) == "YES"]
+        if not turn_on:
+            return None
+        stmts = [f"ALTER TABLE `{tbl}` ALTER CHECK `{name}` ENFORCED;"
+                 for tbl, name in turn_on]
+        undo = [f"ALTER TABLE `{tbl}` ALTER CHECK `{name}` NOT ENFORCED;"
+                for tbl, name in turn_on]
+        return RepairAction(db, "constraints", stmts, undo,
+                            f"{len(turn_on)} check constraints the target"
+                            " was not enforcing")
+
     def _grant_repair(self, db):
         """Replay the grants the mover did not carry, with a REVOKE to undo.
 
@@ -1694,6 +1730,9 @@ class MySQLEngine(Engine):
             g = self._grant_repair(db)
             if g:
                 actions.append(g)
+            c = self._constraint_repair(db)
+            if c:
+                actions.append(c)
         if kind in ("rows", "all"):
             d = self.hop.report_dir(db)
             tables = sorted({f.name.split(".")[0][len("data-"):]
@@ -1759,7 +1798,7 @@ class MySQLEngine(Engine):
             finally:
                 conn.close()
             return
-        if action.kind in ("schema", "grants"):
+        if action.kind in ("schema", "grants", "constraints"):
             # mysql CLI handles routine/trigger bodies (DELIMITER) correctly
             tg = self.hop.target
             ddl = "\n".join(action.statements) + "\n"
