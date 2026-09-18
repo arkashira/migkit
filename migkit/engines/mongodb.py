@@ -187,6 +187,91 @@ class MongoEngine(Engine):
         coll = self._client(side)[self._d(side, db)][table]
         coll.delete_one(dict(key))
 
+    # A change stream reports these four as row changes. The rest are
+    # collection- and database-level events, and none of them is something a
+    # row-shaped applier can carry.
+    STREAM_OPS = {"insert": "insert", "replace": "insert",
+                  "update": "update", "delete": "delete"}
+
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """Row changes out of a change stream, as neutral records.
+
+        Opened over the whole database rather than per collection, so one
+        cursor covers every table the hop moves.
+
+        `fullDocument="updateLookup"` is not optional here. Measured on
+        MongoDB 7: without it an `update` event carries only
+        `updateDescription.updatedFields` - the delta - and nothing else. On
+        a target row that already exists that is enough; on one that is
+        missing it would insert a row holding the key and the changed field
+        and nothing more, which is a row that looks present and is not. The
+        cost is that the lookup reads the document as it is *now*, so a value
+        newer than the event can arrive early. A tail converges either way;
+        a half-written row does not.
+
+        `updateDescription.removedFields` names what `$unset` took away, and
+        those come through as `canon.ABSENT` - the same marker the full load
+        uses, so a SQL target counts them and a document target keeps them
+        missing.
+        """
+        from .. import canon
+        client = self._client(side)
+        target = self._d(side, db)
+        args = {"full_document": "updateLookup"}
+        if token:
+            args["resume_after"] = {"_data": token}
+        try:
+            stream = client[target].watch([], **args)
+        except Exception as e:
+            if "only supported on replica sets" in str(e):
+                raise SystemExit(
+                    "this server is a standalone, and a change stream needs"
+                    " a replica set - the oplog a stream reads does not"
+                    " exist otherwise. A single node is enough:\n"
+                    "    mongod --replSet rs0\n"
+                    "    mongosh --eval 'rs.initiate()'")
+            raise
+        out = []
+        try:
+            while len(out) < limit:
+                event = stream.try_next()
+                if event is None:
+                    break
+                op = event.get("operationType")
+                if op not in self.STREAM_OPS:
+                    raise SystemExit(
+                        f"the change stream reported {op!r} on"
+                        f" {event.get('ns', {}).get('coll', '?')}, which is"
+                        " not a row change - migkit carries inserts,"
+                        " updates, replaces and deletes, and will not pretend"
+                        " a dropped or renamed collection is one of them.\n"
+                        "    Re-run the full load for that collection, then"
+                        " start the tail again from a token taken after it")
+                table = event.get("ns", {}).get("coll")
+                key = dict(event.get("documentKey") or {})
+                if self.STREAM_OPS[op] == "delete":
+                    out.append(canon.change("delete", table, key))
+                elif event.get("fullDocument") is None:
+                    # The lookup found nothing, which means the document was
+                    # deleted between the change and this read. Whatever
+                    # deleted it produced its own event, and that event is
+                    # behind this one in the same stream - so the truth about
+                    # this key is already on its way and carrying a key with
+                    # no values would put an empty row on the target until it
+                    # arrives.
+                    continue
+                else:
+                    values = dict(event.get("fullDocument") or {})
+                    for gone in ((event.get("updateDescription") or {})
+                                 .get("removedFields") or []):
+                        values[gone] = canon.ABSENT
+                    out.append(canon.change(self.STREAM_OPS[op], table,
+                                            key, values))
+            last = stream.resume_token
+        finally:
+            stream.close()
+        return out, (last or {}).get("_data") if last else token
+
     def neutral_digest(self, side, db, table, columns):
         """(count, digest) folded here rather than in the server.
 
