@@ -112,6 +112,45 @@ class RedisEngine(Engine):
                 + (f" (source caps at {smax:,})" if smax else ""))
         return items
 
+    def _health(self, side):
+        """What this server says about its own load, for the throttle.
+
+        `connected_clients` against `maxclients` is the same shape the other
+        engines use: work in flight against the ceiling, not throughput.
+
+        Throughput was the obvious choice and it is the wrong one. Measured,
+        `instantaneous_ops_per_sec` read **287,248** on a Redis whose own
+        latency probe said 0.02 ms - a server doing a great deal of work
+        perfectly comfortably - and it still read **287,187** a full two
+        seconds after the load stopped, because it is a rolling sample rather
+        than a reading of now. A throttle built on it would have backed off
+        from a fast healthy server and kept going against a struggling slow
+        one, which is the wrong way round.
+
+        A background save or AOF rewrite is folded up to the busy threshold
+        the way MongoDB folds its queue: Redis forks for those, and a fork on
+        a large keyspace is the one moment when adding a full scan is
+        genuinely unkind. Measured, `rdb_bgsave_in_progress` is 1 while it
+        runs.
+        """
+        from ..throttle import BUSY_RATIO, Health
+        try:
+            info = self._client(side).info()
+        except Exception:
+            return None
+        busy = None
+        ceiling = float(info.get("maxclients") or 0)
+        if ceiling:
+            busy = float(info.get("connected_clients") or 0) / ceiling
+        if (info.get("rdb_bgsave_in_progress")
+                or info.get("aof_rewrite_in_progress")):
+            busy = max(busy or 0.0, BUSY_RATIO)
+        if busy is None:
+            # the server would not say, which is not the same as idle
+            return None
+        return Health(busy_ratio=busy,
+                      note="rewriting to disk" if busy >= BUSY_RATIO else "")
+
     def check_counts(self, db):
         a = self._client("src", db).dbsize()
         b = self._client("dst", db).dbsize()
@@ -156,6 +195,7 @@ class RedisEngine(Engine):
         return bad
 
     def check_data(self, db, table=None, stream=None):
+        from ..throttle import Throttle
         s = self._client("src", db)
         t = self._client("dst", db)
         sample = int(self.hop.options.get("sample", 5000))
@@ -163,12 +203,18 @@ class RedisEngine(Engine):
         checked = 0
         bad = 0
         cursor = 0
+        # A SCAN plus a pipeline of reads is the heaviest thing a verifier
+        # does to a single-threaded server, and nothing else was slowing it
+        # down: this loop ran at whatever speed the network allowed, against
+        # a Redis that might also be serving an application.
+        gate = Throttle(1, probe=lambda: self._health("src"))
         while True:
             cursor, keys = s.scan(cursor, count=1000)
             if not deep and checked + len(keys) > sample:
                 keys = keys[:max(0, sample - checked)]
             if keys:
-                bad += len(self._batch_compare(s, t, keys))
+                with gate.unit():
+                    bad += len(self._batch_compare(s, t, keys))
                 checked += len(keys)
             if stream and checked and checked % 20000 < 1000:
                 stream(f"db{db}: {checked} keys compared")

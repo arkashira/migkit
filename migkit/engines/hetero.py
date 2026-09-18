@@ -291,6 +291,23 @@ class HeteroEngine(Engine):
         items += self._pair_capabilities()
         return items
 
+    def _health(self, side):
+        """The load of whichever server this side actually is.
+
+        A cross-engine hop has no server of its own, so a throttle here has
+        nothing to ask unless it asks the engine on that side. Without this
+        the pair that reads hardest - the one doing the full scan - was the
+        only configuration with no brake at all.
+        """
+        probe = getattr(self.src_engine if side == "src" else self.dst_engine,
+                        "_health", None)
+        if probe is None:
+            return None
+        try:
+            return probe(side)
+        except Exception:
+            return None
+
     def _pair_capabilities(self):
         """What this combination can do, answered from the classes.
 
@@ -416,9 +433,13 @@ class HeteroEngine(Engine):
         after = tuple(st["last"]) if st.get("last") is not None else None
         moved = int(st.get("moved", 0))
         absent = 0
+        from ..throttle import Throttle
+        # the read side is the one under load, so that is what the gate asks
+        gate = Throttle(1, probe=lambda: self._health("src"))
         while True:
-            rows, last = self.src_engine.neutral_read(
-                "src", db, src_t, src_cols, after, chunk)
+            with gate.unit():
+                rows, last = self.src_engine.neutral_read(
+                    "src", db, src_t, src_cols, after, chunk)
             if not rows:
                 break
             rows, flattened = self._flatten_absent(rows)
