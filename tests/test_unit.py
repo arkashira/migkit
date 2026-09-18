@@ -63,17 +63,24 @@ def test_every_engine_instantiates():
         assert hasattr(eng, "check_counts")
 
 
-def test_hetero_rejects_unbuilt_pair():
+def test_hetero_rejects_an_engine_migkit_does_not_have():
+    """A pair migkit has both halves of now builds whatever the direction;
+    what is still refused is a side it has no driver for at all. This used to
+    be the same check because every pair but one was refused."""
     from migkit.config import Endpoint, Hop
-    hop = Hop(name="t", engine="hetero",
-              source=Endpoint(host="s", user="u", password="p"),
-              target=Endpoint(host="t", user="u", password="p"),
-              options={"source_engine": "oracle", "target_engine": "mysql"})
+
+    def hop(src, dst):
+        return Hop(name="t", engine="hetero",
+                   source=Endpoint(host="s", user="u", password="p"),
+                   target=Endpoint(host="t", user="u", password="p"),
+                   options={"source_engine": src, "target_engine": dst})
     try:
-        get_engine(hop)
-        assert False, "should reject unbuilt pair"
-    except SystemExit:
-        pass
+        get_engine(hop("oracle", "mysql"))
+        assert False, "should reject an engine with no driver"
+    except SystemExit as e:
+        assert "oracle" in str(e)
+    eng = get_engine(hop("postgres", "mysql"))
+    assert eng.src_engine.CANON_ENGINE == "postgres"
 
 
 def test_report_renders_without_findings():

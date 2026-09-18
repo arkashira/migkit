@@ -8,12 +8,27 @@ from .base import Engine, Result
 
 
 class HeteroEngine(Engine):
-    """Cross-engine hop, mysql source to postgres target first.
+    """A hop whose two sides are different database engines.
 
-    Reuses the native engines for each side: reads through the source
-    engine driver, writes through the target engine bulk path. Schema
-    crosses via pgloader when installed, else sqlglot transpilation.
-    Data validation crosses via reladiff which speaks both dialects."""
+    One driver per side, built from the same registry every other hop uses,
+    so the pair is configuration rather than code. What used to be here was a
+    single hand-written mysql-to-postgres pipeline that refused every other
+    pairing outright; the comparison below is now written once against the
+    neutral contract in `migkit.engines.base` and the rendering in
+    `migkit.canon`, which is what makes a second pair cost nothing.
+
+    Verification happens **inside each server**. Both sides fold their rows
+    into one number using the same function over the same canonical text, and
+    only the two numbers meet - so the size of the table has nothing to do
+    with the amount of data on the wire. A validator that fetches both sides'
+    rows into a middle box to compare them pays for the table twice, and pays
+    again every time it re-runs.
+
+    Moving data, converting DDL and tailing changes are still the
+    mysql-to-postgres paths they always were, and say so when asked for
+    another pair. Comparing correctly for every pair first is deliberate:
+    a mover nobody can verify is the thing this tool exists to argue against.
+    """
 
     checks = ("counts", "data")
     counts_from_data = True
@@ -23,18 +38,193 @@ class HeteroEngine(Engine):
 
     def __init__(self, hop):
         super().__init__(hop)
-        pair = (hop.options.get("source_engine", "mysql"),
-                hop.options.get("target_engine", "postgres"))
-        if pair != ("mysql", "postgres"):
-            raise SystemExit(f"hetero {pair[0]}->{pair[1]} not built yet,"
-                             " mysql->postgres is the first pair")
-        from .mysql import MySQLEngine
-        from .postgres import PostgresEngine
-        self.my = MySQLEngine(hop)
-        self.pg = PostgresEngine(hop)
+        self.src_name = hop.options.get("source_engine", "mysql")
+        self.dst_name = hop.options.get("target_engine", "postgres")
+        for role, name in (("source_engine", self.src_name),
+                           ("target_engine", self.dst_name)):
+            if name == "hetero":
+                raise SystemExit(f"{role} cannot be 'hetero'")
+        from . import engine_named
+        self.src_engine = engine_named(self.src_name, hop)
+        self.dst_engine = engine_named(self.dst_name, hop)
+        # the mover, the DDL conversion and the binlog tail below are still
+        # written for this one pair; they are reached through these names and
+        # refuse anything else rather than pretending
+        self.my = self.src_engine if self.src_name == "mysql" else None
+        self.pg = self.dst_engine if self.dst_name == "postgres" else None
+
+    def _mysql_to_postgres_only(self, what):
+        if self.my is None or self.pg is None:
+            raise SystemExit(
+                f"hetero {self.src_name}->{self.dst_name}: {what} is still"
+                " written for mysql->postgres only. `check` works on this"
+                " pair; this does not.")
 
     def databases(self):
-        return self.my.databases()
+        return self.src_engine.databases()
+
+    # ---- comparing, for any pair ---------------------------------------
+
+    @staticmethod
+    def _leaf(identifier):
+        """The table's own name, without whatever qualifies it.
+
+        MySQL answers `orders`; PostgreSQL answers `public.orders`. Matching
+        on the last component is what lets the two lists meet without either
+        engine having to know the other exists.
+        """
+        return str(identifier).split(".")[-1]
+
+    @staticmethod
+    def match_tables(src_ids, dst_ids):
+        """(pairs, src_only, dst_only, ambiguous) by unqualified name.
+
+        A name that appears twice on one side - the same table in two schemas -
+        is returned as ambiguous rather than resolved. Picking one would
+        compare a table against a namesake and report the verdict as if it
+        were about the one the operator meant.
+        """
+        def index(ids):
+            out = {}
+            for i in ids:
+                out.setdefault(HeteroEngine._leaf(i), []).append(i)
+            return out
+        s, d = index(src_ids), index(dst_ids)
+        ambiguous = sorted(
+            [v[0] for v in s.values() if len(v) > 1]
+            + [v[0] for v in d.values() if len(v) > 1])
+        pairs, src_only, dst_only = [], [], []
+        for leaf in sorted(set(s) | set(d)):
+            sv, dv = s.get(leaf, []), d.get(leaf, [])
+            if len(sv) > 1 or len(dv) > 1:
+                continue
+            if sv and dv:
+                pairs.append((sv[0], dv[0]))
+            elif sv:
+                src_only.append(sv[0])
+            else:
+                dst_only.append(dv[0])
+        return pairs, src_only, dst_only, ambiguous
+
+    def _column_plan(self, src_table, dst_table, db):
+        """What to hash on each side, and everything that is not hashable.
+
+        Returns (src_cols, dst_cols, notes). The two column lists are the
+        same names in the same order - **sorted by name**, not by the order
+        each server happens to report, because the row text is positional and
+        two servers agreeing on a set of columns says nothing about the order
+        they list them in.
+        """
+        from .. import canon
+
+        def declared(engine, side, table):
+            got = {}
+            for name, typ in engine.neutral_columns(side, db, table):
+                got[name] = typ
+            return got
+        src_types = declared(self.src_engine, "src", src_table)
+        dst_types = declared(self.dst_engine, "dst", dst_table)
+        notes = []
+        both = sorted(set(src_types) & set(dst_types))
+        only_src = sorted(set(src_types) - set(dst_types))
+        only_dst = sorted(set(dst_types) - set(src_types))
+        if only_src:
+            notes.append(f"columns only on the source, not compared:"
+                         f" {', '.join(only_src)}")
+        if only_dst:
+            notes.append(f"columns only on the target, not compared:"
+                         f" {', '.join(only_dst)}")
+        src_cols, dst_cols = [], []
+        for name in both:
+            scls, swhy = canon.comparable(self.src_engine.CANON_ENGINE,
+                                          src_types[name])
+            dcls, dwhy = canon.comparable(self.dst_engine.CANON_ENGINE,
+                                          dst_types[name])
+            if not scls or not dcls:
+                notes.append(f"{name}: {swhy or dwhy}")
+                continue
+            src_cols.append((name, scls))
+            dst_cols.append((name, dcls))
+        return src_cols, dst_cols, notes
+
+    def _neutral_rows(self, db, table=None, stream=None):
+        """One (scope, status, detail, src_rows, dst_rows) per table.
+
+        The single computation behind both `check_counts` and `check_data`:
+        the digest query returns the count alongside the checksum, so asking
+        twice would be two answers taken at two different moments about the
+        same question.
+        """
+        src_ids = self.src_engine.neutral_tables("src", db)
+        dst_ids = self.dst_engine.neutral_tables("dst", db)
+        pairs, src_only, dst_only, ambiguous = self.match_tables(src_ids,
+                                                                 dst_ids)
+        if table:
+            pairs = [p for p in pairs if self._leaf(p[0]) == self._leaf(table)]
+            src_only = [t for t in src_only
+                        if self._leaf(t) == self._leaf(table)]
+        rows = []
+        for t in src_only:
+            rows.append((f"{db}.{self._leaf(t)}", "diff",
+                         f"{t} is on the source and not on the target",
+                         None, None))
+        for t in dst_only:
+            rows.append((f"{db}.{self._leaf(t)}", "warn",
+                         f"{t} is on the target and not on the source",
+                         None, None))
+        for t in ambiguous:
+            rows.append((f"{db}.{self._leaf(t)}", "warn",
+                         f"{self._leaf(t)} exists more than once on one side,"
+                         " so migkit will not guess which one the other side"
+                         " means - name the schema", None, None))
+        for src_t, dst_t in pairs:
+            scope = f"{db}.{self._leaf(src_t)}"
+            try:
+                src_cols, dst_cols, notes = self._column_plan(src_t, dst_t, db)
+            except Exception as e:
+                rows.append((scope, "error",
+                             f"cannot read the columns: {str(e)[:120]}",
+                             None, None))
+                continue
+            tail = ("; " + "; ".join(notes)) if notes else ""
+            if not src_cols:
+                rows.append((scope, "warn",
+                             "no column on this table can be compared across"
+                             " these two engines" + tail, None, None))
+                continue
+            try:
+                a = self.src_engine.neutral_digest("src", db, src_t, src_cols)
+                b = self.dst_engine.neutral_digest("dst", db, dst_t, dst_cols)
+            except Exception as e:
+                rows.append((scope, "error",
+                             str(e).splitlines()[-1][:120], None, None))
+                continue
+            if stream:
+                stream(f"{scope}: {'ok' if a == b else 'diff'}")
+            if a == b:
+                rows.append((scope, "ok",
+                             f"rows {a[0]:,} and every compared column equal"
+                             f" across {self.src_name}/{self.dst_name}"
+                             f" (digest {a[1]}){tail}", a[0], b[0]))
+            elif a[0] != b[0]:
+                rows.append((scope, "diff",
+                             f"rows src={a[0]:,} dst={b[0]:,}{tail}",
+                             a[0], b[0]))
+            else:
+                rows.append((scope, "diff",
+                             f"rows {a[0]:,} match but the contents do not:"
+                             f" digest src={a[1]} dst={b[1]}{tail}",
+                             a[0], b[0]))
+        return rows
+
+    def _neutral_compare(self, db, table=None, stream=None):
+        return [Result("data", scope, status, detail)
+                for scope, status, detail, _, _
+                in self._neutral_rows(db, table, stream)]
+
+    def _can_compare_neutrally(self):
+        return bool(self.src_engine.CANON_ENGINE
+                    and self.dst_engine.CANON_ENGINE)
 
     def _url(self, side, db):
         from urllib.parse import quote
@@ -44,27 +234,40 @@ class HeteroEngine(Engine):
                 f"@{ep.host}:{ep.port}/{db}")
 
     def check_counts(self, db):
-        bad = []
-        total_a = total_b = 0
-        for t in self.my._tables("src", db):
-            a = self.my._q("src", f"select count(*) from `{db}`.`{t}`")[0][0]
-            try:
-                b = int(self.pg._psql("dst", db,
-                                      f'select count(*) from "{t}"'))
-            except RuntimeError:
-                bad.append(f"{t} missing on target")
-                continue
-            total_a += a
-            total_b += b
-            if a != b:
-                bad.append(f"{t} src={a} dst={b}")
+        if not self._can_compare_neutrally():
+            return [Result("counts", db, "error",
+                           f"{self.src_name}->{self.dst_name}: one of these"
+                           " engines has no canonical rendering yet, so"
+                           " migkit will not claim the two sides agree")]
+        rows = self._neutral_rows(db)
+        if not rows:
+            return [Result("counts", db, "warn",
+                           "no table on either side, so nothing was compared"
+                           " - unknown, not clean")]
+        bad = [(scope, status, detail) for scope, status, detail, a, b in rows
+               if status != "ok" or a != b]
         if bad:
-            return [Result("counts", db, "diff", "; ".join(bad[:10]))]
+            return [Result("counts", scope, status, detail)
+                    for scope, status, detail in bad[:10]]
+        total = sum(a for _, _, _, a, _ in rows if a is not None)
         return [Result("counts", db, "ok",
-                       f"rows {total_a:,}=={total_b:,} across engines")]
+                       f"rows {total:,}=={total:,} across"
+                       f" {self.src_name}/{self.dst_name},"
+                       f" {len(rows)} tables")]
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
+        """The digest comparison for any pair, with reladiff for the pair it
+        was written for.
+
+        reladiff names the rows that differ, which the digest cannot - it
+        answers whether, not which. So it stays where it applies, and the
+        digest is what makes every other pairing answerable at all.
+        """
+        if self._can_compare_neutrally() and not (self.my and self.pg):
+            return self._neutral_compare(db, table, stream)
         if not which("reladiff"):
+            if self._can_compare_neutrally():
+                return self._neutral_compare(db, table, stream)
             return [Result("data", db, "error",
                            "reladiff needed for cross-engine data compare,"
                            " run bootstrap.sh")]
@@ -145,6 +348,7 @@ class HeteroEngine(Engine):
     ]
 
     def convert_ddl(self, db):
+        self._mysql_to_postgres_only("converting DDL")
         import sqlglot
         out = []
         for t in self.my._tables("src", db):
@@ -160,6 +364,7 @@ class HeteroEngine(Engine):
         return out
 
     def setup_target_plan(self, db):
+        self._mysql_to_postgres_only("the target setup plan")
         plan = []
         if which("pgloader"):
             plan.append(f"pgloader mysql://user@{self.hop.source.host}/{db}"
@@ -174,9 +379,11 @@ class HeteroEngine(Engine):
         return plan
 
     def list_move_tables(self, db):
+        self._mysql_to_postgres_only("listing tables to move")
         return [("", t) for t in self.my._tables("src", db)]
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
+        self._mysql_to_postgres_only("moving a table")
         t = tbl or sch
         key = f"{db}.{t}"
         st = ck.setdefault(key, {})
@@ -244,6 +451,7 @@ class HeteroEngine(Engine):
         ck.save()
 
     def tail_apply(self, db, go, token_path, log):
+        self._mysql_to_postgres_only("tailing changes")
         import json as _json
         try:
             from pymysqlreplication import BinLogStreamReader
