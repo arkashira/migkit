@@ -5,6 +5,7 @@ from .base import Engine, Result
 
 class RedisEngine(Engine):
     checks = ("counts", "data")
+    ENGINE_FAMILY = "redis"
 
     def _client(self, side, db=0):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -22,14 +23,31 @@ class RedisEngine(Engine):
         info = self._client("src").info("keyspace")
         return sorted(k[2:] for k in info) or ["0"]
 
-    def _server_versions(self):
-        """What each side says about itself, from INFO server."""
-        def ver(side):
+    def _brand_probes(self):
+        """The whole INFO from each side, not just the Server section.
+
+        Whole, because KeyDB publishes nothing named for itself up there -
+        measured, its Server section carries `redis_version:6.3.4` and no
+        more. What does name it, `server_threads` and `mvcc_depth`, is
+        further down in the same reply.
+        """
+        def info(side):
             try:
-                return self._client(side).info("server").get("redis_version")
+                return self._client(side).info()
             except Exception:
-                return None
-        return (ver("src"), ver("dst"))
+                return {}
+        return (info("src"), info("dst"))
+
+    def _server_versions(self):
+        """Each side's own version, not the protocol number it advertises.
+
+        `redis_version` is a compatibility claim on every fork: measured, a
+        Valkey 8.1.10 server reports 7.2.4 and a Dragonfly df-v2.0.0 reports
+        7.4.0. Reading it as the version put a Redis source and a Valkey
+        target side by side as an exact match.
+        """
+        s, d = self._brands()
+        return (s.version or None, d.version or None)
 
     def _assess_extra(self):
         """What has to be true before a Redis move is worth starting.

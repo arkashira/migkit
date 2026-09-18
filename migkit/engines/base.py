@@ -235,6 +235,63 @@ class Engine:
         """
         return (None, None)
 
+    def _brand_probes(self):
+        """({source fields}, {target fields}) for identifying the software.
+
+        Whatever the server said about itself - a version banner, an INFO
+        dict, a settings row. An engine with no probe yet returns empty
+        mappings, which `variants.identify` reports as an unidentified brand
+        rather than as the engine's own software.
+        """
+        return ({}, {})
+
+    def _brands(self):
+        """(source Brand, target Brand), probed once per engine instance.
+
+        A probe that raises is not allowed to take `assess` down with it: the
+        brand comes back unidentified, which is a `warn` in the rows below.
+        """
+        cached = getattr(self, "_brand_cache", None)
+        if cached is None:
+            from .. import variants as _v
+            fam = self.ENGINE_FAMILY or ""
+            try:
+                s_raw, d_raw = self._brand_probes()
+            except Exception:
+                s_raw = d_raw = {}
+            cached = (_v.identify(fam, s_raw), _v.identify(fam, d_raw))
+            self._brand_cache = cached
+        return cached
+
+    def _brand_rows(self):
+        """assess rows naming each side's software and its measured limits."""
+        from .. import variants as _v
+        return _v.rows(*self._brands())
+
+    def _version_row(self, sv, dv, parts=1):
+        """The server-version-match row, aware of what reported the numbers.
+
+        Two versions agreeing means nothing when they came from different
+        software. Measured: a Redis 7.2.4 source and a Valkey 8.1.10 target
+        both report `redis_version:7.2.4`, so the naive comparison passes them
+        and the report reads as a clean bill for a pairing nobody checked. A
+        brand mismatch demotes this row instead of letting the numbers speak
+        for software they do not describe.
+        """
+        from .. import variants as _v
+        item = "server version match"
+        if not sv or not dv:
+            return {"level": "warn", "scope": "instance", "item": item,
+                    "detail": (f"src {sv or '?'} / dst {dv or '?'} - a side"
+                               " that would not say is unknown, not clean")}
+        same = str(sv).split(".")[:parts] == str(dv).split(".")[:parts]
+        why = _v.mismatch(*self._brands())
+        if why:
+            return {"level": "warn", "scope": "instance", "item": item,
+                    "detail": f"src {sv} / dst {dv} - {why}"}
+        return {"level": "pass" if same else "warn", "scope": "instance",
+                "item": item, "detail": f"src {sv} / dst {dv}"}
+
     def assess(self):
         """Pre-migration readiness. The same command on every engine.
 
@@ -250,19 +307,15 @@ class Engine:
         def add(level, scope, item, detail=""):
             items.append({"level": level, "scope": scope, "item": item,
                           "detail": str(detail)})
+        items += self._brand_rows()
         try:
             sv, dv = self._server_versions()
         except Exception as e:
             sv = dv = None
             add("warn", "instance", "cannot read the server versions",
                 f"{str(e)[:90]} - unknown, not clean")
-        if sv and dv:
-            same = str(sv).split(".")[0] == str(dv).split(".")[0]
-            add("pass" if same else "warn", "instance",
-                "server version match", f"src {sv} / dst {dv}")
-        elif not items:
-            add("warn", "instance", "server version match",
-                "neither side reported a version - unknown, not clean")
+        else:
+            items.append(self._version_row(sv, dv))
         if self.CLIENT_TOOLS:
             items += self._client_tool_versions(self.CLIENT_TOOLS, dv)
         items += self._assess_extra()

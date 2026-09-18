@@ -36,6 +36,24 @@ class MySQLEngine(Engine):
             return c
         return with_retry(_open, label=f"mysql connect {side}")
 
+    def _brand_probes(self):
+        """`version()` and `@@version_comment` per side, in one round trip.
+
+        Two fields because the forks split across them: MariaDB puts its name
+        in both (measured: `11.8.9-MariaDB-ubu2404` /
+        `mariadb.org binary distribution`), TiDB and Vitess put theirs in the
+        version string, and Percona only shows up in the comment.
+        """
+        def one(side):
+            try:
+                r = self._q(side, "select version(), @@version_comment")
+            except Exception:
+                return {}
+            if not r:
+                return {}
+            return {"version": r[0][0], "version_comment": r[0][1]}
+        return (one("src"), one("dst"))
+
     def _q(self, side, sql, args=None, fresh=False):
         # retry the connect+query as a unit so a TLS/socket blip clears
         def once():
@@ -1946,10 +1964,10 @@ class MySQLEngine(Engine):
             r = self._q(side, f"show variables like '{name}'")
             return r[0][1] if r else "?"
 
+        items += self._brand_rows()
         sv = self._q("src", "select version()")[0][0]
         dv = self._q("dst", "select version()")[0][0]
-        add("pass" if sv.split(".")[:2] == dv.split(".")[:2] else "warn",
-            "instance", "server version match", f"src {sv} / dst {dv}")
+        items.append(self._version_row(sv, dv, parts=2))
         for name, want, lvl in (("log_bin", "ON", "fail"),
                                 ("binlog_format", "ROW", "fail"),
                                 ("binlog_row_image", "FULL", "warn")):

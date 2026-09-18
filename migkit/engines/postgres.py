@@ -113,6 +113,25 @@ class PostgresEngine(Engine):
                 env=env)
         return p.stdout.rstrip("\n")
 
+    def _brand_probes(self):
+        """The version banner and the reported server_version, per side.
+
+        Both, in one round trip, because they disagree on everything that is
+        not PostgreSQL itself: measured, CockroachDB v23.2.5 answers
+        `show server_version` with `13.0.0` while its banner says what it
+        really is. The banner is the evidence; the number is what every other
+        comparison in migkit is built on, which is the problem.
+        """
+        def one(side):
+            try:
+                got = self._psql(side, "postgres",
+                                 "select version()||chr(31)"
+                                 "||current_setting('server_version')")
+            except Exception:
+                return {}
+            ver, _, sver = got.strip().partition("\x1f")
+            return {"version": ver, "server_version": sver}
+        return (one("src"), one("dst"))
 
     def databases(self):
         if self.hop.databases:
@@ -2434,10 +2453,13 @@ class PostgresEngine(Engine):
             items.append({"level": level, "scope": scope,
                           "item": item, "detail": str(detail)})
 
-        sv = self._psql("src", "postgres", "show server_version")
-        dv = self._psql("dst", "postgres", "show server_version")
-        add("pass" if sv.split(".")[0] == dv.split(".")[0] else "warn",
-            "instance", "server version match", f"src {sv} / dst {dv}")
+        items += self._brand_rows()
+        src_b, dst_b = self._brands()
+        sv = src_b.version or self._psql("src", "postgres",
+                                         "show server_version")
+        dv = dst_b.version or self._psql("dst", "postgres",
+                                         "show server_version")
+        items.append(self._version_row(sv, dv))
 
         # read replica (pg_is_in_recovery=t) rejects writes incl SELECT FOR
         # UPDATE (25006): fatal as a target, ok-for-checks as a source
