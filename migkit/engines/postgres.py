@@ -2478,9 +2478,13 @@ class PostgresEngine(Engine):
         cols = [c for c in out.splitlines() if c]
         if not cols:
             return None
-        parts = " || chr(2) || ".join(
-            f'coalesce(t."{c}"::text, chr(1))' for c in cols)
-        return f"md5({parts})"
+        # Joined with chr(2) and standing in for NULL with chr(1), this had
+        # the same ambiguity the MySQL row hash was proved to have: measured,
+        # `coalesce(chr(1), chr(1)) = coalesce(null, chr(1))` is true, so a
+        # key holding chr(1) hashed as a NULL. Unlikely in a primary key and
+        # exactly as wrong, so it uses the same encoding as everything else.
+        from .. import rowtext
+        return f"md5({rowtext.postgres_row(cols)})"
 
     def _row_hash_expr(self, side=None, db=None, table=None):
         """The one expression that hashes one row of `t`. Used everywhere.
@@ -2752,9 +2756,13 @@ class PostgresEngine(Engine):
                 " and attgenerated = '' order by attnum").splitlines() if l]
         if not cols:
             return []
+        # One value per hash, so no separator is involved - but chr(1) stood
+        # in for NULL, and a column holding chr(1) hashed as a NULL
+        from .. import rowtext
         expr = ", ".join(
-            f"coalesce(sum(('x'||substr(md5(coalesce(\"{c}\"::text,"
-            f" chr(1))),1,16))::bit(64)::bigint::numeric), 0)"
+            f"coalesce(sum(('x'||substr(md5("
+            f"{rowtext.postgres_row([c], alias='')}"
+            f"),1,16))::bit(64)::bigint::numeric), 0)"
             for c in cols)
         q = f'select {expr} from "{sch}"."{tbl}"'
         try:

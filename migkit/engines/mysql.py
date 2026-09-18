@@ -8,7 +8,6 @@ from ..util import keepalive as _keepalive, run, which, with_retry
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
-NULL_TOKEN = "~null~"
 
 
 class MySQLEngine(Engine):
@@ -277,9 +276,18 @@ class MySQLEngine(Engine):
         return [r[0] for r in rows]
 
     def _row_expr(self, db, t):
-        cols = ", ".join(f"ifnull(cast(`{c}` as char), '{NULL_TOKEN}')"
-                         for c in self._cols(db, t))
-        return f"concat_ws('#', {cols})"
+        """The row as one string, encoded so distinct rows cannot collide.
+
+        This used to be `concat_ws('#', ...)` with `~null~` standing in for
+        NULL, and both halves of that were wrong in the same way. Measured on
+        MySQL 8: ('x#y','z') and ('x','y#z') both rendered `x#y#z` and hashed
+        to CRC32 3898531935, and a NULL and the literal `~null~` did the same.
+        A source holding the first of each against a target holding the second
+        was reported `rows 2==2, checksum 810ced44==810ced44` - a verifier
+        certifying a difference as equality. See `migkit.rowtext`.
+        """
+        from .. import rowtext
+        return rowtext.mysql_row(self._cols(db, t))
 
     def check_counts(self, db):
         st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
@@ -461,8 +469,10 @@ class MySQLEngine(Engine):
         pks = self._pk_cols(db, t)
         if not pks:
             return None
-        return "concat_ws('\\x02', " + ", ".join(
-            f"coalesce(cast(`{c}` as char), '\\x01')" for c in pks) + ")"
+        from .. import rowtext
+        # `\x02` joined and `\x01` stood in for NULL here, which is the same
+        # ambiguity as the row hash had, just with rarer characters
+        return rowtext.mysql_row(pks)
 
     def _checksum(self, side, db, t, expr, where="", key_expr=None):
         cols = ["count(*)", "coalesce(bit_xor(crc32(" + expr + ")), 0)",
@@ -603,8 +613,8 @@ class MySQLEngine(Engine):
 
     def _drilldown(self, db, t, pks, expr, ranges):
         scope = f"{db}.{t}"
-        pkexpr = "concat_ws('\\t', " + ", ".join(
-            f"cast(`{c}` as char)" for c in pks) + ")"
+        from .. import rowtext
+        pkexpr = rowtext.mysql_row(pks)
         src, dst = {}, {}
         for w in ranges:
             src.update(dict(self._q("src",
@@ -643,9 +653,13 @@ class MySQLEngine(Engine):
         cols = self._cols(db, t)
         if not cols:
             return []
+        # One value per hash, so there is no separator to be confused by -
+        # but a NULL and the literal that stood in for it still collided, and
+        # the encoding is meant to be the same everywhere
+        from .. import rowtext
         expr = ", ".join(
-            f"coalesce(bit_xor(conv(substring(md5(coalesce("
-            f"cast(`{c}` as char), '{NULL_TOKEN}')), 1, 8), 16, 10)), 0)"
+            f"coalesce(bit_xor(conv(substring(md5("
+            f"{rowtext.mysql_row([c])}), 1, 8), 16, 10)), 0)"
             for c in cols)
         try:
             a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]
@@ -667,8 +681,8 @@ class MySQLEngine(Engine):
         if not pks:
             return None
         expr = self._row_expr(db, t)
-        pkexpr = ("concat_ws('\\t', "
-                  + ", ".join(f"cast(`{c}` as char)" for c in pks) + ")")
+        from .. import rowtext
+        pkexpr = rowtext.mysql_row(pks)
         def fetch(side):
             out = {}
             klist = sorted(keys)
@@ -683,7 +697,9 @@ class MySQLEngine(Engine):
                                            for c in pks) + ")")
                     one = "(" + ", ".join(["%s"] * len(pks)) + ")"
                     where = tup + " in (" + ", ".join([one] * len(chunk)) + ")"
-                    args = [x for k in chunk for x in k.split("\t")]
+                    # decoded by the same module that encoded it; splitting
+                    # on a tab here is what a tab inside a key value broke
+                    args = [x for k in chunk for x in rowtext.parse(k)]
                 q = (f"select {pkexpr}, md5({expr})"
                      f" from `{self._d(side, db)}`.`{t}` where {where}")
                 out.update({r[0]: r[1] for r in self._q(side, q, args)})
