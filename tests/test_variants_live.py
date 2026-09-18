@@ -241,3 +241,23 @@ def test_the_recorded_gtid_finding_holds_against_the_server(maria_engine):
     from migkit import variants as v
     why = maria_engine._brands()[0].cannot(v.CDC_POSITION)
     assert "gtid_current_pos" in why, why
+
+
+def test_a_cockroach_side_gets_no_change_marker_at_all(pg_engine):
+    """The marker's failure mode is skipping a scan and calling the table
+    proved equal, so it is allowed only on software whose statistics were
+    measured. CockroachDB answers every question in the marker query - with
+    values that never move - and the version gate only refuses it because
+    13.0.0 happens to be below the minimum."""
+    pg_engine._psql("dst", "postgres",
+                    "create table if not exists marker_gate (id int primary"
+                    " key)")
+    assert pg_engine._change_marker("dst", "postgres", "public.marker_gate") \
+        is None
+
+    pg_engine._psql("src", "postgres",
+                    "create table if not exists marker_gate (id int primary"
+                    " key)")
+    got = pg_engine._change_marker("src", "postgres", "public.marker_gate")
+    assert got, "stock postgres must still produce a marker, or this gate" \
+                " has turned the optimisation off everywhere"

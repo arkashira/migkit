@@ -115,3 +115,21 @@ def test_saving_is_atomic_and_leaves_no_partial_file(tmp_path):
     s.save()
     assert p.exists()
     assert [f.name for f in p.parent.iterdir()] == ["proof.json"]
+
+
+def test_only_software_the_marker_was_measured_on_is_trusted():
+    """An allow-list, not a list of brands to avoid. Skipping a scan reports
+    a table as proved equal, so an unidentified or merely unmeasured server
+    has to fall back to reading it - which is the old behaviour, only
+    slower."""
+    from migkit import variants as v
+    pg = v.identify("postgres",
+                    {"version": "PostgreSQL 16.15 on aarch64-unknown-linux-gnu",
+                     "server_version": "16.15"})
+    crdb = v.identify("postgres", {"version": "CockroachDB CCL v23.2.5",
+                                   "server_version": "13.0.0"})
+    unknown = v.identify("postgres", {})
+    assert u.usable_brand(pg)
+    assert not u.usable_brand(crdb)
+    assert not u.usable_brand(unknown)
+    assert not u.usable_brand(None)

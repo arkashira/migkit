@@ -44,6 +44,33 @@ going into a cutover decision, every table is read.
 # trusted. Shared-memory statistics landed in 15.
 MIN_PG_MAJOR = 15
 
+# Software whose statistics migkit has actually measured the marker against.
+#
+# Deliberately an allow-list rather than a list of brands to avoid. This
+# module's failure mode is skipping a scan and reporting the table as proved
+# equal, so "nothing is known against that brand" is not a good enough reason
+# to trust it - and a wire-compatible fork is free to answer every question
+# here plausibly and wrongly.
+#
+# Measured on CockroachDB v23.2.5, which speaks the PostgreSQL protocol:
+# `pg_stat_all_tables` exists and is empty (`select count(*)` returns 0) and
+# `pg_class.relfilenode` is 0 for every relation. A marker built there is the
+# same string forever, so every table would skip its scan on every run. The
+# only thing stopping that today is that CockroachDB reports `server_version`
+# as 13.0.0 and the version gate refuses anything below 15 - a safety that is
+# an accident of a number the brand is free to change.
+TRUSTED_BRANDS = {"postgres"}
+
+
+def usable_brand(brand):
+    """Whether a marker from this software may be trusted at all.
+
+    An unidentified server is refused for the same reason an unmeasured one
+    is: the answer to "is this safe to skip" cannot be yes when the answer to
+    "what is this" is unknown.
+    """
+    return getattr(brand, "name", None) in TRUSTED_BRANDS
+
 
 def server_major(text):
     """Major version from what the engine reported, or None."""

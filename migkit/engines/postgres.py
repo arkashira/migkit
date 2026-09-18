@@ -1981,6 +1981,13 @@ class PostgresEngine(Engine):
         """
         from .. import unchanged as _u
         sch, _, tbl = table.partition(".")
+        # Before the version, because a wire-compatible fork answers the
+        # version question plausibly and the pieces underneath it are dead.
+        # Measured on CockroachDB: empty pg_stat_all_tables, relfilenode 0
+        # everywhere, and a reported server_version of 13.0.0 - so the marker
+        # would be constant and the only thing refusing it is that number.
+        if not _u.usable_brand(self._brands()[0 if side == "src" else 1]):
+            return None
         try:
             ver = self._psql(side, db, "show server_version")
             if not _u.usable_postgres(ver):
