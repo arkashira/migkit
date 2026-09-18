@@ -169,6 +169,27 @@ class MongoEngine(Engine):
                          else canon.ABSENT for n in names])
         return self._by_key_map(columns, key, rows)
 
+    @staticmethod
+    def _bind(value):
+        """One value on its way into a BSON document.
+
+        MongoDB has a decimal type and pymongo will not reach it on its own:
+        measured, `insert_one({"n": Decimal("1.50")})` raises `InvalidDocument:
+        cannot encode object: Decimal('1.50'), of type: <class
+        'decimal.Decimal'>`. That is where a PostgreSQL `numeric` column meets
+        this side of a move or a repair.
+
+        `Decimal128` is the right home for it rather than a float or a
+        string: measured, it comes back holding the scale it was given
+        (`1.50` stays `1.50`), which is what makes the two sides render to
+        the same text.
+        """
+        import decimal
+        if isinstance(value, decimal.Decimal):
+            from bson.decimal128 import Decimal128
+            return Decimal128(value)
+        return value
+
     def neutral_write(self, side, db, table, columns, rows):
         """Upsert by `_id`, leaving an absent field absent.
 
@@ -190,7 +211,7 @@ class MongoEngine(Engine):
         at = names.index("_id")
         ops = []
         for row in rows:
-            body = {n: v for n, v in zip(names, row)
+            body = {n: self._bind(v) for n, v in zip(names, row)
                     if n != "_id" and v is not canon.ABSENT}
             unset = {n: "" for n, v in zip(names, row)
                      if n != "_id" and v is canon.ABSENT}
@@ -213,7 +234,7 @@ class MongoEngine(Engine):
     def _apply_upsert(self, side, db, table, key, values):
         from .. import canon
         table = self.local_table(table)
-        body = {n: v for n, v in values.items()
+        body = {n: self._bind(v) for n, v in values.items()
                 if n not in key and v is not canon.ABSENT}
         unset = {n: "" for n, v in values.items()
                  if n not in key and v is canon.ABSENT}

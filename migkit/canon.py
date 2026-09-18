@@ -173,12 +173,18 @@ TYPES = {
     # left holding two real types is genuinely ambiguous and comes back
     # unmapped rather than resolved to whichever is more common.
     #
-    # `decimal` (Decimal128), `object` and `array` are absent on purpose:
-    # migkit has not measured a rendering for them that another engine
-    # reproduces, and claiming one would be claiming the comparison works.
+    # `object` and `array` are absent on purpose: migkit has not measured a
+    # rendering for them that another engine reproduces, and claiming one
+    # would be claiming the comparison works.
+    #
+    # `decimal` is here because it has now been measured. A Decimal128 keeps
+    # the scale it was given - `1.50` comes back `1.50` - so once it is taken
+    # through `to_decimal()` the same fixed-point text comes out as
+    # PostgreSQL's `::text` and MySQL's `cast(... as char)` produce.
     "mongodb": {
         "int": "integer", "long": "integer",
         "double": "float",
+        "decimal": "decimal",
         "bool": "boolean",
         "string": "text", "objectid": "text", "symbol": "text",
         "bindata": "bytes",
@@ -341,7 +347,14 @@ def render_value(cls, value):
         # `Decimal('1E-10')`, whose `str` is `1E-10` while the server's own
         # text is `0.0000000001`. Formatting with `f` is the same number
         # written the way both servers write it.
+        #
+        # BSON's Decimal128 is asked for its Decimal rather than its `str`
+        # for exactly the same reason, measured the same way: a Decimal128
+        # holding 0.0000000001 prints as `1E-10` too. Duck-typed so this
+        # module does not import bson to know that.
         from decimal import Decimal
+        if hasattr(value, "to_decimal"):
+            value = value.to_decimal()
         return format(value if isinstance(value, Decimal) else Decimal(value),
                       "f")
     if cls == "text":
