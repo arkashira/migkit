@@ -240,6 +240,7 @@ class PostgresEngine(Engine):
 
     def _apply_upsert(self, side, db, table, key, values):
         from .. import canon
+        table = self.local_table(table)
         sch, tbl = self._split(table)
         row = dict(key)
         row.update(values)
@@ -260,6 +261,7 @@ class PostgresEngine(Engine):
 
     def _apply_delete(self, side, db, table, key):
         from .. import canon
+        table = self.local_table(table)
         sch, tbl = self._split(table)
         names = sorted(key)
         where = " and ".join(f'"{n}" = %s' for n in names)
@@ -268,6 +270,112 @@ class PostgresEngine(Engine):
                 cur.execute(f'delete from "{sch}"."{tbl}" where {where}',
                             [canon.sql_value(key[n]) for n in names])
             conn.commit()
+
+    PLUGIN = "test_decoding"
+
+    def slot_name(self):
+        """The slot this hop reads from.
+
+        Derived from the hop's name so two hops against one server do not
+        consume each other's changes, and sanitised because a slot name takes
+        only lower-case letters, digits and underscores.
+        """
+        import re
+        base = re.sub(r"[^a-z0-9_]", "_", str(self.hop.name).lower())
+        return f"migkit_{base}"[:63]
+
+    def _slot_ready(self, side, db):
+        """Make sure the slot exists and is one migkit can read. Returns its
+        name.
+
+        Created rather than assumed: a slot that does not exist yet has no
+        changes in it, and a tail that silently started from "now" would skip
+        everything written between the full load and the first call. The slot
+        has to exist **before** the rows are copied, which is why this is
+        callable on its own.
+        """
+        name = self.slot_name()
+        target = self._d(side, db)
+        got = self._psql(side, target,
+                         "select plugin from pg_replication_slots"
+                         f" where slot_name = '{name}'").strip()
+        if not got:
+            level = self._psql(side, target, "show wal_level").strip()
+            if level != "logical":
+                raise SystemExit(
+                    f"wal_level is {level} on this server and a logical slot"
+                    " needs 'logical'. Nothing migkit does client-side can"
+                    " make the WAL carry row images it was not told to"
+                    " carry.\n"
+                    "    alter system set wal_level = 'logical';"
+                    "   -- then restart\n"
+                    "    rds.logical_replication = 1"
+                    "                -- parameter group, then reboot")
+            self._psql(side, target,
+                       "select pg_create_logical_replication_slot"
+                       f"('{name}', '{self.PLUGIN}')")
+            return name
+        if got != self.PLUGIN:
+            raise SystemExit(
+                f"the slot {name} was made with the {got} plugin and migkit"
+                f" reads {self.PLUGIN}. Reading one plugin's output as"
+                " another's does not fail, it mis-parses - drop the slot and"
+                " let migkit make it, or point this hop at another name")
+        return name
+
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """Row changes out of a logical slot, as neutral records.
+
+        **Peeked, not consumed.** `pg_logical_slot_get_changes` advances the
+        slot as it reads, so a crash between reading and applying loses the
+        changes with nothing left to replay. `peek` leaves them, and a restart
+        re-reads what it had already applied - which the appliers are
+        idempotent for. Duplicated work is visible; a hole is not.
+
+        What consumes them is the token coming back: handing back the token
+        from the previous call is how a caller says "everything up to here is
+        applied", and only then does the slot move past it. So the slot is
+        advanced by evidence of success rather than by the act of looking.
+        """
+        from .. import pgslot
+        name = self._slot_ready(side, db)
+        target = self._d(side, db)
+        if token:
+            # the caller applied everything up to this LSN, so the server may
+            # stop keeping it
+            self._psql(side, target,
+                       f"select pg_replication_slot_advance('{name}',"
+                       f" '{token}')")
+        rows = self._psql(side, target,
+                          "select lsn::text || chr(31) || data from"
+                          f" pg_logical_slot_peek_changes('{name}', null,"
+                          f" {int(limit)})")
+        out, last = [], token
+        keys = {}
+        for line in rows.splitlines():
+            lsn, _, data = line.partition("\x1f")
+            parsed = pgslot.parse_line(data)
+            last = lsn or last
+            if parsed is None:
+                continue
+            table = parsed["table"]
+            if table not in keys:
+                keys[table] = self.neutral_key(side, db, table)
+                if not keys[table]:
+                    raise SystemExit(
+                        f"no primary key on {table} - a change to a keyless"
+                        " table cannot be addressed on the target, and"
+                        " applying it by matching every column would hit"
+                        " every duplicate.\n"
+                        "    The change is still in the slot and every call"
+                        " will stop here again, because peeking never throws"
+                        " anything away. Give the table a key or a unique"
+                        " REPLICA IDENTITY, or step past it with:\n"
+                        f"    select pg_replication_slot_advance('{name}',"
+                        " pg_current_wal_lsn());"
+                        "  -- skips everything pending, including this")
+            out.append(pgslot.change(parsed, keys[table]))
+        return out, last
 
     def neutral_digest(self, side, db, table, columns):
         from .. import canon

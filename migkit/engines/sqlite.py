@@ -141,10 +141,15 @@ class SQLiteEngine(Engine):
             conn.close()
         return ddl
 
+    def local_table(self, table):
+        """The last component: this engine has no schemas to qualify with."""
+        return str(table).split(".")[-1]
+
     def _apply_upsert(self, side, db, table, key, values):
         import sqlite3
 
         from .. import canon
+        table = self.local_table(table)
         row = dict(key)
         row.update(values)
         names = sorted(row)
@@ -168,6 +173,7 @@ class SQLiteEngine(Engine):
         import sqlite3
 
         from .. import canon
+        table = self.local_table(table)
         names = sorted(key)
         where = " and ".join(f'"{n}" = ?' for n in names)
         conn = sqlite3.connect(self._path(side))

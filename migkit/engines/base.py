@@ -476,6 +476,21 @@ class Engine:
             n += 1
         return n
 
+    def local_table(self, table):
+        """A table name from another engine, in this engine's own terms.
+
+        A change record carries the name the source used, and the two sides
+        do not have to agree on what a name is: PostgreSQL says `public.t`
+        and MySQL has no schemas at all, so applying the source's name
+        verbatim looks for `cx.public.t` and does not find it.
+
+        The default keeps the name whole; an engine that qualifies
+        differently overrides. Matching on the last component is the same
+        rule the comparison uses to pair tables, and for the same reason -
+        it is the only part both sides agree on.
+        """
+        return table
+
     def _apply_upsert(self, side, db, table, key, values):
         """Write this row, replacing whatever is at that key."""
         raise self._no_canon("apply changes")

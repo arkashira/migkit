@@ -161,8 +161,13 @@ class MongoEngine(Engine):
         coll.bulk_write(ops, ordered=False)
         return len(rows)
 
+    def local_table(self, table):
+        """The last component: this engine has no schemas to qualify with."""
+        return str(table).split(".")[-1]
+
     def _apply_upsert(self, side, db, table, key, values):
         from .. import canon
+        table = self.local_table(table)
         body = {n: v for n, v in values.items()
                 if n not in key and v is not canon.ABSENT}
         unset = {n: "" for n, v in values.items()
@@ -178,6 +183,7 @@ class MongoEngine(Engine):
         coll.update_one(dict(key), update, upsert=True)
 
     def _apply_delete(self, side, db, table, key):
+        table = self.local_table(table)
         coll = self._client(side)[self._d(side, db)][table]
         coll.delete_one(dict(key))
 
