@@ -64,6 +64,59 @@ class SQLiteEngine(Engine):
         return [(r[1], r[2]) for r in
                 self._q(side, f'pragma table_info("{table}")')]
 
+    def neutral_key(self, side, db, table):
+        return [r[1] for r in
+                self._q(side, f'pragma table_info("{table}")') if r[5]]
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+        names = [n for n, _ in columns]
+        cols = ", ".join(f'"{n}"' for n in names)
+        key = self.neutral_key(side, db, table)
+        where = ""
+        if key and after is not None:
+            places = ", ".join(repr(v) if not isinstance(v, str)
+                               else "'" + v.replace("'", "''") + "'"
+                               for v in after)
+            keys = ", ".join(f'"{k}"' for k in key)
+            where = f" where ({keys}) > ({places})"
+        order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
+        cap = f" limit {int(limit)}" if key else ""
+        rows = [list(r) for r in
+                self._q(side, f'select {cols} from "{table}"'
+                              f"{where}{order}{cap}")]
+        if not rows or not key:
+            return (rows, None)
+        idx = [names.index(k) for k in key if k in names]
+        if len(idx) != len(key):
+            return (rows, None)
+        return (rows, tuple(rows[-1][i] for i in idx))
+
+    def neutral_write(self, side, db, table, columns, rows):
+        import sqlite3
+        if not rows:
+            return 0
+        names = [n for n, _ in columns]
+        cols = ", ".join(f'"{n}"' for n in names)
+        place = ", ".join(["?"] * len(names))
+        key = self.neutral_key(side, db, table)
+        if key and all(k in names for k in key):
+            sets = ", ".join(f'"{n}" = excluded."{n}"'
+                             for n in names if n not in key)
+            conflict = ", ".join(f'"{k}"' for k in key)
+            tail = (f" on conflict ({conflict}) do update set {sets}"
+                    if sets else f" on conflict ({conflict}) do nothing")
+        else:
+            tail = ""
+        conn = sqlite3.connect(self._path(side))
+        try:
+            conn.executemany(f'insert into "{table}" ({cols})'
+                             f" values ({place}){tail}",
+                             [tuple(r) for r in rows])
+            conn.commit()
+        finally:
+            conn.close()
+        return len(rows)
+
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
         row = canon.row_expr("sqlite", columns)

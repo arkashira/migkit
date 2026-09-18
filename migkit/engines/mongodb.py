@@ -93,6 +93,74 @@ class MongoEngine(Engine):
                 for name, (types, _, _) in
                 sorted(self.field_types(side, db, table).items())]
 
+    EXPRESSES_ABSENT = True
+    CREATES_ON_WRITE = True
+
+    def neutral_key(self, side, db, table):
+        """`_id`, which MongoDB guarantees on every document."""
+        return ["_id"]
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+        """Documents as rows, with a missing field marked rather than nulled.
+
+        `canon.ABSENT` is not None: MongoDB distinguishes a field that is not
+        there from one holding null, and reading the first as the second here
+        would destroy the distinction before the mover could count what the
+        target does to it.
+        """
+        from .. import canon
+        coll = self._client(side)[self._d(side, db)][table]
+        names = [n for n, _ in columns]
+        projection = {f: 1 for f in names}
+        projection.setdefault("_id", 1 if "_id" in names else 0)
+        flt = {"_id": {"$gt": after[0]}} if after else {}
+        cursor = coll.find(flt, projection).sort("_id", 1).limit(int(limit))
+        rows, last = [], None
+        for doc in cursor:
+            rows.append([doc.get(n, canon.ABSENT) if n in doc
+                         else canon.ABSENT for n in names])
+            last = doc.get("_id", last)
+        if not rows:
+            return ([], None)
+        return (rows, (last,) if last is not None else None)
+
+    def neutral_write(self, side, db, table, columns, rows):
+        """Upsert by `_id`, leaving an absent field absent.
+
+        A value that arrived as `canon.ABSENT` is not written at all, so a
+        MongoDB-to-MongoDB move keeps the shape of the document it copied. A
+        value that arrived as None is written as null, because that is what
+        the source said it was.
+        """
+        from pymongo import UpdateOne
+
+        from .. import canon
+        if not rows:
+            return 0
+        names = [n for n, _ in columns]
+        if "_id" not in names:
+            raise SystemExit(f"{table}: migkit will not write documents"
+                             " without _id - there would be no way to write"
+                             " the same row twice without duplicating it")
+        at = names.index("_id")
+        ops = []
+        for row in rows:
+            body = {n: v for n, v in zip(names, row)
+                    if n != "_id" and v is not canon.ABSENT}
+            unset = {n: "" for n, v in zip(names, row)
+                     if n != "_id" and v is canon.ABSENT}
+            update = {}
+            if body:
+                update["$set"] = body
+            if unset:
+                update["$unset"] = unset
+            if not update:
+                update = {"$setOnInsert": {}}
+            ops.append(UpdateOne({"_id": row[at]}, update, upsert=True))
+        coll = self._client(side)[self._d(side, db)][table]
+        coll.bulk_write(ops, ordered=False)
+        return len(rows)
+
     def neutral_digest(self, side, db, table, columns):
         """(count, digest) folded here rather than in the server.
 

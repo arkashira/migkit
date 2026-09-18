@@ -86,6 +86,33 @@ FLOAT_MAX = "1e45"
 # control character no rendering here produces and both engines accept.
 UNCOMPARABLE = "\x1funcomparable"
 
+
+class _Absent:
+    """A field that is not there, as distinct from one holding NULL.
+
+    MongoDB keeps those apart and every SQL engine here collapses them, so a
+    value moving out of MongoDB carries which one it was and the mover
+    decides - and counts - what the target can express. Reading absence as
+    NULL at the point it is read would throw the distinction away before
+    anyone could be told it was thrown away.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "ABSENT"
+
+    def __bool__(self):
+        return False
+
+
+ABSENT = _Absent()
+
 # declared type (lower-cased, without length/precision) -> neutral class
 TYPES = {
     "mysql": {

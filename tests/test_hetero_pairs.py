@@ -76,10 +76,12 @@ def test_moving_and_comparing_are_answered_per_pair_without_connecting():
     things to tell the operator."""
     cases = {("postgres", "mysql"): (True, True),
              ("mysql", "postgres"): (True, True),
-             # sqlite and mongodb compare but have no writer yet
-             ("sqlite", "postgres"): (False, True),
-             ("mongodb", "postgres"): (False, True),
-             ("mysql", "redis"): (False, False)}
+             ("sqlite", "postgres"): (True, True),
+             ("mongodb", "postgres"): (True, True),
+             ("postgres", "mongodb"): (True, True),
+             # redis has neither a rendering nor a row to read
+             ("mysql", "redis"): (False, False),
+             ("redis", "postgres"): (False, False)}
     for pair, (can_move, can_compare) in cases.items():
         eng = HeteroEngine(_hop(*pair))
         assert eng._can_move_neutrally() is can_move, pair
@@ -87,10 +89,38 @@ def test_moving_and_comparing_are_answered_per_pair_without_connecting():
 
 
 def test_a_pair_that_cannot_move_still_says_which_pair_it_is():
-    eng = HeteroEngine(_hop("mongodb", "postgres"))
+    eng = HeteroEngine(_hop("redis", "postgres"))
     with pytest.raises(SystemExit) as e:
         eng.move_table("db", "", "t", 1, {}, print)
-    assert "mongodb->postgres" in str(e.value)
+    assert "redis->postgres" in str(e.value)
+
+
+def test_only_a_schemaless_target_can_hold_a_field_that_is_not_there():
+    """The flag that decides whether `canon.ABSENT` survives the hop or is
+    counted and flattened to NULL."""
+    from migkit.engines.mongodb import MongoEngine
+    from migkit.engines.postgres import PostgresEngine
+    assert MongoEngine.EXPRESSES_ABSENT is True
+    assert PostgresEngine.EXPRESSES_ABSENT is False
+
+
+def test_absent_is_flattened_and_counted_for_a_sql_target():
+    from migkit import canon
+    eng = HeteroEngine(_hop("mongodb", "postgres"))
+    rows, n = eng._flatten_absent([[1, canon.ABSENT], [2, "x"],
+                                   [canon.ABSENT, canon.ABSENT]])
+    assert rows == [[1, None], [2, "x"], [None, None]]
+    assert n == 3
+
+
+def test_absent_is_left_alone_for_a_schemaless_target():
+    """Flattening it here would turn a MongoDB-to-MongoDB copy into a
+    document full of nulls the source never had."""
+    from migkit import canon
+    eng = HeteroEngine(_hop("postgres", "mongodb"))
+    rows, n = eng._flatten_absent([[1, canon.ABSENT]])
+    assert rows == [[1, canon.ABSENT]]
+    assert n == 0
 
 
 def test_tables_are_matched_on_the_name_without_its_qualifier():

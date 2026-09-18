@@ -276,14 +276,23 @@ class HeteroEngine(Engine):
         """
         src_types = dict(self.src_engine.neutral_columns("src", db,
                                                          src_table))
-        dst_types = dict(self.dst_engine.neutral_columns("dst", db,
-                                                         dst_table))
-        both = sorted(set(src_types) & set(dst_types))
+        try:
+            dst_types = dict(self.dst_engine.neutral_columns("dst", db,
+                                                             dst_table))
+        except Exception:
+            dst_types = {}
         notes = []
-        missing = sorted(set(src_types) - set(dst_types))
-        if missing:
-            notes.append("not carried, the target has no such column: "
-                         + ", ".join(missing))
+        if not dst_types and self.dst_engine.CREATES_ON_WRITE:
+            # nothing to intersect with: the collection is made by the write
+            # itself, so what it will hold is whatever the source has
+            both = sorted(src_types)
+            dst_types = dict(src_types)
+        else:
+            both = sorted(set(src_types) & set(dst_types))
+            missing = sorted(set(src_types) - set(dst_types))
+            if missing:
+                notes.append("not carried, the target has no such column: "
+                             + ", ".join(missing))
         from .. import canon
         src_cols, dst_cols = [], []
         for name in both:
@@ -307,10 +316,15 @@ class HeteroEngine(Engine):
             self.src_engine.neutral_tables("src", db),
             self.dst_engine.neutral_tables("dst", db))
         match = [d for s_, d in pairs if self._leaf(s_) == leaf]
-        if not match:
+        if match:
+            dst_t = match[0]
+        elif self.dst_engine.CREATES_ON_WRITE:
+            dst_t = leaf
+            log(f"{leaf}: not on the target yet;"
+                f" {self.dst_name} creates it on the first write")
+        else:
             raise SystemExit(f"{leaf} is not on the target - create it first,"
                              " migkit does not invent a table it cannot see")
-        dst_t = match[0]
         src_cols, dst_cols, notes = self._move_columns(src_t, dst_t, db)
         for n in notes:
             log(f"{leaf}: {n}")
@@ -321,11 +335,14 @@ class HeteroEngine(Engine):
             return
         after = tuple(st["last"]) if st.get("last") is not None else None
         moved = int(st.get("moved", 0))
+        absent = 0
         while True:
             rows, last = self.src_engine.neutral_read(
                 "src", db, src_t, src_cols, after, chunk)
             if not rows:
                 break
+            rows, flattened = self._flatten_absent(rows)
+            absent += flattened
             self.dst_engine.neutral_write("dst", db, dst_t, dst_cols, rows)
             moved += len(rows)
             st["moved"] = moved
@@ -337,8 +354,33 @@ class HeteroEngine(Engine):
             st["last"] = list(last)
             ck.save()
             log(f"{key}: {moved:,} rows")
+        if absent:
+            log(f"{key}: {absent:,} values were not there on the source and"
+                f" landed as NULL - {self.dst_name} has no way to store"
+                " \"this field is not here\" apart from \"this field is"
+                " null\", so the distinction ends at this hop")
         st["done"] = True
         ck.save()
+
+    def _flatten_absent(self, rows):
+        """Turn `canon.ABSENT` into None when the target cannot hold it.
+
+        Counted rather than quietly converted. MongoDB keeps a missing field
+        and a null field apart; a SQL column has one state for both, so the
+        move is lossy in a direction nobody notices unless the number is
+        printed. When the target *can* express it, nothing is touched.
+        """
+        from .. import canon
+        if self.dst_engine.EXPRESSES_ABSENT:
+            return rows, 0
+        n = 0
+        out = []
+        for row in rows:
+            if any(v is canon.ABSENT for v in row):
+                n += sum(1 for v in row if v is canon.ABSENT)
+                row = [None if v is canon.ABSENT else v for v in row]
+            out.append(row)
+        return out, n
 
     def _can_compare_neutrally(self):
         return bool(self.src_engine.CANON_ENGINE

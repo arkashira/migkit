@@ -137,13 +137,34 @@ def test_a_float_in_the_band_the_engines_render_differently_still_matches(
     assert _one(eng).status == "ok"
 
 
-def test_moving_is_still_refused_for_this_pair_and_says_so(engine):
-    """Comparing crossed first on purpose. The mover has not, and an
-    AttributeError on a field that only exists for mysql->postgres would read
-    as a migkit bug rather than as the sentence it is."""
+def test_rows_move_from_the_file_into_the_server(engine):
+    """This pair refused to move at all until the read/write contract existed.
+    A row is deleted from the target and carried back across, and the digest
+    - not the absence of an error - is what says it arrived."""
+    eng, _ = engine
+
+    class _Checkpoint(dict):
+        def save(self):
+            pass
+
+    assert pg_sql("delete from items where id = 2").returncode == 0
+    assert pg_sql("select count(*) from items").stdout.strip() == "2"
+    assert _one(eng).status == "diff"
+
+    assert ("", "items") in eng.list_move_tables("main"), \
+        eng.list_move_tables("main")
+    eng.move_table("main", "", "items", 10, _Checkpoint(), lambda m: None)
+    assert pg_sql("select count(*) from items").stdout.strip() == "3"
+    assert _one(eng).status == "ok"
+
+
+def test_converting_the_schema_is_still_written_for_one_pair_only(engine):
+    """Moving rows crosses now; turning one engine's DDL into another's does
+    not. An AttributeError on a field that only exists for mysql->postgres
+    would read as a migkit bug rather than as the sentence it is."""
     eng, _ = engine
     with pytest.raises(SystemExit) as e:
-        eng.list_move_tables("main")
+        eng.convert_ddl("main")
     assert "sqlite->postgres" in str(e.value)
     assert "mysql->postgres only" in str(e.value)
 

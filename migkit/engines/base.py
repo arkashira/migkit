@@ -339,6 +339,18 @@ class Engine:
     # Which rendering family in `migkit.canon` this engine speaks, or "".
     CANON_ENGINE = ""
 
+    # Whether writing to a table that does not exist creates it. A SQL
+    # engine refuses, so a missing target table has to be a hard stop before
+    # anything is read; a document store makes the collection on the first
+    # write, and stopping there would be refusing the thing the operator
+    # asked for.
+    CREATES_ON_WRITE = False
+
+    # Whether this engine can store "the field is not there" as something
+    # other than NULL. Only the schemaless ones can, and a mover carrying a
+    # value out of one of them has to know whether the distinction survives.
+    EXPRESSES_ABSENT = False
+
     # Whether reading this engine's data means moving it across a network.
     # A server does; a file on this disk does not, and a report that told an
     # operator their local SQLite file had been shipped over the wire would
