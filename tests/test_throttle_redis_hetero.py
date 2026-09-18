@@ -134,21 +134,35 @@ def test_throughput_would_have_been_the_wrong_signal(redis_server):
 
 def test_a_background_save_counts_as_busy(redis_server):
     """Redis forks to write the RDB, and a fork over a large keyspace is the
-    one moment when adding a full scan is genuinely unkind."""
+    one moment when adding a full scan is genuinely unkind.
+
+    One INFO reply is both the evidence and the input: reading the flag with
+    one call and asking migkit with another made this flake, because a save
+    that finishes between the two leaves the pair disagreeing while both are
+    telling the truth about their own moment.
+    """
+    from migkit.engines.redis import RedisEngine
     assert rcli("debug", "populate", "2000000").returncode == 0
-    assert rcli("bgsave").returncode == 0
-    saw_busy = False
+    client = _engine()._client("src")
+    caught = None
     for _ in range(20):
-        info = rcli("info", "persistence").stdout.replace("\r", "")
-        running = "rdb_bgsave_in_progress:1" in info
-        health = _engine()._health("src")
-        if running:
-            saw_busy = True
-            assert health.stressed(), (health.busy_ratio, health.note)
-            assert "rewriting to disk" in health.note
+        assert rcli("bgsave").returncode == 0
+        for _ in range(40):
+            info = client.info()
+            if info.get("rdb_bgsave_in_progress"):
+                caught = info
+                break
+        if caught:
             break
         time.sleep(0.2)
-    assert saw_busy, "the background save finished before it could be sampled"
+    assert caught, "no INFO reply ever reported a save in progress"
+    health = RedisEngine._health_from(caught)
+    assert health.stressed(), (health.busy_ratio, health.note,
+                               caught.get("rdb_bgsave_in_progress"))
+    assert "rewriting to disk" in health.note
+    # and the same reply with the flag down reads as quiet again
+    quiet = dict(caught, rdb_bgsave_in_progress=0, aof_rewrite_in_progress=0)
+    assert not RedisEngine._health_from(quiet).stressed(), quiet
     rcli("flushall")
 
 

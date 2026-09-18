@@ -1,13 +1,15 @@
 import time
 
-from .base import Engine, Result
+from .base import Engine, RepairAction, Result
 
 
 class RedisEngine(Engine):
     checks = ("counts", "data")
     ENGINE_FAMILY = "redis"
 
-    def _client(self, side, db=0):
+    def _client(self, side, db=0, decode=True):
+        """`decode=False` for DUMP payloads, which are binary: decoding one
+        as text is how a repair would corrupt what it copied."""
         ep = self.hop.source if side == "src" else self.hop.target
         try:
             import redis
@@ -15,7 +17,7 @@ class RedisEngine(Engine):
             raise SystemExit("pip install 'migkit[redis]' for redis support")
         return redis.Redis(host=ep.host, port=ep.port,
                            password=ep.password or None, db=int(db),
-                           socket_timeout=15, decode_responses=True)
+                           socket_timeout=15, decode_responses=decode)
 
     def databases(self):
         if self.hop.databases:
@@ -133,11 +135,22 @@ class RedisEngine(Engine):
         genuinely unkind. Measured, `rdb_bgsave_in_progress` is 1 while it
         runs.
         """
-        from ..throttle import BUSY_RATIO, Health
         try:
             info = self._client(side).info()
         except Exception:
             return None
+        return self._health_from(info)
+
+    @staticmethod
+    def _health_from(info):
+        """The reading, taken apart from the fetching.
+
+        One INFO reply in, one Health out, so what the server said and what
+        migkit made of it can be judged together. Two separate samples cannot
+        be: a background save that ends between them makes the pair disagree
+        without either being wrong.
+        """
+        from ..throttle import BUSY_RATIO, Health
         busy = None
         ceiling = float(info.get("maxclients") or 0)
         if ceiling:
@@ -160,8 +173,14 @@ class RedisEngine(Engine):
 
     def _batch_compare(self, s, t, keys):
         """Pipelined type-aware compare: two round trips per batch per
-        side instead of one per key."""
-        bad = []
+        side instead of one per key.
+
+        (missing, changed) rather than one list of bad keys, because the
+        repair does different things with them and the report says which is
+        which. A key the target does not have answers `none` to TYPE, which
+        is how the two are told apart without another round trip.
+        """
+        missing, changed = [], []
         ps, pt = s.pipeline(transaction=False), t.pipeline(transaction=False)
         for k in keys:
             ps.type(k)
@@ -171,7 +190,7 @@ class RedisEngine(Engine):
         plan = []
         for k, ty, dty in zip(keys, stypes, dtypes):
             if ty != dty:
-                bad.append(k)
+                (missing if dty == "none" else changed).append(k)
                 continue
             for p in (ps, pt):
                 if ty == "string":
@@ -191,8 +210,8 @@ class RedisEngine(Engine):
             plan.append(k)
         for k, a, b in zip(plan, ps.execute(), pt.execute()):
             if a != b:
-                bad.append(k)
-        return bad
+                changed.append(k)
+        return missing, changed
 
     def _scan_batches(self, client, sample, deep):
         """Batches of keys from one side, up to the sample cap."""
@@ -235,12 +254,16 @@ class RedisEngine(Engine):
         # gated on its own health, since each pass leans on a different one.
         src_gate = Throttle(1, probe=lambda: self._health("src"))
         dst_gate = Throttle(1, probe=lambda: self._health("dst"))
+        missing, changed = [], []
         for keys in self._scan_batches(s, sample, deep):
             with src_gate.unit():
-                bad += len(self._batch_compare(s, t, keys))
+                gone, differ = self._batch_compare(s, t, keys)
+            missing.extend(gone)
+            changed.extend(differ)
             checked += len(keys)
             if stream and checked % 20000 < 1000:
                 stream(f"db{db}: {checked} keys compared")
+        bad = len(missing) + len(changed)
         extra = []
         seen_dst = 0
         for keys in self._scan_batches(t, sample, deep):
@@ -251,13 +274,22 @@ class RedisEngine(Engine):
                 extra.extend(k for k, there in zip(keys, pipe.execute())
                              if not there)
             seen_dst += len(keys)
+        self._write_drilldown(db, missing=missing, changed=changed,
+                              extra=extra)
         mode = "full scan" if deep else f"sample {checked}"
         res = []
         if bad:
+            parts = []
+            if missing:
+                parts.append(f"{len(missing)} missing on the target")
+            if changed:
+                parts.append(f"{len(changed)} with a different value")
             res.append(Result("data", f"db{db}", "diff",
-                              f"{bad}/{checked} keys differ ({mode})", "",
-                              "full sync: use RIOT (riot replicate) or"
-                              " redis-shake, both verify and resume"))
+                              f"{bad}/{checked} keys differ ({mode}):"
+                              f" {', '.join(parts)}", "",
+                              f"migkit sync {self.hop.name} --db {db}"
+                              " --kind rows --apply, or a full sync with RIOT"
+                              " (riot replicate) or redis-shake"))
         if extra:
             shown = ", ".join(sorted(extra)[:6])
             more = f" (+{len(extra) - 6} more)" if len(extra) > 6 else ""
@@ -265,13 +297,133 @@ class RedisEngine(Engine):
                 "data", f"db{db} extra keys", "diff",
                 f"{len(extra)} of {seen_dst} keys on the target are not on"
                 f" the source: {shown}{more}", "",
-                "a target still holding keys from an earlier attempt -"
-                " delete them or reload the target from empty; the key count"
-                " can match on both sides while this is true"))
+                "a target still holding keys from an earlier attempt:"
+                f" migkit sync {self.hop.name} --db {db} --kind rows --apply"
+                " removes them, with the old values written to the undo file"
+                " first; the key count can match while this is true"))
         return res or [Result(
             "data", f"db{db}", "ok",
             f"{checked} keys value-equal, {seen_dst} target keys all present"
             f" on the source ({mode}, pipelined)")]
+
+    def _drilldown_path(self, db, kind):
+        return self.hop.report_dir(db) / f"data-db{db}.{kind}"
+
+    def _write_drilldown(self, db, **kinds):
+        """The keys behind the counts, one per line, in the estate's file
+        names - which is what makes a repair possible at all.
+
+        A run that finds nothing removes the file rather than leaving the
+        previous run's list behind for `sync` to act on.
+        """
+        for kind, keys in kinds.items():
+            path = self._drilldown_path(db, kind)
+            if keys:
+                path.write_text("\n".join(sorted(keys)) + "\n")
+            elif path.exists():
+                path.unlink()
+
+    def _read_drilldown(self, db, kind):
+        path = self._drilldown_path(db, kind)
+        if not path.exists():
+            return []
+        return [l for l in path.read_text().splitlines() if l]
+
+    def repair_plan(self, db, kind):
+        """What `migkit sync --kind rows` would do to this database.
+
+        The keys come from the last check's drilldown files, so the plan
+        describes what was actually found rather than re-scanning and acting
+        on something the operator never saw.
+        """
+        if kind not in ("rows", "all"):
+            return []
+        missing = self._read_drilldown(db, "missing")
+        changed = self._read_drilldown(db, "changed")
+        extra = self._read_drilldown(db, "extra")
+        if not (missing or changed or extra):
+            return []
+        statements = []
+        if missing or changed:
+            names = ", ".join((missing + changed)[:6])
+            statements.append(
+                f"RESTORE {len(missing) + len(changed)} keys from the source,"
+                f" type and expiry included: {names}"
+                + (" ..." if len(missing) + len(changed) > 6 else ""))
+        if extra:
+            statements.append(
+                f"DEL {len(extra)} keys the source does not have:"
+                f" {', '.join(extra[:6])}"
+                + (" ..." if len(extra) > 6 else ""))
+        return [RepairAction(
+            f"db{db}", "rows", statements, [],
+            f"{len(missing)} missing, {len(changed)} changed,"
+            f" {len(extra)} extra; every key the repair overwrites or removes"
+            " is dumped to the undo file before it is touched")]
+
+    def apply(self, db, action):
+        """Copy the keys back with DUMP/RESTORE, then remove the strays.
+
+        DUMP carries the type and the expiry with the value, so one path
+        covers strings, hashes, lists, sets, sorted sets and streams alike -
+        measured across two servers, a hash came back a hash and a key with
+        600s left came back with 599992 ms.
+
+        It is also version-bound, and loudly: measured, a payload taken from
+        Redis 7.4 and restored into Redis 6.2 answers `DUMP payload version
+        or checksum are wrong` rather than writing anything. That is reported
+        as it is instead of being worked around, because the way around it -
+        re-issuing each value with type-specific commands - quietly changes
+        what some types contain.
+
+        Writes come first and deletions last: a repair cut off in the middle
+        then leaves keys that should not be there, which the next check
+        names, rather than a hole nothing looks for.
+        """
+        import base64
+        import json
+        raw_s = self._client("src", db, decode=False)
+        raw_t = self._client("dst", db, decode=False)
+        undo_dir = self.hop.report_dir(db) / "undo"
+        undo_dir.mkdir(parents=True, exist_ok=True)
+        undo = undo_dir / f"db{db}.keys.jsonl"
+        missing = self._read_drilldown(db, "missing")
+        changed = self._read_drilldown(db, "changed")
+        extra = self._read_drilldown(db, "extra")
+
+        def remember(client, key, handle):
+            payload = client.dump(key.encode())
+            if payload is None:
+                return
+            ttl = client.pttl(key.encode())
+            handle.write(json.dumps({
+                "key": key, "pttl": ttl,
+                "dump": base64.b64encode(payload).decode()}) + "\n")
+
+        with undo.open("a") as handle:
+            done = 0
+            for key in missing + changed:
+                remember(raw_t, key, handle)
+                payload = raw_s.dump(key.encode())
+                if payload is None:
+                    continue    # gone from the source since the check
+                ttl = raw_s.pttl(key.encode())
+                try:
+                    raw_t.restore(key.encode(), ttl if ttl and ttl > 0 else 0,
+                                  payload, replace=True)
+                except Exception as e:
+                    raise SystemExit(
+                        f"RESTORE of {key!r} was refused by the target:"
+                        f" {str(e)[:90]}. {done} keys were copied before"
+                        " this one and nothing has been deleted. A payload"
+                        " version error means the target runs an older Redis"
+                        " than the source - migrate with RIOT (riot"
+                        " replicate) or redis-shake, which re-issue values"
+                        " instead of moving RDB payloads")
+                done += 1
+            for key in extra:
+                remember(raw_t, key, handle)
+                raw_t.delete(key.encode())
 
     def check_deep(self, db):
         s = self._client("src", db)
