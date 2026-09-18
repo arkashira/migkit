@@ -128,17 +128,45 @@ class Engine:
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
 
+    #: what an engine puts in a settings mapping it could not read
+    UNREADABLE = "_error"
+
     def _param_result(self, db, src, dst, critical, hint):
         """Dump every server setting from both sides to params.json (same shape
         as objects.json), then flag mismatches. Only behavior-critical settings
         (timezone, encoding, collation, sql_mode, ...) fail the check; the many
         instance-specific ones that always differ on managed databases (memory,
-        paths, limits) are counted but stay ok. The full list is on disk."""
+        paths, limits) are counted but stay ok. The full list is on disk.
+
+        A side that could not be read has to be said out loud before any of
+        that. Measured on a MongoDB started with authentication and connected
+        to without credentials - which is what a managed cluster looks like -
+        `getParameter` comes back `OperationFailure: Command getParameter
+        requires authentication`. Both sides fail the same way, both mappings
+        end up holding the same one entry, nothing differs between them, and
+        this returned `ok | 1 settings, all equal both sides` about two
+        servers that had said nothing at all. An empty reading on both sides
+        did the same thing with `0 settings`.
+        """
         import json
         names = sorted(set(src) | set(dst))
         inv = {n: {"src": src.get(n), "dst": dst.get(n)} for n in names}
         out = self.hop.report_dir(db) / "params.json"
         out.write_text(json.dumps(inv, indent=1, default=str))
+        blind = []
+        for side, got in (("source", src), ("target", dst)):
+            if not got:
+                blind.append(f"{side}: nothing came back")
+            elif self.UNREADABLE in got:
+                blind.append(f"{side}: {got[self.UNREADABLE]}")
+        if blind:
+            return [Result("params", f"{db} params", "error",
+                           "the settings could not be read - "
+                           + "; ".join(blind)
+                           + ". Two readings that failed are not two servers"
+                             " that agree", str(out),
+                           "give migkit an account that can read the server's"
+                           " settings on both sides, then re-run")]
         crit_lc = {c.lower() for c in critical}
         diff = [n for n in names if src.get(n) != dst.get(n)]
         crit = [n for n in diff if n.lower() in crit_lc]

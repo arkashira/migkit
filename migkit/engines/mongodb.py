@@ -414,11 +414,36 @@ class MongoEngine(Engine):
         return res
 
     def check_counts(self, db):
+        """Counts per collection - and the collections that are on one side
+        only, which this used to drop before counting anything.
+
+        Measured: a collection holding 9 documents that existed only on the
+        source came back `ok | 1 collections, docs 5==5`. The intersection
+        removed it, so the check reported on what the two sides happened to
+        share and called that agreement. Every other engine names a missing
+        table right here, and `migkit check` is meant to be the same command
+        whichever store is underneath.
+        """
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
+
+        def collections(side):
+            return {c for c in side.list_collection_names()
+                    if not c.startswith("system.")
+                    and not self.hop.excluded(db, c)}
+
+        src_names, dst_names = collections(s), collections(t)
+        res = []
+        if src_names - dst_names:
+            res.append(Result("counts", db, "diff",
+                              "missing collections on target:"
+                              f" {sorted(src_names - dst_names)}", "",
+                              "create and load them before cutover"))
+        if dst_names - src_names:
+            res.append(Result("counts", db, "diff",
+                              "extra collections on target:"
+                              f" {sorted(dst_names - src_names)}"))
         bad = []
-        names = sorted(c for c in
-                       set(s.list_collection_names()) & set(t.list_collection_names())
-                       if not self.hop.excluded(db, c))
+        names = sorted(src_names & dst_names)
         total_a = total_b = 0
         for name in names:
             a = s[name].count_documents({})
@@ -428,17 +453,17 @@ class MongoEngine(Engine):
             if a != b:
                 bad.append(f"{name} src={a} dst={b}")
         if bad:
-            return [Result("counts", db, "diff", "; ".join(bad))]
-        return [Result("counts", db, "ok",
-                       f"{len(names)} collections, docs"
-                       f" {total_a:,}=={total_b:,}")]
+            res.append(Result("counts", db, "diff", "; ".join(bad)))
+        return res or [Result("counts", db, "ok",
+                              f"{len(names)} collections, docs"
+                              f" {total_a:,}=={total_b:,}")]
 
     def check_params(self, db):
         def pull(side):
             try:
                 res = self._client(side).admin.command({"getParameter": "*"})
             except Exception as e:
-                return {"_error": str(e).splitlines()[-1][:80]}
+                return {self.UNREADABLE: str(e).splitlines()[-1][:80]}
             return {k: v for k, v in res.items() if k != "ok"}
         return self._param_result(
             db, pull("src"), pull("dst"), ("featureCompatibilityVersion",),
