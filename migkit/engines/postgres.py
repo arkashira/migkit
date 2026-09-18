@@ -724,6 +724,34 @@ class PostgresEngine(Engine):
                 f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t'
                 + (f" where {pred}" if pred else ""))
 
+        def both(fn, *args):
+            """Run the source and target aggregates at the same time.
+
+            They used to run one after the other, so every table and every
+            range waited for the source scan before the target scan started -
+            two full passes of wall-clock for work that has no ordering
+            between the sides.
+
+            This does not add load to the source: a unit still issues exactly
+            one source query. The second thread is the target's, and the
+            target is the machine nobody is serving from yet. The throttle
+            therefore keeps meaning what it meant.
+
+            **The speed-up is not measured.** On the sandbox both servers are
+            containers on a two-CPU VM, so they share the cores that do the
+            hashing and running them together came out at 0.96x - neutral,
+            inside the noise. A real leg has the two servers on two machines,
+            where the work genuinely overlaps, but that is reasoning and not a
+            number, and there is no honest way to produce the number here. The
+            change is kept because removing an artificial ordering between two
+            independent queries is right regardless; if anyone measures it on
+            separate hosts, put the figure in this docstring.
+            """
+            with ThreadPoolExecutor(max_workers=2) as two:
+                fa = two.submit(fn, "src", *args)
+                fb = two.submit(fn, "dst", *args)
+                return fa.result(), fb.result()
+
         def one_chunked(t, col):
             """Same answer as one pass, but restartable.
 
@@ -748,8 +776,7 @@ class PostgresEngine(Engine):
                 with gate.unit():
                     started = time.monotonic()
                     try:
-                        a = csum_range("src", t, col, rlo, rhi)
-                        b = csum_range("dst", t, col, rlo, rhi)
+                        a, b = both(csum_range, t, col, rlo, rhi)
                     except RuntimeError as e:
                         # partials already recorded survive for the next run
                         return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
@@ -779,7 +806,7 @@ class PostgresEngine(Engine):
                 return one_chunked(t, big[t][1])
             with gate.unit():
                 try:
-                    a, b = csum("src", t), csum("dst", t)
+                    a, b = both(csum, t)
                 except RuntimeError as e:
                     return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
             if a == b:
