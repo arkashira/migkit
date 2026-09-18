@@ -715,6 +715,11 @@ class PostgresEngine(Engine):
         from .. import unchanged as _un
         proof = _un.Proof(self.hop.report_dir(db) / "proof.json")
         skipped = []
+        # Read once: a source in recovery produces the target-ahead shapes all
+        # by itself, and the verdict has to say so. See `migkit.standby`.
+        from .. import standby as _sb
+        src_note = _sb.note(self._in_recovery("src", db),
+                            self._replay_lag("src", db))
         # How many rows one chunk should cover is not a number anyone can
         # supply usefully - it depends on the row width, the indexes and how
         # busy the server is. Measure it instead.
@@ -805,7 +810,10 @@ class PostgresEngine(Engine):
             pa, pb = a.split("|"), b.split("|")
             k = difference_kind(pa[0], pa[2] if len(pa) > 2 else None,
                                 pb[0], pb[2] if len(pb) > 2 else None)
-            return f" kind={k}" if k else ""
+            if not k:
+                return ""
+            note = _sb.caveat(k, src_note)
+            return f" kind={k}" + (f" -- {note}" if note else "")
 
         def markers(t):
             """(src, dst) change markers, or (None, None) if either is
@@ -865,6 +873,10 @@ class PostgresEngine(Engine):
         except Exception:
             pass                      # a store we cannot write just means
                                       # the next run reads everything again
+        if src_note:
+            lines.append(f"# source read while {src_note}; a source behind"
+                         f" its writer shows fewer rows than the target and"
+                         f" reads as rows-extra")
         if skipped:
             lines.append(f"# {len(skipped)} of {len(tables)} tables unchanged"
                          f" since their last proof and not read this run;"
@@ -1911,6 +1923,23 @@ class PostgresEngine(Engine):
            and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
         order by 1"""
 
+    def _replay_lag(self, side, db):
+        """Seconds this side is behind its writer, or None if it will not say.
+
+        None rather than zero: a replica that hides its replay position is a
+        replica of unknown freshness, and calling that "caught up" is the
+        mistake this exists to prevent.
+        """
+        try:
+            raw = self._psql(side, db,
+                             "select coalesce(extract(epoch from"
+                             " (now() - pg_last_xact_replay_timestamp()))"
+                             ", -1)").strip()
+            v = float(raw)
+        except Exception:
+            return None
+        return None if v < 0 else v
+
     def _change_marker(self, side, db, table):
         """A cheap proof that this table has not moved, or None.
 
@@ -2416,7 +2445,12 @@ class PostgresEngine(Engine):
         dst_ro = self._in_recovery("dst", "postgres")
         add("warn" if src_ro else "pass", "instance",
             "source endpoint role",
-            "READ REPLICA (read-only) - ok for checks, but point at the"
+            "READ REPLICA (read-only) - it writes nothing, so it is the"
+            " only way to verify a frozen source, but a replica that has not"
+            " replayed shows fewer rows than the target and reads as"
+            " rows-extra. Measured: a paused standby produced"
+            " `kind=rows-extra by=5` against a primary five rows ahead. The"
+            " data check names the replica when it reports one; point at the"
             " writer/cluster endpoint for replication and the LSN fence"
             if src_ro else "primary / writer (writable)")
         add("fail" if dst_ro else "pass", "instance",
