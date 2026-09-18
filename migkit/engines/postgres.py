@@ -1857,6 +1857,46 @@ class PostgresEngine(Engine):
            and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
         order by 1"""
 
+    def _change_marker(self, side, db, table):
+        """A cheap proof that this table has not moved, or None.
+
+        The pieces were chosen by measuring what each kind of change actually
+        moves, on PostgreSQL 16:
+
+            UPDATE / DELETE   the tuple counters move
+            TRUNCATE          **the counters do not move at all** - only
+                              relfilenode and the relation size do
+            statistics reset  the counters drop to zero
+
+        So the counters alone would skip a truncated table and call it equal.
+        `relfilenode` is in the marker for exactly that case, and the whole
+        thing is compared for equality so a reset reads as "look again".
+
+        None is returned rather than a guess when the server is too old to
+        trust: before 15 the statistics collector used UDP and could drop a
+        message, and a dropped UPDATE is the false negative this exists to
+        avoid.
+        """
+        from .. import unchanged as _u
+        sch, _, tbl = table.partition(".")
+        try:
+            ver = self._psql(side, db, "show server_version")
+            if not _u.usable_postgres(ver):
+                return None
+            row = self._psql(side, db, f"""
+                select coalesce(s.n_tup_ins, -1)||chr(31)
+                       ||coalesce(s.n_tup_upd, -1)||chr(31)
+                       ||coalesce(s.n_tup_del, -1)||chr(31)
+                       ||c.relfilenode||chr(31)
+                       ||pg_relation_size(c.oid)
+                  from pg_class c
+                  join pg_namespace n on n.oid = c.relnamespace
+                  left join pg_stat_all_tables s on s.relid = c.oid
+                 where n.nspname = '{sch}' and c.relname = '{tbl}'""").strip()
+        except RuntimeError:
+            return None
+        return _u.marker(row.split("\x1f")) if row else None
+
     def _unvalidated_checks(self, db):
         """[(table, constraint, definition)] left NOT VALID on the target.
 
