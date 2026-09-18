@@ -194,7 +194,33 @@ class RedisEngine(Engine):
                 bad.append(k)
         return bad
 
+    def _scan_batches(self, client, sample, deep):
+        """Batches of keys from one side, up to the sample cap."""
+        cursor = 0
+        seen = 0
+        while True:
+            cursor, keys = client.scan(cursor, count=1000)
+            if not deep and seen + len(keys) > sample:
+                keys = keys[:max(0, sample - seen)]
+            if keys:
+                seen += len(keys)
+                yield keys
+            if cursor == 0 or (not deep and seen >= sample):
+                break
+
     def check_data(self, db, table=None, stream=None):
+        """Both directions, because scanning the source only sees one of
+        them.
+
+        A key the target has and the source never did is invisible to a scan
+        of the source, and the count check cannot see it either: measured,
+        deleting one key on the target and adding one stray key there leaves
+        `dbsize` at 20 on both sides, and the old pair of checks reported
+        `keys 20==20` and said nothing about the stray. A target still
+        carrying keys from an earlier attempt is exactly what that looks
+        like, and every other engine names what the target has and the source
+        does not.
+        """
         from ..throttle import Throttle
         s = self._client("src", db)
         t = self._client("dst", db)
@@ -202,32 +228,50 @@ class RedisEngine(Engine):
         deep = bool(self.hop.options.get("deep", False))
         checked = 0
         bad = 0
-        cursor = 0
         # A SCAN plus a pipeline of reads is the heaviest thing a verifier
         # does to a single-threaded server, and nothing else was slowing it
         # down: this loop ran at whatever speed the network allowed, against
-        # a Redis that might also be serving an application.
-        gate = Throttle(1, probe=lambda: self._health("src"))
-        while True:
-            cursor, keys = s.scan(cursor, count=1000)
-            if not deep and checked + len(keys) > sample:
-                keys = keys[:max(0, sample - checked)]
-            if keys:
-                with gate.unit():
-                    bad += len(self._batch_compare(s, t, keys))
-                checked += len(keys)
-            if stream and checked and checked % 20000 < 1000:
+        # a Redis that might also be serving an application. Each side is
+        # gated on its own health, since each pass leans on a different one.
+        src_gate = Throttle(1, probe=lambda: self._health("src"))
+        dst_gate = Throttle(1, probe=lambda: self._health("dst"))
+        for keys in self._scan_batches(s, sample, deep):
+            with src_gate.unit():
+                bad += len(self._batch_compare(s, t, keys))
+            checked += len(keys)
+            if stream and checked % 20000 < 1000:
                 stream(f"db{db}: {checked} keys compared")
-            if cursor == 0 or (not deep and checked >= sample):
-                break
+        extra = []
+        seen_dst = 0
+        for keys in self._scan_batches(t, sample, deep):
+            with dst_gate.unit():
+                pipe = s.pipeline(transaction=False)
+                for k in keys:
+                    pipe.exists(k)
+                extra.extend(k for k, there in zip(keys, pipe.execute())
+                             if not there)
+            seen_dst += len(keys)
         mode = "full scan" if deep else f"sample {checked}"
+        res = []
         if bad:
-            return [Result("data", f"db{db}", "diff",
-                           f"{bad}/{checked} keys differ ({mode})", "",
-                           "full sync: use RIOT (riot replicate) or"
-                           " redis-shake, both verify and resume")]
-        return [Result("data", f"db{db}", "ok",
-                       f"{checked} keys value-equal ({mode}, pipelined)")]
+            res.append(Result("data", f"db{db}", "diff",
+                              f"{bad}/{checked} keys differ ({mode})", "",
+                              "full sync: use RIOT (riot replicate) or"
+                              " redis-shake, both verify and resume"))
+        if extra:
+            shown = ", ".join(sorted(extra)[:6])
+            more = f" (+{len(extra) - 6} more)" if len(extra) > 6 else ""
+            res.append(Result(
+                "data", f"db{db} extra keys", "diff",
+                f"{len(extra)} of {seen_dst} keys on the target are not on"
+                f" the source: {shown}{more}", "",
+                "a target still holding keys from an earlier attempt -"
+                " delete them or reload the target from empty; the key count"
+                " can match on both sides while this is true"))
+        return res or [Result(
+            "data", f"db{db}", "ok",
+            f"{checked} keys value-equal, {seen_dst} target keys all present"
+            f" on the source ({mode}, pipelined)")]
 
     def check_deep(self, db):
         s = self._client("src", db)
@@ -259,7 +303,11 @@ class RedisEngine(Engine):
                     if a is None or a < 0:
                         continue  # no ttl on source
                     if b is None or b == -2:
-                        continue  # key missing on dst, counts covers it
+                        continue  # missing on the target: the data check
+                        # compares every sampled key's type and value, which
+                        # is where that is reported. The count check is not
+                        # what covers it - it compares dbsize totals, and one
+                        # key missing plus one stray key leaves those equal.
                     if b == -1:
                         no_ttl.append(k)
                     elif abs(a - b) > max(60000, a * 0.1):
