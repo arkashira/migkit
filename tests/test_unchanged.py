@@ -72,3 +72,46 @@ def test_server_major_reads_the_shapes_engines_report():
     assert u.server_major("16.15") == 16
     assert u.server_major("8.0.30-txsql") == 8
     assert u.server_major(None) is None
+
+
+def test_the_proof_store_round_trips(tmp_path):
+    p = tmp_path / "proof.json"
+    s = u.Proof(p)
+    assert s.get("public.t") is None
+    s.set("public.t", "A", "B")
+    s.save()
+    again = u.Proof(p)
+    assert again.get("public.t") == {"src": "A", "dst": "B"}
+
+
+def test_a_table_that_differed_loses_its_proof(tmp_path):
+    """A marker recorded against a table that does not match is evidence of
+    the wrong thing - keeping it would let the next run skip a table already
+    known to be wrong."""
+    s = u.Proof(tmp_path / "proof.json")
+    s.set("t", "A", "B")
+    s.drop("t")
+    assert s.get("t") is None
+
+
+def test_a_half_marker_is_not_stored(tmp_path):
+    s = u.Proof(tmp_path / "proof.json")
+    s.set("t", "A", None)
+    assert s.get("t") is None
+
+
+def test_an_unreadable_store_proves_nothing(tmp_path):
+    p = tmp_path / "proof.json"
+    p.write_text("{ this is not json")
+    s = u.Proof(p)
+    assert s.data == {}
+    assert s.get("anything") is None
+
+
+def test_saving_is_atomic_and_leaves_no_partial_file(tmp_path):
+    p = tmp_path / "sub" / "proof.json"
+    s = u.Proof(p)
+    s.set("t", "A", "B")
+    s.save()
+    assert p.exists()
+    assert [f.name for f in p.parent.iterdir()] == ["proof.json"]

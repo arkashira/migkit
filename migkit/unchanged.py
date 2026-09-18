@@ -106,3 +106,63 @@ def record(src_now, dst_now):
     if not src_now or not dst_now:
         return None
     return {"src": src_now, "dst": dst_now}
+
+
+class Proof:
+    """Which tables were proved equal, and the marker they carried then.
+
+    Kept beside the reports rather than in the checkpoint: a checkpoint holds
+    partial work inside one run and is cleared the moment a table finishes,
+    which is exactly when this needs to start remembering.
+
+    A table is dropped from the store the moment it comes out different. A
+    marker recorded against a table that does not match is not weaker
+    evidence - it is evidence of the wrong thing, and keeping it would let the
+    next run skip a table that is known to be wrong.
+    """
+
+    def __init__(self, path):
+        import json
+        import pathlib as _p
+        self.path = _p.Path(path)
+        self.data = {}
+        if self.path.exists():
+            try:
+                loaded = json.loads(self.path.read_text())
+                if isinstance(loaded, dict):
+                    self.data = loaded
+            except Exception:
+                # an unreadable store proves nothing, and guessing at its
+                # contents would be guessing about what was verified
+                self.data = {}
+
+    def get(self, table):
+        v = self.data.get(str(table))
+        return v if isinstance(v, dict) else None
+
+    def set(self, table, src_now, dst_now):
+        rec = record(src_now, dst_now)
+        if rec:
+            self.data[str(table)] = rec
+        else:
+            self.drop(table)
+
+    def drop(self, table):
+        self.data.pop(str(table), None)
+
+    def save(self):
+        import json
+        import os
+        import tempfile
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(self.data, f, indent=1, sort_keys=True)
+            os.replace(tmp, self.path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise

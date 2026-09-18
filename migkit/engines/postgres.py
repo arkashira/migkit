@@ -663,7 +663,7 @@ class PostgresEngine(Engine):
             pass    # no estimates = no chunking, never a failure
         return out
 
-    def _data_fast_native(self, db, stream=None):
+    def _data_fast_native(self, db, stream=None, may_skip=True):
         """Per-table checksum on both sides in parallel: commutative
         sum-of-md5 as a Postgres parallel aggregate (no sort, no lock beyond
         a plain SELECT). Emits the same OK/DIFF/ERROR lines the slice-mode
@@ -709,6 +709,12 @@ class PostgresEngine(Engine):
                         probe=lambda: self._health("src", db))
         big = self._chunkable(db)
         cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+        # What was proved equal last time, and the marker it carried then.
+        # `--consistent` never reaches this function, so the final proof
+        # cannot skip anything by construction rather than by a flag.
+        from .. import unchanged as _un
+        proof = _un.Proof(self.hop.report_dir(db) / "proof.json")
+        skipped = []
         # How many rows one chunk should cover is not a number anyone can
         # supply usefully - it depends on the row width, the indexes and how
         # busy the server is. Measure it instead.
@@ -801,18 +807,47 @@ class PostgresEngine(Engine):
                                 pb[0], pb[2] if len(pb) > 2 else None)
             return f" kind={k}" if k else ""
 
+        def markers(t):
+            """(src, dst) change markers, or (None, None) if either is
+            untrustworthy - which never skips."""
+            try:
+                return (self._change_marker("src", db, t),
+                        self._change_marker("dst", self._d("dst", db), t))
+            except Exception:
+                return (None, None)
+
         def one(t):
+            src_m, dst_m = markers(t)
+            if may_skip and _un.skippable(proof.get(t), src_m, dst_m):
+                skipped.append(t)
+                # deliberately not "OK": nothing was read this run, and a
+                # line that looks like a fresh verdict would be a lie about
+                # when the evidence was taken
+                return (f"{t}: UNCHANGED since it was last proved equal"
+                        f" (no rows read this run)")
             if t in big:
-                return one_chunked(t, big[t][1])
-            with gate.unit():
-                try:
-                    a, b = both(csum, t)
-                except RuntimeError as e:
-                    return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
-            if a == b:
-                return (f"{t}: OK rows={a.split('|')[0]}"
-                        f" checksum={a.split('|')[1]}")
-            return f"{t}: DIFF src={a} dst={b}{_kind(a, b)}"
+                line = one_chunked(t, big[t][1])
+            else:
+                with gate.unit():
+                    try:
+                        a, b = both(csum, t)
+                    except RuntimeError as e:
+                        return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
+                if a == b:
+                    line = (f"{t}: OK rows={a.split('|')[0]}"
+                            f" checksum={a.split('|')[1]}")
+                else:
+                    line = f"{t}: DIFF src={a} dst={b}{_kind(a, b)}"
+            if ": OK" in line:
+                # the markers are the ones read *before* the scan, so they
+                # can never be newer than the evidence they stand for
+                proof.set(t, src_m, dst_m)
+            else:
+                # a marker against a table that does not match is evidence of
+                # the wrong thing; keeping it would let the next run skip a
+                # table already known to be wrong
+                proof.drop(t)
+            return line
 
         lines, rc = [], 0
         with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
@@ -820,8 +855,20 @@ class PostgresEngine(Engine):
                 lines.append(line)
                 if stream:
                     stream(line)
-                if ": OK" not in line:
+                # say what a failure is rather than inferring it from the
+                # absence of the word OK: an UNCHANGED line is neither, and
+                # treating it as a failure made a fully quiet run exit 1
+                if ": DIFF" in line or ": ERROR" in line:
                     rc = 1
+        try:
+            proof.save()
+        except Exception:
+            pass                      # a store we cannot write just means
+                                      # the next run reads everything again
+        if skipped:
+            lines.append(f"# {len(skipped)} of {len(tables)} tables unchanged"
+                         f" since their last proof and not read this run;"
+                         f" `check --consistent` reads every table")
         note = gate.line()
         if note:
             lines.append(f"# {note}")
@@ -927,7 +974,10 @@ class PostgresEngine(Engine):
                 for line in out.splitlines():
                     stream(line)
         else:
-            rc, out = self._data_fast_native(db, stream=stream)
+            # when the row counts are merged out of this pass, every table
+            # has to be read or the count is short by whatever was skipped
+            rc, out = self._data_fast_native(db, stream=stream,
+                                             may_skip=not with_counts)
         ev = self.hop.report_dir(db) / "data-evidence.txt"
         ev.write_text(out + "\n")
         pre = [self._counts_from_fast(db, out)] if with_counts else []
@@ -936,9 +986,13 @@ class PostgresEngine(Engine):
             import re as _re
             rows = sum(int(m) for m in _re.findall(r"rows=(\d+)", out))
             n = out.count(": OK")
+            unchanged = out.count(": UNCHANGED")
+            extra = (f", {unchanged} unchanged since their last proof and"
+                     f" not read this run" if unchanged else "")
             return pre + [Result("data", db, "ok",
                                  f"{mode}{n} tables, {rows:,} rows,"
-                                 f" checksums equal both sides", str(ev))]
+                                 f" checksums equal both sides{extra}",
+                                 str(ev))]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
         for t in bad:
