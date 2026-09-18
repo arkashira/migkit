@@ -1245,7 +1245,68 @@ class MySQLEngine(Engine):
         res += self._deep_float(db, ddb)
         res += self._deep_unenforced_checks(db, ddb)
         res += self._check_grants(db)
+        res += self._deep_ownership(db, ddb)
         return res
+
+    OWNED = (("views", "table_schema", "table_name"),
+             ("routines", "routine_schema", "routine_name"),
+             ("triggers", "trigger_schema", "trigger_name"),
+             ("events", "event_schema", "event_name"))
+
+    def _deep_ownership(self, db, ddb):
+        """DEFINER and SQL SECURITY drift, which the schema diff cannot see.
+
+        `_canon_ddl` strips both before comparing, deliberately: the mover
+        rewrites them on every object, and leaving them in would bury every
+        real schema finding under cosmetic noise. So they are reported here
+        instead, where one line can describe a change made to everything.
+
+        Measured before this existed: a view that was `app@% / DEFINER` on the
+        source and `dts_migration@% / INVOKER` on the target passed the schema
+        check, the object check and atlas, all three reporting ok.
+        """
+        from .. import ownership as _own
+        rows = []
+        for table, sch_col, name_col in self.OWNED:
+            has_sec = table in ("views", "routines")
+            sec = ", security_type" if has_sec else ""
+            q = (f"select {name_col}, definer{sec} from information_schema."
+                 f"{table} where {sch_col} = %s")
+            try:
+                a = {r[0]: "/".join(str(x) for x in r[1:])
+                     for r in self._q("src", q, (db,))}
+                b = {r[0]: "/".join(str(x) for x in r[1:])
+                     for r in self._q("dst", q, (ddb,))}
+            except Exception as e:
+                return [Result("deep", f"{db} ownership", "warn",
+                               f"cannot read {table}: {str(e)[:90]} -"
+                               " unknown, not clean")]
+            # objects missing on one side are the object check's finding, not
+            # this one; saying it twice would let the two drift apart
+            rows += [(f"{table[:-1]} {n}", a[n], b[n])
+                     for n in sorted(set(a) & set(b))]
+        if not rows:
+            return [Result("deep", f"{db} ownership", "ok",
+                           "no views, routines, triggers or events")]
+        changes = _own.group(rows)
+        if not changes:
+            return [Result("deep", f"{db} ownership", "ok",
+                           f"{len(rows)} objects keep their definer"
+                           " and security mode")]
+        note = ("one substitution across every object - a decision or"
+                " something the mover did to all of them"
+                if _own.systematic(changes) else
+                "objects drifted individually - read each one")
+        invoker = sum(len(v) for (a, b), v in changes.items()
+                      if "DEFINER" in a and "INVOKER" in b)
+        detail = f"{_own.total(changes)} of {len(rows)}: {_own.describe(changes)}"
+        if invoker:
+            # the privilege change, not just the name change
+            detail += (f"; {invoker} dropped from SQL SECURITY DEFINER to"
+                       " INVOKER - they now run with the caller's privileges")
+        return [Result("deep", f"{db} ownership", "diff", detail, "",
+                       f"{note}; recreate with the intended DEFINER before"
+                       " the application depends on it")]
 
     # ---- checks PostgreSQL already had and MySQL did not ----
 

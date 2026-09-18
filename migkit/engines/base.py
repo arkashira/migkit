@@ -47,6 +47,11 @@ CATEGORIES = {
     "parity": "identity.sequence-parity",
     "grants": "access.table-grants",
     "seq-grants": "access.sequence-grants",
+    # who an object belongs to, and whose privileges it runs with. One
+    # category for both because the consequence is the same: the object is
+    # present and correct, and the account attached to it is not the one the
+    # application was built around.
+    "ownership": "access.object-ownership",
     # how the data moved
     "boundary": "movement.target-ahead",
 }

@@ -1800,6 +1800,8 @@ class PostgresEngine(Engine):
                               f"{len(se)} extensions match" if se
                               else "no non-default extensions"))
 
+        res += self._deep_ownership(db)
+
         pkq = ("select n.nspname||'|'||c.relname||'|'||a.attname"
                " from pg_index i"
                " join pg_class c on c.oid = i.indrelid"
@@ -1855,6 +1857,72 @@ class PostgresEngine(Engine):
             res.append(Result("deep", f"{db} boundary", "ok",
                               "no single-int-pk tables to boundary-check"))
         return res
+
+    OWNER_SQL = """
+        select 'table '||n.nspname||'.'||c.relname||'|'
+               ||pg_get_userbyid(c.relowner)
+          from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where c.relkind in ('r','p','v','m','S')
+           and n.nspname not in ('pg_catalog','information_schema')
+           and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
+        union all
+        select 'routine '||n.nspname||'.'||p.proname||'|'
+               ||pg_get_userbyid(p.proowner)
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname not in ('pg_catalog','information_schema')
+           and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
+        union all
+        select 'schema '||n.nspname||'|'||pg_get_userbyid(n.nspowner)
+          from pg_namespace n
+         where n.nspname not in ('pg_catalog','information_schema')
+           and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
+        order by 1"""
+
+    def _deep_ownership(self, db):
+        """Object owners, which the structural differ does not compare.
+
+        Tencent's PostgreSQL migration notes say objects created by `postgres`
+        on the source change ownership to the migration account on the target.
+        Measured: a table owned by `appowner` arrived owned by
+        `dts_migration`, and the generated fix contained no `OWNER TO` at all -
+        `results` compares definitions, and an owner is not part of one.
+
+        The owner is the role that may ALTER or DROP the object. A target
+        where the application role no longer owns its own tables looks correct
+        until the first migration the application tries to run on itself.
+
+        A function's SECURITY DEFINER flag is deliberately not checked here:
+        it is part of the definition, so the structural diff already catches
+        it, and checking it twice is how two copies drift apart.
+        """
+        from .. import ownership as _own
+        try:
+            a = dict(l.split("|", 1) for l in
+                     self._psql("src", db, self.OWNER_SQL).splitlines() if "|" in l)
+            b = dict(l.split("|", 1) for l in
+                     self._psql("dst", self._d("dst", db),
+                                self.OWNER_SQL).splitlines() if "|" in l)
+        except RuntimeError as e:
+            return [Result("deep", f"{db} ownership", "warn",
+                           f"cannot read owners: {str(e).splitlines()[-1][:90]}"
+                           " - unknown, not clean")]
+        shared = sorted(set(a) & set(b))
+        if not shared:
+            return [Result("deep", f"{db} ownership", "skip",
+                           "no objects present on both sides to compare")]
+        changes = _own.group([(n, a[n], b[n]) for n in shared])
+        if not changes:
+            return [Result("deep", f"{db} ownership", "ok",
+                           f"{len(shared)} objects keep their owner")]
+        note = ("one substitution across every object - most likely the mover"
+                " reassigning what it created"
+                if _own.systematic(changes) else
+                "objects drifted individually - read each one")
+        return [Result("deep", f"{db} ownership", "diff",
+                       f"{_own.total(changes)} of {len(shared)}:"
+                       f" {_own.describe(changes)}", "",
+                       f"{note}; ALTER ... OWNER TO the intended role, or the"
+                       " application cannot alter its own objects")]
 
     def repair_plan(self, db, kind):
         actions = []
