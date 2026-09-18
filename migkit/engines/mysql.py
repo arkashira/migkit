@@ -1974,6 +1974,50 @@ class MySQLEngine(Engine):
                 "grant select on mysql.user to compare accounts")
         inv = self._handwork()
         items += inv.rows() + inv.summary()
+        items += self._mover_leftovers()
+        return items
+
+    def _mover_leftovers(self):
+        """What a mover added to the source and did not take away.
+
+        MySQL has no replication slot to pin WAL, so nothing here is urgent in
+        the way the PostgreSQL side can be - but a leftover database or table
+        is still evidence of which mover touched this server, which matters
+        when two of them ran and only one is admitted to.
+        """
+        from .. import leftovers as _lo
+        found, items = [], []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "source leftovers",
+                          "item": item, "detail": str(detail)})
+        try:
+            for (name,) in self._q("src", "show databases"):
+                found.append(("database", name))
+            for (u, h) in self._q("src", "select user, host from mysql.user"):
+                found.append(("user", f"{u}@{h}"))
+        except Exception as e:
+            add("warn", "cannot list databases or users on the source",
+                f"{str(e)[:90]} - unknown, not clean")
+            return items
+        for db in self.databases():
+            try:
+                for (name,) in self._q(
+                        "src", "select table_name from information_schema"
+                               ".tables where table_schema = %s", (db,)):
+                    found.append(("table", name))
+            except Exception as e:
+                add("warn", f"cannot list tables in {db}",
+                    f"{str(e)[:90]} - unknown, not clean")
+        by = _lo.group(found)
+        if not by:
+            add("pass", "no mover artifacts left in the source",
+                f"{len(found)} objects examined")
+            return items
+        add("warn", f"{_lo.total(by)} mover artifacts left in the source",
+            _lo.describe(by) + ". Drop them once every leg that used them is"
+            " finished - they are on the source, so nothing on the target"
+            " tells you they are there")
         return items
 
     def _handwork(self):

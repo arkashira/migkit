@@ -2385,6 +2385,58 @@ class PostgresEngine(Engine):
                 add("fail", db, "assess queries", str(e).splitlines()[-1][:120])
         hw = self._handwork(avail)
         items += hw.rows() + hw.summary()
+        items += self._mover_leftovers()
+        return items
+
+    def _mover_leftovers(self):
+        """What a mover added to the source and did not take away.
+
+        migkit's own playbook has said for a long time to remove these after
+        cutover. Saying it in prose is a note to remember something; this
+        counts them. A replication slot in particular is not untidiness - it
+        pins WAL, and the source can run out of disk long after everybody has
+        moved on.
+        """
+        from .. import leftovers as _lo
+        found, items = [], []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "source leftovers",
+                          "item": item, "detail": str(detail)})
+        try:
+            for name in self._psql("src", "postgres",
+                                   "select slot_name from pg_replication_slots"
+                                   ).splitlines():
+                if name:
+                    found.append(("slot", name))
+        except RuntimeError as e:
+            add("warn", "cannot list replication slots on the source",
+                f"{str(e).splitlines()[-1][:90]} - unknown, not clean")
+        for db in self.databases():
+            try:
+                for q, kind in (
+                        ("select nspname from pg_namespace", "schema"),
+                        ("select pubname from pg_publication", "publication"),
+                        ("select evtname from pg_event_trigger",
+                         "event trigger"),
+                        ("select extname from pg_extension", "extension")):
+                    for name in self._psql("src", db, q).splitlines():
+                        if name:
+                            found.append((kind, name))
+            except RuntimeError as e:
+                add("warn", f"cannot list objects in {db}",
+                    f"{str(e).splitlines()[-1][:90]} - unknown, not clean")
+        by = _lo.group(found)
+        if not by:
+            add("pass", "no mover artifacts left in the source",
+                f"{len(found)} objects examined")
+            return items
+        for label, why in _lo.urgent(by):
+            add("fail", f"{label} is still active on the source", why)
+        add("warn", f"{_lo.total(by)} mover artifacts left in the source",
+            _lo.describe(by) + ". Drop them once every leg that used them is"
+            " finished - they are on the source, so nothing on the target"
+            " tells you they are there")
         return items
 
     def _handwork(self, avail):
