@@ -106,8 +106,17 @@ class MySQLEngine(Engine):
             conn.close()
         return len(rows)
 
-    def neutral_create(self, side, db, table, columns, key=()):
+    def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
+        defs = [f"`{n}` {canon.ddl_type('mysql', c, w)}"
+                for n, c, w in columns]
+        if key:
+            defs.append("primary key (" + ", ".join(f"`{k}`" for k in key)
+                        + ")")
+        return (f"create table `{self._d(side, db)}`.`{table}` ("
+                + ", ".join(defs) + ")")
+
+    def neutral_create(self, side, db, table, columns, key=()):
         exists = self._q(side, "select count(*) from information_schema"
                                ".tables where table_schema=%s"
                                " and table_name=%s",
@@ -116,13 +125,7 @@ class MySQLEngine(Engine):
             raise SystemExit(f"{table} already exists on the target -"
                              " migkit will not alter or replace a table that"
                              " is already there")
-        defs = [f"`{n}` {canon.ddl_type('mysql', c, w)}"
-                for n, c, w in columns]
-        if key:
-            defs.append("primary key (" + ", ".join(f"`{k}`" for k in key)
-                        + ")")
-        ddl = (f"create table `{self._d(side, db)}`.`{table}` ("
-               + ", ".join(defs) + ")")
+        ddl = self.neutral_create_sql(side, db, table, columns, key)
         conn = self._conn(side)
         try:
             with conn.cursor() as cur:

@@ -158,15 +158,19 @@ def test_rows_move_from_the_file_into_the_server(engine):
     assert _one(eng).status == "ok"
 
 
-def test_converting_the_schema_is_still_written_for_one_pair_only(engine):
-    """Moving rows crosses now; turning one engine's DDL into another's does
-    not. An AttributeError on a field that only exists for mysql->postgres
-    would read as a migkit bug rather than as the sentence it is."""
+def test_the_target_ddl_is_written_from_a_file_schema_too(engine):
+    """`convert_ddl` used to read `show create table` out of MySQL and
+    transpile it, so the source had to be MySQL. It now asks whichever engine
+    is on the left, and SQLite - whose declared type is a hint rather than a
+    guarantee - is as far from that as the sources get."""
     eng, _ = engine
-    with pytest.raises(SystemExit) as e:
-        eng.convert_ddl("main")
-    assert "sqlite->postgres" in str(e.value)
-    assert "mysql->postgres only" in str(e.value)
+    got = eng.convert_ddl("main")
+    one = [s for s in got if "items" in s]
+    assert len(one) == 1, got
+    assert one[0].startswith('create table "public"."items" ('), one[0]
+    assert '"ratio" double precision' in one[0], one[0]
+    assert '"name" text' in one[0], one[0]
+    assert 'primary key ("id")' in one[0], one[0]
 
 
 def test_the_report_does_not_claim_a_local_file_crossed_a_network(engine):

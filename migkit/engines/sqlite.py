@@ -120,19 +120,22 @@ class SQLiteEngine(Engine):
             conn.close()
         return len(rows)
 
-    def neutral_create(self, side, db, table, columns, key=()):
-        import sqlite3
+    def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
-        if table in self._tables(side):
-            raise SystemExit(f"{table} already exists on the target -"
-                             " migkit will not alter or replace a table that"
-                             " is already there")
         defs = [f'"{n}" {canon.ddl_type("sqlite", c, w)}'
                 for n, c, w in columns]
         if key:
             defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
                         + ")")
-        ddl = f'create table "{table}" (' + ", ".join(defs) + ")"
+        return f'create table "{table}" (' + ", ".join(defs) + ")"
+
+    def neutral_create(self, side, db, table, columns, key=()):
+        import sqlite3
+        if table in self._tables(side):
+            raise SystemExit(f"{table} already exists on the target -"
+                             " migkit will not alter or replace a table that"
+                             " is already there")
+        ddl = self.neutral_create_sql(side, db, table, columns, key)
         conn = sqlite3.connect(self._path(side))
         try:
             conn.execute(ddl)

@@ -405,6 +405,15 @@ class Engine:
         """
         raise self._no_canon("write rows")
 
+    def neutral_create_sql(self, side, db, table, columns, key=()):
+        """The statement that would create this table here, without running it.
+
+        Split from `neutral_create` so `convert-schema` can print exactly what
+        the mover would execute. When the two were written separately they
+        were free to disagree, and the one you read was not the one that ran.
+        """
+        raise self._no_canon("write a create statement")
+
     def neutral_create(self, side, db, table, columns, key=()):
         """Create a table to receive rows. Returns the DDL it ran.
 

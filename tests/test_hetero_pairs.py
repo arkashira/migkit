@@ -61,12 +61,24 @@ def test_the_pair_specific_paths_say_which_pair_they_are_for():
     refuse - converting DDL and the target setup plan. Moving rows crosses
     now, so it is no longer in this list."""
     eng = HeteroEngine(_hop("postgres", "mysql"))
-    for call in (lambda: eng.convert_ddl("db"),
-                 lambda: eng.setup_target_plan("db")):
-        with pytest.raises(SystemExit) as e:
-            call()
-        assert "mysql->postgres only" in str(e.value)
-        assert "postgres->mysql" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        eng.setup_target_plan("db")
+    assert "mysql->postgres only" in str(e.value)
+    assert "postgres->mysql" in str(e.value)
+
+
+def test_writing_the_target_ddl_crosses_pairs_now():
+    """`convert_ddl` was a sqlglot transpile plus ten regular expressions and
+    only ever ran mysql->postgres. It is the same statement `move` executes
+    when a table is missing, so it works wherever that does - and refuses
+    where there is no type mapping rather than printing something plausible.
+    """
+    eng = HeteroEngine(_hop("mysql", "redis"))
+    with pytest.raises(SystemExit) as e:
+        eng.convert_ddl("db")
+    assert "no type mapping" in str(e.value)
+    assert "mysql->redis" in str(e.value)
+    assert not hasattr(HeteroEngine, "TYPE_FIX")
 
 
 def test_moving_and_comparing_are_answered_per_pair_without_connecting():

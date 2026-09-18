@@ -218,8 +218,17 @@ class PostgresEngine(Engine):
             conn.commit()
         return len(rows)
 
-    def neutral_create(self, side, db, table, columns, key=()):
+    def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
+        sch, tbl = self._split(table)
+        defs = [f'"{n}" {canon.ddl_type("postgres", c, w)}'
+                for n, c, w in columns]
+        if key:
+            defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
+                        + ")")
+        return f'create table "{sch}"."{tbl}" (' + ", ".join(defs) + ")"
+
+    def neutral_create(self, side, db, table, columns, key=()):
         sch, tbl = self._split(table)
         exists = self._psql(side, self._d(side, db),
                             "select count(*) from information_schema.tables"
@@ -229,12 +238,7 @@ class PostgresEngine(Engine):
             raise SystemExit(f"{table} already exists on the target -"
                              " migkit will not alter or replace a table that"
                              " is already there")
-        defs = [f'"{n}" {canon.ddl_type("postgres", c, w)}'
-                for n, c, w in columns]
-        if key:
-            defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
-                        + ")")
-        ddl = f'create table "{sch}"."{tbl}" (' + ", ".join(defs) + ")"
+        ddl = self.neutral_create_sql(side, db, table, columns, key)
         self._psql(side, self._d(side, db), ddl)
         return ddl
 

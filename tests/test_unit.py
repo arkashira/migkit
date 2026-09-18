@@ -101,16 +101,33 @@ def test_report_flags_diff():
     assert "missing=3" in html
 
 
-def test_mysql_ddl_type_mapping():
-    from migkit.engines.hetero import HeteroEngine
-    import re
-    sql = "CREATE TABLE t (id INT AUTO_INCREMENT, v DOUBLE, b TINYINT(1))"
-    for pat, rep in HeteroEngine.TYPE_FIX:
-        sql = re.sub(pat, rep, sql, flags=re.I)
-    assert "DOUBLE PRECISION" in sql
-    assert "DOUBLE PRECISION PRECISION" not in sql
-    assert "IDENTITY" in sql
-    assert "BOOLEAN" in sql
+def test_a_mysql_type_becomes_the_postgres_one_through_the_class():
+    """This was ten regular expressions rewriting generated SQL - one of them
+    `DOUBLE -> DOUBLE PRECISION`, guarded by a lookahead so it would not run
+    twice on its own output. The type now goes through its neutral class, so
+    the question "what does this become" is asked of a mapping rather than
+    of the text."""
+    from migkit import canon
+    pairs = {"double": "double precision", "tinyint(1)": "bigint",
+             "datetime(6)": "timestamp(6)", "longtext": "text",
+             "longblob": "bytea", "int unsigned": "bigint"}
+    for declared, expected in pairs.items():
+        cls = canon.type_class("mysql", declared)
+        assert cls, declared
+        got = canon.ddl_type("postgres", cls, canon.params(declared))
+        assert got == expected, (declared, cls, got)
+
+
+def test_the_ddl_mapping_refuses_a_class_it_has_no_type_for():
+    """A table created with the wrong column type is harder to notice than
+    one that was never created."""
+    import pytest
+
+    from migkit import canon
+    with pytest.raises(ValueError):
+        canon.ddl_type("postgres", "geography")
+    with pytest.raises(ValueError):
+        canon.ddl_type("oracle", "integer")
 
 
 def test_secret_env_and_file_resolution(tmp_path, monkeypatch):

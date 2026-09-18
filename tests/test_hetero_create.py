@@ -226,3 +226,39 @@ def test_binary_arrives_as_bytes_not_as_the_text_of_a_python_object(engine):
     assert src == dst, (src, dst)
     assert src[0] == "00FF41", src
     assert "6D656D6F7279" not in dst[0], dst      # hex of "memory"
+
+
+def test_convert_schema_prints_exactly_what_the_mover_would_run(engine):
+    """One source of truth. When the printed DDL and the executed DDL were
+    written separately, the one an operator reviewed was not the one that
+    ran - `convert_ddl` was a sqlglot transpile plus ten regular expressions
+    while `move` used the type mapping."""
+    assert my_sql("drop table if exists wide", "cx").returncode == 0
+    printed = [s for s in engine.convert_ddl("cx")
+               if '`wide`' in s or '"wide"' in s]
+    assert len(printed) == 1, printed
+
+    lines = []
+    engine.move_table("cx", "public", "wide", 10, _Checkpoint(), lines.append)
+    ran = [m.split("created it - ", 1)[1] for m in lines
+           if "created it - " in m]
+    assert len(ran) == 1, lines
+    assert printed[0] == ran[0] + ";", (printed[0], ran[0])
+
+
+def test_convert_schema_covers_every_source_table_not_just_one_pair(engine):
+    """It used to read `show create table` from MySQL and transpile it, so
+    the source had to be MySQL. It now asks whichever engine is on the left."""
+    assert pg_sql("create table extra_one (id bigint primary key,"
+                  " v varchar(10))").returncode == 0
+    try:
+        got = engine.convert_ddl("cx")
+        assert any("extra_one" in s for s in got), got
+        one = [s for s in got if "extra_one" in s][0]
+        assert one.startswith("create table `cx`.`extra_one` ("), one
+        assert "`v` varchar(10)" in one, one
+        assert "primary key (`id`)" in one, one
+        assert one.endswith(";"), one
+    finally:
+        pg_sql("drop table extra_one")
+        my_sql("drop table if exists extra_one", "cx")
