@@ -45,6 +45,8 @@ def test_movers_pick_prefers_installed(monkeypatch):
             "pgloader", "mongodump", "mongorestore"}
     monkeypatch.setattr(movers, "which",
                         lambda n: f"/bin/{n}" if n in have else None)
+    # the container path is a separate question from what is on PATH
+    monkeypatch.setattr(movers, "pgcopydb_available", lambda: False)
     assert movers.pick("postgres") == "pgdump"
     assert movers.pick("mysql") == "mydumper"
     assert movers.pick("hetero") == "pgloader"
@@ -54,9 +56,26 @@ def test_movers_pick_prefers_installed(monkeypatch):
     assert movers.pick("postgres") == "builtin"
 
 
+def test_the_fastest_available_postgres_path_is_preferred(monkeypatch):
+    """pgcopydb overlaps copy, index and constraint work, builds indexes
+    after the rows land and needs no intermediate directory. When its
+    version-matched container is here it wins; when it is not, the dump path
+    is still there."""
+    from migkit import movers
+    monkeypatch.setattr(movers, "which", lambda n: "/bin/" + n)
+    monkeypatch.setattr(movers, "pgcopydb_available", lambda: True)
+    assert movers.pick("postgres") == "pgcopydb"
+    monkeypatch.setattr(movers, "pgcopydb_available", lambda: False)
+    assert movers.pick("postgres") == "pgdump"
+    # a single table still goes through the resumable chunked path
+    monkeypatch.setattr(movers, "pgcopydb_available", lambda: True)
+    assert movers.pick("postgres", table="x.y") == "builtin"
+
+
 def test_mover_choice_is_not_a_user_decision(monkeypatch):
     from migkit import movers
     monkeypatch.setattr(movers, "which", lambda n: "/bin/" + n)
+    monkeypatch.setattr(movers, "pgcopydb_available", lambda: False)
     monkeypatch.delenv("MIGKIT_MOVER", raising=False)
     # no flag, no argument: migkit decides from what is installed
     assert movers.chosen("postgres") == "pgdump"

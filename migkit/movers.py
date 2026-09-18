@@ -15,7 +15,8 @@ from urllib.parse import quote
 
 from .util import run, tool_env, which
 
-VIAS = ("auto", "builtin", "pgdump", "mydumper", "pgloader", "mongodump")
+VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper",
+        "pgloader", "mongodump")
 
 
 def pick(engine, table=""):
@@ -23,8 +24,14 @@ def pick(engine, table=""):
     (chunk resume matters more than raw speed there)."""
     if table:
         return "builtin"
-    if engine == "postgres" and which("pg_dump") and which("pg_restore"):
-        return "pgdump"
+    if engine == "postgres":
+        # the version-matched container first: it overlaps copy, index and
+        # constraint work, builds indexes after the rows land, and needs no
+        # intermediate directory - none of which the dump path does
+        if pgcopydb_available():
+            return "pgcopydb"
+        if which("pg_dump") and which("pg_restore"):
+            return "pgdump"
     if engine == "mysql" and which("mydumper") and which("myloader"):
         return "mydumper"
     if engine == "hetero" and which("pgloader"):
@@ -58,6 +65,7 @@ def chosen(engine, table=""):
 
 def supported(engine, via):
     return {"pgdump": engine == "postgres",
+            "pgcopydb": engine == "postgres",
             "mydumper": engine == "mysql",
             "pgloader": engine == "hetero",
             "mongodump": engine == "mongodb"}.get(via, True)
@@ -80,17 +88,42 @@ def _sh(cmd, env=None, log=None):
     return p
 
 
+PG_TRUNCATE_SQL = (
+    "select coalesce('truncate table '||string_agg("
+    "format('%I.%I', n.nspname, c.relname), ', ')||' cascade', '')"
+    " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+    " where c.relkind = 'r'"
+    " and n.nspname not in ('pg_catalog','information_schema')"
+    " and n.nspname not like 'pg\\_%'"
+    " and n.nspname not like '\\_\\_%'"
+    " and c.relname not like 'migkit\\_%'")
+
+
+def _pg_truncate_target(hop, db, log=None):
+    """Empty the user tables a data-only load is about to fill.
+
+    One copy, used by both PostgreSQL bulk paths: a data-only load that
+    appends instead of replacing produces a target with every row twice, and
+    two versions of "which tables count as the application's" would eventually
+    disagree about which ones got emptied.
+    """
+    t = hop.target
+    ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
+    env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    p = _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
+             "-d", ddb, "-X", "-At", "-c", PG_TRUNCATE_SQL], env_t)
+    stmt = p.stdout.strip()
+    if stmt:
+        _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
+             "-d", ddb, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", stmt],
+            env_t, log)
+    return stmt
+
+
 def pgdump_move(hop, db, workers, go, log):
     s, t = hop.source, hop.target
     outdir = hop.report_dir(db) / "pgdump"
-    trunc = ("select coalesce('truncate table '||string_agg("
-             "format('%I.%I', n.nspname, c.relname), ', ')||' cascade', '')"
-             " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
-             " where c.relkind = 'r'"
-             " and n.nspname not in ('pg_catalog','information_schema')"
-             " and n.nspname not like 'pg\\_%'"
-             " and n.nspname not like '\\_\\_%'"
-             " and c.relname not like 'migkit\\_%'")
+    trunc = PG_TRUNCATE_SQL
     steps = [
         f"# truncate all user tables on target {db} (generated from catalog)",
         f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fd"
@@ -101,13 +134,7 @@ def pgdump_move(hop, db, workers, go, log):
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
-    p = _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", db, "-X", "-At", "-c", trunc], env_t)
-    stmt = p.stdout.strip()
-    if stmt:
-        _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", stmt],
-            env_t, log)
+    _pg_truncate_target(hop, db, log)
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
     _sh(["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
@@ -209,6 +236,122 @@ def mongodump_move(hop, db, workers, go, log):
         raise RuntimeError((err_d + err_r).decode()[-500:])
     if log:
         log(f"{db}: mongodump | mongorestore complete")
+    return steps
+
+
+
+PGCOPYDB_IMAGE = "dimitri/pgcopydb:latest"
+_PGCOPYDB_OK = None
+
+
+def pgcopydb_available():
+    """Whether the version-matched pgcopydb container can be run here.
+
+    Deliberately the image and not a local binary. Homebrew's pgcopydb 0.18 is
+    compiled against PostgreSQL 18 and emits `SET transaction_timeout = 0` on
+    the target; PostgreSQL 16 has never heard of that parameter, so the
+    statement fails, the transaction aborts, and every later statement in it is
+    refused - measured, a whole-database clone moved zero rows while reporting
+    each rejection separately. The published image is compiled against 16 and
+    states its compatible range, which is the difference between a tool that
+    works and one that reports success while moving nothing.
+    """
+    global _PGCOPYDB_OK
+    if _PGCOPYDB_OK is not None:
+        return _PGCOPYDB_OK
+    ok = False
+    if which("docker"):
+        try:
+            p = run(["docker", "image", "inspect", PGCOPYDB_IMAGE],
+                    check=False, timeout=20)
+            ok = p.returncode == 0
+        except Exception:
+            ok = False
+    # cached: `pick` is called per table, and starting a docker client each
+    # time to ask the same question would cost more than the answer is worth
+    _PGCOPYDB_OK = ok
+    return ok
+
+
+def pgcopydb_move(hop, db, workers, go, log):
+    """Parallel data-only copy through pgcopydb, source straight to target.
+
+    `copy table-data` and not `clone`, and the difference matters. `clone`
+    restores the schema as well and refuses a target that already has objects
+    - measured, it exits with `clone process has terminated`. migkit prepares
+    the target schema in its own step before any data moves, so by the time a
+    mover runs the target is never empty, and `clone` can never be the right
+    subcommand here.
+
+    What that leaves, against `pg_dump -Fd -j | pg_restore`: the tables are
+    copied in parallel straight from source to target with no intermediate
+    directory to write out and read back. What it does *not* leave, precisely
+    because the schema is already in place: the indexes exist, so they are
+    maintained during the load rather than built after it - which is the
+    larger of the two wins and belongs to `clone` alone.
+
+    So this is faster than the dump path, and not by as much as pgcopydb is
+    capable of. Saying which is better than implying the rest.
+
+    The network is the host's by default, so the endpoints resolve exactly as
+    they do for migkit itself. `MIGKIT_PGCOPYDB_NETWORK` overrides it - an
+    environment variable rather than a flag, so it stays out of the command
+    surface, the same way `MIGKIT_MOVER` does.
+
+    **The target has to be empty.** Unlike `pgdump_move`, which truncates the
+    user tables it is about to fill, `clone` restores the schema as well and
+    refuses to run over objects that already exist - measured, it exits with
+    `clone process has terminated`. That refusal is the right behaviour and is
+    left as it is: `--drop-if-exists` would make a second run destroy a target
+    somebody may have been using, which is not a decision a mover should make
+    on its own.
+    """
+    import os
+    from urllib.parse import quote
+    s, t = hop.source, hop.target
+    ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
+    src = (f"postgresql://{s.user}:{quote(s.password or '', safe='')}"
+           f"@{s.host}:{s.port}/{db}")
+    dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
+           f"@{t.host}:{t.port}/{ddb}")
+    net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
+    cmd = ["docker", "run", "--rm", "--network", net,
+           "-e", f"PGCOPYDB_SOURCE_PGURI={src}",
+           "-e", f"PGCOPYDB_TARGET_PGURI={dst}",
+           PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
+           "--table-jobs", str(workers)]
+    # the password sits *before* the @, so splitting there and keeping the
+    # front half kept the secret and threw the host away - the printed steps
+    # are what an operator pastes into a ticket
+    import re as _re
+    shown = [_re.sub(r"(://[^:/@]+:)[^@]*@", r"\1***@", c) for c in cmd]
+    steps = ["# truncate all user tables on target (generated from catalog)",
+             "# parallel table copy, source to target, no intermediate file",
+             " ".join(shown)]
+    if not go:
+        return steps + ["# dry-run, add --go to execute"]
+
+    # Having the image is not the same as being able to reach the databases
+    # from inside it: the container has its own network view, and on a laptop
+    # `--network host` is the VM's host, not this one. `ping` is the tool's
+    # own answer to that question, and asking it first turns a failed move
+    # into a fallback rather than an outage.
+    ping = cmd[:cmd.index(PGCOPYDB_IMAGE) + 1] + ["pgcopydb", "ping"]
+    try:
+        _sh(ping)
+    except Exception as e:
+        if log:
+            log(f"pgcopydb cannot reach both endpoints from its container"
+                f" (network={net}): {str(e).splitlines()[-1][:120]}")
+            log("falling back to the pg_dump path")
+        return pgdump_move(hop, db, workers, go, log)
+
+    _pg_truncate_target(hop, db, log)
+    # logged through the redacted form, never the raw argv: `_sh` would echo
+    # the command as given, and the command carries both passwords
+    if log:
+        log("$ " + " ".join(shown[1:]))
+    _sh(cmd)
     return steps
 
 
@@ -387,9 +530,15 @@ def stream_status(name, port=8083):
 
 
 def run_via(via, hop, db, workers, go, log):
-    fn = {"pgdump": pgdump_move, "mydumper": mydumper_move,
-          "pgloader": pgloader_move, "mongodump": mongodump_move}[via]
+    fns = {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
+           "mydumper": mydumper_move, "pgloader": pgloader_move,
+           "mongodump": mongodump_move}
+    if via not in fns:
+        # a mover nobody has taught this function about must stop here rather
+        # than fall through to whatever happens to be first
+        raise SystemExit(f"no bulk path named {via!r}")
     tools = {"pgdump": ("pg_dump", "pg_restore"),
+             "pgcopydb": ("docker",),
              "mydumper": ("mydumper", "myloader"),
              "pgloader": ("pgloader",),
              "mongodump": ("mongodump", "mongorestore")}[via]
@@ -397,4 +546,8 @@ def run_via(via, hop, db, workers, go, log):
     if missing:
         raise SystemExit(f"the {via} bulk path needs {', '.join(missing)}"
                          " installed - run: migkit doctor --install")
-    return fn(hop, db, workers, go, log)
+    if via == "pgcopydb" and not pgcopydb_available():
+        raise SystemExit(f"the pgcopydb bulk path needs the"
+                         f" {PGCOPYDB_IMAGE} image: docker pull"
+                         f" {PGCOPYDB_IMAGE}")
+    return fns[via](hop, db, workers, go, log)
