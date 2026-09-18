@@ -1461,14 +1461,19 @@ class MySQLEngine(Engine):
         # comparing users that exist on one side only just restates the users
         # check; what is worth knowing here is whether the users that DO exist
         # on both sides carry the same rights on this database
-        shared = sorted(set(src) & set(dst))
+        on_target = getattr(self, "_grant_users", {}).get("dst", set())
+        # a user present on the target is comparable even when it holds
+        # nothing there yet - that is a total loss of its grants, and it used
+        # to be reported as "the user does not exist on target", which was
+        # both wrong and pointed at the wrong fix
+        shared = sorted(set(src) & on_target)
         miss, extra = [], []
         for who in shared:
-            for g in sorted(src[who] - dst[who]):
+            for g in sorted(src[who] - dst.get(who, set())):
                 miss.append(f"{who}: {g}")
-            for g in sorted(dst[who] - src[who]):
+            for g in sorted(dst.get(who, set()) - src[who]):
                 extra.append(f"{who}: {g}")
-        only_src = sorted(set(src) - set(dst))
+        only_src = sorted(set(src) - on_target)
         total = sum(len(v) for v in src.values())
 
         if miss or extra:
@@ -1522,6 +1527,19 @@ class MySQLEngine(Engine):
         # depending on version, and never `dbase` when we asked for `db`
         pat = re.compile(r"\sON\s+`?" + re.escape(dbn) + r"`?\s*\.", re.I)
         out = {}
+        # every account this side has, whether or not it holds anything on
+        # this database. Without it, a user that exists on the target but was
+        # granted nothing there is indistinguishable from one that is not
+        # there at all - and it used to be reported as the second.
+        seen = getattr(self, "_grant_users", None)
+        if seen is None:
+            seen = self._grant_users = {}
+        seen = seen.setdefault(side, set())
+        seen.clear()
+        store = getattr(self, "_grant_raw", None)
+        if store is None:
+            store = self._grant_raw = {}
+        raw = store.setdefault(side, {})
         for u, h in users:
             try:
                 rows = self._q(side, "show grants for %s@%s", (u, h))
@@ -1529,10 +1547,22 @@ class MySQLEngine(Engine):
                 # a user that was dropped mid-scan, or one this account may not
                 # inspect: skip the user, do not fail the whole check
                 continue
-            privs = {self._canon_grant(r[0], dbn) for r in rows
-                     if pat.search(r[0]) and not r[0].startswith("GRANT PROXY")}
+            keep = [r[0] for r in rows
+                    if pat.search(r[0]) and not r[0].startswith("GRANT PROXY")]
+            # `keep` already holds the statement text, so the canonical form
+            # is taken from the line - indexing it again would take its first
+            # character, which for a moment it did: every user's privilege set
+            # came out as {'G'}
+            who = f"{u}@{h}"
+            seen.add(who)
+            privs = {self._canon_grant(line, dbn) for line in keep}
             if privs:
-                out[f"{u}@{h}"] = privs
+                out[who] = privs
+                # the server's own text, kept so the repair replays exactly
+                # what it printed instead of reassembling a GRANT from the
+                # canonical form and getting the quoting subtly wrong
+                for line in keep:
+                    raw[(who, self._canon_grant(line, dbn))] = line
         return out, ""
 
     @staticmethod
@@ -1557,6 +1587,74 @@ class MySQLEngine(Engine):
         t = re.sub(r"(\sON\s+)" + re.escape(dbn) + r"(\s*\.)",
                    r"\1<db>\2", t, flags=re.I)
         return t.rstrip(";")
+
+    def _grant_repair(self, db):
+        """Replay the grants the mover did not carry, with a REVOKE to undo.
+
+        The statement replayed is the one the source server printed, with only
+        the database name swapped for the target's. Reassembling a GRANT from
+        the canonical comparison form would mean re-deriving the quoting, and
+        the quoting is exactly what differs between servers - which is why the
+        canonical form exists in the first place.
+
+        Users that exist on one side only are left alone: that is the users
+        check's finding, and `migkit users create` replays their whole grant
+        set. Granting to an account that does not exist would just fail.
+        """
+        ddb = self._d("dst", db)
+        src, serr = self._grants_for_db("src", db)
+        dst, derr = self._grants_for_db("dst", ddb)
+        if serr or derr:
+            return None
+        raw = getattr(self, "_grant_raw", {}).get("src", {})
+        # an account that exists on the target holding nothing on this
+        # database is exactly the case worth repairing, and `dst` only lists
+        # accounts that already hold something - so the target's account list
+        # decides, not its grant list
+        on_target = getattr(self, "_grant_users", {}).get("dst", set())
+        stmts, undo, n = [], [], 0
+        for who in sorted(set(src) & on_target):
+            for g in sorted(src[who] - dst.get(who, set())):
+                line = raw.get((who, g))
+                if not line:
+                    continue
+                fwd = self._retarget_grant(line, db, ddb)
+                stmts.append(fwd)
+                undo += self._revoke_for(fwd)
+                n += 1
+        if not stmts:
+            return None
+        return RepairAction(db, "grants", stmts, undo,
+                            f"{n} grants the mover did not carry")
+
+    @staticmethod
+    def _retarget_grant(line, src_db, dst_db):
+        """The source's own GRANT, pointed at the target's database name."""
+        out = re.sub(r"(\sON\s+)`?" + re.escape(src_db) + r"`?(\s*\.)",
+                     r"\1`" + dst_db + r"`\2", line, flags=re.I)
+        return out.rstrip(";") + ";"
+
+    @staticmethod
+    def _revoke_for(grant):
+        """The statements that undo one GRANT.
+
+        `WITH GRANT OPTION` is revoked separately because MySQL will not take
+        it as part of the privilege list, and leaving it granted would undo
+        less than the forward statement did.
+        """
+        body = grant.rstrip(";")
+        extra = []
+        if re.search(r"\s+WITH\s+GRANT\s+OPTION\s*$", body, re.I):
+            body = re.sub(r"\s+WITH\s+GRANT\s+OPTION\s*$", "", body,
+                          flags=re.I)
+            extra.append(re.sub(r"^GRANT\s+.*?\s+ON\s", "GRANT OPTION ON ",
+                                body, flags=re.I)
+                         .replace(" TO ", " FROM ", 1)
+                         .replace("GRANT OPTION ON ", "REVOKE GRANT OPTION ON ",
+                                  1) + ";")
+        rev = re.sub(r"^GRANT\s", "REVOKE ", body, flags=re.I)
+        rev = rev.replace(" TO ", " FROM ", 1)
+        return [rev + ";"] + extra
 
     def repair_plan(self, db, kind):
         actions = []
@@ -1590,6 +1688,12 @@ class MySQLEngine(Engine):
                          + "; ".join(refuse[:4]))
             if stmts or refuse:
                 actions.append(RepairAction(db, "sequences", stmts, undo, note))
+        if kind in ("schema", "all"):
+            # GRANT is DDL: it goes with the schema repair rather than adding
+            # a choice to --kind, so a plain `migkit sync --apply` restores it
+            g = self._grant_repair(db)
+            if g:
+                actions.append(g)
         if kind in ("rows", "all"):
             d = self.hop.report_dir(db)
             tables = sorted({f.name.split(".")[0][len("data-"):]
@@ -1655,13 +1759,19 @@ class MySQLEngine(Engine):
             finally:
                 conn.close()
             return
-        if action.kind == "schema":
+        if action.kind in ("schema", "grants"):
             # mysql CLI handles routine/trigger bodies (DELIMITER) correctly
             tg = self.hop.target
             ddl = "\n".join(action.statements) + "\n"
+            if action.kind == "grants":
+                ddl += "flush privileges;\n"
             run(["mysql", "-h", tg.host, "-P", str(tg.port), "-u", tg.user,
                  f"-p{tg.password}", self._d("dst", db)], input=ddl)
             return
+        if action.kind != "rows":
+            # the same trap the postgres side had: an unhandled kind used to
+            # fall through to the row path and be read as a table name
+            raise RuntimeError(f"no way to apply a {action.kind!r} repair")
         t = action.statements[0].split()[3]
         self._apply_rows(db, t, getattr(self, "_undo_dir", None))
 

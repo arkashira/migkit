@@ -1693,86 +1693,41 @@ class PostgresEngine(Engine):
                           "refresh materialized view ... on target"
                           if stale else ""))
 
-        # raw relacl, not information_schema.table_privileges: that view hides
-        # grants whose grantee the connected user is not a member of, which
-        # reads as missing on a target reached with a plain application user
-        ign = "','".join(r.strip() for r in os.environ.get(
-            "GRANTS_IGNORE_ROLES", "root,rdsadmin").split(",") if r.strip())
-        gq = ("select pg_get_userbyid(a.grantee)||'|'||n.nspname||'.'||c.relname"
-              "||'|'||a.privilege_type"
-              " from pg_class c"
-              " join pg_namespace n on n.oid = c.relnamespace,"
-              " aclexplode(c.relacl) a"
-              " where c.relkind in ('r','p','v','m','f')"
-              " and n.nspname not in ('pg_catalog','information_schema')"
-              " and n.nspname not like '\\_\\_%'"
-              " and pg_get_userbyid(a.grantee) <> 'PUBLIC'"
-              " and pg_get_userbyid(a.grantee) not like 'pg\\_%'"
-              " and pg_get_userbyid(a.grantee) not like 'rds%'"
-              " and pg_get_userbyid(a.grantee) not like '%tencent%'"
-              f" and pg_get_userbyid(a.grantee) not in ('{ign}')"
-              " and c.relname not like 'migkit\\_%'")
-        ga = set(self._psql("src", db, gq).splitlines()) - {""}
-        gb = set(self._psql("dst", db, gq).splitlines()) - {""}
-        droles = set(self._psql("dst", db,
-                                "select rolname from pg_roles").splitlines())
-        sroles = set(self._psql("src", db,
-                                "select rolname from pg_roles").splitlines())
-        noise = self._noise()
-
-        def _app(rows):
-            if not noise:
-                return rows
-            return {g for g in rows
-                    if not g.split("|")[1].partition(".")[2].startswith(noise)}
-        ga, gb = _app(ga), _app(gb)
-        miss = sorted(g for g in ga - gb if g.split("|")[0] in droles)
-        extra = sorted(g for g in gb - ga if g.split("|")[0] in sroles)
-        if miss or extra:
-            res.append(Result("deep", f"{db} grants", "diff",
-                              (f"{len(miss)} grants missing on target"
-                               + (": " + "; ".join(
-                                   g.replace("|", " ") for g in miss[:3])
-                                  if miss else "")
-                               + (f"; {len(extra)} extra" if extra else "")),
-                              "", "re-grant on target (pg_dump drops grants"
-                                  " with --no-privileges)"))
+        # The same computation feeds the repair, so it lives in one place:
+        # two copies of "which grants are missing" would eventually disagree,
+        # and the disagreement would be a repair that grants the wrong thing.
+        gaps = self._grant_gaps(db)
+        if gaps is None:
+            res.append(Result("deep", f"{db} grants", "warn",
+                              "cannot read grants - unknown, not clean"))
         else:
-            res.append(Result("deep", f"{db} grants", "ok",
-                              f"{len(ga)} table grants match"
-                              " (roles present both sides)"))
-
-        # a SERIAL/identity column depends on a sequence with its OWN acl; the
-        # classic trap is granting the table but not its sequence, so the app's
-        # inserts fail with "permission denied for sequence". Table grants
-        # above miss it entirely - diff sequence grants separately.
-        sgq = ("select pg_get_userbyid(a.grantee)||'|'||n.nspname||'.'"
-               "||c.relname||'|'||a.privilege_type from pg_class c"
-               " join pg_namespace n on n.oid = c.relnamespace"
-               " cross join lateral aclexplode(c.relacl) a"
-               " where c.relkind = 'S'"
-               " and n.nspname not in ('pg_catalog','information_schema')"
-               " and n.nspname not like 'pg\\_%'"
-               " and n.nspname not like '\\_\\_%'"
-               " and pg_get_userbyid(a.grantee) <> 'PUBLIC'"
-               f" and pg_get_userbyid(a.grantee) not in ('{ign}')"
-               " and c.relname not like 'migkit\\_%'")
-        sga = _app(set(self._psql("src", db, sgq).splitlines()) - {""})
-        sgb = _app(set(self._psql("dst", db, sgq).splitlines()) - {""})
-        smiss = sorted(g for g in sga - sgb if g.split("|")[0] in droles)
-        if smiss:
-            res.append(Result("deep", f"{db} seq-grants", "diff",
-                              f"{len(smiss)} sequence grants missing on target"
-                              " (inserts will hit 'permission denied for"
-                              " sequence'): "
-                              + "; ".join(g.replace("|", " ")
-                                          for g in smiss[:4]), "",
-                              "grant usage/select/update on the sequence to the"
-                              " app role on target"))
-        else:
-            res.append(Result("deep", f"{db} seq-grants", "ok",
-                              f"{len(sga)} sequence grants match"
-                              if sga else "no explicit sequence grants"))
+            miss, extra, smiss, seen, sseen = gaps
+            if miss or extra:
+                res.append(Result("deep", f"{db} grants", "diff",
+                                  (f"{len(miss)} grants missing on target"
+                                   + (": " + "; ".join(
+                                       g.replace("|", " ") for g in miss[:3])
+                                      if miss else "")
+                                   + (f"; {len(extra)} extra" if extra else "")),
+                                  "", "migkit sync --kind schema --apply"
+                                      " re-grants them, with undo"))
+            else:
+                res.append(Result("deep", f"{db} grants", "ok",
+                                  f"{seen} table grants match"
+                                  " (roles present both sides)"))
+            if smiss:
+                res.append(Result("deep", f"{db} seq-grants", "diff",
+                                  f"{len(smiss)} sequence grants missing on"
+                                  " target (inserts will hit 'permission"
+                                  " denied for sequence'): "
+                                  + "; ".join(g.replace("|", " ")
+                                              for g in smiss[:4]), "",
+                                  "migkit sync --kind schema --apply grants"
+                                  " them, with undo"))
+            else:
+                res.append(Result("deep", f"{db} seq-grants", "ok",
+                                  f"{sseen} sequence grants match"
+                                  if sseen else "no explicit sequence grants"))
 
         # a missing or version-mismatched extension breaks its functions and
         # can fail the restore outright; the mover copies data, not CREATE
@@ -1877,6 +1832,105 @@ class PostgresEngine(Engine):
          where n.nspname not in ('pg_catalog','information_schema')
            and n.nspname not like 'pg\\_%' and n.nspname not like '\\_\\_%'
         order by 1"""
+
+    def _grant_gaps(self, db):
+        """(missing, extra, missing_sequence, n_seen, n_seq_seen), or None.
+
+        One computation, used by the deep check and by the repair. When these
+        lived apart the repair did not exist at all; the moment it did, two
+        copies of "which grants are missing" would have been two chances to
+        grant the wrong thing to the wrong role.
+
+        Reads raw `relacl` rather than `information_schema.table_privileges`:
+        that view hides grants whose grantee the connected user is not a
+        member of, which reads as missing on a target reached with a plain
+        application user.
+        """
+        ign = "','".join(r.strip() for r in os.environ.get(
+            "GRANTS_IGNORE_ROLES", "root,rdsadmin").split(",") if r.strip())
+        common = (" and n.nspname not in ('pg_catalog','information_schema')"
+                  " and n.nspname not like 'pg\\_%'"
+                  " and n.nspname not like '\\_\\_%'"
+                  " and pg_get_userbyid(a.grantee) <> 'PUBLIC'"
+                  " and pg_get_userbyid(a.grantee) not like 'pg\\_%'"
+                  " and pg_get_userbyid(a.grantee) not like 'rds%'"
+                  " and pg_get_userbyid(a.grantee) not like '%tencent%'"
+                  f" and pg_get_userbyid(a.grantee) not in ('{ign}')"
+                  " and c.relname not like 'migkit\\_%'")
+        pick = ("select pg_get_userbyid(a.grantee)||'|'||n.nspname||'.'"
+                "||c.relname||'|'||a.privilege_type from pg_class c"
+                " join pg_namespace n on n.oid = c.relnamespace"
+                " cross join lateral aclexplode(c.relacl) a"
+                " where c.relkind in ({kinds})" + common)
+        gq = pick.format(kinds="'r','p','v','m','f'")
+        sgq = pick.format(kinds="'S'")
+        try:
+            ddb = self._d("dst", db)
+            ga = set(self._psql("src", db, gq).splitlines()) - {""}
+            gb = set(self._psql("dst", ddb, gq).splitlines()) - {""}
+            sga = set(self._psql("src", db, sgq).splitlines()) - {""}
+            sgb = set(self._psql("dst", ddb, sgq).splitlines()) - {""}
+            droles = set(self._psql("dst", ddb,
+                                    "select rolname from pg_roles").splitlines())
+            sroles = set(self._psql("src", db,
+                                    "select rolname from pg_roles").splitlines())
+        except RuntimeError:
+            return None
+        noise = self._noise()
+
+        def _app(rows):
+            if not noise:
+                return rows
+            return {g for g in rows
+                    if not g.split("|")[1].partition(".")[2].startswith(noise)}
+        ga, gb, sga, sgb = _app(ga), _app(gb), _app(sga), _app(sgb)
+        # a grant to a role the target does not have is a missing role, which
+        # `users` reports; granting to it here would just fail
+        miss = sorted(g for g in ga - gb if g.split("|")[0] in droles)
+        extra = sorted(g for g in gb - ga if g.split("|")[0] in sroles)
+        smiss = sorted(g for g in sga - sgb if g.split("|")[0] in droles)
+        return miss, extra, smiss, len(ga), len(sga)
+
+    @staticmethod
+    def _grant_sql(entry, revoke=False, obj_type=""):
+        """One GRANT (or REVOKE) from a `role|schema.object|PRIVILEGE` row.
+
+        `obj_type` is spelled out for sequences. Measured on PostgreSQL 16
+        that the bare form is accepted for them too - `GRANT USAGE ON
+        "public"."t_id_seq"` succeeds - but the object type is known here, so
+        saying it costs nothing and removes the dependence on that fallback.
+        """
+        role, obj, priv = entry.split("|", 2)
+        sch, _, name = obj.partition(".")
+        kind = f"{obj_type} " if obj_type else ""
+        target = f'{kind}"{sch}"."{name}"'
+        who = f'"{role}"'
+        if revoke:
+            return f'REVOKE {priv} ON {target} FROM {who};'
+        return f'GRANT {priv} ON {target} TO {who};'
+
+    def _grant_repair(self, db):
+        """Re-grant what the mover did not carry, with a REVOKE to undo it.
+
+        Extra grants on the target are reported by the check but not revoked
+        here. Removing a privilege somebody may have added on purpose is a
+        different decision from restoring one the migration dropped, and doing
+        both under one word would hide the second inside the first.
+        """
+        gaps = self._grant_gaps(db)
+        if not gaps:
+            return None
+        miss, _extra, smiss, _, _ = gaps
+        if not (miss or smiss):
+            return None
+        stmts = ([self._grant_sql(g) for g in miss]
+                 + [self._grant_sql(g, obj_type="SEQUENCE") for g in smiss])
+        undo = ([self._grant_sql(g, revoke=True) for g in miss]
+                + [self._grant_sql(g, revoke=True, obj_type="SEQUENCE")
+                   for g in smiss])
+        note = (f"{len(miss)} table and {len(smiss)} sequence grants the"
+                " mover did not carry")
+        return RepairAction(db, "grants", stmts, undo, note)
 
     def _deep_ownership(self, db):
         """Object owners, which the structural differ does not compare.
@@ -2016,6 +2070,12 @@ class PostgresEngine(Engine):
                     f"{t}: {', '.join(counts) or 'no pk files'},"
                     " deleted rows saved to undo before recopy"))
         if kind in ("schema", "all"):
+            # GRANT is DDL and belongs with the schema repair, so no new
+            # choice is added to --kind: a plain `migkit sync --apply` now
+            # restores them along with everything else
+            g = self._grant_repair(db)
+            if g:
+                actions.append(g)
             act = self._schema_repair_action(db)
             if act:
                 actions.append(act)
@@ -2042,13 +2102,21 @@ class PostgresEngine(Engine):
         if action.kind == "sequences":
             self._psql("dst", db,
                        "\n".join(s.split("  --")[0] for s in action.statements))
-        elif action.kind == "schema":
-            # one psql call: multi-statement + $$-quoted bodies apply intact
+        elif action.kind in ("schema", "grants"):
+            # one psql call: multi-statement + $$-quoted bodies apply intact,
+            # and a grant set lands all-or-nothing
             blob = "begin;\n" + "\n".join(action.statements) + "\ncommit;"
             self._psql("dst", db, blob)
-        else:
+        elif action.kind == "rows":
             for stmt in action.statements:
                 self._repair_rows_native(db, stmt.split(" ", 1)[1])
+        else:
+            # This used to be the row branch's `else`, so a kind nobody had
+            # taught it about was read as a table name - the grant repair's
+            # first run tried to look up a primary key for a relation called
+            # `INSERT ON "public"."t" TO "app";`. An unknown repair must
+            # refuse, not guess.
+            raise RuntimeError(f"no way to apply a {action.kind!r} repair")
 
     def _psql_run(self, side, db, script):
         """Run a multi-statement psql script from stdin so client-side

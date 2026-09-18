@@ -587,6 +587,10 @@ def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
         want = {"counts", "autoinc", "data"}
         if kind in ("schema", "all"):
             want.add("schema")
+            # grants are reported by the deep check, so a database whose only
+            # difference is a missing grant used to be skipped here and never
+            # reached the repair that can now fix it
+            want.add("deep")
         dbs = sorted({r["scope"].split()[0].split(".")[0]
                       for r in json.loads(summary.read_text())
                       if r["status"] == "diff" and r["check"] in want})
