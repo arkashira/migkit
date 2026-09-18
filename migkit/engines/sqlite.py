@@ -358,22 +358,127 @@ class SQLiteEngine(Engine):
         return [Result("autoinc", db, "ok",
                        f"{len(a)} counters, values match")]
 
+    CHUNK = 2000
+
+    def _reader(self, side):
+        """One read-only connection, held open across chunks."""
+        import sqlite3
+        conn = sqlite3.connect(f"file:{self._path(side)}?mode=ro", uri=True)
+        self._register(conn)
+        return conn
+
+    def _row_walk(self, side, table):
+        """The columns that put this table in a repeatable order.
+
+        `rowid` is not something every table has. A WITHOUT ROWID table has
+        none, and asking for one raises `no such column: rowid` - on both
+        sides at once, which is how the old read turned two failures into
+        agreement and called them equal.
+
+        The declared primary key comes first because it is the same key in
+        both files. rowid is only the fallback for a table that declares no
+        key at all, and it is insertion order: two files holding the same rows
+        loaded in a different order have different rowids, so a difference
+        found that way is worth looking at before believing.
+        """
+        info = self._q(side, f'pragma table_info("{table}")')
+        pk = [r[1] for r in sorted(info, key=lambda r: r[5]) if r[5]]
+        if pk:
+            return pk, False
+        try:
+            self._q(side, f'select rowid from "{table}" limit 1')
+        except Exception:
+            return None, False
+        return ["rowid"], True
+
     def _hash(self, side, t):
+        """(digest, rows, error) - read one chunk at a time.
+
+        Chunking is not only about the memory a whole table takes. Measured on
+        a WAL database with 157 frames waiting to be checkpointed: while a
+        single `select` was part-way through, a passive checkpoint moved **0
+        of 157** frames, and the moment that statement finished the same
+        checkpoint moved all 157. A whole-table read therefore pins the
+        write-ahead log for as long as it runs - the same file measured 729KB
+        of WAL under a writer alone and 2.1MB with a reader holding a snapshot
+        - so whatever else writes to that file keeps growing it and cannot
+        reclaim it. One finished chunk at a time bounds that to one chunk, and
+        the reader connection can stay open: what releases the snapshot is the
+        statement ending, which was measured too.
+
+        An error is returned rather than folded into the digest, because two
+        reads that failed identically are not two tables that agree.
+        """
+        import sqlite3
+        try:
+            order, use_rowid = self._row_walk(side, t)
+        except Exception as e:
+            return None, 0, str(e)
+        if order is None:
+            return None, 0, (f'"{t}" has neither a primary key nor a rowid,'
+                             " so there is no repeatable order to read it in")
+        cols = ", ".join("rowid" if use_rowid else f'"{c}"' for c in order)
         h = hashlib.md5()
         n = 0
+        after = None
+        conn = self._reader(side)
         try:
-            for row in self._q(side, f'select * from "{t}" order by rowid'):
-                h.update(repr(row).encode())
-                n += 1
+            while True:
+                where = ""
+                args = ()
+                if after is not None:
+                    marks = ", ".join(["?"] * len(order))
+                    left = cols if len(order) == 1 else f"({cols})"
+                    right = marks if len(order) == 1 else f"({marks})"
+                    where = f" where {left} > {right}"
+                    args = after
+                rows = conn.execute(
+                    f'select *, {cols} from "{t}"{where}'
+                    f" order by {cols} limit {int(self.CHUNK)}",
+                    args).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    h.update(repr(row[:-len(order)]).encode())
+                    n += 1
+                after = tuple(rows[-1][-len(order):])
+                if len(rows) < self.CHUNK:
+                    break
         except Exception as e:
-            return f"error: {e}", -1
-        return h.hexdigest(), n
+            return None, n, str(e)
+        finally:
+            conn.close()
+        return h.hexdigest(), n, ""
 
     def check_data(self, db, table=None, stream=None):
         res = []
+        try:
+            present = set(self._tables("dst"))
+        except Exception as e:
+            return [Result("data", db, "error",
+                           f"target: {e} - nothing below this could be"
+                           " compared, which is not the same as nothing"
+                           " differing")]
         for t in ([table] if table else self._tables("src")):
-            ha, na = self._hash("src", t)
-            hb, nb = self._hash("dst", t)
+            if t not in present:
+                if stream:
+                    stream(f"{t}: diff")
+                res.append(Result("data", f"{db}.{t}", "diff",
+                                  "missing on target", "",
+                                  "create and copy the table, sqlite files"
+                                  " are cheap"))
+                continue
+            ha, na, ea = self._hash("src", t)
+            hb, nb, eb = self._hash("dst", t)
+            if ea or eb:
+                why = "; ".join(f"{name}: {err}" for name, err in
+                                (("source", ea), ("target", eb)) if err)
+                if stream:
+                    stream(f"{t}: error")
+                res.append(Result("data", f"{db}.{t}", "error", why, "",
+                                  "migkit could not read the table, which is"
+                                  " not the same as the two sides agreeing"))
+                continue
             status = "ok" if (ha, na) == (hb, nb) else "diff"
             if stream:
                 stream(f"{t}: {status}")
