@@ -80,6 +80,21 @@ def postgres_row_from(text_exprs):
     return (" || '" + SEP + "' || ").join(parts)
 
 
+def sqlite_row_from(text_exprs):
+    """The injective row string for SQLite, given text expressions.
+
+    Same format as the other two - `length:value` joined by a separator -
+    written in the dialect SQLite has. `::` is PostgreSQL syntax and `concat`
+    is MySQL's; SQLite concatenates with `||` and casts the long way round.
+    """
+    parts = [
+        f"""coalesce(cast(length({e}) as text), '{NULL_LEN}')"""
+        f""" || ':' || coalesce({e}, '')"""
+        for e in text_exprs
+    ]
+    return (" || '" + SEP + "' || ").join(parts)
+
+
 def mysql_row(columns, quote='`'):
     """The injective row string for MySQL, given column names."""
     return mysql_row_from([f"cast({quote}{c}{quote} as char)"

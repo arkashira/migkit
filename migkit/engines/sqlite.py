@@ -15,10 +15,60 @@ class SQLiteEngine(Engine):
     def _q(self, side, sql):
         import sqlite3
         conn = sqlite3.connect(f"file:{self._path(side)}?mode=ro", uri=True)
+        self._register(conn)
         try:
             return conn.execute(sql).fetchall()
         finally:
             conn.close()
+
+    @staticmethod
+    def _register(conn):
+        """The two functions the cross-engine comparison needs.
+
+        SQLite ships with neither. `md5` is simply absent, and the number it
+        would have to be folded into does not exist either - measured,
+        `sum()` over 60-bit values raises `integer overflow` past 2**63, and
+        `total()` returns a real that has already lost the low digits.
+
+        Both are supplied here, from `migkit.canon`, so the rendering and the
+        arithmetic are the same ones the SQL engines use rather than a second
+        definition that happens to agree today.
+        """
+        from .. import canon
+
+        def render(value, cls):
+            return canon.render_value(cls, value)
+
+        class _Digest:
+            def __init__(self):
+                self.total = 0
+
+            def step(self, text):
+                self.total = canon.digest_step(self.total, text)
+
+            def finalize(self):
+                # text, not a number: Python integers have no width and
+                # SQLite would hand a large one back as a float
+                return str(self.total)
+
+        conn.create_function("migkit_canon", 2, render, deterministic=True)
+        conn.create_aggregate("migkit_digest", 1, _Digest)
+
+    CANON_ENGINE = "sqlite"
+
+    def neutral_tables(self, side, db):
+        return self._tables(side)
+
+    def neutral_columns(self, side, db, table):
+        return [(r[1], r[2]) for r in
+                self._q(side, f'pragma table_info("{table}")')]
+
+    def neutral_digest(self, side, db, table, columns):
+        from .. import canon
+        row = canon.row_expr("sqlite", columns)
+        got = self._q(side, f"select count(*), {canon.digest_expr('sqlite', row)}"
+                            f' from "{table}"')[0]
+        return (int(got[0]), str(got[1]))
 
     def databases(self):
         return ["main"]

@@ -104,7 +104,11 @@ def test_the_digest_is_refused_for_an_engine_that_has_no_rule():
     with pytest.raises(ValueError):
         c.digest_expr("mongodb", "row")
     with pytest.raises(ValueError):
-        c.row_expr("sqlite", [("a", "integer")])
+        c.row_expr("mongodb", [("a", "integer")])
+    # sqlite joined by supplying the two primitives it lacks, not by being
+    # excused from them
+    assert c.row_expr("sqlite", [("a", "integer")])
+    assert c.digest_expr("sqlite", "row")
 
 
 def test_the_digest_folds_with_sum_not_bit_xor():

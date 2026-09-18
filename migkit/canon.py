@@ -123,6 +123,23 @@ TYPES = {
         "time without time zone": "time", "time": "time",
         "json": "json", "jsonb": "json",
     },
+    # SQLite's declared type is a hint rather than a guarantee - a column
+    # declared INTEGER will hold text if something writes text to it. Only
+    # the classes whose rendering does not depend on the declaration are
+    # mapped; `decimal`, the date types and `json` are deliberately absent
+    # until migkit measures what they actually hold, and an unmapped type is
+    # reported rather than guessed at.
+    "sqlite": {
+        "int": "integer", "integer": "integer", "tinyint": "integer",
+        "smallint": "integer", "mediumint": "integer", "bigint": "integer",
+        "int2": "integer", "int8": "integer", "boolean": "integer",
+        "real": "float", "double": "float", "double precision": "float",
+        "float": "float",
+        "character": "text", "varchar": "text", "varying character": "text",
+        "nchar": "text", "native character": "text", "nvarchar": "text",
+        "text": "text", "clob": "text",
+        "blob": "bytes",
+    },
 }
 
 # MySQL has no boolean: `tinyint(1)` is the convention and holds -128..127.
@@ -203,7 +220,75 @@ def _postgres(col, cls):
     return f"{c}::text"
 
 
-BUILDERS = {"mysql": _mysql, "postgres": _postgres}
+def _sqlite(col, cls):
+    """SQLite renders through a function migkit registers on the connection.
+
+    There is no server to push the rendering into: SQLite runs inside the
+    process that opened the file, so "computed in the database" and "computed
+    here" are the same sentence. What still has to hold is that the text it
+    produces is identical to what the other engines produce, which is what
+    `render_value` below is for and what the cross-engine test measures.
+    """
+    return f'migkit_canon("{col}", \'{cls}\')'
+
+
+BUILDERS = {"mysql": _mysql, "postgres": _postgres, "sqlite": _sqlite}
+
+
+def _float_text(d):
+    """The banded float rendering, in Python.
+
+    Same rule as the SQL: a fixed twenty-place decimal where that is exact on
+    every engine, the shortest round-trip text outside it. The decimal is
+    taken from `repr`, not from formatting the binary value directly - both
+    engines convert through the shortest decimal representation first, and
+    `'%.20f' % 0.05` would print the binary error they do not.
+    """
+    import math
+    from decimal import Decimal, localcontext
+    if math.isinf(d) or math.isnan(d):
+        return UNCOMPARABLE
+    if d == 0:
+        # -0.0 formats with a leading minus that neither engine produces
+        d = 0.0
+    if abs(d) >= float(FLOAT_MAX) or (d != 0 and abs(d) < float(FLOAT_MIN)):
+        return repr(d).replace("e+", "e")
+    with localcontext() as ctx:
+        ctx.prec = 80
+        return format(Decimal(repr(d)).quantize(Decimal(1).scaleb(-FLOAT_SCALE)),
+                      "f")
+
+
+def render_value(cls, value):
+    """One value as the canonical text, or None when it is NULL.
+
+    The third implementation of the rendering, after the two SQL ones. They
+    are held together by the cross-engine test rather than by sharing code,
+    which is the same arrangement MySQL and PostgreSQL were already in.
+    """
+    if value is None:
+        return None
+    if cls == "integer":
+        return str(int(value))
+    if cls == "float":
+        return _float_text(float(value))
+    if cls == "text":
+        return value if isinstance(value, str) else str(value)
+    if cls == "bytes":
+        return bytes(value).hex().upper()
+    raise ValueError(f"no in-process rendering for class {cls!r}")
+
+
+def digest_step(total, text):
+    """Fold one row's text into a running digest, the same way the SQL does.
+
+    Separate from the aggregate that calls it so the arithmetic can be tested
+    without a database, and so an engine that has to accumulate in Python
+    cannot drift from the one that accumulates in SQL.
+    """
+    import hashlib
+    h = hashlib.md5(("" if text is None else str(text)).encode()).hexdigest()
+    return total + int(h[:DIGEST_HEX], 16)
 
 
 def expr(engine, col, cls):
@@ -265,6 +350,18 @@ def digest_expr(engine, row_expr):
     if engine == "postgres":
         return (f"coalesce(sum(('x'||substr(md5({row_expr}),1,{DIGEST_HEX}))"
                 f"::bit({DIGEST_BITS})::bigint::numeric), 0)")
+    if engine == "sqlite":
+        # SQLite has neither md5 nor a wide enough number. Measured: `sum()`
+        # over 60-bit values raises `integer overflow` once the total passes
+        # 2**63, and `total()`, the obvious way around that, returns a real -
+        # 20 rows of (2**60 - 1) came back as 2.305843009213694e+19 against
+        # an exact 23058430092136939500. One refuses to answer and the other
+        # answers approximately; neither can produce the digest.
+        #
+        # The aggregate migkit registers accumulates in Python integers,
+        # which have no width, and returns the total as text - which is what
+        # the other two engines produce as well.
+        return f"migkit_digest({row_expr})"
     raise ValueError(f"no cross-engine digest for engine {engine!r}")
 
 
@@ -276,4 +373,6 @@ def row_expr(engine, columns):
         return rowtext.mysql_row_from(parts)
     if engine == "postgres":
         return rowtext.postgres_row_from(parts)
+    if engine == "sqlite":
+        return rowtext.sqlite_row_from(parts)
     raise ValueError(f"no canonical row text for engine {engine!r}")
