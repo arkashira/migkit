@@ -273,40 +273,154 @@ class KafkaEngine(Engine):
 
     def check_data(self, db, table=None, stream=None):
         from kafka import TopicPartition
+
+        from ..throttle import Throttle
         sample = int(self.hop.options.get("sample", 200))
         sc, dc = self._consumer("src"), self._consumer("dst")
         topics = [table] if table else self._topics(sc)
         bad = []
+        unread = []
         checked = 0
+        # Fetching the tail of every partition on both clusters is the
+        # heaviest thing this check does, and brokers are shared with whatever
+        # else produces and consumes. Kafka publishes its own load over JMX,
+        # which a client cannot reach, so there is no health probe here and
+        # the throttle's latency signal carries it: if the fetches slow to
+        # several times this run's fastest, the check waits instead of
+        # pulling harder. The replication state below is reported as a
+        # finding rather than used as a brake - a cluster missing a broker is
+        # exactly when a quick honest answer matters most.
+        gate = Throttle(1)
         for t in topics:
-            for p in self._partitions(sc, t):
+            parts = self._partitions(sc, t)
+            if not parts:
+                unread.append((t, None, "no partitions on the source"))
+                continue
+            for p in parts:
                 tp = TopicPartition(t, p)
-                a = self._tail_hash(sc, tp, sample)
-                b = self._tail_hash(dc, tp, sample)
+                with gate.unit():
+                    a, ea = self._tail_hash(sc, tp, sample)
+                    b, eb = self._tail_hash(dc, tp, sample)
+                if ea or eb:
+                    for side, err in (("source", ea), ("target", eb)):
+                        if err:
+                            unread.append((t, p, f"{side}: {err}"))
+                    if stream:
+                        stream(f"{t}[{p}]: unreadable")
+                    continue
                 checked += 1
                 if stream:
                     stream(f"{t}[{p}]: {'ok' if a == b else 'DIFF'}")
                 if a != b:
                     bad.append(f"{t}[{p}]")
+        res = []
+        if unread:
+            named = "; ".join(f"{t}[{p}] {why}" if p is not None
+                              else f"{t} {why}" for t, p, why in unread[:6])
+            distinct = len({(t, p) for t, p, _ in unread})
+            res.append(Result(
+                "data", "tail-sample", "error",
+                f"{distinct} partition{'' if distinct == 1 else 's'} could not"
+                f" be read: {named}"
+                + self._why_unreadable(unread), "",
+                "a partition with no leader cannot be read at all - start the"
+                " broker holding it and re-run; an unread partition is not a"
+                " partition that matched"))
         if bad:
-            return [Result("data", "tail-sample", "diff",
-                           f"content differs in: {', '.join(bad[:10])}", "",
-                           "re-mirror those topics, verify consumer-group"
-                           " checkpoints before cutover")]
-        return [Result("data", "tail-sample", "ok",
-                       f"last {sample} messages hash-equal on"
-                       f" {checked} partitions")]
+            res.append(Result("data", "tail-sample", "diff",
+                              f"content differs in: {', '.join(bad[:10])}", "",
+                              "re-mirror those topics, verify consumer-group"
+                              " checkpoints before cutover"))
+        if not res and not checked:
+            res.append(Result("data", "tail-sample", "error",
+                              "no partitions were compared at all, which is"
+                              " not the same as every partition matching"))
+        elif not res:
+            res.append(Result("data", "tail-sample", "ok",
+                              f"last {sample} messages hash-equal on"
+                              f" {checked} partitions"))
+        return res
+
+    def _why_unreadable(self, unread):
+        """Turn the client's exception into what the cluster says is wrong.
+
+        `end_offsets` on a partition with no leader raises a bare
+        `KeyError(TopicPartition(...))` - not a Kafka error class, and nothing
+        a reader of the report could act on. The cluster itself is explicit:
+        measured with one broker of two stopped, the partitions whose only
+        replica lived there came back from `describe_topics` with
+        `leader_id: -1`, `error_code: 5` and `offline_replicas: [3]`.
+        """
+        seen = {}
+        for topic, part, _ in unread:
+            if part is None:
+                continue
+            if topic not in seen:
+                seen[topic] = self._partition_state("src", topic)
+            why = seen[topic].get(part)
+            if why:
+                return f" - the cluster reports {topic}[{part}] {why}"
+        return ""
+
+    def _partition_state(self, side, topic):
+        """Each troubled partition of one topic, as the cluster describes it.
+
+        Measured with a broker stopped: an offline partition still lists the
+        broker that is gone in `isr_nodes`, so in-sync-against-replicas does
+        not find it. The leader does - `leader_id` is -1 - and that is the
+        difference between a partition that is behind and one that is not
+        there at all.
+        """
+        out = {}
+        try:
+            admin = self._admin(side)
+            try:
+                described = admin.describe_topics([topic])
+            finally:
+                admin.close()
+        except Exception:
+            return out
+        for described_topic in described:
+            for p in described_topic.get("partitions", []):
+                idx = p.get("partition_index")
+                replicas = list(p.get("replica_nodes") or [])
+                isr = list(p.get("isr_nodes") or [])
+                offline = list(p.get("offline_replicas") or [])
+                if p.get("leader_id", -1) < 0:
+                    out[idx] = ("has no leader"
+                                + (f", replicas offline on broker(s)"
+                                   f" {offline}" if offline else ""))
+                elif offline or set(isr) < set(replicas):
+                    out[idx] = (f"is under-replicated: in-sync {isr} of"
+                                f" replicas {replicas}")
+        return out
 
     def _tail_hash(self, consumer, tp, n):
+        """(digest, error) for the last n messages of one partition.
+
+        The error is handed back rather than folded into the digest. It used
+        to be returned as the string `unavailable` in the digest's place, so
+        two partitions nobody could read compared equal and the check
+        reported the last messages hash-equal on both sides. Measured against
+        a cluster with a broker stopped, this is not a hypothetical path:
+        asking for the offsets of a partition whose leader is gone raises a
+        bare `KeyError(TopicPartition(...))` while the client's metadata is
+        still stale, and `KafkaTimeoutError` after the request timeout once it
+        has caught up. Neither is a Kafka error class a caller could match on,
+        which is why the text is carried out as it is.
+        """
         try:
             consumer.assign([tp])
             end = consumer.end_offsets([tp])[tp]
             beg = consumer.beginning_offsets([tp])[tp]
-        except Exception:
-            return "unavailable"
+        except Exception as e:
+            # some of these already begin with their own class name
+            text = str(e)[:80] or repr(e)
+            name = type(e).__name__
+            return None, text if text.startswith(name) else f"{name}: {text}"
         start = max(beg, end - n)
         if start >= end:
-            return "empty"
+            return "empty", ""
         consumer.seek(tp, start)
         h = hashlib.md5()
         got = 0
@@ -321,38 +435,75 @@ class KafkaEngine(Engine):
                     h.update(m.key or b"")
                     h.update(m.value or b"")
                     got += 1
-        return f"{got}|{h.hexdigest()}"
+        return f"{got}|{h.hexdigest()}", ""
 
     def delta_verify(self, db, limit=20000, log=None):
         """Offset-based delta: track each partition's end offset; the new
         messages since the baseline are re-hashed on both sides (offsets
         aren't preserved across clusters, so content, not offset numbers,
-        is the check). Baseline advances only on a clean cycle."""
+        is the check). Baseline advances only on a clean cycle.
+
+        A partition whose offsets cannot be read is the case worth being
+        careful about. It used to be dropped from the reading silently, and
+        because the file written back is the reading, its old baseline was
+        erased with it: when the broker came back the partition looked new,
+        its stored offset defaulted to wherever it now was, and every message
+        written in between was never compared by anyone. The baseline is
+        carried forward and the cycle is not clean.
+        """
         import json
 
         from kafka import TopicPartition
         state = self.hop.report_dir(db) / "delta-offsets.json"
 
         def ends(consumer):
-            out = {}
+            out, unread = {}, {}
             for t in self._topics(consumer):
                 for p in self._partitions(consumer, t):
                     try:
                         tp = TopicPartition(t, p)
                         out[f"{t}/{p}"] = consumer.end_offsets([tp])[tp]
-                    except Exception:
-                        pass
-            return out
+                    except Exception as e:
+                        text = str(e)[:80] or repr(e)
+                        name = type(e).__name__
+                        unread[f"{t}/{p}"] = (
+                            text if text.startswith(name)
+                            else f"{name}: {text}")
+            return out, unread
 
         sc, dc = self._consumer("src"), self._consumer("dst")
-        cur = ends(sc)
+        cur, unread = ends(sc)
         if not state.exists():
             state.write_text(json.dumps(cur))
-            return [Result("delta", "cluster", "ok",
-                           "baseline offsets recorded, changes tracked"
-                           " from here")]
+            first = [Result("delta", "cluster", "ok",
+                            f"baseline offsets recorded for {len(cur)}"
+                            " partitions, changes tracked from here")]
+            for key, why in sorted(unread.items()):
+                topic, _, part = key.rpartition("/")
+                first.append(Result(
+                    "delta", f"{topic}[{part}]", "error",
+                    f"left out of the baseline - {why}; changes to this"
+                    " partition from now on will not be noticed until it can"
+                    " be read and a baseline recorded"))
+            return first
         prev = json.loads(state.read_text())
         res, clean, total = [], True, 0
+        for key, why in sorted(unread.items()):
+            # keep whatever the baseline already said, so the messages written
+            # while this partition was unreadable are still waiting to be
+            # compared rather than skipped over
+            clean = False
+            if key in prev:
+                cur[key] = prev[key]
+            topic, _, part = key.rpartition("/")
+            res.append(Result(
+                "delta", f"{topic}[{part}]", "error",
+                f"offsets could not be read - {why}"
+                + self._why_unreadable([(topic, int(part), why)])
+                + ("; its baseline is held where it was"
+                   if key in prev else "")))
+            if log:
+                log(f"{topic}[{part}]: offsets unreadable")
         for key, s_end in cur.items():
             n = s_end - prev.get(key, s_end)
             if n <= 0:
@@ -360,8 +511,21 @@ class KafkaEngine(Engine):
             total += n
             t, p = key.rsplit("/", 1)
             tp = TopicPartition(t, int(p))
-            a = self._tail_hash(sc, tp, min(n, limit))
-            b = self._tail_hash(dc, tp, min(n, limit))
+            a, ea = self._tail_hash(sc, tp, min(n, limit))
+            b, eb = self._tail_hash(dc, tp, min(n, limit))
+            if ea or eb:
+                # the baseline must not move past changes nobody could read:
+                # those messages would never be looked at again, and the next
+                # cycle would report a clean delta over a gap
+                clean = False
+                why = "; ".join(f"{side}: {err}" for side, err in
+                                (("source", ea), ("target", eb)) if err)
+                res.append(Result("delta", f"{t}[{p}]", "error",
+                                  f"{n} new messages could not be read - {why}"
+                                  + self._why_unreadable([(t, int(p), why)])))
+                if log:
+                    log(f"{t}[{p}]: {n} new, unreadable")
+                continue
             ok = a == b
             clean = clean and ok
             res.append(Result("delta", f"{t}[{p}]", "ok" if ok else "diff",
@@ -371,10 +535,14 @@ class KafkaEngine(Engine):
                 log(f"{t}[{p}]: {n} new, {'ok' if ok else 'DIFF'}")
         if clean:
             state.write_text(json.dumps(cur))
-        res.insert(0, Result("delta", "cluster", "ok" if clean else "diff",
+        blind = [r for r in res if r.status == "error"]
+        res.insert(0, Result("delta", "cluster",
+                             "error" if blind else "ok" if clean else "diff",
                              f"{total} new messages across {len(res)}"
                              f" partitions, offsets"
-                             f" {'advanced' if clean else 'NOT advanced'}"))
+                             f" {'advanced' if clean else 'NOT advanced'}"
+                             + (f", {len(blind)} partitions could not be read"
+                                " at all" if blind else "")))
         return res
 
     def watch_sample(self, db):
