@@ -419,6 +419,71 @@ class Engine:
         """
         raise self._no_canon("create a table")
 
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """(changes, token) from this engine's own change log.
+
+        `token` is opaque and belongs to the engine that made it - a binlog
+        file and position, a replication slot's LSN, a resume token. It is
+        stored and handed back so a stopped tail continues where it was
+        rather than from the top.
+
+        Each change is a `canon.change(...)` record. An engine with no change
+        log says so rather than polling the table and calling the difference
+        a change: a poll cannot see a row that was inserted and deleted
+        between two looks, and reporting that as "nothing happened" is the
+        failure this whole contract is built to avoid.
+        """
+        raise self._no_canon("read a change log")
+
+    def neutral_apply(self, side, db, changes):
+        """Apply change records. Returns how many were applied.
+
+        Idempotent by key: an insert that is already there updates, a delete
+        of a row that is gone is not an error. A tail that is restarted
+        replays the changes it had already applied, and the only safe way
+        through that is for replaying to be a no-op rather than a duplicate.
+
+        The loop is here and the two statements are per engine, because the
+        decision - upsert this, delete that - is the same everywhere and only
+        the dialect differs. An engine that grew its own copy of the loop
+        would be one bug fix away from behaving differently on one target.
+        """
+        n = 0
+        for c in changes:
+            op = c.get("op")
+            if op == "delete":
+                self._apply_delete(side, db, c["table"], c["key"])
+            elif op in ("insert", "update"):
+                values = c.get("values") or {}
+                table = c["table"]
+                moved = any(k in values and values[k] != v
+                            for k, v in c["key"].items())
+                if moved:
+                    # the UPDATE changed the primary key, so the row has to
+                    # leave its old address as well as arrive at the new one.
+                    # Write first, delete second: interrupted between the two
+                    # leaves a duplicate, which is visible, rather than
+                    # nothing, which is not.
+                    self._apply_upsert(side, db, table,
+                                       {k: values[k] for k in c["key"]},
+                                       values)
+                    self._apply_delete(side, db, table, c["key"])
+                else:
+                    self._apply_upsert(side, db, table, c["key"], values)
+            else:
+                raise ValueError(f"unknown change op {op!r} on"
+                                 f" {c.get('table')!r}")
+            n += 1
+        return n
+
+    def _apply_upsert(self, side, db, table, key, values):
+        """Write this row, replacing whatever is at that key."""
+        raise self._no_canon("apply changes")
+
+    def _apply_delete(self, side, db, table, key):
+        """Remove the row at that key, whether or not it is there."""
+        raise self._no_canon("apply changes")
+
     def neutral_digest(self, side, db, table, columns):
         """(row count, digest) over `[(name, canon class)]`.
 

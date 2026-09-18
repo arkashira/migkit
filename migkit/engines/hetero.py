@@ -715,12 +715,8 @@ class HeteroEngine(Engine):
                 pks = self.my._pk_cols(db, t)
                 if not pks:
                     continue
-                real = self.my._cols(db, t)
-
                 def fix(vals):
-                    if not any(k.startswith("UNKNOWN_COL") for k in vals):
-                        return vals
-                    return {real[int(k[11:])]: v for k, v in vals.items()}
+                    return self.my.binlog_names(db, t, vals)
 
                 stmts = []
                 for row in ev.rows:

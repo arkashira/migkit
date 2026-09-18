@@ -132,6 +132,169 @@ class MySQLEngine(Engine):
             conn.close()
         return ddl
 
+    def _apply_upsert(self, side, db, table, key, values):
+        from .. import canon
+        row = dict(key)
+        row.update(values)
+        names = sorted(row)
+        cols = ", ".join(f"`{n}`" for n in names)
+        marks = ", ".join(["%s"] * len(names))
+        sets = ", ".join(f"`{n}` = values(`{n}`)"
+                         for n in names if n not in key)
+        tail = f" on duplicate key update {sets}" if sets else ""
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"insert into `{self._d(side, db)}`.`{table}`"
+                            f" ({cols}) values ({marks}){tail}",
+                            [canon.sql_value(row[n]) for n in names])
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _apply_delete(self, side, db, table, key):
+        from .. import canon
+        names = sorted(key)
+        where = " and ".join(f"`{n}` = %s" for n in names)
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"delete from `{self._d(side, db)}`.`{table}`"
+                            f" where {where}",
+                            [canon.sql_value(key[n]) for n in names])
+            conn.commit()
+        finally:
+            conn.close()
+
+    def binlog_names(self, db, table, values):
+        """Binlog row values keyed by column name rather than by position.
+
+        `binlog_row_metadata` defaults to MINIMAL, and at MINIMAL the binlog
+        carries no column names at all - the reader hands back
+        `UNKNOWN_COL0`, `UNKNOWN_COL1` and so on. Setting it to FULL fixes
+        that on a server you control, and a managed MySQL often will not let
+        you, so the mapping has to exist either way.
+
+        The index is the column's ordinal position, which is what
+        `information_schema` orders by, so the two line up.
+        """
+        if not any(str(k).startswith("UNKNOWN_COL") for k in values):
+            return values
+        real = self._cols(db, table)
+        out = {}
+        for k, v in values.items():
+            if str(k).startswith("UNKNOWN_COL"):
+                i = int(str(k)[11:])
+                if i >= len(real):
+                    raise SystemExit(
+                        f"{table}: the binlog has more columns than"
+                        " information_schema does, which means the table was"
+                        " altered after this event was written - replaying it"
+                        " would put values in the wrong columns")
+                out[real[i]] = v
+            else:
+                out[k] = v
+        return out
+
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """Row changes out of the binlog, as neutral records.
+
+        Non-blocking on purpose: this returns what is there now and a token
+        to come back with, rather than holding the connection open. A caller
+        that wants to follow calls it again; one that wants a bounded catch-up
+        gets a bounded one.
+
+        A table with no primary key is skipped and named. Without a key there
+        is no way to address the row on the target, and applying an UPDATE by
+        matching every column would hit every duplicate of it.
+        """
+        from pymysqlreplication import BinLogStreamReader
+        from pymysqlreplication.row_event import (DeleteRowsEvent,
+                                                  UpdateRowsEvent,
+                                                  WriteRowsEvent)
+
+        from .. import canon
+        ep = self.hop.source if side == "src" else self.hop.target
+        for name, why in (
+                ("binlog_row_metadata",
+                 "without it the binlog carries no column names and no"
+                 " charset per column, so the reader cannot tell a"
+                 " varbinary from a varchar - measured, it tries to UTF-8"
+                 " decode the binary and raises. The library's way around"
+                 " that replaces the bytes it cannot decode, which is worse"
+                 " than stopping"),
+                ("binlog_row_image",
+                 "without it an UPDATE's before image carries only the key,"
+                 " so a column that was not part of the change arrives as"
+                 " missing rather than unchanged")):
+            got = self._q(side, f"select @@{name}")
+            value = str(got[0][0]) if got else "?"
+            if value.upper() != "FULL":
+                raise SystemExit(
+                    f"{name} is {value} on this server, and the tail needs"
+                    f" FULL: {why}.\n"
+                    f"    set global {name} = 'FULL';   -- self-managed\n"
+                    f"    {name}=FULL                   -- parameter group")
+        token = dict(token or {})
+        if not token:
+            pos = (self._q(side, "show binary log status")
+                   or self._q(side, "show master status"))
+            if not pos:
+                raise SystemExit(
+                    "the binlog is off on this server, so there is no change"
+                    " log to read - turn on log_bin, or move without CDC")
+            token = {"log_file": pos[0][0], "log_pos": int(pos[0][1])}
+        stream = BinLogStreamReader(
+            connection_settings={"host": ep.host, "port": ep.port,
+                                 "user": ep.user, "passwd": ep.password},
+            server_id=int(self.hop.options.get("server_id", 4379)),
+            blocking=False, resume_stream=True,
+            log_file=token.get("log_file"), log_pos=token.get("log_pos"),
+            only_schemas=[self._d(side, db)],
+            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent])
+        out, skipped = [], set()
+        try:
+            for ev in stream:
+                table = ev.table
+                keys = self._pk_cols(self._d(side, db), table)
+                if not keys:
+                    skipped.add(table)
+                    continue
+                named = self._d(side, db)
+                for row in ev.rows:
+                    if isinstance(ev, WriteRowsEvent):
+                        vals = self.binlog_names(named, table, row["values"])
+                        out.append(canon.change(
+                            "insert", table,
+                            {k: vals[k] for k in keys}, vals))
+                    elif isinstance(ev, UpdateRowsEvent):
+                        before = self.binlog_names(named, table,
+                                                   row["before_values"])
+                        after = self.binlog_names(named, table,
+                                                  row["after_values"])
+                        # the key from the *before* image: an UPDATE that
+                        # moved the primary key has to find the old row
+                        out.append(canon.change(
+                            "update", table,
+                            {k: before[k] for k in keys}, after))
+                    else:
+                        vals = self.binlog_names(named, table, row["values"])
+                        out.append(canon.change(
+                            "delete", table, {k: vals[k] for k in keys}))
+                token = {"log_file": stream.log_file,
+                         "log_pos": stream.log_pos}
+                if len(out) >= limit:
+                    break
+        finally:
+            stream.close()
+        if skipped:
+            raise SystemExit(
+                f"no primary key on {', '.join(sorted(skipped))} - a change"
+                " to a keyless table cannot be addressed on the target, and"
+                " applying it by matching every column would hit every"
+                " duplicate. Add a key, or exclude the table")
+        return out, token
+
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
         row = canon.row_expr("mysql", columns)

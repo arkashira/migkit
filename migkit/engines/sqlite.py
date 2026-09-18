@@ -141,6 +141,43 @@ class SQLiteEngine(Engine):
             conn.close()
         return ddl
 
+    def _apply_upsert(self, side, db, table, key, values):
+        import sqlite3
+
+        from .. import canon
+        row = dict(key)
+        row.update(values)
+        names = sorted(row)
+        cols = ", ".join(f'"{n}"' for n in names)
+        marks = ", ".join(["?"] * len(names))
+        sets = ", ".join(f'"{n}" = excluded."{n}"'
+                         for n in names if n not in key)
+        conflict = ", ".join(f'"{k}"' for k in sorted(key))
+        tail = (f" on conflict ({conflict}) do update set {sets}" if sets
+                else f" on conflict ({conflict}) do nothing")
+        conn = sqlite3.connect(self._path(side))
+        try:
+            conn.execute(f'insert into "{table}" ({cols})'
+                         f" values ({marks}){tail}",
+                         [canon.sql_value(row[n]) for n in names])
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _apply_delete(self, side, db, table, key):
+        import sqlite3
+
+        from .. import canon
+        names = sorted(key)
+        where = " and ".join(f'"{n}" = ?' for n in names)
+        conn = sqlite3.connect(self._path(side))
+        try:
+            conn.execute(f'delete from "{table}" where {where}',
+                         [canon.sql_value(key[n]) for n in names])
+            conn.commit()
+        finally:
+            conn.close()
+
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
         row = canon.row_expr("sqlite", columns)

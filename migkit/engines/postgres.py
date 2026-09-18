@@ -131,7 +131,7 @@ class PostgresEngine(Engine):
         source, which loses a limit the application was relying on without
         losing a row to show for it.
         """
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         out = self._psql(side, self._d(side, db), f"""
             select a.attname||chr(31)
                    ||pg_catalog.format_type(a.atttypid, a.atttypmod)
@@ -144,7 +144,7 @@ class PostgresEngine(Engine):
         return [tuple(l.split("\x1f", 1)) for l in out.splitlines() if l]
 
     def neutral_key(self, side, db, table):
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         out = self._psql(side, self._d(side, db), f"""
             select a.attname
               from pg_index i
@@ -165,7 +165,7 @@ class PostgresEngine(Engine):
                                 connect_timeout=15)
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000):
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
@@ -197,7 +197,7 @@ class PostgresEngine(Engine):
         from psycopg2.extras import execute_values
 
         from .. import canon
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
@@ -220,7 +220,7 @@ class PostgresEngine(Engine):
 
     def neutral_create(self, side, db, table, columns, key=()):
         from .. import canon
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         exists = self._psql(side, self._d(side, db),
                             "select count(*) from information_schema.tables"
                             f" where table_schema='{sch}'"
@@ -238,9 +238,40 @@ class PostgresEngine(Engine):
         self._psql(side, self._d(side, db), ddl)
         return ddl
 
+    def _apply_upsert(self, side, db, table, key, values):
+        from .. import canon
+        sch, tbl = self._split(table)
+        row = dict(key)
+        row.update(values)
+        names = sorted(row)
+        cols = ", ".join(f'"{n}"' for n in names)
+        marks = ", ".join(["%s"] * len(names))
+        sets = ", ".join(f'"{n}" = excluded."{n}"'
+                         for n in names if n not in key)
+        conflict = ", ".join(f'"{k}"' for k in sorted(key))
+        tail = (f" on conflict ({conflict}) do update set {sets}" if sets
+                else f" on conflict ({conflict}) do nothing")
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'insert into "{sch}"."{tbl}" ({cols})'
+                            f" values ({marks}){tail}",
+                            [canon.sql_value(row[n]) for n in names])
+            conn.commit()
+
+    def _apply_delete(self, side, db, table, key):
+        from .. import canon
+        sch, tbl = self._split(table)
+        names = sorted(key)
+        where = " and ".join(f'"{n}" = %s' for n in names)
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'delete from "{sch}"."{tbl}" where {where}',
+                            [canon.sql_value(key[n]) for n in names])
+            conn.commit()
+
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         row = canon.row_expr("postgres", columns)
         got = self._psql(side, self._d(side, db),
                          "select count(*)::text||chr(31)||"
@@ -248,6 +279,19 @@ class PostgresEngine(Engine):
                          f' from "{sch}"."{tbl}"').strip()
         n, _, d = got.partition("\x1f")
         return (int(n), d)
+
+    @staticmethod
+    def _split(table):
+        """(schema, table) from either form.
+
+        `"t".partition(".")` answers `('t', '', '')`, so an unqualified name
+        silently became schema `t` and table `""` - which PostgreSQL reports
+        as `zero-length delimited identifier`. Change records arrive with
+        bare table names because a binlog has no schemas, which is where this
+        first showed up.
+        """
+        schema, sep, name = str(table).partition(".")
+        return (schema, name) if sep else ("public", schema)
 
     def _brand_probes(self):
         """The version banner and the reported server_version, per side.
@@ -2116,7 +2160,7 @@ class PostgresEngine(Engine):
         avoid.
         """
         from .. import unchanged as _u
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         # Before the version, because a wire-compatible fork answers the
         # version question plausibly and the pieces underneath it are dead.
         # Measured on CockroachDB: empty pg_stat_all_tables, relfilenode 0
@@ -3119,7 +3163,7 @@ class PostgresEngine(Engine):
             cache = self._col_cache = {}
         if key in cache:
             return cache[key]
-        sch, _, tbl = table.partition(".")
+        sch, tbl = self._split(table)
         rows = self._psql(side, db,
             "select a.attname||'|'||coalesce(t.typname,'') "
             "from pg_attribute a "

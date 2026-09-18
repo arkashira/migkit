@@ -161,6 +161,26 @@ class MongoEngine(Engine):
         coll.bulk_write(ops, ordered=False)
         return len(rows)
 
+    def _apply_upsert(self, side, db, table, key, values):
+        from .. import canon
+        body = {n: v for n, v in values.items()
+                if n not in key and v is not canon.ABSENT}
+        unset = {n: "" for n, v in values.items()
+                 if n not in key and v is canon.ABSENT}
+        update = {}
+        if body:
+            update["$set"] = body
+        if unset:
+            update["$unset"] = unset
+        if not update:
+            update = {"$setOnInsert": {}}
+        coll = self._client(side)[self._d(side, db)][table]
+        coll.update_one(dict(key), update, upsert=True)
+
+    def _apply_delete(self, side, db, table, key):
+        coll = self._client(side)[self._d(side, db)][table]
+        coll.delete_one(dict(key))
+
     def neutral_digest(self, side, db, table, columns):
         """(count, digest) folded here rather than in the server.
 

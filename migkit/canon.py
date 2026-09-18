@@ -447,6 +447,40 @@ def ddl_type(engine, cls, numbers=()):
         return wide
 
 
+# What one change looks like once it has left the engine that produced it.
+#
+# The three logs this is read from say the same three things in three shapes:
+# a MySQL binlog row event carries before and after images, a PostgreSQL
+# logical slot emits a text or protocol message, a MongoDB change stream
+# hands back a document. What survives translation is the operation, which
+# table it was on, which row it was, and - for anything that is not a delete -
+# what the row now holds.
+#
+# `key` is separate from `values` on purpose. Applying a change needs to
+# address the row, and the address is not always inside the payload: a MySQL
+# UPDATE that moved the primary key has one key in the before image and
+# another in the after, and an applier that took the key from `values` would
+# write a second row rather than move the first.
+CHANGE_OPS = ("insert", "update", "delete")
+
+
+def change(op, table, key, values=None):
+    """One change record, checked at the point it is made.
+
+    Not a bare dict: an op this file does not know is a log format that
+    changed under migkit, and finding that out where the record is built is
+    cheaper than finding it out as a row that never arrived.
+    """
+    if op not in CHANGE_OPS:
+        raise ValueError(f"unknown change op {op!r}, expected one of"
+                         f" {', '.join(CHANGE_OPS)}")
+    if not key:
+        raise ValueError(f"a {op} on {table} with no key cannot be applied -"
+                         " migkit will not guess which row it meant")
+    return {"op": op, "table": str(table), "key": dict(key),
+            "values": dict(values or {})}
+
+
 def sql_value(value):
     """One value on its way into a SQL driver.
 
