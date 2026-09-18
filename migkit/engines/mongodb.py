@@ -46,6 +46,27 @@ class MongoEngine(Engine):
                       if d not in SKIP_DBS and not self.hop.excluded(d))
 
     CANON_ENGINE = "mongodb"
+    ENGINE_FAMILY = "mongodb"
+
+    def _brand_probes(self):
+        """`buildInfo` from each side, which is where MongoDB names itself.
+
+        The alternative this replaced was reading the hostname and calling
+        anything with `docdb` in it Amazon DocumentDB. A CNAME, a bastion or
+        a connection string with a different label defeats that, and it
+        answers about the address rather than about the software.
+        """
+        def one(side):
+            try:
+                return dict(self._client(side).admin.command("buildInfo"))
+            except Exception:
+                return {}
+        return (one("src"), one("dst"))
+
+    def _server_versions(self):
+        s, d = self._brands()
+        return (s.version or None, d.version or None)
+
 
     def neutral_tables(self, side, db):
         c = self._client(side)[self._d(side, db)]
@@ -1079,14 +1100,10 @@ class MongoEngine(Engine):
             items.append({"level": level, "scope": scope,
                           "item": item, "detail": str(detail)})
 
-        sv = self._client("src").server_info().get("version", "?")
-        dv = self._client("dst").server_info().get("version", "?")
-        add("pass" if sv.split(".")[0] == dv.split(".")[0] else "warn",
-            "instance", "server version match", f"src {sv} / dst {dv}")
-        if "docdb" in (self.hop.source.host or ""):
-            add("warn", "instance", "source is DocumentDB",
-                "no dbHash or hashed-index aggregation,"
-                " client-side hashing is used (slower)")
+        items += self._brand_rows()
+        sv, dv = self._server_versions()
+        items.append(self._version_row(sv, dv))
+
         inv = self._handwork()
         items += inv.rows() + inv.summary()
         items += self._mover_leftovers()

@@ -61,6 +61,30 @@ class KafkaEngine(Engine):
             return None
         return out
 
+    ENGINE_FAMILY = "kafka"
+
+    def _brand_probes(self):
+        """The cluster id from each side.
+
+        It is the one thing a Kafka client can read that ever carries a
+        brand: measured, Redpanda answers `redpanda.<uuid>` and Apache Kafka
+        answers a bare `5L6g3nShT-eMCtK--X86sw`. The bare form is what MSK
+        and Confluent report too, so it names the protocol implementation and
+        not the distribution - which is recorded as a limit rather than
+        papered over.
+        """
+        def one(side):
+            try:
+                consumer = self._consumer(side)
+                try:
+                    cid = consumer._client.cluster.cluster_id
+                finally:
+                    consumer.close()
+                return {"cluster_id": cid} if cid else {}
+            except Exception:
+                return {}
+        return (one("src"), one("dst"))
+
     def _server_versions(self):
         """Kafka does not publish a version over the client protocol the way
         a database does, so this says so rather than inventing one."""

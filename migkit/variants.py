@@ -136,6 +136,32 @@ SIGNATURES = {
         ("percona", [("version_comment", "percona")], "version"),
         ("mysql", [("version_comment", "mysql")], "version"),
     ],
+    # MongoDB names itself by what it carries in `buildInfo`: a git version,
+    # a JavaScript engine and a list of storage engines. Measured on 7.0.43,
+    # all three are there.
+    #
+    # There is deliberately no signature for DocumentDB or CosmosDB. Their
+    # `buildInfo` is documented as thinner than this one, but migkit has not
+    # been able to run against either, and a brand identified from the
+    # *absence* of a field is a brand named by guessing. They come back
+    # unidentified, which `rows` reports as "migkit cannot say which software
+    # is answering" - which is the truth.
+    "mongodb": [
+        ("ferretdb", [("ferretdb", "")], "version"),
+        ("mongodb", [("storageengines", ""), ("gitversion", "")], "version"),
+    ],
+    # A Kafka client can read the cluster id, and Redpanda puts its name in
+    # front of one. Measured:
+    #
+    #     redpanda        redpanda.60bd60c1-e78e-423e-b877-f1caa1fc5835
+    #     apache kafka    5L6g3nShT-eMCtK--X86sw
+    #
+    # The bare form is all any Apache-Kafka-protocol broker reports, so it
+    # names the implementation and not the distribution - see LIMITS.
+    "kafka": [
+        ("redpanda", [("cluster_id", "redpanda.")], ""),
+        ("kafka", [("cluster_id", "")], ""),
+    ],
     "redis": [
         # Valkey says both, and says them in the Server section of INFO where
         # the engine is already looking.
@@ -180,6 +206,13 @@ LIMITS = {
         VERSION_IS_REAL:
             "redis_version is a compatibility number (measured: 7.4.0 on a"
             " df-v2.0.0 server); the real one is dragonfly_version",
+    },
+    "kafka": {
+        VERSION_IS_REAL:
+            "a Kafka broker's cluster id is a bare identifier - measured,"
+            " 5L6g3nShT-eMCtK--X86sw - and MSK, Confluent and a self-hosted"
+            " broker all answer the same way, so this names the protocol"
+            " implementation rather than the distribution",
     },
     "mariadb": {
         CDC_POSITION:
