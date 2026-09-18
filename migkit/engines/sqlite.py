@@ -54,6 +54,104 @@ class SQLiteEngine(Engine):
         conn.create_function("migkit_canon", 2, render, deterministic=True)
         conn.create_aggregate("migkit_digest", 1, _Digest)
 
+    CLIENT_TOOLS = ()
+
+    def _server_versions(self):
+        def ver(side):
+            try:
+                return self._q(side, "select sqlite_version()")[0][0]
+            except Exception:
+                return None
+        return (ver("src"), ver("dst"))
+
+    def _assess_extra(self):
+        """What has to be true about two files before a migration starts.
+
+        SQLite has no server to ask, so every question here is about the file
+        and about settings that live on the connection rather than in the
+        database. Two of them are the ones that bite:
+
+        **Foreign keys are off by default.** Measured, `pragma foreign_keys`
+        answers 0 on a fresh connection - SQLite parses the constraints and
+        does not enforce them unless each connection turns them on. A source
+        that has been written to for years with them off can hold rows that a
+        target enforcing them will refuse, and the migration is where that is
+        discovered.
+
+        **A damaged file raises rather than reporting.** `pragma
+        integrity_check` on a corrupted database does not come back with a
+        list of problems; it raises `DatabaseError: database disk image is
+        malformed`. A check that only read the returned rows would let that
+        exception escape and take the whole assess with it, so both are
+        handled.
+        """
+        import os
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "file", "item": item,
+                          "detail": str(detail)})
+        for side in ("src", "dst"):
+            path = self._path(side)
+            if not path:
+                add("fail", f"{side} file path", "no path configured")
+                continue
+            if not os.path.exists(path):
+                add("fail" if side == "src" else "warn",
+                    f"{side} database file",
+                    f"{path} does not exist"
+                    + ("" if side == "src" else
+                       " - a target file is created by the first write, so"
+                       " this is only a problem if you expected it there"))
+                continue
+            size = os.path.getsize(path)
+            add("pass", f"{side} database file", f"{path}, {size:,} bytes")
+            try:
+                rows = self._q(side, "pragma integrity_check")
+                verdict = rows[0][0] if rows else "?"
+                add("pass" if verdict == "ok" else "fail",
+                    f"{side} integrity_check",
+                    verdict if verdict == "ok"
+                    else f"{len(rows)} problems, first: {verdict}")
+            except Exception as e:
+                add("fail", f"{side} integrity_check",
+                    f"{str(e)[:90]} - the file cannot be read as a database,"
+                    " so nothing below it means anything")
+                continue
+            try:
+                fk = self._q(side, "pragma foreign_keys")[0][0]
+                journal = self._q(side, "pragma journal_mode")[0][0]
+            except Exception as e:
+                add("warn", f"{side} settings",
+                    f"{str(e)[:80]} - unknown, not clean")
+                continue
+            add("warn" if not fk else "pass", f"{side} foreign_keys",
+                f"{fk}" + ("" if fk else
+                           " - SQLite parses foreign keys and does not"
+                           " enforce them unless each connection turns them"
+                           " on, so rows here may not satisfy constraints a"
+                           " target does enforce"))
+            add("pass" if str(journal).lower() == "wal" else "warn",
+                f"{side} journal_mode", f"{journal}"
+                + ("" if str(journal).lower() == "wal" else
+                   " - a reader and a writer block each other outside WAL,"
+                   " so a long read holds up whatever writes to this file"))
+        try:
+            free = os.statvfs(os.path.dirname(
+                os.path.abspath(self._path("dst") or ".")) or ".")
+            room = free.f_bavail * free.f_frsize
+            need = (os.path.getsize(self._path("src"))
+                    if self._path("src") and os.path.exists(self._path("src"))
+                    else 0)
+            add("pass" if room > need * 2 else "warn",
+                "room for the target",
+                f"{room:,} bytes free where the target lives, source is"
+                f" {need:,}")
+        except Exception as e:
+            add("warn", "room for the target",
+                f"{str(e)[:80]} - unknown, not clean")
+        return items
+
     CANON_ENGINE = "sqlite"
     OVER_NETWORK = False
 

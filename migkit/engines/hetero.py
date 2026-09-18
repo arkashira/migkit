@@ -253,6 +253,83 @@ class HeteroEngine(Engine):
                          " which is where it runs anyway")
         return (" - " + "; ".join(parts)) if parts else ""
 
+    def assess(self):
+        """Both sides, plus what this particular pairing can and cannot do.
+
+        A cross-engine hop has two servers and neither engine's own assess
+        knows the other exists. So this runs both - labelling every row with
+        which side it came from, because "server version match" means nothing
+        when the two sides are different software - and then answers the
+        question only the pair can answer: which of migkit's operations work
+        for *this* combination.
+
+        The capability rows are read from the classes rather than by calling
+        them, so `assess` says what the pairing supports even when one of the
+        servers is unreachable.
+        """
+        from .base import Engine
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "pair", "item": item,
+                          "detail": str(detail)})
+        add("pass", "engines", f"{self.src_name} -> {self.dst_name}")
+
+        for side, name, engine in (("source", self.src_name, self.src_engine),
+                                   ("target", self.dst_name,
+                                    self.dst_engine)):
+            try:
+                for row in engine.assess():
+                    row = dict(row)
+                    row["scope"] = f"{side} ({name}) {row.get('scope', '')}"
+                    row["item"] = f"{side}: {row.get('item', '')}"
+                    items.append(row)
+            except Exception as e:
+                add("warn", f"{side} ({name}) could not be assessed",
+                    f"{str(e).splitlines()[-1][:110]} - unknown, not clean")
+
+        items += self._pair_capabilities()
+        return items
+
+    def _pair_capabilities(self):
+        """What this combination can do, answered from the classes.
+
+        Separate from `assess` because it needs no server: a capability
+        question is about the two engines, and turning it into "is the
+        database up right now" would give it a different answer on a bad
+        afternoon. It is also the part of the report worth reading when a
+        side is unreachable.
+        """
+        from .base import Engine
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "pair", "item": item,
+                          "detail": str(detail)})
+        for label, ok, why in (
+                ("compare", self._can_compare_neutrally(),
+                 "both engines have a canonical rendering, so a digest"
+                 " computed on each side is the same number"),
+                ("move rows", self._can_move_neutrally(),
+                 "both engines can be read from and written to"),
+                ("create the target table",
+                 type(self.dst_engine).neutral_create_sql
+                 is not Engine.neutral_create_sql
+                 or self.dst_engine.CREATES_ON_WRITE,
+                 (f"{self.dst_name} makes it on the first write"
+                  if self.dst_engine.CREATES_ON_WRITE
+                  else f"{self.dst_name} can be told what table to build")),
+                ("tail changes",
+                 type(self.src_engine).neutral_changes
+                 is not Engine.neutral_changes
+                 and type(self.dst_engine)._apply_upsert
+                 is not Engine._apply_upsert,
+                 f"{self.src_name} has a change log and {self.dst_name} can"
+                 " apply what comes out of it")):
+            add("pass" if ok else "warn", f"this pair can {label}",
+                why if ok else f"no: {why} is not true here")
+        return items
+
     def _can_move_neutrally(self):
         """Whether both engines implement the read/write contract.
 
