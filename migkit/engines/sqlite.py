@@ -401,11 +401,25 @@ class SQLiteEngine(Engine):
         renders that number as, so writing it keeps the two sides agreeing
         rather than introducing a second, quieter rendering.
         """
+        import datetime
         import decimal
 
         from .. import canon
         if isinstance(value, decimal.Decimal):
             return canon.render_value("decimal", value)
+        # the date and time types, written out rather than left to the
+        # driver. Measured: `datetime.time` is refused outright -
+        # `ProgrammingError: type 'datetime.time' is not supported` - so a
+        # PostgreSQL `time` column could not cross at all, while `datetime`
+        # and `date` went through adapters Python deprecated in 3.12 and will
+        # remove. The text below is byte-for-byte what those adapters
+        # produced, so nothing already written changes meaning.
+        if isinstance(value, datetime.datetime):
+            return canon.render_value("timestamp", value)
+        if isinstance(value, datetime.date):
+            return canon.render_value("date", value)
+        if isinstance(value, datetime.time):
+            return canon.render_value("time", value)
         return canon.sql_value(value)
 
     def _reader(self, side):

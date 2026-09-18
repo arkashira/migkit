@@ -166,6 +166,25 @@ TYPES = {
         "nchar": "text", "native character": "text", "nvarchar": "text",
         "text": "text", "clob": "text",
         "blob": "bytes",
+        # SQLite has no date or time type. A column declared `datetime` holds
+        # whatever was written into it - text, a number of seconds, a Julian
+        # day - and the declared name is a hint to the reader rather than a
+        # promise from the engine. So these are `text`: what is stored is
+        # compared as what it is, which for a table migkit created is the
+        # same canonical text the other engines print. The alternative was
+        # leaving the column out of the comparison entirely.
+        #
+        # Measured, the affinity rules keep that honest. These names carry
+        # NUMERIC affinity, and `2024-01-02 03:04:05.000006` cannot be turned
+        # into a number, so it stays text and renders as itself. A column
+        # holding `1704164645` comes back as the integer it was converted to
+        # and reads as a difference against a PostgreSQL timestamp - which is
+        # what it is. `numeric` itself stays unmapped below for the other
+        # half of the same measurement: `1.50` written into one is stored as
+        # the real 1.5, and rendering that beside a PostgreSQL `numeric(10,2)`
+        # would invent a difference migkit cannot resolve.
+        "date": "text", "datetime": "text", "timestamp": "text",
+        "time": "text",
     },
     # MongoDB reports the BSON type of what is actually stored rather than a
     # declared one, and a field can hold more than one across a collection.
@@ -371,6 +390,13 @@ def render_value(cls, value):
         # the last three digits are zeros - which is the truth about what the
         # field can hold, not a rounding migkit chose.
         return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+    if cls == "date":
+        # what both SQL renderings fall through to: PostgreSQL's `::text` and
+        # MySQL's `cast(d as char)` both print `2024-01-02`
+        return value.strftime("%Y-%m-%d")
+    if cls == "time":
+        # `to_char(t, 'HH24:MI:SS.US')` and `time_format(t, '%H:%i:%s.%f')`
+        return value.strftime("%H:%M:%S.%f")
     raise ValueError(f"no in-process rendering for class {cls!r}")
 
 

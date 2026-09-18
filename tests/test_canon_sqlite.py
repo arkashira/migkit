@@ -176,10 +176,35 @@ def test_sqlite_maps_only_the_types_it_can_answer_for(sqlite_engine):
     assert canon.type_class("sqlite", "integer") == "integer"
     assert canon.type_class("sqlite", "real") == "float"
     assert canon.type_class("sqlite", "blob") == "bytes"
-    for unmapped in ("decimal(12,4)", "datetime", "json", "numeric"):
+    for unmapped in ("decimal(12,4)", "json", "numeric"):
         cls, why = canon.comparable("sqlite", unmapped)
         assert cls is None, (unmapped, cls)
         assert "no canonical rendering" in why
+
+
+def test_the_date_names_are_compared_as_the_text_they_hold(sqlite_engine,
+                                                           tmp_path):
+    """`datetime` is mapped now, and to `text` rather than to a date class,
+    because that is what SQLite stores. The affinity rules are what make it
+    work, and they are measured here rather than taken from the manual: these
+    names carry NUMERIC affinity, so a timestamp stays text (it cannot be
+    turned into a number) while something that looks like a number does not.
+    """
+    import sqlite3
+    for declared in ("date", "datetime", "timestamp", "time"):
+        assert canon.type_class("sqlite", declared) == "text", declared
+
+    conn = sqlite3.connect(tmp_path / "affinity.db")
+    conn.execute("create table t (a datetime, b numeric)")
+    conn.execute("insert into t values (?, ?)",
+                 ("2024-01-02 03:04:05.000006", "1.50"))
+    conn.execute("insert into t values (?, ?)", ("1704164645", "2"))
+    got = conn.execute("select typeof(a), a, typeof(b), b from t").fetchall()
+    conn.close()
+    assert got[0][:2] == ("text", "2024-01-02 03:04:05.000006"), got
+    assert got[1][:2] == ("integer", 1704164645), got
+    # and the other half: why `numeric` is still not mapped
+    assert got[0][2:] == ("real", 1.5), got
 
 
 def test_the_three_engines_agree_on_the_same_rows(sqlite_engine, servers):
