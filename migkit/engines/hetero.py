@@ -323,8 +323,7 @@ class HeteroEngine(Engine):
             log(f"{leaf}: not on the target yet;"
                 f" {self.dst_name} creates it on the first write")
         else:
-            raise SystemExit(f"{leaf} is not on the target - create it first,"
-                             " migkit does not invent a table it cannot see")
+            dst_t = self._create_target(db, src_t, leaf, log)
         src_cols, dst_cols, notes = self._move_columns(src_t, dst_t, db)
         for n in notes:
             log(f"{leaf}: {n}")
@@ -361,6 +360,47 @@ class HeteroEngine(Engine):
                 " null\", so the distinction ends at this hop")
         st["done"] = True
         ck.save()
+
+    def _create_target(self, db, src_table, leaf, log):
+        """Build the table the rows are about to land in, and say what it ran.
+
+        A missing target used to stop the move. Creating it is what the
+        operator asked for by starting one - but only when it is genuinely
+        missing: `neutral_create` refuses an existing table rather than
+        altering it, so a name that already means something on the target is
+        never quietly redefined.
+
+        The types come from the source's classes, widened where the class
+        does not carry the source's own numbers. Wider cannot truncate;
+        narrower can, so the direction of the guess is not a coin toss.
+        """
+        from .. import canon
+        declared = self.src_engine.neutral_columns("src", db, src_table)
+        columns, unknown = [], []
+        for name, typ in sorted(declared):
+            cls = canon.type_class(self.src_engine.CANON_ENGINE, typ)
+            if cls is None:
+                unknown.append(f"{name} ({typ})")
+                continue
+            columns.append((name, cls, canon.params(typ)))
+        if unknown:
+            raise SystemExit(
+                f"{leaf} is not on the target and migkit cannot build it:"
+                f" no neutral class for {', '.join(unknown)}."
+                " Create the table yourself and run this again - guessing a"
+                " column type is how a migration arrives complete and wrong")
+        try:
+            key = [k for k in self.src_engine.neutral_key("src", db,
+                                                          src_table)
+                   if k in {n for n, _, _ in columns}]
+        except Exception:
+            key = []
+        ddl = self.dst_engine.neutral_create("dst", db, leaf, columns, key)
+        log(f"{leaf}: not on the target, created it - {ddl}")
+        if not key:
+            log(f"{leaf}: created without a primary key, because the source"
+                " has none - the rows still move, and a restart starts over")
+        return leaf
 
     def _flatten_absent(self, rows):
         """Turn `canon.ABSENT` into None when the target cannot hold it.

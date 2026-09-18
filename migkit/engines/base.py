@@ -405,6 +405,20 @@ class Engine:
         """
         raise self._no_canon("write rows")
 
+    def neutral_create(self, side, db, table, columns, key=()):
+        """Create a table to receive rows. Returns the DDL it ran.
+
+        `columns` is [(name, class, numbers)] where `numbers` are whatever
+        the source's declared type carried - a length, or a precision and
+        scale. They travel because the class does not carry them and a
+        narrower target would truncate.
+
+        **An existing table is never touched.** Not altered, not dropped,
+        not emptied: the one thing worse than a missing target is a target
+        that used to hold something else.
+        """
+        raise self._no_canon("create a table")
+
     def neutral_digest(self, side, db, table, columns):
         """(row count, digest) over `[(name, canon class)]`.
 

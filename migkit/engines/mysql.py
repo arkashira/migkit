@@ -83,6 +83,7 @@ class MySQLEngine(Engine):
     def neutral_write(self, side, db, table, columns, rows):
         if not rows:
             return 0
+        from .. import canon
         names = [n for n, _ in columns]
         cols = ", ".join(f"`{n}`" for n in names)
         key = set(self.neutral_key(side, db, table))
@@ -98,11 +99,38 @@ class MySQLEngine(Engine):
             with conn.cursor() as cur:
                 cur.executemany(
                     f"insert into `{self._d(side, db)}`.`{table}` ({cols})"
-                    f" values {place}{tail}", [tuple(r) for r in rows])
+                    f" values {place}{tail}",
+                    [tuple(canon.sql_value(v) for v in r) for r in rows])
             conn.commit()
         finally:
             conn.close()
         return len(rows)
+
+    def neutral_create(self, side, db, table, columns, key=()):
+        from .. import canon
+        exists = self._q(side, "select count(*) from information_schema"
+                               ".tables where table_schema=%s"
+                               " and table_name=%s",
+                         (self._d(side, db), table))[0][0]
+        if exists:
+            raise SystemExit(f"{table} already exists on the target -"
+                             " migkit will not alter or replace a table that"
+                             " is already there")
+        defs = [f"`{n}` {canon.ddl_type('mysql', c, w)}"
+                for n, c, w in columns]
+        if key:
+            defs.append("primary key (" + ", ".join(f"`{k}`" for k in key)
+                        + ")")
+        ddl = (f"create table `{self._d(side, db)}`.`{table}` ("
+               + ", ".join(defs) + ")")
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+            conn.commit()
+        finally:
+            conn.close()
+        return ddl
 
     def neutral_digest(self, side, db, table, columns):
         from .. import canon

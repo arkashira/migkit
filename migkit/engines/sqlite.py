@@ -93,6 +93,8 @@ class SQLiteEngine(Engine):
 
     def neutral_write(self, side, db, table, columns, rows):
         import sqlite3
+
+        from .. import canon
         if not rows:
             return 0
         names = [n for n, _ in columns]
@@ -111,11 +113,33 @@ class SQLiteEngine(Engine):
         try:
             conn.executemany(f'insert into "{table}" ({cols})'
                              f" values ({place}){tail}",
-                             [tuple(r) for r in rows])
+                             [tuple(canon.sql_value(v) for v in r)
+                              for r in rows])
             conn.commit()
         finally:
             conn.close()
         return len(rows)
+
+    def neutral_create(self, side, db, table, columns, key=()):
+        import sqlite3
+        from .. import canon
+        if table in self._tables(side):
+            raise SystemExit(f"{table} already exists on the target -"
+                             " migkit will not alter or replace a table that"
+                             " is already there")
+        defs = [f'"{n}" {canon.ddl_type("sqlite", c, w)}'
+                for n, c, w in columns]
+        if key:
+            defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
+                        + ")")
+        ddl = f'create table "{table}" (' + ", ".join(defs) + ")"
+        conn = sqlite3.connect(self._path(side))
+        try:
+            conn.execute(ddl)
+            conn.commit()
+        finally:
+            conn.close()
+        return ddl
 
     def neutral_digest(self, side, db, table, columns):
         from .. import canon

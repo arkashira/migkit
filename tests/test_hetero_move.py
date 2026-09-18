@@ -193,13 +193,19 @@ def test_a_column_the_target_lacks_is_named_rather_than_dropped_silently(
         pg_sql("alter table t drop column note")
 
 
-def test_a_table_missing_on_the_target_is_refused_not_invented(engine):
-    assert pg_sql("create table only_here (id int primary key)").returncode \
-        == 0
+def test_a_table_missing_on_the_target_is_built_rather_than_refused(engine):
+    """This used to stop the move. Creating the table is what the operator
+    asked for by starting one - and the line says what DDL ran, because a
+    table appearing on a target without a record of why is its own problem."""
+    assert pg_sql("create table only_here (id int primary key, v text);"
+                  " insert into only_here values (1,'x')").returncode == 0
     try:
-        with pytest.raises(SystemExit) as e:
-            engine.move_table("cx", "public", "only_here", 100,
-                              _Checkpoint(), lambda m: None)
-        assert "not on the target" in str(e.value)
+        lines = []
+        engine.move_table("cx", "public", "only_here", 100, _Checkpoint(),
+                          lines.append)
+        assert any("created it - create table" in m for m in lines), lines
+        assert my_sql("select v from only_here where id=1",
+                      "cx").stdout.strip() == "x"
     finally:
         pg_sql("drop table only_here")
+        my_sql("drop table if exists only_here", "cx")

@@ -350,6 +350,128 @@ def render_value(cls, value):
     raise ValueError(f"no in-process rendering for class {cls!r}")
 
 
+# What a class becomes when a table has to be created to receive it.
+#
+# `{0}` and `{1}` are the numbers the source's own declared type carried -
+# a length for text, a precision and scale for decimal. They are kept because
+# the class alone does not: `varchar(50)` and `text` are both `text`, and a
+# target built from the class alone would quietly drop a limit the
+# application may be relying on.
+#
+# Where the class carries no numbers, or the source did not supply them, the
+# widest form is used. Creating a column wider than the source cannot lose a
+# value; creating one narrower can, and this file will not do that.
+DDL = {
+    "postgres": {
+        "integer": ("bigint", "bigint"),
+        "decimal": ("numeric", "numeric({0},{1})"),
+        "float": ("double precision", "double precision"),
+        "boolean": ("boolean", "boolean"),
+        "text": ("text", "varchar({0})"),
+        "bytes": ("bytea", "bytea"),
+        "date": ("date", "date"),
+        "timestamp": ("timestamp(6)", "timestamp({0})"),
+        "time": ("time(6)", "time({0})"),
+        "json": ("jsonb", "jsonb"),
+    },
+    "mysql": {
+        "integer": ("bigint", "bigint"),
+        "decimal": ("decimal(65,10)", "decimal({0},{1})"),
+        "float": ("double", "double"),
+        # MySQL has no boolean; `tinyint(1)` is the convention every driver
+        # and ORM reads back as one
+        "boolean": ("tinyint(1)", "tinyint(1)"),
+        # not `text`: MySQL cannot index or key a TEXT column without a
+        # prefix length, and a key column is exactly what a mover needs
+        "text": ("varchar(1024)", "varchar({0})"),
+        "bytes": ("longblob", "varbinary({0})"),
+        "date": ("date", "date"),
+        "timestamp": ("datetime(6)", "datetime({0})"),
+        "time": ("time(6)", "time({0})"),
+        "json": ("json", "json"),
+    },
+    "sqlite": {
+        "integer": ("integer", "integer"),
+        "decimal": ("numeric", "numeric({0},{1})"),
+        "float": ("real", "real"),
+        "boolean": ("integer", "integer"),
+        "text": ("text", "text"),
+        "bytes": ("blob", "blob"),
+        "date": ("text", "text"),
+        "timestamp": ("text", "text"),
+        "time": ("text", "text"),
+        "json": ("text", "text"),
+    },
+}
+
+
+def params(declared):
+    """The numbers inside a declared type, as ints. `varchar(50)` -> (50,).
+
+    Anything that is not a plain number is dropped rather than guessed at -
+    `enum('a','b')` carries values, not a width, and passing them into a
+    length would produce DDL that does not parse.
+    """
+    import re
+    m = re.search(r"\(([^)]*)\)", str(declared or ""))
+    if not m:
+        return ()
+    out = []
+    for part in m.group(1).split(","):
+        part = part.strip()
+        if not part.isdigit():
+            return ()
+        out.append(int(part))
+    return tuple(out)
+
+
+def ddl_type(engine, cls, numbers=()):
+    """The column type to create for a class on this engine.
+
+    Raises for an engine or class with no mapping rather than falling back to
+    something plausible: a table created with the wrong column type is harder
+    to notice than one that was never created.
+    """
+    table = DDL.get(engine)
+    if table is None:
+        raise ValueError(f"no DDL types for engine {engine!r}")
+    pair = table.get(cls)
+    if pair is None:
+        raise ValueError(f"no DDL type for class {cls!r} on {engine}")
+    wide, parametrised = pair
+    if not numbers or "{0}" not in parametrised:
+        return wide
+    try:
+        return parametrised.format(*numbers)
+    except IndexError:
+        return wide
+
+
+def sql_value(value):
+    """One value on its way into a SQL driver.
+
+    PostgreSQL hands back a `jsonb` column as a Python dict, and no SQL
+    driver here will send one - `dict can not be used as parameter` is where
+    a JSON column first shows up in a cross-engine move. Serialising it is
+    the only step; MySQL and PostgreSQL both normalise the text on storage,
+    so the key order chosen here is not what either one stores.
+
+    Everything else is passed through untouched. A converter that guessed at
+    types it was not written for would be a second, quieter rendering.
+    """
+    if isinstance(value, (dict, list)):
+        import json
+        return json.dumps(value, sort_keys=True, default=str)
+    if isinstance(value, (memoryview, bytearray)):
+        # psycopg2 hands a `bytea` column back as a memoryview, and pymysql
+        # has no escape rule for one - measured, it stored the *text* of the
+        # object: `<memory at 0x10ad03dc0>`, 23 bytes where the source held
+        # 3. No error, the right number of rows, and the bytes replaced by
+        # an address. The digest is what caught it.
+        return bytes(value)
+    return value
+
+
 def digest_step(total, text):
     """Fold one row's text into a running digest, the same way the SQL does.
 

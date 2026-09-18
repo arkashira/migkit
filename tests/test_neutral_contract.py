@@ -164,8 +164,23 @@ def test_the_declared_types_differ_and_both_map(my_engine, pg_engine):
     pg = dict(pg_engine.neutral_columns("src", "postgres", "public.shape"))
     assert my["flag"].startswith("tinyint") and pg["flag"] == "boolean"
     assert my["made"].startswith("datetime")
-    assert pg["made"] == "timestamp without time zone"
+    assert pg["made"].startswith("timestamp")
     assert my["ratio"] == "double" and pg["ratio"] == "double precision"
+
+
+def test_the_declared_type_carries_its_own_numbers(my_engine, pg_engine):
+    """`information_schema.data_type` answers `character varying` and keeps
+    the 50 somewhere else, so a target built from it came out wider than the
+    source. `format_type` answers with the number attached, which is what
+    `canon.params` reads."""
+    from migkit import canon
+    pg = dict(pg_engine.neutral_columns("src", "postgres", "public.shape"))
+    my = dict(my_engine.neutral_columns("src", "nx", "shape"))
+    assert canon.params(pg["name"]) == (50,), pg["name"]
+    assert canon.params(pg["amount"]) == (12, 4), pg["amount"]
+    assert canon.params(pg["made"]) == (6,), pg["made"]
+    assert canon.params(my["name"]) == (50,), my["name"]
+    assert canon.params(my["amount"]) == (12, 4), my["amount"]
 
 
 def test_the_count_and_digest_agree_across_the_two_engines(my_engine,

@@ -123,13 +123,24 @@ class PostgresEngine(Engine):
         return [l for l in out.splitlines() if l]
 
     def neutral_columns(self, side, db, table):
+        """[(name, declared type)] with the type's own numbers attached.
+
+        `format_type` rather than `information_schema.data_type`: the latter
+        answers `character varying` and keeps the 50 in a separate column, so
+        a target built from it came out `varchar(1024)` - wider than the
+        source, which loses a limit the application was relying on without
+        losing a row to show for it.
+        """
         sch, _, tbl = table.partition(".")
-        out = self._psql(side, self._d(side, db),
-                         "select column_name||chr(31)||data_type"
-                         " from information_schema.columns"
-                         f" where table_schema='{sch}'"
-                         f" and table_name='{tbl}'"
-                         " order by ordinal_position")
+        out = self._psql(side, self._d(side, db), f"""
+            select a.attname||chr(31)
+                   ||pg_catalog.format_type(a.atttypid, a.atttypmod)
+              from pg_attribute a
+              join pg_class c on c.oid = a.attrelid
+              join pg_namespace n on n.oid = c.relnamespace
+             where n.nspname = '{sch}' and c.relname = '{tbl}'
+               and a.attnum > 0 and not a.attisdropped
+             order by a.attnum""")
         return [tuple(l.split("\x1f", 1)) for l in out.splitlines() if l]
 
     def neutral_key(self, side, db, table):
@@ -184,6 +195,8 @@ class PostgresEngine(Engine):
         if not rows:
             return 0
         from psycopg2.extras import execute_values
+
+        from .. import canon
         sch, _, tbl = table.partition(".")
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
@@ -199,9 +212,31 @@ class PostgresEngine(Engine):
         with self._conn(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
                 execute_values(cur, f'insert into "{sch}"."{tbl}" ({cols})'
-                                    f" values %s{tail}", rows)
+                                    f" values %s{tail}",
+                               [[canon.sql_value(v) for v in r]
+                                for r in rows])
             conn.commit()
         return len(rows)
+
+    def neutral_create(self, side, db, table, columns, key=()):
+        from .. import canon
+        sch, _, tbl = table.partition(".")
+        exists = self._psql(side, self._d(side, db),
+                            "select count(*) from information_schema.tables"
+                            f" where table_schema='{sch}'"
+                            f" and table_name='{tbl}'").strip()
+        if exists != "0":
+            raise SystemExit(f"{table} already exists on the target -"
+                             " migkit will not alter or replace a table that"
+                             " is already there")
+        defs = [f'"{n}" {canon.ddl_type("postgres", c, w)}'
+                for n, c, w in columns]
+        if key:
+            defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
+                        + ")")
+        ddl = f'create table "{sch}"."{tbl}" (' + ", ".join(defs) + ")"
+        self._psql(side, self._d(side, db), ddl)
+        return ddl
 
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
