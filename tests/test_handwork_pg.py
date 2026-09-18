@@ -140,11 +140,14 @@ def test_a_materialized_view_is_listed_as_needing_a_refresh(inv):
     assert "public.mv" in d and "REFRESH" in d, d
 
 
-def test_large_objects_are_counted(inv):
-    """They live outside every table, so a table-by-table mover never sees
-    them."""
+def test_large_objects_are_counted_and_the_finding_names_the_leg(inv):
+    """They live outside every table, so a mover working table by table never
+    sees them - but migkit's own pg_dump path does carry them (measured with
+    the exact flags `pgdump_move` uses). The finding has to say which, or it
+    sends someone to move objects that already arrived."""
     d = _row(inv, "not-carried")["detail"]
     assert "pg_largeobject" in d, d
+    assert "carries them" in d, d
 
 
 def test_plain_views_and_functions_are_not_claimed(inv):

@@ -2550,12 +2550,20 @@ class PostgresEngine(Engine):
                 inv.add("not-carried", db,
                         "materialized views needing REFRESH", mviews)
 
-                # Large objects live outside every table, so a table-by-table
-                # mover never touches them.
+                # Large objects live outside every table, so a mover that
+                # works table by table never sees them - which is most
+                # managed services. migkit's own pg_dump path is not one of
+                # them: measured, `pg_dump -Fd -j --data-only` (the exact
+                # flags `pgdump_move` uses) puts them in the dump and
+                # pg_restore lands them. So this is a finding about the leg,
+                # not about the objects, and the wording says which.
                 los = self._psql("src", db,
                                  "select count(*) from"
                                  " pg_largeobject_metadata").strip()
-                inv.add("not-carried", db, "large objects",
+                inv.add("not-carried", db,
+                        "large objects (a managed service moving table by"
+                        " table leaves them; migkit's own pg_dump path"
+                        " carries them)",
                         [f"{los} in pg_largeobject"] if los not in
                         ("0", "") else [])
 
