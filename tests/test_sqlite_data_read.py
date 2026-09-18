@@ -131,9 +131,12 @@ def test_a_table_missing_on_the_target_is_a_difference_not_an_error(tmp_path):
 def test_a_target_that_cannot_be_opened_is_not_a_clean_check(tmp_path):
     src = tmp_path / "a.db"
     _build(src, "same")
-    results = _engine(src, tmp_path / "not-there.db").check_data("main")
+    missing = tmp_path / "not-there.db"
+    results = _engine(src, missing).check_data("main")
     assert [r.status for r in results] == ["error"], results
-    assert "target:" in results[0].detail
+    # the path and which side, which the bare driver error carried neither of
+    assert str(missing) in results[0].detail, results[0].detail
+    assert "target database file does not exist" in results[0].detail
 
 
 def test_the_chunk_boundary_does_not_change_what_is_compared(tmp_path):

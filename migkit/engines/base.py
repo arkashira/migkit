@@ -230,6 +230,23 @@ class Engine:
     def repair_plan(self, db, kind):
         return []
 
+    def prepare_target(self, db):
+        """Make whatever the target needs before a first write, or nothing.
+
+        Returns a line for the log when it did something, None when there
+        was nothing to do - which is the answer for every engine where the
+        database is the operator's to create. PostgreSQL and MySQL will not
+        have one conjured for them here: `create database` is a decision
+        about where data lives, with an owner and an encoding and a
+        tablespace behind it.
+
+        SQLite is the exception, and the reason this exists: there the
+        database *is* a file, the mover creates the tables in it anyway, and
+        listing what is already there fails outright on a path that does not
+        exist yet. Nothing that exists is ever altered by this.
+        """
+        return None
+
     def setup_target_plan(self, db):
         return []
 

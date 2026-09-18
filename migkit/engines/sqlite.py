@@ -12,10 +12,36 @@ class SQLiteEngine(Engine):
         ep = self.hop.source if side == "src" else self.hop.target
         return ep.options.get("path") or ep.host
 
-    def _q(self, side, sql):
+    def _open_ro(self, side):
+        """A read-only connection, or a sentence saying why there is none.
+
+        `sqlite3.connect(..., mode=ro)` on a path that is not there raises
+        `unable to open database file` and says nothing about which path or
+        which side, which is what a `move` into a target file that does not
+        exist yet used to print. The path is in the message now, and whether
+        it is missing or merely unreadable is told apart by looking.
+        """
+        import os
         import sqlite3
-        conn = sqlite3.connect(f"file:{self._path(side)}?mode=ro", uri=True)
+        path = self._path(side)
+        # the words the report uses everywhere else, not the internal ones
+        name = "source" if side == "src" else "target"
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn.execute("select 1")
+        except sqlite3.OperationalError as e:
+            if not path:
+                raise sqlite3.OperationalError(
+                    f"no {name} database file is configured")
+            raise sqlite3.OperationalError(
+                f"{path}: the {name} database file"
+                + (" does not exist" if not os.path.exists(path)
+                   else f" cannot be read ({e})"))
         self._register(conn)
+        return conn
+
+    def _q(self, side, sql):
+        conn = self._open_ro(side)
         try:
             return conn.execute(sql).fetchall()
         finally:
@@ -345,13 +371,13 @@ class SQLiteEngine(Engine):
         postgres and mysql both name an extra table right here, and `migkit
         check` is meant to be the same command underneath every engine.
         """
-        src_tables = self._tables("src")
         try:
+            src_tables = self._tables("src")
             dst_tables = set(self._tables("dst"))
         except Exception as e:
             return [Result("counts", db, "error",
-                           f"target: {e} - nothing could be counted, which is"
-                           " not the same as the counts matching")]
+                           f"{e} - nothing could be counted, which is not the"
+                           " same as the counts matching")]
         bad = [f"{t} missing on target" for t in src_tables
                if t not in dst_tables]
         bad += [f"{t} extra on target"
@@ -424,10 +450,37 @@ class SQLiteEngine(Engine):
 
     def _reader(self, side):
         """One read-only connection, held open across chunks."""
+        return self._open_ro(side)
+
+    def prepare_target(self, db):
+        """Create the target file if it is not there, and only then.
+
+        A SQLite database is a file, and a move into one that does not exist
+        yet failed before it started: the mover lists what the target already
+        holds, that read opens the path read-only, and a path with nothing at
+        it cannot be opened that way. `assess` has always said a target file
+        is created by the first write; this is what makes that true for a
+        move as well.
+
+        The directory is not created. A path whose parent is missing is
+        usually a typo, and making the tree would turn that into a migration
+        into somewhere nobody meant.
+        """
+        import os
         import sqlite3
-        conn = sqlite3.connect(f"file:{self._path(side)}?mode=ro", uri=True)
-        self._register(conn)
-        return conn
+        path = self._path("dst")
+        if not path:
+            raise SystemExit("no target database file is configured")
+        if os.path.exists(path):
+            return None
+        parent = os.path.dirname(os.path.abspath(path))
+        if not os.path.isdir(parent):
+            raise SystemExit(
+                f"{path}: the directory {parent} does not exist, so migkit"
+                " will not create the target file - make the directory first"
+                " if this is really where the data should land")
+        sqlite3.connect(path).close()
+        return f"created the empty target database file {path}"
 
     def _row_walk(self, side, table):
         """The columns that put this table in a repeatable order.
@@ -516,12 +569,12 @@ class SQLiteEngine(Engine):
         res = []
         try:
             present = set(self._tables("dst"))
+            wanted = [table] if table else self._tables("src")
         except Exception as e:
             return [Result("data", db, "error",
-                           f"target: {e} - nothing below this could be"
-                           " compared, which is not the same as nothing"
-                           " differing")]
-        for t in ([table] if table else self._tables("src")):
+                           f"{e} - nothing below this could be compared,"
+                           " which is not the same as nothing differing")]
+        for t in wanted:
             if t not in present:
                 if stream:
                     stream(f"{t}: diff")

@@ -951,6 +951,12 @@ class HeteroEngine(Engine):
         if not (self.my and self.pg):
             if not self._can_move_neutrally():
                 self._mysql_to_postgres_only("moving a table")
+            # before anything is read from the target: some targets are not
+            # there until something makes them, and listing what a target
+            # already holds is the first thing this does
+            made = self.dst_engine.prepare_target(db)
+            if made:
+                log(f"{self.dst_name}: {made}")
             return self._neutral_move(db, sch, tbl, chunk, ck, log)
         t = tbl or sch
         key = f"{db}.{t}"
