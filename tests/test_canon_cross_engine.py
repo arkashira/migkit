@@ -310,3 +310,51 @@ def test_the_digest_does_not_degrade_to_floating_point_on_mysql(pair):
     exact = _my("select sum(cast(conv(substr(md5(c_txt),1,15),16,10)"
                 " as decimal(65,0))) from v")
     assert naive != exact, (naive, exact)
+
+
+LONG_EXPANSION = {4: "1.0/3", 7: "1.0/7", 3: "2.0/3", 11: "1.0/11"}
+
+
+def test_a_float_with_a_long_decimal_expansion_still_agrees(pair):
+    """The values that caught `float8::numeric`.
+
+    PostgreSQL's cast from float8 to numeric keeps about fifteen significant
+    digits; its own `::text` keeps seventeen, and MySQL's
+    `cast(d as decimal)` goes through the shortest round-trip decimal. So the
+    canonical rendering had to route through the text form, and every float
+    with a short decimal expansion - 0.1, 1e20, 123456.789 - agreed either
+    way, which is why the first set of measurements missed it.
+
+    The literals are written as float division on both sides on purpose:
+    MySQL evaluates `1.0/7` with DECIMAL arithmetic and stores 0.142857142,
+    so a seed written the obvious way puts different numbers on the two sides
+    and the test fails for a reason that has nothing to do with rendering.
+    """
+    assert _pg("create table longf (id int, d double precision)"
+               ) is not None
+    _my("create table longf (id int, d double)")
+    try:
+        for id_, expr in LONG_EXPANSION.items():
+            _pg(f"insert into longf values ({id_}, {expr})")
+            num, _, den = expr.partition("/")
+            _my(f"insert into longf values ({id_},"
+                f" cast({num} as double)/{den})")
+        assert _pg("select count(*) from longf") == str(len(LONG_EXPANSION))
+        assert _my("select count(*) from longf") == str(len(LONG_EXPANSION))
+
+        # the raw values must already be equal, or this measures the seed
+        raw_pg = _pg("select d::text from longf order by id")
+        raw_my = _my("select cast(d as char) from longf order by id")
+        assert raw_pg == raw_my, (raw_pg, raw_my)
+        assert any(len(l) > 17 for l in raw_pg.splitlines()), raw_pg
+
+        cols = [("d", "float")]
+        a = _my("select " + c.digest_expr("mysql", c.row_expr("mysql", cols))
+                + " from longf")
+        b = _pg("select "
+                + c.digest_expr("postgres", c.row_expr("postgres", cols))
+                + " from longf")
+        assert a == b, f"\nmysql={a!r}\npg   ={b!r}"
+    finally:
+        _pg("drop table longf")
+        _my("drop table longf")

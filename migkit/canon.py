@@ -229,7 +229,15 @@ def _postgres(col, cls):
                 f" or {c} = 'NaN'::float8 then '{UNCOMPARABLE}'"
                 f" when {c} <> 0 and (abs({c}) >= {FLOAT_MAX}"
                 f" or abs({c}) < {FLOAT_MIN}) then {outer}"
-                f" else round({c}::numeric, {FLOAT_SCALE})::text"
+                # through the text form, not straight to numeric. PostgreSQL's
+                # `float8::numeric` cast is lossier than its own `::text`:
+                # measured, 1.0/7 renders as 0.14285714285714285 as text and
+                # as 0.142857142857143 through numeric - fifteen significant
+                # digits against seventeen. MySQL's `cast(d as decimal)` goes
+                # via the shortest round-trip decimal, so the two only meet
+                # when this one does too, and the values that exposed it were
+                # the first test data with a long decimal expansion.
+                f" else round(({c}::text)::numeric, {FLOAT_SCALE})::text"
                 f" end")
     if cls == "boolean":
         return f"{c}::int::text"
