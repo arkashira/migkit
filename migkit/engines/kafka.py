@@ -61,6 +61,56 @@ class KafkaEngine(Engine):
             return None
         return out
 
+    def _server_versions(self):
+        """Kafka does not publish a version over the client protocol the way
+        a database does, so this says so rather than inventing one."""
+        return (None, None)
+
+    def _assess_extra(self):
+        """What has to line up before topics are moved.
+
+        Partition counts are the one that cannot be fixed afterwards: a
+        consumer's key-to-partition mapping depends on the count, so a target
+        with a different number of partitions delivers the same key to a
+        different consumer - and nothing errors.
+        """
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "instance",
+                          "item": item, "detail": str(detail)})
+        try:
+            sc, dc = self._consumer("src"), self._consumer("dst")
+            stops = set(self._topics(sc))
+            dtops = set(self._topics(dc))
+        except Exception as e:
+            add("warn", "cannot list topics on both sides",
+                f"{str(e)[:90]} - unknown, not clean")
+            return items
+
+        missing = sorted(stops - dtops)
+        add("pass" if not missing else "fail",
+            "every source topic exists on the target",
+            f"{len(stops)} topics" if not missing
+            else f"{len(missing)} missing: {', '.join(missing[:5])}")
+
+        drift = []
+        for topic in sorted(stops & dtops):
+            try:
+                sp = len(self._partitions(sc, topic) or [])
+                dp = len(self._partitions(dc, topic) or [])
+            except Exception:
+                continue
+            if sp != dp:
+                drift.append(f"{topic} {sp}->{dp}")
+        add("pass" if not drift else "fail",
+            "partition counts match",
+            "all equal" if not drift else
+            "; ".join(drift[:5]) + " - a key lands on a different partition"
+            " when the count changes, so ordering and consumer assignment"
+            " move with it and nothing errors")
+        return items
+
     def check_schema(self, db):
         sc, dc = self._consumer("src"), self._consumer("dst")
         src = {t: len(self._partitions(sc, t)) for t in self._topics(sc)}

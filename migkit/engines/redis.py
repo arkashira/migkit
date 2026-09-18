@@ -22,6 +22,78 @@ class RedisEngine(Engine):
         info = self._client("src").info("keyspace")
         return sorted(k[2:] for k in info) or ["0"]
 
+    def _server_versions(self):
+        """What each side says about itself, from INFO server."""
+        def ver(side):
+            try:
+                return self._client(side).info("server").get("redis_version")
+            except Exception:
+                return None
+        return (ver("src"), ver("dst"))
+
+    def _assess_extra(self):
+        """What has to be true before a Redis move is worth starting.
+
+        Persistence is the one that matters and is easy to miss: a target
+        with neither RDB snapshots nor AOF keeps everything in memory, so a
+        restart between the load and the cutover loses the whole database
+        without any error anywhere.
+        """
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "instance",
+                          "item": item, "detail": str(detail)})
+        try:
+            s = self._client("src").info()
+            d = self._client("dst").info()
+        except Exception as e:
+            add("warn", "cannot read INFO from both sides",
+                f"{str(e)[:90]} - unknown, not clean")
+            return items
+
+        # `rdb_last_save_time` is set at startup whether or not snapshots are
+        # configured - measured, it is identical on a default server and on
+        # one started with `--save ""`. Reading it as evidence of persistence
+        # reported a memory-only target as safe, which is the worst direction
+        # for this check to be wrong in. The configuration is the signal.
+        try:
+            save = str(self._client("dst").config_get("save").get("save", ""))
+            aofc = str(self._client("dst").config_get("appendonly")
+                       .get("appendonly", "no"))
+        except Exception as e:
+            add("warn", "cannot read the target's persistence settings",
+                f"{str(e)[:90]} - unknown, not clean")
+            save = aofc = None
+        if save is not None:
+            keeps = bool(save.strip()) or aofc.lower() == "yes"
+            add("pass" if keeps else "warn",
+                "target keeps the data on disk",
+                f"save={save.strip() or '(none)'} appendonly={aofc}"
+                + ("" if keeps else
+                   " - memory only, so a restart between the load and the"
+                   " cutover loses everything with no error anywhere"))
+
+        pol = str(d.get("maxmemory_policy", "?"))
+        add("pass" if pol in ("noeviction", "?") else "fail",
+            "target eviction policy",
+            f"{pol}" + ("" if pol in ("noeviction", "?") else
+                        " - the target will silently drop keys under memory"
+                        " pressure, which reads as a migration that lost data"))
+
+        smax = int(s.get("maxmemory", 0) or 0)
+        dmax = int(d.get("maxmemory", 0) or 0)
+        used = int(s.get("used_memory", 0) or 0)
+        if dmax and used > dmax:
+            add("fail", "target memory limit is below the source's usage",
+                f"source uses {used:,} bytes, target caps at {dmax:,}")
+        else:
+            add("pass", "target memory limit",
+                f"source uses {used:,} bytes, target caps at"
+                f" {dmax or 'unlimited'}"
+                + (f" (source caps at {smax:,})" if smax else ""))
+        return items
+
     def check_counts(self, db):
         a = self._client("src", db).dbsize()
         b = self._client("dst", db).dbsize()

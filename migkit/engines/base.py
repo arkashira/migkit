@@ -222,7 +222,52 @@ class Engine:
                         "detail": detail})
         return out
 
+    # (label, tool names) the client-version check should look at for this
+    # engine. Empty means there are no client programs to compare.
+    CLIENT_TOOLS = ()
+
+    def _server_versions(self):
+        """(source version, target version) as the engine reports them.
+
+        (None, None) when the engine cannot say. That is reported as unknown
+        rather than skipped: an operator reading `assess` should be told that
+        nobody checked, not left to assume it matched.
+        """
+        return (None, None)
+
     def assess(self):
-        return [{"level": "warn", "scope": "-",
-                 "item": "assess not implemented for this engine yet",
-                 "detail": ""}]
+        """Pre-migration readiness. The same command on every engine.
+
+        The parts that are true of any database live here - are the two sides
+        the same version, and can the client tools on this machine actually
+        talk to that server - so an engine gets a real answer the day it is
+        added, and deepens from there rather than starting at "not
+        implemented". Engines with more to say extend this rather than
+        replacing it.
+        """
+        items = []
+
+        def add(level, scope, item, detail=""):
+            items.append({"level": level, "scope": scope, "item": item,
+                          "detail": str(detail)})
+        try:
+            sv, dv = self._server_versions()
+        except Exception as e:
+            sv = dv = None
+            add("warn", "instance", "cannot read the server versions",
+                f"{str(e)[:90]} - unknown, not clean")
+        if sv and dv:
+            same = str(sv).split(".")[0] == str(dv).split(".")[0]
+            add("pass" if same else "warn", "instance",
+                "server version match", f"src {sv} / dst {dv}")
+        elif not items:
+            add("warn", "instance", "server version match",
+                "neither side reported a version - unknown, not clean")
+        if self.CLIENT_TOOLS:
+            items += self._client_tool_versions(self.CLIENT_TOOLS, dv)
+        items += self._assess_extra()
+        return items
+
+    def _assess_extra(self):
+        """Whatever else this engine knows to look at before a migration."""
+        return []
