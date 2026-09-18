@@ -506,6 +506,40 @@ def sql_value(value):
     return value
 
 
+def from_text(cls, text):
+    """A value back out of the text an engine printed for it.
+
+    The inverse of the rendering, for the one place that needs it: a logical
+    decoding plugin hands its output as text, and passing that text on to the
+    target driver is how `\\x00ff41` lands in a binary column as nine
+    characters instead of three bytes - the same failure as the memoryview,
+    arriving from the other direction.
+
+    A class this does not convert comes back as the text it was given. That
+    is not a silent fallback: `text` is the class where that is correct, and
+    for anything else the value is one a driver takes as a string anyway.
+    """
+    if text is None:
+        return None
+    if cls == "integer":
+        return int(text)
+    if cls == "float":
+        return float(text)
+    if cls == "decimal":
+        import decimal
+        return decimal.Decimal(text)
+    if cls == "boolean":
+        # PostgreSQL prints `t`/`f` in some contexts and `true`/`false` in
+        # others; both appear depending on the caller, so both are read
+        return str(text).lower() in ("t", "true", "1")
+    if cls == "bytes":
+        raw = str(text)
+        if raw.startswith("\\x"):
+            return bytes.fromhex(raw[2:])
+        return raw.encode()
+    return text
+
+
 def digest_step(total, text):
     """Fold one row's text into a running digest, the same way the SQL does.
 
