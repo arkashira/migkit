@@ -653,7 +653,11 @@ class PostgresEngine(Engine):
 
         def csum(side, t):
             sch, tbl = t.split(".", 1)
-            h = self._row_hash_expr(side, db, t)
+            # named from the source and run on both sides, the same way
+            # `_key_hash_expr` already is: identical columns in identical
+            # order, and a column the target is missing fails loudly instead
+            # of quietly hashing to something else
+            h = self._row_hash_expr("src", db, t)
             if t not in keyexpr:
                 keyexpr[t] = self._key_hash_expr("src", db, t)
             return self._psql(side, db,
@@ -675,7 +679,7 @@ class PostgresEngine(Engine):
 
         def csum_range(side, t, col, lo, hi):
             sch, tbl = t.split(".", 1)
-            h = self._row_hash_expr(side, db, t)
+            h = self._row_hash_expr("src", db, t)
             pred = _cp.where(f'"{col}"', lo, hi)
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather = {w};"
@@ -811,8 +815,9 @@ class PostgresEngine(Engine):
 
         def fetch(side, where=""):
             out = {}
+            h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
             for l in self._psql(side, db,
-                                f"select {pkexpr}||'|'||md5(to_jsonb(t)::text)"
+                                f"select {pkexpr}||'|'||{h}"
                                 f" from {qt} t {where}").splitlines():
                 k, _, hsh = l.rpartition("|")
                 out[k] = hsh
@@ -1631,9 +1636,13 @@ class PostgresEngine(Engine):
             if pop != "t":
                 stale.append(f"{m}: not populated on target")
                 continue
-            # count misses a stale mv with the same size; checksum content
+            # count misses a stale mv with the same size; checksum content.
+            # The expression comes from the source and is applied to both
+            # sides, so a target whose columns sit in a different order still
+            # compares equal - see `_row_hash_expr`.
+            h = self._row_hash_expr("src", db, m)
             q = ("select count(*)||'|'||coalesce(sum(('x'||substr("
-                 "md5(t::text),1,16))::bit(64)::bigint::numeric), 0)"
+                 f"{h},1,16))::bit(64)::bigint::numeric), 0)"
                  f" from {m} t")
             a = self._psql("src", db, q)
             b = self._psql("dst", db, q)
@@ -2340,7 +2349,8 @@ class PostgresEngine(Engine):
                         for k in chunk)
                     where = f"({tup}) in ({vals})"
                     pk = f"concat_ws(e'\\t', {tup})"
-                q = (f"select {pk}||'|'||md5(to_jsonb(t)::text)"
+                h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
+                q = (f"select {pk}||'|'||{h}"
                      f' from "{sch}"."{tbl}" t where {where}')
                 for line in self._psql(side, db, q).splitlines():
                     k, _, h = line.rpartition("|")
@@ -2437,35 +2447,69 @@ class PostgresEngine(Engine):
         return f"md5({parts})"
 
     def _row_hash_expr(self, side=None, db=None, table=None):
-        """Expression that hashes one row of `t`.
+        """The one expression that hashes one row of `t`. Used everywhere.
 
-        `t::text` renders a PostGIS geometry as hex EWKB, and that encoding is
-        not stable across PostGIS patch releases - two servers holding the
-        identical shape produce different bytes, so the checksum reports a
-        difference that ST_AsText says is not there. Where the table has
-        geometry or geography columns the row is rebuilt with those columns as
-        canonical text, which compares the shape rather than its encoding.
+        Built from named columns in name-sorted order, never from the
+        whole-row cast, for two measured reasons.
+
+        **Column order.** `t::text` renders columns in physical attribute
+        order, so a source whose history includes a DROP COLUMN and an ADD
+        COLUMN hashes differently from a target created fresh from the same
+        logical schema - identical values, different hash, reported as a
+        difference nobody can act on. Measured on PostgreSQL 16: the two sides
+        gave -3370828463729857743 and -4255070870107345456 for rows that
+        compare equal column by column. Naming the columns removes the
+        dependence entirely, and it is what the MySQL engine has always done.
+
+        **PostGIS.** `t::text` renders a geometry as hex EWKB, and that
+        encoding is not stable across PostGIS patch releases - two servers
+        holding the identical shape produce different bytes. Geometry columns
+        are rebuilt as canonical text so the shape is compared, not its
+        encoding.
+
+        The jsonb variant uses `jsonb_build_object` rather than wrapping a
+        `ROW`: `to_jsonb(ROW(a, b))` throws the column names away and yields
+        `{"f1": ..., "f2": ...}`, which would make a renamed column hash the
+        same as the original - a check that is quieter than the truth.
+        `jsonb_build_object` was measured to produce output byte-identical to
+        `to_jsonb(t)`, and jsonb sorts its keys, so it is order-independent
+        for free.
         """
         jsonb = self.hop.options.get("checksum", "text") == "jsonb"
-        cols = self._geom_cols(side, db, table) if table else None
-        if cols:
-            rebuilt = ", ".join(
-                (f'ST_AsEWKT(t."{c}")' if kind == "geometry"
-                 else f'ST_AsEWKT(t."{c}"::geometry)') if kind else f't."{c}"'
-                for c, kind in cols)
-            inner = f"ROW({rebuilt})"
-            return f"md5(to_jsonb({inner})::text)" if jsonb else f"md5({inner}::text)"
-        return "md5(to_jsonb(t)::text)" if jsonb else "md5(t::text)"
+        cols = self._row_cols(side, db, table)
+        if not cols:
+            # No catalogue to read - the whole-row cast is all that is left.
+            # It is order-dependent, which is the defect described above, so
+            # every caller that can name a table should pass one.
+            return "md5(to_jsonb(t)::text)" if jsonb else "md5(t::text)"
 
-    def _geom_cols(self, side, db, table):
-        """[(column, 'geometry'|'geography'|None)] when the table has any
-        PostGIS column, else None so callers keep the cheap whole-row cast."""
+        def val(c, kind):
+            if kind == "geometry":
+                return f'ST_AsEWKT(t."{c}")'
+            if kind == "geography":
+                return f'ST_AsEWKT(t."{c}"::geometry)'
+            return f't."{c}"'
+
+        if jsonb:
+            args = ", ".join(f"'{c}', {val(c, kind)}" for c, kind in cols)
+            return f"md5(jsonb_build_object({args})::text)"
+        return "md5(ROW(" + ", ".join(val(c, kind)
+                                      for c, kind in cols) + ")::text)"
+
+    def _row_cols(self, side, db, table):
+        """[(column, 'geometry'|'geography'|None)] sorted by column name.
+
+        Sorted by name rather than by attribute number so the expression is
+        the same whichever side produced it - the checkpoint keys its stored
+        partials on the expression text, so an expression that varied by side
+        would throw away resumable work for no reason.
+        """
         if not (side and db and table):
             return None
         key = (side, db, table)
-        cache = getattr(self, "_geom_cache", None)
+        cache = getattr(self, "_col_cache", None)
         if cache is None:
-            cache = self._geom_cache = {}
+            cache = self._col_cache = {}
         if key in cache:
             return cache[key]
         sch, _, tbl = table.partition(".")
@@ -2476,11 +2520,12 @@ class PostgresEngine(Engine):
             "join pg_namespace n on n.oid = c.relnamespace "
             "left join pg_type t on t.oid = a.atttypid "
             f"where n.nspname = '{sch}' and c.relname = '{tbl}' "
-            "and a.attnum > 0 and not a.attisdropped order by a.attnum").splitlines()
+            "and a.attnum > 0 and not a.attisdropped "
+            "order by a.attname").splitlines()
         parsed = [(r.split("|")[0], r.split("|")[1]) for r in rows if r]
         out = [(c, ty if ty in ("geometry", "geography") else None)
                for c, ty in parsed]
-        cache[key] = out if any(k for _, k in out) else None
+        cache[key] = out or None
         return cache[key]
 
     def _fast_consistent(self, db):
@@ -2494,8 +2539,6 @@ class PostgresEngine(Engine):
                                        self.USER_TABLES).splitlines() if l)
         both = [t for t in st if t in dt]
         w = int(self.hop.options.get("checksum_workers", 8))
-        h = self._row_hash_expr()
-
         def script(side):
             lines = ["begin transaction isolation level repeatable read"
                      " read only;",
@@ -2505,6 +2548,10 @@ class PostgresEngine(Engine):
                      " pg_current_wal_lsn()::text end;"]
             for t in both:
                 sch, tbl = t.split(".", 1)
+                # named from the source for both sides, so the two scripts
+                # hash the same columns in the same order whatever order the
+                # two servers store them in
+                h = self._row_hash_expr("src", db, t)
                 lines.append(
                     f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
                     f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
