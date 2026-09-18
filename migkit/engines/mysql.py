@@ -945,9 +945,13 @@ class MySQLEngine(Engine):
     def _column_fingerprint(self, db, t):
         """One scan per side, one aggregate per column: which columns
         actually differ before any row-level work."""
-        cols = self._cols(db, t)
+        try:
+            cols = self._cols(db, t)
+        except Exception as e:
+            return self._fingerprint_failed(e)
         if not cols:
-            return []
+            return self._fingerprint_failed(
+                f"the source lists no columns for {t}")
         # One value per hash, so there is no separator to be confused by -
         # but a NULL and the literal that stood in for it still collided, and
         # the encoding is meant to be the same everywhere
@@ -960,8 +964,8 @@ class MySQLEngine(Engine):
             a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]
             b = self._q("dst",
                         f"select {expr} from `{self._d('dst', db)}`.`{t}`")[0]
-        except Exception:
-            return []
+        except Exception as e:
+            return self._fingerprint_failed(e)
         diff = [c for c, x, y in zip(cols, a, b) if x != y]
         out = self.hop.report_dir(db) / f"data-{t}.columns"
         if diff:

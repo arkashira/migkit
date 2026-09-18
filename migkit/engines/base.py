@@ -131,6 +131,20 @@ class Engine:
     #: what an engine puts in a settings mapping it could not read
     UNREADABLE = "_error"
 
+    @staticmethod
+    def _fingerprint_failed(error):
+        """What a column fingerprint that could not run has to say.
+
+        Every engine's fingerprint returns the columns that differ, so an
+        empty list is the sentence "no column differs" - which is the
+        opposite of what happened when the query failed. One wording here
+        because the callers put it straight into the report, and a reader
+        comparing two engines' output should not have to know which one
+        stays quiet.
+        """
+        return [f"(column fingerprint failed: "
+                f"{str(error).splitlines()[-1][:70]})"]
+
     def _param_result(self, db, src, dst, critical, hint):
         """Dump every server setting from both sides to params.json (same shape
         as objects.json), then flag mismatches. Only behavior-critical settings

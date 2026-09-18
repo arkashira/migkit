@@ -324,22 +324,38 @@ class SQLiteEngine(Engine):
                        "apply DDL from schema-src.sql on target")]
 
     def check_counts(self, db):
-        bad = []
+        """Both directions: a table only the target has is a finding too.
+
+        Measured, a target still holding a 40-row table from an earlier load
+        came back `ok | rows 5==5` - this walked the source's tables and
+        nothing walked the target's, so the leftover was never looked at.
+        postgres and mysql both name an extra table right here, and `migkit
+        check` is meant to be the same command underneath every engine.
+        """
+        src_tables = self._tables("src")
+        try:
+            dst_tables = set(self._tables("dst"))
+        except Exception as e:
+            return [Result("counts", db, "error",
+                           f"target: {e} - nothing could be counted, which is"
+                           " not the same as the counts matching")]
+        bad = [f"{t} missing on target" for t in src_tables
+               if t not in dst_tables]
+        bad += [f"{t} extra on target"
+                for t in sorted(dst_tables - set(src_tables))]
+        common = [t for t in src_tables if t in dst_tables]
         ta = tb = 0
-        for t in self._tables("src"):
+        for t in common:
             a = self._q("src", f'select count(*) from "{t}"')[0][0]
-            try:
-                b = self._q("dst", f'select count(*) from "{t}"')[0][0]
-            except Exception:
-                bad.append(f"{t} missing on target")
-                continue
+            b = self._q("dst", f'select count(*) from "{t}"')[0][0]
             ta += a
             tb += b
             if a != b:
                 bad.append(f"{t} src={a} dst={b}")
         if bad:
             return [Result("counts", db, "diff", "; ".join(bad[:10]))]
-        return [Result("counts", db, "ok", f"rows {ta:,}=={tb:,}")]
+        return [Result("counts", db, "ok",
+                       f"{len(common)} tables, rows {ta:,}=={tb:,}")]
 
     def _seqs(self, side):
         try:

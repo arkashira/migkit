@@ -3472,13 +3472,17 @@ class PostgresEngine(Engine):
         differ. Localizes drift (e.g. only updated_at differs = timezone
         rendering, not data loss) before any row-level work."""
         sch, tbl = table.split(".", 1)
-        cols = [l for l in self._psql("src", db,
-                "select attname from pg_attribute"
-                f""" where attrelid = '"{sch}"."{tbl}"'::regclass"""
-                " and attnum > 0 and not attisdropped"
-                " and attgenerated = '' order by attnum").splitlines() if l]
+        try:
+            cols = [l for l in self._psql("src", db,
+                    "select attname from pg_attribute"
+                    f""" where attrelid = '"{sch}"."{tbl}"'::regclass"""
+                    " and attnum > 0 and not attisdropped"
+                    " and attgenerated = '' order by attnum").splitlines() if l]
+        except Exception as e:
+            return self._fingerprint_failed(e)
         if not cols:
-            return []
+            return self._fingerprint_failed(
+                f"the source lists no columns for {table}")
         # One value per hash, so no separator is involved - but chr(1) stood
         # in for NULL, and a column holding chr(1) hashed as a NULL
         from .. import rowtext
@@ -3491,8 +3495,8 @@ class PostgresEngine(Engine):
         try:
             a = self._psql("src", db, q).split("|")
             b = self._psql("dst", db, q).split("|")
-        except RuntimeError:
-            return ["(column fingerprint failed, column sets may differ)"]
+        except RuntimeError as e:
+            return self._fingerprint_failed(e)
         diff = [c for c, x, y in zip(cols, a, b) if x != y]
         out = self.hop.report_dir(db) / f"data-{table}.columns"
         if diff:
