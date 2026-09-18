@@ -4,7 +4,7 @@ import re
 import subprocess
 
 from ..util import run, tool_env, which
-from .base import Engine, Result
+from .base import Engine, RepairAction, Result
 
 
 class HeteroEngine(Engine):
@@ -408,6 +408,128 @@ class HeteroEngine(Engine):
             return probe(side)
         except Exception:
             return None
+
+    def _drill_tables(self, db):
+        """Tables the last check left a drilldown for, and what it found."""
+        import json
+        found = {}
+        for path in sorted(self.hop.report_dir(db).glob("data-*.*")):
+            name, _, kind = path.name[len("data-"):].rpartition(".")
+            if kind not in ("missing", "changed", "extra") or not name:
+                continue
+            keys = [tuple(json.loads(l)) for l in
+                    path.read_text().splitlines() if l]
+            if keys:
+                found.setdefault(name, {})[kind] = keys
+        return found
+
+    def repair_plan(self, db, kind):
+        """What `migkit sync --kind rows` would carry across the pair.
+
+        The rows come from the last check's drilldown, so the plan describes
+        what the operator was shown rather than whatever the two sides happen
+        to disagree about at this moment.
+        """
+        if kind not in ("rows", "all"):
+            return []
+        actions = []
+        for name, found in sorted(self._drill_tables(db).items()):
+            send = found.get("missing", []) + found.get("changed", [])
+            drop = found.get("extra", [])
+            statements = []
+            if send:
+                statements.append(
+                    f"copy {len(send)} rows from {self.src_name} to"
+                    f" {self.dst_name}: "
+                    + ", ".join("/".join(k) for k in send[:6])
+                    + (" ..." if len(send) > 6 else ""))
+            if drop:
+                statements.append(
+                    f"delete {len(drop)} rows the source does not have: "
+                    + ", ".join("/".join(k) for k in drop[:6])
+                    + (" ..." if len(drop) > 6 else ""))
+            actions.append(RepairAction(
+                f"{db}.{name}", "rows", statements, [],
+                f"{len(found.get('missing', []))} missing,"
+                f" {len(found.get('changed', []))} changed,"
+                f" {len(drop)} extra; every target row this overwrites or"
+                " removes is written to the undo file first"))
+        return actions
+
+    def apply(self, db, action):
+        """Carry the rows across, then remove the ones that should not exist.
+
+        The keys come back out of the drilldown as canonical text and are
+        turned into values with `canon.from_text`, the same way a change
+        record from a logical decoder is - the text is the one form both
+        engines agree on, and re-deriving the value per side is what lets a
+        key written by one engine address a row in the other.
+
+        Writes first and deletions last, so a repair cut off in the middle
+        leaves rows that should not be there - which the next check names -
+        rather than a hole nothing looks for.
+        """
+        import json
+
+        from .. import canon
+        if not self._can_move_neutrally():
+            raise SystemExit(
+                f"this pair cannot repair rows: {self.src_name} ->"
+                f" {self.dst_name} does not implement both halves of the"
+                " read/write contract, so there is nothing to carry the rows"
+                " with. `migkit assess` lists what the pair can do")
+        name = action.scope.split(".", 1)[1]
+        found = self._drill_tables(db).get(name, {})
+        if not found:
+            return
+        pairs, _, _, _ = self.match_tables(
+            self.src_engine.neutral_tables("src", db),
+            self.dst_engine.neutral_tables("dst", db))
+        match = [(s, d) for s, d in pairs if self._leaf(s) == name]
+        if not match:
+            raise SystemExit(f"{name} is no longer on both sides, so the"
+                             " rows the last check listed cannot be placed")
+        src_t, dst_t = match[0]
+        src_cols, dst_cols, _ = self._column_plan(src_t, dst_t, db)
+        key = list(self.src_engine.neutral_key("src", db, src_t))
+        cls = {n: c for n, c in src_cols}
+        if not key or any(k not in cls for k in key):
+            raise SystemExit(f"{name} has no key among the compared columns,"
+                             " so a row cannot be addressed on both sides")
+
+        def values(key_text):
+            return tuple(canon.from_text(cls[k], t) for k, t in zip(key,
+                                                                    key_text))
+        undo_dir = self.hop.report_dir(db) / "undo"
+        undo_dir.mkdir(parents=True, exist_ok=True)
+        undo = undo_dir / f"{name}.rows.jsonl"
+
+        def remember(handle, key_texts):
+            if not key_texts:
+                return
+            held = self.dst_engine.neutral_rows_by_key(
+                "dst", db, dst_t, dst_cols, key, [values(k) for k in
+                                                  key_texts])
+            for key_text, row in held.items():
+                handle.write(json.dumps({
+                    "table": name, "key": list(key_text),
+                    "row": dict(zip([n for n, _ in dst_cols],
+                                    self._row_text(dst_cols, row)))}) + "\n")
+
+        send = found.get("missing", []) + found.get("changed", [])
+        drop = found.get("extra", [])
+        with undo.open("a") as handle:
+            remember(handle, found.get("changed", []))
+            remember(handle, drop)
+        if send:
+            rows = self.src_engine.neutral_rows_by_key(
+                "src", db, src_t, src_cols, key, [values(k) for k in send])
+            if rows:
+                self.dst_engine.neutral_write("dst", db, dst_t, dst_cols,
+                                              list(rows.values()))
+        for key_text in drop:
+            self.dst_engine._apply_delete(
+                "dst", db, dst_t, dict(zip(key, values(key_text))))
 
     def _pair_capabilities(self):
         """What this combination can do, answered from the classes.

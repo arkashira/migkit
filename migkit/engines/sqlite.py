@@ -224,7 +224,7 @@ class SQLiteEngine(Engine):
         try:
             conn.executemany(f'insert into "{table}" ({cols})'
                              f" values ({place}){tail}",
-                             [tuple(canon.sql_value(v) for v in r)
+                             [tuple(self._bind(v) for v in r)
                               for r in rows])
             conn.commit()
         finally:
@@ -278,7 +278,7 @@ class SQLiteEngine(Engine):
         try:
             conn.execute(f'insert into "{table}" ({cols})'
                          f" values ({marks}){tail}",
-                         [canon.sql_value(row[n]) for n in names])
+                         [self._bind(row[n]) for n in names])
             conn.commit()
         finally:
             conn.close()
@@ -293,7 +293,7 @@ class SQLiteEngine(Engine):
         conn = sqlite3.connect(self._path(side))
         try:
             conn.execute(f'delete from "{table}" where {where}',
-                         [canon.sql_value(key[n]) for n in names])
+                         [self._bind(key[n]) for n in names])
             conn.commit()
         finally:
             conn.close()
@@ -388,6 +388,25 @@ class SQLiteEngine(Engine):
                        f"{len(a)} counters, values match")]
 
     CHUNK = 2000
+
+    @staticmethod
+    def _bind(value):
+        """One value on its way into the sqlite3 driver.
+
+        SQLite has no decimal type and its driver will not guess one:
+        measured, binding a `Decimal` raises `sqlite3.ProgrammingError: Error
+        binding parameter 3: type 'decimal.Decimal' is not supported`, which
+        is where a PostgreSQL `numeric` column first shows up on this side of
+        a move or a repair. The canonical text is what the comparison already
+        renders that number as, so writing it keeps the two sides agreeing
+        rather than introducing a second, quieter rendering.
+        """
+        import decimal
+
+        from .. import canon
+        if isinstance(value, decimal.Decimal):
+            return canon.render_value("decimal", value)
+        return canon.sql_value(value)
 
     def _reader(self, side):
         """One read-only connection, held open across chunks."""
