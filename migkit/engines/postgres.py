@@ -132,6 +132,77 @@ class PostgresEngine(Engine):
                          " order by ordinal_position")
         return [tuple(l.split("\x1f", 1)) for l in out.splitlines() if l]
 
+    def neutral_key(self, side, db, table):
+        sch, _, tbl = table.partition(".")
+        out = self._psql(side, self._d(side, db), f"""
+            select a.attname
+              from pg_index i
+              join pg_class c on c.oid = i.indrelid
+              join pg_namespace n on n.oid = c.relnamespace
+              join pg_attribute a on a.attrelid = c.oid
+                                 and a.attnum = any(i.indkey)
+             where i.indisprimary and n.nspname = '{sch}'
+               and c.relname = '{tbl}'
+             order by array_position(i.indkey, a.attnum)""")
+        return [l for l in out.splitlines() if l]
+
+    def _conn(self, side, db):
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+        return psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+                                password=ep.password, dbname=db,
+                                connect_timeout=15)
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+        sch, _, tbl = table.partition(".")
+        names = [n for n, _ in columns]
+        cols = ", ".join(f'"{n}"' for n in names)
+        key = self.neutral_key(side, db, table)
+        where, args = "", []
+        if key and after is not None:
+            places = ", ".join(["%s"] * len(key))
+            keys = ", ".join(f'"{k}"' for k in key)
+            where = f" where ({keys}) > ({places})"
+            args = list(after)
+        order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
+        cap = f" limit {int(limit)}" if key else ""
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'select {cols} from "{sch}"."{tbl}"'
+                            f"{where}{order}{cap}", args)
+                rows = [list(r) for r in cur.fetchall()]
+        if not rows or not key:
+            return (rows, None)
+        idx = [names.index(k) for k in key if k in names]
+        if len(idx) != len(key):
+            # the key is not among the columns being moved, so there is
+            # nothing to resume from - one pass, and say so by returning None
+            return (rows, None)
+        return (rows, tuple(rows[-1][i] for i in idx))
+
+    def neutral_write(self, side, db, table, columns, rows):
+        if not rows:
+            return 0
+        from psycopg2.extras import execute_values
+        sch, _, tbl = table.partition(".")
+        names = [n for n, _ in columns]
+        cols = ", ".join(f'"{n}"' for n in names)
+        key = self.neutral_key(side, db, table)
+        if key and all(k in names for k in key):
+            sets = ", ".join(f'"{n}" = excluded."{n}"'
+                             for n in names if n not in key)
+            conflict = ", ".join(f'"{k}"' for k in key)
+            tail = (f" on conflict ({conflict}) do update set {sets}"
+                    if sets else f" on conflict ({conflict}) do nothing")
+        else:
+            tail = ""
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                execute_values(cur, f'insert into "{sch}"."{tbl}" ({cols})'
+                                    f" values %s{tail}", rows)
+            conn.commit()
+        return len(rows)
+
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
         sch, _, tbl = table.partition(".")

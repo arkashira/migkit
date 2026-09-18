@@ -358,6 +358,41 @@ class Engine:
         """[(column name, declared type)] in the order the server reports."""
         raise self._no_canon("describe columns")
 
+    def neutral_key(self, side, db, table):
+        """Columns that order the table for a resumable read, or [].
+
+        An empty list is not a failure. It means the table has no key, which
+        `neutral_read` handles by reading it in one pass - slower to restart,
+        and still correct, which is the trade the operator would have made.
+        """
+        raise self._no_canon("find a key")
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+        """(rows, last_key) - values as Python objects, in key order.
+
+        Objects rather than the canonical text: the text exists so two
+        engines can *compare*, and round-tripping a value through it to
+        *move* it would throw away precision the target could have held.
+        `columns` carries the class of each value so the writer knows what it
+        is being handed.
+
+        `after` is the key returned last time. None starts at the beginning,
+        and a table with no key returns everything in one call with a
+        `last_key` of None - which the caller must treat as "there is no
+        second call", not as "there is nothing left".
+        """
+        raise self._no_canon("read rows")
+
+    def neutral_write(self, side, db, table, columns, rows):
+        """Write rows read from another engine. Returns how many landed.
+
+        Existing rows with the same key are replaced rather than duplicated,
+        so a move that is interrupted and restarted converges instead of
+        piling up. A table with no key cannot express that, and the engine
+        says so rather than inserting twice.
+        """
+        raise self._no_canon("write rows")
+
     def neutral_digest(self, side, db, table, columns):
         """(row count, digest) over `[(name, canon class)]`.
 

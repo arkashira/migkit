@@ -49,6 +49,61 @@ class MySQLEngine(Engine):
                        (self._d(side, db), table))
         return [(r[0], r[1]) for r in rows]
 
+    def neutral_key(self, side, db, table):
+        rows = self._q(side,
+                       "select column_name from information_schema"
+                       ".key_column_usage where table_schema=%s"
+                       " and table_name=%s and constraint_name='PRIMARY'"
+                       " order by ordinal_position",
+                       (self._d(side, db), table))
+        return [r[0] for r in rows]
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+        names = [n for n, _ in columns]
+        cols = ", ".join(f"`{n}`" for n in names)
+        key = self.neutral_key(side, db, table)
+        where, args = "", []
+        if key and after is not None:
+            places = ", ".join(["%s"] * len(key))
+            keys = ", ".join(f"`{k}`" for k in key)
+            where = f" where ({keys}) > ({places})"
+            args = list(after)
+        order = (" order by " + ", ".join(f"`{k}`" for k in key)) if key else ""
+        cap = f" limit {int(limit)}" if key else ""
+        rows = [list(r) for r in self._q(
+            side, f"select {cols} from `{self._d(side, db)}`.`{table}`"
+                  f"{where}{order}{cap}", args or None)]
+        if not rows or not key:
+            return (rows, None)
+        idx = [names.index(k) for k in key if k in names]
+        if len(idx) != len(key):
+            return (rows, None)
+        return (rows, tuple(rows[-1][i] for i in idx))
+
+    def neutral_write(self, side, db, table, columns, rows):
+        if not rows:
+            return 0
+        names = [n for n, _ in columns]
+        cols = ", ".join(f"`{n}`" for n in names)
+        key = set(self.neutral_key(side, db, table))
+        sets = ", ".join(f"`{n}` = values(`{n}`)"
+                         for n in names if n not in key)
+        # `on duplicate key update` rather than `replace into`: REPLACE
+        # deletes the old row first, which fires delete triggers and drops
+        # any column the incoming row does not carry
+        tail = f" on duplicate key update {sets}" if sets else ""
+        place = "(" + ", ".join(["%s"] * len(names)) + ")"
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"insert into `{self._d(side, db)}`.`{table}` ({cols})"
+                    f" values {place}{tail}", [tuple(r) for r in rows])
+            conn.commit()
+        finally:
+            conn.close()
+        return len(rows)
+
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
         row = canon.row_expr("mysql", columns)

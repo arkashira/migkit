@@ -57,16 +57,40 @@ def test_hetero_cannot_be_one_of_its_own_sides():
 
 def test_the_pair_specific_paths_say_which_pair_they_are_for():
     """An AttributeError on `self.my` would read as a migkit bug. This reads
-    as the sentence it is: the comparison crossed, the mover has not."""
+    as the sentence it is. Only the paths that are still written for one pair
+    refuse - converting DDL and the target setup plan. Moving rows crosses
+    now, so it is no longer in this list."""
     eng = HeteroEngine(_hop("postgres", "mysql"))
     for call in (lambda: eng.convert_ddl("db"),
-                 lambda: eng.setup_target_plan("db"),
-                 lambda: eng.list_move_tables("db"),
-                 lambda: eng.move_table("db", "", "t", 1, {}, print)):
+                 lambda: eng.setup_target_plan("db")):
         with pytest.raises(SystemExit) as e:
             call()
         assert "mysql->postgres only" in str(e.value)
         assert "postgres->mysql" in str(e.value)
+
+
+def test_moving_and_comparing_are_answered_per_pair_without_connecting():
+    """Both capability questions are answered from the classes. A probe that
+    opened a connection would turn "can this pair move" into "is the database
+    up right now" - two questions with different answers and different
+    things to tell the operator."""
+    cases = {("postgres", "mysql"): (True, True),
+             ("mysql", "postgres"): (True, True),
+             # sqlite and mongodb compare but have no writer yet
+             ("sqlite", "postgres"): (False, True),
+             ("mongodb", "postgres"): (False, True),
+             ("mysql", "redis"): (False, False)}
+    for pair, (can_move, can_compare) in cases.items():
+        eng = HeteroEngine(_hop(*pair))
+        assert eng._can_move_neutrally() is can_move, pair
+        assert eng._can_compare_neutrally() is can_compare, pair
+
+
+def test_a_pair_that_cannot_move_still_says_which_pair_it_is():
+    eng = HeteroEngine(_hop("mongodb", "postgres"))
+    with pytest.raises(SystemExit) as e:
+        eng.move_table("db", "", "t", 1, {}, print)
+    assert "mongodb->postgres" in str(e.value)
 
 
 def test_tables_are_matched_on_the_name_without_its_qualifier():

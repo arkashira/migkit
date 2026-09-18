@@ -249,6 +249,97 @@ class HeteroEngine(Engine):
                          " which is where it runs anyway")
         return (" - " + "; ".join(parts)) if parts else ""
 
+    def _can_move_neutrally(self):
+        """Whether both engines implement the read/write contract.
+
+        Answered from the classes, not by calling them: a capability probe
+        that opens a connection turns "can this pair move" into "is the
+        database up right now", and the two questions have different answers
+        and different failure messages.
+        """
+        return all(
+            type(engine).neutral_read is not Engine.neutral_read
+            and type(engine).neutral_write is not Engine.neutral_write
+            for engine in (self.src_engine, self.dst_engine))
+
+    def _move_columns(self, src_table, dst_table, db):
+        """Column names to carry, and what is being left behind.
+
+        Matched by name and **sorted**, so the two sides line up by name
+        rather than by the order each server happens to list them in - the
+        same rule the comparison uses, and for the same reason.
+
+        Unlike the comparison, a column whose type has no canonical rendering
+        is still moved: the rendering exists so two engines can be compared,
+        and a value that cannot be compared can still be carried. What is not
+        carried is a column the target does not have, and that is named.
+        """
+        src_types = dict(self.src_engine.neutral_columns("src", db,
+                                                         src_table))
+        dst_types = dict(self.dst_engine.neutral_columns("dst", db,
+                                                         dst_table))
+        both = sorted(set(src_types) & set(dst_types))
+        notes = []
+        missing = sorted(set(src_types) - set(dst_types))
+        if missing:
+            notes.append("not carried, the target has no such column: "
+                         + ", ".join(missing))
+        from .. import canon
+        src_cols, dst_cols = [], []
+        for name in both:
+            src_cols.append((name, canon.type_class(
+                self.src_engine.CANON_ENGINE, src_types[name])))
+            dst_cols.append((name, canon.type_class(
+                self.dst_engine.CANON_ENGINE, dst_types[name])))
+        return src_cols, dst_cols, notes
+
+    def _neutral_move(self, db, sch, tbl, chunk, ck, log):
+        """Read from one engine, write to the other, for any pair.
+
+        Resumable through the checkpoint the caller already keeps, by the
+        target table's own key. A table with no key is read in one pass and
+        the log says so - restarting that one starts it over, which is the
+        honest consequence of there being nothing to resume from.
+        """
+        src_t = f"{sch}.{tbl}" if sch else tbl
+        leaf = self._leaf(src_t)
+        pairs, _, _, _ = self.match_tables(
+            self.src_engine.neutral_tables("src", db),
+            self.dst_engine.neutral_tables("dst", db))
+        match = [d for s_, d in pairs if self._leaf(s_) == leaf]
+        if not match:
+            raise SystemExit(f"{leaf} is not on the target - create it first,"
+                             " migkit does not invent a table it cannot see")
+        dst_t = match[0]
+        src_cols, dst_cols, notes = self._move_columns(src_t, dst_t, db)
+        for n in notes:
+            log(f"{leaf}: {n}")
+        key = f"{db}.{leaf}"
+        st = ck.setdefault(key, {})
+        if st.get("done"):
+            log(f"{key}: done earlier, skip")
+            return
+        after = tuple(st["last"]) if st.get("last") is not None else None
+        moved = int(st.get("moved", 0))
+        while True:
+            rows, last = self.src_engine.neutral_read(
+                "src", db, src_t, src_cols, after, chunk)
+            if not rows:
+                break
+            self.dst_engine.neutral_write("dst", db, dst_t, dst_cols, rows)
+            moved += len(rows)
+            st["moved"] = moved
+            if last is None:
+                log(f"{key}: {moved:,} rows in one pass (no key to resume"
+                    " from, so a restart starts over)")
+                break
+            after = last
+            st["last"] = list(last)
+            ck.save()
+            log(f"{key}: {moved:,} rows")
+        st["done"] = True
+        ck.save()
+
     def _can_compare_neutrally(self):
         return bool(self.src_engine.CANON_ENGINE
                     and self.dst_engine.CANON_ENGINE)
@@ -406,11 +497,24 @@ class HeteroEngine(Engine):
         return plan
 
     def list_move_tables(self, db):
-        self._mysql_to_postgres_only("listing tables to move")
+        if not (self.my and self.pg):
+            if not self._can_move_neutrally():
+                self._mysql_to_postgres_only("listing tables to move")
+            pairs, _, _, _ = self.match_tables(
+                self.src_engine.neutral_tables("src", db),
+                self.dst_engine.neutral_tables("dst", db))
+            out = []
+            for src_t, _ in pairs:
+                sch, _, tbl = src_t.rpartition(".")
+                out.append((sch, tbl))
+            return out
         return [("", t) for t in self.my._tables("src", db)]
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
-        self._mysql_to_postgres_only("moving a table")
+        if not (self.my and self.pg):
+            if not self._can_move_neutrally():
+                self._mysql_to_postgres_only("moving a table")
+            return self._neutral_move(db, sch, tbl, chunk, ck, log)
         t = tbl or sch
         key = f"{db}.{t}"
         st = ck.setdefault(key, {})
