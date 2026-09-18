@@ -3338,10 +3338,56 @@ class PostgresEngine(Engine):
                 return col
         return None
 
-    def _copy_pipe(self, db, select_sql, qt, pre_sql=""):
+    def _copy_cols(self, db, sch, tbl):
+        """The source's live columns, in its own order, or None.
+
+        None means the catalogue could not be read, and the copy then falls
+        back to positional mapping - which is what it always did. Better to
+        keep working than to refuse, but the caller logs it.
+        """
+        try:
+            out = self._psql("src", db,
+                             "select a.attname from pg_attribute a"
+                             " join pg_class c on c.oid = a.attrelid"
+                             " join pg_namespace n on n.oid = c.relnamespace"
+                             f" where n.nspname = '{sch}'"
+                             f" and c.relname = '{tbl}'"
+                             " and a.attnum > 0 and not a.attisdropped"
+                             " and a.attgenerated = ''"
+                             " order by a.attnum")
+        except Exception:
+            return None
+        cols = [l for l in out.splitlines() if l]
+        return cols or None
+
+    @staticmethod
+    def _copy_select(qt, cols, pred=""):
+        """SELECT naming the columns, so both ends of the pipe agree."""
+        what = ", ".join(f'"{c}"' for c in cols) if cols else "*"
+        sql = f"select {what} from {qt}"
+        return f"{sql} where {pred}" if pred else sql
+
+    def _copy_pipe(self, db, select_sql, qt, pre_sql="", columns=None):
+        """Stream rows from source to target through a COPY pipe.
+
+        `columns` names them on the receiving side. Without it COPY maps by
+        position, and position is not a property either side agrees on:
+        measured, a source holding (id, a='AAA', b='BBB') copied into a target
+        whose columns are declared (id, b, a) lands as a='BBB', b='AAA' - no
+        error, every value in the wrong column. A source with a DROP COLUMN in
+        its history against a target created fresh from today's schema is
+        exactly that shape, and migkit has already measured that pairing
+        happening in the row hash.
+
+        So the column list is not an optimisation. It is the difference
+        between moving the data and moving it into the wrong columns.
+        """
         s, t = self.hop.source, self.hop.target
         env_s = tool_env({"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"})
         env_t = tool_env({"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"})
+        collist = ""
+        if columns:
+            collist = " (" + ", ".join(f'"{c}"' for c in columns) + ")"
         out = subprocess.Popen(
             ["psql", "-h", s.host, "-p", str(s.port), "-U", s.user, "-d", db,
              "-X", "-q", "-v", "ON_ERROR_STOP=1",
@@ -3352,7 +3398,7 @@ class PostgresEngine(Engine):
             ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
              "-d", self._d("dst", db),
              "-X", "-q", "-v", "ON_ERROR_STOP=1", "-1", *cmds,
-             "-c", f"\\copy {qt} from stdin"],
+             "-c", f"\\copy {qt}{collist} from stdin"],
             stdin=out.stdout, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env_t)
         out.stdout.close()
@@ -3372,8 +3418,9 @@ class PostgresEngine(Engine):
         pk = self._int_pk(db, sch, tbl)
         if not pk:
             log(f"{key}: no single int pk, single-shot copy")
-            self._copy_pipe(db, f"select * from {qt}", qt,
-                            f"truncate {qt}")
+            cols = self._copy_cols(db, sch, tbl)
+            self._copy_pipe(db, self._copy_select(qt, cols), qt,
+                            f"truncate {qt}", columns=cols)
             st["done"] = True
             return
         mm = self._psql("src", db,
@@ -3384,8 +3431,9 @@ class PostgresEngine(Engine):
         while last < hi:
             nxt = min(last + chunk, hi)
             pred = f'"{pk}" > {last} and "{pk}" <= {nxt}'
-            self._copy_pipe(db, f"select * from {qt} where {pred}", qt,
-                            f"delete from {qt} where {pred}")
+            cols = self._copy_cols(db, sch, tbl)
+            self._copy_pipe(db, self._copy_select(qt, cols, pred), qt,
+                            f"delete from {qt} where {pred}", columns=cols)
             last = nxt
             st["last"] = last
             ck.save()
