@@ -189,6 +189,19 @@ class SQLiteEngine(Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+        import sqlite3
+        if not key or not keys:
+            return {}
+        sql, args = self._by_key_query(f'"{table}"', columns, key, list(keys),
+                                       lambda n: f'"{n}"', "?")
+        conn = self._reader(side)
+        try:
+            rows = [list(r) for r in conn.execute(sql, args).fetchall()]
+        finally:
+            conn.close()
+        return self._by_key_map(columns, key, rows)
+
     def neutral_write(self, side, db, table, columns, rows):
         import sqlite3
 

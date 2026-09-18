@@ -358,3 +358,55 @@ def test_a_float_with_a_long_decimal_expansion_still_agrees(pair):
     finally:
         _pg("drop table longf")
         _my("drop table longf")
+
+
+DECIMALS = ("7", "-0.5", "0.0000000001", "100", "99999999.99",
+            "12345678901234567890.123", "0.000000000000000000001")
+
+
+def test_a_decimal_renders_the_same_in_sql_and_in_process(pair):
+    """The in-process rendering exists for values that never pass through
+    SQL - a key read by a driver, on its way into a cross-engine drilldown.
+    It has to produce what the two servers produce.
+
+    `str(Decimal)` does not. Measured against PostgreSQL, a numeric(30,10)
+    holding 0.0000000001 comes back from psycopg2 as `Decimal('1E-10')`,
+    whose `str` is `1E-10` while the server's own text is `0.0000000001`.
+    """
+    import psycopg2
+    values = ", ".join(f"({i}, {v})" for i, v in enumerate(DECIMALS))
+    _pg("create table decs (id int, d numeric(45,21))")
+    _my("create table decs (id int, d decimal(45,21))")
+    try:
+        _pg(f"insert into decs values {values}")
+        _my(f"insert into decs values {values}")
+        assert _pg("select count(*) from decs") == str(len(DECIMALS))
+        assert _my("select count(*) from decs") == str(len(DECIMALS))
+
+        sql_pg = _pg(f"select {c.expr('postgres', 'd', 'decimal')}"
+                     " from decs order by id")
+        sql_my = _my(f"select {c.expr('mysql', 'd', 'decimal')}"
+                     " from decs order by id")
+        assert sql_pg == sql_my, f"\npg={sql_pg!r}\nmy={sql_my!r}"
+
+        # one query, so the value and the text it must match cannot drift
+        conn = psycopg2.connect(host="127.0.0.1", port=PG_PORT,
+                                user="postgres", password="test", dbname="cx")
+        try:
+            cur = conn.cursor()
+            cur.execute(f"select d, {c.expr('postgres', 'd', 'decimal')}"
+                        " from decs order by id")
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == len(DECIMALS)
+        assert any(str(value) != text for value, text in rows), (
+            "no value in this set exposes the difference between str() and"
+            " the server's own text - the test would pass on the old code")
+        bad = [(value, text, c.render_value("decimal", value))
+               for value, text in rows
+               if c.render_value("decimal", value) != text]
+        assert not bad, bad
+    finally:
+        _pg("drop table decs")
+        _my("drop table decs")

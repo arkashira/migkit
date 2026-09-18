@@ -80,6 +80,15 @@ class MySQLEngine(Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+        if not key or not keys:
+            return {}
+        sql, args = self._by_key_query(
+            f"`{self._d(side, db)}`.`{table}`", columns, key, list(keys),
+            lambda n: f"`{n}`", "%s")
+        rows = [list(r) for r in self._q(side, sql, args)]
+        return self._by_key_map(columns, key, rows)
+
     def neutral_write(self, side, db, table, columns, rows):
         if not rows:
             return 0

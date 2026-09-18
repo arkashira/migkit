@@ -333,6 +333,17 @@ def render_value(cls, value):
         return str(int(value))
     if cls == "float":
         return _float_text(float(value))
+    if cls == "decimal":
+        # what `cast(col as char)` and `col::text` produce: the digits the
+        # server sent, trailing zeros and all, and never an exponent.
+        # `str(Decimal)` is not that - measured against PostgreSQL, a
+        # numeric(30,10) holding 0.0000000001 comes back from the driver as
+        # `Decimal('1E-10')`, whose `str` is `1E-10` while the server's own
+        # text is `0.0000000001`. Formatting with `f` is the same number
+        # written the way both servers write it.
+        from decimal import Decimal
+        return format(value if isinstance(value, Decimal) else Decimal(value),
+                      "f")
     if cls == "text":
         return value if isinstance(value, str) else str(value)
     if cls == "bytes":

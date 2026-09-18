@@ -191,6 +191,18 @@ class PostgresEngine(Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+        if not key or not keys:
+            return {}
+        sch, tbl = self._split(table)
+        sql, args = self._by_key_query(f'"{sch}"."{tbl}"', columns, key,
+                                       list(keys), lambda n: f'"{n}"', "%s")
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                rows = [list(r) for r in cur.fetchall()]
+        return self._by_key_map(columns, key, rows)
+
     def neutral_write(self, side, db, table, columns, rows):
         if not rows:
             return 0

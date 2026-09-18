@@ -437,6 +437,53 @@ class Engine:
         """
         raise self._no_canon("read rows")
 
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+        """{canonical key: row} for the rows carrying these key values.
+
+        Reading by key rather than walking the two sides in step is what
+        makes a cross-engine drilldown possible. Two engines do not agree on
+        the order of a text key - one collation difference is enough - so a
+        merge over two ordered reads would report rows missing on one side
+        and extra on the other with neither being true. Asking each side for
+        the same keys asks a question that has one answer.
+
+        The mapping is keyed by the canonical text of the key columns, not by
+        the values themselves, because the two engines may hand the same key
+        back as different Python objects (a Decimal here, an int there) and
+        the point is to line the two sides up.
+        """
+        raise self._no_canon("read rows by key")
+
+    @staticmethod
+    def _key_of(columns, key, row):
+        """The canonical text of one row's key, for matching across engines."""
+        from .. import canon
+        cls = {n: c for n, c in columns}
+        at = {n: i for i, (n, _) in enumerate(columns)}
+        return tuple(canon.render_value(cls[k], row[at[k]]) for k in key)
+
+    def _by_key_map(self, columns, key, rows):
+        return {self._key_of(columns, key, row): row for row in rows}
+
+    @staticmethod
+    def _by_key_query(quoted_table, columns, key, keys, quote, mark):
+        """The select every SQL engine here needs, written once.
+
+        A single-column key uses `in (...)`; a composite one uses a row
+        value, which PostgreSQL, MySQL and SQLite all accept.
+        """
+        from .. import canon
+        cols = ", ".join(quote(n) for n, _ in columns)
+        if len(key) == 1:
+            where = f"{quote(key[0])} in ({', '.join([mark] * len(keys))})"
+            args = [canon.sql_value(k[0]) for k in keys]
+        else:
+            left = "(" + ", ".join(quote(k) for k in key) + ")"
+            one = "(" + ", ".join([mark] * len(key)) + ")"
+            where = f"{left} in ({', '.join([one] * len(keys))})"
+            args = [canon.sql_value(v) for k in keys for v in k]
+        return f"select {cols} from {quoted_table} where {where}", args
+
     def neutral_write(self, side, db, table, columns, rows):
         """Write rows read from another engine. Returns how many landed.
 

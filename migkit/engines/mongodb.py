@@ -145,6 +145,30 @@ class MongoEngine(Engine):
             return ([], None)
         return (rows, (last,) if last is not None else None)
 
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+        """The same lookup, expressed as a filter instead of a select.
+
+        A field that is not there still comes back as `canon.ABSENT` rather
+        than None, for the same reason the ordered read does: the two mean
+        different things here and only one of them is a value.
+        """
+        from .. import canon
+        if not key or not keys:
+            return {}
+        names = [n for n, _ in columns]
+        projection = {f: 1 for f in names}
+        projection.setdefault("_id", 1 if "_id" in names else 0)
+        if len(key) == 1:
+            flt = {key[0]: {"$in": [k[0] for k in keys]}}
+        else:
+            flt = {"$or": [dict(zip(key, values)) for values in keys]}
+        rows = []
+        for doc in self._client(side)[self._d(side, db)][table].find(
+                flt, projection):
+            rows.append([doc.get(n, canon.ABSENT) if n in doc
+                         else canon.ABSENT for n in names])
+        return self._by_key_map(columns, key, rows)
+
     def neutral_write(self, side, db, table, columns, rows):
         """Upsert by `_id`, leaving an absent field absent.
 
