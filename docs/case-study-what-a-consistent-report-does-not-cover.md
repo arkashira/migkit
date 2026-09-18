@@ -198,9 +198,24 @@ The data is equal. The system is not.
 | Table grants | no | yes |
 | Sequence grants | no | yes |
 | Row-level security policies | no | yes |
+| Object owner (who may ALTER or DROP it) | no | yes |
+| DEFINER and SQL SECURITY mode | no | yes |
 
 Zero RLS policies on a table that had them is either deny-all or expose-all.
 Neither is what you migrated.
+
+Ownership is the one a schema differ structurally cannot catch: it compares
+definitions, and an owner is not part of a definition. Measured - a table
+owned by the application role arrived owned by the migration account, and the
+generated fix contained no `OWNER TO` statement at all.
+
+The MySQL half is worse than a name change. A view or routine that was
+`SQL SECURITY DEFINER` and came across as `INVOKER` now runs with the
+**caller's** privileges instead of the definer's. It either stops working, or
+starts working for callers who should not have been able to run it. Schema
+comparison misses this on purpose: movers rewrite `DEFINER=` on every object,
+so a text diff that kept it would bury every real finding under noise. The
+answer is to report it separately, not to ignore it.
 
 ### Schema objects
 
@@ -294,7 +309,7 @@ database does not work.
 | Move large objects | Blobs missing |
 | Disable TTL indexes and events on the target during sync | **The target deletes its own data while syncing** |
 | Validate `NOT VALID` constraints, fix FK orphans | Invalid data accepted from day one |
-| Fix object ownership | Recurring grant and ownership drift |
+| Fix object ownership | The app no longer owns its own tables and cannot alter them |
 | Prove all of the above | — |
 
 None of these is a row.
