@@ -1,11 +1,12 @@
 """The manual-work inventory, against a real MySQL pair.
 
-Everything asserted here was measured on the server first. In particular:
-`mysqldump --no-data --routines --triggers` - the exact flags migkit's
-structural check uses - emits no CREATE EVENT at all, which is why events are
-listed as left behind while routines and triggers are not. That is verified
-below rather than assumed, because a wrong entry in this inventory sends
-someone to do work that was already done, and a missing one loses an object.
+Everything asserted here was measured on the server first, and one entry had
+to be corrected after measuring: events are NOT missing from migkit's dump
+(`_dump_schema` passes `--events`) and the object check names a missing one.
+They are listed as left behind because atlas - which generates the fix DDL -
+does not model MySQL events and reports such a pair as clean. Detected, never
+repaired. A wrong entry in this inventory sends someone to redo finished work,
+and a missing one loses an object, so each one is pinned to a measurement.
 """
 import socket
 import subprocess
@@ -140,17 +141,41 @@ def test_a_unique_not_null_index_counts_as_a_key(inv):
 def test_an_event_is_reported_as_left_behind(inv):
     d = _row(inv, "not-carried")["detail"]
     assert "ev" in d and "scheduled events" in d, d
+    # the reason has to travel with the finding, or the next reader guesses
+    assert "no tool generates the DDL" in d, d
 
 
-def test_the_dump_flags_migkit_uses_really_do_omit_events(pair):
-    """The measurement the entry above rests on. If a future mysqldump starts
-    including events, this fails and the inventory entry becomes a lie."""
-    r = subprocess.run(["docker", "exec", SRC, "mysqldump", "-uroot",
-                        "-ptest", "--no-data", "--routines", "--triggers",
-                        "shop"], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert "CREATE" in r.stdout            # the dump is not empty
-    assert "EVENT" not in r.stdout.upper(), "mysqldump now carries events"
+def test_migkit_sees_the_event_but_cannot_generate_its_ddl(pair, tmp_path):
+    """The measurement the entry above rests on, and it is a narrow one.
+
+    migkit's dump does include the event, and the object check names it. The
+    gap is the repair: atlas writes the fix DDL and does not model MySQL
+    events, so it reports the pair as clean. Detected, never fixed.
+
+    An earlier version of this test asserted that migkit's dump omitted
+    events, which was simply wrong - `_dump_schema` passes `--events`. If
+    atlas ever learns about events, this test goes red and the inventory entry
+    has to go with it.
+    """
+    eng = _engine(tmp_path)
+    dump = eng._dump_schema("src", "shop")
+    assert "EVENT" in dump.upper(), "migkit's own dump lost the event"
+    results = eng.check_schema("shop")
+    named = [r for r in results if "event" in r.detail and "ev" in r.detail]
+    assert named, [r.detail for r in results]
+    # Ask the direct question rather than reading atlas's overall verdict:
+    # this fixture has table differences too, so atlas says "diff" for
+    # reasons that have nothing to do with the event.
+    fix = tmp_path / "atlas-fix.sql"
+    # The target is missing five tables and a view, so atlas has plenty to
+    # write about. Asserting the file exists keeps the next assertion from
+    # passing vacuously on an atlas that produced nothing at all.
+    assert fix.exists(), sorted(f.name for f in tmp_path.iterdir())
+    text = fix.read_text().upper()
+    assert "CREATE TABLE" in text, text[:300]
+    assert "EVENT" not in text, (
+        "atlas now generates DDL for events - they are carried, and the "
+        "inventory entry must be removed")
 
 
 def test_a_memory_table_is_reported_as_not_carried(inv):

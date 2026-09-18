@@ -211,10 +211,27 @@ class PostgresEngine(Engine):
                           "reinstall migkit; this check must not be skipped")
         try:
             # from target to source: what the target needs in order to match
-            m = Migration(_results.db(turl), _results.db(surl))
+            sdb, tdb = _results.db(surl), _results.db(turl)
+            m = Migration(tdb, sdb)
             m.add_all_changes_ordered(privileges=True)
             sql = m.sql
             meta = m.result_metadata(options={"privileges": True})
+            # The same comparison in the opposite direction is the undo of
+            # exactly these statements. It has to be taken here, from the same
+            # two snapshots: after the fix is applied the target no longer
+            # describes where it came from, and the undo is unrecoverable.
+            #
+            # The same two handles serve both directions - measured, and the
+            # reason it matters is that `results` exposes no way to close a
+            # connection and does not drop one on garbage collection, so a
+            # second pair would double what this check leaves open against a
+            # production source every time it runs.
+            try:
+                r = Migration(sdb, tdb)
+                r.add_all_changes_ordered(privileges=True)
+                reverse_sql = r.sql
+            except Exception:
+                reverse_sql = ""
         except Exception as e:
             return Result("schema", f"{db} (structural)", "error",
                           f"structural diff failed: {str(e).splitlines()[0][:160]}",
@@ -222,6 +239,14 @@ class PostgresEngine(Engine):
         (d / "structural-diff.json").write_text(json.dumps(meta, indent=1,
                                                            sort_keys=True))
         if not sql.strip():
+            # Clear the previous run's evidence, the way the MySQL paths
+            # already do. A left-over fix script is a repair for differences
+            # that no longer exist, and a left-over revert is worse: an undo
+            # for changes nobody made, sitting in the directory an operator
+            # opens during a cutover.
+            for stale in ("structural-fix.sql", "structural-fix.locks.txt",
+                          "structural-fix.revert.sql"):
+                (d / stale).unlink(missing_ok=True)
             return Result("schema", f"{db} (structural)", "ok",
                           f"{meta['totals']['added'] + meta['totals']['removed']}"
                           " object differences, none structural"
@@ -236,8 +261,15 @@ class PostgresEngine(Engine):
         # without saying what it blocks is how a verification becomes an
         # outage.
         from .. import locks as _locks
+        from .. import revert as _revert
         lock_text, lock_counts = _locks.report(sql)
         (d / "structural-fix.locks.txt").write_text(lock_text)
+        rev_path = d / "structural-fix.revert.sql"
+        rev_body = _revert.script(sql, reverse_sql, "structural-fix.sql")
+        if rev_body:
+            rev_path.write_text(rev_body)
+        else:
+            rev_path.unlink(missing_ok=True)
         tot = meta["totals"]
         detail = (f"{tot['added']} to add, {tot['removed']} to remove,"
                   f" {tot['modified']} to change"
@@ -248,11 +280,15 @@ class PostgresEngine(Engine):
         lock_line = _locks.summary(lock_counts)
         if lock_line:
             detail += f"; {lock_line}"
+        rev_line = _revert.summary(sql, reverse_sql)
+        detail += ("; " + rev_line if rev_line else
+                   "; no undo could be generated - take a backup first")
         return Result("schema", f"{db} (structural)", "diff", detail,
                       str(path),
                       "statements are in dependency order; read"
                       " structural-fix.locks.txt for what each one blocks,"
-                      " review the removals, then apply on the target")
+                      " review the removals, then apply on the target."
+                      " structural-fix.revert.sql undoes it")
 
     def check_atlas(self, db):
         from urllib.parse import quote

@@ -223,13 +223,37 @@ class MySQLEngine(Engine):
             return None
         text = p.stdout.strip()
         if not text or "Schemas are synced" in text:
-            (self.hop.report_dir(db) / "atlas-fix.sql").unlink(missing_ok=True)
+            # both files, not just the fix: an undo left behind after the
+            # schemas converged is a rollback for changes nobody made
+            for stale in ("atlas-fix.sql", "atlas-fix.revert.sql"):
+                (self.hop.report_dir(db) / stale).unlink(missing_ok=True)
             return Result("schema", f"{db} (atlas)", "ok", "atlas diff clean")
         out = self.hop.report_dir(db) / "atlas-fix.sql"
         out.write_text(text + "\n")
-        return Result("schema", f"{db} (atlas)", "diff",
-                      f"atlas generated {len(text.splitlines())} lines of fix DDL",
-                      str(out), "review then apply atlas-fix.sql on target")
+        detail = f"atlas generated {len(text.splitlines())} lines of fix DDL"
+        # The same diff run the other way is the undo of exactly these
+        # statements, and it has to be taken now: once the fix is applied the
+        # two schemas no longer describe where the target came from.
+        from .. import revert as _revert
+        rev = self.hop.report_dir(db) / "atlas-fix.revert.sql"
+        try:
+            rp = run(["atlas", "schema", "diff", "--from", su, "--to", tu,
+                      "--exclude", "migkit_changelog"],
+                     check=False, timeout=180)
+            rtext = rp.stdout.strip() if rp.returncode == 0 else ""
+        except Exception:
+            rtext = ""
+        body = _revert.script(text, rtext, "atlas-fix.sql")
+        if body:
+            rev.write_text(body)
+            detail += "; " + _revert.summary(text, rtext)
+        else:
+            # no undo is a fact worth stating, not a blank to fill in later
+            rev.unlink(missing_ok=True)
+            detail += "; no undo could be generated - take a backup first"
+        return Result("schema", f"{db} (atlas)", "diff", detail,
+                      str(out), "review then apply atlas-fix.sql on target;"
+                      " atlas-fix.revert.sql undoes it")
 
     def _tables(self, side, db):
         rows = self._q(side, "select table_name from information_schema.tables"
@@ -1769,11 +1793,18 @@ class MySQLEngine(Engine):
         """Inventory the work the move will not do, per `migkit.handwork`.
 
         Only things migkit genuinely leaves behind belong here. Routines,
-        triggers and views are absent on purpose: the structural check dumps
-        them with `--routines --triggers` and diffs them, so they are carried.
-        Events are not - measured against MySQL 8, a `--no-data --routines
-        --triggers` dump contains no CREATE EVENT at all, and adding `--events`
-        is what makes them appear.
+        triggers and views are absent on purpose: `_dump_schema` dumps them,
+        the textual diff compares them, and atlas generates the DDL to create
+        a missing one - so they are carried end to end.
+
+        Events are the boundary case, and the boundary is narrower than
+        "not dumped". Measured against MySQL 8 with a source holding one event
+        and a target holding none: `_dump_schema` does include it (it passes
+        `--events`), and the object check names it - `event 1/0 missing: ev`.
+        What does not happen is the repair. atlas, which is what writes the
+        fix DDL, reported `atlas diff clean` for that same pair: it does not
+        model MySQL events at all. So a missing event is found and never
+        fixed, and creating it is hands work.
         """
         from .. import handwork
         inv = handwork.Inventory()
@@ -1805,7 +1836,10 @@ class MySQLEngine(Engine):
                 ev = self._q("src",
                     "select event_name, status from information_schema.events"
                     " where event_schema = %s", (db,))
-                inv.add("not-carried", db, "scheduled events",
+                # detected by the object check, never written into the fix
+                # DDL - see this method's docstring for the measurement
+                inv.add("not-carried", db, "scheduled events (detected, but"
+                        " no tool generates the DDL to recreate them)",
                         [r[0] for r in ev])
                 if ev:
                     # an event enabled on the target rewrites rows while the
