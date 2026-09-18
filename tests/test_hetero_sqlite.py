@@ -146,3 +146,14 @@ def test_moving_is_still_refused_for_this_pair_and_says_so(engine):
         eng.list_move_tables("main")
     assert "sqlite->postgres" in str(e.value)
     assert "mysql->postgres only" in str(e.value)
+
+
+def test_the_report_does_not_claim_a_local_file_crossed_a_network(engine):
+    """SQLite is folded in this process too, but its data was already here -
+    it is a file on this disk. Saying its rows crossed the network, as the
+    line for MongoDB correctly does, would be wrong about the one fact an
+    operator reads this clause for."""
+    eng, _ = engine
+    detail = _one(eng).detail
+    assert "sqlite was folded in this process" in detail, detail
+    assert "crossed the network" not in detail, detail

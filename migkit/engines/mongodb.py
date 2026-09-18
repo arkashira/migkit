@@ -45,6 +45,91 @@ class MongoEngine(Engine):
         return sorted(d for d in c.list_database_names()
                       if d not in SKIP_DBS and not self.hop.excluded(d))
 
+    CANON_ENGINE = "mongodb"
+
+    def neutral_tables(self, side, db):
+        c = self._client(side)[self._d(side, db)]
+        return sorted(n for n in c.list_collection_names()
+                      if not n.startswith("system.")
+                      and not self.hop.excluded(db, n))
+
+    def field_types(self, side, db, collection):
+        """{field: (types, present_count, null_count)} over the whole
+        collection.
+
+        A full scan rather than `$sample`. Sampling would be cheaper and
+        would answer a different question: a field that exists in one
+        document out of a million is exactly the one a migration drops, and a
+        sample that misses it reports a collection migkit never looked at as
+        fully described.
+
+        `missing` and `null` are counted apart because MongoDB keeps them
+        apart and the target usually cannot. Both land as NULL in a SQL
+        column, so the conversion is one-way and nobody notices unless it is
+        said out loud.
+        """
+        coll = self._client(side)[self._d(side, db)][collection]
+        rows = coll.aggregate([
+            {"$project": {"kv": {"$objectToArray": "$$ROOT"}}},
+            {"$unwind": "$kv"},
+            {"$group": {"_id": "$kv.k",
+                        "types": {"$addToSet": {"$type": "$kv.v"}},
+                        "present": {"$sum": 1},
+                        "nulls": {"$sum": {"$cond": [
+                            {"$eq": [{"$type": "$kv.v"}, "null"]}, 1, 0]}}}},
+            {"$sort": {"_id": 1}},
+        ])
+        return {r["_id"]: (sorted(r["types"]), r["present"], r["nulls"])
+                for r in rows}
+
+    def neutral_columns(self, side, db, table):
+        """[(field, types joined by '|')] - the set, not a declaration.
+
+        The set is what `canon.type_class` is given: it drops `null` and
+        `missing`, and a field left holding two real types comes back
+        unmapped rather than resolved to the more popular one.
+        """
+        return [(name, "|".join(types))
+                for name, (types, _, _) in
+                sorted(self.field_types(side, db, table).items())]
+
+    def neutral_digest(self, side, db, table, columns):
+        """(count, digest) folded here rather than in the server.
+
+        MongoDB has no hashing operator at all - measured on 7.0, `$md5`,
+        `$sha1`, `$sha256` and `$hash` are each "Unknown expression". The two
+        ways to get one are `$toHashedIndexKey`, which is internal and whose
+        value no other engine can reproduce, and `$function`, which runs
+        server-side JavaScript that would have to carry its own MD5 and that
+        several MongoDB-compatible services do not allow at all.
+
+        So the documents are read and folded on this machine, using the same
+        rendering and the same arithmetic the SQL engines use in-server. The
+        answer is identical; what differs is that the collection crosses the
+        network to produce it, and `check` says so rather than letting the
+        number imply otherwise.
+        """
+        from .. import canon, rowtext
+        coll = self._client(side)[self._d(side, db)][table]
+        fields = [name for name, _ in columns]
+        classes = dict(columns)
+        total, n = 0, 0
+        projection = {f: 1 for f in fields}
+        projection.setdefault("_id", 1 if "_id" in fields else 0)
+        for doc in coll.find({}, projection):
+            parts = []
+            for name in fields:
+                value = doc.get(name)
+                text = (None if value is None
+                        else canon.render_value(classes[name], value))
+                if text is None:
+                    parts.append(f"{rowtext.NULL_LEN}:")
+                else:
+                    parts.append(f"{len(text)}:{text}")
+            total = canon.digest_step(total, rowtext.SEP.join(parts))
+            n += 1
+        return (n, str(total))
+
     def _shape(self, side, db):
         d = self._client(side)[self._d(side, db)]
         shape = {}

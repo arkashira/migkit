@@ -140,6 +140,23 @@ TYPES = {
         "text": "text", "clob": "text",
         "blob": "bytes",
     },
+    # MongoDB reports the BSON type of what is actually stored rather than a
+    # declared one, and a field can hold more than one across a collection.
+    # `type_class` takes the set with `null` and `missing` removed; a field
+    # left holding two real types is genuinely ambiguous and comes back
+    # unmapped rather than resolved to whichever is more common.
+    #
+    # `decimal` (Decimal128), `object` and `array` are absent on purpose:
+    # migkit has not measured a rendering for them that another engine
+    # reproduces, and claiming one would be claiming the comparison works.
+    "mongodb": {
+        "int": "integer", "long": "integer",
+        "double": "float",
+        "bool": "boolean",
+        "string": "text", "objectid": "text", "symbol": "text",
+        "bindata": "bytes",
+        "date": "timestamp",
+    },
 }
 
 # MySQL has no boolean: `tinyint(1)` is the convention and holds -128..127.
@@ -164,6 +181,15 @@ def type_class(engine, declared):
             base = base.split(cut)[0].strip()
     if base.endswith(" unsigned"):
         base = base[:-9].strip()
+    if "|" in base:
+        # a set of types rather than one, which is how a schemaless engine
+        # answers. `null` and `missing` say nothing about what the field
+        # holds when it holds something, so they are dropped; anything left
+        # over one real type is ambiguous and stays unmapped.
+        seen = {t.strip() for t in base.split("|")} - {"null", "missing", ""}
+        if len(seen) != 1:
+            return None
+        base = seen.pop()
     return TYPES.get(engine, {}).get(base)
 
 
@@ -276,6 +302,16 @@ def render_value(cls, value):
         return value if isinstance(value, str) else str(value)
     if cls == "bytes":
         return bytes(value).hex().upper()
+    if cls == "boolean":
+        # 0/1, which is what PostgreSQL's boolean renders to and what a
+        # MySQL tinyint(1) already is
+        return "1" if value else "0"
+    if cls == "timestamp":
+        # the same six-place form `to_char(..., 'US')` and
+        # `date_format(..., '%f')` produce. BSON dates carry milliseconds, so
+        # the last three digits are zeros - which is the truth about what the
+        # field can hold, not a rounding migkit chose.
+        return value.strftime("%Y-%m-%d %H:%M:%S.%f")
     raise ValueError(f"no in-process rendering for class {cls!r}")
 
 
@@ -314,9 +350,21 @@ def comparable(engine, declared):
         return (None, f"{engine} type {declared!r} has no canonical rendering"
                       " in migkit, so a comparison across engines would be"
                       " comparing two renderings nobody checked agree")
-    if engine not in BUILDERS:
+    if not renders(engine):
         return (None, f"no canonical rendering for engine {engine!r}")
     return (cls, "")
+
+
+# Engines that produce the canonical text in this process rather than in a
+# SQL expression. Not a lesser arrangement - SQLite is in both lists, because
+# it runs here anyway - but for MongoDB it means the documents cross the
+# network to be folded, which `check` reports rather than leaves implied.
+IN_PROCESS = {"mongodb", "sqlite"}
+
+
+def renders(engine):
+    """Whether migkit can produce canonical text for this engine at all."""
+    return engine in BUILDERS or engine in IN_PROCESS
 
 
 # The digest two different engines can both compute, over the canonical row

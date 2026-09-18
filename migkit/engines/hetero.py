@@ -205,7 +205,8 @@ class HeteroEngine(Engine):
                 rows.append((scope, "ok",
                              f"rows {a[0]:,} and every compared column equal"
                              f" across {self.src_name}/{self.dst_name}"
-                             f" (digest {a[1]}){tail}", a[0], b[0]))
+                             f" (digest {a[1]}){self._where_folded()}{tail}",
+                             a[0], b[0]))
             elif a[0] != b[0]:
                 rows.append((scope, "diff",
                              f"rows src={a[0]:,} dst={b[0]:,}{tail}",
@@ -221,6 +222,32 @@ class HeteroEngine(Engine):
         return [Result("data", scope, status, detail)
                 for scope, status, detail, _, _
                 in self._neutral_rows(db, table, stream)]
+
+    def _where_folded(self):
+        """A clause naming any side that had to fold its rows on this machine.
+
+        The digest is the same number either way; what is not the same is
+        where the data went to produce it. An engine with no hashing operator
+        - MongoDB has none at all - sends its documents here, and a report
+        that read identically for both cases would be hiding the one fact an
+        operator needs to size the run.
+        """
+        from .. import canon
+        remote, local = [], []
+        for name, engine in ((self.src_name, self.src_engine),
+                             (self.dst_name, self.dst_engine)):
+            if engine.CANON_ENGINE not in canon.IN_PROCESS:
+                continue
+            (remote if engine.OVER_NETWORK else local).append(name)
+        parts = []
+        if remote:
+            parts.append(f"{', '.join(remote)} has no hashing operator of its"
+                         " own, so its rows crossed the network to be folded"
+                         " here")
+        if local:
+            parts.append(f"{', '.join(local)} was folded in this process,"
+                         " which is where it runs anyway")
+        return (" - " + "; ".join(parts)) if parts else ""
 
     def _can_compare_neutrally(self):
         return bool(self.src_engine.CANON_ENGINE

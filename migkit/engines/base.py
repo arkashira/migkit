@@ -339,6 +339,12 @@ class Engine:
     # Which rendering family in `migkit.canon` this engine speaks, or "".
     CANON_ENGINE = ""
 
+    # Whether reading this engine's data means moving it across a network.
+    # A server does; a file on this disk does not, and a report that told an
+    # operator their local SQLite file had been shipped over the wire would
+    # be wrong in a way that costs trust in every other line.
+    OVER_NETWORK = True
+
     def _no_canon(self, what):
         return NotImplementedError(
             f"{type(self).__name__} cannot {what} for a cross-engine"

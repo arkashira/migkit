@@ -55,6 +55,7 @@ class SQLiteEngine(Engine):
         conn.create_aggregate("migkit_digest", 1, _Digest)
 
     CANON_ENGINE = "sqlite"
+    OVER_NETWORK = False
 
     def neutral_tables(self, side, db):
         return self._tables(side)
