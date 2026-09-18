@@ -232,3 +232,48 @@ def comparable(engine, declared):
     if engine not in BUILDERS:
         return (None, f"no canonical rendering for engine {engine!r}")
     return (cls, "")
+
+
+# The digest two different engines can both compute, over the canonical row
+# text above.
+#
+# migkit's own per-engine checksums cannot be used for this: PostgreSQL folds
+# rows with `sum(...::bit(64)::bigint)` and MySQL with `bit_xor(conv(...))`,
+# which are different functions of the same data and never meet. What both can
+# express is a sum over a fixed-width prefix of the row's MD5.
+#
+# 60 bits rather than 64, measured: MySQL's `conv()` returns a string, and
+# summing it coerces to DOUBLE - the same three rows came back as
+# `7.50945936868949e17` on MySQL against `750945936868948924` on PostgreSQL,
+# a difference produced entirely by the aggregate. Casting to `decimal(65,0)`
+# fixes that; 60 bits keeps every intermediate inside a signed 64-bit integer
+# so neither side has to be trusted with an overflow rule.
+#
+# `sum` rather than `bit_xor` because it is in every engine at every version -
+# PostgreSQL only grew a native `bit_xor` in 14, which is why AWS tells its
+# own customers to hand-create the aggregate on 12 and 13.
+DIGEST_HEX = 15
+DIGEST_BITS = DIGEST_HEX * 4
+
+
+def digest_expr(engine, row_expr):
+    """Aggregate yielding one number for a whole table, comparable across
+    engines. Order-independent, so neither side has to sort."""
+    if engine == "mysql":
+        return (f"coalesce(sum(cast(conv(substr(md5({row_expr}),1,"
+                f"{DIGEST_HEX}),16,10) as decimal(65,0))), 0)")
+    if engine == "postgres":
+        return (f"coalesce(sum(('x'||substr(md5({row_expr}),1,{DIGEST_HEX}))"
+                f"::bit({DIGEST_BITS})::bigint::numeric), 0)")
+    raise ValueError(f"no cross-engine digest for engine {engine!r}")
+
+
+def row_expr(engine, columns):
+    """The canonical injective row text for `[(name, class)]`."""
+    from . import rowtext
+    parts = [expr(engine, name, cls) for name, cls in columns]
+    if engine == "mysql":
+        return rowtext.mysql_row_from(parts)
+    if engine == "postgres":
+        return rowtext.postgres_row_from(parts)
+    raise ValueError(f"no canonical row text for engine {engine!r}")

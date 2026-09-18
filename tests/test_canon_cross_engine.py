@@ -71,7 +71,14 @@ def _wait(port, timeout=180):
 
 
 def _my(sql, db="cx"):
+    # `--default-character-set` is not decoration. Without it the client
+    # negotiates latin1, and `café` sent as UTF-8 bytes is stored as the five
+    # characters `cafÃ©`. Reading it back through the same connection undoes
+    # the damage, so a column-by-column comparison still passes while the two
+    # sides hold different data - which is how the row-length prefix caught a
+    # seed that every earlier assertion had been happy with.
     r = subprocess.run(["docker", "exec", MY, "mysql", "-uroot", "-ptest",
+                        "--default-character-set=utf8mb4",
                         "-N", "-B", "-D", db, "-e", sql],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -237,3 +244,69 @@ def test_the_values_mysql_cannot_hold_are_marked_not_rendered(pair):
             _my("drop table ext")
     finally:
         _pg("drop table ext")
+
+
+def _classes():
+    """[(name, class)] per engine, from the types each server declares."""
+    my_t, pg_t = _declared()
+    my, pg = [], []
+    for name, _, _, _, _ in COLS:
+        mcls, mwhy = c.comparable("mysql", my_t[name])
+        pcls, pwhy = c.comparable("postgres", pg_t[name])
+        assert mcls and pcls, (name, mwhy, pwhy)
+        my.append((name, mcls))
+        pg.append((name, pcls))
+    return my, pg
+
+
+def test_the_whole_row_encodes_to_the_same_text_on_both_engines(pair):
+    """One string per row, length-prefixed so a separator inside a value
+    cannot shift a field boundary, built from the canonical rendering of each
+    column rather than the column itself."""
+    my_cols, pg_cols = _classes()
+    a = _my(f"select {c.row_expr('mysql', my_cols)} from v")
+    b = _pg(f"select {c.row_expr('postgres', pg_cols)} from v")
+    assert a == b, f"\nmysql={a!r}\npg   ={b!r}"
+    assert a.startswith("19:9223372036854775807|"), a
+
+
+def test_the_digest_agrees_across_engines(pair):
+    """The number that actually crosses the network. Neither side sends a
+    row: each folds its own table down to one value, and the two values are
+    compared."""
+    my_cols, pg_cols = _classes()
+    a = _my(f"select count(*), {c.digest_expr('mysql', c.row_expr('mysql', my_cols))} from v")
+    b = _pg(f"select count(*), {c.digest_expr('postgres', c.row_expr('postgres', pg_cols))} from v")
+    assert a == b, f"\nmysql={a!r}\npg   ={b!r}"
+    assert a.split("\t")[1] != "0", a
+
+
+def test_a_one_character_change_moves_the_digest(pair):
+    """Without this the agreement above could come from a digest that is the
+    same number for every table."""
+    my_cols, pg_cols = _classes()
+    def digest_pg():
+        return _pg(f"select {c.digest_expr('postgres', c.row_expr('postgres', pg_cols))} from v")
+    before = digest_pg()
+    _pg("update v set c_txt = 'cafe'")
+    try:
+        assert digest_pg() != before
+    finally:
+        _pg("update v set c_txt = 'café'")
+    assert digest_pg() == before
+
+
+def test_the_digest_does_not_degrade_to_floating_point_on_mysql(pair):
+    """MySQL's `conv()` returns a string and summing it coerces to DOUBLE.
+    Measured, the same three rows came back as `7.50945936868949e17` from
+    MySQL against `750945936868948924` from PostgreSQL - a difference the
+    aggregate invented. The cast to decimal is what stops it, so a digest
+    that has grown an exponent is this bug coming back."""
+    my_cols, _ = _classes()
+    got = _my(f"select {c.digest_expr('mysql', c.row_expr('mysql', my_cols))} from v")
+    assert "e" not in got.lower() and "." not in got, got
+
+    naive = _my("select sum(conv(substr(md5(c_txt),1,15),16,10)) from v")
+    exact = _my("select sum(cast(conv(substr(md5(c_txt),1,15),16,10)"
+                " as decimal(65,0))) from v")
+    assert naive != exact, (naive, exact)

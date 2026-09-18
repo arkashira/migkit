@@ -94,3 +94,30 @@ def test_every_class_has_a_rendering_on_every_engine_that_has_any():
         for cls in c.CLASSES:
             sql = c.expr(engine, "col", cls)
             assert sql and "col" in sql, (engine, cls)
+
+
+def test_the_digest_is_refused_for_an_engine_that_has_no_rule():
+    """Dispatch that does not recognise its input raises. A cross-engine
+    digest silently falling back to one engine's own composition would
+    compare two different functions of the data and call the result a
+    mismatch."""
+    with pytest.raises(ValueError):
+        c.digest_expr("mongodb", "row")
+    with pytest.raises(ValueError):
+        c.row_expr("sqlite", [("a", "integer")])
+
+
+def test_the_digest_folds_with_sum_not_bit_xor():
+    """`bit_xor` arrived in PostgreSQL 14 - AWS tells its own customers to
+    hand-create the aggregate on 12 and 13 - while `sum` is in every engine
+    at every version."""
+    for engine in ("mysql", "postgres"):
+        sql = c.digest_expr(engine, "r")
+        assert "sum(" in sql and "bit_xor" not in sql, (engine, sql)
+
+
+def test_the_mysql_digest_is_cast_away_from_floating_point():
+    """MySQL's `conv()` returns a string and summing a string coerces to
+    DOUBLE, which loses the low digits: measured, the same rows gave
+    `7.50945936868949e17` against PostgreSQL's `750945936868948924`."""
+    assert "decimal(65,0)" in c.digest_expr("mysql", "r")

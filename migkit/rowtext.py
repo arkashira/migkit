@@ -60,13 +60,30 @@ def join(fragments):
     return f"concat_ws('{SEP}', " + ", ".join(fragments) + ")"
 
 
+def mysql_row_from(text_exprs):
+    """The injective row string for MySQL, given text expressions.
+
+    Expressions rather than column names, because a cross-engine comparison
+    hashes the *canonical* rendering of each value (see `migkit.canon`) rather
+    than the column, and the encoding around it has to be the same one.
+    """
+    return join([fragment(e, f"char_length({e})") for e in text_exprs])
+
+
+def postgres_row_from(text_exprs):
+    """The injective row string for PostgreSQL, given text expressions."""
+    parts = [
+        f"""coalesce(length({e})::text, '{NULL_LEN}')"""
+        f""" || ':' || coalesce({e}, '')"""
+        for e in text_exprs
+    ]
+    return (" || '" + SEP + "' || ").join(parts)
+
+
 def mysql_row(columns, quote='`'):
     """The injective row string for MySQL, given column names."""
-    return join([
-        fragment(f"cast({quote}{c}{quote} as char)",
-                 f"char_length(cast({quote}{c}{quote} as char))")
-        for c in columns
-    ])
+    return mysql_row_from([f"cast({quote}{c}{quote} as char)"
+                           for c in columns])
 
 
 def postgres_row(columns, alias="t"):
@@ -80,12 +97,7 @@ def postgres_row(columns, alias="t"):
     does not use one.
     """
     q = f'{alias}."{{}}"' if alias else '"{}"'
-    parts = [
-        f"""coalesce(length({q.format(c)}::text)::text, '{NULL_LEN}')"""
-        f""" || ':' || coalesce({q.format(c)}::text, '')"""
-        for c in columns
-    ]
-    return (" || '" + SEP + "' || ").join(parts)
+    return postgres_row_from([f"{q.format(c)}::text" for c in columns])
 
 
 def parse(encoded):
