@@ -70,6 +70,7 @@ def _seq_buffer():
 
 
 class PostgresEngine(Engine):
+    ENGINE_FAMILY = "postgres"
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = True
 
@@ -2434,6 +2435,8 @@ class PostgresEngine(Engine):
         hw = self._handwork(avail)
         items += hw.rows() + hw.summary()
         items += self._mover_leftovers()
+        items += self._client_tool_versions(
+            ("pg_dump", "pg_restore", "psql"), dv)
         return items
 
     def _mover_leftovers(self):

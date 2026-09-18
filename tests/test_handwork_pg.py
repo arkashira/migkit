@@ -197,3 +197,29 @@ def test_assess_ends_with_the_inventory_and_no_estimate(pair, tmp_path):
     text = " ".join(i["item"] + i["detail"] for i in items).lower()
     for word in ("person-day", "man-day", "effort score"):
         assert word not in text, word
+
+
+def test_assess_reports_a_client_tool_newer_than_the_server(pair, tmp_path):
+    """The check that exists because a newer client emits settings an older
+    server rejects, and the failure lands mid-transaction.
+
+    This machine's `pg_dump` is ahead of the PostgreSQL 16 containers, which
+    is the normal state of a laptop with Homebrew on it - so the finding is
+    expected here rather than incidental. If the two ever match, the row is a
+    pass and the assertion below follows it.
+    """
+    from migkit.util import run, which
+    assert which("pg_dump"), "pg_dump is not installed, so this tests nothing"
+    items = _engine(tmp_path).assess()
+    rows = [i for i in items if i["scope"] == "client tools"]
+    assert rows, [i["scope"] for i in items]
+    names = {i["item"] for i in rows}
+    assert any("pg_dump" in n for n in names), names
+
+    client = run(["pg_dump", "--version"], check=False).stdout
+    from migkit import toolversion as tv
+    ahead = tv.major(client, "pg_dump") > 16
+    hit = [i for i in rows if "pg_dump" in i["item"]][0]
+    assert hit["level"] == ("warn" if ahead else "pass"), (hit, client)
+    if ahead:
+        assert "mid-transaction" in hit["detail"], hit

@@ -11,6 +11,7 @@ SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
 
 
 class MySQLEngine(Engine):
+    ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = True
 
@@ -2014,6 +2015,7 @@ class MySQLEngine(Engine):
         inv = self._handwork()
         items += inv.rows() + inv.summary()
         items += self._mover_leftovers()
+        items += self._client_tool_versions(("mysqldump", "mysql"), dv)
         return items
 
     def _mover_leftovers(self):

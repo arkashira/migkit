@@ -194,6 +194,34 @@ class Engine:
     def watch_sample(self, db):
         return {}
 
+    # which family of client tools this engine uses, for the version check
+    ENGINE_FAMILY = ""
+
+    def _client_tool_versions(self, tools, server_version):
+        """assess rows for client tools running ahead of the target server.
+
+        `doctor` says whether a program is installed; this says whether it can
+        talk to the server it is about to be pointed at. See
+        `migkit.toolversion` for the two measurements behind it.
+        """
+        from .. import toolversion as _tv
+        from ..util import run, which
+        got = {}
+        for tool in tools:
+            if not which(tool):
+                continue
+            try:
+                got[tool] = run([tool, "--version"], check=False).stdout
+            except Exception:
+                got[tool] = None
+        out = []
+        for level, tool, detail in _tv.report(got, server_version,
+                                              self.ENGINE_FAMILY):
+            out.append({"level": level, "scope": "client tools",
+                        "item": f"{tool} against this target",
+                        "detail": detail})
+        return out
+
     def assess(self):
         return [{"level": "warn", "scope": "-",
                  "item": "assess not implemented for this engine yet",
