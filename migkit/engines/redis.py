@@ -306,28 +306,13 @@ class RedisEngine(Engine):
             f"{checked} keys value-equal, {seen_dst} target keys all present"
             f" on the source ({mode}, pipelined)")]
 
-    def _drilldown_path(self, db, kind):
-        return self.hop.report_dir(db) / f"data-db{db}.{kind}"
-
     def _write_drilldown(self, db, **kinds):
-        """The keys behind the counts, one per line, in the estate's file
-        names - which is what makes a repair possible at all.
-
-        A run that finds nothing removes the file rather than leaving the
-        previous run's list behind for `sync` to act on.
-        """
-        for kind, keys in kinds.items():
-            path = self._drilldown_path(db, kind)
-            if keys:
-                path.write_text("\n".join(sorted(keys)) + "\n")
-            elif path.exists():
-                path.unlink()
+        """The keys behind the counts, through the shared writer."""
+        self._write_drill(db, f"db{db}",
+                          **{k: sorted(v) for k, v in kinds.items()})
 
     def _read_drilldown(self, db, kind):
-        path = self._drilldown_path(db, kind)
-        if not path.exists():
-            return []
-        return [l for l in path.read_text().splitlines() if l]
+        return self._read_drill(db, f"db{db}", kind)
 
     def repair_plan(self, db, kind):
         """What `migkit sync --kind rows` would do to this database.

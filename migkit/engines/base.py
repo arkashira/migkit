@@ -454,6 +454,29 @@ class Engine:
         """
         raise self._no_canon("read rows by key")
 
+    def _drill_path(self, db, name, kind):
+        return self.hop.report_dir(db) / f"data-{name}.{kind}"
+
+    def _write_drill(self, db, name, **kinds):
+        """The rows behind the counts, one per line, in the estate's file
+        names - which is what makes a repair possible at all.
+
+        A run that finds nothing removes the file rather than leaving the
+        previous run's list behind for `sync` to act on.
+        """
+        for kind, items in kinds.items():
+            path = self._drill_path(db, name, kind)
+            if items:
+                path.write_text("\n".join(str(i) for i in items) + "\n")
+            elif path.exists():
+                path.unlink()
+
+    def _read_drill(self, db, name, kind):
+        path = self._drill_path(db, name, kind)
+        if not path.exists():
+            return []
+        return [l for l in path.read_text().splitlines() if l]
+
     @staticmethod
     def _key_of(columns, key, row):
         """The canonical text of one row's key, for matching across engines."""
