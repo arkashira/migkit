@@ -206,3 +206,58 @@ def test_a_type_with_no_rendering_is_named_and_the_rest_still_compare(engine):
     finally:
         pg_sql("alter table shape drop column doc")
         my_sql("alter table shape drop column doc", "cx")
+
+
+def test_a_table_with_no_primary_key_is_still_verified(engine):
+    """AWS DMS reports `ValidationState: No primary key` and never compares
+    such a table at all - its validation walks rows by key. The digest here
+    is an order-independent sum over every row, so a key is not needed to
+    answer whether the two sides hold the same contents.
+
+    What a key would buy is *which* row differs, not *whether*. Answering
+    only the second question is less than a keyed comparison and far more
+    than nothing, which is what a table like this gets today.
+    """
+    assert pg_sql("create table nokey (a int, b text);"
+                  " insert into nokey values (1,'x'),(1,'x'),(2,'y'),"
+                  "(null,null)").returncode == 0
+    assert my_sql("create table nokey (a int, b text);"
+                  " insert into nokey values (1,'x'),(1,'x'),(2,'y'),"
+                  "(null,null)", "cx").returncode == 0
+    try:
+        assert pg_sql("select count(*) from nokey").stdout.strip() == "4"
+        r = _one(engine, "nokey")
+        assert r.status == "ok", r.detail
+        assert "rows 4" in r.detail
+
+        # the hard half: one of two *identical* rows changed, so the row
+        # count does not move and there is no key to address the row by
+        assert my_sql("update nokey set b='z' where b='x' limit 1",
+                      "cx").returncode == 0
+        r = _one(engine, "nokey")
+        assert r.status == "diff", r.detail
+        assert "rows 4 match but the contents do not" in r.detail
+    finally:
+        pg_sql("drop table nokey")
+        my_sql("drop table nokey", "cx")
+
+
+def test_a_null_row_is_not_equal_to_a_row_of_empty_strings(engine):
+    """The length prefix in the row text is what keeps these apart: a NULL
+    carries a marker that is not a number, so no literal can impersonate it.
+    Across engines this matters more than within one, because the two sides
+    render an empty string identically and a NULL differently."""
+    assert pg_sql("create table nulls (a text, b text);"
+                  " insert into nulls values (null, null)").returncode == 0
+    assert my_sql("create table nulls (a text, b text);"
+                  " insert into nulls values (null, null)",
+                  "cx").returncode == 0
+    try:
+        assert _one(engine, "nulls").status == "ok"
+        assert my_sql("update nulls set a=''", "cx").returncode == 0
+        r = _one(engine, "nulls")
+        assert r.status == "diff", r.detail
+        assert "contents do not" in r.detail
+    finally:
+        pg_sql("drop table nulls")
+        my_sql("drop table nulls", "cx")
