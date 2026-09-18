@@ -86,6 +86,135 @@ class GenericEngine(Engine):
         return (lines[-1][-160:] if lines else
                 (p.stdout or "").strip()[-160:] or "no output at all")
 
+    #: a column name no table will have, used to make reladiff list the real
+    #: ones: `Column 'x' not found in table 1, named 't'. Columns: id, v`
+    PROBE_COLUMN = "migkit_probe_no_such_column"
+    PROBE_TABLE = "migkit_probe_no_such_table"
+    #: how many tables assess will probe before it stops and says so
+    ASSESS_TABLES = 10
+
+    def _probe(self, side, table, key=None):
+        """One reladiff call that is meant to fail, read for what it says.
+
+        Every question assess wants answered comes back as an error message
+        before reladiff compares anything, so none of these probes scan a
+        table. Measured, all four exit 0 and differ only in what they print:
+
+            reachable, table absent   Table 'x' does not exist, or has no columns
+            wrong key                 Column 'k' not found in table 1, named 't'.
+                                      Columns: id, v
+            unsupported scheme        Scheme 'sqlite' currently not supported
+            nothing listening         Is the server running on that host ...
+
+        The wrong-key one is the useful one twice over: asking for a column
+        that cannot exist is how migkit gets the real column list without a
+        query of its own.
+        """
+        if not which("reladiff"):
+            return None
+        url = self._url(side)
+        cmd = ["reladiff", url, table, table, "--stats",
+               "-k", key or self.PROBE_COLUMN]
+        return run(cmd, check=False, timeout=120)
+
+    @staticmethod
+    def _probe_says(p):
+        """(kind, detail) for one probe's output."""
+        text = ((p.stderr or "") + (p.stdout or "")).strip()
+        last = text.splitlines()[-1].strip() if text else ""
+        if "currently not supported" in text:
+            return "scheme", last
+        if "does not exist, or has no columns" in text:
+            return "no-table", last
+        if "not found in table" in text:
+            columns = text.rsplit("Columns:", 1)[-1].strip() if "Columns:" \
+                in text else ""
+            return "columns", columns
+        if not text:
+            return "quiet", "reladiff said nothing at all"
+        return "unreachable", last[-160:]
+
+    def _assess_extra(self):
+        """What has to be true before reladiff is pointed at anything.
+
+        This engine shells out, and the tool it shells out to reports every
+        failure the same way: a line on stderr and an exit status of 0. A run
+        that never compared a row looks like a run that found no differences
+        unless someone asks these questions first.
+        """
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "tool", "item": item,
+                          "detail": str(detail)})
+        found = which("reladiff")
+        if not found:
+            add("fail", "reladiff", "not on PATH - the generic engine is a"
+                                    " wrapper around it and can do nothing"
+                                    " without it")
+            return items
+        version = run(["reladiff", "--version"], check=False, timeout=60)
+        add("pass", "reladiff",
+            f"{found} ({(version.stdout or version.stderr).strip()[:60]})")
+
+        try:
+            tables = self._tables()
+        except SystemExit as e:
+            add("fail", "tables to compare", str(e))
+            tables = []
+        key = self.hop.options.get("key", "id")
+        keys = [key] if isinstance(key, str) else list(key)
+        add("pass" if self.hop.options.get("key") else "warn",
+            "key columns",
+            f"{', '.join(keys)}"
+            + ("" if self.hop.options.get("key") else
+               " - not configured, so the default `id` is being used"))
+
+        usable = []
+        for side in ("src", "dst"):
+            try:
+                self._url(side)
+            except SystemExit as e:
+                add("fail", f"{side} url", str(e))
+                continue
+            kind, detail = self._probe_says(self._probe(side,
+                                                        self.PROBE_TABLE))
+            if kind == "no-table":
+                usable.append(side)
+                add("pass", f"{side} url",
+                    "reachable, and reladiff speaks this scheme")
+            elif kind == "scheme":
+                add("fail", f"{side} url",
+                    f"{detail} - reladiff exits 0 on this, so a check would"
+                    " have looked like a clean run")
+            else:
+                add("fail", f"{side} url", detail)
+
+        # a side that could not be reached at all is not asked about its
+        # tables: the answer would be the same sentence again, once per table
+        for table in tables[:self.ASSESS_TABLES] if usable else []:
+            for side in usable:
+                kind, detail = self._probe_says(self._probe(side, table))
+                if kind == "columns":
+                    have = {c.strip().lower() for c in detail.split(",") if c}
+                    missing = [k for k in keys if k.lower() not in have]
+                    add("pass" if not missing else "fail",
+                        f"{side} {table}",
+                        f"{len(have)} columns"
+                        if not missing else
+                        f"key column(s) {', '.join(missing)} are not there:"
+                        f" {detail}")
+                elif kind == "no-table":
+                    add("fail", f"{side} {table}", "not on this side")
+                else:
+                    add("warn", f"{side} {table}",
+                        f"{detail} - unknown, not clean")
+        if len(tables) > self.ASSESS_TABLES:
+            add("warn", "tables probed",
+                f"{self.ASSESS_TABLES} of {len(tables)} - the rest were not"
+                " looked at here")
+        return items
+
     def check_counts(self, db):
         bad = []
         blind = []

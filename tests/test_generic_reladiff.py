@@ -170,3 +170,91 @@ def test_the_engine_says_what_is_missing_before_it_runs_anything(tmp_path):
     hop.options["tables"] = []
     with pytest.raises(SystemExit, match="options.tables"):
         eng._tables()
+
+
+# ---- assess: the questions worth asking before reladiff runs at all -----
+
+def _rows(items, needle):
+    return [i for i in items if needle in i["item"]]
+
+
+@needs_reladiff
+def test_assess_confirms_both_urls_and_the_key_before_anything_runs(pg_pair):
+    _seed(pg_pair)
+    items = _engine(pg_pair).assess()
+    assert _rows(items, "reladiff")[0]["level"] == "pass"
+    assert "v0.6" in _rows(items, "reladiff")[0]["detail"], items[0]
+    for side in ("src", "dst"):
+        assert _rows(items, f"{side} url")[0]["level"] == "pass", items
+        table = _rows(items, f"{side} t")[0]
+        assert table["level"] == "pass", table
+        assert "2 columns" in table["detail"], table
+
+
+@needs_reladiff
+def test_assess_names_a_key_column_that_is_not_there(pg_pair):
+    """The failure this exists to catch: reladiff prints one line about the
+    column and exits 0, so a run with a wrong key looks like a run that
+    found nothing."""
+    _seed(pg_pair)
+    items = _engine(pg_pair, key="nosuchcol").assess()
+    for side in ("src", "dst"):
+        row = _rows(items, f"{side} t")[0]
+        assert row["level"] == "fail", row
+        assert "nosuchcol" in row["detail"], row
+        # and it says what the table does have
+        assert "id, v" in row["detail"], row
+
+
+@needs_reladiff
+def test_assess_refuses_a_scheme_reladiff_does_not_speak(pg_pair):
+    _seed(pg_pair)
+    eng = _engine(pg_pair)
+    eng.hop.target.options["url"] = "sqlite:///tmp/does-not-matter.db"
+    items = eng.assess()
+    bad = _rows(items, "dst url")[0]
+    assert bad["level"] == "fail", bad
+    assert "not supported" in bad["detail"], bad
+    assert "exits 0" in bad["detail"], bad
+    # the side that cannot be reached is not asked about every table in turn
+    assert not _rows(items, "dst t"), items
+    assert _rows(items, "src t")[0]["level"] == "pass"
+
+
+@needs_reladiff
+def test_assess_names_a_table_that_is_on_neither_side(pg_pair):
+    _seed(pg_pair)
+    items = _engine(pg_pair, tables=["ghost"]).assess()
+    for side in ("src", "dst"):
+        row = _rows(items, f"{side} ghost")[0]
+        assert row["level"] == "fail", row
+        assert "not on this side" in row["detail"], row
+
+
+@needs_reladiff
+def test_assess_says_when_it_stopped_short_of_the_whole_list(pg_pair):
+    _seed(pg_pair)
+    eng = _engine(pg_pair, tables=["t"] * 12)
+    eng.ASSESS_TABLES = 2
+    items = eng.assess()
+    row = _rows(items, "tables probed")
+    assert row and row[0]["level"] == "warn", items
+    assert "2 of 12" in row[0]["detail"], row
+
+
+def test_assess_says_so_when_reladiff_is_not_installed(monkeypatch, tmp_path):
+    """No server needed: without the tool there is nothing this engine can
+    do, and that has to be the first line of the report rather than a
+    traceback from the first check."""
+    from migkit.engines import generic
+    from migkit.engines.generic import GenericEngine
+    monkeypatch.setattr(generic, "which", lambda name: None)
+    ep = Endpoint(host="x", port=0, user="", password="",
+                  options={"url": "postgresql://x/y"})
+    hop = Hop(name="g", engine="generic", source=ep, target=ep,
+              options={"tables": ["t"]})
+    hop.report_dir = lambda db=None: tmp_path
+    items = [i for i in GenericEngine(hop).assess() if i["scope"] == "tool"]
+    assert len(items) == 1, items
+    assert items[0]["level"] == "fail"
+    assert "not on PATH" in items[0]["detail"]
