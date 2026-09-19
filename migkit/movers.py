@@ -467,21 +467,50 @@ def pgcopydb_available():
     states its compatible range, which is the difference between a tool that
     works and one that reports success while moving nothing.
     """
-    global _PGCOPYDB_OK
-    if _PGCOPYDB_OK is not None:
-        return _PGCOPYDB_OK
-    ok = False
+    return bool(pgcopydb_runner())
+
+
+_PGCOPYDB_HOW = None
+
+
+def pgcopydb_runner():
+    """How to run pgcopydb here: the image, the local binary, or not at all.
+
+    The image is preferred because its build matches the server range it
+    states. The local binary is accepted for `copy table-data` because the
+    failure the image exists to avoid was re-measured and is narrower than
+    it looked: Homebrew's 0.18, built against PostgreSQL 18, does emit `SET
+    transaction_timeout = 0` and PostgreSQL 16 does reject it - the error
+    appears in the server log - and yet 50,000 and then 2,000,000 rows
+    arrived through `copy table-data` all the same. `clone` is the
+    subcommand that dies on it, and migkit does not use `clone`.
+
+    That is worth measuring against: on this machine pgcopydb moved a
+    555 MB table in 4.1 s against the dump path's 11.7 s, and 2,093 MB of
+    large objects in 18.2 s against 93.6 s. What makes taking the binary
+    safe rather than hopeful is the guard that runs afterwards: a move that
+    reports success and leaves the target empty is refused by
+    `Engine.moved_nothing`, so the failure this note describes cannot pass
+    as a completed migration.
+    """
+    global _PGCOPYDB_HOW
+    if _PGCOPYDB_HOW is not None:
+        return _PGCOPYDB_HOW
+    how = ""
     if which("docker"):
         try:
             p = run(["docker", "image", "inspect", PGCOPYDB_IMAGE],
                     check=False, timeout=20)
-            ok = p.returncode == 0
+            if p.returncode == 0:
+                how = "image"
         except Exception:
-            ok = False
+            how = ""
+    if not how and which("pgcopydb"):
+        how = "local"
     # cached: `pick` is called per table, and starting a docker client each
     # time to ask the same question would cost more than the answer is worth
-    _PGCOPYDB_OK = ok
-    return ok
+    _PGCOPYDB_HOW = how
+    return how
 
 
 def pgcopydb_move(hop, db, workers, go, log):
@@ -526,11 +555,25 @@ def pgcopydb_move(hop, db, workers, go, log):
     dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
            f"@{t.host}:{t.port}/{ddb}")
     net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
-    cmd = ["docker", "run", "--rm", "--network", net,
-           "-e", f"PGCOPYDB_SOURCE_PGURI={src}",
-           "-e", f"PGCOPYDB_TARGET_PGURI={dst}",
-           PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
-           "--table-jobs", str(workers)]
+    how = pgcopydb_runner()
+    if how == "local":
+        # its own directory per run. pgcopydb keeps its state - including the
+        # exported snapshot - under /tmp/pgcopydb by default, so a second run
+        # finds the first one's snapshot and dies on it: measured,
+        # `FATAL Failed to use given --snapshot "00000003-00000048-1"`. The
+        # container path never hit this because each container brought its
+        # own filesystem; the binary shares the host's.
+        import tempfile
+        work = tempfile.mkdtemp(prefix="migkit-pgcopydb-")
+        cmd = ["pgcopydb", "copy", "table-data",
+               "--table-jobs", str(workers), "--dir", work,
+               "--source", src, "--target", dst]
+    else:
+        cmd = ["docker", "run", "--rm", "--network", net,
+               "-e", f"PGCOPYDB_SOURCE_PGURI={src}",
+               "-e", f"PGCOPYDB_TARGET_PGURI={dst}",
+               PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
+               "--table-jobs", str(workers)]
     # the password sits *before* the @, so splitting there and keeping the
     # front half kept the secret and threw the host away - the printed steps
     # are what an operator pastes into a ticket
@@ -547,13 +590,21 @@ def pgcopydb_move(hop, db, workers, go, log):
     # `--network host` is the VM's host, not this one. `ping` is the tool's
     # own answer to that question, and asking it first turns a failed move
     # into a fallback rather than an outage.
-    ping = cmd[:cmd.index(PGCOPYDB_IMAGE) + 1] + ["pgcopydb", "ping"]
+    if how == "local":
+        # `ping` does not take `--dir` - it answers with its usage if you
+        # give it one, which reads as a connectivity failure and sends the
+        # move down the fallback path for no reason
+        ping = ["pgcopydb", "ping", "--source", src, "--target", dst]
+    else:
+        ping = cmd[:cmd.index(PGCOPYDB_IMAGE) + 1] + ["pgcopydb", "ping"]
     try:
         _sh(ping)
     except Exception as e:
         if log:
-            log(f"pgcopydb cannot reach both endpoints from its container"
-                f" (network={net}): {str(e).splitlines()[-1][:120]}")
+            where = ("from its container"
+                     f" (network={net})" if how != "local" else "")
+            log(f"pgcopydb cannot reach both endpoints {where}:"
+                f" {str(e).splitlines()[-1][:120]}")
             log("falling back to the pg_dump path")
         return pgdump_move(hop, db, workers, go, log)
 

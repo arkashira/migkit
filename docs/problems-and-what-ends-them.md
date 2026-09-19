@@ -179,9 +179,16 @@ moved in 57.9 s and verified in 62.4 s, with migkit's own peak memory at
 30 MB and 333 MB - flat against the 1M run, because the digest is computed
 inside each server.
 
-**Missing:** the pairs with no native mover, LOBs in the benchmark table,
-and a comparison against pgcopydb on the same hardware. Until that
-comparison exists migkit makes no claim about being faster than anything.
+Since measuring it, the chooser takes pgcopydb from a local binary rather
+than insisting on the container image, which cut the same move from 11.7 s
+to 5.4 s - and every mover's result is now checked by
+`Engine.moved_nothing`, so a tool that exits 0 and leaves the target empty
+cannot be reported as a completed move. Test:
+`test_move_moved_something.py`.
+
+**Missing:** the pairs with no native mover, and a comparison against a
+managed service on the same hardware. Until that exists migkit makes no
+claim about being faster than anything beyond the two movers measured.
 
 ### C2. LOBs
 

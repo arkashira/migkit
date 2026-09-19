@@ -124,6 +124,23 @@ class Engine:
     def check_deep(self, db):
         return [Result("deep", db, "skip", "no deep checks for this engine yet")]
 
+    def moved_nothing(self, db):
+        """Tables the source has rows in and the target has none of.
+
+        The guard for the failure an external mover can produce without
+        saying so: it exits 0, prints its progress, and the target is empty.
+        Measured for real - pgcopydb built against a newer PostgreSQL emits
+        `SET transaction_timeout = 0`, an older server rejects it, and a
+        whole-database clone reports each rejection separately while moving
+        no rows at all.
+
+        An existence probe rather than a count, deliberately: this is the
+        "nothing arrived" case, and `migkit check` is what proves the rest.
+        Returns the table names, or **None** when the engine cannot answer -
+        which is not the same as an empty list, and the caller says so.
+        """
+        return None
+
     def settle_target(self, db):
         """Leave the target usable after a bulk load, or say nothing.
 

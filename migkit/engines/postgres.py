@@ -1397,6 +1397,28 @@ class PostgresEngine(Engine):
                 pats += [p for p in f.read_text().splitlines() if p.strip()]
         return [_re.compile(p) for p in pats]
 
+    def moved_nothing(self, db):
+        """Which tables the source has rows in and the target does not."""
+        try:
+            src = set(self._psql("src", db, self.USER_TABLES).splitlines())
+            dst = set(self._psql("dst", self._d("dst", db),
+                                 self.USER_TABLES).splitlines())
+        except Exception:
+            return None
+        empty = []
+        for t in sorted(x for x in src & dst if x):
+            sch, tbl = t.split(".", 1)
+            q = f'select 1 from "{sch}"."{tbl}" limit 1'
+            try:
+                has_src = bool(self._psql("src", db, q).strip())
+                has_dst = bool(self._psql("dst", self._d("dst", db),
+                                          q).strip())
+            except Exception:
+                return None
+            if has_src and not has_dst:
+                empty.append(t)
+        return empty
+
     def settle_target(self, db):
         """Analyze the target after a load, in stages.
 

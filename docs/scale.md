@@ -127,15 +127,17 @@ confirmed to fail without the fix (it reported 100 for a 400-row table).
 
 ## Notes and open questions
 
-- **The chooser should probably prefer pgcopydb, and does not yet.**
-  Measured above: 2.9x on a plain table, 5.2x with LOBs, at a fraction of
-  the host CPU. What stands in the way is `pgcopydb_available()` demanding
-  the container image because a local binary built against a newer
-  PostgreSQL breaks `clone` - a constraint measured here to **not** apply to
-  the `copy table-data` path migkit actually uses. Changing it needs a guard
-  that catches the failure the old note describes (a run that reports
-  success and moves nothing), which is the next piece of work rather than a
-  one-line edit.
+- **The chooser now takes pgcopydb from a local binary, with a guard.**
+  Measured end to end afterwards: the same 555 MB / 2,000,000-row move went
+  from 11.7 s to **5.4 s** through `migkit move --go`, truncate, analyze and
+  guard included. What made that safe rather than hopeful is
+  `Engine.moved_nothing`: after any mover reports success, the tables the
+  source has rows in must have rows on the target, or the command refuses to
+  say it finished. Two things the local binary needed that the container had
+  been hiding: its own `--dir` per run (pgcopydb keeps the exported snapshot
+  under `/tmp/pgcopydb` by default, and the second run died on the first
+  one's snapshot), and no `--dir` on `ping`, which answers with its usage
+  and reads as a connectivity failure.
 - **LOB numbers are above**, and the shape of the cost is clear: half the
   throughput per byte, and on the dump path most of the wall clock is host
   CPU spent compressing incompressible bytes.

@@ -122,7 +122,12 @@ def test_the_printed_command_does_not_leak_the_password(pair, tmp_path):
     from migkit import movers
     steps = movers.pgcopydb_move(_hop(tmp_path), "app", 4, False, None)
     joined = " ".join(steps)
-    assert "PGCOPYDB_SOURCE_PGURI" in joined
+    # the two connection strings have to be in there somewhere. Which form
+    # depends on how pgcopydb is being run: the container takes them as
+    # `PGCOPYDB_SOURCE_PGURI` environment variables, the local binary as
+    # `--source`/`--target`. Pinning one of those was pinning the runner
+    # rather than the behaviour.
+    assert ("PGCOPYDB_SOURCE_PGURI" in joined or "--source" in joined), joined
     # the password is the word before the @, which is exactly where a
     # split-on-@ redaction leaves it
     assert ":test@" not in joined, joined

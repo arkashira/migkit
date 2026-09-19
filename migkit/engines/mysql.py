@@ -1151,6 +1151,29 @@ class MySQLEngine(Engine):
                              f" {note}"))
         return res
 
+    def moved_nothing(self, db):
+        """Which tables the source has rows in and the target does not."""
+        ddb = self._d("dst", db)
+        try:
+            names = [r[0] for r in self._q(
+                "src", "select table_name from information_schema.tables"
+                       " where table_schema = %s and table_type = 'BASE TABLE'"
+                       " order by 1", (db,))]
+        except Exception:
+            return None
+        empty = []
+        for t in names:
+            try:
+                has_src = bool(self._q("src",
+                                       f"select 1 from `{db}`.`{t}` limit 1"))
+                has_dst = bool(self._q("dst",
+                                       f"select 1 from `{ddb}`.`{t}` limit 1"))
+            except Exception:
+                return None
+            if has_src and not has_dst:
+                empty.append(t)
+        return empty
+
     def settle_target(self, db):
         """`ANALYZE TABLE` every table that was just loaded.
 

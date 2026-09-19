@@ -1009,6 +1009,22 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
                     for s0 in steps:
                         console.print(f"  {s0}")
                     if go:
+                        # an external mover can exit 0 and leave the target
+                        # empty; saying "complete" over that is the one
+                        # thing a migration tool must never do
+                        empty = eng.moved_nothing(d)
+                        if empty:
+                            raise SystemExit(
+                                f"{v} reported success and {d} is still"
+                                f" empty on the target: "
+                                + ", ".join(empty[:6])
+                                + (" ..." if len(empty) > 6 else "")
+                                + ". Nothing has been marked as moved - look"
+                                  " at the mover's output above, and at the"
+                                  " target server's log")
+                        if empty is None:
+                            chat("  (this engine cannot confirm the rows"
+                                 " landed; `migkit check` is what proves it)")
                         _changelog(hop, {"op": f"move-{v}", "db": d})
                         # the load left the statistics behind it; the engine
                         # puts them right before anybody queries the target
