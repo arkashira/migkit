@@ -200,6 +200,58 @@ In order. Each item says what has to be measured before it is written.
    them apart. The envelope now carries a `coverage` block and reports
    `incomplete` rather than `same` when the run was narrowed, with
    `has_differences` left alone.
+17. **Mapping and transformation, verified rather than declared.** DMS and
+   DTS rename schemas, tables and columns and filter rows during a move,
+   and migkit has none of it - only a database-name map (`_d(side, db)`).
+   The shallow version is a rename list. **Deeper, and the part DMS cannot
+   do:** the same mapping drives the *verification* leg, so a renamed table
+   is compared against its renamed counterpart and a filtered load is
+   compared against the same filter - DMS's own validation is documented as
+   unable to validate a transformed target. Three more things it should do
+   that a rule list does not: translate one `mapping:` block into each
+   wrapped tool's own dialect (pgcopydb `--filters`, mydumper `--regex`,
+   `pg_dump -t/-T`, Debezium `table.include.list` + `RegexRouter`) so the
+   filtering happens at the mover and fewer bytes move; **refuse an
+   ambiguous mapping instead of guessing**, the way `hetero.match_tables`
+   already refuses two tables with the same unqualified name; and report a
+   rule that matched nothing, because a filter that silently matches
+   nothing is how a table goes missing.
+
+18. **Continuous verification that costs what changed, not what exists.**
+   GoldenGate Veridata compares on a schedule and reports; the comparison
+   is a pass over the tables. **migkit already has the stronger mechanism**
+   and it is worth saying so: `watch --verify --delta` re-verifies only the
+   rows touched since the last verified point, driven by the WAL slot,
+   binlog or change stream - implemented on postgres, mysql, mongodb, mssql
+   and kafka - and the LSN fence tells a real difference from in-flight
+   replication deterministically instead of waiting and hoping. What is
+   missing is not the mechanism but the **operation around it**: a per-table
+   ledger of last-verified position, verdict and cost; a sweep ordered by
+   risk (changed most, failed before, never verified) rather than
+   round-robin; and repair that stays bounded on a table too big to hold.
+   That is the Veridata capability, reached from a better starting point.
+
+19. **Bisection diffing across engines, on a rendering both sides agree
+   on.** `reladiff` is wired for PostgreSQL only. data-diff's bisection is
+   the right shape for a table too large to hash whole, and the reason it
+   cannot be trusted across engines is that it leans on each server's own
+   checksum semantics. **migkit has the missing piece already**: the canon
+   layer defines a canonical rendering per engine, so the bisection can run
+   over text both sides agree on. Two things it must do that data-diff does
+   not: a column with no canonical rendering is named per column rather
+   than quietly left out of the hash (catalogue D15), and a mismatch found
+   mid-bisection is put through the same in-flight fence before it is
+   called a difference.
+
+20. **PL/SQL conversion with behavioural proof.** Section H says stored
+   logic is reported and never converted. Ora2Pg converts it, and wrapping
+   Ora2Pg is the obvious move. **The deeper half is what nobody ships:** a
+   conversion is a guess until the two versions are run against the same
+   inputs and their outputs compared - which is the one thing a tool that
+   already owns a verification engine can do. Convert with Ora2Pg, run both
+   sides, compare with the machinery that already exists, and put what
+   could not be converted or could not be proven into `handwork` by name.
+
 
 ## Sources
 
