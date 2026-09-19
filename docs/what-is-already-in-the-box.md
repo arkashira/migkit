@@ -105,9 +105,8 @@ rather than moved in full and left failing its own check for ever.
 
     used:     source connector (MySQL, PostgreSQL), JDBC sink, upsert,
               delete.enabled, schema.evolution basic
-    unopened: signal.data.collection + signal.enabled.channels
-              (ad-hoc and incremental snapshot), SMT (RegexRouter,
-              Filter), other connectors on the same runtime
+    unopened: SMT (RegexRouter, Filter), other connectors on the same
+              runtime
 
 **Now open, and the measurement changed the design.** The `source`
 channel reads the request from a signalling table in the source database;
@@ -129,6 +128,15 @@ into that same table on the source, so it is not available without write
 access there. Blocking needs no table and works. `resnapshot_message`
 defaults to blocking for that reason, and says so where the operator
 reads it. Tests: `test_resnapshot_signal.py`.
+
+`table.exclude.list` is wired too: both connectors were asked what they
+accept (a config validate lists it for PostgreSQL and MySQL alike), so the
+hop's deny list maps across with no inversion, and the CDC leg stops
+carrying a table the bulk movers already skip. The values are regexes, so
+the dots are escaped - unescaped, `public.orders` would also match
+`publicXorders` and quietly stop streaming something nobody excluded.
+Unlike the signal keys, Debezium really does validate this one: a broken
+regex comes back `The 'table.exclude.list' value is invalid`.
 
 ### mongodump / mongorestore
 

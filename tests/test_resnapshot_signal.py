@@ -111,3 +111,98 @@ def test_incremental_is_not_the_default_and_the_reason_is_measured():
     from migkit import movers
     _, _, default = movers.resnapshot_message("h", ["public.t"])
     assert default["data"]["type"] == "BLOCKING", default
+
+
+def test_the_hops_exclude_list_reaches_the_connector(tmp_path, monkeypatch):
+    """Both connectors were asked, not assumed: a config validate against
+    Debezium 3.9 lists `table.exclude.list` for PostgreSQL and MySQL
+    alike, so the hop's deny list maps across with no inversion.
+    """
+    from migkit import movers
+
+    class Fake:
+        def __init__(self, hop):
+            pass
+
+        def neutral_tables(self, side, db):
+            return ["public.orders", "public.audit_log"]
+
+    import migkit.engines.postgres as pg
+    monkeypatch.setattr(pg, "PostgresEngine", Fake)
+    hop = Hop(name="sig", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["appdb"], exclude=["audit_log"])
+    hop.report_dir = lambda db=None: tmp_path
+    out = movers.stream_codegen(hop, ["appdb"], "postgres")
+    cfg = json.loads((out / "source-connector.json").read_text())["config"]
+    assert cfg["table.exclude.list"] == r"public\.audit_log", cfg
+
+
+def test_the_exclude_list_is_a_regex_with_its_dots_escaped():
+    """Debezium matches these as regular expressions against the whole
+    qualified name. An unescaped dot would make `public.orders` also match
+    `publicXorders` and quietly stop streaming a table nobody excluded."""
+    from migkit import movers
+    hop = Hop(name="x", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["appdb"], exclude=["audit_log"])
+    got = movers.debezium_exclude(hop, "appdb",
+                                  ["public.orders", "public.audit_log"],
+                                  "public")
+    assert got == r"public\.audit_log", got
+    import re
+    assert re.fullmatch(got, "public.audit_log")
+    assert not re.fullmatch(got, "publicXaudit_log")
+
+
+def test_mysql_names_are_qualified_by_database_not_by_public():
+    """PostgreSQL tables arrive as `schema.table`; MySQL's arrive bare and
+    Debezium wants `database.table`. Prefixing `public.` there would
+    exclude nothing at all."""
+    from migkit import movers
+    hop = Hop(name="x", engine="mysql",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["appdb"], exclude=["audit_log"])
+    got = movers.debezium_exclude(hop, "appdb", ["orders", "audit_log"],
+                                  "appdb")
+    assert got == r"appdb\.audit_log", got
+
+
+def test_a_hop_with_no_exclude_list_adds_no_key(tmp_path):
+    from migkit import movers
+    hop = Hop(name="sig", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["appdb"])
+    hop.report_dir = lambda db=None: tmp_path
+    out = movers.stream_codegen(hop, ["appdb"], "postgres")
+    cfg = json.loads((out / "source-connector.json").read_text())["config"]
+    assert "table.exclude.list" not in cfg, cfg
+
+
+def test_a_source_that_cannot_be_listed_leaves_the_stream_unfiltered(
+        tmp_path, monkeypatch):
+    """Guessing at table names would be worse: a wrong regex silently
+    stops streaming something nobody excluded."""
+    from migkit import movers
+
+    class Boom:
+        def __init__(self, hop):
+            pass
+
+        def neutral_tables(self, side, db):
+            raise RuntimeError("connection refused")
+
+    import migkit.engines.postgres as pg
+    monkeypatch.setattr(pg, "PostgresEngine", Boom)
+    hop = Hop(name="sig", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["appdb"], exclude=["audit_log"])
+    hop.report_dir = lambda db=None: tmp_path
+    out = movers.stream_codegen(hop, ["appdb"], "postgres")
+    cfg = json.loads((out / "source-connector.json").read_text())["config"]
+    assert "table.exclude.list" not in cfg, cfg

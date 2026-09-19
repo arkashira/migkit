@@ -426,7 +426,7 @@ class _MyIndexWindow:
         return False
 
 
-def excluded_tables(hop, db, tables):
+def excluded_tables(hop, db, tables, qualifier="public"):
     """The hop's excluded tables as concrete `schema.table` names.
 
     One resolution for every mover, and the reason is that the alternative
@@ -437,6 +437,10 @@ def excluded_tables(hop, db, tables):
     mover excludes a second, and `check` - which asks `hop.excluded()` -
     uses a third. Resolving here through the same `hop.excluded()` the
     check uses is what keeps the three answers identical.
+
+    `qualifier` is what an unqualified name is prefixed with. PostgreSQL
+    tables arrive as `schema.table` already; MySQL's arrive bare, and
+    Debezium wants them as `database.table`, so the caller says which.
     """
     if not getattr(hop, "exclude", None):
         return []
@@ -445,7 +449,7 @@ def excluded_tables(hop, db, tables):
         parts = [p for p in str(ident).split(".") if p]
         if hop.excluded(db, *parts):
             out.append(".".join(parts) if len(parts) > 1
-                       else f"public.{parts[0]}")
+                       else f"{qualifier}.{parts[0]}")
     return out
 
 
@@ -865,6 +869,27 @@ def stream_codegen(hop, dbs, engine):
             "plugin.name": "pgoutput",
             "slot.name": name.replace("-", "_"),
         })
+    # what the hop already excludes, kept out of the stream as well. The
+    # same resolution the bulk movers and `check` use, so a table nobody
+    # wants is not carried by the CDC leg either.
+    if getattr(hop, "exclude", None):
+        try:
+            from .engines.mysql import MySQLEngine
+            from .engines.postgres import PostgresEngine
+            one = dbs[0] if dbs else "postgres"
+            if src_is_mysql:
+                tables = MySQLEngine(hop).neutral_tables("src", one)
+                skip = debezium_exclude(hop, one, tables, one)
+            else:
+                tables = PostgresEngine(hop).neutral_tables("src", one)
+                skip = debezium_exclude(hop, one, tables, "public")
+        except Exception:
+            # a source that cannot be listed leaves the stream unfiltered
+            # rather than guessing at names; the README says so
+            skip = None
+        if skip:
+            source["config"]["table.exclude.list"] = skip
+
     dst_is_pg = engine in ("postgres", "hetero")
     jdbc = (f"jdbc:postgresql://{t.host}:{t.port}/" if dst_is_pg
             else f"jdbc:mysql://{t.host}:{t.port}/")
@@ -940,6 +965,25 @@ def _connect_api(method, path, body=None, port=8083, timeout=15):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
         return r.status, (_json.loads(raw) if raw else None)
+
+
+def debezium_exclude(hop, db, tables, qualifier):
+    """`table.exclude.list` for the connector, or None.
+
+    Both connectors were asked what they accept rather than assumed: a
+    config validate against Debezium 3.9 lists `table.exclude.list` and
+    `table.include.list` for PostgreSQL and MySQL alike, so the hop's
+    deny list maps straight across with no inversion.
+
+    The values are **regular expressions** matched against the whole
+    qualified name, so the dots are escaped - an unescaped `.` would make
+    `public.orders` also match `publicXorders`, and quietly stop streaming
+    a table nobody excluded.
+    """
+    names = excluded_tables(hop, db, tables, qualifier)
+    if not names:
+        return None
+    return ",".join(n.replace(".", "\\.") for n in names)
 
 
 def resnapshot_message(hop_name, tables, kind="blocking"):
