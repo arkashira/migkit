@@ -117,6 +117,39 @@ to be drained before a child can be created, `async_partitioning_in_progress`
 silently stopping maintenance, a unique key that must include the partition
 key) are not modelled.
 
+### A7. The order the target is built in
+
+**What happens.** The schema is restored in one piece, so every secondary
+index is on the table before a single row arrives, and the load maintains
+them one row at a time. It is the default shape of every "restore the
+schema, then load the data" runbook.
+
+Measured on 1,000,000 rows with three secondary indexes, on the sandbox's
+two shared cores:
+
+| | wall | on disk |
+|---|---|---|
+| indexes already present, then load | 4.48 s | **275 MB** |
+| load, then build the same indexes | 2.53 s (0.91 + 1.62) | **218 MB** |
+
+Not quite twice the time - and the part that does not go away: the table
+loaded with its indexes in place is **26% larger**, because an index
+maintained one row at a time does not pack the way one built in a single
+pass does. Nothing later reclaims that.
+
+**migkit: Ends it** - `test_setup_target_plan_pg.py`. `migkit schema
+--setup` prints the plan an operator runs by hand, and that plan now splits
+the restore at exactly the line that matters: `--section=pre-data` (tables,
+no indexes), then the load, then `--section=post-data` (indexes, foreign
+keys and triggers, built once over the loaded data). Measured: pre-data
+leaves the table with **0** indexes and post-data brings them back, and a
+test runs both halves against live servers rather than only reading the
+printed words.
+
+It also replaces the old advice to disable foreign keys and triggers by
+hand before the load - with post-data held back, they are not there to
+disable.
+
 ### A6. The bill for moving the bytes
 
 **What happens.** Egress is charged when data leaves a provider and ingress
@@ -627,11 +660,17 @@ answer was real. The one state MySQL does have, a secondary index InnoDB has
 marked corrupt, has no catalog column at all and surfaces only as error 1712.
 Unknown, not zero.
 
-**Also missing:** the settings that make the rebuild finish in the first
-place. The measured difference is not small - the same `CREATE INDEX` took
-21.99 s with `max_parallel_maintenance_workers=2` and 12.82 s with it at 8 -
-and `migkit move` does not raise it, or `maintenance_work_mem`, for the
-rebuild it triggers.
+**On the rebuild settings, a correction.** An earlier pass here recorded
+that `migkit move` should raise `maintenance_work_mem` and
+`max_parallel_maintenance_workers` for "the rebuild it triggers". Checked:
+**migkit never builds an index at all** - there is no `CREATE INDEX` in any
+code path, only in hint text, and `test_setup_target_plan_pg.py` pins that.
+And the settings themselves did not reproduce here: 64 MB to 1 GB and two
+workers to four made three index builds take **1.65 s against 1.54 s** on
+two vCPUs. The 21.99 s / 12.82 s figures came from an article on other
+hardware, so migkit does not recommend the setting.
+
+**What the same look did find** is in [A7](#a7-the-order-the-target-is-built-in).
 
 ### C6. The target rewrote the rows as they landed
 

@@ -98,10 +98,10 @@ In order. Each item says what has to be measured before it is written.
 3. ~~**The index nobody can see is broken.**~~ **Done** - `check --deep`
    reads `indisvalid` on both sides, tells apart the invalid index that costs
    every write from the one that only holds its name, and warns rather than
-   fails on a partitioned parent. **Still open from this item:** the settings
-   that make the rebuild finish - `migkit move` raises neither
-   `maintenance_work_mem` nor `max_parallel_maintenance_workers`, worth
-   21.99 s against 12.82 s on the same `CREATE INDEX`.
+   fails on a partitioned parent. **Corrected since:** migkit never builds an
+   index at all, and the rebuild settings did not reproduce on this
+   hardware (1.65 s against 1.54 s). What the printed setup plan *did*
+   need was the ordering - see the entry on A7.
 4. **The sort order that moved.** **Done** - `check --deep` compares the
    recorded collation version against the one the OS provides now, on both
    sides, for every collation something is actually sorted by. The duplicate
