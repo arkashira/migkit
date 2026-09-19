@@ -119,7 +119,7 @@ def test_settings_that_really_are_equal_still_pass():
 
 @pytest.fixture(scope="module")
 def auth_mongo():
-    subprocess.run(["docker", "rm", "-f", MG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MG], capture_output=True)
     subprocess.run(
         ["docker", "run", "-d", "--name", MG, "-p", f"{MG_PORT}:27017",
          "-e", f"MONGO_INITDB_ROOT_USERNAME={USER}",
@@ -140,7 +140,7 @@ def auth_mongo():
     else:
         pytest.skip("mongo never started enforcing authentication")
     yield
-    subprocess.run(["docker", "rm", "-f", MG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MG], capture_output=True)
 
 
 @pytest.mark.docker

@@ -84,7 +84,7 @@ def _hop(src, dst):
 @pytest.fixture(scope="module")
 def servers():
     for n in (MONGO, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MONGO, "-p",
                     f"{MONGO_PORT}:27017", "mongo:7"], check=True,
                    capture_output=True)
@@ -111,7 +111,7 @@ def servers():
     assert pg_sql("select count(*) from src").stdout.strip() == "0"
     yield
     for n in (MONGO, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def test_documents_land_in_a_table_and_the_digest_agrees(servers):

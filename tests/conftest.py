@@ -48,7 +48,7 @@ def pg_pair():
     names = ["migkit-test-pg-src", "migkit-test-pg-dst"]
     ports = [55432, 55433]
     for n in names:
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     for n, p in zip(names, ports):
         subprocess.run(
             ["docker", "run", "-d", "--name", n, "-e",
@@ -59,7 +59,7 @@ def pg_pair():
     time.sleep(3)
     yield {"src": ports[0], "dst": ports[1]}
     for n in names:
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def psql(port, sql, db="postgres"):

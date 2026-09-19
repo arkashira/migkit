@@ -67,7 +67,7 @@ def my_sql(sql, db=None):
 
 @pytest.fixture(scope="module")
 def mysql_server():
-    subprocess.run(["docker", "rm", "-f", MY], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MY], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MY, "-e",
                     "MYSQL_ROOT_PASSWORD=test", "-p", f"{MY_PORT}:3306",
                     "mysql:8"], check=True, capture_output=True)
@@ -79,12 +79,12 @@ def mysql_server():
     else:
         pytest.fail("mysql never accepted a connection")
     yield
-    subprocess.run(["docker", "rm", "-f", MY], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MY], capture_output=True)
 
 
 @pytest.fixture(scope="module")
 def mongo_server():
-    subprocess.run(["docker", "rm", "-f", MG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MG], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MG, "-p",
                     f"{MG_PORT}:27017", "mongo:7"], check=True,
                    capture_output=True)
@@ -99,7 +99,7 @@ def mongo_server():
     else:
         pytest.fail("mongo never answered")
     yield
-    subprocess.run(["docker", "rm", "-f", MG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MG], capture_output=True)
 
 
 def _cols(engine, side, db, table):

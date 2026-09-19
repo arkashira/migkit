@@ -69,7 +69,7 @@ class _Checkpoint(dict):
 @pytest.fixture(scope="module")
 def engine():
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -113,7 +113,7 @@ def engine():
                        "target_engine": "mysql"})
     yield HeteroEngine(hop)
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _verdict(eng):

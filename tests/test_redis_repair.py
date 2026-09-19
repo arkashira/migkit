@@ -63,7 +63,7 @@ def servers():
     spec = ((SRC, SRC_PORT, "redis:7"), (DST, DST_PORT, "redis:7"),
             (OLD, OLD_PORT, "redis:6"))
     for name, port, image in spec:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", name, "-p",
                         f"{port}:6379", image], check=True,
                        capture_output=True)
@@ -80,7 +80,7 @@ def servers():
             pytest.fail(f"{name} never answered")
     yield
     for name, _, _ in spec:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
 
 
 def _client(port, decode=True):

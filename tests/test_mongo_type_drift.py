@@ -50,7 +50,7 @@ def _wait(port, timeout=90):
 @pytest.fixture(scope="module")
 def pair():
     for n, p in ((SRC, SRC_PORT), (DST, DST_PORT)):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", n, "-p",
                         f"{p}:27017", "mongo:7"], check=True,
                        capture_output=True)
@@ -59,7 +59,7 @@ def pair():
     time.sleep(3)
     yield
     for n in (SRC, DST):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _engine():

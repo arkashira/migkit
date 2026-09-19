@@ -54,7 +54,7 @@ def q(sql, db="cx"):
 
 @pytest.fixture(scope="module")
 def slot():
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16", "-c", "wal_level=logical"],
@@ -78,7 +78,7 @@ def slot():
     # not in it - the same ordering a migration needs for the same reason
     q(f"select pg_create_logical_replication_slot('{SLOT}','test_decoding')")
     yield
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
 
 
 def _drain():

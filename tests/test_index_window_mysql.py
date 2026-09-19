@@ -52,7 +52,7 @@ def _my(name, sql, db="d"):
 @pytest.fixture(scope="module")
 def pair():
     for n, p in ((SRC, SRC_PORT), (DST, DST_PORT)):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", n, "-e",
                         "MYSQL_ROOT_PASSWORD=test", "-p", f"{p}:3306",
                         "mysql:8"], check=True, capture_output=True)
@@ -79,7 +79,7 @@ def pair():
     assert _my(SRC, "select count(*) from t") == "2"
     yield
     for n in (SRC, DST):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _engine(tmp_path):

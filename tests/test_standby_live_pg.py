@@ -66,7 +66,7 @@ def _up(name, timeout=120):
 @pytest.fixture(scope="module")
 def pair():
     for n in (SBY, PRI):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "network", "create", NET], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PRI, "--network", NET,
                     "-e", "POSTGRES_PASSWORD=test", "-p", f"{PRI_PORT}:5432",
@@ -104,7 +104,7 @@ def pair():
         "the standby did not replicate the seed, so nothing below is tested"
     yield
     for n in (SBY, PRI):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "network", "rm", NET], capture_output=True)
 
 

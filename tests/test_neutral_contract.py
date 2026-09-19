@@ -77,7 +77,7 @@ def _hop(engine, port, user, password, db):
 
 @pytest.fixture(scope="module")
 def my_engine():
-    subprocess.run(["docker", "rm", "-f", MY], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MY], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MY, "-e",
                     "MYSQL_ROOT_PASSWORD=test", "-p", f"{MY_PORT}:3306",
                     "mysql:8"], check=True, capture_output=True)
@@ -97,7 +97,7 @@ def my_engine():
             break
         time.sleep(2)
     else:
-        subprocess.run(["docker", "rm", "-f", MY], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", MY], capture_output=True)
         pytest.fail("mysql never accepted a connection")
     assert cli(DDL_MY, "nx").returncode == 0
     assert cli(f"insert into shape values {ROWS_MY}", "nx").returncode == 0
@@ -107,7 +107,7 @@ def my_engine():
     eng = MySQLEngine(_hop("mysql", MY_PORT, "root", "test", "nx"))
     eng._cli = cli
     yield eng
-    subprocess.run(["docker", "rm", "-f", MY], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MY], capture_output=True)
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +115,7 @@ def pg_engine(tmp_path_factory):
     # deliberately not the shared `pg_pair`: its autouse cleaner drops every
     # public table before each test, and this module's table has to survive
     # the whole file
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -132,14 +132,14 @@ def pg_engine(tmp_path_factory):
             pass
         time.sleep(2)
     else:
-        subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
         pytest.fail("postgres never accepted a connection")
     eng._psql("src", "postgres", DDL_PG)
     eng._psql("src", "postgres", f"insert into shape values {ROWS_PG}")
     assert eng._psql("src", "postgres",
                      "select count(*) from shape").strip() == "3"
     yield eng
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
 
 
 def _cols(eng, side, db, table):

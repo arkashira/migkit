@@ -60,7 +60,7 @@ def pair():
     for n, p, args in ((L1, L1_PORT, ["--character-set-server=latin1",
                                       "--collation-server=latin1_swedish_ci"]),
                        (U8, U8_PORT, ["--character-set-server=utf8mb4"])):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", n, "-e",
                         "MYSQL_ROOT_PASSWORD=test", "-p", f"{p}:3306",
                         "mysql:8"] + args, check=True, capture_output=True)
@@ -78,7 +78,7 @@ def pair():
             pytest.fail(f"{n} never accepted a connection")
     yield
     for n in (L1, U8):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _conn(port):

@@ -55,7 +55,7 @@ def _sql(name, db, sql):
 @pytest.fixture(scope="module")
 def pair():
     for n, p in ((SRC, SRC_PORT), (DST, DST_PORT)):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", n,
                         "-e", "POSTGRES_PASSWORD=test", "-p", f"{p}:5432",
                         "postgres:16"], check=True, capture_output=True)
@@ -74,7 +74,7 @@ def pair():
         _sql(n, "postgres", "create database app")
     yield
     for n in (SRC, DST):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _engine(tmp_path):

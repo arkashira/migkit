@@ -64,7 +64,7 @@ def pg_sql(sql, db="cx"):
 @pytest.fixture(scope="module")
 def pair():
     for n in (MY, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MY, "-e",
                     "MYSQL_ROOT_PASSWORD=test", "-p", f"{MY_PORT}:3306",
                     "mysql:8", "--log-bin=binlog", "--server-id=1",
@@ -116,7 +116,7 @@ def pair():
                  db_map={"cx": "cx"})
     yield MySQLEngine(my_hop), PostgresEngine(pg_hop)
     for n in (MY, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _drain(my, token=None):

@@ -64,7 +64,7 @@ def engine(tmp_path_factory):
     assert conn.execute("select count(*) from items").fetchone()[0] == 3
     conn.close()
 
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -96,7 +96,7 @@ def engine(tmp_path_factory):
                        "target_engine": "postgres"})
     eng = HeteroEngine(hop)
     yield eng, path
-    subprocess.run(["docker", "rm", "-f", PG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", PG], capture_output=True)
 
 
 def _one(eng):

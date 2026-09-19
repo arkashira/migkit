@@ -53,7 +53,7 @@ def _wait(port, timeout=180):
 
 
 def _run(name, *args):
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", name, *args],
                    check=True, capture_output=True)
 
@@ -82,7 +82,7 @@ def servers():
     time.sleep(8)
     yield
     for name in (RD_SRC, RD_DST, MG, KF):
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
 
 
 def _seed_redis():

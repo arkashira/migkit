@@ -59,14 +59,14 @@ def _hop(engine, sport, dport, user="postgres", password="test", db=None):
 def redis_pair():
     for n, p, img in ((REDIS, REDIS_PORT, "redis:7"),
                       (VALKEY, VALKEY_PORT, "valkey/valkey:8")):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", n, "-p",
                         f"{p}:6379", img], check=True, capture_output=True)
     for p in (REDIS_PORT, VALKEY_PORT):
         assert _wait(p)
     yield
     for n in (REDIS, VALKEY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 @pytest.fixture(scope="module")
@@ -123,14 +123,14 @@ def test_assess_refuses_to_pass_the_version_row_across_two_brands(
 @pytest.fixture(scope="module")
 def crdb():
     """CockroachDB alone; the PostgreSQL side is the shared session pair."""
-    subprocess.run(["docker", "rm", "-f", CRDB], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", CRDB], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", CRDB, "-p",
                     f"{CRDB_PORT}:26257", "cockroachdb/cockroach:v23.2.5",
                     "start-single-node", "--insecure"],
                    check=True, capture_output=True)
     assert _wait(CRDB_PORT)
     yield CRDB_PORT
-    subprocess.run(["docker", "rm", "-f", CRDB], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", CRDB], capture_output=True)
 
 
 @pytest.fixture(scope="module")
@@ -202,7 +202,7 @@ def test_assess_names_the_brand_before_it_compares_versions(pg_engine):
 
 @pytest.fixture(scope="module")
 def maria_engine():
-    subprocess.run(["docker", "rm", "-f", MARIA], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MARIA], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MARIA, "-e",
                     "MARIADB_ROOT_PASSWORD=test", "-p", f"{MARIA_PORT}:3306",
                     "mariadb:11"], check=True, capture_output=True)
@@ -218,10 +218,10 @@ def maria_engine():
             pass
         time.sleep(2)
     else:
-        subprocess.run(["docker", "rm", "-f", MARIA], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", MARIA], capture_output=True)
         pytest.fail("mariadb never answered a query")
     yield eng
-    subprocess.run(["docker", "rm", "-f", MARIA], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MARIA], capture_output=True)
 
 
 def test_mariadb_is_named_rather_than_counted_as_mysql(maria_engine):

@@ -46,7 +46,7 @@ def pair():
     for n, p, extra in ((SRC, SRC_PORT, []),
                         (DST, DST_PORT, ["--maxmemory-policy", "allkeys-lru",
                                          "--save", ""])):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", n, "-p",
                         f"{p}:6379", "redis:7"] + extra,
                        check=True, capture_output=True)
@@ -55,7 +55,7 @@ def pair():
     time.sleep(1)
     yield
     for n in (SRC, DST):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _engine(tmp_path):

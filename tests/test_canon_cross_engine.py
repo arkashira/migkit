@@ -97,7 +97,7 @@ def _pg(sql):
 @pytest.fixture(scope="module")
 def pair():
     for n in (MY, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MY, "-e",
                     "MYSQL_ROOT_PASSWORD=test", "-p", f"{MY_PORT}:3306",
                     "mysql:8"], check=True, capture_output=True)
@@ -137,7 +137,7 @@ def pair():
     assert _pg("select count(*) from v") == "1"
     yield
     for n in (MY, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _declared():

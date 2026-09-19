@@ -87,7 +87,7 @@ def _hop(engine, host, port, user, password):
 @pytest.fixture(scope="module")
 def pair():
     for n in (MONGO, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MONGO, "-p",
                     f"{MONGO_PORT}:27017", "mongo:7"], check=True,
                    capture_output=True)
@@ -119,7 +119,7 @@ def pair():
                              "postgres", "test"))
     yield mo, pg
     for n in (MONGO, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _cols(eng, side, db, table, drop=()):

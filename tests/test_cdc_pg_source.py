@@ -70,7 +70,7 @@ def _hop(name, engine, port, user, password):
 @pytest.fixture(scope="module")
 def pair():
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16", "-c", "wal_level=logical"],
@@ -107,7 +107,7 @@ def pair():
                                "postgres", "test")),
            MySQLEngine(_hop("pgcdc", "mysql", MY_PORT, "root", "test")))
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def test_the_slot_is_created_before_anything_is_read(pair):
@@ -253,7 +253,7 @@ def test_a_server_without_logical_wal_is_refused_with_the_setting(pair):
     """Nothing client-side can make the WAL carry row images it was never
     told to carry, so the message is the setting rather than a workaround."""
     other = "migkit-test-pgcdc-min"
-    subprocess.run(["docker", "rm", "-f", other], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", other], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", other, "-e",
                     "POSTGRES_PASSWORD=test", "-p", "15456:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -277,4 +277,4 @@ def test_a_server_without_logical_wal_is_refused_with_the_setting(pair):
         assert "wal_level is replica" in str(e.value)
         assert "alter system set wal_level" in str(e.value)
     finally:
-        subprocess.run(["docker", "rm", "-f", other], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", other], capture_output=True)

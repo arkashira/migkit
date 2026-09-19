@@ -93,7 +93,7 @@ def test_the_bare_cluster_id_is_recorded_as_naming_less_than_it_seems():
 @pytest.fixture(scope="module")
 def servers():
     for n in (MG, RP, AK):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MG, "-p",
                     f"{MG_PORT}:27017", "mongo:7"], check=True,
                    capture_output=True)
@@ -123,7 +123,7 @@ def servers():
     time.sleep(12)
     yield
     for n in (MG, RP, AK):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def test_the_mongo_engine_asks_the_server_not_the_hostname(servers):

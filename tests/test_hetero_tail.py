@@ -74,7 +74,7 @@ def _hop(src, dst):
 @pytest.fixture(scope="module")
 def engine():
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16", "-c", "wal_level=logical"],
@@ -106,7 +106,7 @@ def engine():
     from migkit.engines.hetero import HeteroEngine
     yield HeteroEngine(_hop("postgres", "mysql"))
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _tail_briefly(eng, token_path, go=True, seconds=6):

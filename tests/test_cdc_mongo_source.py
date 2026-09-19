@@ -77,7 +77,7 @@ def _hop(engine, port, user, password):
 @pytest.fixture(scope="module")
 def pair():
     for n in (MG, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MG, "-p",
                     f"{MG_PORT}:27017", "mongo:7", "--replSet", "rs0",
                     "--bind_ip_all"], check=True, capture_output=True)
@@ -115,7 +115,7 @@ def pair():
     yield (MongoEngine(_hop("mongodb", MG_PORT, "", "")),
            PostgresEngine(_hop("postgres", PG_PORT, "postgres", "test")))
     for n in (MG, PG):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def test_a_standalone_is_refused_with_the_way_out(pair):
@@ -123,7 +123,7 @@ def test_a_standalone_is_refused_with_the_way_out(pair):
     message is the two commands that fix it, because nothing client-side
     can."""
     other = "migkit-test-mgcdc-solo"
-    subprocess.run(["docker", "rm", "-f", other], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", other], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", other, "-p",
                     "27068:27017", "mongo:7"], check=True,
                    capture_output=True)
@@ -144,7 +144,7 @@ def test_a_standalone_is_refused_with_the_way_out(pair):
         assert "--replSet rs0" in str(e.value)
         assert "rs.initiate()" in str(e.value)
     finally:
-        subprocess.run(["docker", "rm", "-f", other], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", other], capture_output=True)
 
 
 def test_an_update_without_updatelookup_carries_only_the_delta(pair):

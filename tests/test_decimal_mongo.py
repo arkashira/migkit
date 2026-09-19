@@ -54,7 +54,7 @@ def _wait(port, timeout=120):
 
 @pytest.fixture(scope="module")
 def mongo():
-    subprocess.run(["docker", "rm", "-f", MG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MG], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MG, "-p",
                     f"{MG_PORT}:27017", "mongo:7"], check=True,
                    capture_output=True)
@@ -69,7 +69,7 @@ def mongo():
     else:
         pytest.fail("mongo never answered")
     yield
-    subprocess.run(["docker", "rm", "-f", MG], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", MG], capture_output=True)
 
 
 def _client():

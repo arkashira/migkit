@@ -82,7 +82,7 @@ def sqlite_engine(tmp_path_factory):
 @pytest.fixture(scope="module")
 def servers():
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", PG, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PG_PORT}:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -157,7 +157,7 @@ def servers():
                               "root", "test", "cx"))
     yield pg_eng, my_eng, pg, my
     for n in (PG, MY):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
 
 
 def _cols(eng, side, db, table):

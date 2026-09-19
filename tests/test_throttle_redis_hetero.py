@@ -67,7 +67,7 @@ def _engine(port=RD_PORT):
 
 @pytest.fixture(scope="module")
 def redis_server():
-    subprocess.run(["docker", "rm", "-f", RD], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", RD], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", RD, "-p",
                     f"{RD_PORT}:6379", "redis:7"], check=True,
                    capture_output=True)
@@ -79,7 +79,7 @@ def redis_server():
     else:
         pytest.fail("redis never answered")
     yield
-    subprocess.run(["docker", "rm", "-f", RD], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", RD], capture_output=True)
 
 
 def test_an_idle_server_reads_as_idle(redis_server):

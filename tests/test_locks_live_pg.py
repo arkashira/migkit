@@ -45,7 +45,7 @@ def _wait(port, timeout=90):
 @pytest.fixture(scope="module")
 def conn():
     import psycopg2
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", NAME, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PORT}:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -73,7 +73,7 @@ def conn():
     """)
     yield c
     c.close()
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
 
 
 LOCKS_SQL = """

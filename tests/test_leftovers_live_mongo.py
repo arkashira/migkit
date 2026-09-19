@@ -51,14 +51,14 @@ def _client():
 
 @pytest.fixture(scope="module")
 def mongo():
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", NAME, "-p",
                     f"{PORT}:27017", "mongo:7"], check=True,
                    capture_output=True)
     assert _wait(PORT)
     time.sleep(3)
     yield
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
 
 
 def _engine(tmp_path):

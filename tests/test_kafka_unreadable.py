@@ -83,7 +83,7 @@ def _describe(topic):
 @pytest.fixture(scope="module")
 def cluster():
     for n in (CTL, B1, B2):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "network", "rm", NET], capture_output=True)
     subprocess.run(["docker", "network", "create", NET], check=True,
                    capture_output=True)
@@ -135,7 +135,7 @@ def cluster():
     _produce("two", 120)
     yield
     for n in (CTL, B1, B2):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "network", "rm", NET], capture_output=True)
 
 

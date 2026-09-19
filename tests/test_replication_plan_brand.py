@@ -69,7 +69,7 @@ def _engine(port):
 @pytest.fixture(scope="module")
 def servers():
     for n in (MY, MARIA):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", n], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", MY, "-e",
                     "MYSQL_ROOT_PASSWORD=test", "-p", f"{MY_PORT}:3306",
                     "mysql:8", "--log-bin=binlog", "--server-id=1"],

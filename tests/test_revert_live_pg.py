@@ -61,7 +61,7 @@ def _apply(db, path):
 
 @pytest.fixture(scope="module")
 def pg():
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", NAME, "-e",
                     "POSTGRES_PASSWORD=test", "-p", f"{PORT}:5432",
                     "postgres:16"], check=True, capture_output=True)
@@ -76,7 +76,7 @@ def pg():
     else:
         pytest.fail("postgres never accepted a connection")
     yield
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
 
 
 def _engine(tmp_path):

@@ -67,7 +67,7 @@ def clusters():
     from kafka import KafkaProducer
     from kafka.admin import KafkaAdminClient, NewTopic
     for name, port in ((SRC, SRC_PORT), (DST, DST_PORT)):
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
         subprocess.run([
             "docker", "run", "-d", "--name", name, "-p", f"{port}:9092",
             "-e", "KAFKA_NODE_ID=1",
@@ -108,7 +108,7 @@ def clusters():
         producer.close()
     yield
     for name in (SRC, DST):
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
 
 
 def _engine(tmp_path):
