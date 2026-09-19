@@ -1071,6 +1071,13 @@ class PostgresEngine(Engine):
                 f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t'
                 + (f" where {pred}" if pred else ""))
 
+        def table_rows(side, t):
+            """The table's own row count, for the moment a chunk differs and
+            the range's count would otherwise be reported as the table's."""
+            sch, tbl = t.split(".", 1)
+            return self._psql(side, db,
+                              f'select count(*) from "{sch}"."{tbl}"').strip()
+
         def both(fn, *args):
             """Run the source and target aggregates at the same time.
 
@@ -1132,7 +1139,19 @@ class PostgresEngine(Engine):
                 if a != b:
                     cp.clear(t)
                     pred = _cp.where(col, rlo, rhi) or "whole table"
-                    return f"{t}: DIFF src={a} dst={b} where {pred}"
+                    # `a` and `b` are this range's `rows|checksum`, and the
+                    # row counts ride out of here into the counts check -
+                    # so the range's count would be reported as the table's.
+                    # Measured on 10,000,000 rows split into five chunks:
+                    # `counts postgres: DIFF public.bench_rows src=2000000
+                    # dst=1999992` about a table holding ten million. The
+                    # checksums stay range-scoped, which is what `where`
+                    # says; the counts are the table's, which is what
+                    # anybody reading `src=` means by it.
+                    rows_a, rows_b = both(table_rows, t)
+                    return (f"{t}: DIFF src={rows_a}|{a.split('|', 1)[1]}"
+                            f" dst={rows_b}|{b.split('|', 1)[1]}"
+                            f" where {pred}")
                 cp.record(t, rlo, rhi, *a.split("|", 1))
             rows, total = cp.total(t)
             cp.clear(t)

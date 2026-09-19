@@ -26,7 +26,7 @@ Ordered by how often practitioners name them, not by how hard they are.
 | A difference nobody can act on | The validator says "3 rows differ" and stops | **Covered** — every engine names the rows and can repair them |
 | Cutover | Not one switch: freeze, delta sync, rollback rehearsal, cache warming, dual writes | **Partly** — delta verify, revert/restore, leftovers. No cutover runbook the tool drives |
 | Resume after a crash | A copy that dies at 80% starts over, or resumes inconsistently | **Partly** — chunked resume exists per engine, on one machine, with a proof file |
-| Scale | Practices that work at 10 GB fail at 1 TB; nobody finds out until the rehearsal | **Unproven** — largest measured run here is 200k rows on a laptop |
+| Scale | Practices that work at 10 GB fail at 1 TB; nobody finds out until the rehearsal | **Measured to 10M rows** — [scale.md](scale.md): flat throughput, constant client memory, and one real bug found by running it |
 | Cloud without tools | No OS access, no `pg_dump` on the box, no ports outbound, no place to put a dump file | **Partly** — everything runs from the operator's machine over normal client connections; no reliance on being on the host |
 | Two engines that disagree about a value | Collation, timezone, NULL vs empty, float rendering, charset | **Covered** — canonical rendering per engine, and a refusal when a type has no agreed rendering |
 
@@ -81,11 +81,15 @@ the product that is genuinely ahead rather than merely different.
 
 In order. Each item says what has to be measured before it is written.
 
-1. **Prove the scale claim, or retract it.** Generate rows with `faker`
-   into the docker sandbox - 1M, 10M, and a table wide enough to matter -
-   and record: full-load time per mover, verify time, memory, and where it
-   falls over. Publish the numbers with the hardware beside them. Until
-   this exists, "works at scale" is not a claim migkit is allowed to make.
+1. **Prove the scale claim, or retract it.** *Done to ten million rows -
+   [scale.md](scale.md).* `bench/seed.py` builds the table and the numbers
+   are published with the hardware beside them: throughput flat between 1M
+   and 10M (~173k rows/s), and migkit's own memory did not follow the data
+   (30 MB moving, 333 MB verifying, at both sizes). It also found a bug no
+   small table could - a chunked table reported the differing chunk's row
+   count as the table's. **Still open:** a LOB column in the bench table, a
+   comparison against pgcopydb on this hardware, and anything above ten
+   million rows (the 20 GiB sandbox disk is the ceiling).
 2. **Oracle**, then the rest of the DMS list. Measured this tick:
    `gvenzl/oracle-free:slim` has an arm64 build, boots to Oracle 26ai Free,
    and `python-oracledb` 26 connects in thin mode with no Instant Client -

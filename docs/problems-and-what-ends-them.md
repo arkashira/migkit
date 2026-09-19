@@ -173,11 +173,15 @@ often *not* fastest, because skewed partitions leave one long-tail subtask.
 
 **migkit: Partly.** migkit calls the native mover for the pairs that have
 one (pgcopydb, mydumper, COPY binary - measured 1.53x for binary format),
-so it inherits their speed rather than competing with it.
+so it inherits their speed rather than competing with it. Measured end to
+end on this hardware ([scale.md](scale.md)): 10,000,000 rows / 2,777 MB
+moved in 57.9 s and verified in 62.4 s, with migkit's own peak memory at
+30 MB and 333 MB - flat against the 1M run, because the digest is computed
+inside each server.
 
-**Missing:** the pairs with no native mover, and a measured benchmark to say
-what migkit's own path costs. Until that benchmark exists migkit makes no
-throughput claim at all.
+**Missing:** the pairs with no native mover, LOBs in the benchmark table,
+and a comparison against pgcopydb on the same hardware. Until that
+comparison exists migkit makes no claim about being faster than anything.
 
 ### C2. LOBs
 
