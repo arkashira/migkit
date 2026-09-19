@@ -600,13 +600,45 @@ class SQLiteEngine(Engine):
             detail = (f"rows {na:,}=={nb:,}, md5 {ha} both sides"
                       if status == "ok"
                       else f"rows {na} vs {nb}, md5 {ha} vs {hb}")
+            if status == "ok":
+                self._write_drill(db, t, missing=[], changed=[], extra=[])
+            else:
+                detail += self._drill(db, t)
             res.append(Result("data", f"{db}.{t}", status, detail, "",
                               "" if status == "ok" else
-                              "recopy the table, sqlite files are cheap"))
+                              "`migkit sync --kind rows` names the rows and"
+                              " can put them right, or recopy the whole"
+                              " table - sqlite files are cheap"))
         return res
+
+    def _drill(self, db, table):
+        """The base's row walk, with this engine on both sides of it.
+
+        A checksum over the whole table says it is wrong and nothing more,
+        and for a long time the answer here was to recopy the file. That is
+        still often the right thing for a file, but it left this as the one
+        full engine whose `check` said `diff` and whose `sync` then said
+        there was nothing to repair - an empty answer standing in for a no,
+        under the same command that names the rows everywhere else.
+        """
+        try:
+            cols, dst_cols, notes = self._comparable_columns(
+                db, self, table, self, table)
+        except Exception as e:
+            return f"; rows not localised: {str(e).splitlines()[-1][:80]}"
+        if not cols:
+            return ("; rows not localised: no column on this table has a"
+                    " canonical rendering"
+                    + ("; " + "; ".join(notes) if notes else ""))
+        clause = self._drill_rows(db, table, self, table, cols, self, table,
+                                  dst_cols)
+        return clause + (("; " + "; ".join(notes)) if notes else "")
 
     def repair_plan(self, db, kind):
         actions = []
+        if kind in ("rows", "all"):
+            actions += self._rows_plan(db, "from the source file to the"
+                                           " target file")
         if kind in ("sequences", "all"):
             a, b = self._seqs("src"), self._seqs("dst")
             stmts = [f"update sqlite_sequence set seq = {v}"
@@ -624,6 +656,14 @@ class SQLiteEngine(Engine):
         return actions
 
     def apply(self, db, action):
+        if action.kind == "rows":
+            name = action.scope.split(".", 1)[1]
+            cols, dst_cols, _ = self._comparable_columns(db, self, name, self,
+                                                         name)
+            return self._apply_rows(db, name, self, name, cols, self, name,
+                                    dst_cols)
+        if action.kind != "sequences":
+            raise SystemExit(f"sqlite cannot apply a {action.kind!r} action")
         import sqlite3
         conn = sqlite3.connect(self._path("dst"))
         try:

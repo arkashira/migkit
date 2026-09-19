@@ -111,45 +111,9 @@ class HeteroEngine(Engine):
         return pairs, src_only, dst_only, ambiguous
 
     def _column_plan(self, src_table, dst_table, db):
-        """What to hash on each side, and everything that is not hashable.
-
-        Returns (src_cols, dst_cols, notes). The two column lists are the
-        same names in the same order - **sorted by name**, not by the order
-        each server happens to report, because the row text is positional and
-        two servers agreeing on a set of columns says nothing about the order
-        they list them in.
-        """
-        from .. import canon
-
-        def declared(engine, side, table):
-            got = {}
-            for name, typ in engine.neutral_columns(side, db, table):
-                got[name] = typ
-            return got
-        src_types = declared(self.src_engine, "src", src_table)
-        dst_types = declared(self.dst_engine, "dst", dst_table)
-        notes = []
-        both = sorted(set(src_types) & set(dst_types))
-        only_src = sorted(set(src_types) - set(dst_types))
-        only_dst = sorted(set(dst_types) - set(src_types))
-        if only_src:
-            notes.append(f"columns only on the source, not compared:"
-                         f" {', '.join(only_src)}")
-        if only_dst:
-            notes.append(f"columns only on the target, not compared:"
-                         f" {', '.join(only_dst)}")
-        src_cols, dst_cols = [], []
-        for name in both:
-            scls, swhy = canon.comparable(self.src_engine.CANON_ENGINE,
-                                          src_types[name])
-            dcls, dwhy = canon.comparable(self.dst_engine.CANON_ENGINE,
-                                          dst_types[name])
-            if not scls or not dcls:
-                notes.append(f"{name}: {swhy or dwhy}")
-                continue
-            src_cols.append((name, scls))
-            dst_cols.append((name, dcls))
-        return src_cols, dst_cols, notes
+        """The base's column plan, over this hop's two engines."""
+        return self._comparable_columns(db, self.src_engine, src_table,
+                                        self.dst_engine, dst_table)
 
     def _neutral_rows(self, db, table=None, stream=None):
         """One (scope, status, detail, src_rows, dst_rows) per table.
@@ -224,104 +188,12 @@ class HeteroEngine(Engine):
         return rows
 
     #: how many rows per side a drilldown will walk before saying it stopped
-    DRILL_CAP = 20000
-
-    def _row_text(self, columns, row):
-        from .. import canon
-        return tuple(canon.render_value(cls, value)
-                     for (_, cls), value in zip(columns, row))
 
     def _drill(self, db, src_t, dst_t, src_cols, dst_cols):
-        """Which rows differ, written to the estate's files, as a clause.
-
-        The digests disagreeing says a table is wrong; this says which rows,
-        which is what a repair needs and what an operator reads first. Both
-        sides are asked for the same keys rather than walked in step: two
-        engines do not agree on the order of a text key, so a merge over two
-        ordered reads would invent missing and extra rows in equal numbers.
-
-        A pair that cannot be lined up says why instead of writing an empty
-        list, which `sync` would read as nothing to do.
-        """
-        leaf = self._leaf(src_t)
-        names = [n for n, _ in src_cols]
-        try:
-            key = list(self.src_engine.neutral_key("src", db, src_t))
-            dst_key = list(self.dst_engine.neutral_key("dst", db, dst_t))
-        except Exception as e:
-            return f"; rows not localised: {str(e).splitlines()[-1][:80]}"
-        if not key or not dst_key:
-            side = "source" if not key else "target"
-            return (f"; rows not localised: the {side} table has no key, so"
-                    " there is nothing to line the two sides up by")
-        if sorted(key) != sorted(dst_key):
-            return (f"; rows not localised: the two sides key on different"
-                    f" columns ({', '.join(key)} vs {', '.join(dst_key)})")
-        if any(k not in names for k in key):
-            return ("; rows not localised: the key is not among the columns"
-                    " these two engines can compare")
-
-        missing, changed, extra = [], [], []
-        capped = []
-        at = [names.index(k) for k in key]
-
-        def walk(engine, side, table, cols, other, other_side, other_table,
-                 other_cols, on_absent, on_differs):
-            seen = 0
-            after = None
-            while seen < self.DRILL_CAP:
-                got, after = engine.neutral_read(side, db, table, cols, after,
-                                                 min(1000,
-                                                     self.DRILL_CAP - seen))
-                if not got:
-                    return False
-                seen += len(got)
-                raw = [tuple(row[i] for i in at) for row in got]
-                theirs = other.neutral_rows_by_key(other_side, db, other_table,
-                                                   other_cols, key, raw)
-                for row in got:
-                    text = self._key_of(cols, key, row)
-                    if text not in theirs:
-                        on_absent(text)
-                    elif on_differs is not None and self._row_text(
-                            other_cols, theirs[text]) != self._row_text(cols,
-                                                                       row):
-                        on_differs(text)
-                if after is None:
-                    return False
-            return True
-
-        try:
-            if walk(self.src_engine, "src", src_t, src_cols, self.dst_engine,
-                    "dst", dst_t, dst_cols, missing.append, changed.append):
-                capped.append("source")
-            if walk(self.dst_engine, "dst", dst_t, dst_cols, self.src_engine,
-                    "src", src_t, src_cols, extra.append, None):
-                capped.append("target")
-        except Exception as e:
-            return f"; rows not localised: {str(e).splitlines()[-1][:90]}"
-
-        import json
-        self._write_drill(
-            db, leaf,
-            missing=[json.dumps(list(k)) for k in missing],
-            changed=[json.dumps(list(k)) for k in changed],
-            extra=[json.dumps(list(k)) for k in extra])
-        parts = []
-        for label, found in (("missing on the target", missing),
-                             ("with different values", changed),
-                             ("only on the target", extra)):
-            if found:
-                shown = ", ".join("/".join(k) for k in found[:4])
-                parts.append(f"{len(found)} {label} ({shown}"
-                             + (" ..." if len(found) > 4 else "") + ")")
-        clause = "; " + ("; ".join(parts) if parts else
-                         "no row differs, so the difference is in a column"
-                         " neither side could compare")
-        if capped:
-            clause += (f"; stopped after {self.DRILL_CAP:,} rows on the "
-                       + " and ".join(capped) + ", so there may be more")
-        return clause
+        """The base's walk, over this hop's two engines."""
+        return self._drill_rows(db, self._leaf(src_t),
+                                self.src_engine, src_t, src_cols,
+                                self.dst_engine, dst_t, dst_cols)
 
     def _neutral_compare(self, db, table=None, stream=None):
         return [Result("data", scope, status, detail)
@@ -422,21 +294,10 @@ class HeteroEngine(Engine):
             db, f"from {self.src_name} to {self.dst_name}")
 
     def apply(self, db, action):
-        """Carry the rows across, then remove the ones that should not exist.
-
-        The keys come back out of the drilldown as canonical text and are
-        turned into values with `canon.from_text`, the same way a change
-        record from a logical decoder is - the text is the one form both
-        engines agree on, and re-deriving the value per side is what lets a
-        key written by one engine address a row in the other.
-
-        Writes first and deletions last, so a repair cut off in the middle
-        leaves rows that should not be there - which the next check names -
-        rather than a hole nothing looks for.
+        """What a pair has to settle before the base can carry the rows:
+        that the two engines can move rows at all, and which table on the
+        target the drilldown's table means.
         """
-        import json
-
-        from .. import canon
         if not self._can_move_neutrally():
             raise SystemExit(
                 f"this pair cannot repair rows: {self.src_name} ->"
@@ -456,45 +317,8 @@ class HeteroEngine(Engine):
                              " rows the last check listed cannot be placed")
         src_t, dst_t = match[0]
         src_cols, dst_cols, _ = self._column_plan(src_t, dst_t, db)
-        key = list(self.src_engine.neutral_key("src", db, src_t))
-        cls = {n: c for n, c in src_cols}
-        if not key or any(k not in cls for k in key):
-            raise SystemExit(f"{name} has no key among the compared columns,"
-                             " so a row cannot be addressed on both sides")
-
-        def values(key_text):
-            return tuple(canon.from_text(cls[k], t) for k, t in zip(key,
-                                                                    key_text))
-        undo_dir = self.hop.report_dir(db) / "undo"
-        undo_dir.mkdir(parents=True, exist_ok=True)
-        undo = undo_dir / f"{name}.rows.jsonl"
-
-        def remember(handle, key_texts):
-            if not key_texts:
-                return
-            held = self.dst_engine.neutral_rows_by_key(
-                "dst", db, dst_t, dst_cols, key, [values(k) for k in
-                                                  key_texts])
-            for key_text, row in held.items():
-                handle.write(json.dumps({
-                    "table": name, "key": list(key_text),
-                    "row": dict(zip([n for n, _ in dst_cols],
-                                    self._row_text(dst_cols, row)))}) + "\n")
-
-        send = found.get("missing", []) + found.get("changed", [])
-        drop = found.get("extra", [])
-        with undo.open("a") as handle:
-            remember(handle, found.get("changed", []))
-            remember(handle, drop)
-        if send:
-            rows = self.src_engine.neutral_rows_by_key(
-                "src", db, src_t, src_cols, key, [values(k) for k in send])
-            if rows:
-                self.dst_engine.neutral_write("dst", db, dst_t, dst_cols,
-                                              list(rows.values()))
-        for key_text in drop:
-            self.dst_engine._apply_delete(
-                "dst", db, dst_t, dict(zip(key, values(key_text))))
+        self._apply_rows(db, name, self.src_engine, src_t, src_cols,
+                         self.dst_engine, dst_t, dst_cols)
 
     def _pair_capabilities(self):
         """What this combination can do, answered from the classes.

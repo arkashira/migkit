@@ -536,6 +536,231 @@ class Engine:
             return []
         return [l for l in path.read_text().splitlines() if l]
 
+    #: how many rows a drilldown walks per side before it stops and says so
+    DRILL_CAP = 20000
+
+    def _row_text(self, columns, row):
+        from .. import canon
+        return tuple(canon.render_value(cls, value)
+                     for (_, cls), value in zip(columns, row))
+
+    def _comparable_columns(self, db, src_engine, src_table,
+                            dst_engine, dst_table):
+        """What to hash on each side, and everything that is not hashable.
+
+        Returns (src_cols, dst_cols, notes). The two column lists are the
+        same names in the same order - **sorted by name**, not by the order
+        each server happens to report, because the row text is positional and
+        two servers agreeing on a set of columns says nothing about the order
+        they list them in.
+        """
+        from .. import canon
+
+        def declared(engine, side, table):
+            got = {}
+            for name, typ in engine.neutral_columns(side, db, table):
+                got[name] = typ
+            return got
+        src_types = declared(src_engine, "src", src_table)
+        dst_types = declared(dst_engine, "dst", dst_table)
+        notes = []
+        both = sorted(set(src_types) & set(dst_types))
+        only_src = sorted(set(src_types) - set(dst_types))
+        only_dst = sorted(set(dst_types) - set(src_types))
+        if only_src:
+            notes.append(f"columns only on the source, not compared:"
+                         f" {', '.join(only_src)}")
+        if only_dst:
+            notes.append(f"columns only on the target, not compared:"
+                         f" {', '.join(only_dst)}")
+        src_cols, dst_cols = [], []
+        for name in both:
+            scls, swhy = canon.comparable(src_engine.CANON_ENGINE,
+                                          src_types[name])
+            dcls, dwhy = canon.comparable(dst_engine.CANON_ENGINE,
+                                          dst_types[name])
+            if not scls or not dcls:
+                notes.append(f"{name}: {swhy or dwhy}")
+                continue
+            src_cols.append((name, scls))
+            dst_cols.append((name, dcls))
+        return src_cols, dst_cols, notes
+
+    def _drill_rows(self, db, name, src_engine, src_t, src_cols,
+                    dst_engine, dst_t, dst_cols):
+        """Which rows differ, written to the estate's files, as a clause.
+
+        A digest says a table is wrong; this says which rows, which is what
+        a repair needs and what an operator reads first. Both sides are
+        asked for the same keys rather than walked in step: two engines do
+        not agree on the order of a text key, so a merge over two ordered
+        reads would invent missing and extra rows in equal numbers.
+
+        The two engines are arguments rather than `self` because the same
+        walk serves a hop between two different engines and a hop within
+        one - for the second, both are the same object. A pair that cannot
+        be lined up says why instead of writing an empty list, which `sync`
+        would read as nothing to do.
+        """
+        import json
+        names = [n for n, _ in src_cols]
+        try:
+            key = list(src_engine.neutral_key("src", db, src_t))
+            dst_key = list(dst_engine.neutral_key("dst", db, dst_t))
+        except Exception as e:
+            return f"; rows not localised: {str(e).splitlines()[-1][:80]}"
+        if not key or not dst_key:
+            side = "source" if not key else "target"
+            return (f"; rows not localised: the {side} table has no key, so"
+                    " there is nothing to line the two sides up by")
+        if sorted(key) != sorted(dst_key):
+            return (f"; rows not localised: the two sides key on different"
+                    f" columns ({', '.join(key)} vs {', '.join(dst_key)})")
+        if any(k not in names for k in key):
+            return ("; rows not localised: the key is not among the columns"
+                    " these two engines can compare")
+
+        missing, changed, extra = [], [], []
+        capped = []
+        at = [names.index(k) for k in key]
+
+        def walk(engine, side, table, cols, other, other_side, other_table,
+                 other_cols, on_absent, on_differs):
+            seen = 0
+            after = None
+            while seen < self.DRILL_CAP:
+                got, after = engine.neutral_read(side, db, table, cols, after,
+                                                 min(1000,
+                                                     self.DRILL_CAP - seen))
+                if not got:
+                    return False
+                seen += len(got)
+                raw = [tuple(row[i] for i in at) for row in got]
+                theirs = other.neutral_rows_by_key(other_side, db, other_table,
+                                                   other_cols, key, raw)
+                for row in got:
+                    text = self._key_of(cols, key, row)
+                    if text not in theirs:
+                        on_absent(text)
+                    elif on_differs is not None and self._row_text(
+                            other_cols, theirs[text]) != self._row_text(cols,
+                                                                       row):
+                        on_differs(text)
+                if after is None:
+                    return False
+            return True
+
+        try:
+            if walk(src_engine, "src", src_t, src_cols, dst_engine,
+                    "dst", dst_t, dst_cols, missing.append, changed.append):
+                capped.append("source")
+            if walk(dst_engine, "dst", dst_t, dst_cols, src_engine,
+                    "src", src_t, src_cols, extra.append, None):
+                capped.append("target")
+        except Exception as e:
+            return f"; rows not localised: {str(e).splitlines()[-1][:90]}"
+
+        self._write_drill(
+            db, name,
+            missing=[json.dumps(list(k)) for k in missing],
+            changed=[json.dumps(list(k)) for k in changed],
+            extra=[json.dumps(list(k)) for k in extra])
+        parts = []
+        for label, found in (("missing on the target", missing),
+                             ("with different values", changed),
+                             ("only on the target", extra)):
+            if found:
+                shown = ", ".join("/".join(k) for k in found[:4])
+                parts.append(f"{len(found)} {label} ({shown}"
+                             + (" ..." if len(found) > 4 else "") + ")")
+        clause = "; " + ("; ".join(parts) if parts else
+                         "no row differs, so the difference is in a column"
+                         " neither side could compare")
+        if capped:
+            clause += (f"; stopped after {self.DRILL_CAP:,} rows on the "
+                       + " and ".join(capped) + ", so there may be more")
+        return clause
+
+    def _apply_rows(self, db, name, src_engine, src_t, src_cols,
+                    dst_engine, dst_t, dst_cols):
+        """Carry the listed rows across, then remove the ones that should
+        not exist.
+
+        The keys come back out of the drilldown as canonical text and are
+        turned into values with `canon.from_text`, the same way a change
+        record from a logical decoder is - the text is the one form both
+        sides agree on, and re-deriving the value per side is what lets a
+        key written by one engine address a row in the other.
+
+        Writes first and deletions last, so a repair cut off in the middle
+        leaves rows that should not be there - which the next check names -
+        rather than a hole nothing looks for.
+        """
+        import json
+
+        from .. import canon
+        found = self._drill_tables(db).get(name, {})
+        if not found:
+            return
+        key = list(src_engine.neutral_key("src", db, src_t))
+        cls = {n: c for n, c in src_cols}
+        if not key or any(k not in cls for k in key):
+            raise SystemExit(f"{name} has no key among the compared columns,"
+                             " so a row cannot be addressed on both sides")
+
+        def values(key_text):
+            return tuple(canon.from_text(cls[k], t)
+                         for k, t in zip(key, key_text))
+        undo_dir = self.hop.report_dir(db) / "undo"
+        undo_dir.mkdir(parents=True, exist_ok=True)
+        undo = undo_dir / f"{name}.rows.jsonl"
+
+        def remember(handle, key_texts):
+            if not key_texts:
+                return
+            held = dst_engine.neutral_rows_by_key(
+                "dst", db, dst_t, dst_cols, key,
+                [values(k) for k in key_texts])
+            for key_text, row in held.items():
+                handle.write(json.dumps({
+                    "table": name, "key": list(key_text),
+                    "row": dict(zip([n for n, _ in dst_cols],
+                                    self._row_text(dst_cols, row)))}) + "\n")
+
+        send = found.get("missing", []) + found.get("changed", [])
+        drop = found.get("extra", [])
+        # a column with no canonical rendering was left out of the
+        # comparison, and writing the row without it would put a row on the
+        # target that is missing values the source has - measured on a
+        # sqlite `numeric` column, whose rows came back with the column set
+        # to NULL and the table still differing afterwards. Deletions are
+        # unaffected: removing a row the source does not have needs no
+        # rendering of anything.
+        if send:
+            whole = {n for n, _ in dst_engine.neutral_columns("dst", db,
+                                                              dst_t)}
+            dropped = sorted(whole - {n for n, _ in dst_cols})
+            if dropped:
+                raise SystemExit(
+                    f"{name} cannot be repaired row by row: "
+                    + ", ".join(dropped) + " could not be rendered, and a"
+                    " row written without those columns would be a row the"
+                    " source does not have. Nothing has been written."
+                    " `migkit move` can re-copy the table, which carries"
+                    " every column whether migkit can compare it or not")
+        with undo.open("a") as handle:
+            remember(handle, found.get("changed", []))
+            remember(handle, drop)
+        if send:
+            rows = src_engine.neutral_rows_by_key(
+                "src", db, src_t, src_cols, key, [values(k) for k in send])
+            if rows:
+                dst_engine.neutral_write("dst", db, dst_t, dst_cols,
+                                         list(rows.values()))
+        for key_text in drop:
+            dst_engine._apply_delete("dst", db, dst_t,
+                                     dict(zip(key, values(key_text))))
+
     def _drill_tables(self, db):
         """Tables the last check left a drilldown for, and what it found.
 
