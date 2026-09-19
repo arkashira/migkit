@@ -1529,6 +1529,51 @@ thing pgcopydb does per table, and the thing that matters for a table loaded
 with `autovacuum_enabled = false`, which autoanalyze will never catch up.
 Test: `test_planner_statistics.py`.
 
+**Corrected by measurement - the check cries wolf, and its own reasoning
+was wrong.** The claim above, and in the check's docstring, was that
+autoanalyze "will not run until a tenth of the rows have changed again -
+which, on a table that was migrated and is now only read, may be never."
+The bulk load *is* those modifications. Measured on PostgreSQL 16, a
+5,000-row table loaded and then left alone, nothing touching it:
+
+    at load       reltuples=-1  ever_analyzed=0  n_mod_since_analyze=5000
+                  threshold = 50 + 0.1*5000 = 550
+    90s later     ever_analyzed=1  last_autoanalyze=10:21:45  n_mod=0
+
+Autoanalyze ran on its own one naptime after the load, because 5000 is
+already far past the threshold. It does not wait for a second round of
+changes. Any migrated table above about 55 rows is in the same position.
+
+What that costs today: on a pair where **every parity check passes** -
+schema identical by five separate differs, counts equal, checksums equal -
+the run reports
+
+    deep postgres statistics: DIFF 1 tables the planner has no statistics for
+    verdict: different
+
+for about sixty seconds after a load, and then reports `OK` with nothing
+changed but time. `diff` everywhere else in this tool means *the two sides
+do not match*; here it means *the target will be slow*, which sends the
+reader hunting for missing rows on a migration that is byte-perfect.
+
+**The check still has a real job**, which is why the answer is not to
+delete it. The same table on a target started with `autovacuum=off`:
+
+    75s later     ever_analyzed=0  n_mod=5000  reltuples=-1
+
+Never analyzed, and never will be. That - along with a per-table
+`autovacuum_enabled = false`, which `migkit move --go` already handles - is
+the case worth a finding.
+
+**Not yet fixed.** The fix is to tell the two apart: read `autovacuum` and
+the table's own reloption on the target, report a table autovacuum will
+reach as at most `warn` naming the naptime, keep the finding for one it
+will not reach, and stop a target-performance condition from spelling
+itself `diff` where every other `diff` means the data differs. Held for an
+implement tick because changing a check's status moves the verdict on many
+suites - `test_deep_float_pg.py::test_identical_floats_pass` is already
+failing on exactly this, having been written before the check existed.
+
 On MySQL the check reports `skip` with the measurement behind it rather than
 a verdict: `innodb_table_stats.n_rows` read 19 for a table holding 50,000
 rows while the load settled, and `information_schema` `update_time` did not
