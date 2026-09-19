@@ -10,23 +10,28 @@ and 40 on the target.
                                              verdict: same
 
 The second is not wrong about the table it was asked about. The artifact
-is. With the timestamp, fingerprint and tool version removed, that run's
-`verdict.json` is **byte-identical** to one from a genuinely clean database
-checked in full - same `status`, same `has_differences`, same totals, with
-60 rows missing from a table the run never opened. A CI gate reading
-`has_differences == false` passes both.
+was. With the timestamp, fingerprint and tool version removed, that run's
+`verdict.json` was **byte-identical** to one from a genuinely clean
+database checked in full - same `status`, same `has_differences`, same
+totals, with 60 rows missing from a table the run never opened. A CI gate
+reading `has_differences == false` passed both. The information existed in
+`summary.json` beside it (`"scope": "postgres public.good"`) and stopped
+short of the file automation reads.
 
-`test_the_narrowed_verdict_is_indistinguishable` is the unusual one here:
-it pins behaviour that is **wrong**, so the measurement cannot quietly
-decay into a memory. It is written to fail the moment the envelope learns
-to describe its own coverage, and its docstring says what to replace it
-with. The fix is designed in catalogue D14 and deliberately not shipped in
-the same tick as the measurement - 24 test files invoke `--only` or
-`--table`, and changing the artifact every check writes deserves the whole
-suite rather than two adjacent files.
+The envelope now carries a `coverage` block naming what narrowed the run,
+and a narrowed run that finds nothing reports `incomplete` instead of
+`same`. `has_differences` is untouched: no difference was found, and
+saying otherwise would be a lie in the other direction.
 
-The other two tests pin what migkit already gets right, so that fix cannot
-take them away by accident.
+Two things migkit already got right are pinned here so this change could
+not take them away: a mistyped table name errors rather than passing
+clean, and `--table` narrows the checksum pass while `counts` still sweeps
+the whole database - which is why hiding `bad` above needed `--only data`
+as well.
+
+The measurement above was recorded a tick before the fix, as a test that
+deliberately pinned the defect. That test is gone now, replaced by its
+opposite; this docstring is what is left of it.
 """
 import json
 import socket
@@ -131,34 +136,53 @@ def test_the_pair_really_is_broken_and_the_narrow_one_really_is_clean(
     assert "public.bad" in out, out
 
 
-def test_the_narrowed_verdict_is_indistinguishable(nar_pair, tmp_path,
-                                                     monkeypatch):
-    """**This pins a defect, on purpose.**
+def test_the_narrowed_run_records_what_it_covered(nar_pair, tmp_path,
+                                                   monkeypatch):
+    """The envelope now describes its own scope, so the two runs above stop
+    being the same file.
 
-    When `verdict.summarize` learns to record what a run covered, this test
-    fails - and that is the signal to replace it with its opposite: assert
-    that the narrowed envelope carries a `coverage` block naming
-    `public.good`, and that its status is `incomplete` rather than `same`.
-    Written this way because a measurement nobody re-runs becomes a memory,
-    and this one is the whole argument for the change.
+    `has_differences` stays `false` - no difference was found, and claiming
+    one would be a lie in the other direction. What changes is the word: a
+    run that looked at part of the hop and found nothing reports
+    `incomplete`, which the status vocabulary already carried for "nothing
+    found, not everything looked at".
     """
     _seed(nar_pair, 40)
     _, narrowed = _run(nar_pair, tmp_path, monkeypatch,
                        ["check", "sc", "--table", "public.good", "--only",
                         "data"], "narrow")
-    assert narrowed["status"] == "same", narrowed
+    assert narrowed["status"] == "incomplete", narrowed
     assert narrowed["has_differences"] is False, narrowed
+    assert narrowed["coverage"] == {"checks": ["data"],
+                                    "table": "public.good"}, narrowed
 
-    # now a database where nothing is wrong at all, checked in full
+    # the same database with nothing wrong, checked in full
     for port in NAMES:
         assert q(port, "drop table bad").returncode == 0
     _, healthy = _run(nar_pair, tmp_path, monkeypatch,
                       ["check", "sc", "--only", "data"], "healthy")
-    assert healthy["status"] == "same", healthy
+    assert narrowed != healthy, "the two runs must no longer be one file"
+    assert healthy.get("coverage") == {"checks": ["data"]}, healthy
 
-    assert narrowed == healthy, (
-        "the defect this pins has been fixed - replace this test with the"
-        " assertion that the narrowed run records its coverage")
+
+def test_a_full_run_says_same_and_carries_no_coverage(nar_pair, tmp_path,
+                                                        monkeypatch):
+    """The cry-wolf guard. If every run came back `incomplete`, the word
+    would mean nothing and people would gate on `has_differences` again -
+    which is the hole this was opened to close."""
+    _seed(nar_pair, 100)
+    out, env = _run(nar_pair, tmp_path, monkeypatch,
+                    ["check", "sc", "--only", "counts,data"], "full-both")
+    assert "coverage" in env, env
+    # counts,data is still short of the battery, so it is narrowed - but a
+    # hop checked with every check it has must not be
+    from migkit import verdict as _v
+    assert _v.summarize(type("H", (), {"name": "h", "engine": "postgres"})(),
+                        [{"status": "ok", "category": "c"}])["status"] \
+        == "same"
+    assert "coverage" not in _v.summarize(
+        type("H", (), {"name": "h", "engine": "postgres"})(),
+        [{"status": "ok", "category": "c"}])
 
 
 def test_a_mistyped_table_errors_rather_than_passing(nar_pair, tmp_path,

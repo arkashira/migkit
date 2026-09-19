@@ -95,12 +95,28 @@ def fingerprint(records):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def summarize(hop, records, engine=None, load=None):
+def summarize(hop, records, engine=None, load=None, coverage=None):
     """Build the normalized envelope for one check run.
 
     `load` is what the throttle did, when it did anything: a run that took
     three times as long because the server was busy should say so, not just
     be slow.
+
+    `coverage` is what the run was narrowed to, and it exists because this
+    file is read by a machine rather than a person. Measured before it did:
+    a `--table public.good --only data` run over a database whose *other*
+    table was missing 60 of its 100 rows produced an envelope
+    **byte-identical** to a full run over a healthy database - same
+    `status: same`, same `has_differences: false`, same totals. A gate
+    reading `has_differences` passed both. The information existed in
+    `summary.json` beside it and stopped short of the file automation
+    reads.
+
+    A narrowed run that found nothing therefore reports `incomplete`
+    rather than `same`: the vocabulary already had a word for "nothing
+    found, not everything looked at". `has_differences` stays `false`,
+    because no difference *was* found and saying otherwise would be a
+    second lie in the other direction.
     """
     totals = {s: 0 for s in STATUSES}
     for r in records:
@@ -112,9 +128,12 @@ def summarize(hop, records, engine=None, load=None):
         status = "different"
     elif totals.get("skip") and not (totals.get("ok") or totals.get("warn")):
         status = "incomplete"
+    elif coverage:
+        status = "incomplete"
     else:
         status = "same"
     return {
+        **({"coverage": coverage} if coverage else {}),
         "format_version": FORMAT_VERSION,
         "tool": "migkit",
         "tool_version": __version__,
@@ -141,9 +160,9 @@ def summarize(hop, records, engine=None, load=None):
     }
 
 
-def write(hop, records, engine=None, load=None):
+def write(hop, records, engine=None, load=None, coverage=None):
     """Write verdict.json for this hop and return (path, envelope)."""
-    env = summarize(hop, records, engine, load)
+    env = summarize(hop, records, engine, load, coverage)
     p = hop.report_dir() / "verdict.json"
     p.write_text(json.dumps(env, indent=1, sort_keys=True, default=str))
     return p, env

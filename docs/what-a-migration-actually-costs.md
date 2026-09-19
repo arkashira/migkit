@@ -193,12 +193,13 @@ In order. Each item says what has to be measured before it is written.
    each one beside the escaped values, so the reader gets a finding rather
    than a number. Classified by Unicode category on the base contract, so
    both engines read one implementation.
-16. **A verdict that states its own coverage.** **Open, measured** -
-   `verdict.json` from a run narrowed with `--table` and `--only` is
-   byte-identical to one from a full run over a healthy database, while a
-   table sits 60% empty. The envelope records nothing about what the run
-   covered, so a CI gate on `has_differences` cannot tell the two apart.
-   Fix designed in catalogue D14.
+16. **A verdict that states its own coverage.** **Done** -
+   `verdict.json` from a run narrowed with `--table` and `--only` used to
+   be byte-identical to one from a full run over a healthy database, while
+   a table sat 60% empty; a CI gate on `has_differences` could not tell
+   them apart. The envelope now carries a `coverage` block and reports
+   `incomplete` rather than `same` when the run was narrowed, with
+   `has_differences` left alone.
 
 ## Sources
 

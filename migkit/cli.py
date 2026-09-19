@@ -541,9 +541,25 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     from . import verdict as _verdict
     was_same = _verdict.unchanged_since(hop, results)
     summary_path.write_text(json.dumps(results, indent=1, default=str))
+    # What this run did *not* look at, for the file a CI job reads. Only
+    # what genuinely narrows it: `--db` on a single-database hop narrows
+    # nothing, and no `--only` means the full battery ran. The hop's own
+    # exclude list is deliberately absent - that is the hop's definition
+    # rather than a narrowing of it, and a verdict covering the hop fully
+    # is complete.
+    coverage = {}
+    if table:
+        coverage["table"] = table
+    if db and len(eng.databases()) > 1:
+        coverage["db"] = db
+    if only and set(checks) < set(allowed):
+        coverage["checks"] = sorted(checks)
+    if exclude:
+        coverage["exclude"] = [p.strip() for p in exclude.split(",")
+                               if p.strip()]
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
-        load=getattr(eng, "_last_throttle", None))
+        load=getattr(eng, "_last_throttle", None), coverage=coverage or None)
     from .report import write_report
     report_path = write_report(hop, results)
     bad = [r for r in results if r["status"] not in ("ok", "skip")]

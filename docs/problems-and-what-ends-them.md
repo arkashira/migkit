@@ -1335,19 +1335,20 @@ a person - a CI job asks "did it pass" and nothing else. If the artifact it
 reads cannot distinguish "everything matched" from "the part I looked at
 matched", then narrowing the run is indistinguishable from passing it.
 
-**migkit: does not end it yet.** Found by running two commands that should
-not be able to agree, on one pair: a database with `good` (100 rows both
-sides) and `bad` (100 rows on the source, 40 on the target).
+**migkit: Ends it** - `test_narrowed_run_verdict.py`. Found by running two
+commands that should not be able to agree, on one pair: a database with
+`good` (100 rows both sides) and `bad` (100 rows on the source, 40 on the
+target).
 
     check sc --only data                    data  DIFF  public.bad
                                             verdict: different
     check sc --table public.good --only data data  OK missing=0 extra=0
                                             verdict: same
 
-The second is not wrong about the table it was asked about. What is wrong
-is the artifact. With the timestamp, fingerprint and tool version removed,
-the `verdict.json` from that run is **byte-identical** to the one from a
-genuinely clean database checked in full:
+The second was not wrong about the table it was asked about. The artifact
+was. With the timestamp, fingerprint and tool version removed, the
+`verdict.json` from that run was **byte-identical** to one from a genuinely
+clean database checked in full:
 
     {"by_category": {"parity.row-content": {"ok": 1}}, "findings": [],
      "has_differences": false, "hop": "sc", "status": "same",
@@ -1355,26 +1356,34 @@ genuinely clean database checked in full:
 
 Same `status`, same `has_differences`, same totals - with 60 rows missing
 from a table the run never opened. A gate reading `has_differences == false`
-passes both. Nothing in the envelope records `--table`, `--only`, `--db` or
-`--exclude`, so nothing downstream can tell a full run from a narrowed one.
-`summary.json` beside it *does* carry `"scope": "postgres public.good"`, so
-the information exists and stops at the file automation reads.
+passed both. `summary.json` beside it *did* carry `"scope": "postgres
+public.good"`, so the information existed and stopped short of the file
+automation reads.
 
-Two things migkit already gets right here, and both were measured rather
-than assumed: a mistyped table name (`--table public.gooood`) reports
+The envelope now carries what narrowed the run, and the same command says:
+
+    verdict: incomplete
+    "coverage": {"checks": ["data"], "table": "public.good"}
+    "status": "incomplete", "has_differences": false
+
+`incomplete` is not a new word - the vocabulary already had it for "nothing
+found, not everything looked at". **`has_differences` is deliberately
+untouched**: no difference was found, and flipping it would be a lie in the
+other direction, aimed at forcing a gate rather than informing it.
+
+What counts as narrowing was written to avoid crying wolf, because a
+verdict that comes back `incomplete` every time is one people learn to
+ignore, and then they gate on `has_differences` again - the hole this was
+opened to close. `--db` on a single-database hop narrows nothing. No
+`--only` means the full battery ran. The hop's own exclude list is absent
+on purpose: that is the hop's definition rather than a narrowing of it, so
+a run covering the hop fully is complete.
+
+Two things migkit already got right are pinned so this change could not
+take them away: a mistyped table name (`--table public.gooood`) reports
 `ERROR` and `verdict: error` rather than a clean nothing, and `--table`
-narrows `data` while `counts` still sweeps the whole database - so the
-example above needed `--only data` to hide `bad` at all.
-
-**The fix, designed and not yet written:** carry the narrowing into
-`verdict.summarize` and record it as a `coverage` block, and when a run was
-narrowed let the status be `incomplete` - a word the vocabulary already has
-for "nothing found, not everything looked at" - instead of `same`.
-`has_differences` stays `false`, because no difference was found and
-claiming one would be its own lie. Deliberately not shipped in the same
-tick as the measurement: 24 test files invoke `--only` or `--table`, and a
-change to the artifact every check writes deserves the whole suite rather
-than the two adjacent files a small tick can run.
+narrows the checksum pass while `counts` still sweeps the whole database -
+which is why hiding `bad` above needed `--only data` as well.
 
 ## E. Keeping the two sides in step
 
