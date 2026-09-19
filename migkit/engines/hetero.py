@@ -79,25 +79,77 @@ class HeteroEngine(Engine):
         """
         return str(identifier).split(".")[-1]
 
+    def _rename(self, identifier):
+        """This source table's name on the target, from the hop's mapping.
+
+        One place, so the pairing and the message explaining it cannot
+        disagree about which rename applied.
+        """
+        parts = [p for p in str(identifier).split(".") if p]
+        return self.hop.target_table(*parts)
+
     @staticmethod
-    def match_tables(src_ids, dst_ids):
+    def match_tables(src_ids, dst_ids, rename=None):
         """(pairs, src_only, dst_only, ambiguous) by unqualified name.
 
         A name that appears twice on one side - the same table in two schemas -
         is returned as ambiguous rather than resolved. Picking one would
         compare a table against a namesake and report the verdict as if it
         were about the one the operator meant.
+
+        `rename` is the hop's mapping, as a callable from a source id to
+        the name that table has on the target. Given one, a mapped table is
+        paired with what it was renamed *to* rather than with its namesake -
+        which is the difference between verifying a transformed target and
+        reporting every renamed table as missing. Without one, nothing
+        changes: the leaf match below is what every hop uses today.
+
+        A rename pointing at a table the target does not have is returned
+        in `src_only`, because that is what it is - it is neither paired
+        with its old namesake (which would verify a table nobody asked
+        about) nor dropped. Saying *why* it is missing is the caller's
+        job.
         """
         def index(ids):
             out = {}
             for i in ids:
                 out.setdefault(HeteroEngine._leaf(i), []).append(i)
             return out
+        pairs, mapped_missing = [], []
+        if rename:
+            dst_by_leaf = index(dst_ids)
+            dst_exact = {str(i) for i in dst_ids}
+            taken_s, taken_d = set(), set()
+            for sid in sorted(src_ids):
+                want = rename(sid)
+                if not want or str(want) == str(sid):
+                    continue
+                hit = None
+                if str(want) in dst_exact:
+                    hit = str(want)
+                else:
+                    same = dst_by_leaf.get(HeteroEngine._leaf(want), [])
+                    if len(same) == 1:
+                        hit = same[0]
+                taken_s.add(sid)
+                if hit is not None and hit not in taken_d:
+                    taken_d.add(hit)
+                    pairs.append((sid, hit))
+                else:
+                    # named a target that is not there. It must not fall
+                    # back to its namesake - the operator said this table
+                    # lives somewhere else, and pairing it with the old
+                    # name would verify a table nobody asked about - and it
+                    # must not vanish either, which is what the first
+                    # version of this did.
+                    mapped_missing.append(sid)
+            src_ids = [i for i in src_ids if i not in taken_s]
+            dst_ids = [i for i in dst_ids if i not in taken_d]
         s, d = index(src_ids), index(dst_ids)
         ambiguous = sorted(
             [v[0] for v in s.values() if len(v) > 1]
             + [v[0] for v in d.values() if len(v) > 1])
-        pairs, src_only, dst_only = [], [], []
+        src_only, dst_only = list(mapped_missing), []
         for leaf in sorted(set(s) | set(d)):
             sv, dv = s.get(leaf, []), d.get(leaf, [])
             if len(sv) > 1 or len(dv) > 1:
@@ -125,17 +177,22 @@ class HeteroEngine(Engine):
         """
         src_ids = self.src_engine.neutral_tables("src", db)
         dst_ids = self.dst_engine.neutral_tables("dst", db)
-        pairs, src_only, dst_only, ambiguous = self.match_tables(src_ids,
-                                                                 dst_ids)
+        pairs, src_only, dst_only, ambiguous = self.match_tables(
+            src_ids, dst_ids, self._rename)
         if table:
             pairs = [p for p in pairs if self._leaf(p[0]) == self._leaf(table)]
             src_only = [t for t in src_only
                         if self._leaf(t) == self._leaf(table)]
         rows = []
         for t in src_only:
-            rows.append((f"{db}.{self._leaf(t)}", "diff",
-                         f"{t} is on the source and not on the target",
-                         None, None))
+            want = self._rename(t)
+            why = f"{t} is on the source and not on the target"
+            if want and str(want) != str(t):
+                # the mapping is why it looks missing, and without saying so
+                # the operator hunts for a table by a name it no longer has
+                why = (f"{t} is mapped to {want}, which the target does"
+                       " not have")
+            rows.append((f"{db}.{self._leaf(t)}", "diff", why, None, None))
         for t in dst_only:
             rows.append((f"{db}.{self._leaf(t)}", "warn",
                          f"{t} is on the target and not on the source",
@@ -310,7 +367,7 @@ class HeteroEngine(Engine):
             return
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db))
+            self.dst_engine.neutral_tables("dst", db), self._rename)
         match = [(s, d) for s, d in pairs if self._leaf(s) == name]
         if not match:
             raise SystemExit(f"{name} is no longer on both sides, so the"
@@ -424,7 +481,7 @@ class HeteroEngine(Engine):
         leaf = self._leaf(src_t)
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db))
+            self.dst_engine.neutral_tables("dst", db), self._rename)
         match = [d for s_, d in pairs if self._leaf(s_) == leaf]
         if match:
             dst_t = match[0]
@@ -751,7 +808,7 @@ class HeteroEngine(Engine):
                 self._mysql_to_postgres_only("listing tables to move")
             pairs, _, _, _ = self.match_tables(
                 self.src_engine.neutral_tables("src", db),
-                self.dst_engine.neutral_tables("dst", db))
+                self.dst_engine.neutral_tables("dst", db), self._rename)
             out = []
             for src_t, _ in pairs:
                 sch, _, tbl = src_t.rpartition(".")
