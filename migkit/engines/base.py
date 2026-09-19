@@ -300,6 +300,16 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _quote_literal(self, value):
+        """One string as a SQL literal.
+
+        Doubling the quote is the standard and is all PostgreSQL needs.
+        MySQL also reads a backslash as an escape unless the session says
+        otherwise, so it overrides this - which is the reason the method
+        exists at all rather than the quoting being written inline.
+        """
+        return "'" + str(value).replace("'", "''") + "'"
+
     def _extension_data_result(self, db, findings, checked, hint):
         """Rows an extension owns, which nothing else in the report looks
         at.
@@ -942,6 +952,123 @@ class Engine:
             "deep", f"{db} mojibake", "ok",
             f"{scanned} non-ASCII values sampled across the text columns,"
             " none of them UTF-8 that was stored twice")
+
+    #: How many broken values one pass rewrites. A text repair is one
+    #: statement per row, so an uncapped plan is a transaction nobody can
+    #: review. Hitting the cap is said out loud and the work converges: a
+    #: repaired value no longer classifies as double-encoded, so the next
+    #: pass takes the next batch rather than redoing this one.
+    MOJIBAKE_REPAIR_CAP = 20000
+
+    @staticmethod
+    def _repair_text_enabled():
+        """Whether the text repair carries statements or only describes
+        itself.
+
+        Off by default, and the default is the interesting half. Every other
+        repair here moves the target *towards* the source; this one moves it
+        away on purpose, because the source is what is broken. An automated
+        reconcile loop that quietly rewrote text would leave a target that
+        can never check clean again, with nobody having decided that.
+        """
+        import os
+        return os.environ.get("MIGKIT_REPAIR_TEXT", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+
+    def _mojibake_updates(self, db, table, key, columns, rows):
+        """Statements that repair only the values `_double_encoded` confirms.
+
+        `rows` lines up with `_mojibake_tally`'s except that each row starts
+        with its key values: `key` names them, `columns` names the text
+        columns that follow. Written here rather than per engine because the
+        statement is plain SQL and the decision of *which* rows to touch is
+        the whole point - an engine supplying rows cannot get it wrong.
+
+        Two properties the tests pin:
+
+        * a value that is not double-encoded produces no statement at all,
+          which is what separates this from the blanket column conversion
+          the check warns about;
+        * every update matches on the **old value** as well as the key, so a
+          row somebody edited between the read and the apply is skipped
+          rather than overwritten with a repair of text that is no longer
+          there.
+
+        Returns (statements, undo, columns repaired, repaired, left alone,
+        skipped, beyond the cap).
+        """
+        stmts, undo = [], []
+        touched = set()
+        repaired = clean = skipped = left = 0
+        quoted = self._qualified("dst", db, table)
+        for row in rows:
+            keys, values = row[:len(key)], row[len(key):]
+            if any(k is None for k in keys):
+                # a key that cannot address one row cannot repair one row
+                skipped += 1
+                continue
+            where = " and ".join(f"{self._quote_ident(k)} = "
+                                 f"{self._quote_literal(v)}"
+                                 for k, v in zip(key, keys))
+            for col, value in zip(columns, values):
+                if not isinstance(value, str) or value.isascii():
+                    continue
+                said = self._double_encoded(value)
+                if not said:
+                    # genuinely accented text. The whole reason this is a
+                    # row-level repair rather than one conversion per column
+                    clean += 1
+                    continue
+                if repaired >= self.MOJIBAKE_REPAIR_CAP:
+                    left += 1
+                    continue
+                c = self._quote_ident(col)
+                old, new = self._quote_literal(value), \
+                    self._quote_literal(said[1])
+                stmts.append(f"update {quoted} set {c} = {new}"
+                             f" where {where} and {c} = {old};")
+                undo.append(f"update {quoted} set {c} = {old}"
+                            f" where {where} and {c} = {new};")
+                touched.add(f"{table}.{col}")
+                repaired += 1
+        return stmts, undo, touched, repaired, clean, skipped, left
+
+    def _mojibake_repair_note(self, repaired, columns, clean, skipped, left,
+                              refused, enabled):
+        """What the plan says about a repair that moves the target away from
+        the source rather than towards it.
+
+        `refused` is [(what, why)] rather than a list of names, because the
+        two reasons a column is left out - the table has no primary key, and
+        the broken column *is* the primary key - are not interchangeable and
+        a reader who cannot tell them apart cannot act on either.
+        """
+        if not repaired:
+            return ""
+        note = (f"{repaired} double-encoded values in {len(columns)} columns"
+                f" ({', '.join(sorted(columns)[:3])}"
+                + (" ..." if len(columns) > 3 else "") + ")")
+        if clean:
+            note += (f", the {clean} genuinely accented values beside them"
+                     " left alone")
+        if left:
+            note += (f"; at least {left} beyond the"
+                     f" {self.MOJIBAKE_REPAIR_CAP} this pass carries -"
+                     " re-run for the rest")
+        if skipped:
+            note += f"; {skipped} rows had no usable key"
+        if refused:
+            note += "; SKIPPED " + ", ".join(
+                f"{what} ({why})" for what, why in sorted(refused)[:4])
+        if not enabled:
+            return (note + " - REFUSED: this rewrites target data so the"
+                    " target no longer matches the source, and a later"
+                    " `sync --kind rows` copies the source's broken text"
+                    " back over it. Fix the source too, then set"
+                    " MIGKIT_REPAIR_TEXT=1 to include these statements")
+        return (note + "; each update matches the old value as well as the"
+                " key, so a row changed since this was read is skipped"
+                " rather than overwritten")
 
     def _collation_version_result(self, db, drifted, missing, checked, hint):
         """Whether the sort order an index was built under still exists.

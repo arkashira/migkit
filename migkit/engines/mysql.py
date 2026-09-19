@@ -1308,6 +1308,13 @@ class MySQLEngine(Engine):
     def _quote_ident(self, name):
         return "`" + str(name).replace("`", "``") + "`"
 
+    def _quote_literal(self, value):
+        """MySQL reads a backslash inside a string as an escape unless the
+        session sets NO_BACKSLASH_ESCAPES, which the default sql_mode does
+        not. Doubling the quote alone - correct everywhere else - would turn
+        a value holding `\\n` into a newline on the way in."""
+        return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
+
     def _qualified(self, side, db, table):
         return (self._quote_ident(self._d(side, db)) + "."
                 + self._quote_ident(table))

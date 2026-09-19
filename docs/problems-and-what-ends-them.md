@@ -344,8 +344,9 @@ conversion or a client change, then `é` becomes `Ã©`. The repair path is a
 `BLOB` round trip - which corrupts the rows that were *not* double-encoded,
 so a column with mixed history breaks under a uniform fix.
 
-**migkit: Ends it** for the part that decides whether a repair is safe -
-`test_mojibake.py`, on PostgreSQL and MySQL alike. Charset and encoding
+**migkit: Ends it** - `test_mojibake.py` for the part that decides
+whether a repair is safe, on PostgreSQL and MySQL alike, and
+`test_mojibake_repair.py` for the repair itself. Charset and encoding
 parity were already checked (`test_charset_encoding_mysql.py`,
 `test_deep_encoding_pg.py`); what is new is reading the text itself:
 
@@ -384,8 +385,40 @@ sample, and the rows come back as JSON so a value containing a tab or a
 newline cannot be read as three values - a mistake this project made once
 already, in the drilldown.
 
-**Missing:** the repair. migkit reports which rows are safe to convert; it
-does not convert them.
+**The repair is done too** - `test_mojibake_repair.py`. `sync` plans one
+`UPDATE` per value `_double_encoded` confirms and nothing else, so the rows
+that were never broken are not in the statement list at all:
+
+    update "public"."notes" set "body" = 'éclair'
+      where "id" = '1' and "body" = 'Ã©clair';
+
+Measured on a column holding `Ã©clair`, `café`, `plain ascii`, `£100`,
+`Ã¼ber` and `æ¥æ¬èª`: three rows repaired, three byte-identical
+afterwards, and a second pass finds nothing left - repaired text no longer
+classifies as double-encoded, so the work converges where running the
+column conversion twice destroys it. The blanket one-liner on that same
+column does not manage a single row: `ERROR: invalid byte sequence for
+encoding "UTF8": 0xe9`, thrown by the `é` in `café`.
+
+Three decisions the tests pin:
+
+* **It writes to the target, never the source.** The source is somebody's
+  live database and migkit writes to it nowhere; the target is the copy it
+  is answerable for.
+* **The statements are withheld by default.** Every other repair here moves
+  the target *towards* the source. This one moves it away on purpose,
+  because the source is what is broken - and the resync action standing
+  next to it in the same plan would copy the broken text straight back. So
+  the action is always listed, with that consequence in its note, and
+  carries statements only under `MIGKIT_REPAIR_TEXT=1`. An automated
+  reconcile loop rewrites no text on its own.
+* **Every update matches the old value as well as the key**, so a row
+  somebody edited between the plan and the apply is skipped rather than
+  overwritten with a repair of text that is no longer there.
+
+What it will not do is said rather than skipped: a table with no primary
+key, and a broken column that *is* the primary key, are both named in the
+note - rewriting a key moves the row every foreign key points at.
 
 ### B4. The server changed its default collation under you
 

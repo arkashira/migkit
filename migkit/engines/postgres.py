@@ -3425,6 +3425,12 @@ class PostgresEngine(Engine):
                     db, "rows", [f"resync-rows {t}"], [],
                     f"{t}: {', '.join(counts) or 'no pk files'},"
                     " deleted rows saved to undo before recopy"))
+            # after the resync, never before it: a recopy takes its rows from
+            # the source, which is where the broken text lives, so a text
+            # repair applied first would be undone by the action next to it
+            text = self._mojibake_repair(db)
+            if text:
+                actions.append(text)
         if kind in ("schema", "all"):
             # GRANT is DDL and belongs with the schema repair, so no new
             # choice is added to --kind: a plain `migkit sync --apply` now
@@ -3439,6 +3445,81 @@ class PostgresEngine(Engine):
             if act:
                 actions.append(act)
         return actions
+
+    def _mojibake_repair(self, db):
+        """The row-by-row repair the deep check tells the operator to do.
+
+        That check ends with "repair row by row, matching only the values
+        that re-encode to valid UTF-8" - the hardest part of the job, handed
+        back to the engineer along with the warning that the obvious
+        one-liner destroys the rows that were never broken. This does it.
+
+        It reads the **target**: migkit writes to the source nowhere, and
+        the target is the copy it is answerable for. The price is real and
+        is written into the note rather than discovered later - a repaired
+        target no longer matches the source it came from.
+
+        Target triggers fire for these updates, unlike a `move`, which runs
+        with `session_replication_role = replica`. A handful of statements
+        is not a reload, and quieting them needs a privilege an application
+        role may not have; `check --deep`'s triggers line names the ones
+        that would run.
+        """
+        cols = {}
+        for line in self._psql("dst", db, self.TEXT_COLUMNS).splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2:
+                cols.setdefault(parts[0], []).append(parts[1])
+        stmts, undo, touched, refused = [], [], set(), []
+        repaired = clean = skipped = left = 0
+        for table, columns in sorted(cols.items()):
+            key = self._pk_cols_of(db, table, "dst")
+            if not key:
+                refused.append((table, "no primary key, so no row can be"
+                                       " addressed"))
+                continue
+            want = [c for c in columns if c not in key]
+            for c in columns:
+                if c in key:
+                    refused.append((f"{table}.{c}", "the key itself -"
+                                    " rewriting it would move rows other"
+                                    " tables point at"))
+            if not want:
+                continue
+            sch, tbl = table.split(".", 1)
+            quoted = ['"' + c.replace('"', '""') + '"' for c in key + want]
+            where = " or ".join(
+                f"octet_length({q}) <> char_length({q})"
+                for q in quoted[len(key):])
+            out = self._psql(
+                "dst", db,
+                f'select row_to_json(s) from (select {", ".join(quoted)}'
+                f' from "{sch.replace(chr(34), chr(34) * 2)}".'
+                f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                f' where {where} limit {self.MOJIBAKE_REPAIR_CAP + 1}) s')
+            rows = []
+            for line in out.splitlines():
+                if not line.strip():
+                    continue
+                got = json.loads(line)
+                rows.append([got.get(c) for c in key]
+                            + [got.get(c) for c in want])
+            s, u, t, rep, cl, sk, lf = self._mojibake_updates(
+                db, table, key, want, rows)
+            stmts += s
+            undo += u
+            touched |= t
+            repaired += rep
+            clean += cl
+            skipped += sk
+            left += lf
+        if not repaired:
+            return None
+        enabled = self._repair_text_enabled()
+        note = self._mojibake_repair_note(repaired, touched, clean, skipped,
+                                          left, refused, enabled)
+        return RepairAction(db, "text", stmts if enabled else [],
+                            undo if enabled else [], note)
 
     def _schema_repair_action(self, db):
         """DDL that makes the target's objects (columns, indexes, PK/FK,
@@ -3461,6 +3542,13 @@ class PostgresEngine(Engine):
         if action.kind == "sequences":
             self._psql("dst", db,
                        "\n".join(s.split("  --")[0] for s in action.statements))
+        elif action.kind == "text":
+            # withheld unless MIGKIT_REPAIR_TEXT says otherwise, in which
+            # case the note is the whole action - applying it must do
+            # nothing rather than send `begin; commit;` and report success
+            if action.statements:
+                self._psql("dst", db, "begin;\n"
+                           + "\n".join(action.statements) + "\ncommit;")
         elif action.kind in ("schema", "grants", "constraints"):
             # one psql call: multi-statement + $$-quoted bodies apply intact,
             # and a grant set lands all-or-nothing
@@ -3947,9 +4035,9 @@ class PostgresEngine(Engine):
                             f" {str(e).splitlines()[-1][:100]}")
         return inv
 
-    def _pk_cols_of(self, db, table):
+    def _pk_cols_of(self, db, table, side="src"):
         sch, tbl = table.split(".", 1)
-        cols = self._psql("src", db,
+        cols = self._psql(side, db,
             "select a.attname from pg_index i"
             " join pg_attribute a on a.attrelid = i.indrelid"
             " and a.attnum = any(i.indkey)"

@@ -113,9 +113,12 @@ In order. Each item says what has to be measured before it is written.
 5. **The text that was broken before the move.** **Done** - `check --deep`
    samples every text column on the source and reports which ones hold
    *both* double-encoded and correct rows, because that pair is what makes
-   a blanket conversion destructive. **Still open from this item:** the
-   repair - migkit says which rows are safe to convert and does not convert
-   them.
+   a blanket conversion destructive. The repair is done too: `sync` plans
+   one `UPDATE` per confirmed row against the target and leaves the
+   genuinely accented rows beside them untouched, with undo and a match on
+   the old value. It is the one repair here withheld by default
+   (`MIGKIT_REPAIR_TEXT`), because it is the one that moves the target
+   *away* from its source.
 6. **The temporal types.** **Done for the meaning** - `canon.time_meaning`
    answers what a temporal column is *for*, separately from how to render
    it, and `check --deep` compares it column by column on both engines. It
