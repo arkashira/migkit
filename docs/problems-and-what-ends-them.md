@@ -1295,18 +1295,38 @@ reports 1 where it reported 0. The MySQL engine reads its sample through a
 driver and never had this - recorded with a test, so a future rewrite to
 shell out cannot reintroduce it quietly.
 
-**Still open: the seeing half.** `--drill` now counts every one of these,
-and still prints them like this:
+**And the seeing half.** `--drill` now adds what datacompy cannot work
+out - the values escaped, and the reason beside them:
 
-    id  v (source)  v (target)
-     1  café        café
-     2  hello       hello
-     3  ab          ab
-     4  a b         a b
+      id=1  v
+          source  'caf\xe9'
+          target  'cafe\u0301'
+          the same text written with different code points (NFC vs NFD)
+      id=3  v
+          source  'ab'
+          target  'a\u200bb'
+          a zero-width character (U+200B)
 
-Four rows that differ, rendered as four rows that do not. Counting a
-difference is not the same as being able to act on one; a sample that
-cannot show what changed leaves the last step with the engineer.
+Five kinds are named from one definition of "renders the same": NFC vs NFD,
+leading or trailing whitespace, a carriage return (and which side has it), a
+zero-width character, and a space that is not U+0020 - each reported with
+its code point. The classification is by Unicode category rather than a
+hand-written list of characters, and the categories were checked against
+`unicodedata` rather than assumed: `Cf` for the zero-width and BOM family,
+`Zs` for every space that is not U+0020, `Cc` for carriage return and tab,
+`Mn` for the combining marks NFC folds away.
+
+Two exclusions carry as much weight as the inclusions, and both are pinned
+by tests. A row differing `red` from `blue` never appears: a difference
+anybody can see needs no explanation, and a section repeating every
+differing row would bury the ones that do. A lone carriage return between
+two letters is also left out - it returns the cursor rather than printing,
+so `a\rb` and `ab` really do render differently. The section prints nothing
+at all when there is nothing invisible to explain.
+
+It lives on the base contract and reads two dataframes, so MySQL gets it
+without a line of its own - asserted by a test rather than assumed, because
+"it should inherit" is how two copies start.
 
 ## E. Keeping the two sides in step
 

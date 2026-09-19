@@ -402,6 +402,12 @@ def _drill(hop_name, db, table, limit):
                                   join_columns=[k.lower() for k in keys],
                                   df1_name="source", df2_name="target")
     console.print(cmp.report())
+    # datacompy counts the differing rows; it prints the values as they are,
+    # which for an invisible difference is two identical-looking strings.
+    # The count was never the hard part.
+    extra = eng._invisible_section(a, b, keys)
+    if extra:
+        console.print(extra)
 
 
 @main.command()

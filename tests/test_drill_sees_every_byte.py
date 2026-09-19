@@ -28,10 +28,25 @@ Carriage returns are not exotic. Any text authored on Windows, pasted from
 one, or round-tripped through a CSV carries them, and they are exactly the
 kind of difference a migration introduces.
 
-The **readability** half of this is a separate, still-open problem, kept
-out of these tests on purpose: `--drill` now *counts* all six rows below,
-but prints `café` beside `café` and `hello` beside `hello ` in its sample.
-Seeing the count is not the same as being able to act on it.
+Counting them was only half of it. datacompy's own sample prints the pairs
+as they are, which for these rows is two identical-looking strings:
+
+       id v (source)  v (target)
+    0   2      hello      hello
+    1   3         ab         ab
+    2   6        red        blue
+
+So the drilldown now adds what it can work out that datacompy cannot - the
+values escaped, and the reason beside them:
+
+      id=3  v
+          source  'ab'
+          target  'a\\u200bb'
+          a zero-width character (U+200B)
+
+`red` against `blue` is deliberately absent: a difference anybody can see
+needs no explanation, and a section that repeated every differing row would
+bury the ones that do.
 """
 import socket
 import subprocess
@@ -230,3 +245,130 @@ def test_mysql_reads_its_sample_through_a_driver(tmp_path):
     src = inspect.getsource(MySQLEngine.fetch_sample_df)
     assert "text=True" not in src, src
     assert "self._q(" in src, src
+
+
+def test_every_invisible_difference_is_named_not_just_counted(inv_pair,
+                                                                tmp_path,
+                                                                monkeypatch):
+    """The count was never the hard part. Each pair gets its bytes and the
+    reason they differ."""
+    _seed(inv_pair, PAIRS)
+    out = _cli(inv_pair, tmp_path, monkeypatch,
+               ["check", "inv", "--db", "postgres", "--table", "public.t",
+                "--drill"])
+    section = out.split("Differences You Cannot See", 1)
+    assert len(section) == 2, out
+    seen = section[1]
+    for escaped in ("'caf\\xe9'", "'cafe\\u0301'", "'hello '", "'a\\u200bb'",
+                    "'a\\xa0b'", "'one\\r\\ntwo'"):
+        assert escaped in seen, (escaped, seen)
+    for reason in ("NFC vs NFD", "trailing whitespace", "U+200B", "U+00A0",
+                   "carriage return"):
+        assert reason in seen, (reason, seen)
+
+
+def test_a_difference_anybody_can_see_stays_out(inv_pair, tmp_path,
+                                                  monkeypatch):
+    """`red` against `blue` needs no explanation. A section that repeated
+    every differing row would bury the rows that do."""
+    _seed(inv_pair, PAIRS)
+    out = _cli(inv_pair, tmp_path, monkeypatch,
+               ["check", "inv", "--db", "postgres", "--table", "public.t",
+                "--drill"])
+    seen = out.split("Differences You Cannot See", 1)[1]
+    assert "blue" not in seen, seen
+    assert "'red'" not in seen, seen
+    # the sample datacompy prints still carries it, so nothing was hidden
+    assert "blue" in out, out
+
+
+def test_a_matching_pair_prints_no_section(inv_pair, tmp_path, monkeypatch):
+    """The cry-wolf guard: a heading with nothing under it teaches people to
+    scroll past the heading."""
+    _seed(inv_pair, [(i, s, s) for i, s, _ in PAIRS])
+    out = _cli(inv_pair, tmp_path, monkeypatch,
+               ["check", "inv", "--db", "postgres", "--table", "public.t",
+                "--drill"])
+    assert "Differences You Cannot See" not in out, out
+
+
+def test_both_engines_read_one_implementation(tmp_path):
+    """It lives on the base contract, so MySQL gets it without a line of
+    its own - asserted rather than assumed, because 'it should inherit' is
+    how two copies start."""
+    import pandas as pd
+
+    from migkit.engines.mysql import MySQLEngine
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="x", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"),
+              target=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"), databases=["x"])
+    hop.report_dir = lambda db=None: tmp_path
+    src = pd.DataFrame({"id": [1], "v": [PAIRS[3][1]]})
+    dst = pd.DataFrame({"id": [1], "v": [PAIRS[3][2]]})
+    pg = PostgresEngine(hop)._invisible_section(src, dst, ["id"])
+    my = MySQLEngine(hop)._invisible_section(src, dst, ["id"])
+    assert "U+00A0" in pg, pg
+    assert pg == my, (pg, my)
+
+
+def test_the_reasons_need_no_server(tmp_path):
+    from migkit.engines.base import Engine
+    hop = Hop(name="x", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"),
+              target=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"), databases=["x"])
+    hop.report_dir = lambda db=None: tmp_path
+    eng = Engine(hop)
+
+    # written as escapes, not as literal characters: a heredoc or an
+    # editor that normalises the file turns the NFD case into the NFC one
+    # and the test then passes for the wrong reason
+    named = {
+        ("caf\u00e9", "cafe\u0301"): "NFC vs NFD",
+        ("hello", "hello "): "leading or trailing whitespace",
+        ("ab", "a\u200bb"): "U+200B",
+        ("a b", "a\u00a0b"): "U+00A0",
+        ("one\ntwo", "one\r\ntwo"): "carriage return on the target",
+        ("a b", "a  b"): "runs of spaces",
+    }
+    for (a, b), want in named.items():
+        why = eng._invisible_difference(a, b)
+        assert len(why) == 1, (a, b, why)
+        assert want in why[0], (a, b, why)
+
+    # nothing to explain
+    for a, b in (("red", "blue"), ("same", "same"), ("x", None), (None, 1)):
+        assert eng._invisible_difference(a, b) == [], (a, b)
+
+    # the carriage return is attributed to the side that carries it
+    assert "on the source" in eng._invisible_difference("one\r\ntwo",
+                                                        "one\ntwo")[0]
+
+    # a lone carriage return between two letters is left out on purpose:
+    # it returns the cursor rather than printing, so `a\rb` and `ab` really
+    # do render differently and belong in the visible sample above
+    assert eng._invisible_difference("a\rb", "ab") == []
+
+
+def test_the_section_stops_and_says_it_stopped(tmp_path):
+    """A list longer than the sample it explains is not an explanation."""
+    import pandas as pd
+
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="x", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"),
+              target=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"), databases=["x"])
+    hop.report_dir = lambda db=None: tmp_path
+    eng = PostgresEngine(hop)
+    n = eng.INVISIBLE_CAP + 5
+    src = pd.DataFrame({"id": list(range(n)), "v": ["ab"] * n})
+    dst = pd.DataFrame({"id": list(range(n)), "v": ["a​b"] * n})
+    got = eng._invisible_section(src, dst, ["id"])
+    assert got.count("source  'ab'") == eng.INVISIBLE_CAP, got
+    assert "... 5 more not shown" in got, got

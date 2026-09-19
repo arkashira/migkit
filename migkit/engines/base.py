@@ -300,6 +300,131 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    @staticmethod
+    def _visible_text(s):
+        """What a reader actually sees, so two renderings can be compared.
+
+        Categories rather than a hand-written list of code points: `Cf` is
+        the zero-width and BOM family, `Zs` is every space that is not
+        U+0020, `Cc` covers carriage return and tab, and NFC folds a
+        combining accent onto the letter it decorates. All four were
+        checked against `unicodedata` rather than assumed.
+
+        Runs of whitespace collapse to one, because they render as one.
+        Without that, `one\\r\\ntwo` and `one\\ntwo` come out as `one  two`
+        and `one two` and the carriage return - the difference this whole
+        section exists for - reads as something a reader could have seen.
+        """
+        import unicodedata
+        out = []
+        for c in unicodedata.normalize("NFC", s):
+            cat = unicodedata.category(c)
+            if cat == "Cf":
+                continue
+            out.append(" " if cat == "Zs" or (cat == "Cc" and c.isspace())
+                       else c)
+        return " ".join("".join(out).split())
+
+    @classmethod
+    def _invisible_difference(cls, a, b):
+        """Why two values that print the same are not the same.
+
+        Returns the reasons, or `[]` when the two are equal *or* when the
+        difference is one anybody can see - a row differing `red` from
+        `blue` has nothing to explain and would only crowd out the rows
+        that do.
+        """
+        import unicodedata
+        if not isinstance(a, str) or not isinstance(b, str):
+            return []
+        if a == b or cls._visible_text(a) != cls._visible_text(b):
+            return []
+        why = []
+        if unicodedata.normalize("NFC", a) == unicodedata.normalize("NFC", b):
+            why.append("the same text written with different code points"
+                       " (NFC vs NFD)")
+        if len(a) - len(a.strip()) != len(b) - len(b.strip()):
+            why.append("leading or trailing whitespace")
+        if ("\r" in a) != ("\r" in b):
+            why.append("a carriage return on the "
+                       + ("source" if "\r" in a else "target"))
+
+        def cats(s, want):
+            return {c for c in s if unicodedata.category(c) == want
+                    and c != " "}
+        for cat, what in (("Cf", "a zero-width character"),
+                          ("Zs", "a space that is not U+0020")):
+            odd = cats(a, cat) ^ cats(b, cat)
+            if odd:
+                why.append(what + " ("
+                           + ", ".join(f"U+{ord(c):04X}" for c in sorted(odd))
+                           + ")")
+        if why:
+            return why
+        # Only now, because `str.split()` treats a non-breaking space as
+        # whitespace and every reason above is more useful than this one -
+        # said first, it turned "a space that is not U+0020" into a second
+        # line nobody needed.
+        if a.split() == b.split():
+            return ["the runs of spaces, tabs or newlines differ"]
+        return ["characters that render the same"]
+
+    #: How many identical-looking pairs one report names. A section longer
+    #: than the sample it explains stops being an explanation.
+    INVISIBLE_CAP = 20
+
+    def _invisible_section(self, src_df, dst_df, keys):
+        """The part of a drilldown a reader could not otherwise act on.
+
+        A count of differing rows is not a finding anybody can work with
+        when the values print identically. Both engines hand their sample
+        back as a dataframe, so this is written once and read by both.
+        """
+        def col(df, name):
+            for c in df.columns:
+                if str(c).lower() == str(name).lower():
+                    return c
+            return None
+
+        on = [col(src_df, k) for k in keys]
+        if any(c is None for c in on) or any(col(dst_df, k) is None
+                                             for k in keys):
+            return ""
+        try:
+            merged = src_df.merge(dst_df, on=on, suffixes=("__s", "__d"))
+        except Exception:
+            return ""
+        found, more = [], 0
+        for name in src_df.columns:
+            if name in on or col(dst_df, name) is None:
+                continue
+            left, right = f"{name}__s", f"{name}__d"
+            if left not in merged or right not in merged:
+                continue
+            for _, row in merged.iterrows():
+                why = self._invisible_difference(row[left], row[right])
+                if not why:
+                    continue
+                if len(found) >= self.INVISIBLE_CAP:
+                    more += 1
+                    continue
+                key = " ".join(f"{k}={row[k]}" for k in on)
+                found.append((key, name, row[left], row[right], why))
+        if not found:
+            return ""
+        out = ["", "Differences You Cannot See",
+               "--------------------------",
+               "These pairs print identically in the sample above. Shown"
+               " escaped, so the bytes are readable.", ""]
+        for key, name, a, b, why in found:
+            out.append(f"  {key}  {name}")
+            out.append(f"      source  {ascii(a)}")
+            out.append(f"      target  {ascii(b)}")
+            out.append(f"      {'; '.join(why)}")
+        if more:
+            out.append(f"  ... {more} more not shown")
+        return "\n".join(out)
+
     def _quote_literal(self, value):
         """One string as a SQL literal.
 
