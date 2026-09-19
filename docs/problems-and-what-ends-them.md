@@ -218,14 +218,48 @@ conversion or a client change, then `é` becomes `Ã©`. The repair path is a
 `BLOB` round trip - which corrupts the rows that were *not* double-encoded,
 so a column with mixed history breaks under a uniform fix.
 
-**migkit: Partly.** Charset and encoding parity are checked
-(`test_charset_encoding_mysql.py`, `test_deep_encoding_pg.py`), and every
-comparison runs over canonical text, so a difference in stored bytes shows
-as a difference rather than as noise.
+**migkit: Ends it** for the part that decides whether a repair is safe -
+`test_mojibake.py`, on PostgreSQL and MySQL alike. Charset and encoding
+parity were already checked (`test_charset_encoding_mysql.py`,
+`test_deep_encoding_pg.py`); what is new is reading the text itself:
 
-**Missing:** a mojibake detector - a check that samples text columns for the
-`Ã©`/`â€"` signatures and for genuine high-byte latin1, and reports that the
-column has *both* before anybody runs a conversion.
+    deep postgres mojibake: DIFF 1 columns hold both double-encoded and
+      correct text: public.notes.body 2 double-encoded and 2 genuinely
+      accented (e.g. 'cafÃ©' is really 'café') - converting the whole
+      column repairs the first kind and destroys the second
+
+The finding is deliberately *not* "this column has mojibake". It is **which
+columns hold both kinds of row**, because that is exactly where the obvious
+repair does damage. Measured: the blanket byte round trip over such a column
+fails outright on PostgreSQL - `invalid byte sequence for encoding "UTF8":
+0xa3` on a genuine `£100` - and the application-side version of the same
+fix, the one written with `errors='replace'`, turns it into `�100` without
+a word.
+
+The detection is a round trip rather than a search for `Ã`: re-encode the
+characters into the bytes they would have been and see whether those bytes
+are valid UTF-8 that says something else. That is what keeps it off correct
+text, and the separation was measured on a live column before the check was
+written:
+
+| caught | left alone |
+|---|---|
+| `cafÃ©` `naÃ¯ve rÃ©sumÃ©` `Â£100` | `café` `Ångström` `Müller` `Ação` |
+| `emâ€"dash` (cp1252) `emâ<80><94>dash` (latin1) | `Ça va` `Ægir` `£100` `日本語` |
+
+Both codecs are tried, because cp1252 maps the C1 block to typographic
+characters and is what produces the `â€"` everybody recognises. `£100` and
+`Â£100` sitting in one column is the whole problem in two rows, and a test
+pins that pair.
+
+One scan per table rather than per column (`octet_length <> char_length` is
+the same "has a non-ASCII character" test in both engines), bounded to a
+sample, and the rows come back as JSON so a value containing a tab or a
+newline cannot be read as three values - a mistake this project made once
+already, in the drilldown.
+
+**Missing:** the repair. migkit reports which rows are safe to convert; it
+does not convert them.
 
 ### B4. The server changed its default collation under you
 

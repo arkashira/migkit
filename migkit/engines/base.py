@@ -259,6 +259,126 @@ class Engine:
                       f"{len(tables)} tables, all analyzed since they were"
                       " last written")
 
+    #: How many non-ASCII rows per table to look at. The classification is
+    #: per value and needs no context, so a sample answers the question that
+    #: matters - "does this column hold both kinds of row" - without reading
+    #: a terabyte to do it.
+    MOJIBAKE_SAMPLE = 2000
+
+    #: The codecs a UTF-8 string gets read as when the connection lied about
+    #: its charset. latin-1 is the classic; cp1252 is the one that produces
+    #: the `â€"` everybody recognises, because it maps the C1 block to
+    #: typographic characters instead of controls.
+    MOJIBAKE_CODECS = ("latin-1", "cp1252")
+
+    @classmethod
+    def _double_encoded(cls, text):
+        """Was this text UTF-8 that something read as single-byte and stored
+        again.
+
+        The test is the round trip, not a list of suspicious substrings:
+        re-encode the characters back to the bytes they would have been, and
+        see whether those bytes are valid UTF-8 that says something else.
+        Genuine accented text fails it, which is the whole point - measured
+        on a live column, `café`, `Ångström`, `Müller`, `Ação`, `Ça va`,
+        `Ægir`, `£100` and `日本語` all come back clean, because a lone
+        `é` (0xE9) is not the start of any valid UTF-8 sequence.
+
+        Returns (codec, what it really says) or None.
+        """
+        for codec in cls.MOJIBAKE_CODECS:
+            try:
+                decoded = text.encode(codec).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+            if decoded != text:
+                return codec, decoded
+        return None
+
+    def _mojibake_tally(self, table, columns, rows):
+        """Count, per column, how many sampled values are double-encoded and
+        how many are simply non-ASCII and fine.
+
+        `rows` is an iterable of sequences lined up with `columns`, so an
+        engine that reads through a driver and one that reads JSON out of a
+        client both arrive here rather than each growing their own counter.
+
+        Returns (findings, values seen).
+        """
+        tally = {c: [0, 0, None, None] for c in columns}
+        seen = 0
+        for row in rows:
+            for col, value in zip(columns, row):
+                if not isinstance(value, str) or value.isascii():
+                    continue
+                seen += 1
+                said = self._double_encoded(value)
+                if said:
+                    tally[col][0] += 1
+                    if tally[col][2] is None:
+                        tally[col][2], tally[col][3] = value, said[1]
+                else:
+                    tally[col][1] += 1
+        return ([(table, c, *tally[c]) for c in columns
+                 if tally[c][0] or tally[c][1]], seen)
+
+    def _mojibake_result(self, db, findings, scanned, hint):
+        """Text that was already broken before anybody moved it.
+
+        An application sending UTF-8 through a latin1 connection stores the
+        bytes as latin1 characters: `é` becomes `Ã©`, and everything looks
+        fine until a conversion or a client change. The repair is a byte
+        round trip over the column.
+
+        The finding that matters is not "this column has mojibake" - it is
+        **which columns have both kinds of row**, because that is where the
+        obvious repair destroys data. Measured: applying the round trip to a
+        column holding a genuine `£100` fails outright in PostgreSQL
+        (`invalid byte sequence for encoding "UTF8": 0xa3`), and the
+        application-side version of the same fix, which passes
+        `errors='replace'`, silently turns it into `�100`. Rows that
+        were never broken break, and nothing says so.
+
+        `findings` is [(table, column, suspects, clean, example, decoded)]
+        counted over the sampled rows.
+        """
+        mixed = [f for f in findings if f[2] and f[3]]
+        broken = [f for f in findings if f[2] and not f[3]]
+        if mixed:
+            worst = ", ".join(
+                f"{t}.{c} {s} double-encoded and {k} genuinely accented"
+                f" (e.g. {ex!r} is really {dec!r})"
+                for t, c, s, k, ex, dec in mixed[:3])
+            return Result(
+                "deep", f"{db} mojibake", "diff",
+                f"{len(mixed)} columns hold both double-encoded and correct"
+                f" text: {worst}"
+                + (" ..." if len(mixed) > 3 else "")
+                + " - converting the whole column repairs the first kind and"
+                  " destroys the second", "",
+                "repair row by row, matching only the values that re-encode"
+                " to valid UTF-8 - a blanket conversion over these columns"
+                " corrupts the rows that were never broken")
+        if broken:
+            worst = ", ".join(
+                f"{t}.{c} {s} rows (e.g. {ex!r} is really {dec!r})"
+                for t, c, s, _, ex, dec in broken[:3])
+            return Result(
+                "deep", f"{db} mojibake", "diff",
+                f"{len(broken)} columns are double-encoded throughout:"
+                f" {worst}"
+                + (" ..." if len(broken) > 3 else "")
+                + " - no correctly-encoded row was found among those"
+                  " sampled, so one conversion over the column fits", "",
+                hint)
+        if not scanned:
+            return Result("deep", f"{db} mojibake", "ok",
+                          "no text column holds a non-ASCII character")
+        return Result(
+            "deep", f"{db} mojibake", "ok",
+            f"{scanned} non-ASCII values sampled across the text columns,"
+            " none of them UTF-8 that was stored twice")
+
     def _collation_version_result(self, db, drifted, missing, checked, hint):
         """Whether the sort order an index was built under still exists.
 

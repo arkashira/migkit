@@ -1281,6 +1281,53 @@ class MySQLEngine(Engine):
                       " the table was written - a verdict from either would"
                       " be guesswork")
 
+    TEXT_TYPES = ("char", "varchar", "tinytext", "text", "mediumtext",
+                  "longtext")
+
+    def _mojibake(self, db):
+        """The same sampling as PostgreSQL, through a driver instead of a
+        client: `length <> char_length` is the same "has a non-ASCII
+        character" test, and the counting and the verdict are the base's."""
+        findings, scanned = [], 0
+        try:
+            cols = {}
+            place = ",".join(["%s"] * len(self.TEXT_TYPES))
+            for t, c in self._q("src",
+                                "select c.table_name, c.column_name"
+                                " from information_schema.columns c"
+                                " join information_schema.tables t"
+                                " on t.table_schema = c.table_schema"
+                                " and t.table_name = c.table_name"
+                                " where c.table_schema = %s"
+                                " and t.table_type = 'BASE TABLE'"
+                                " and c.table_name not like 'migkit%%'"
+                                f" and c.data_type in ({place})"
+                                " order by 1, 2",
+                                (db,) + self.TEXT_TYPES):
+                cols.setdefault(t, []).append(c)
+            for table, columns in sorted(cols.items()):
+                quoted = ["`" + c.replace("`", "``") + "`" for c in columns]
+                where = " or ".join(f"length({q}) <> char_length({q})"
+                                    for q in quoted)
+                rows = self._q("src",
+                               f"select {', '.join(quoted)} from"
+                               f" `{db.replace('`', '``')}`."
+                               f"`{table.replace('`', '``')}`"
+                               f" where {where}"
+                               f" limit {self.MOJIBAKE_SAMPLE}")
+                found, seen = self._mojibake_tally(table, columns, rows)
+                findings += found
+                scanned += seen
+        except Exception as e:
+            return Result("deep", f"{db} mojibake", "error",
+                          "could not sample the source's text columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._mojibake_result(
+            db, findings, scanned,
+            "convert the column once on the source before moving it, and"
+            " re-check afterwards - a second pass over already-repaired text"
+            " breaks it again")
+
     def _collation_versions(self, db):
         """MySQL cannot have this problem, and that is a design difference
         worth stating rather than a check worth faking.
@@ -1337,7 +1384,8 @@ class MySQLEngine(Engine):
         res = [self._planner_stats(db),
                self._lob_check(db),
                self._invalid_indexes(db),
-               self._collation_versions(db)]
+               self._collation_versions(db),
+               self._mojibake(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

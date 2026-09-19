@@ -108,16 +108,22 @@ In order. Each item says what has to be measured before it is written.
    from this item:** once drift is found, listing the duplicate rows a
    broken unique index stopped catching - which has to run with
    `enable_indexscan = off`, because the index is the thing lying.
-5. **The pre-flight the practitioners keep asking for**: before anything
+5. **The text that was broken before the move.** **Done** - `check --deep`
+   samples every text column on the source and reports which ones hold
+   *both* double-encoded and correct rows, because that pair is what makes
+   a blanket conversion destructive. **Still open from this item:** the
+   repair - migkit says which rows are safe to convert and does not convert
+   them.
+6. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-6. **LOBs**, as correctness first and speed second: find them, size them,
+7. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-7. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+8. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-8. **Then** consider a migkit-owned mover, with the benchmark from item 1
+9. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources

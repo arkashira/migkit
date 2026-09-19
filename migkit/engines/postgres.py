@@ -1485,6 +1485,64 @@ class PostgresEngine(Engine):
             " those tables with a path that does not truncate -"
             " `migkit move --go` does not")
 
+    #: Every text column on a real table, which is where text that was
+    #: already broken before the move is hiding.
+    TEXT_COLUMNS = (
+        "select c.table_schema||'.'||c.table_name||chr(9)||c.column_name"
+        " from information_schema.columns c"
+        " join information_schema.tables t"
+        " on t.table_schema = c.table_schema and t.table_name = c.table_name"
+        " where t.table_type = 'BASE TABLE'"
+        " and c.table_schema not in ('pg_catalog','information_schema')"
+        " and c.table_schema not like 'pg\\_%'"
+        " and c.table_schema not like '\\_\\_%'"
+        " and c.table_name not like 'migkit\\_%'"
+        " and c.data_type in ('text','character varying','character')"
+        " order by 1")
+
+    def _mojibake(self, db):
+        """Sample the non-ASCII rows of every text column on the source.
+
+        `octet_length <> char_length` is exactly "this value has a character
+        outside ASCII", it is the same expression on MySQL, and it lets one
+        scan per *table* stand in for one per column. The rows come back as
+        JSON so a value containing a tab or a newline cannot be read as two
+        values - the mistake this project has already made once.
+        """
+        findings, scanned = [], 0
+        try:
+            cols = {}
+            for line in self._psql("src", db,
+                                   self.TEXT_COLUMNS).splitlines():
+                parts = line.split("\t")
+                if len(parts) == 2:
+                    cols.setdefault(parts[0], []).append(parts[1])
+            for table, columns in sorted(cols.items()):
+                sch, tbl = table.split(".", 1)
+                quoted = ['"' + c.replace('"', '""') + '"' for c in columns]
+                where = " or ".join(f"octet_length({q}) <> char_length({q})"
+                                    for q in quoted)
+                out = self._psql(
+                    "src", db,
+                    f'select row_to_json(s) from (select {", ".join(quoted)}'
+                    f' from "{sch.replace(chr(34), chr(34) * 2)}".'
+                    f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                    f' where {where} limit {self.MOJIBAKE_SAMPLE}) s')
+                rows = [[json.loads(line).get(c) for c in columns]
+                        for line in out.splitlines() if line.strip()]
+                found, seen = self._mojibake_tally(table, columns, rows)
+                findings += found
+                scanned += seen
+        except Exception as e:
+            return Result("deep", f"{db} mojibake", "error",
+                          "could not sample the source's text columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._mojibake_result(
+            db, findings, scanned,
+            "convert the column once on the source before moving it, and"
+            " re-check afterwards - a second pass over already-repaired text"
+            " breaks it again")
+
     #: A collation nothing uses cannot have broken anything, and after a real
     #: glibc upgrade *every* locale the OS ships has drifted - 873 of them on
     #: the measured image. Restricting to the ones a user column or index
@@ -1744,6 +1802,7 @@ class PostgresEngine(Engine):
         res.append(self._lob_check(db))
         res.append(self._invalid_indexes(db))
         res.append(self._collation_versions(db))
+        res.append(self._mojibake(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """
