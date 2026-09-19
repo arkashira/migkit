@@ -1262,6 +1262,52 @@ keys, which is the point where a "settle" is no longer a settle.
 When every difference resolves this way the report says so in those words -
 `all diffs proven in-flight replication` - rather than quietly passing.
 
+### D13. The difference you cannot see, and the one the reader ate
+
+**What happens.** Two values print identically and are not equal: `é` as
+one code point or as `e` plus a combining accent, a trailing space, a
+zero-width space, a non-breaking space, `\r\n` against `\n`. The digest is
+right and the operator, looking at two identical-looking strings, concludes
+the tool is wrong. Worse, the tools that render these values often *fix*
+them on the way past, so the report disagrees with the digest that produced
+it.
+
+**migkit: Ends the reading half** - `test_drill_sees_every_byte.py`. This
+was found in migkit itself, and it was the worse shape of the two. On a
+pair whose only difference was a carriage return, one run gave two answers:
+
+    check --only data   DIFF, pk-level file data-public.t.changed -> 5
+    check --drill       Number of rows with some compared columns unequal: 0
+
+`--drill` exists precisely to explain a DIFF, so the answer an operator
+would act on was the wrong one - and "the digest was a false positive" is
+the conclusion it invites. The mechanism was isolated rather than assumed:
+`fetch_sample_df` ran psql with `text=True`, and Python's universal-newline
+decoding rewrites the payload. The same subprocess call, twice:
+
+    capture_output=True                  b'"one\r\ntwo"\n'
+    capture_output=True, text=True        '"one\ntwo"\n'
+
+Both sides lost the CR, so both sides matched. Reading the bytes and
+decoding them without translation ends it: the same pair now reports 6 of 6
+differing rows where it reported 5, and the carriage-return-only pair
+reports 1 where it reported 0. The MySQL engine reads its sample through a
+driver and never had this - recorded with a test, so a future rewrite to
+shell out cannot reintroduce it quietly.
+
+**Still open: the seeing half.** `--drill` now counts every one of these,
+and still prints them like this:
+
+    id  v (source)  v (target)
+     1  café        café
+     2  hello       hello
+     3  ab          ab
+     4  a b         a b
+
+Four rows that differ, rendered as four rows that do not. Counting a
+difference is not the same as being able to act on one; a sample that
+cannot show what changed leaves the last step with the engineer.
+
 ## E. Keeping the two sides in step
 
 ### E1. Sequences do not replicate

@@ -185,6 +185,13 @@ In order. Each item says what has to be measured before it is written.
    reset, rollback rehearsal - the steps exist as separate commands today.
 14. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
+15. **A difference an operator can see.** **Half done** - `check --drill`
+   used to lose a carriage return to the reader's own text decoding and
+   report a differing table as clean, contradicting the digest in the same
+   run; it now reads bytes and counts every invisible difference (NFC/NFD,
+   trailing space, zero-width and non-breaking spaces, CRLF). **Still
+   open:** the sample it prints renders those pairs identically, so the
+   count is trustworthy and the display is not.
 
 ## Sources
 

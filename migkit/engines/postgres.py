@@ -4823,6 +4823,23 @@ class PostgresEngine(Engine):
         return diff(tu, su), diff(su, tu)
 
     def fetch_sample_df(self, side, db, table, limit):
+        """The rows `--drill` compares, read without being rewritten.
+
+        `text=True` here would decode psql's output with universal
+        newlines, which turns a `\\r\\n` inside a value into `\\n` before
+        anything compares it. Measured on a pair whose only difference was
+        a carriage return in one column:
+
+            check --only data   DIFF, pk-level file names row 5
+            check --drill       "Number of rows with some compared columns
+                                 unequal: 0"
+
+        Two answers from one run, and the wrong one came from the command
+        whose whole job is to show what differs. The bytes psql sends are
+        `b'"one\\r\\ntwo"\\n'`; the same call with `text=True` returns
+        `'"one\\ntwo"\\n'`, so the CR is gone before pandas is reached. The
+        MySQL engine reads through a driver and never had this.
+        """
         import io as _io
 
         import pandas as pd
@@ -4834,10 +4851,10 @@ class PostgresEngine(Engine):
              "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",
              "-c", f"\\copy (select * from \"{sch}\".\"{tbl}\""
                    f" limit {limit}) to stdout (format csv, header)"],
-            capture_output=True, text=True, env=env)
+            capture_output=True, env=env)
         if p.returncode:
-            raise RuntimeError(p.stderr[-200:])
-        return pd.read_csv(_io.StringIO(p.stdout))
+            raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])
+        return pd.read_csv(_io.StringIO(p.stdout.decode("utf-8"), newline=""))
 
     def watch_sample(self, db):
         sample = {"db": db, "ts": time.time()}
