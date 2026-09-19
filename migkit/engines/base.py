@@ -295,6 +295,99 @@ class Engine:
                 return codec, decoded
         return None
 
+    #: Instants to ask every zone about. A zone is its *history*, so asking
+    #: only for today's offset would miss the changes that actually break a
+    #: migration - Brazil abolished DST in 2019, Iran in 2022. Measured:
+    #: `America/Sao_Paulo` reads 10:00 at the 2018 probe and 09:00 at the
+    #: 2020 one, so a server carrying older rules answers differently and
+    #: the fingerprint says so.
+    TZ_PROBES = ("1995-07-01 12:00:00", "2005-01-15 12:00:00",
+                 "2015-07-01 12:00:00", "2018-01-15 12:00:00",
+                 "2020-01-15 12:00:00", "2022-07-01 12:00:00",
+                 "2026-07-01 12:00:00")
+
+    def _zone_fingerprints(self, side, db):
+        """{zone name: fingerprint of what it does at TZ_PROBES}, or **None**
+        when this engine cannot be asked - which the caller must not read as
+        an empty set of zones."""
+        return None
+
+    def _time_zone_rules(self, db):
+        """Do both sides agree on what the zone names mean.
+
+        The fingerprint is deliberately "what wall clock does this zone show
+        at these instants" rather than anything engine-specific, and that
+        turns out to be literally portable: measured, PostgreSQL 16 and
+        MySQL 8 produce the **same** md5 for `America/New_York`
+        (`789e2da8…`), `America/Sao_Paulo`, `Asia/Tehran` and `UTC`. So this
+        compares across a hop between two different engines as readily as
+        within one.
+        """
+        try:
+            src = self._zone_fingerprints("src", db)
+            dst = self._zone_fingerprints("dst", db)
+        except Exception as e:
+            return Result("deep", f"{db} time zone rules", "error",
+                          "could not read the time zone rules:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        if src is None or dst is None:
+            return Result("deep", f"{db} time zone rules", "skip",
+                          "this engine does not expose what its zone names"
+                          " mean, so migkit cannot compare them")
+        missing = sorted(set(src) - set(dst))
+        drifted = sorted(n for n in set(src) & set(dst) if src[n] != dst[n])
+        return self._time_zone_result(
+            db, len(src), len(dst), missing, drifted,
+            "load the same time zone rules on both sides and restart -"
+            " the data is cached, so loading them is not enough on its own")
+
+    def _time_zone_result(self, db, src_count, dst_count, missing, drifted,
+                          hint):
+        """What an unloaded or stale zone table costs, as measured.
+
+        The official `mysql:8` image arrives with **1,795** zones loaded,
+        which is why this is easy to believe is somebody else's problem.
+        Emptied and restarted, the same server answers
+        `convert_tz('2026-07-01 12:00:00','UTC','America/New_York')` with
+        **NULL** and `show warnings` with nothing at all. The offset form
+        `'+00:00'` keeps working, so a smoke test written that way passes
+        while every named zone silently answers NULL - and a **stored
+        generated column** built on `CONVERT_TZ` wrote NULL to disk for a
+        row whose source value was present. Data, on disk, wrong, no error.
+        """
+        for side, count in (("source", src_count), ("target", dst_count)):
+            if not count:
+                return Result(
+                    "deep", f"{db} time zone rules", "diff",
+                    f"the {side} cannot resolve a single zone name - every"
+                    " conversion by name returns NULL there, with no warning"
+                    " and no error, and anything computed from one writes"
+                    " NULL to disk", "", hint)
+        if missing:
+            return Result(
+                "deep", f"{db} time zone rules", "diff",
+                f"{len(missing)} zone names the target cannot resolve:"
+                f" {', '.join(missing[:5])}"
+                + (" ..." if len(missing) > 5 else "")
+                + " - a conversion naming one of these returns NULL on the"
+                  " target and the same expression worked on the source",
+                "", hint)
+        if drifted:
+            return Result(
+                "deep", f"{db} time zone rules", "warn",
+                f"{len(drifted)} zones mean different things on the two"
+                f" sides: {', '.join(drifted[:5])}"
+                + (" ..." if len(drifted) > 5 else "")
+                + " - the two servers carry different rules, so the same"
+                  " conversion of the same value gives two answers", "",
+                hint)
+        if not src_count:
+            return Result("deep", f"{db} time zone rules", "skip",
+                          "neither side has any named zones to compare")
+        return Result("deep", f"{db} time zone rules", "ok",
+                      f"{src_count} named zones, and both sides agree about"
+                      " what every one of them does")
+
     def _temporal_meaning_result(self, db, mismatched, unmapped, checked):
         """Whether the two sides agree on what a temporal column is *for*.
 

@@ -409,14 +409,47 @@ queries: a **stored generated column** defined with `CONVERT_TZ` wrote
 `NULL` to disk for a row whose source value was present. Real data, on
 disk, wrong, with no error anywhere.
 
-**migkit: Not yet.** `time_zone` and `system_time_zone` are compared as
-critical parameters, which is not the same question - both sides can agree
-on the session zone while one of them cannot resolve a zone name at all.
-The check that would end it is cheap and was measured: `select count(*)
-from mysql.time_zone_name` (1,795 against 0 here), and for drift between
-two loaded servers a fingerprint of the rules themselves - **118,689** rows
-in `mysql.time_zone_transition`, md5 `0d26588a…` - so two servers carrying
-different tzdata can be told apart rather than assumed identical.
+**migkit: Ends it** - `test_time_zone_rules.py`. `time_zone` and
+`system_time_zone` were already compared as critical parameters, which is a
+different question: both sides can agree on the session zone while one of
+them cannot resolve a zone name at all. `check --deep` now asks every zone
+what wall clock it shows at seven probe instants and compares the
+fingerprints:
+
+    deep mysql time zone rules: DIFF 1 zone names the target cannot
+      resolve: Asia/Tehran - a conversion naming one of these returns NULL
+      on the target and the same expression worked on the source
+
+Three verdicts, all proven live against two MySQL servers: a zone whose
+**rules differ** is a warning (`America/Sao_Paulo`), a zone the target
+**cannot resolve** is a difference, and a server that can resolve
+**nothing** is the worst of the three. The same test asserts the two
+details that make this invisible without it - the offset form
+`'+00:00'`/`'-04:00'` still answers correctly on the broken server, and
+`show warnings` says nothing.
+
+**The probes are chosen, not arbitrary.** A zone is its history, so asking
+today's offset would miss what actually breaks a migration. Brazil
+abolished DST in 2019 and `America/Sao_Paulo` reads `10:00` at the 2018
+probe against `09:00` at the 2020 one - a test pins that pair, so a future
+edit cannot quietly reduce the probes to instants where every rule set
+agrees.
+
+**The fingerprint is portable between engines**, which was measured rather
+than hoped for: PostgreSQL 16 and MySQL 8 produce the *same* md5 for
+`America/New_York`, `Asia/Tehran`, `Europe/Lisbon` and `UTC`, because both
+are being asked the same question about the same instants. A test pins the
+equality and also checks the four values differ from each other, so the
+agreement cannot be the trivial kind.
+
+**What could not be reproduced here:** two PostgreSQL images four major
+versions apart (13 and 16) agreed on all **487** zones at these probes, so
+tzdata drift between those two images is not demonstrable in this sandbox.
+The drift path is proven on MySQL, where the rules can be made to differ
+for real.
+
+**Missing:** which zones the *data* actually uses. Every finding above is
+about what the servers can do, not about how many rows depend on it.
 
 ---
 

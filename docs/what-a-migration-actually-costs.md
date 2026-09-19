@@ -120,13 +120,15 @@ In order. Each item says what has to be measured before it is written.
    answers what a temporal column is *for*, separately from how to render
    it, and `check --deep` compares it column by column on both engines. It
    exists because `timestamp` means opposite things in the two: PostgreSQL's
-   is the wall clock, MySQL's is the instant, both measured. **Still open
-   from this item:** values the other side will not accept at all
-   (`0000-00-00` is stored by MySQL and rejected outright by PostgreSQL -
-   migkit reports the difference afterwards and does not count the rows
-   beforehand), and MySQL's named zones, where an unloaded
-   `mysql.time_zone*` makes `CONVERT_TZ` return NULL with no warning -
-   measured writing NULL into a stored generated column.
+   is the wall clock, MySQL's is the instant, both measured. The zone rules
+   behind them are done too: `check --deep` fingerprints what every named
+   zone does at seven probe instants and reports a zone the target cannot
+   resolve, a zone whose rules differ, or a server that can resolve none -
+   all three proven live. **Still open from this item:** values the other
+   side will not accept at all (`0000-00-00` is stored by MySQL and
+   rejected outright by PostgreSQL - migkit reports the difference
+   afterwards and does not count the rows beforehand), and which zones the
+   data actually uses.
 7. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

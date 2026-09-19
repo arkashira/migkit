@@ -1281,6 +1281,20 @@ class MySQLEngine(Engine):
                       " the table was written - a verdict from either would"
                       " be guesswork")
 
+    def _zone_fingerprints(self, side, db):
+        """The same reading as PostgreSQL's, which is why the two engines
+        produce the same fingerprint for the same zone.
+
+        `ifnull` rather than bare `convert_tz`: `concat_ws` drops NULLs, so
+        a zone that answers nothing would otherwise fingerprint the same as
+        a zone with one fewer probe."""
+        readings = ", ".join(
+            f"ifnull(convert_tz('{p}','UTC',Name),'?')" for p in self.TZ_PROBES)
+        rows = self._q(side, "select Name, md5(concat_ws(','"
+                             f", {readings})) from mysql.time_zone_name"
+                             " order by Name")
+        return {r[0]: r[1] for r in rows}
+
     def _duplicate_keys(self, db, reason=""):
         """migkit has no measured trigger for this on MySQL, and says so
         rather than either hunting blindly or implying the database is safe.
@@ -1417,7 +1431,8 @@ class MySQLEngine(Engine):
                self._collation_versions(db),
                self._mojibake(db),
                self._duplicate_keys(db),
-               self._temporal_meaning(db)]
+               self._temporal_meaning(db),
+               self._time_zone_rules(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified
