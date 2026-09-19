@@ -1269,8 +1269,7 @@ class PostgresEngine(Engine):
             return None
         sch, tbl = table.split(".", 1)
         qt = f'"{sch}"."{tbl}"'
-        pkexpr = "concat_ws(e'\\t', " + ", ".join(
-            f'"{c}"::text' for c in cols) + ")"
+        pkexpr = self._pk_text_expr(cols)
 
         def fetch(side, where=""):
             out = {}
@@ -2038,8 +2037,7 @@ class PostgresEngine(Engine):
             if not pks:
                 continue
             sch2, t2 = tbl.split(".", 1)
-            pkexpr = ("concat_ws(e'\\t', "
-                      + ", ".join(f'"{p}"::text' for p in pks) + ")")
+            pkexpr = self._pk_text_expr(pks)
             q = (f'select {pkexpr}||\'|\'||"{col}"::text'
                  f' from "{sch2}"."{t2}" where "{col}" is not null limit 5')
             try:
@@ -3105,6 +3103,59 @@ class PostgresEngine(Engine):
             " order by array_position(i.indkey, a.attnum)").splitlines()
         return [c for c in cols if c]
 
+    #: The key files are read back with psql's `\copy`, which parses COPY
+    #: text: tabs separate columns and a backslash starts an escape. Writing
+    #: the raw value meant the reader and the writer disagreed about both.
+    #: Measured against PostgreSQL 16 on a text primary key:
+    #:
+    #:     key `has<TAB>tab`    ERROR: extra data after last expected column
+    #:                          COPY _pk, line 2: "has	tab"   - nothing repaired
+    #:     key `back\slash`     apply returned with no error at all, the row
+    #:                          was not restored, and the next check still
+    #:                          said diff. `\s` is not an escape COPY knows,
+    #:                          so it read `backslash` and the join matched
+    #:                          no row - a repair reported as done that was
+    #:                          never performed, which is the worst shape a
+    #:                          failure can take here.
+    #:
+    #: So every key this engine renders is escaped the way COPY would have
+    #: written it, and anything reading one back undoes exactly that.
+    PK_ESCAPE = (r"replace(replace(replace(replace({0}, E'\\', E'\\\\'),"
+                 r" E'\t', E'\\t'), E'\n', E'\\n'), E'\r', E'\\r')")
+
+    @classmethod
+    def _pk_text_expr(cls, cols):
+        """SQL for one row's key: each column escaped, then tab-joined."""
+        return ("concat_ws(e'\\t', " + ", ".join(
+            cls.PK_ESCAPE.format(f'"{c}"::text') for c in cols) + ")")
+
+    @staticmethod
+    def _pk_unescape(text):
+        """One column's value back from the form `_pk_text_expr` wrote.
+
+        A backslash before anything COPY does not recognise is dropped and
+        the character kept, which is what PostgreSQL itself does - so a file
+        written by an older migkit is read the way that migkit's repair read
+        it, rather than differently.
+        """
+        known = {"t": "\t", "n": "\n", "r": "\r", "\\": "\\", "b": "\b",
+                 "f": "\f", "v": "\v"}
+        out = []
+        i = 0
+        while i < len(text):
+            if text[i] == "\\" and i + 1 < len(text):
+                out.append(known.get(text[i + 1], text[i + 1]))
+                i += 2
+            else:
+                out.append(text[i])
+                i += 1
+        return "".join(out)
+
+    @classmethod
+    def _pk_parts(cls, key):
+        """The original column values of one encoded key."""
+        return [cls._pk_unescape(p) for p in key.split("\t")]
+
     def _compare_pks(self, db, table, keys):
         """Row-level compare of the given pk keys (tab-joined when
         composite). Returns (missing, extra, changed) or None when the
@@ -3123,16 +3174,16 @@ class PostgresEngine(Engine):
             for i in range(0, len(klist), 500):
                 chunk = klist[i:i + 500]
                 if len(cols) == 1:
-                    inlist = ", ".join(esc(k) for k in chunk)
+                    inlist = ", ".join(esc(self._pk_unescape(k))
+                                       for k in chunk)
                     where = f'"{cols[0]}"::text in ({inlist})'
-                    pk = f'"{cols[0]}"::text'
                 else:
                     tup = ", ".join(f'"{c}"::text' for c in cols)
                     vals = ", ".join(
-                        "(" + ", ".join(esc(p) for p in k.split("\t")) + ")"
-                        for k in chunk)
+                        "(" + ", ".join(esc(p) for p in self._pk_parts(k))
+                        + ")" for k in chunk)
                     where = f"({tup}) in ({vals})"
-                    pk = f"concat_ws(e'\\t', {tup})"
+                pk = self._pk_text_expr(cols)
                 h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
                 q = (f"select {pk}||'|'||{h}"
                      f' from "{sch}"."{tbl}" t where {where}')
