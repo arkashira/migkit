@@ -919,18 +919,82 @@ class HeteroEngine(Engine):
         return out
 
     def setup_target_plan(self, db):
-        self._mysql_to_postgres_only("the target setup plan")
-        plan = []
-        if which("pgloader"):
-            plan.append(f"pgloader mysql://user@{self.hop.source.host}/{db}"
-                        f" postgresql://user@{self.hop.target.host}/{db}"
-                        "  # schema+data+indexes in one shot")
-        plan.append(f"migkit convert-schema <hop> --db {db}"
-                    "   # sqlglot DDL conversion, review then --apply")
-        plan.append(f"migkit move <hop> --db {db} --go"
-                    "   # resumable chunked data copy")
-        plan.append("cross-engine CDC: migkit move <hop> --mode cdc --go"
-                    "   # migkit stands up the streaming pipeline")
+        """The steps for this pair, rather than for the pair it was written
+        for.
+
+        `migkit setup` used to refuse every combination except MySQL to
+        PostgreSQL - honestly, with a sentence saying so, but a refusal all
+        the same, on a command that only prints a list of steps. The steps
+        are now read off what this pairing can actually do, which
+        `_pair_capabilities` already answers without opening a connection.
+
+        Nothing here runs: it is a dry run an operator reads and then carries
+        out, which is why a step this pair cannot do has to be replaced by
+        the reason rather than left in the list to fail later.
+        """
+        hop = self.hop.name
+        if self.my and self.pg:
+            plan = []
+            if which("pgloader"):
+                plan.append(f"pgloader mysql://user@{self.hop.source.host}"
+                            f"/{db} postgresql://user@"
+                            f"{self.hop.target.host}/{db}"
+                            "  # schema+data+indexes in one shot")
+            plan.append(f"migkit convert-schema {hop} --db {db}"
+                        "   # sqlglot DDL conversion, review then --apply")
+            plan.append(f"migkit move {hop} --db {db} --go"
+                        "   # resumable chunked data copy")
+            plan.append(f"cross-engine CDC: migkit move {hop} --mode cdc --go"
+                        "   # migkit stands up the streaming pipeline")
+            return plan
+
+        can = {row["item"]: row["level"] == "pass"
+               for row in self._pair_capabilities()}
+        plan = [f"# {self.src_name} -> {self.dst_name}, database {db}"]
+        if not (can.get("this pair can compare")
+                or can.get("this pair can move rows")):
+            # nothing migkit does to rows applies here, and a list of steps
+            # that cannot be taken is worse than saying so
+            return plan + [
+                f"-- migkit has no table-shaped path between"
+                f" {self.src_name} and {self.dst_name}: they do not both"
+                " speak in rows, so there is nothing for it to compare or"
+                " carry",
+                f"migkit assess {hop}"
+                "   # what this pair can and cannot do, in full"]
+        if self.dst_engine.CREATES_ON_WRITE:
+            plan.append(f"-- {self.dst_name} creates the collection on the"
+                        " first write, so there is nothing to make by hand")
+        elif type(self.dst_engine).prepare_target is not Engine.prepare_target:
+            plan.append(f"-- migkit makes the {self.dst_name} target itself"
+                        " when the move starts")
+        else:
+            plan.append(f"create the target database on {self.dst_name}"
+                        " yourself, with the encoding and collation you want"
+                        " - migkit will not choose those for you")
+        if can.get("this pair can create the target table"):
+            plan.append(f"migkit convert-schema {hop} --db {db}"
+                        "   # the DDL this pair would run, review then"
+                        " --apply")
+        else:
+            plan.append(f"-- {self.dst_name} cannot be told what table to"
+                        " build, so create the target objects yourself")
+        if can.get("this pair can move rows"):
+            plan.append(f"migkit move {hop} --db {db} --go"
+                        "   # resumable chunked copy through the neutral"
+                        " contract")
+        else:
+            plan.append(f"-- migkit cannot copy rows between {self.src_name}"
+                        f" and {self.dst_name}: one of them has no row-shaped"
+                        " read or write. Use a mover built for this pair")
+        if can.get("this pair can tail changes"):
+            plan.append(f"migkit move {hop} --mode cdc --go"
+                        "   # changes on the source applied to the target")
+        else:
+            plan.append(f"-- no change stream for this pair, so plan a"
+                        " cutover with writes stopped rather than a tail")
+        plan.append(f"migkit check {hop} --db {db}"
+                    "   # the same digest on both sides, table by table")
         return plan
 
     def list_move_tables(self, db):

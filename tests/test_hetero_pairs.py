@@ -57,14 +57,25 @@ def test_hetero_cannot_be_one_of_its_own_sides():
 
 def test_the_pair_specific_paths_say_which_pair_they_are_for():
     """An AttributeError on `self.my` would read as a migkit bug. This reads
-    as the sentence it is. Only the paths that are still written for one pair
-    refuse - converting DDL and the target setup plan. Moving rows crosses
-    now, so it is no longer in this list."""
-    eng = HeteroEngine(_hop("postgres", "mysql"))
+    as the sentence it is.
+
+    The list of paths that still refuse keeps shrinking, and what is left
+    refuses for a reason about the pair rather than about which pair was
+    written first: moving rows needs both sides to speak in rows, so
+    mysql->redis is told so by name.
+    """
+    eng = HeteroEngine(_hop("mysql", "redis"))
     with pytest.raises(SystemExit) as e:
-        eng.setup_target_plan("db")
+        eng.list_move_tables("db")
+    assert "mysql->redis" in str(e.value)
     assert "mysql->postgres only" in str(e.value)
-    assert "postgres->mysql" in str(e.value)
+
+
+def test_the_setup_plan_crosses_pairs_now():
+    """It used to refuse everything except mysql->postgres, on a command
+    that only prints steps. It reads the pair's capabilities instead."""
+    plan = HeteroEngine(_hop("postgres", "mysql")).setup_target_plan("db")
+    assert plan and any("migkit move" in line for line in plan), plan
 
 
 def test_writing_the_target_ddl_crosses_pairs_now():
