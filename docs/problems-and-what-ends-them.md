@@ -313,6 +313,89 @@ and the server-level settings are compared by `check params`.
 target's collation, and which comparisons in the schema now mix two of them.
 Both are answerable with a query and neither is asked.
 
+### B5. The timestamp that lost its offset
+
+**What happens.** Neither `timestamp` nor `timestamptz` stores a time zone.
+The naive one keeps the digits it was handed and throws away everything that
+said what they meant; the other converts to UTC on write. Feed the same
+literal to both and they stop agreeing. Measured on PostgreSQL 16:
+
+    insert '2020-11-01 01:05:00+04' into
+      timestamp    -> 2020-11-01 01:05:00
+      timestamptz  -> 2020-10-31 21:05:00+00
+
+Four hours, discarded in silence, from a value that named its own offset.
+The ambiguous hour is the same wound: `2026-11-01 01:30:00-04` and
+`2026-11-01 01:30:00-05` are two different instants - measured as
+`05:30:00+00` and `06:30:00+00` - and a naive column records both as the
+identical digits `01:30:00`. Nothing afterwards can tell them apart, which
+is why the bug surfaces twice a year and is blamed on the application.
+
+**migkit: Not yet, and the gap is inside migkit.** `canon.comparable` was
+asked directly:
+
+    postgres  timestamp with time zone      -> ('timestamp', '')
+    postgres  timestamp without time zone   -> ('timestamp', '')
+    mysql     datetime                      -> ('timestamp', '')
+
+All three collapse to one canonical class, so migkit's type layer treats a
+column that records an instant and a column that records a wall clock as
+the same kind of thing. That is the right call for *rendering a value* and
+the wrong one for *deciding the two sides mean the same*. A source
+`timestamptz` landing in a target `timestamp` is exactly the shape above,
+and nothing in the report says so.
+
+### B6. The value the target will not accept at all
+
+**What happens.** MySQL has let `0000-00-00` into date and datetime columns
+for decades, and applications leaned on it as "not set" - WordPress is the
+famous offender. PostgreSQL does not merely dislike the value, it refuses it:
+
+    mysql     insert '0000-00-00'   -> stored, readable, 1 row
+    postgres  select '0000-00-00'::date
+              ERROR:  date/time field value out of range: "0000-00-00"
+
+Measured both ways on live servers, with `sql_mode` relaxed on the MySQL
+side the way a legacy server has it. The load stops partway, or the mover
+substitutes something and the application starts rendering 1970.
+
+**migkit: Partly, and it does not agree by accident.** The driver hands the
+value back as the string `'0000-00-00'` rather than as NULL or an exception
+- measured through migkit's own connection - so a target holding NULL there
+reads as a difference and is reported. What is missing is saying it
+*before* the move: migkit can count the rows holding a value the other side
+cannot store, and does not.
+
+### B7. The time zone rules are not on both servers
+
+**What happens.** MySQL keeps named zones in `mysql.time_zone*` tables that
+somebody has to load with `mysql_tzinfo_to_sql`. Where they are missing,
+`CONVERT_TZ` with a named zone returns NULL - and it does not complain.
+
+Measured, and worse than the write-ups describe. The official `mysql:8`
+image arrives with **1,795** zones loaded, so the usual advice ("check
+whether it is empty") reads as already handled. Emptied and restarted, the
+same server gives:
+
+    select convert_tz('2026-07-01 12:00:00','UTC','America/New_York')  -> NULL
+    show warnings                                                      -> (nothing)
+    select convert_tz('2026-07-01 12:00:00','+00:00','-04:00')         -> 08:00:00
+
+The offset form still works, so a smoke test written with `+00:00` passes
+while every named zone silently answers NULL. And it is not confined to
+queries: a **stored generated column** defined with `CONVERT_TZ` wrote
+`NULL` to disk for a row whose source value was present. Real data, on
+disk, wrong, with no error anywhere.
+
+**migkit: Not yet.** `time_zone` and `system_time_zone` are compared as
+critical parameters, which is not the same question - both sides can agree
+on the session zone while one of them cannot resolve a zone name at all.
+The check that would end it is cheap and was measured: `select count(*)
+from mysql.time_zone_name` (1,795 against 0 here), and for drift between
+two loaded servers a fingerprint of the rules themselves - **118,689** rows
+in `mysql.time_zone_transition`, md5 `0d26588a…` - so two servers carrying
+different tzdata can be told apart rather than assumed identical.
+
 ---
 
 ## C. The move itself
@@ -792,6 +875,16 @@ Later research passes:
 [MySQL 8.0 collations: migrating from older collations](https://dev.mysql.com/blog-archive/mysql-8-0-collations-migrating-from-older-collations/),
 [PgBouncer features and limitations](https://www.pgbouncer.org/features.html),
 [prepared statements in transaction mode](https://www.crunchydata.com/blog/prepared-statements-in-transaction-mode-for-pgbouncer).
+
+Temporal types and time zones:
+[the DST bug that only breaks twice a year](https://www.codewithkarani.com/blog/postgres-timestamp-vs-timestamptz-dst-bug),
+[Oracle datetime and time zone support](https://docs.oracle.com/en/database/oracle/oracle-database/18/nlspg/datetime-data-types-and-time-zone-support.html),
+[incorrect date value '0000-00-00'](https://tableplus.com/blog/2019/10/incorrect-date-value-0000-00-00-date-datetime.html),
+[pgloader and MySQL default dates](https://github.com/dimitri/pgloader/issues/252),
+[convert_tz returns null if a named time zone is used](https://bugs.mysql.com/bug.php?id=12445),
+[mysql_tzinfo_to_sql](https://docs.oracle.com/cd/E17952_01/mysql-8.0-en/mysql-tzinfo-to-sql.html),
+[foreign keys and circular dependencies](https://www.cybertec-postgresql.com/en/foreign-keys/),
+[deferrable SQL constraints in depth](https://begriffs.com/posts/2017-08-27-deferrable-sql-constraints.html).
 
 Cutover, aftermath and compliance:
 [zero-downtime patterns](https://launchdarkly.com/blog/3-best-practices-for-zero-downtime-database-migrations/),

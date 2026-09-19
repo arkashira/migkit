@@ -116,16 +116,27 @@ In order. Each item says what has to be measured before it is written.
    a blanket conversion destructive. **Still open from this item:** the
    repair - migkit says which rows are safe to convert and does not convert
    them.
-6. **The pre-flight the practitioners keep asking for**: before anything
+6. **The temporal types, which this tick measured migkit through.**
+   `canon.comparable` returns the same class for `timestamp with time zone`
+   and `timestamp without time zone`, so migkit's type layer cannot say
+   that a target column records a wall clock where the source recorded an
+   instant - measured at four hours discarded from a single literal, and at
+   two distinct instants collapsing onto identical digits across a DST
+   boundary. Beside it: values the other side will not accept at all
+   (`0000-00-00` is stored by MySQL and rejected outright by PostgreSQL),
+   and MySQL's named zones, where an unloaded `mysql.time_zone*` makes
+   `CONVERT_TZ` return NULL with no warning - measured writing NULL into a
+   stored generated column.
+7. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-7. **LOBs**, as correctness first and speed second: find them, size them,
+8. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-8. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+9. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-9. **Then** consider a migkit-owned mover, with the benchmark from item 1
+10. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources
