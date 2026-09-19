@@ -5070,6 +5070,11 @@ class PostgresEngine(Engine):
                       " latest_end_time from pg_stat_subscription",
         }
 
+    def replication_status(self, db, sql):
+        got = self._psql("dst", db, sql).strip()
+        return got or ("no subscription on the target: the statements ran"
+                       " but nothing is replicating")
+
     def migration_pair(self, db):
         from urllib.parse import quote
         if not which("atlas"):

@@ -1446,6 +1446,32 @@ class Engine:
     def repair_plan(self, db, kind):
         return []
 
+    def replication_status(self, db, sql):
+        """One line saying whether the native replication this engine just
+        set up is actually running, read from the target.
+
+        An engine that offers `replicate_sql` has to answer this, because
+        the statements that start replication are not the thing that proves
+        it works:
+
+        * PostgreSQL's `CREATE SUBSCRIPTION` dials the source while it runs,
+          so it fails loudly - but only after the connection attempt gives
+          up. Measured on 16 against a target with no route to the source:
+          134 seconds, and `connect_timeout` in the subscription's own
+          conninfo does not shorten it (the same conninfo through plain
+          libpq failed in exactly the 10 it was given).
+        * MySQL's `START REPLICA` returns at once and the IO thread fails
+          behind it, so the same broken pair looks like a success. The only
+          place that says otherwise is `Last_IO_Error`.
+
+        Two engines, two ways for "replication started" to be a lie, and one
+        line that has to tell the truth in both.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} emits replicate_sql but cannot say"
+            " whether replication is running; printing the statements"
+            " without that is how a dead replica looks like a live one")
+
     def _stream_connector(self):
         """The generated source connector for this hop, or None.
 

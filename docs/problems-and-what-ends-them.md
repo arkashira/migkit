@@ -1486,6 +1486,48 @@ operational health rather than counting slots. Tests:
 
 ---
 
+### E6. Replication that started and is not running
+
+**What happens.** Native replication is set up target-side, and the
+statement that starts it is not the thing that proves it works. The two
+engines get this wrong in opposite directions, both measured on live
+pairs whose networks genuinely could not route to each other:
+
+* **PostgreSQL fails late.** `CREATE SUBSCRIPTION` dials the source while
+  it runs, so it does fail - after **134 seconds**, per database, with
+  nothing on screen until it gives up. The parameter that looks like it
+  bounds that wait does not: `connect_timeout=10` inside the
+  subscription's own connection string made no difference (134s again),
+  while the *same* conninfo handed to plain `psql` gave up in exactly 10.
+  It is enforced by libpq's synchronous connect path, and the walreceiver
+  does not use that path. `statement_timeout` on the target session does
+  work - measured at 15s - and nothing is created when it fires, so a
+  bounded attempt costs nothing.
+* **MySQL fails silently.** `START REPLICA` returns OK whether or not the
+  target can reach the source; the IO thread starts, fails and retries
+  behind it. Measured on 8.4: statement succeeded,
+  `Replica_IO_Running: Connecting`, and the timeout sitting in
+  `Last_IO_Error` where nobody was looking.
+
+And migkit's own line under `--mode cdc --go` read that status with
+`eng._psql(...)`, which only the PostgreSQL engine has - so every MySQL
+cdc run ended in `AttributeError: 'MySQLEngine' object has no attribute
+'_psql'`, after both sides' statements had already run and before the
+changelog entry recording it was written.
+
+**migkit: Ends it.** `replication_status` is on the engine base as a
+contract every engine that emits `replicate_sql` must answer, and the
+shared path asks the engine instead of reaching for a PostgreSQL method.
+The MySQL implementation reads `SHOW REPLICA STATUS` **by column name**
+(`_q_named`, since `_q` returns bare tuples and MariaDB spells every one
+of these columns differently), and says `NOT replicating` with the real
+error whenever either thread is not `Yes`. Three states measured live and
+pinned: unreachable source, dead applier, and a healthy replica whose rows
+actually arrived - the last so the check cannot pass by always saying no.
+Test: `test_replication_says_whether_it_is_running.py`.
+
+---
+
 ## F. Cutover and rollback
 
 ### F1. Dual writes drift

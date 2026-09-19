@@ -381,6 +381,24 @@ class MySQLEngine(Engine):
                 conn.close()
         return with_retry(once, label=f"mysql query {side}")
 
+    def _q_named(self, side, sql):
+        """`_q`, keeping the column names.
+
+        `SHOW REPLICA STATUS` answers one row of about fifty columns whose
+        order is not a contract and whose names differ between MySQL and
+        MariaDB. Reading it by index would be guessing twice.
+        """
+        def once():
+            conn = self._conn(side)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    cols = [d[0] for d in (cur.description or ())]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            finally:
+                conn.close()
+        return with_retry(once, label=f"mysql named query {side}")
+
     def _rows_utc(self, side, sql):
         """Read with the session time_zone pinned to +00:00 so UNIX_TIMESTAMP
         on a DATETIME is comparable across sides regardless of server tz -
@@ -3006,6 +3024,54 @@ class MySQLEngine(Engine):
                 "note": f"written for {brand}; binlog now at {coords},"
                         f" {gtid_note},"
                         " run move first then replicate from these coords"}
+
+    # `SHOW REPLICA STATUS` on MySQL 8 and `SHOW SLAVE STATUS` on MariaDB
+    # answer the same facts under different column names. Asked in this
+    # order so the first name present wins.
+    _REPL_FIELDS = {
+        "io": ("Replica_IO_Running", "Slave_IO_Running"),
+        "sql": ("Replica_SQL_Running", "Slave_SQL_Running"),
+        "lag": ("Seconds_Behind_Source", "Seconds_Behind_Master"),
+        "host": ("Source_Host", "Master_Host"),
+    }
+
+    @staticmethod
+    def _repl_field(row, names):
+        for n in names:
+            if n in row:
+                return row[n]
+        return None
+
+    def replication_status(self, db, sql):
+        """What `START REPLICA` did not say.
+
+        It returns success whether or not the target can reach the source -
+        the IO thread starts, fails, and retries behind it. Measured on
+        MySQL 8 with the two servers on networks that cannot route to each
+        other: `start replica` returned OK, and `Replica_IO_Running` was
+        `Connecting` with `Last_IO_Error` holding the timeout. Printing
+        "replication started" over that is the failure this line exists to
+        stop.
+        """
+        rows = self._q_named("dst", sql)
+        if not rows:
+            return ("no replica configured on the target: the statements ran"
+                    " but nothing is replicating")
+        r = rows[0]
+        io = self._repl_field(r, self._REPL_FIELDS["io"])
+        sq = self._repl_field(r, self._REPL_FIELDS["sql"])
+        lag = self._repl_field(r, self._REPL_FIELDS["lag"])
+        host = self._repl_field(r, self._REPL_FIELDS["host"])
+        out = [f"source {host}" if host else "source unknown",
+               f"io {io}", f"sql {sq}",
+               "lag unknown" if lag is None else f"lag {lag}s"]
+        for key in ("Last_IO_Error", "Last_SQL_Error"):
+            err = (r.get(key) or "").strip()
+            if err:
+                out.append(f"{key} {err[:160]}")
+        if str(io) != "Yes" or str(sq) != "Yes":
+            out.append("NOT replicating")
+        return ", ".join(out)
 
     def _gtid_state(self, brand):
         """(whether to replicate by GTID, what to say about it).

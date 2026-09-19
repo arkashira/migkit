@@ -922,7 +922,7 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
                 else:
                     eng._q(side, stmt)
         if go and not do_drop:
-            console.print("  " + eng._psql("dst", d, sql["status"]))
+            console.print("  " + eng.replication_status(d, sql["status"]))
             _changelog(hop, {"op": "replicate", "db": d})
         if go and do_drop:
             _changelog(hop, {"op": "replicate-drop", "db": d})

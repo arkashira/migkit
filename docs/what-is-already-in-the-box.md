@@ -44,8 +44,31 @@ in `migkit/`.
 What that leaves on the floor:
 
 * **`follow`** - a complete logical-decoding CDC pipeline with resume and
-  an end position. migkit has one CDC path (Debezium); this is a second,
-  native to PostgreSQL, with no Kafka to stand up.
+  an end position, run from wherever migkit runs. That last part is the
+  reason to want it: PostgreSQL's own `CREATE SUBSCRIPTION` needs the
+  *target* to dial the source, which plenty of migrations cannot do, and
+  it leaves the source's password in `pg_subscription` when it can (G2).
+  `follow` dials both sides itself and stores nothing on the target.
+
+  Tried against a pair on two docker networks with no route between them -
+  exactly the case that defeats a subscription - and it replayed the
+  changes correctly. Two things measured on the way, neither of them in
+  the tool's help text, and both of which a wrapper has to handle:
+
+  * It applies nothing until `pgcopydb stream sentinel set apply`. Before
+    that the log says only *"Waiting until the pgcopydb sentinel apply is
+    enabled"*.
+  * With apply enabled it still sat on six decoded statements for over two
+    minutes without touching the target - while reporting `replay_lsn`
+    back to the source as fully caught up, so the *source's*
+    `confirmed_flush_lsn` advanced past changes the target did not have.
+    The target's own `pg_replication_origin_status` was the only honest
+    number. A cutover decision read off the source slot would have been
+    made against an empty target.
+
+  So the wrap is not "shell out to `follow`": it is to drive the sentinel,
+  bound the run with `--endpos`, and prove convergence from the *target's*
+  replication origin. Not built yet.
 * ~~**`compare data`**~~ **done** - run against migkit's own verdict on the
   same pair under `MIGKIT_CROSSCHECK=1`, and reported as a deep check. It
   agreed on all four pairs it was tried on: identical rows, `numeric` 1.0
