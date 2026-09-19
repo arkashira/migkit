@@ -142,14 +142,15 @@ In order. Each item says what has to be measured before it is written.
    `OVERRIDING SYSTEM VALUE` where the catalog says it is needed. `move`
    was measured to be unaffected, because `COPY` is not subject to the
    restriction.
-8. **Two blind spots this tick measured, both in migkit itself.** With
-   row-level security on both sides and five of the source's ten rows
-   deleted from the target, `counts` and `data` both reported **OK, 5 rows
-   both sides** - the deep check does catch the condition, but the passes
-   that pronounce on the data do not ask it. And `_apply_upsert` cannot
-   write a table with a `GENERATED ALWAYS AS ... STORED` column at all;
-   unlike the identity case, `OVERRIDING SYSTEM VALUE` does not help - the
-   column has to be left out of the statement.
+8. **Two blind spots measured in migkit itself.** The first is **done**:
+   `counts` and `data` reported OK on a target missing half its rows,
+   because row-level security filtered both sides, and now say WARN naming
+   what they could not see - while a role that sees everything is not
+   nagged, the rule having been measured across all four role shapes.
+   **Still open:** `_apply_upsert` cannot write a table with a `GENERATED
+   ALWAYS AS ... STORED` column at all. Unlike the identity case,
+   `OVERRIDING SYSTEM VALUE` does not help - the column has to be left out
+   of the statement entirely.
 9. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

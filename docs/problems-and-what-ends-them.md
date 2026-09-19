@@ -910,8 +910,8 @@ explicit design. The trap is `--enable-row-security`, which someone adds to
 make a failing backup script "work" - after which the dump succeeds and
 contains part of the table.
 
-**migkit: Partly, and the part that is missing is the loud one.** The deep
-check already catches the condition and says so:
+**migkit: Ends it** - `test_rls_filtered_verdict.py`. The deep check
+already caught the condition:
 
     deep postgres rls: DIFF migkit's source role is subject to RLS on 1
       tables
@@ -919,22 +919,46 @@ check already catches the condition and says so:
 It also reports RLS tables with **zero** policies, which read as empty to
 anyone who is not the owner.
 
-But the passes that pronounce on the data do not know. Measured, with the
-same policy on both sides and **five of the source's ten rows deleted from
-the target**:
+What was missing is that the passes which pronounce on the data did not
+know. Measured, with the same policy on both sides and **five of the
+source's ten rows deleted from the target**:
 
     counts   postgres: OK 1 tables, rows 5==5
     data     postgres: OK 1 tables, 5 rows, checksums equal both sides
 
-Half the table missing on the target, and the two checks whose whole job is
-to say whether the data landed both said OK. They were not wrong about what
-they compared; they compared five rows to five rows. Nothing in either line
-says the five was a filtered count.
+Half the table missing, and the two checks whose whole job is to say
+whether the data landed both said OK. They were not wrong about what they
+compared - they compared five rows to five rows. Nothing in either line
+said the five was a filtered count.
 
-**Missing:** `counts` and `data` should refuse to pronounce - or at least
-say what they could not see - when the connected role is subject to RLS on
-the tables being checked. The deep check already has the facts; the
-verifying passes do not ask for them.
+They now say it:
+
+    counts   postgres: WARN 1 tables, rows 5==5 ... - but the role migkit
+      is connected as cannot read 1 of these tables in full
+      (public.tenant), so those numbers are what it was allowed to see and
+      not what is there
+
+**Only a clean verdict is softened.** A `diff` found inside what the role
+*could* see is real whatever is hidden behind it, and a test pins that it
+stays a diff.
+
+**Who is actually filtered was measured**, across every role shape, rather
+than taken from the documentation:
+
+| | superuser | owner | BYPASSRLS | plain role |
+|---|---|---|---|---|
+| RLS enabled | 6 | 6 | 6 | **3** |
+| RLS enabled + `FORCE` | 6 | **3** | 6 | **3** |
+
+An owner reads its own tables in full until they are `FORCE`d. The deep
+check used to test only `rolsuper or rolbypassrls`, so it called **every
+owner** filtered - a warning on a healthy database, which is how people
+learn to stop reading warnings. Both passes now ask the same question in
+one place, and a test asserts a role that sees everything is not nagged.
+
+**Missing:** the other engines. The base returns None - "no claim" rather
+than "nothing is filtered" - so nothing else acquires a verdict it has not
+earned.
 
 ## E. Keeping the two sides in step
 

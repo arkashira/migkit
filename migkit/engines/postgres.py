@@ -1304,6 +1304,33 @@ class PostgresEngine(Engine):
                     bad.append(f"{m.group(1)} src={a} dst={b}")
         return n, rows_src, rows_dst, bad
 
+    #: Tables this role reads through a policy. Measured across all four
+    #: role shapes rather than assumed from the docs: a superuser and a
+    #: BYPASSRLS role always see everything, an owner sees everything until
+    #: the table is `FORCE`d and then does not, and any other role is
+    #: filtered either way. Checking only `rolsuper or rolbypassrls` - which
+    #: is what the deep check used to do - calls every owner filtered and
+    #: cries wolf on a healthy database.
+    RLS_FILTERED = (
+        "select n.nspname||'.'||c.relname"
+        " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+        " where c.relkind = 'r' and c.relrowsecurity"
+        " and not (select bool_or(rolsuper or rolbypassrls) from pg_roles"
+        "          where rolname = current_user)"
+        " and (c.relforcerowsecurity"
+        "      or not pg_has_role(current_user, c.relowner, 'USAGE'))"
+        " and n.nspname not in ('pg_catalog','information_schema')"
+        " and n.nspname not like 'pg\\_%'"
+        " and n.nspname not like '\\_\\_%'"
+        " order by 1")
+
+    def _filtered_tables(self, side, db):
+        try:
+            out = self._psql(side, self._d(side, db), self.RLS_FILTERED)
+        except Exception:
+            return None
+        return [line for line in out.splitlines() if line]
+
     def _counts_from_fast(self, db, out):
         n, rows_src, rows_dst, bad = self._parse_fast(out)
         st = set(self._psql("src", db, self.USER_TABLES).splitlines())
@@ -1313,9 +1340,10 @@ class PostgresEngine(Engine):
         if bad:
             return Result("counts", db, "diff", "; ".join(bad[:10]), "",
                           "missing rows show up in check data, fix there")
-        return Result("counts", db, "ok",
-                      f"{n} tables, rows {rows_src:,}=={rows_dst:,}"
-                      " (from the checksum pass, no extra scan)")
+        return self._honest_about_filtering(
+            Result("counts", db, "ok",
+                   f"{n} tables, rows {rows_src:,}=={rows_dst:,}"
+                   " (from the checksum pass, no extra scan)"), db)
 
     def _drilldown_native(self, db, table):
         """Find the differing pks of one table (whole-table for normal
@@ -1393,10 +1421,11 @@ class PostgresEngine(Engine):
             unchanged = out.count(": UNCHANGED")
             extra = (f", {unchanged} unchanged since their last proof and"
                      f" not read this run" if unchanged else "")
-            return pre + [Result("data", db, "ok",
-                                 f"{mode}{n} tables, {rows:,} rows,"
-                                 f" checksums equal both sides{extra}",
-                                 str(ev))]
+            return pre + [self._honest_about_filtering(
+                Result("data", db, "ok",
+                       f"{mode}{n} tables, {rows:,} rows,"
+                       f" checksums equal both sides{extra}",
+                       str(ev)), db)]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
         for t in bad:
@@ -2060,20 +2089,22 @@ class PostgresEngine(Engine):
                " and n.nspname not like 'pg\\_%'"
                " and n.nspname not like '\\_\\_%'").splitlines() if l]
         if rls:
-            bypass = self._psql("src", db,
-                                "select case when rolsuper or rolbypassrls"
-                                " then 'y' else 'n' end from pg_roles"
-                                " where rolname = current_user") == "y"
+            # the same rule the counts and data passes use, asked once:
+            # an owner reads its own tables in full unless they are FORCEd,
+            # so checking only for superuser/BYPASSRLS called every owner
+            # filtered
+            filtered = self._filtered_tables("src", db) or []
             deny = [r[0] for r in rls if r[1] == "0"]
             msgs = []
             if deny:
                 msgs.append(f"{len(deny)} RLS tables have ZERO policies"
                             " (default-deny, read as empty by non-owners): "
                             + ", ".join(deny[:4]))
-            if not bypass:
+            if filtered:
                 msgs.append("migkit's source role is subject to RLS on"
-                            f" {len(rls)} tables - counts/checksums there may"
-                            " be a filtered subset, not the full data")
+                            f" {len(filtered)} tables - counts/checksums"
+                            " there may be a filtered subset, not the full"
+                            " data: " + ", ".join(filtered[:4]))
             res.append(Result("deep", f"{db} rls", "diff" if msgs else "ok",
                               "; ".join(msgs) if msgs
                               else f"{len(rls)} RLS tables, all have policies"

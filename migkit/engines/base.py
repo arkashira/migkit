@@ -300,6 +300,53 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _filtered_tables(self, side, db):
+        """Tables the role migkit is connected as cannot read in full.
+
+        Row-level security is a `WHERE` clause the server adds to every
+        query, and it applies to the tool doing the verifying as readily as
+        to the application. A hop configured with an application role -
+        which is what people do rather than hand a migration tool superuser
+        - reads a subset on **both** sides and has no way to know it.
+
+        Returns the table names, or **None** when the engine has no such
+        concept or cannot be asked; the caller must not read None as "none
+        are filtered".
+        """
+        return None
+
+    def _honest_about_filtering(self, result, db):
+        """An `ok` reached through a filter is not an `ok`.
+
+        Measured before this existed: with the same policy on both sides and
+        five of the source's ten rows deleted from the target, `counts`
+        reported `OK 1 tables, rows 5==5` and `data` reported `OK 1 tables,
+        5 rows, checksums equal both sides`. Neither was wrong about what it
+        compared. Both were silent about what they could not see, which made
+        a half-empty target read as verified.
+
+        Only a clean verdict is touched: a `diff` found a real difference
+        inside what the role *could* see, and that difference is real
+        whatever is hidden behind it.
+        """
+        if result.status != "ok":
+            return result
+        hidden = self._filtered_tables("src", db)
+        if not hidden:
+            return result
+        return Result(
+            result.check, result.scope, "warn",
+            result.detail
+            + f" - but the role migkit is connected as cannot read"
+              f" {len(hidden)} of these tables in full"
+              f" ({', '.join(hidden[:4])}"
+            + (" ..." if len(hidden) > 4 else "")
+            + "), so those numbers are what it was allowed to see and not"
+              " what is there",
+            result.report,
+            "re-run as a role that bypasses row-level security - an owner"
+            " without FORCE, or one with BYPASSRLS - before trusting this")
+
     def _insert_override(self, side, db, table, names):
         """A clause an engine needs before VALUES to write a column the
         server would otherwise generate itself. Empty for engines with no
