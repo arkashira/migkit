@@ -659,6 +659,16 @@ def stream_codegen(hop, dbs, engine):
             "database.password": s.password,
             "topic.prefix": name,
             "snapshot.mode": "initial",
+            # A signal channel, so one table can be snapshotted again
+            # without stopping the stream. Debezium's `source` channel
+            # reads the request from a table it expects to find in the
+            # source database; migkit writes to the source nowhere, and
+            # the broker is already in this compose file, so the Kafka
+            # channel buys the same capability without breaking that.
+            "signal.enabled.channels": "kafka",
+            "signal.kafka.topic": f"{name}-signal",
+            "signal.kafka.bootstrap.servers": "redpanda:9092",
+            "signal.kafka.groupId": f"{name}-signal",
         },
     }
     if src_is_mysql:
@@ -750,6 +760,52 @@ def _connect_api(method, path, body=None, port=8083, timeout=15):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
         return r.status, (_json.loads(raw) if raw else None)
+
+
+def resnapshot_message(hop_name, tables, kind="blocking"):
+    """The (topic, key, value) that asks a running connector to read a
+    table again from scratch.
+
+    Debezium calls this an ad-hoc snapshot. The key has to be the
+    connector's `topic.prefix` - the signal topic is shared, and that is
+    how a connector tells its own requests from another's.
+
+    **Blocking, not incremental, and that is measured rather than
+    preferred.** An incremental snapshot reads the table in chunks
+    alongside the stream, which sounds strictly better, and Debezium
+    refuses to run one here:
+
+        Requested 'INCREMENTAL' snapshot of data collections
+          '[public.orders]'
+        Action execute-snapshot failed ...
+        DebeziumException: Incremental snapshot is not properly
+          configured, either sinalling data collection is not provided
+          or connector-specific snapshotting not set
+
+    The chunking is bracketed by watermark rows that Debezium writes into
+    a signalling table **in the source database**, so incremental cannot
+    work without write access to the source. migkit does not have it and
+    should not ask for it. The blocking snapshot needs no such table, and
+    on the same pipeline it ran: 50 rows re-emitted, the topic's high
+    watermark moving 50 -> 100, `snapshot=BLOCKING snapshot_completed=true`.
+
+    What blocking costs is honest and worth stating where the operator
+    sees it: streaming pauses while the table is re-read. Pass
+    `kind="incremental"` to ask for the other one anyway - it works the
+    moment a signalling table exists and `signal.data.collection` names
+    it, which is a decision about the source, not about migkit.
+
+    Returns the pieces rather than sending them, so the caller can be
+    tested without a broker.
+    """
+    prefix = f"migkit-{hop_name}"
+    return (
+        f"{prefix}-signal",
+        prefix,
+        {"type": "execute-snapshot",
+         "data": {"data-collections": list(tables),
+                  "type": kind.upper()}},
+    )
 
 
 def stream_up(out, log=None):

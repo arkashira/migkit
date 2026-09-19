@@ -94,9 +94,26 @@ the rows never cross the wire. Verified by running `mydumper --help` here.
               (ad-hoc and incremental snapshot), SMT (RegexRouter,
               Filter), other connectors on the same runtime
 
-`grep -i signal movers.py` returns nothing. Debezium can re-snapshot one
-table mid-stream on request; migkit cannot ask it to. Same runtime, same
-image, a config key and a row in a signal table.
+**Now open, and the measurement changed the design.** The `source`
+channel reads the request from a signalling table in the source database;
+migkit writes to a source nowhere, so the **Kafka** channel was used
+instead - the broker is already in the generated compose file. Verified
+end to end against Debezium 3.9 on the generated pipeline: the signal
+topic is created, the `SignalProcessor` joins it, and the request is read.
+
+What the run then refused is the part worth keeping:
+
+    INCREMENTAL  DebeziumException: Incremental snapshot is not properly
+                 configured, either sinalling data collection is not
+                 provided ...          topic watermark unchanged at 50
+    BLOCKING     Finished exporting 50 records for 'public.orders'
+                 snapshot_completed=true   topic watermark 50 -> 100
+
+An incremental snapshot brackets each chunk with watermark rows written
+into that same table on the source, so it is not available without write
+access there. Blocking needs no table and works. `resnapshot_message`
+defaults to blocking for that reason, and says so where the operator
+reads it. Tests: `test_resnapshot_signal.py`.
 
 ### mongodump / mongorestore
 
