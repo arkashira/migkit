@@ -17,9 +17,11 @@ the reads:
     workers not sharing the snapshot    a=2  b=2
     workers sharing the snapshot        a=1  b=1
 
-**Not yet wired into the pass.** This is the mechanism and its proof; the
-change to `_fast_consistent` that uses it is its own piece of work,
-because it rewrites how that script is built.
+`_fast_consistent` now uses it: a side's tables are split across lanes,
+every lane adopts the same snapshot, and the fence LSN is asked for by one
+lane so there is a single position to prove convergence against. A side
+that cannot export falls back to the single script it always ran - an
+inconsistent "consistent" pass would be worse than a slow one.
 """
 import socket
 import subprocess
@@ -187,3 +189,89 @@ def test_no_snapshot_still_produces_a_usable_preamble():
     got = PostgresEngine._snapshot_preamble(None, 4)
     assert not any("snapshot" in line for line in got), got
     assert len(got) == 2, got
+
+
+def test_the_lanes_all_read_the_same_instant(tmp_path):
+    """Splitting a side's tables across connections is only safe because
+    every lane runs the same preamble. If one lane omitted it, that lane
+    would read a different instant and the mode would be lying."""
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="sn", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["x"], workers=3)
+    hop.report_dir = lambda db=None: tmp_path
+    eng = PostgresEngine(hop)
+    eng._row_hash_expr = lambda side, db, t: "md5(t::text)"
+    got = eng._snapshot_scripts("src", "x",
+                                ["public.a", "public.b", "public.c"],
+                                "SNAP", 3, 8)
+    assert len(got) == 3, got
+    for sc in got:
+        assert "set transaction snapshot 'SNAP';" in sc, sc
+        assert sc.rstrip().endswith("commit;"), sc
+
+
+def test_only_one_lane_reports_the_fence(tmp_path):
+    """The LSN is the fence a convergence proof rests on. Two lanes
+    reporting two positions would leave the caller picking one."""
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="sn", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["x"], workers=3)
+    hop.report_dir = lambda db=None: tmp_path
+    eng = PostgresEngine(hop)
+    eng._row_hash_expr = lambda side, db, t: "md5(t::text)"
+    got = eng._snapshot_scripts("src", "x", ["a.a", "b.b", "c.c"], "S", 3, 8)
+    assert sum("LSN|" in sc for sc in got) == 1, got
+
+
+def test_every_table_lands_in_exactly_one_lane(tmp_path):
+    """A table in two lanes would be counted twice; a table in none would
+    vanish from the verdict - the quieter of the two failures."""
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="sn", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["x"], workers=4)
+    hop.report_dir = lambda db=None: tmp_path
+    eng = PostgresEngine(hop)
+    eng._row_hash_expr = lambda side, db, t: "md5(t::text)"
+    tables = [f"public.t{i}" for i in range(7)]
+    got = eng._snapshot_scripts("src", "x", tables, "S", 4, 8)
+    joined = "\n".join(got)
+    for t in tables:
+        assert joined.count(f"'{t}|'") == 1, (t, joined)
+
+
+def test_more_lanes_than_tables_makes_no_empty_lane(tmp_path):
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="sn", engine="postgres",
+              source=Endpoint(host="h", port=1, user="u", password="p"),
+              target=Endpoint(host="h", port=2, user="u", password="p"),
+              databases=["x"], workers=8)
+    hop.report_dir = lambda db=None: tmp_path
+    eng = PostgresEngine(hop)
+    eng._row_hash_expr = lambda side, db, t: "md5(t::text)"
+    got = eng._snapshot_scripts("src", "x", ["public.only"], "S", 8, 8)
+    assert len(got) == 1, got
+
+
+def test_the_consistent_pass_still_agrees_with_itself(snap_db, tmp_path):
+    """The end of it: same database on both sides of the hop, several
+    lanes, and every table has to come back OK. A lane reading a different
+    instant, or a table counted twice, shows up here."""
+    eng = _engine(snap_db, tmp_path)
+    subprocess.run(["docker", "exec", NAME, "psql", "-U", "postgres", "-d",
+                    "postgres", "-q", "-c",
+                    "create table if not exists c (id int);"
+                    " create table if not exists d (id int);"
+                    " insert into c select generate_series(1,50);"
+                    " insert into d select generate_series(1,50);"],
+                   check=True, capture_output=True)
+    rc, out = eng._fast_consistent("postgres")
+    assert rc == 0, out
+    assert "consistent snapshot" in out, out
+    for table in ("public.a", "public.b", "public.c", "public.d"):
+        assert f"{table}: OK" in out, (table, out)

@@ -4523,6 +4523,38 @@ class PostgresEngine(Engine):
                 pass
             return None, None
 
+    def _snapshot_scripts(self, side, db, tables, snapshot, lanes, workers):
+        """One script per lane, every lane reading the shared snapshot.
+
+        The LSN is asked for once, by the first lane, because it is the
+        fence for convergence proofs and two lanes reporting two positions
+        would leave the caller to pick one. Every lane runs the same
+        preamble, so the instant is identical whichever lane a table lands
+        in - which is the only reason splitting them is safe.
+        """
+        lanes = max(1, min(lanes, len(tables)))
+        buckets = [tables[i::lanes] for i in range(lanes)]
+        out = []
+        for n, bucket in enumerate(buckets):
+            if not bucket:
+                continue
+            lines = self._snapshot_preamble(snapshot, workers)
+            if n == 0:
+                lines.append(
+                    "select 'LSN|'||case when pg_is_in_recovery() then"
+                    " 'standby (read replica, no fence)' else"
+                    " pg_current_wal_lsn()::text end;")
+            for t in bucket:
+                sch, tbl = t.split(".", 1)
+                h = self._row_hash_expr("src", db, t)
+                lines.append(
+                    f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
+                    f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
+                    f' from "{sch}"."{tbl}" t;')
+            lines.append("commit;")
+            out.append("\n".join(lines))
+        return out
+
     def _fast_consistent(self, db):
         """Whole-database checksum inside ONE repeatable-read read-only
         transaction per side: no intra-db skew (every table of a side is
@@ -4554,16 +4586,40 @@ class PostgresEngine(Engine):
             lines.append("commit;")
             return "\n".join(lines)
 
-        procs = {}
-        for side in ("src", "dst"):
-            p, sql = self._psql_script(side, db, script(side))
-            procs[side] = (p, sql)
-        outs = {}
-        for side, (p, sql) in procs.items():
-            stdout, stderr = p.communicate(sql)
-            if p.returncode:
-                return 1, f"consistent pass failed on {side}: {stderr[-300:]}"
-            outs[side] = stdout
+        # One transaction per side is what makes this consistent, and it is
+        # also what made it serial: every table of a side queued behind the
+        # one before it. An exported snapshot lets several connections read
+        # that same instant at the same time, so consistency stops costing
+        # the parallelism. Failing to export falls back to the single
+        # script rather than reading without one - an inconsistent
+        # "consistent" pass is the answer this mode exists to avoid.
+        lanes = max(1, int(self.hop.workers or 1))
+        outs, holders = {}, []
+        try:
+            for side in ("src", "dst"):
+                conn, snap = (self._export_snapshot(side, db)
+                              if lanes > 1 and len(both) > 1 else (None, None))
+                if conn is not None:
+                    holders.append(conn)
+                scripts = ([script(side)] if not snap
+                           else self._snapshot_scripts(side, db, both, snap,
+                                                       lanes, w))
+                procs = [self._psql_script(side, db, sc) for sc in scripts]
+                text = []
+                for proc, sql in procs:
+                    stdout, stderr = proc.communicate(sql)
+                    if proc.returncode:
+                        return 1, (f"consistent pass failed on {side}:"
+                                   f" {stderr[-300:]}")
+                    text.append(stdout)
+                outs[side] = "\n".join(text)
+        finally:
+            for conn in holders:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    pass
 
         def parse(text):
             lsn, rows = "", {}

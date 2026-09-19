@@ -66,9 +66,12 @@ What that leaves on the floor:
       workers not sharing the snapshot    a=2  b=2
       workers sharing the snapshot        a=1  b=1
 
-  The export helper and its ordering rule are in place and tested
-  (`test_shared_snapshot.py`); using them inside `_fast_consistent` is the
-  next piece.
+  `_fast_consistent` now uses it: a side's tables are split across lanes,
+  every lane adopts the same snapshot, and one lane asks for the fence LSN
+  so there is a single position to prove convergence against. A side that
+  cannot export falls back to the single script it always ran, because an
+  inconsistent "consistent" pass is worse than a slow one.
+  `test_shared_snapshot.py`.
 * **`clone`** - schema, data, indexes, constraints and sequences in one
   pass, in the order pgcopydb already knows is fastest.
 
