@@ -85,6 +85,7 @@ class Hop:
     workers: int = 4
     options: dict = field(default_factory=dict)
     db_map: dict = field(default_factory=dict)
+    mapping: dict = field(default_factory=dict)
 
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
@@ -112,6 +113,76 @@ class Hop:
         parts = [str(p) for p in parts if p not in (None, "")]
         cands = {".".join(parts[i:]) for i in range(len(parts))}
         return any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands)
+
+    @staticmethod
+    def _ids(*parts):
+        """Every name an object answers to, longest first.
+
+        The same right-anchored suffix rule `excluded` uses, so one idea of
+        "which table is this" serves the deny list and the mapping instead
+        of two that can disagree.
+        """
+        parts = [str(p) for p in parts if p not in (None, "")]
+        return [".".join(parts[i:]) for i in range(len(parts))]
+
+    def table_map(self):
+        """`{source id: target id}` from the hop's `mapping.tables`."""
+        return dict((self.mapping or {}).get("tables") or {})
+
+    def target_table(self, *parts):
+        """What this source table is called on the target.
+
+        Identity when unmapped, which is the answer for almost every table
+        - the same shape as `target_db`, and for the same reason: a rename
+        is a fact about the hop, not something each caller should carry.
+        """
+        rules = self.table_map()
+        for ident in self._ids(*parts):
+            if ident in rules:
+                return str(rules[ident])
+        return ".".join(str(p) for p in parts if p not in (None, ""))
+
+    def row_filter(self, *parts):
+        """The predicate that decides which rows of this table move, or None.
+
+        Returned as written. It is pushed into the mover's own flag and
+        into the checksum's `WHERE`, so a filtered load is compared against
+        the same filter rather than against the whole source - which is the
+        half DMS leaves out, and the reason a filtered target reads as
+        missing rows there.
+        """
+        rules = (self.mapping or {}).get("where") or {}
+        for ident in self._ids(*parts):
+            if ident in rules:
+                return str(rules[ident])
+        return None
+
+    def ambiguous_mapping(self):
+        """Renames that would land two source tables on one target.
+
+        Refused rather than resolved: whichever copy ran second would
+        overwrite the first, and the verification would then compare one
+        source against a target holding the other. `hetero.match_tables`
+        already refuses an ambiguous *pair* for the same reason.
+        """
+        seen = {}
+        for src, dst in sorted(self.table_map().items()):
+            seen.setdefault(str(dst), []).append(src)
+        return {dst: srcs for dst, srcs in seen.items() if len(srcs) > 1}
+
+    def unused_mapping(self, source_ids):
+        """Mapping keys that matched nothing on the source.
+
+        A rule that matches nothing is how a table quietly fails to move:
+        the operator believes it was renamed or filtered, and it was never
+        considered at all. `source_ids` is what the source actually has.
+        """
+        known = set()
+        for ident in source_ids:
+            known.update(self._ids(*str(ident).split(".")))
+        keys = set(self.table_map()) | set(
+            ((self.mapping or {}).get("where") or {}))
+        return sorted(k for k in keys if k not in known)
 
 
 DEFAULT_PORTS = {
@@ -202,6 +273,7 @@ def load_hops(path=None):
             workers=int(raw.get("workers", 4)),
             options=raw.get("options") or {},
             db_map=raw.get("db_map") or {},
+            mapping=raw.get("mapping") or {},
         )
     return hops
 

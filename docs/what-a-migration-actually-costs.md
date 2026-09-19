@@ -200,7 +200,7 @@ In order. Each item says what has to be measured before it is written.
    them apart. The envelope now carries a `coverage` block and reports
    `incomplete` rather than `same` when the run was narrowed, with
    `has_differences` left alone.
-17. **Mapping and transformation, verified rather than declared.** DMS and
+17. **Mapping and transformation, verified rather than declared.** *(core landed: `mapping.tables` / `mapping.where` on the hop, with the same right-anchored naming `exclude` uses, ambiguous renames refused and rules that match nothing reported - `test_mapping_rules.py`. Still to wire: the mover flags and the check's own use of it.)* DMS and
    DTS rename schemas, tables and columns and filter rows during a move,
    and migkit has none of it - only a database-name map (`_d(side, db)`).
    The shallow version is a rename list. **Deeper, and the part DMS cannot
