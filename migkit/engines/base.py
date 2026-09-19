@@ -295,6 +295,102 @@ class Engine:
                 return codec, decoded
         return None
 
+    def _temporal_meaning_result(self, db, mismatched, unmapped, checked):
+        """Whether the two sides agree on what a temporal column is *for*.
+
+        A checksum compares the values as they now stand and will happily
+        agree that `2020-11-01 01:05:00` equals `2020-11-01 01:05:00`. It
+        cannot say that the source column recorded an instant and the target
+        column records digits off a wall clock, because that is a fact about
+        the type and not about any row.
+
+        What it costs, measured rather than reasoned: PostgreSQL given
+        `'2020-11-01 01:05:00+04'` stores `01:05:00` in a `timestamp` and
+        `2020-10-31 21:05:00+00` in a `timestamptz` - four hours discarded
+        from a value that named its own offset. And across a DST boundary
+        two genuinely different instants, `01:30:00-04` and `01:30:00-05`,
+        both become the digits `01:30:00`, after which nothing can tell them
+        apart.
+
+        The trap this exists for is that **`timestamp` means opposite things
+        in the two engines**: PostgreSQL's is the wall clock and MySQL's is
+        the instant. A MySQL `timestamp` landing in a PostgreSQL `timestamp`
+        looks like the identity mapping and is not.
+
+        `mismatched` is [(table, column, src_type, src_meaning, dst_type,
+        dst_meaning)]; `unmapped` counts temporal-looking columns whose
+        engine migkit has not measured, which is not the same as agreement.
+        """
+        def side(t, m):
+            return f"{t} ({m})"
+
+        if mismatched:
+            worst = ", ".join(
+                f"{t}.{c} {side(st, sm)} -> {side(dt, dm)}"
+                for t, c, st, sm, dt, dm in mismatched[:4])
+            return Result(
+                "deep", f"{db} temporal meaning", "diff",
+                f"{len(mismatched)} columns change what they mean between"
+                f" the two sides: {worst}"
+                + (" ..." if len(mismatched) > 4 else "")
+                + " - one side records an instant and the other records"
+                  " digits off a wall clock, so the offset is dropped on the"
+                  " way across and a checksum of what arrives cannot see it",
+                "",
+                "give the target the type that carries the same meaning, or"
+                " convert deliberately with the zone the values were"
+                " actually in - converting without naming it uses whichever"
+                " zone the session happened to have")
+        if unmapped:
+            return Result(
+                "deep", f"{db} temporal meaning", "skip",
+                f"{checked} temporal columns agree, and {unmapped} are on an"
+                " engine whose temporal types migkit has not measured - so"
+                " this says nothing about those")
+        if not checked:
+            return Result("deep", f"{db} temporal meaning", "skip",
+                          "no temporal columns on both sides to compare")
+        return Result("deep", f"{db} temporal meaning", "ok",
+                      f"{checked} temporal columns record the same kind of"
+                      " time on both sides")
+
+    def _temporal_meaning(self, db):
+        """Built on the neutral contract, so every engine that can list its
+        columns gets this without writing any of it again."""
+        from .. import canon
+        mismatched, unmapped, checked = [], 0, 0
+        engine = self.CANON_ENGINE
+        try:
+            src_tables = set(self.neutral_tables("src", db))
+            dst_tables = set(self.neutral_tables("dst", db))
+            for table in sorted(src_tables & dst_tables):
+                dst_types = dict(self.neutral_columns("dst", db, table))
+                for name, src_type in self.neutral_columns("src", db, table):
+                    if name not in dst_types:
+                        continue
+                    src_meaning = canon.time_meaning(engine, src_type)
+                    dst_meaning = canon.time_meaning(engine, dst_types[name])
+                    if src_meaning is None and dst_meaning is None:
+                        # a column with no measured meaning is either not
+                        # temporal at all or temporal on an engine nobody
+                        # measured, and those must not read the same. The
+                        # canonical class already knows which it is.
+                        if canon.comparable(engine, src_type)[0] in (
+                                "timestamp", "date", "time"):
+                            unmapped += 1
+                        continue
+                    checked += 1
+                    if src_meaning != dst_meaning:
+                        mismatched.append((table, name, src_type, src_meaning
+                                           or "unknown", dst_types[name],
+                                           dst_meaning or "unknown"))
+        except Exception as e:
+            return Result("deep", f"{db} temporal meaning", "error",
+                          "could not compare the temporal columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._temporal_meaning_result(db, mismatched, unmapped,
+                                             checked)
+
     #: Duplicate groups to name per index. Enough to act on, few enough that
     #: a table which has gone entirely wrong does not produce a report
     #: nobody can read.

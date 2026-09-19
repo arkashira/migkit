@@ -1895,6 +1895,7 @@ class PostgresEngine(Engine):
         else:
             why = ""
         res.append(self._duplicate_keys(db, why))
+        res.append(self._temporal_meaning(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """

@@ -1416,7 +1416,8 @@ class MySQLEngine(Engine):
                self._invalid_indexes(db),
                self._collation_versions(db),
                self._mojibake(db),
-               self._duplicate_keys(db)]
+               self._duplicate_keys(db),
+               self._temporal_meaning(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

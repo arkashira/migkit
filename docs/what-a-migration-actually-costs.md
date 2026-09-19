@@ -116,17 +116,17 @@ In order. Each item says what has to be measured before it is written.
    a blanket conversion destructive. **Still open from this item:** the
    repair - migkit says which rows are safe to convert and does not convert
    them.
-6. **The temporal types, which this tick measured migkit through.**
-   `canon.comparable` returns the same class for `timestamp with time zone`
-   and `timestamp without time zone`, so migkit's type layer cannot say
-   that a target column records a wall clock where the source recorded an
-   instant - measured at four hours discarded from a single literal, and at
-   two distinct instants collapsing onto identical digits across a DST
-   boundary. Beside it: values the other side will not accept at all
-   (`0000-00-00` is stored by MySQL and rejected outright by PostgreSQL),
-   and MySQL's named zones, where an unloaded `mysql.time_zone*` makes
-   `CONVERT_TZ` return NULL with no warning - measured writing NULL into a
-   stored generated column.
+6. **The temporal types.** **Done for the meaning** - `canon.time_meaning`
+   answers what a temporal column is *for*, separately from how to render
+   it, and `check --deep` compares it column by column on both engines. It
+   exists because `timestamp` means opposite things in the two: PostgreSQL's
+   is the wall clock, MySQL's is the instant, both measured. **Still open
+   from this item:** values the other side will not accept at all
+   (`0000-00-00` is stored by MySQL and rejected outright by PostgreSQL -
+   migkit reports the difference afterwards and does not count the rows
+   beforehand), and MySQL's named zones, where an unloaded
+   `mysql.time_zone*` makes `CONVERT_TZ` return NULL with no warning -
+   measured writing NULL into a stored generated column.
 7. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

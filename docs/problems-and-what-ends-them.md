@@ -331,19 +331,41 @@ The ambiguous hour is the same wound: `2026-11-01 01:30:00-04` and
 identical digits `01:30:00`. Nothing afterwards can tell them apart, which
 is why the bug surfaces twice a year and is blamed on the application.
 
-**migkit: Not yet, and the gap is inside migkit.** `canon.comparable` was
-asked directly:
+**migkit: Ends it** - `test_temporal_meaning.py`, on PostgreSQL and MySQL
+alike. The gap was found by asking `canon.comparable` directly:
 
     postgres  timestamp with time zone      -> ('timestamp', '')
     postgres  timestamp without time zone   -> ('timestamp', '')
     mysql     datetime                      -> ('timestamp', '')
 
-All three collapse to one canonical class, so migkit's type layer treats a
-column that records an instant and a column that records a wall clock as
-the same kind of thing. That is the right call for *rendering a value* and
-the wrong one for *deciding the two sides mean the same*. A source
-`timestamptz` landing in a target `timestamp` is exactly the shape above,
-and nothing in the report says so.
+All three collapse to one canonical class - which is the right call for
+*rendering a value* and the wrong one for *deciding the two sides mean the
+same*. Rather than change that mapping and break the rendering that depends
+on it, `canon.time_meaning` answers the separate question, and
+`check --deep` compares it column by column:
+
+    deep postgres temporal meaning: DIFF 1 columns change what they mean
+      between the two sides: public.events.at timestamp with time zone
+      (instant) -> timestamp without time zone (wall clock) - one side
+      records an instant and the other records digits off a wall clock, so
+      the offset is dropped on the way across and a checksum of what
+      arrives cannot see it
+
+**The reason it is a check and not a footnote:** `timestamp` means
+*opposite things* in the two engines, measured on both. PostgreSQL's
+`timestamp` is the wall clock and its `timestamptz` the instant; MySQL's
+`datetime` is the wall clock and its **`timestamp` is the instant** -
+written at `time_zone '+00:00'` and read back at `'+07:00'`, `datetime`
+returned `12:00:00` unchanged while `timestamp` returned `19:00:00`. So a
+MySQL `timestamp` landing in a PostgreSQL `timestamp` looks like the
+identity mapping and is the silent conversion above. A test pins the table
+in both directions precisely because a plausible-looking edit would swap
+them.
+
+The check is written entirely on the neutral contract - `neutral_tables`
+and `neutral_columns` - so it is not postgres-only by construction, and an
+engine whose temporal types migkit has *not* measured is reported as
+unmeasured rather than counted as agreement.
 
 ### B6. The value the target will not accept at all
 

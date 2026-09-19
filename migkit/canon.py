@@ -618,6 +618,57 @@ def expr(engine, col, cls):
     return build(col, cls)
 
 
+#: What a temporal column is *for*, which is a different question from how
+#: to render it. Two columns can share a canonical class - and therefore
+#: compare correctly value by value - while one records an instant in time
+#: and the other records digits off a wall clock. Moving data from one to
+#: the other is a silent conversion that no row count and no checksum of
+#: the values as they now stand will show.
+#:
+#: The word `timestamp` means **opposite things** in the two engines
+#: mapped here, which is why this table exists rather than a rule of thumb.
+#: Measured, not assumed:
+#:
+#:   postgres  '2020-11-01 01:05:00+04' -> timestamp    2020-11-01 01:05:00
+#:                                      -> timestamptz  2020-10-31 21:05:00+00
+#:   mysql     written at time_zone '+00:00', read at '+07:00'
+#:                        datetime   2026-07-01 12:00:00  (unchanged)
+#:                        timestamp  2026-07-01 19:00:00  (converted)
+INSTANT, WALL = "instant", "wall clock"
+
+TIME_MEANING = {
+    "postgres": {
+        "timestamp with time zone": INSTANT, "timestamptz": INSTANT,
+        "time with time zone": INSTANT, "timetz": INSTANT,
+        "timestamp without time zone": WALL, "timestamp": WALL,
+        "time without time zone": WALL, "time": WALL, "date": WALL,
+    },
+    "mysql": {
+        "timestamp": INSTANT,
+        "datetime": WALL, "date": WALL, "time": WALL, "year": WALL,
+    },
+}
+
+
+def time_meaning(engine, declared):
+    """`INSTANT`, `WALL`, or None when this is not a temporal column - or
+    when migkit has not measured what this engine means by it, which the
+    caller has to tell apart from "they agree"."""
+    if not declared:
+        return None
+    # `timestamp(6) with time zone` and `datetime(3)` have to land on the
+    # same key as the bare spelling, and this file carries no imports
+    name, depth = [], 0
+    for ch in str(declared).lower():
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            name.append(ch)
+    return TIME_MEANING.get(engine, {}).get(" ".join("".join(name).split()))
+
+
 def comparable(engine, declared):
     """(class, why-not). Exactly one of the two is set."""
     cls = type_class(engine, declared)
