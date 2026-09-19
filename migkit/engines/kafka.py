@@ -1,7 +1,7 @@
 import hashlib
 import time
 
-from .base import Engine, Result
+from .base import Engine, RepairAction, Result
 
 
 class KafkaEngine(Engine):
@@ -177,69 +177,215 @@ class KafkaEngine(Engine):
                                   f" configs match on {len(common)} topics"))
         return res
 
+    def _groups(self, side):
+        """Consumer group ids on one side.
+
+        `list_groups()` answers with dicts on this client - measured,
+        `{'group_id': 'billing', 'protocol_type': 'consumer', 'group_state':
+        'Empty', ...}`. The old reading indexed them as tuples and called
+        `list_consumer_groups`, which is a kafka-python 2.x name: against the
+        client migkit installs, `check --check deep` raised `AttributeError:
+        'KafkaAdminClient' object has no attribute 'list_consumer_groups'`
+        before it compared anything at all.
+        """
+        admin = self._admin(side)
+        try:
+            groups = admin.list_groups()
+        finally:
+            admin.close()
+        out = set()
+        for group in groups:
+            name = (group.get("group_id") if isinstance(group, dict)
+                    else group[0])
+            if name and not name.startswith("_"):
+                out.add(name)
+        return out
+
+    def _group_offsets(self, side, group):
+        """{TopicPartition: committed offset} for one group."""
+        admin = self._admin(side)
+        try:
+            got = admin.list_group_offsets(group)
+        finally:
+            admin.close()
+        per_group = got.get(group, got) if isinstance(got, dict) else {}
+        return {tp: meta.offset for tp, meta in per_group.items()
+                if not tp.topic.startswith("__") and meta.offset >= 0}
+
+    def _comparable(self, tps):
+        """The partitions whose offsets mean the same thing on both sides.
+
+        An offset is a position in one cluster's log, and two clusters only
+        agree on what a number means when their logs start and end in the
+        same place. Copying a committed offset between clusters that do not
+        is how a consumer is silently moved past messages it never read, so
+        migkit checks first and says which partitions it could not vouch for.
+        """
+        sc, dc = self._consumer("src"), self._consumer("dst")
+        same, apart = [], []
+        for tp in tps:
+            try:
+                ends = (sc.end_offsets([tp])[tp], dc.end_offsets([tp])[tp])
+                begins = (sc.beginning_offsets([tp])[tp],
+                          dc.beginning_offsets([tp])[tp])
+            except Exception:
+                apart.append(tp)
+                continue
+            (same if ends[0] == ends[1] and begins[0] == begins[1]
+             else apart).append(tp)
+        return same, apart
+
     def check_deep(self, db):
         """Consumer-group parity: the classic kafka-migration failure is
         moving the data but not the committed offsets - every consumer
-        restarts from earliest/latest and double-processes or drops."""
-        from kafka import TopicPartition
+        restarts from earliest/latest and double-processes or drops.
+
+        What it finds is written down the way every other engine writes it,
+        so `migkit sync --kind sequences` can put it right: a committed
+        offset is a counter that has to follow the data, which is the same
+        thing a sequence is.
+        """
+        import json
         try:
-            admin_s, admin_d = self._admin("src"), self._admin("dst")
+            gs = self._groups("src")
+            gd = self._groups("dst")
         except Exception as e:
-            return [Result("deep", "groups", "error", str(e))]
-        gs = {g[0] for g in admin_s.list_consumer_groups()
-              if g[0] and not g[0].startswith("_")}
-        gd = {g[0] for g in admin_d.list_consumer_groups()
-              if g[0] and not g[0].startswith("_")}
+            return [Result("deep", "groups", "error",
+                           f"{type(e).__name__}: {str(e)[:110]} - the groups"
+                           " could not be listed, which is not the same as"
+                           " there being none")]
         missing = sorted(gs - gd)
         res = []
         if missing:
             res.append(Result("deep", "groups", "diff",
                               f"{len(missing)} consumer groups missing on"
                               f" target: {', '.join(missing[:6])}", "",
-                              "mirror offsets (mirrormaker2 checkpoint +"
-                              " MirrorCheckpointConnector sync) or seed"
-                              " kafka-consumer-groups --reset-offsets"))
+                              f"migkit sync {self.hop.name} --db {db}"
+                              " --kind sequences --apply, or mirror them with"
+                              " MirrorCheckpointConnector"))
         else:
             res.append(Result("deep", "groups", "ok",
                               f"{len(gs)} consumer groups present on"
                               " target"))
-        sc, dc = self._consumer("src"), self._consumer("dst")
-        stale = []
+        behind, unsure, changed = [], [], []
         checked = 0
-        for g in sorted(gs & gd):
+        for group in sorted(gs | gd):
             try:
-                offs_s = admin_s.list_consumer_group_offsets(g)
-                offs_d = admin_d.list_consumer_group_offsets(g)
+                offs_s = self._group_offsets("src", group)
             except Exception:
+                unsure.append(f"{group} (its offsets could not be read)")
                 continue
-            tps = [tp for tp in offs_s if not tp.topic.startswith("__")]
-            if not tps:
+            if not offs_s:
                 continue
+            try:
+                offs_d = self._group_offsets("dst", group)
+            except Exception:
+                offs_d = {}
             checked += 1
-            lag_s = lag_d = 0
-            try:
-                end_s = sc.end_offsets(tps)
-                end_d = dc.end_offsets(tps)
-            except Exception:
-                continue
-            for tp in tps:
-                lag_s += max(0, end_s.get(tp, 0) - offs_s[tp].offset)
-                d_off = offs_d.get(tp)
-                if d_off is None or d_off.offset < 0:
-                    lag_d += max(0, end_d.get(tp, 0))
-                else:
-                    lag_d += max(0, end_d.get(tp, 0) - d_off.offset)
-            if lag_d > lag_s + 10000:
-                stale.append(f"{g} lag src={lag_s} dst={lag_d}"
-                             " (offsets not translated?)")
-        res.append(Result("deep", "group-lag",
-                          "diff" if stale else "ok",
-                          "; ".join(stale[:6]) if stale
-                          else f"{checked} common groups, target lag in"
-                          " line with source", "",
-                          "translate offsets before cutover or consumers"
-                          " will reprocess/skip" if stale else ""))
+            same, apart = self._comparable(list(offs_s))
+            for tp in apart:
+                unsure.append(f"{group} {tp.topic}[{tp.partition}]")
+            for tp in same:
+                if offs_d.get(tp) != offs_s[tp]:
+                    behind.append(f"{group} {tp.topic}[{tp.partition}]"
+                                  f" src={offs_s[tp]} dst={offs_d.get(tp)}")
+                    changed.append(json.dumps(
+                        {"group": group, "topic": tp.topic,
+                         "partition": tp.partition, "offset": offs_s[tp]}))
+        self._write_drill(db, "groups", missing=missing, changed=changed)
+        # a pass has to say what it did not look at, or a group with one
+        # untranslatable partition reads as a group that was checked
+        aside = (f" ({len(unsure)} partitions not comparable, below)"
+                 if unsure else "")
+        res.append(Result(
+            "deep", "group-offsets", "diff" if behind else "ok",
+            "; ".join(behind[:6]) + aside if behind
+            else f"{checked} groups, every comparable committed offset"
+                 f" matches{aside}", "",
+            f"migkit sync {self.hop.name} --db {db} --kind sequences --apply"
+            if behind else ""))
+        if unsure:
+            res.append(Result(
+                "deep", "group-offsets not comparable", "warn",
+                f"{len(unsure)} partitions where an offset does not mean the"
+                f" same thing on both sides: {', '.join(unsure[:6])} - the"
+                " two logs do not start and end together, so migkit will not"
+                " copy a number between them", "",
+                "translate them with MirrorMaker2's checkpoints, or reset the"
+                " target's groups deliberately with kafka-consumer-groups"
+                " --reset-offsets"))
         return res
+
+    def repair_plan(self, db, kind):
+        """Committed offsets are the counters this engine can put right.
+
+        Not the messages: re-producing them would give them new offsets and
+        new timestamps, and a topic is not a table that can be written into
+        twice. `check --check deep` is what fills the list this reads.
+        """
+        if kind not in ("sequences", "all"):
+            return []
+        changed = self._read_drill(db, "groups", "changed")
+        if not changed:
+            return []
+        import json
+        rows = [json.loads(line) for line in changed]
+        groups = sorted({r["group"] for r in rows})
+        return [RepairAction(
+            db, "sequences",
+            [f"commit {len(rows)} offsets on the target for"
+             f" {len(groups)} groups: {', '.join(groups[:6])}"
+             + (" ..." if len(groups) > 6 else "")],
+            [], "only partitions whose logs begin and end together on the two"
+                " sides are listed; the target's current offsets go to the"
+                " undo file first")]
+
+    def apply(self, db, action):
+        """Set the target's committed offsets to the source's.
+
+        Measured: `alter_group_offsets` creates the group when it is not
+        there, which is what a migrated cluster needs, and reports per
+        partition - `{TopicPartition: NoError}` - so the result is read
+        rather than assumed.
+        """
+        import json
+
+        from kafka import TopicPartition
+        from kafka.structs import OffsetAndMetadata
+        rows = [json.loads(line)
+                for line in self._read_drill(db, "groups", "changed")]
+        if not rows:
+            return
+        undo_dir = self.hop.report_dir(db) / "undo"
+        undo_dir.mkdir(parents=True, exist_ok=True)
+        by_group = {}
+        for row in rows:
+            by_group.setdefault(row["group"], {})[
+                TopicPartition(row["topic"], row["partition"])] = row["offset"]
+        admin = self._admin("dst")
+        try:
+            with (undo_dir / "group-offsets.jsonl").open("a") as handle:
+                for group, wanted in sorted(by_group.items()):
+                    held = self._group_offsets("dst", group)
+                    for tp in wanted:
+                        handle.write(json.dumps(
+                            {"group": group, "topic": tp.topic,
+                             "partition": tp.partition,
+                             "offset": held.get(tp)}) + "\n")
+                    got = admin.alter_group_offsets(
+                        group, {tp: OffsetAndMetadata(offset, "", -1)
+                                for tp, offset in wanted.items()})
+                    bad = [f"{tp.topic}[{tp.partition}]: {err.__name__}"
+                           for tp, err in (got or {}).items()
+                           if err is not None
+                           and getattr(err, "__name__", "") != "NoError"]
+                    if bad:
+                        raise SystemExit(
+                            f"the target refused offsets for {group}:"
+                            f" {'; '.join(bad[:6])}. Offsets committed"
+                            " before this one stand; nothing was deleted")
+        finally:
+            admin.close()
 
     def check_counts(self, db):
         from kafka import TopicPartition
