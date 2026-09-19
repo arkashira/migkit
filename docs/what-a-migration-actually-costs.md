@@ -142,16 +142,24 @@ In order. Each item says what has to be measured before it is written.
    `OVERRIDING SYSTEM VALUE` where the catalog says it is needed. `move`
    was measured to be unaffected, because `COPY` is not subject to the
    restriction.
-8. **The pre-flight the practitioners keep asking for**: before anything
+8. **Two blind spots this tick measured, both in migkit itself.** With
+   row-level security on both sides and five of the source's ten rows
+   deleted from the target, `counts` and `data` both reported **OK, 5 rows
+   both sides** - the deep check does catch the condition, but the passes
+   that pronounce on the data do not ask it. And `_apply_upsert` cannot
+   write a table with a `GENERATED ALWAYS AS ... STORED` column at all;
+   unlike the identity case, `OVERRIDING SYSTEM VALUE` does not help - the
+   column has to be left out of the statement.
+9. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-9. **LOBs**, as correctness first and speed second: find them, size them,
+10. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-10. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+11. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-11. **Then** consider a migkit-owned mover, with the benchmark from item 1
+12. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources

@@ -762,6 +762,32 @@ A test also asserts the server still refuses the unclaused statement, so if
 that assertion ever stops failing it means the sandbox changed rather than
 that the problem went away.
 
+### C8. The column the target computes for itself
+
+**What happens.** A `GENERATED ALWAYS AS (...) STORED` column is the
+server's to write, and it refuses anybody else's value - measured:
+
+    copy gen (id, price, qty, total) from stdin
+    ERROR:  column "total" is a generated column
+    DETAIL:  Generated columns cannot be used in COPY.
+
+**migkit: Not yet, and it is the same family as C7.** `_apply_upsert`
+builds its column list from the row it is repairing, generated column
+included, and against such a target it answers `cannot insert a non-DEFAULT
+value into column "total"`. So `migkit apply` cannot repair a row in any
+table that has one.
+
+The fix is **not** the one C7 needed, which is worth writing down before
+somebody assumes it is: `OVERRIDING SYSTEM VALUE` was tried here and
+rejected with the same error. A generated column has to be left out of the
+statement entirely, after which the server computes it - measured, an
+insert omitting `total` stored `total=20` from `price * qty`. The catalog
+signal is `pg_attribute.attgenerated <> ''`.
+
+Comparing the column is right and stays: `neutral_columns` reports it, so a
+target whose generated expression differs from the source's shows up as a
+value difference. It is only the **writing** that has to change.
+
 ---
 
 ## D. Proving the data actually landed
@@ -869,6 +895,46 @@ deferrable constraints are checked (`test_deep_nopk_pg.py`,
 items)") run on both sides and compared.
 
 ---
+
+### D8. The verifier was looking through a filter
+
+**What happens.** Row-level security is a `WHERE` clause the server adds to
+every query, and it applies to whoever is connected - including the tool
+doing the verifying. A hop configured with an application role, which is
+the natural thing to do when nobody wants to hand a migration tool
+superuser, sees only the rows that role is allowed to see. On both sides.
+
+PostgreSQL is careful about this where it can be: `pg_dump` sets
+`row_security = off` and **errors** rather than dumping a subset, by
+explicit design. The trap is `--enable-row-security`, which someone adds to
+make a failing backup script "work" - after which the dump succeeds and
+contains part of the table.
+
+**migkit: Partly, and the part that is missing is the loud one.** The deep
+check already catches the condition and says so:
+
+    deep postgres rls: DIFF migkit's source role is subject to RLS on 1
+      tables
+
+It also reports RLS tables with **zero** policies, which read as empty to
+anyone who is not the owner.
+
+But the passes that pronounce on the data do not know. Measured, with the
+same policy on both sides and **five of the source's ten rows deleted from
+the target**:
+
+    counts   postgres: OK 1 tables, rows 5==5
+    data     postgres: OK 1 tables, 5 rows, checksums equal both sides
+
+Half the table missing on the target, and the two checks whose whole job is
+to say whether the data landed both said OK. They were not wrong about what
+they compared; they compared five rows to five rows. Nothing in either line
+says the five was a filtered count.
+
+**Missing:** `counts` and `data` should refuse to pronounce - or at least
+say what they could not see - when the connected role is subject to RLS on
+the tables being checked. The deep check already has the facts; the
+verifying passes do not ask for them.
 
 ## E. Keeping the two sides in step
 
@@ -1106,6 +1172,12 @@ What the target does to the rows as they land:
 [handling identity columns in AWS DMS](https://aws.amazon.com/blogs/database/handle-identity-columns-in-aws-dms-part-1/),
 [PostgreSQL identity columns](https://www.postgresql.org/docs/current/ddl-identity-columns.html),
 [INSERT and OVERRIDING](https://www.postgresql.org/docs/current/sql-insert.html).
+
+The verifier's own blind spots:
+[row security considerations](https://wiki.postgresql.org/wiki/Row_Security_Considerations),
+[pg_dump and row_security](https://www.postgresql.org/docs/current/app-pgdump.html),
+[partial dumps using RLS, on purpose](https://supabase.com/blog/partial-postgresql-data-dumps-with-rls),
+[insert/dump/restore with generated columns](https://postgrespro.com/list/thread-id/2558357).
 
 Cutover, aftermath and compliance:
 [zero-downtime patterns](https://launchdarkly.com/blog/3-best-practices-for-zero-downtime-database-migrations/),
