@@ -101,3 +101,60 @@ def test_the_predicate_is_passed_through_unchanged():
     got = movers.mydumper_defaults(_hop({"where": {"orders": hairy}}),
                                    "appdb")
     assert f"where = {hairy}" in got, got
+
+
+def test_postgres_movers_have_no_row_filter_and_the_move_refuses():
+    """Measured, not assumed. `pg_dump --help` on 18.6 offers `-t`, `-T`,
+    `--exclude-table-data` and `--filter`; `pgcopydb clone --help` on 0.18
+    offers `--filters`. Every one of them selects *tables*. Neither tool
+    has a row predicate anywhere.
+
+    The quiet failure that makes this a refusal rather than a warning: the
+    mover would copy every row, and `check` - reading the same mapping -
+    would then compare a filtered source against a full target and report
+    the difference for ever. The move appears to work and the verification
+    never goes green.
+    """
+    from migkit import movers
+    hop = _hop({"where": {"orders": "region = 'apac'"}})
+    for via in ("pgdump", "pgcopydb"):
+        with pytest.raises(SystemExit) as e:
+            movers.refuse_unpushable_filters(hop, "appdb", via)
+        said = str(e.value)
+        assert "orders" in said, said
+        assert "never by row" in said or "not rows" in said, said
+        # and it offers the way out rather than only saying no
+        assert "view the hop points at" in said, said
+
+
+def test_the_mover_that_can_do_it_is_not_refused():
+    from migkit import movers
+    hop = _hop({"where": {"orders": "region = 'apac'"}})
+    movers.refuse_unpushable_filters(hop, "appdb", "mydumper")
+
+
+def test_the_builtin_mover_is_refused_too_and_says_so_plainly():
+    """migkit's own copy path applies no predicate either. Naming pg_dump
+    in that message would be telling the operator about a tool that is not
+    running."""
+    from migkit import movers
+    with pytest.raises(SystemExit) as e:
+        movers.refuse_unpushable_filters(
+            _hop({"where": {"orders": "x"}}), "appdb", "builtin")
+    said = str(e.value)
+    assert "builtin mover applies no row predicate" in said, said
+    assert "pg_dump" not in said, said
+
+
+def test_a_hop_with_no_row_filters_is_never_refused():
+    """Which is every hop in use. The refusal must be reachable only by
+    asking for something the tool cannot do."""
+    from migkit import movers
+    for via in ("pgdump", "pgcopydb", "mydumper", "builtin"):
+        movers.refuse_unpushable_filters(_hop(), "appdb", via)
+
+
+def test_a_filter_on_another_database_does_not_block_this_one():
+    from migkit import movers
+    hop = _hop({"where": {"other.orders": "x"}})
+    movers.refuse_unpushable_filters(hop, "appdb", "pgdump")

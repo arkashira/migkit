@@ -1025,6 +1025,9 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
             lk = _lock(hop) if go else None
             try:
                 for d in dbs:
+                    # before anything is copied: a filter this mover cannot
+                    # apply would silently move every row
+                    movers.refuse_unpushable_filters(hop, d, v)
                     console.print(f"[bold]{d}[/bold] bulk copy:")
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))

@@ -82,9 +82,15 @@ liquibase has one for schema. Two mechanisms that should agree.
     unopened: -x/--regex (db.table matching), --where (dump only
               selected records), --rows (chunked parallel per table)
 
-`--regex` and `--where` are, between them, most of plan item 17 for the
-MySQL leg - table selection and row filtering, pushed down to the mover so
-the rows never cross the wire. Verified by running `mydumper --help` here.
+`--where` is now wired: a generated defaults file gives mydumper one
+section per table, verified on a live dump (2 of 3 rows where a rule
+applied, untouched where none did). `--regex` is still unopened.
+
+**The asymmetry this exposed is worth recording.** `pg_dump` 18.6 offers
+`-t`, `-T`, `--exclude-table-data` and `--filter`; `pgcopydb` 0.18 offers
+`--filters`. Every one selects *tables*. Neither has a row predicate, so a
+PostgreSQL hop with `mapping.where` is refused before the copy starts
+rather than moved in full and left failing its own check for ever.
 
 ### Debezium - the runtime is up, the signal channel is not
 

@@ -63,6 +63,47 @@ def chosen(engine, table=""):
     return pick(engine, table)
 
 
+#: Movers that can be given a row predicate per table, measured rather
+#: than assumed. mydumper takes one section per table in a defaults file
+#: (verified: 2 of 3 rows dumped where a rule applied). `pg_dump` 18.6 and
+#: `pgcopydb` 0.18 have `-t`, `-T`, `--exclude-table-data`, `--filter` and
+#: `--filters` between them and **not one row predicate** - their filtering
+#: is table-level throughout.
+ROW_FILTER_MOVERS = ("mydumper",)
+
+
+def refuse_unpushable_filters(hop, db, via):
+    """Stop a move whose row filters the chosen mover cannot honour.
+
+    The quiet failure this prevents is the expensive one. A mover that
+    ignores the filter copies every row; the check, reading the same
+    mapping, then compares the filtered source against a target holding
+    everything and reports the difference forever. The move looks like it
+    worked and the verification never goes green, which is the worst of
+    both - so it refuses before anything is copied, and names the tables.
+    """
+    rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
+    if not rules or via in ROW_FILTER_MOVERS:
+        return
+    mine = sorted(k for k in rules
+                  if len([p for p in str(k).split(".") if p]) < 2
+                  or str(k).split(".")[0] == db)
+    if not mine:
+        return
+    why = {
+        "pgdump": "pg_dump 18.6 filters by table (-t, -T,"
+                  " --exclude-table-data, --filter) and never by row",
+        "pgcopydb": "pgcopydb 0.18's --filters selects tables, not rows",
+    }.get(via, f"the {via} mover applies no row predicate")
+    raise SystemExit(
+        f"the hop maps row filters onto {', '.join(mine)}, and {why}."
+        " Moving anyway would copy every row and leave `check` comparing"
+        " a filtered source against a full target for good. Drop the"
+        " filters, or narrow the source with a view the hop points at"
+        " instead."
+    )
+
+
 def supported(engine, via):
     return {"pgdump": engine == "postgres",
             "pgcopydb": engine == "postgres",
