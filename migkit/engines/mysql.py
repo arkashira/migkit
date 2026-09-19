@@ -1151,6 +1151,52 @@ class MySQLEngine(Engine):
                              f" {note}"))
         return res
 
+    #: Types whose values behave like the LOBs a mover has a mode for.
+    LOB_TYPES = ("blob", "tinyblob", "mediumblob", "longblob",
+                 "text", "tinytext", "mediumtext", "longtext",
+                 "json", "varbinary")
+
+    def _lob_check(self, db):
+        """The biggest value per large column, on both sides.
+
+        The ceiling here is the server's own `max_allowed_packet` - a single
+        row larger than it cannot be sent at all, and the default is small
+        enough to matter (measured on MySQL 8: 67,108,864). What the check
+        is really for is the comparison: a target whose biggest value is
+        smaller than the source's is what a mover truncating past its LOB
+        limit leaves behind, and the row counts agree throughout.
+        """
+        ddb = self._d("dst", db)
+        try:
+            cols = [(r[0], r[1]) for r in self._q(
+                "src", "select table_name, column_name"
+                       " from information_schema.columns"
+                       " where table_schema = %s and data_type in ("
+                       + ", ".join(["%s"] * len(self.LOB_TYPES)) + ")"
+                       " order by table_name, column_name",
+                       (db, *self.LOB_TYPES))]
+            limit = int(self._q("dst", "select @@max_allowed_packet")[0][0])
+        except Exception as e:
+            return Result("deep", f"{db} lobs", "error",
+                          "could not size the large columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        findings = []
+        for table, column in cols:
+            q = "select coalesce(max(length(`{}`)), 0) from `{}`.`{}`"
+            try:
+                src = int(self._q("src", q.format(column, db, table))[0][0])
+            except Exception:
+                continue
+            try:
+                dst = int(self._q("dst", q.format(column, ddb, table))[0][0])
+            except Exception:
+                dst = None
+            findings.append((table, column, src, dst, limit))
+        return self._lob_result(
+            db, findings, "server's max_allowed_packet",
+            "raise the mover's LOB size limit above the biggest value, or"
+            " move those tables with a path that does not truncate")
+
     def moved_nothing(self, db):
         """Which tables the source has rows in and the target does not."""
         ddb = self._d("dst", db)
@@ -1236,7 +1282,8 @@ class MySQLEngine(Engine):
                       " be guesswork")
 
     def check_deep(self, db):
-        res = [self._planner_stats(db)]
+        res = [self._planner_stats(db),
+               self._lob_check(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

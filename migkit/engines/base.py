@@ -124,6 +124,61 @@ class Engine:
     def check_deep(self, db):
         return [Result("deep", db, "skip", "no deep checks for this engine yet")]
 
+    #: How close to the engine's own ceiling a value may get before it is
+    #: worth saying out loud. Not a guess about the data - a value at 80% of
+    #: a hard limit is one growth spurt from an outage.
+    LOB_HEADROOM = 0.80
+
+    def _lob_result(self, db, findings, limit_name, hint):
+        """What the largest values in a table say about the move.
+
+        `findings` is [(table, column, src_max, dst_max, hard_limit)] with
+        sizes in bytes and `dst_max` None when the target has no such table
+        yet.
+
+        Two questions, and the second is the one nothing else asks. First:
+        how big is the biggest value, because every mover with a LOB mode
+        needs that number and gets it wrong by default - AWS DMS's limited
+        LOB mode pre-allocates to `LobMaxSize` and **truncates past it with
+        a warning in a log nobody reads**. Second: is the target's biggest
+        value smaller than the source's, which is what that truncation looks
+        like afterwards - the row counts match, the checksums differ, and
+        without this the operator is left guessing which column lost what.
+        """
+        cut = [(t, c, s, d) for t, c, s, d in
+               ((t, c, s, d) for t, c, s, d, _ in findings)
+               if d is not None and s is not None and d < s]
+        near = [(t, c, s, lim) for t, c, s, _, lim in findings
+                if lim and s and s > lim * self.LOB_HEADROOM]
+        if cut:
+            worst = ", ".join(
+                f"{t}.{c} {s:,} -> {d:,} bytes" for t, c, s, d in cut[:4])
+            return Result(
+                "deep", f"{db} lobs", "diff",
+                f"{len(cut)} columns hold smaller values on the target than"
+                f" on the source: {worst}"
+                + (" ..." if len(cut) > 4 else "")
+                + " - that is what a mover truncating past its LOB limit"
+                  " leaves behind, and the row counts will not show it",
+                "", hint)
+        if near:
+            worst = ", ".join(f"{t}.{c} {s:,} of {lim:,} bytes"
+                              for t, c, s, lim in near[:4])
+            return Result(
+                "deep", f"{db} lobs", "warn",
+                f"{len(near)} columns are within"
+                f" {int((1 - self.LOB_HEADROOM) * 100)}% of the"
+                f" {limit_name}: {worst}", "", hint)
+        if not findings:
+            return Result("deep", f"{db} lobs", "ok",
+                          "no columns large enough to be stored out of line")
+        biggest = max((s or 0, t, c) for t, c, s, _, _ in findings)
+        return Result(
+            "deep", f"{db} lobs", "ok",
+            f"{len(findings)} large-value columns, biggest is"
+            f" {biggest[1]}.{biggest[2]} at {biggest[0]:,} bytes"
+            " - a mover with a LOB size limit needs to be set above that")
+
     def moved_nothing(self, db):
         """Tables the source has rows in and the target has none of.
 

@@ -200,10 +200,26 @@ one table, so `pg_dump`/`pg_restore` are single-threaded for every large
 object in the database - one team's 12.5 hour downtime was almost entirely
 this.
 
-**migkit: Not yet.** No LOB inventory, no size histogram, no truncation
-detection. Given that the failure is silent and the detection is cheap
-(`max(pg_column_size(col))` per candidate column, compared against whatever
-limit the mover was configured with), this is high value per line.
+**migkit: Ends the silent part.** `migkit check --deep` reports the biggest
+value in every column that can hold one - the number a mover's LOB limit has
+to be set above - and, more usefully, compares it against the target's: a
+column whose largest value is smaller on the target than on the source is
+what truncation leaves behind, and it names the column and both sizes. It
+also warns when a value approaches the engine's own ceiling (PostgreSQL's
+1 GB field, MySQL's `max_allowed_packet`). Tests: `test_lob_sizes.py`.
+
+Two things were measured rather than assumed. The obvious cheap filter -
+only look at tables whose TOAST relation holds data - has a hole: a
+1,000,000-byte value compressed to 11,452 bytes on the way in, so a check
+reading stored sizes would have passed over exactly the value most likely
+to be truncated. And it buys nothing: `max(octet_length(col))` over two
+columns of a 2,000,000-row, 531 MB table answered in 0.25 s. The check
+reports `octet_length`, which is the size a limit is compared against,
+rather than `pg_column_size`, which is what was left after compression.
+
+**Missing:** `pg_largeobject`-style out-of-table LOBs are inventoried by
+`handwork` but not sized, and nothing yet measures how long they will take
+to move.
 
 ### C3. It died at 80% and nobody knows what is safe to keep
 

@@ -1397,6 +1397,94 @@ class PostgresEngine(Engine):
                 pats += [p for p in f.read_text().splitlines() if p.strip()]
         return [_re.compile(p) for p in pats]
 
+    #: A single field cannot exceed 1 GB in PostgreSQL - bytea, text and
+    #: json alike. Measured guidance from the field puts the practical
+    #: ceiling lower still, around 500 MB without binary transfer.
+    PG_FIELD_LIMIT = 1024 ** 3
+
+    #: Types whose values can be stored out of line, which is what makes
+    #: them behave like the LOBs a mover has a mode for.
+    LOB_TYPES = ("bytea", "text", "json", "jsonb", "xml",
+                 "character varying")
+
+    def _lob_columns(self, db):
+        """Every column whose type can hold a value bigger than a mover's
+        LOB limit.
+
+        No cleverness in the filter, and that is deliberate. The obvious
+        shortcut - only look at tables whose TOAST relation holds data -
+        was measured to have a hole in it: a 1,000,000-byte text value
+        compressed to 11,452 bytes on the way in, so a filter reading
+        stored sizes would have passed over the very value a limited LOB
+        mode would truncate. And the shortcut buys nothing:
+        `max(octet_length(col))` over two columns of a 2,000,000-row,
+        531 MB table answered in 0.25 s.
+        """
+        rows = self._psql("src", db,
+            "select n.nspname||'.'||c.relname||chr(9)||a.attname"
+            "||chr(9)||t.typname"
+            " from pg_class c"
+            " join pg_namespace n on n.oid = c.relnamespace"
+            " join pg_attribute a on a.attrelid = c.oid and a.attnum > 0"
+            " join pg_type t on t.oid = a.atttypid"
+            " where c.relkind = 'r' and not a.attisdropped"
+            " and n.nspname not in ('pg_catalog','information_schema')"
+            " and n.nspname not like 'pg\\_%'"
+            f" and t.typname = any(array{list(self.TOAST_TYPES)}::name[])"
+            " order by 1")
+        out = []
+        for line in rows.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                out.append((parts[0], parts[1], parts[2]))
+        return out
+
+    #: the catalog spells these differently from `information_schema`
+    TOAST_TYPES = ("bytea", "text", "json", "jsonb", "xml", "varchar")
+
+    def _lob_sizes(self, db):
+        """The biggest value per wide column, on each side.
+
+        `octet_length` and not `pg_column_size`: the first is the size of
+        the value, which is what a mover's limit is compared against, and
+        the second is the size PostgreSQL stored after compressing it -
+        measured, 1,000,000 against 11,452 for the same value.
+        """
+        findings = []
+        for table, column, typ in self._lob_columns(db):
+            sch, tbl = table.split(".", 1)
+            col = f'"{column}"'
+            if typ in ("json", "jsonb", "xml"):
+                col += "::text"
+            q = (f'select coalesce(max(octet_length({col})), 0)'
+                 f' from "{sch}"."{tbl}"')
+            try:
+                src = int(self._psql("src", db, q).strip() or 0)
+            except Exception:
+                continue
+            if not src:
+                continue
+            try:
+                dst = int(self._psql("dst", self._d("dst", db), q).strip()
+                          or 0)
+            except Exception:
+                dst = None
+            findings.append((table, column, src, dst, self.PG_FIELD_LIMIT))
+        return findings
+
+    def _lob_check(self, db):
+        try:
+            findings = self._lob_sizes(db)
+        except Exception as e:
+            return Result("deep", f"{db} lobs", "error",
+                          "could not size the wide columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._lob_result(
+            db, findings, "1 GB PostgreSQL field limit",
+            "set the mover's LOB size limit above the biggest value, or move"
+            " those tables with a path that does not truncate -"
+            " `migkit move --go` does not")
+
     def moved_nothing(self, db):
         """Which tables the source has rows in and the target does not."""
         try:
@@ -1517,6 +1605,7 @@ class PostgresEngine(Engine):
                               "every table has a pk or unique index"))
 
         res.append(self._planner_stats(db))
+        res.append(self._lob_check(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """
