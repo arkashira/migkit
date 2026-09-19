@@ -1529,8 +1529,11 @@ thing pgcopydb does per table, and the thing that matters for a table loaded
 with `autovacuum_enabled = false`, which autoanalyze will never catch up.
 Test: `test_planner_statistics.py`.
 
-**Corrected by measurement - the check cries wolf, and its own reasoning
-was wrong.** The claim above, and in the check's docstring, was that
+**Fixed after measurement - the check cried wolf, and its own docstring
+was wrong about why.** `test_planner_statistics.py` had the right story
+from the start (its fixture builds the unhealable case on purpose), but
+the check could not tell the two apart at runtime, so it was never
+exercised on the common one. The claim in the check's docstring was that
 autoanalyze "will not run until a tenth of the rows have changed again -
 which, on a table that was migrated and is now only read, may be never."
 The bulk load *is* those modifications. Measured on PostgreSQL 16, a
@@ -1565,14 +1568,27 @@ Never analyzed, and never will be. That - along with a per-table
 `autovacuum_enabled = false`, which `migkit move --go` already handles - is
 the case worth a finding.
 
-**Not yet fixed.** The fix is to tell the two apart: read `autovacuum` and
-the table's own reloption on the target, report a table autovacuum will
-reach as at most `warn` naming the naptime, keep the finding for one it
-will not reach, and stop a target-performance condition from spelling
-itself `diff` where every other `diff` means the data differs. Held for an
-implement tick because changing a check's status moves the verdict on many
-suites - `test_deep_float_pg.py::test_identical_floats_pass` is already
-failing on exactly this, having been written before the check existed.
+**Fixed.** The check now asks the target which tables autovacuum will
+reach - the global `autovacuum` setting, and each table's own
+`autovacuum_enabled` reloption, cast by the server rather than matched
+against a guessed list of spellings, because a boolean reloption is stored
+as whatever was written (`false`, `off`, `0` and `no` all occur, and the
+first attempt here compared against `off` and misread a table written
+`false`). A table it will reach is `ok` and named in the line - a wait, not
+a fault. A table it will not is the finding it always was:
+
+    DIFF 1 tables the planner has no statistics for and autovacuum will not
+    reach: public.frozen ...; 1 more are not analyzed yet and autovacuum
+    will reach them without being asked
+
+An engine that cannot ask passes nothing and keeps the old behaviour, since
+"I could not tell" is not "there is nothing there". Side effect worth
+naming: `test_deep_float_pg.py::test_identical_floats_pass` had been red
+since the check landed, and went green without being edited.
+
+**Still open, as a question rather than a defect:** whether a
+target-performance finding should be able to spell itself `diff` at all,
+when every other `diff` in this tool means the two sides do not match.
 
 On MySQL the check reports `skip` with the measurement behind it rather than
 a verdict: `innodb_table_stats.n_rows` read 19 for a table holding 50,000

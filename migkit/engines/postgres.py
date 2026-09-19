@@ -2152,6 +2152,13 @@ class PostgresEngine(Engine):
                 " ||chr(9)||(s.last_analyze is not null"
                 "            or s.last_autoanalyze is not null)::int"
                 " ||chr(9)||coalesce(s.n_mod_since_analyze, 0)"
+                # a boolean reloption is stored as whatever spelling was
+                # written - `false`, `off`, `0` and `no` all occur - so the
+                # server casts it rather than this code guessing the list
+                " ||chr(9)||coalesce((select option_value from"
+                "  pg_options_to_table(c.reloptions)"
+                "  where option_name = 'autovacuum_enabled'),"
+                "  'true')::boolean::int"
                 " from pg_class c"
                 " join pg_namespace n on n.oid = c.relnamespace"
                 " left join pg_stat_user_tables s on s.relid = c.oid"
@@ -2165,12 +2172,30 @@ class PostgresEngine(Engine):
             return Result("deep", f"{db} statistics", "error",
                           f"could not read the target's statistics:"
                           f" {str(e).splitlines()[-1][:90]}")
+        # The global switch decides whether the per-table one matters at
+        # all. Read once rather than per table, and read as its own
+        # statement so a server that refuses `pg_settings` leaves the
+        # answer unknown rather than wrong.
+        try:
+            autovacuum_on = self._psql(
+                "dst", self._d("dst", db),
+                "select setting from pg_settings where name = 'autovacuum'"
+            ).strip() == "on"
+        except Exception:
+            autovacuum_on = False
+        reachable = set()
         for line in out.splitlines():
             parts = line.split("\t")
-            if len(parts) != 4:
+            if len(parts) != 5:
                 continue
             rows.append((parts[0], int(parts[1]), parts[2] == "1",
                          int(parts[3])))
+            # A never-analyzed table holds its whole row count in
+            # n_mod_since_analyze, which clears the threshold for anything
+            # above roughly fifty rows - and a table smaller than that has
+            # no plan worth worrying about either way.
+            if autovacuum_on and parts[4] == "1":
+                reachable.add(parts[0])
         if not rows:
             return Result("deep", f"{db} statistics", "skip",
                           "no user tables on the target to have statistics"
@@ -2178,7 +2203,8 @@ class PostgresEngine(Engine):
         return self._planner_stats_result(
             db, rows,
             "run `vacuumdb --analyze-in-stages` against the target (or"
-            " `migkit move --go`, which now analyzes what it loads)")
+            " `migkit move --go`, which now analyzes what it loads)",
+            reachable)
 
     def check_deep(self, db):
         res = []

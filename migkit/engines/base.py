@@ -216,45 +216,77 @@ class Engine:
     #: one the server already works to.
     STALE_STATS_RATIO = 0.10
 
-    def _planner_stats_result(self, db, tables, hint):
+    def _planner_stats_result(self, db, tables, hint, reachable=()):
         """Has the target's planner ever looked at what was just loaded.
 
         A bulk load leaves the statistics behind. Measured on PostgreSQL 16
         right after loading 200,000 rows: `reltuples` is -1, `last_analyze`
         and `last_autoanalyze` are both null, and `n_mod_since_analyze`
-        equals the whole table. Autoanalyze is threshold-driven rather than
-        event-driven, so on a large table it will not run until a tenth of
-        the rows have changed again - which, on a table that was migrated
-        and is now only read, may be never.
+        equals the whole table.
 
-        Nothing else in the check catches this: the data is correct, the
-        counts match, and every structural check passes. The target is
-        simply slow, and the slowness gets blamed on the engine.
+        **Most of those heal themselves, and this used to report them
+        anyway.** The load is itself the modifications autoanalyze counts,
+        so a freshly loaded table is already far past its threshold - on
+        5,000 rows the threshold is 50 + 0.1 * 5000 = 550 and the counter
+        reads 5000. Measured: analyzed by the server, unasked, one naptime
+        after the load. Reporting that as `diff` put `verdict: different` on
+        a pair whose every parity check passed, for about a minute, after
+        which it said `OK` with nothing changed but time - and `diff`
+        everywhere else here means the two sides do not match.
+
+        `reachable` is the tables autovacuum will get to on its own. What
+        is left is the case worth a finding, and it is a real one: a table
+        loaded with `autovacuum_enabled = false` - standard practice during
+        a bulk load, and a standard thing to forget to undo - or a target
+        with autovacuum off altogether. Measured on such a table, 75
+        seconds after the load: still never analyzed, still `reltuples=-1`,
+        and it stays that way.
+
+        An engine that cannot tell the two apart passes nothing and keeps
+        the old behaviour, because "I could not ask" is not "there is
+        nothing there".
 
         `tables` is [(name, rows, analyzed, modified_since)] where
         `analyzed` is False when the server has never analyzed it and
         `modified_since` is how many rows changed since it last did.
         """
-        never = sorted(t for t, _, analyzed, _ in tables if not analyzed)
+        unseen = sorted(t for t, _, analyzed, _ in tables if not analyzed)
+        coming = [t for t in unseen if t in reachable]
+        never = [t for t in unseen if t not in reachable]
         stale = sorted(
             t for t, rows, analyzed, modified in tables
             if analyzed and rows and modified is not None
             and modified > rows * self.STALE_STATS_RATIO)
+        # said wherever the line ends up, because a table the planner has
+        # not seen yet is worth knowing about even when nobody need act
+        waiting = (f"; {len(coming)} more are not analyzed yet and"
+                   " autovacuum will reach them without being asked"
+                   if coming else "")
         if never:
             return Result(
                 "deep", f"{db} statistics", "diff",
-                f"{len(never)} tables the planner has no statistics for:"
-                f" {', '.join(never[:5])}"
+                f"{len(never)} tables the planner has no statistics for and"
+                f" autovacuum will not reach: {', '.join(never[:5])}"
                 + (" ..." if len(never) > 5 else "")
-                + " - the rows are there and the query plans will not be",
-                "", hint)
+                + " - the rows are there and the query plans will not be"
+                + waiting, "", hint)
         if stale:
             return Result(
                 "deep", f"{db} statistics", "warn",
                 f"{len(stale)} tables changed by more than"
                 f" {int(self.STALE_STATS_RATIO * 100)}% since their"
                 f" statistics were taken: {', '.join(stale[:5])}"
-                + (" ..." if len(stale) > 5 else ""), "", hint)
+                + (" ..." if len(stale) > 5 else "") + waiting, "", hint)
+        if coming:
+            return Result(
+                "deep", f"{db} statistics", "ok",
+                f"{len(tables)} tables, {len(coming)} of them not analyzed"
+                f" yet: {', '.join(coming[:5])}"
+                + (" ..." if len(coming) > 5 else "")
+                + " - autovacuum reaches these on its own within a naptime,"
+                  " so this is a wait rather than a fault"
+                + " (`migkit move --go` analyzes what it loads rather than"
+                  " waiting)")
         return Result("deep", f"{db} statistics", "ok",
                       f"{len(tables)} tables, all analyzed since they were"
                       " last written")

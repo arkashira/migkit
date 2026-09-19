@@ -160,3 +160,86 @@ def test_mysql_says_what_it_cannot_prove_rather_than_guessing(tmp_path):
     assert got.status == "skip", got.detail
     assert "50,000" in got.detail and "19" in got.detail, got.detail
     assert "guesswork" in got.detail
+
+
+def test_a_table_autovacuum_will_reach_is_not_a_finding(pg_pair, tmp_path):
+    """The cry-wolf half, measured before it was written.
+
+    The load is itself the modifications autoanalyze counts: on 5,000 rows
+    the threshold is 50 + 0.1 * 5000 = 550 and the counter reads 5000, and
+    the server analyzed it unasked one naptime later. Reporting that put
+    `verdict: different` on a pair whose every parity check passed, for
+    about a minute, after which it said `OK` with nothing changed but time.
+    """
+    psql(pg_pair["dst"], "drop table if exists public.loaded;"
+                         " drop table if exists public.fresh;"
+                         " create table public.fresh (id bigint primary key,"
+                         " v text);"
+                         " insert into public.fresh select g, 'v'||g from"
+                         " generate_series(1,5000) g;")
+    psql(pg_pair["src"], "drop table if exists public.loaded;"
+                         " drop table if exists public.fresh;"
+                         " create table public.fresh (id bigint primary key,"
+                         " v text);"
+                         " insert into public.fresh select g, 'v'||g from"
+                         " generate_series(1,5000) g;")
+    got = _statistics(_engine(pg_pair, tmp_path).check_deep("postgres"))
+    assert got.status == "ok", got.detail
+    # quiet, but not silent: the table is still named
+    if "not analyzed yet" in got.detail:
+        assert "public.fresh" in got.detail, got.detail
+        assert "wait rather than a fault" in got.detail, got.detail
+
+
+def test_the_two_cases_can_appear_together(pg_pair, tmp_path):
+    """One table autovacuum will reach, one it will not. The finding is
+    about the second; the first rides along so nobody wonders where it
+    went."""
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        extra = (" with (autovacuum_enabled = false)"
+                 if port == pg_pair["dst"] else "")
+        psql(port, "drop table if exists public.fresh;"
+                   " drop table if exists public.loaded;"
+                   f" create table public.loaded (id bigint primary key,"
+                   f" v text){extra};"
+                   " insert into public.loaded select g, 'v'||g from"
+                   " generate_series(1,5000) g;"
+                   " create table public.fresh (id bigint primary key,"
+                   " v text);"
+                   " insert into public.fresh select g, 'v'||g from"
+                   " generate_series(1,5000) g;")
+    got = _statistics(_engine(pg_pair, tmp_path).check_deep("postgres"))
+    assert got.status == "diff", got.detail
+    assert "public.loaded" in got.detail, got.detail
+    assert "autovacuum will not reach" in got.detail, got.detail
+    # the reachable one is counted, not listed as a fault
+    assert "public.fresh" not in got.detail.split(" - ")[0], got.detail
+
+
+def test_the_split_needs_no_server(tmp_path):
+    """`reachable` defaults to nothing, so an engine that cannot ask keeps
+    reporting - "I could not tell" is not "there is nothing there"."""
+    from migkit.engines.postgres import PostgresEngine
+    hop = Hop(name="s", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"),
+              target=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"), databases=["x"])
+    hop.report_dir = lambda db=None: tmp_path
+    eng = PostgresEngine(hop)
+    tables = [("public.a", 5000, False, 5000), ("public.b", 5000, False, 5000)]
+
+    silent = eng._planner_stats_result("x", tables, "h")
+    assert silent.status == "diff", silent.detail
+    assert "public.a" in silent.detail and "public.b" in silent.detail
+
+    half = eng._planner_stats_result("x", tables, "h", {"public.b"})
+    assert half.status == "diff", half.detail
+    assert "public.a" in half.detail.split(" - ")[0], half.detail
+    assert "1 more are not analyzed yet" in half.detail, half.detail
+
+    both = eng._planner_stats_result("x", tables, "h",
+                                     {"public.a", "public.b"})
+    assert both.status == "ok", both.detail
+    assert "2 of them not analyzed yet" in both.detail, both.detail
+    assert "wait rather than a fault" in both.detail, both.detail
