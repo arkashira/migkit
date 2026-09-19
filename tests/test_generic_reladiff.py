@@ -258,3 +258,74 @@ def test_assess_says_so_when_reladiff_is_not_installed(monkeypatch, tmp_path):
     assert len(items) == 1, items
     assert items[0]["level"] == "fail"
     assert "not on PATH" in items[0]["detail"]
+
+
+# ---- the brake, which this engine did not have ------------------------
+
+def test_the_thread_count_is_a_connection_count(pg_pair):
+    """The measurement the throttle rests on, run against real servers:
+    `-j` buys connections on somebody's database rather than speed."""
+    import subprocess
+    import time
+    # big enough that the run lasts long enough to sample, and differing
+    # enough that reladiff has to bisect rather than stop at the top hash
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        psql(port, "create table big (id bigint primary key, v text);"
+                   " insert into big select g, md5(g::text)"
+                   " from generate_series(1,300000) g;")
+    psql(pg_pair["dst"], "update big set v = md5((id+1)::text)"
+                         " where id % 500 = 0;")
+
+    def connections_during(jobs):
+        peak = 0
+        proc = subprocess.Popen(
+            [RELADIFF,
+             f"postgresql://postgres:test@127.0.0.1:{pg_pair['src']}/postgres",
+             "big",
+             f"postgresql://postgres:test@127.0.0.1:{pg_pair['dst']}/postgres",
+             "big", "--stats", "-j", str(jobs), "-k", "id", "-c", "%"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while proc.poll() is None:
+            out = psql(pg_pair["src"],
+                       "select count(*) from pg_stat_activity"
+                       " where datname='postgres' and state is not null")
+            try:
+                peak = max(peak, int(out.stdout.strip() or 0))
+            except ValueError:
+                pass
+            time.sleep(0.05)
+        return peak
+
+    few, many = connections_during(1), connections_during(8)
+    assert few > 0 and many > 0, (few, many)
+    assert many > few, (few, many)
+
+
+def test_the_command_asks_for_what_the_throttle_allows(pg_pair, tmp_path):
+    """No mock: a real Throttle, narrowed the way it narrows itself under
+    stress, and the command it produces."""
+    from migkit.throttle import Throttle
+    eng = _engine(pg_pair)
+    gate = Throttle(4)
+    assert "-j" in eng._reladiff_cmd("t", [], jobs=gate.permits)
+    at = eng._reladiff_cmd("t", [], jobs=gate.permits)
+    assert at[at.index("-j") + 1] == "4", at
+
+    gate.permits = 1                      # what `gate()` does when stressed
+    narrowed = eng._reladiff_cmd("t", [], jobs=gate.permits)
+    assert narrowed[narrowed.index("-j") + 1] == "1", narrowed
+    # and it never asks for none
+    zero = eng._reladiff_cmd("t", [], jobs=0)
+    assert zero[zero.index("-j") + 1] == "1", zero
+
+
+@needs_reladiff
+def test_the_checks_still_answer_with_the_gate_in_the_way(pg_pair):
+    _seed(pg_pair, "delete from t where id = 40;")
+    eng = _engine(pg_pair)
+    counts = eng.check_counts("-")
+    data = eng.check_data("-")
+    assert [r.status for r in counts] == ["diff"], [r.detail for r in counts]
+    assert "1 more rows on the source" in counts[0].detail
+    assert [r.status for r in data] == ["diff"], [r.detail for r in data]
+    assert "1 rows only on the source" in data[0].detail

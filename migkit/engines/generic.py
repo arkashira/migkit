@@ -27,16 +27,46 @@ class GenericEngine(Engine):
             raise SystemExit("generic engine needs options.tables: [t1, t2]")
         return tables
 
-    def _reladiff(self, table, extra):
-        if not which("reladiff"):
-            raise SystemExit("reladiff not found, run bootstrap.sh")
+    def _reladiff_cmd(self, table, extra, jobs=None):
+        """The command, apart from running it.
+
+        `-j` is the number of threads reladiff uses, and measured against a
+        200,000-row pair it is a connection count rather than a speed:
+
+            -j 1   2 connections on the source   0.55s
+            -j 8   9 connections on the source   0.54s
+
+        So it is the load this engine puts on somebody's database, and it
+        was pinned to the hop's worker count with nothing watching. The
+        throttle's current allowance is what goes here instead, so a run
+        that is slowing down asks for fewer connections rather than only
+        waiting longer between tables.
+        """
         key = self.hop.options.get("key", "id")
+        # `jobs or workers` would read a throttle down to nothing as "no
+        # preference" and go back to the full count, which is the one moment
+        # it matters most
+        want = self.hop.workers if jobs is None else jobs
         cmd = ["reladiff", self._url("src"), table, self._url("dst"), table,
-               "--stats", "-j", str(self.hop.workers)]
+               "--stats", "-j", str(max(1, int(want)))]
         for k in ([key] if isinstance(key, str) else key):
             cmd += ["-k", k]
-        cmd += extra
-        return run(cmd, check=False, timeout=3600)
+        return cmd + list(extra)
+
+    def _reladiff(self, table, extra, jobs=None):
+        if not which("reladiff"):
+            raise SystemExit("reladiff not found, run bootstrap.sh")
+        return run(self._reladiff_cmd(table, extra, jobs), check=False,
+                   timeout=3600)
+
+    def _gate(self):
+        """One table at a time is not the unit here - reladiff runs a whole
+        table per call, and there is no server to ask how it is doing
+        through a subprocess. The latency signal carries it, and what the
+        gate narrows is passed on as `-j`.
+        """
+        from ..throttle import Throttle
+        return Throttle(self.hop.workers)
 
     #: the lines `--stats` prints, which is the whole of what reladiff says
     STATS = (("rows_a", r"(\d+) rows in table A"),
@@ -219,8 +249,10 @@ class GenericEngine(Engine):
         bad = []
         blind = []
         tables = self._tables()
+        gate = self._gate()
         for t in tables:
-            p = self._reladiff(t, [])
+            with gate.unit():
+                p = self._reladiff(t, [], jobs=gate.permits)
             got = self._stats(p)
             if not got:
                 blind.append(f"{t}: {self._why_no_stats(p)}")
@@ -246,8 +278,10 @@ class GenericEngine(Engine):
 
     def check_data(self, db, table=None, stream=None):
         res = []
+        gate = self._gate()
         for t in ([table] if table else self._tables()):
-            p = self._reladiff(t, ["-c", "%"])
+            with gate.unit():
+                p = self._reladiff(t, ["-c", "%"], jobs=gate.permits)
             got = self._stats(p)
             scope = f"{db}.{t}" if db != "-" else t
             if not got:
