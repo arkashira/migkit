@@ -135,8 +135,9 @@ In order. Each item says what has to be measured before it is written.
    which reported `bulk copy complete`; the loading connection now carries
    `session_replication_role = replica` and the values survive. The
    `pg_dump` path was already covered by `--disable-triggers`, which is why
-   the change is one line. **Still open:** the deep check reports only
-   *disabled* triggers, not the enabled ones a move will quiet. The identity half is **done**: a
+   the change is one line. The deep check now also names the enabled
+   triggers on tables a load writes, so the operator knows what is being
+   quieted on their behalf. The identity half is **done**: a
    `GENERATED ALWAYS AS IDENTITY` key refused the exact `insert ... on
    conflict` statement migkit's own repair builds, and the repair now emits
    `OVERRIDING SYSTEM VALUE` where the catalog says it is needed. `move`

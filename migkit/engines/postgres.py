@@ -1804,6 +1804,20 @@ class PostgresEngine(Engine):
     #: glibc upgrade *every* locale the OS ships has drifted - 873 of them on
     #: the measured image. Restricting to the ones a user column or index
     #: actually references is the difference between a finding and a wall.
+    #: Every trigger a user put on the target, with the table it sits on
+    #: and whether it is enabled. Internal ones are excluded: a foreign key
+    #: is implemented as a pair of constraint triggers, and reporting those
+    #: would bury the ones somebody wrote.
+    TARGET_TRIGGERS = (
+        "select n.nspname||'.'||c.relname||'.'||t.tgname||chr(9)"
+        "||n.nspname||'.'||c.relname||chr(9)||t.tgenabled::text"
+        " from pg_trigger t"
+        " join pg_class c on c.oid = t.tgrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " where not t.tgisinternal"
+        " and n.nspname not in ('pg_catalog','information_schema')"
+        " order by 1")
+
     COLLATION_IN_USE = (
         " and (exists (select 1 from pg_attribute a"
         "   join pg_class t on t.oid = a.attrelid"
@@ -2201,19 +2215,19 @@ class PostgresEngine(Engine):
             res.append(Result("deep", f"{db} rls", "ok",
                               "no row-level security in use"))
 
-        dis = [l for l in self._psql("dst", db,
-               "select n.nspname||'.'||c.relname||'.'||t.tgname"
-               " from pg_trigger t"
-               " join pg_class c on c.oid = t.tgrelid"
-               " join pg_namespace n on n.oid = c.relnamespace"
-               " where not t.tgisinternal and t.tgenabled = 'D'")
-               .splitlines() if l]
-        res.append(Result("deep", f"{db} triggers",
-                          "diff" if dis else "ok",
-                          "disabled on target: " + ", ".join(dis[:5]) if dis
-                          else "no disabled triggers on target", "",
-                          "alter table ... enable trigger before cutover"
-                          if dis else ""))
+        trg = [l.split("\t") for l in
+               self._psql("dst", db, self.TARGET_TRIGGERS).splitlines() if l]
+        dis = [name for name, table, state in trg if state == "D"]
+        # only the tables a load would write: one that exists on the target
+        # alone is never written, and naming it would be noise
+        writable = set(self._psql("src", db, self.USER_TABLES).splitlines())
+        quieted = sorted(name for name, table, state in trg
+                         if state != "D" and table in writable)
+        res.append(self._trigger_result(
+            db, sorted(dis), quieted,
+            "nothing to do unless one of them does work the migrated rows"
+            " need - an audit row, a maintained counter - in which case"
+            " that work has to happen another way"))
 
         colq = ("select table_schema||'.'||table_name||'.'||column_name"
                 "||'|'||coalesce(data_type,'')||'|'||is_nullable"

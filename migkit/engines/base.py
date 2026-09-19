@@ -300,6 +300,46 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _trigger_result(self, db, disabled, quieted, hint):
+        """What the target's triggers will do to a load, in both
+        directions.
+
+        The check used to look one way only: triggers **disabled** on the
+        target, which is the after-cutover worry - somebody turned them off
+        for the load and forgot to turn them back on. That is still the
+        fault, and still a difference.
+
+        What it never said is which triggers are **enabled**, and therefore
+        which ones `move` is about to silence on the operator's behalf. It
+        does silence them, deliberately - a `BEFORE INSERT` trigger setting
+        `updated_at := now()` was measured rewriting every migrated row to
+        the date of the migration. But work that does not happen is worth
+        naming: an audit trigger records nothing for the migrated rows, and
+        a denormalised counter is not maintained.
+
+        `quieted` counts only triggers on tables a load would actually
+        write - a table that exists on the target alone is not one of them,
+        and mentioning it would be the kind of noise that teaches people to
+        skip this line.
+        """
+        if disabled:
+            return Result(
+                "deep", f"{db} triggers", "diff",
+                "disabled on target: " + ", ".join(disabled[:5]), "",
+                "alter table ... enable trigger before cutover")
+        if quieted:
+            return Result(
+                "deep", f"{db} triggers", "ok",
+                f"no disabled triggers on target; {len(quieted)} enabled on"
+                f" tables a load writes ({', '.join(quieted[:4])}"
+                + (" ..." if len(quieted) > 4 else "")
+                + ") - `migkit move` runs with session_replication_role ="
+                  " replica, so these will not fire for the migrated rows",
+                "", hint)
+        return Result("deep", f"{db} triggers", "ok",
+                      "no disabled triggers on target, and none enabled on"
+                      " the tables a load would write")
+
     def _filtered_tables(self, side, db):
         """Tables the role migkit is connected as cannot read in full.
 

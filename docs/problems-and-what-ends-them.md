@@ -718,9 +718,30 @@ The control matters as much as the fix: a separate test loads a row through
 an unguarded connection and asserts the trigger **does** rewrite it, so a
 green suite cannot mean the trigger was never firing.
 
-**Missing:** the deep check still only reports triggers that are
-*disabled*. Naming the enabled ones on the tables a move is about to write
-would tell an operator what is being quieted on their behalf.
+**The deep check now says both halves** -
+`test_triggers_reported.py`. It used to look one way only, reporting `OK no
+disabled triggers on target` while two user triggers sat on a table the
+load was about to write:
+
+    deep postgres triggers: OK no disabled triggers on target; 2 enabled on
+      tables a load writes (public.notes.notes_audit,
+      public.notes.notes_stamp) - `migkit move` runs with
+      session_replication_role = replica, so these will not fire for the
+      migrated rows
+
+Silencing them is right; not saying so was not. Work that does not happen
+is worth naming - an audit trigger records nothing for the migrated rows,
+and a denormalised counter is not maintained.
+
+**Two kinds of noise are left out on purpose**, because a line listing
+things nobody can act on is a line people learn to skip: a foreign key's
+own constraint triggers (internal, and this target really does carry them),
+and tables that exist on the target alone, which a move never writes. A
+control test asserts both are genuinely present before the exclusions are
+checked.
+
+A disabled trigger remains a **difference**, not a note at the end of an ok
+line, and a test asserts the fault wins the line rather than sharing it.
 
 ### C7. The target refuses the key you are carrying
 
