@@ -300,6 +300,37 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _extension_data_result(self, db, findings, checked, hint):
+        """Rows an extension owns, which nothing else in the report looks
+        at.
+
+        The extension list and its versions are compared elsewhere and
+        always have been. This is the third thing an extension brings: its
+        own data. PostGIS keeps coordinate systems in `spatial_ref_sys`,
+        and a custom SRID sits there among the stock entries - a restore
+        does not overwrite rows the target already has, so the stock table
+        wins and the custom entry is quietly absent.
+
+        `findings` is [(extension, table, what differs)].
+        """
+        if findings:
+            worst = ", ".join(f"{ext} {table}: {why}"
+                              for ext, table, why in findings[:4])
+            return Result(
+                "deep", f"{db} extension data", "diff",
+                f"{len(findings)} tables an extension owns differ:"
+                f" {worst}"
+                + (" ..." if len(findings) > 4 else "")
+                + " - the extension is installed and the rows it needs are"
+                  " not the same", "", hint)
+        if not checked:
+            return Result("deep", f"{db} extension data", "ok",
+                          "no extension on the source registers data of its"
+                          " own")
+        return Result("deep", f"{db} extension data", "ok",
+                      f"{checked} tables owned by extensions hold the same"
+                      " rows on both sides")
+
     def _trigger_result(self, db, disabled, quieted, hint):
         """What the target's triggers will do to a load, in both
         directions.

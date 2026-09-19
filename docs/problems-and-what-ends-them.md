@@ -65,13 +65,39 @@ existing ones. Both GCP and Azure state plainly that extensions their
 managed target does not support are simply not migrated - the job succeeds
 and the extension is gone.
 
-**migkit: Partly.** The extension list is compared
-(`test_deep_extensions_pg.py`).
+**migkit: Ends it** - `test_deep_extensions_pg.py` and
+`test_extension_data.py`. An extension is three things, and all three are
+now compared.
 
-**Missing:** extension *versions*, and extension-owned data such as custom
-`spatial_ref_sys` rows. A PostGIS database can pass migkit's current
-extension check and still be wrong. This is the clearest gap the research
-turned up and it goes near the front of the plan.
+**A correction first.** An earlier pass here recorded extension *versions*
+as missing. They were not: `check --deep` has always compared them, and a
+live pair with `hstore 1.8` on one side and `1.6` on the other reports
+`DIFF version mismatch: hstore 1.8`. A test pins it so the claim cannot go
+stale again in the other direction.
+
+**What genuinely was missing is the data extensions own.** PostGIS keeps
+coordinate systems in `spatial_ref_sys`, registered through
+`pg_extension_config_dump` so that a custom SRID is dumped at all - and a
+restore does not overwrite rows the target already has, so a target
+carrying the stock table keeps its own copy and the custom entry is quietly
+absent. `check --deep` now reads `pg_extension.extconfig` - the general
+mechanism, not a PostGIS special case - and compares the contents:
+
+    deep postgres extension data: DIFF 1 tables an extension owns differ:
+      hstore public.srids: src=2|... dst=1|... - the extension is installed
+      and the rows it needs are not the same
+
+The comparison is a **checksum, not a count**, and a test proves why: a
+target holding one row under the right SRID number with the wrong
+definition passes a count and fails this. The same fingerprint now serves
+the materialized-view check, which had its own copy of that expression.
+
+**How it is tested without PostGIS.** No contrib extension in the stock
+image registers data - measured, `extconfig` is NULL for every one of them,
+and a test asserts that rather than assuming it. So the tests hand a table
+to `hstore` through the catalog, the way the collation tests age a
+collation. What that exercises is the check's ability to find and compare a
+table an extension owns, which is the part that was missing.
 
 ### A4. The fork is not the thing it claims to be
 

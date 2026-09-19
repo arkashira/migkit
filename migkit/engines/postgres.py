@@ -1365,6 +1365,71 @@ class PostgresEngine(Engine):
         " and n.nspname not like '\\_\\_%'"
         " order by 1")
 
+    def _content_fingerprint(self, side, db, relation):
+        """`count|checksum` for everything in one relation.
+
+        The expression comes from the **source** and is applied to both
+        sides, so a target whose columns sit in a different order still
+        compares equal - see `_row_hash_expr`. A count alone would miss a
+        copy that is the right size and the wrong contents, which is
+        exactly the shape a stale materialized view and a half-restored
+        extension table both have.
+        """
+        h = self._row_hash_expr("src", db, relation)
+        return self._psql(side, self._d(side, db),
+                          "select count(*)||'|'||coalesce(sum(('x'||substr("
+                          f"{h},1,16))::bit(64)::bigint::numeric), 0)"
+                          f" from {relation} t")
+
+    #: Tables an extension declared as its own configuration data. PostGIS
+    #: registers `spatial_ref_sys` this way, which is why a custom SRID is
+    #: dumped at all - and why a target that already has the stock table
+    #: silently keeps its own rows instead of the ones being restored.
+    EXTENSION_DATA = (
+        "select e.extname||chr(9)||n.nspname||'.'||c.relname"
+        " from pg_extension e"
+        " cross join lateral unnest(e.extconfig) as cfg(oid)"
+        " join pg_class c on c.oid = cfg.oid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " order by 1")
+
+    def _extension_data(self, db):
+        """Extensions do not only bring functions - some bring rows.
+
+        The extension list and its versions were already compared. What was
+        not is the data those extensions own: PostGIS keeps coordinate
+        systems in `spatial_ref_sys`, and a custom SRID lives there beside
+        the several thousand stock ones. `pg_upgrade` has been reported
+        failing with `Cannot find SRID (4283) in spatial_ref_sys` for
+        exactly this reason, and a restored row does not overwrite an
+        existing one, so the target keeps its stock copy and the geometry
+        that needed the custom entry stops working.
+        """
+        findings, checked = [], 0
+        try:
+            rows = [l.split("\t") for l in
+                    self._psql("src", db, self.EXTENSION_DATA).splitlines()
+                    if l]
+            for ext, table in rows:
+                checked += 1
+                try:
+                    a = self._content_fingerprint("src", db, table)
+                    b = self._content_fingerprint("dst", db, table)
+                except Exception:
+                    findings.append((ext, table, "missing on target"))
+                    continue
+                if a != b:
+                    findings.append((ext, table, f"src={a} dst={b}"))
+        except Exception as e:
+            return Result("deep", f"{db} extension data", "error",
+                          "could not compare the data extensions own:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._extension_data_result(
+            db, findings, checked,
+            "copy the rows the extension owns yourself - a restore does not"
+            " overwrite the ones the target already has, so the stock table"
+            " wins and the custom entries are simply absent")
+
     def _filtered_tables(self, side, db):
         try:
             out = self._psql(side, self._d(side, db), self.RLS_FILTERED)
@@ -2779,16 +2844,9 @@ class PostgresEngine(Engine):
             if pop != "t":
                 stale.append(f"{m}: not populated on target")
                 continue
-            # count misses a stale mv with the same size; checksum content.
-            # The expression comes from the source and is applied to both
-            # sides, so a target whose columns sit in a different order still
-            # compares equal - see `_row_hash_expr`.
-            h = self._row_hash_expr("src", db, m)
-            q = ("select count(*)||'|'||coalesce(sum(('x'||substr("
-                 f"{h},1,16))::bit(64)::bigint::numeric), 0)"
-                 f" from {m} t")
-            a = self._psql("src", db, q)
-            b = self._psql("dst", db, q)
+            # count misses a stale mv with the same size; checksum content
+            a = self._content_fingerprint("src", db, m)
+            b = self._content_fingerprint("dst", db, m)
             if a != b:
                 stale.append(f"{m}: rows|checksum src={a} dst={b},"
                              " stale on target")
@@ -2862,6 +2920,7 @@ class PostgresEngine(Engine):
                               f"{len(se)} extensions match" if se
                               else "no non-default extensions"))
 
+        res.append(self._extension_data(db))
         res += self._deep_ownership(db)
 
         pkq = ("select n.nspname||'|'||c.relname||'|'||a.attname"
