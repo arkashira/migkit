@@ -1151,8 +1151,69 @@ class MySQLEngine(Engine):
                              f" {note}"))
         return res
 
+    def settle_target(self, db):
+        """`ANALYZE TABLE` every table that was just loaded.
+
+        Measured on MySQL 8: after loading 50,000 rows the stored estimate
+        read 19, and one ANALYZE moved it to 50,456. InnoDB's automatic
+        recalculation gets there eventually; a migration should not hand
+        over a database that is waiting for it.
+        """
+        ddb = self._d("dst", db)
+        try:
+            tables = [r[0] for r in self._q(
+                "dst", "select table_name from information_schema.tables"
+                       " where table_schema = %s and table_type = 'BASE TABLE'"
+                       " order by 1", (ddb,))]
+        except Exception as e:
+            return f"could not list {ddb} to analyze: {str(e)[:80]}"
+        if not tables:
+            return None
+        done = 0
+        for t in tables:
+            try:
+                self._q("dst", f"analyze table `{ddb}`.`{t}`")
+                done += 1
+            except Exception:
+                continue
+        return f"analyzed {done}/{len(tables)} tables on the target"
+
+    def _planner_stats(self, db):
+        """What this engine can and cannot prove about the target's
+        statistics.
+
+        The two cheap signals were both measured on MySQL 8 and neither can
+        carry the check on its own:
+
+            right after loading 50,000 rows
+                information_schema.tables.table_rows   0
+                mysql.innodb_table_stats.n_rows        19
+            after ANALYZE TABLE                        50,456
+            after an UPDATE, and a `flush tables`
+                information_schema.tables.update_time  unchanged
+
+        So `n_rows` is wrong by three orders of magnitude while the load is
+        settling, and `update_time` does not advance when the data is
+        written - a check built on it would call stale statistics fresh,
+        which is the failure this project refuses to ship. InnoDB's
+        automatic recalculation did correct itself here (19 -> 50,456 ->
+        50,507 against 50,000 real rows), which is why this is a gap worth
+        stating rather than an alarm worth raising.
+
+        Proving it properly needs the target's real row count, which the
+        counts pass already has - joining the two is the work this leaves
+        open.
+        """
+        return Result("deep", f"{db} statistics", "skip",
+                      "migkit cannot prove this on MySQL yet: measured,"
+                      " innodb_table_stats.n_rows read 19 for a table"
+                      " holding 50,000 rows while the load settled, and"
+                      " information_schema update_time did not move when"
+                      " the table was written - a verdict from either would"
+                      " be guesswork")
+
     def check_deep(self, db):
-        res = []
+        res = [self._planner_stats(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

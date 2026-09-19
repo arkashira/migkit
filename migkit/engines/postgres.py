@@ -1397,6 +1397,73 @@ class PostgresEngine(Engine):
                 pats += [p for p in f.read_text().splitlines() if p.strip()]
         return [_re.compile(p) for p in pats]
 
+    def settle_target(self, db):
+        """Analyze the target after a load, in stages.
+
+        `--analyze-in-stages` does three passes of increasing accuracy, so
+        the planner has usable statistics within seconds instead of waiting
+        for the full pass - which is what PostgreSQL's own documentation
+        recommends after a restore, and what autoanalyze will not do for a
+        table nobody writes to afterwards.
+        """
+        ep = self.hop.target
+        target = self._d("dst", db)
+        if not which("vacuumdb"):
+            self._psql("dst", target, "analyze")
+            return f"analyzed {target} on the target"
+        p = run(["vacuumdb", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
+                 "-d", target, "--analyze-in-stages",
+                 "-j", str(max(1, int(self.hop.workers)))],
+                env={"PGPASSWORD": ep.password}, check=False, timeout=7200)
+        if p.returncode:
+            return (f"could not analyze {target}:"
+                    f" {(p.stderr or '').splitlines()[-1][:90] if p.stderr else 'unknown'}")
+        return f"analyzed {target} on the target (in stages)"
+
+    def _planner_stats(self, db):
+        """What the target's own catalog says it knows about its tables.
+
+        `reltuples = -1` is PostgreSQL 14+ for "never counted"; before that
+        it was 0, which is indistinguishable from an empty table - so the
+        two timestamps are what decide it, and reltuples is only read for
+        the row count the ratio needs.
+        """
+        rows = []
+        try:
+            out = self._psql("dst", self._d("dst", db),
+                "select n.nspname||'.'||c.relname"
+                " ||chr(9)||greatest(c.reltuples, 0)::bigint"
+                " ||chr(9)||(s.last_analyze is not null"
+                "            or s.last_autoanalyze is not null)::int"
+                " ||chr(9)||coalesce(s.n_mod_since_analyze, 0)"
+                " from pg_class c"
+                " join pg_namespace n on n.oid = c.relnamespace"
+                " left join pg_stat_user_tables s on s.relid = c.oid"
+                " where c.relkind = 'r'"
+                " and n.nspname not in ('pg_catalog','information_schema')"
+                " and n.nspname not like 'pg\\_%'"
+                " and n.nspname not like '\\_\\_%'"
+                " and c.relname not like 'migkit\\_%'"
+                " order by 1")
+        except Exception as e:
+            return Result("deep", f"{db} statistics", "error",
+                          f"could not read the target's statistics:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 4:
+                continue
+            rows.append((parts[0], int(parts[1]), parts[2] == "1",
+                         int(parts[3])))
+        if not rows:
+            return Result("deep", f"{db} statistics", "skip",
+                          "no user tables on the target to have statistics"
+                          " for")
+        return self._planner_stats_result(
+            db, rows,
+            "run `vacuumdb --analyze-in-stages` against the target (or"
+            " `migkit move --go`, which now analyzes what it loads)")
+
     def check_deep(self, db):
         res = []
         rpt = self.hop.report_dir(db)
@@ -1426,6 +1493,8 @@ class PostgresEngine(Engine):
         else:
             res.append(Result("deep", f"{db} keys", "ok",
                               "every table has a pk or unique index"))
+
+        res.append(self._planner_stats(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """

@@ -446,11 +446,20 @@ keeps pre-load statistics until enough modifications accumulate - on a
 no statistics at all. The planner then chooses a sequential scan over an
 index that exists, and it gets reported as an engine regression.
 
-**migkit: Not yet.** migkit does not run `ANALYZE`, does not run
-`vacuumdb --analyze-in-stages`, and does not check whether the target has
-statistics. This is the cheapest high-value item in the whole catalogue: a
-check that compares `last_analyze`/`reltuples` against the rows that were
-just loaded, and a repair that runs the analyze.
+**migkit: Ends it on PostgreSQL, states the gap on MySQL.**
+`migkit check --deep` reports the tables the target's planner has no
+statistics for, and warns when a table has been rewritten by more than
+autovacuum's own scale factor since its statistics were taken. `migkit move
+--go` analyzes what it loaded before it hands the target back - the same
+thing pgcopydb does per table, and the thing that matters for a table loaded
+with `autovacuum_enabled = false`, which autoanalyze will never catch up.
+Test: `test_planner_statistics.py`.
+
+On MySQL the check reports `skip` with the measurement behind it rather than
+a verdict: `innodb_table_stats.n_rows` read 19 for a table holding 50,000
+rows while the load settled, and `information_schema` `update_time` did not
+move when the table was written - either would produce a false all-clear.
+`migkit move` still runs `ANALYZE TABLE` on what it loaded there.
 
 ### G2. Who could see the data while it was moving
 

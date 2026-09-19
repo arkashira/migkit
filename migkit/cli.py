@@ -1010,6 +1010,11 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
                         console.print(f"  {s0}")
                     if go:
                         _changelog(hop, {"op": f"move-{v}", "db": d})
+                        # the load left the statistics behind it; the engine
+                        # puts them right before anybody queries the target
+                        settled = eng.settle_target(d)
+                        if settled:
+                            console.print(f"  {settled}")
                         console.print(f"[green]{d}: bulk copy complete"
                                       "[/green], run migkit check to verify")
             finally:

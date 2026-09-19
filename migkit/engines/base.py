@@ -124,6 +124,69 @@ class Engine:
     def check_deep(self, db):
         return [Result("deep", db, "skip", "no deep checks for this engine yet")]
 
+    def settle_target(self, db):
+        """Leave the target usable after a bulk load, or say nothing.
+
+        A load leaves the statistics behind it, and the planner then picks
+        plans for a table it has never looked at. pgcopydb runs `VACUUM
+        ANALYZE` per table as soon as that table's data and indexes are
+        done, for exactly this reason; a tool that copies ten million rows
+        and hands back a database that reads slowly has not finished.
+
+        Returns a line for the log when it did something, None when there is
+        nothing to do for this engine.
+        """
+        return None
+
+    #: The share of a table that can change before its statistics stop being
+    #: worth trusting. This is autovacuum's own `autovacuum_analyze_scale_
+    #: factor`, so migkit is not inventing a threshold - it is reading the
+    #: one the server already works to.
+    STALE_STATS_RATIO = 0.10
+
+    def _planner_stats_result(self, db, tables, hint):
+        """Has the target's planner ever looked at what was just loaded.
+
+        A bulk load leaves the statistics behind. Measured on PostgreSQL 16
+        right after loading 200,000 rows: `reltuples` is -1, `last_analyze`
+        and `last_autoanalyze` are both null, and `n_mod_since_analyze`
+        equals the whole table. Autoanalyze is threshold-driven rather than
+        event-driven, so on a large table it will not run until a tenth of
+        the rows have changed again - which, on a table that was migrated
+        and is now only read, may be never.
+
+        Nothing else in the check catches this: the data is correct, the
+        counts match, and every structural check passes. The target is
+        simply slow, and the slowness gets blamed on the engine.
+
+        `tables` is [(name, rows, analyzed, modified_since)] where
+        `analyzed` is False when the server has never analyzed it and
+        `modified_since` is how many rows changed since it last did.
+        """
+        never = sorted(t for t, _, analyzed, _ in tables if not analyzed)
+        stale = sorted(
+            t for t, rows, analyzed, modified in tables
+            if analyzed and rows and modified is not None
+            and modified > rows * self.STALE_STATS_RATIO)
+        if never:
+            return Result(
+                "deep", f"{db} statistics", "diff",
+                f"{len(never)} tables the planner has no statistics for:"
+                f" {', '.join(never[:5])}"
+                + (" ..." if len(never) > 5 else "")
+                + " - the rows are there and the query plans will not be",
+                "", hint)
+        if stale:
+            return Result(
+                "deep", f"{db} statistics", "warn",
+                f"{len(stale)} tables changed by more than"
+                f" {int(self.STALE_STATS_RATIO * 100)}% since their"
+                f" statistics were taken: {', '.join(stale[:5])}"
+                + (" ..." if len(stale) > 5 else ""), "", hint)
+        return Result("deep", f"{db} statistics", "ok",
+                      f"{len(tables)} tables, all analyzed since they were"
+                      " last written")
+
     def check_params(self, db):
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
