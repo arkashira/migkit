@@ -365,12 +365,52 @@ class _MyIndexWindow:
         return False
 
 
+def mydumper_defaults(hop, db):
+    """The hop's row filters as a mydumper defaults file, or None.
+
+    mydumper's `--where` is one predicate for the whole dump; the per-table
+    form lives in a config file, one section per table. Verified against
+    mydumper v1.0.5 on a live pair - a rule on `orders` dumped 2 of its 3
+    rows and left `people`, which no rule names, at all 2:
+
+        [`appdb`.`orders`]
+        where = region = 'apac'
+
+        appdb.orders  INSERT INTO `orders` VALUES(1,"apac"),(3,"apac");
+        appdb.people  INSERT INTO `people` VALUES(1,"a"),(2,"b");
+
+    Pushing the predicate down here rather than filtering afterwards means
+    the rows never cross the wire, and it is the same predicate the check
+    compares with - one mapping, read by both.
+
+    A rule naming another database is skipped rather than applied to this
+    one: `where` keys are right-anchored like every other name in the hop,
+    so `orders` means this database's, and `other.orders` does not.
+    """
+    rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
+    lines = ["[mydumper]"]
+    for key, predicate in sorted(rules.items()):
+        parts = [p for p in str(key).split(".") if p]
+        if len(parts) > 1 and parts[0] != db:
+            continue
+        lines.append(f"[`{db}`.`{parts[-1]}`]")
+        lines.append(f"where = {predicate}")
+    return "\n".join(lines) + "\n" if len(lines) > 1 else None
+
+
 def mydumper_move(hop, db, workers, go, log):
     s, t = hop.source, hop.target
     outdir = hop.report_dir(db) / "mydumper"
+    filters = mydumper_defaults(hop, db)
+    # beside the dump directory, not inside it: myloader is pointed at
+    # that directory and has no reason to meet a file it does not read
+    cnf = hop.report_dir(db) / "mydumper-filters.cnf"
+    extra = ["--defaults-file", str(cnf)] if filters else []
     steps = [
         f"mydumper -h {s.host} -P {s.port} -u {s.user} -p *** -B {db}"
-        f" -o {outdir} --threads {workers} --no-schemas --trx-consistency-only",
+        f" -o {outdir} --threads {workers} --no-schemas --trx-consistency-only"
+        + (f" --defaults-file {cnf}  # row filters from the hop's mapping"
+           if filters else ""),
         f"myloader -h {t.host} -P {t.port} -u {t.user} -p *** -B {db}"
         f" -d {outdir} --threads {workers} --purge-mode TRUNCATE",
     ]
@@ -378,10 +418,13 @@ def mydumper_move(hop, db, workers, go, log):
         return steps + ["# dry-run, add --go to execute"]
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
+    if filters:
+        cnf.write_text(filters)
+        cnf.chmod(0o600)
     _sh(["mydumper", "-h", s.host, "-P", str(s.port), "-u", s.user,
          f"-p{s.password}", "-B", db, "-o", str(outdir),
          "--threads", str(workers), "--no-schemas",
-         "--trx-consistency-only"], None, log)
+         "--trx-consistency-only"] + extra, None, log)
     from .engines.mysql import MySQLEngine
     with _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
         _sh(["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
