@@ -129,16 +129,24 @@ In order. Each item says what has to be measured before it is written.
    **Still open from this item:** values of the wrong *shape* rather than
    the wrong size (`0000-00-00` stored by MySQL and refused outright by
    PostgreSQL), and which zones the data actually uses.
-7. **The pre-flight the practitioners keep asking for**: before anything
+7. **Two things the target does to the rows as they land**, both
+   measured this tick. A `BEFORE INSERT` trigger on the target rewrote
+   `2001-01-01` to today's date for every row of a plain `COPY`, which
+   reported `COPY 2` and success; `session_replication_role = replica` kept
+   the value intact, and migkit's repair path already sets it while `move`
+   does not. And a `GENERATED ALWAYS AS IDENTITY` key refuses an explicit
+   value - including the exact `insert ... on conflict` statement migkit's
+   own repair builds, which was run against such a target and rejected.
+8. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-8. **LOBs**, as correctness first and speed second: find them, size them,
+9. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-9. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+10. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-10. **Then** consider a migkit-owned mover, with the benchmark from item 1
+11. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources
