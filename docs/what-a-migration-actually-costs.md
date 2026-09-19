@@ -28,7 +28,7 @@ Ordered by how often practitioners name them, not by how hard they are.
 | Resume after a crash | A copy that dies at 80% starts over, or resumes inconsistently | **Partly** — chunked resume exists per engine, on one machine, with a proof file |
 | Scale | Practices that work at 10 GB fail at 1 TB; nobody finds out until the rehearsal | **Measured to 10M rows** — [scale.md](scale.md): flat throughput, constant client memory, and one real bug found by running it |
 | Cloud without tools | No OS access, no `pg_dump` on the box, no ports outbound, no place to put a dump file | **Partly** — everything runs from the operator's machine over normal client connections; no reliance on being on the host |
-| Two engines that disagree about a value | Collation, timezone, NULL vs empty, float rendering, charset | **Covered** — canonical rendering per engine, and a refusal when a type has no agreed rendering |
+| Two engines that disagree about a value | Collation, timezone, NULL vs empty, float rendering, charset | **Covered, with the size of the refusal measured** — canonical rendering per engine, and a refusal when a type has no agreed rendering. On a 37-column PostgreSQL table the cross-engine path compares 20 and names the 17 it declines (`enum`, `interval`, `hstore`, `tsvector` among them); the same-engine path hashes the whole row and misses none. Catalogue D15 |
 
 ## 2. How the fast tools get fast
 

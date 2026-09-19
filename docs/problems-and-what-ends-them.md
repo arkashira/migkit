@@ -1385,6 +1385,46 @@ take them away: a mistyped table name (`--table public.gooood`) reports
 narrows the checksum pass while `counts` still sweeps the whole database -
 which is why hiding `bad` above needed `--only data` as well.
 
+### D15. How much of a row the comparison actually compares
+
+**What happens.** "Checksums equal" is only as strong as the set of
+columns that went into the checksum. A verifier that silently leaves out
+the columns it finds awkward gives the same answer as one that compared
+everything.
+
+**migkit: Ends it for the same-engine leg, and states the size of the gap
+on the cross-engine one** - `test_how_much_of_a_row_is_compared.py`. That
+a type with no agreed rendering is refused rather than guessed was already
+the design. What had never been measured is **how big the refusal is**, and
+the two paths are not the same size. One PostgreSQL table, 37 columns,
+carrying what a real schema carries:
+
+    same-engine (pg -> pg)   data: DIFF, every change caught
+    cross-engine (hetero)    compared 20 of 37, 17 refused
+
+The same-engine digest is computed over the whole row inside the server, so
+nothing is outside it - measured by changing *only* the columns the other
+path refuses (`interval`, `enum`, `tsvector`, `hstore`, `bit`, `point`,
+`int4range`) and watching `check` still report DIFF.
+
+The cross-engine path has to render both sides into text two different
+engines agree on. For seventeen of these types no such rendering exists:
+
+    enum, interval, hstore, tsvector, tsquery, bit, varbit,
+    int4range, int4multirange, point, box, circle, lseg, polygon,
+    oid, pg_lsn, txid_snapshot
+
+Refusing is right - comparing two renderings nobody checked agree is worse
+than not comparing - and every refusal is named in the result line rather
+than dropped, which a test pins by asserting that no column is both
+uncompared and unmentioned.
+
+**What is worth saying plainly:** the flagship leg, any-source to
+any-target, verifies fewer columns than the leg between two of the same
+engine, and `enum` and `interval` are in the gap. Those are not corners of
+the type system. Closing them is canonical-rendering work, one type at a
+time, and the number in the test moves when it is done.
+
 ## E. Keeping the two sides in step
 
 ### E1. Sequences do not replicate
