@@ -970,6 +970,80 @@ one place, and a test asserts a role that sees everything is not nagged.
 than "nothing is filtered" - so nothing else acquires a verdict it has not
 earned.
 
+### D9. The view that exists and holds nothing
+
+**What happens.** `pg_dump` does not dump a materialized view's contents.
+It emits `CREATE MATERIALIZED VIEW ... WITH NO DATA` and a separate
+`REFRESH` in the post-data section - deliberately, to guard against hidden
+dependencies. Anything that drops the refresh leaves the view present and
+empty: operators skip it with `pg_restore -L` because it is slow and mean
+to run it later; it times out; or it fails on permissions, which is a real
+enough history that PostgreSQL was changed in 2017 to restore ACLs before
+refreshing matviews rather than after.
+
+PostgreSQL is loud about the result, which helps: an unrefreshed matview is
+*unscannable* rather than empty. Measured -
+
+    select n from daily;
+    ERROR:  materialized view "daily" has not been populated
+    HINT:  Use the REFRESH MATERIALIZED VIEW command.
+
+and `pg_class.relispopulated` is `f`.
+
+**migkit: Ends it.** This was measured expecting a gap and there was not
+one. `check --deep` reports it:
+
+    deep postgres matviews: DIFF public.daily: not populated on target
+
+and when a matview *is* populated it does not stop there - it applies the
+source's own row-hash expression to both sides and compares the result, so
+a matview that refreshed against stale data, and therefore has the right
+row count, is still caught. Test: covered by the deep suite for matviews.
+
+Worth noting alongside: migkit's own target-setup plan now restores
+`--section=post-data` as an explicit step, which is where the `REFRESH`
+lives, so the step people drop is a line in the plan rather than an
+implicit side effect.
+
+### D10. The role could read the table but not the column
+
+**What happens.** Column-level grants (`GRANT SELECT (id) ON sales TO
+role`) are the natural way to keep a migration tool away from columns it
+has no business reading. PostgreSQL's error when it hits one is
+famously misleading - measured:
+
+    select * from sales limit 1;
+    ERROR:  permission denied for table sales
+
+It says **table** when the missing privilege is on a column, which sends
+people to the wrong GRANT. There is an open patch proposing "permission
+denied for column subset of table" for exactly this reason. A second trap:
+a lingering table-level `SELECT` - including one granted to `PUBLIC` -
+silently overrides the column grants, because the table-level check runs
+first.
+
+**migkit: Partly, and it fails in the right direction.** The data pass
+reports it rather than working around it:
+
+    public.sales: ERROR ERROR:  permission denied for table sales
+    data     postgres: ERROR  errors: public.sales
+    verdict: error
+
+which is correct - an unreadable table is not a verified one.
+
+**The narrow thing that is wrong:** in that same run the counts line read
+`OK 0 tables, rows 0==0`. Counts is merged into the checksum pass, so when
+that pass errors on every table there is nothing left to count, and the
+result is a clean verdict computed over nothing. Nobody is misled in a
+default run, because `data` errors beside it and the overall verdict is
+`error`. But "OK, 0 tables" is the same shape as a mover reporting success
+over an empty target, which this project already treats as a bug worth
+refusing.
+
+Counts run **alone** is honest here, and that is worth stating precisely:
+`select count(*)` needs only one readable column, so it answered `100 rows
+both sides` and that number is true.
+
 ## E. Keeping the two sides in step
 
 ### E1. Sequences do not replicate
@@ -1212,6 +1286,13 @@ The verifier's own blind spots:
 [pg_dump and row_security](https://www.postgresql.org/docs/current/app-pgdump.html),
 [partial dumps using RLS, on purpose](https://supabase.com/blog/partial-postgresql-data-dumps-with-rls),
 [insert/dump/restore with generated columns](https://postgrespro.com/list/thread-id/2558357).
+
+Views and column grants:
+[REFRESH MATERIALIZED VIEW](https://www.postgresql.org/docs/current/sql-refreshmaterializedview.html),
+[preventing the refresh during pg_restore](https://www.postgresql.org/message-id/1403794157042-5809367.post@n5.nabble.com),
+[pg_dump emitting REFRESH after ACLs](https://www.postgresql.org/message-id/E1ddNne-0001jw-Vx@gemulon.postgresql.org),
+[column-level security in PostgreSQL](https://www.enterprisedb.com/postgres-tutorials/how-implement-column-and-row-level-security-postgresql),
+[reporting a column-level error when lacking privilege](https://www.postgresql.org/message-id/CAKFQuwaiP%2BkYLCtUh_5Hdd7XKUHHH_Y5JAvb-0x2JQevJevVeA%40mail.gmail.com).
 
 Cutover, aftermath and compliance:
 [zero-downtime patterns](https://launchdarkly.com/blog/3-best-practices-for-zero-downtime-database-migrations/),

@@ -151,16 +151,23 @@ In order. Each item says what has to be measured before it is written.
    table with a `GENERATED ALWAYS AS ... STORED` column at all, and now
    leaves those columns to the server on both engines. Unlike the identity
    case, `OVERRIDING SYSTEM VALUE` did not help - a test pins that.
-9. **The pre-flight the practitioners keep asking for**: before anything
+9. **Counts computed over nothing.** When the checksum pass errors on
+   every table - which a column-level grant will do, since `select *` is
+   refused - the merged counts line reports `OK 0 tables, rows 0==0`. The
+   run as a whole is not misleading, because `data` errors beside it and
+   the verdict is `error`, but a clean verdict derived from zero tables is
+   the same shape as a mover reporting success over an empty target, which
+   this project already refuses.
+10. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-10. **LOBs**, as correctness first and speed second: find them, size them,
+11. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-11. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+12. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-12. **Then** consider a migkit-owned mover, with the benchmark from item 1
+13. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources
