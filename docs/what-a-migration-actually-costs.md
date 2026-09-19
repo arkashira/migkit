@@ -134,9 +134,12 @@ In order. Each item says what has to be measured before it is written.
    `2001-01-01` to today's date for every row of a plain `COPY`, which
    reported `COPY 2` and success; `session_replication_role = replica` kept
    the value intact, and migkit's repair path already sets it while `move`
-   does not. And a `GENERATED ALWAYS AS IDENTITY` key refuses an explicit
-   value - including the exact `insert ... on conflict` statement migkit's
-   own repair builds, which was run against such a target and rejected.
+   does not. The identity half is **done**: a
+   `GENERATED ALWAYS AS IDENTITY` key refused the exact `insert ... on
+   conflict` statement migkit's own repair builds, and the repair now emits
+   `OVERRIDING SYSTEM VALUE` where the catalog says it is needed. `move`
+   was measured to be unaffected, because `COPY` is not subject to the
+   restriction.
 8. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

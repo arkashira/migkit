@@ -300,6 +300,12 @@ class Engine:
         the rule in both spellings, so only the character differs."""
         return '"' + str(name).replace('"', '""') + '"'
 
+    def _insert_override(self, side, db, table, names):
+        """A clause an engine needs before VALUES to write a column the
+        server would otherwise generate itself. Empty for engines with no
+        such concept, which is most of them."""
+        return ""
+
     def _scalar(self, side, db, sql):
         """One row, as text, or **None** when this engine cannot be asked -
         which is not the same as a query that returned nothing."""

@@ -254,6 +254,43 @@ class PostgresEngine(Engine):
         self._psql(side, self._d(side, db), ddl)
         return ddl
 
+    def _insert_override(self, side, db, table, names):
+        """`GENERATED ALWAYS AS IDENTITY` refuses a value the client chose,
+        and a repair has no choice but to choose one - the row it is fixing
+        already has a key.
+
+        Measured on PostgreSQL 16 before this existed: migkit's own repair
+        statement against such a target answered `cannot insert a
+        non-DEFAULT value into column "id"`, and the same statement with
+        this clause succeeded.
+
+        Only the `a` (always) form needs it; `d` (by default), which is what
+        `serial` behaves like, takes the value as given. Emitting the clause
+        unconditionally was measured to be harmless - PostgreSQL accepts it
+        on a table with no identity column at all, and a `by default`
+        column still stored the explicit value - but it is looked up
+        instead, so the statement says what it means and a reader can tell
+        which tables needed it. One catalog query per table, cached.
+
+        **`move` is not affected**, which is what keeps this narrow: `COPY`
+        into a generated-always column was measured to succeed with no
+        clause at all.
+        """
+        cache = self.__dict__.setdefault("_identity_always", {})
+        target = self._d(side, db)
+        ident = (side, target, table)
+        if ident not in cache:
+            sch, tbl = self._split(table)
+            ref = f'"{sch}"."{tbl}"'.replace("'", "''")
+            out = self._psql(side, target,
+                             "select a.attname from pg_attribute a"
+                             f" where a.attrelid = to_regclass('{ref}')"
+                             " and a.attidentity = 'a' and a.attnum > 0"
+                             " and not a.attisdropped")
+            cache[ident] = {line for line in out.splitlines() if line}
+        return (" overriding system value"
+                if cache[ident] & set(names) else "")
+
     def _apply_upsert(self, side, db, table, key, values):
         from .. import canon
         table = self.local_table(table)
@@ -268,10 +305,11 @@ class PostgresEngine(Engine):
         conflict = ", ".join(f'"{k}"' for k in sorted(key))
         tail = (f" on conflict ({conflict}) do update set {sets}" if sets
                 else f" on conflict ({conflict}) do nothing")
+        override = self._insert_override(side, db, table, names)
         with self._conn(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
                 cur.execute(f'insert into "{sch}"."{tbl}" ({cols})'
-                            f" values ({marks}){tail}",
+                            f"{override} values ({marks}){tail}",
                             [canon.sql_value(row[n]) for n in names])
             conn.commit()
 
