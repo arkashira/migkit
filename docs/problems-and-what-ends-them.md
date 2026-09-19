@@ -1328,6 +1328,54 @@ It lives on the base contract and reads two dataframes, so MySQL gets it
 without a line of its own - asserted by a test rather than assumed, because
 "it should inherit" is how two copies start.
 
+### D14. The verdict does not say how much it looked at
+
+**What happens.** A verification run is gated on by a machine, not read by
+a person - a CI job asks "did it pass" and nothing else. If the artifact it
+reads cannot distinguish "everything matched" from "the part I looked at
+matched", then narrowing the run is indistinguishable from passing it.
+
+**migkit: does not end it yet.** Found by running two commands that should
+not be able to agree, on one pair: a database with `good` (100 rows both
+sides) and `bad` (100 rows on the source, 40 on the target).
+
+    check sc --only data                    data  DIFF  public.bad
+                                            verdict: different
+    check sc --table public.good --only data data  OK missing=0 extra=0
+                                            verdict: same
+
+The second is not wrong about the table it was asked about. What is wrong
+is the artifact. With the timestamp, fingerprint and tool version removed,
+the `verdict.json` from that run is **byte-identical** to the one from a
+genuinely clean database checked in full:
+
+    {"by_category": {"parity.row-content": {"ok": 1}}, "findings": [],
+     "has_differences": false, "hop": "sc", "status": "same",
+     "totals": {"diff": 0, "error": 0, "ok": 1, "skip": 0, "warn": 0}}
+
+Same `status`, same `has_differences`, same totals - with 60 rows missing
+from a table the run never opened. A gate reading `has_differences == false`
+passes both. Nothing in the envelope records `--table`, `--only`, `--db` or
+`--exclude`, so nothing downstream can tell a full run from a narrowed one.
+`summary.json` beside it *does* carry `"scope": "postgres public.good"`, so
+the information exists and stops at the file automation reads.
+
+Two things migkit already gets right here, and both were measured rather
+than assumed: a mistyped table name (`--table public.gooood`) reports
+`ERROR` and `verdict: error` rather than a clean nothing, and `--table`
+narrows `data` while `counts` still sweeps the whole database - so the
+example above needed `--only data` to hide `bad` at all.
+
+**The fix, designed and not yet written:** carry the narrowing into
+`verdict.summarize` and record it as a `coverage` block, and when a run was
+narrowed let the status be `incomplete` - a word the vocabulary already has
+for "nothing found, not everything looked at" - instead of `same`.
+`has_differences` stays `false`, because no difference was found and
+claiming one would be its own lie. Deliberately not shipped in the same
+tick as the measurement: 24 test files invoke `--only` or `--table`, and a
+change to the artifact every check writes deserves the whole suite rather
+than the two adjacent files a small tick can run.
+
 ## E. Keeping the two sides in step
 
 ### E1. Sequences do not replicate
