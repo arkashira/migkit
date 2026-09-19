@@ -54,9 +54,21 @@ What that leaves on the floor:
   key missing a row (both *differ*). Off by default because it reads both
   databases a second time. `compare schema` is still unopened.
   `test_crosscheck_pgcopydb.py`.
-* **`snapshot`** - export one consistent snapshot for every worker to share.
-  This is the mechanism behind the concurrency the plan admires in item 2 of
-  *what a migration actually costs*, and it is one command away.
+* **`snapshot`** - and the interesting part is that migkit does not need
+  pgcopydb for it. `pg_export_snapshot` is a PostgreSQL function, and the
+  gap it closes is in migkit's *own* verifier: the fast data pass reads
+  tables through a thread pool, one connection each, so two tables are read
+  at two instants and a row moving between them looks like a difference in
+  both. `--consistent` already avoids that by reading a side inside one
+  transaction, and pays the parallelism for it. Measured with a writer
+  between the export and the reads:
+
+      workers not sharing the snapshot    a=2  b=2
+      workers sharing the snapshot        a=1  b=1
+
+  The export helper and its ordering rule are in place and tested
+  (`test_shared_snapshot.py`); using them inside `_fast_consistent` is the
+  next piece.
 * **`clone`** - schema, data, indexes, constraints and sequences in one
   pass, in the order pgcopydb already knows is fastest.
 

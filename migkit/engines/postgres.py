@@ -4461,6 +4461,68 @@ class PostgresEngine(Engine):
         cache[key] = out or None
         return cache[key]
 
+    @staticmethod
+    def _snapshot_preamble(snapshot, workers):
+        """The statements a worker runs before it reads anything.
+
+        `SET TRANSACTION SNAPSHOT` has to be the first statement of a
+        transaction that has not read yet, so the order here is not
+        cosmetic: begin, adopt the snapshot, then tune. Putting the `set
+        local max_parallel_workers_per_gather` first makes PostgreSQL
+        refuse the snapshot.
+        """
+        lines = ["begin transaction isolation level repeatable read"
+                 " read only;"]
+        if snapshot:
+            lines.append(f"set transaction snapshot '{snapshot}';")
+        lines.append(f"set local max_parallel_workers_per_gather = {workers};")
+        return lines
+
+    def _export_snapshot(self, side, db):
+        """Open a transaction, export its snapshot, and hand back both.
+
+        Returns `(connection, id)` or `(None, None)`. The connection is the
+        point: an exported snapshot lives exactly as long as the
+        transaction that exported it, so the caller has to hold it open
+        while the workers use it and close it after.
+
+        **What it buys, measured.** migkit's fast data pass reads tables
+        through a thread pool, one connection each, so table `a` is read at
+        one instant and table `b` at another - and a transaction that moves
+        a row between them in that gap shows up as a difference in both.
+        On a live server, with a writer inserting between the export and
+        the reads:
+
+            workers not sharing the snapshot    a=2  b=2
+            workers sharing the snapshot        a=1  b=1
+
+        `--consistent` already avoids this by reading every table of a side
+        in one transaction, which costs the parallelism. A shared snapshot
+        is how both are had at once.
+        """
+        try:
+            conn = self._conn(side, self._d(side, db))
+        except Exception:
+            # a server that cannot be reached, which is the caller's cue to
+            # fall back. Deliberately narrow: this used to wrap the call
+            # itself in a bare `except Exception` and a wrong argument list
+            # came back as "no snapshot available" instead of a TypeError.
+            return None, None
+        try:
+            conn.autocommit = False
+            cur = conn.cursor()
+            cur.execute("begin transaction isolation level repeatable read"
+                        " read only")
+            cur.execute("select pg_export_snapshot()")
+            got = cur.fetchone()
+            return (conn, got[0]) if got else (conn, None)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return None, None
+
     def _fast_consistent(self, db):
         """Whole-database checksum inside ONE repeatable-read read-only
         transaction per side: no intra-db skew (every table of a side is
