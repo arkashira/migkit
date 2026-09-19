@@ -791,13 +791,19 @@ class HeteroEngine(Engine):
         return (f"{proto}://{ep.user}:{quote(ep.password, safe='')}"
                 f"@{ep.host}:{ep.port}/{db}")
 
-    def check_counts(self, db):
-        if not self._can_compare_neutrally():
-            return [Result("counts", db, "error",
-                           f"{self.src_name}->{self.dst_name}: one of these"
-                           " engines has no canonical rendering yet, so"
-                           " migkit will not claim the two sides agree")]
-        rows = self._neutral_rows(db)
+    def _no_rendering(self, check):
+        return Result(check, "", "error",
+                      f"{self.src_name}->{self.dst_name}: one of these"
+                      " engines has no canonical rendering yet, so migkit"
+                      " will not claim the two sides agree")
+
+    def _counts_rows(self, db, rows):
+        """The count verdict for rows already compared, in one place.
+
+        `check counts` and `check data --with-counts` are two readings of the
+        same pass, so they are one function - a second copy would be free to
+        disagree with the first about the same tables.
+        """
         if not rows:
             return [Result("counts", db, "warn",
                            "no table on either side, so nothing was compared"
@@ -813,83 +819,36 @@ class HeteroEngine(Engine):
                        f" {self.src_name}/{self.dst_name},"
                        f" {len(rows)} tables")]
 
-    def check_data(self, db, table=None, stream=None, with_counts=False):
-        """The digest comparison for any pair, with reladiff for the pair it
-        was written for.
+    def check_counts(self, db):
+        if not self._can_compare_neutrally():
+            got = self._no_rendering("counts")
+            return [Result("counts", db, got.status, got.detail)]
+        return self._counts_rows(db, self._neutral_rows(db))
 
-        reladiff names the rows that differ, which the digest cannot - it
-        answers whether, not which. So it stays where it applies, and the
-        digest is what makes every other pairing answerable at all.
+    def check_data(self, db, table=None, stream=None, with_counts=False):
+        """One comparison for every pair, including the pair reladiff used
+        to handle.
+
+        The reladiff branch that lived here was written when the digest could
+        only answer *whether* two tables differ. It names *which* rows now,
+        writes them where `migkit sync` can read them, and does it the same
+        way for all nine combinations - so MySQL to PostgreSQL was the one
+        pairing whose check produced nothing a repair could act on.
+
+        Measured before removing it, against a real pair: reladiff has no
+        MySQL driver in this installation and says so - `ERROR - No module
+        named 'mysql'` - then exits 0, which this branch read as a row-level
+        difference. `diff` on a table nobody compared, and no files behind
+        it.
         """
-        if self._can_compare_neutrally() and not (self.my and self.pg):
-            return self._neutral_compare(db, table, stream)
-        if not which("reladiff"):
-            if self._can_compare_neutrally():
-                return self._neutral_compare(db, table, stream)
-            return [Result("data", db, "error",
-                           "reladiff needed for cross-engine data compare,"
-                           " run bootstrap.sh")]
-        res = []
-        tables = [table] if table else self.my._tables("src", db)
-        total_a = total_b = 0
-        bad_counts = []
-        for t in tables:
-            pks = self.my._pk_cols(db, t)
-            if not pks:
-                res.append(Result("data", f"{db}.{t}", "diff",
-                                  "no pk, cross-engine compare needs one"))
-                if with_counts:
-                    a = self.my._q("src",
-                                   f"select count(*) from `{db}`.`{t}`")[0][0]
-                    try:
-                        b = int(self.pg._psql("dst", db,
-                                              f'select count(*) from "{t}"'))
-                    except RuntimeError:
-                        bad_counts.append(f"{t} missing on target")
-                        continue
-                    total_a += a
-                    total_b += b
-                    if a != b:
-                        bad_counts.append(f"{t} src={a} dst={b}")
-                continue
-            cmd = ["reladiff", self._url("src", db), t,
-                   self._url("dst", db), t, "--stats",
-                   "-j", str(self.hop.workers), "-c", "%"]
-            for k in pks:
-                cmd += ["-k", k]
-            p = run(cmd, check=False, timeout=3600)
-            text = p.stdout + p.stderr
-            m = re.search(r"(\d+) rows in table A.*?(\d+) rows in table B",
-                          text, re.S)
-            rows = f"rows {m.group(1)}=={m.group(2)}, " if m else ""
-            if m:
-                a, b = int(m.group(1)), int(m.group(2))
-                total_a += a
-                total_b += b
-                if a != b:
-                    bad_counts.append(f"{t} src={a} dst={b}")
-            import re as _re2
-            nums = [_re2.search(rf"(\d+) rows {k}", text)
-                    for k in ("exclusive to table A", "exclusive to table B",
-                              "updated")]
-            ok = (p.returncode == 0 and all(nums)
-                  and all(n.group(1) == "0" for n in nums))
-            status = "ok" if ok else "diff" if p.returncode in (0, 1) \
-                else "error"
-            if stream:
-                stream(f"{t}: {status}")
-            res.append(Result("data", f"{db}.{t}", status,
-                              f"{rows}reladiff cross-engine"
-                              + ("" if ok else f": {text.strip()[-160:]}")))
+        if not self._can_compare_neutrally():
+            got = self._no_rendering("data")
+            return [Result("data", db, got.status, got.detail)]
+        rows = self._neutral_rows(db, table, stream)
+        res = [Result("data", scope, status, detail)
+               for scope, status, detail, _, _ in rows]
         if with_counts:
-            if bad_counts:
-                cres = Result("counts", db, "diff",
-                              "; ".join(bad_counts[:10]))
-            else:
-                cres = Result("counts", db, "ok",
-                              f"rows {total_a:,}=={total_b:,} across engines"
-                              " (from the reladiff pass, no extra scan)")
-            res.insert(0, cres)
+            res = self._counts_rows(db, rows) + res
         return res
 
     def convert_ddl(self, db):
