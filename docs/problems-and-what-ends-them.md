@@ -771,22 +771,32 @@ server's to write, and it refuses anybody else's value - measured:
     ERROR:  column "total" is a generated column
     DETAIL:  Generated columns cannot be used in COPY.
 
-**migkit: Not yet, and it is the same family as C7.** `_apply_upsert`
-builds its column list from the row it is repairing, generated column
-included, and against such a target it answers `cannot insert a non-DEFAULT
-value into column "total"`. So `migkit apply` cannot repair a row in any
-table that has one.
+**migkit: Ends it** - `test_generated_columns.py`, on both engines.
+`_apply_upsert` built its column list from the row it was repairing,
+generated column included, and against such a target answered `cannot
+insert a non-DEFAULT value into column "total"`. `migkit apply` could not
+repair a row in any table that had one.
 
-The fix is **not** the one C7 needed, which is worth writing down before
-somebody assumes it is: `OVERRIDING SYSTEM VALUE` was tried here and
-rejected with the same error. A generated column has to be left out of the
-statement entirely, after which the server computes it - measured, an
-insert omitting `total` stored `total=20` from `price * qty`. The catalog
-signal is `pg_attribute.attgenerated <> ''`.
+The fix is **not** the one C7 needed, which is why the two are written down
+separately: `OVERRIDING SYSTEM VALUE` was tried here and rejected with the
+same error, and a test pins that it still is. A generated column is left
+out of the statement entirely and the server computes it - measured with a
+deliberately wrong value carried in, so the row proves who did the
+arithmetic: `price=7, qty=4` stored `total=28`, not the 999 migkit was
+holding.
 
-Comparing the column is right and stays: `neutral_columns` reports it, so a
-target whose generated expression differs from the source's shows up as a
-value difference. It is only the **writing** that has to change.
+MySQL refuses the same thing in its own words - `ERROR 3105 (HY000): The
+value specified for generated column 'total' in table 't' is not allowed` -
+and gets the same treatment, including **VIRTUAL** columns, which are not
+stored at all and are refused just as flatly.
+
+**The movers were never affected**, measured with real moves rather than
+inferred from the COPY documentation: both landed all five rows with the
+totals computed. That is what kept the change inside the repair path.
+
+Comparing the column is untouched: `neutral_columns` still reports it, so a
+target whose expression differs from the source's shows up as a value
+difference. Only the writing gives way.
 
 ---
 

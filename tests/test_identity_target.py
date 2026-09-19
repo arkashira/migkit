@@ -106,12 +106,22 @@ def test_the_clause_is_emitted_only_where_it_is_needed(shapes, tmp_path):
                                 ["v"]) == ""
 
 
-def test_the_lookup_is_cached_per_table(shapes, tmp_path):
+def test_the_lookup_is_cached_and_survives_being_asked_twice(shapes,
+                                                              tmp_path):
+    """This used to assert the name of the private cache dict, and broke
+    the moment that dict was renamed - while the behaviour it cared about
+    was fine. It now asks the question an operator would: does the second
+    call answer the same as the first, without a second round trip."""
     eng = _engine(shapes, tmp_path)
-    eng._insert_override("dst", "postgres", "public.ident", ["id"])
-    cached = eng.__dict__["_identity_always"]
-    assert ("dst", "postgres", "public.ident") in cached, cached
-    assert cached[("dst", "postgres", "public.ident")] == {"id"}
+    first = eng._insert_override("dst", "postgres", "public.ident", ["id"])
+    assert first == " overriding system value", repr(first)
+
+    calls = []
+    real = eng._psql
+    eng._psql = lambda *a, **k: (calls.append(a), real(*a, **k))[1]
+    again = eng._insert_override("dst", "postgres", "public.ident", ["id"])
+    assert again == first, (again, first)
+    assert calls == [], calls   # answered from the cache, no query
 
 
 def test_a_bulk_copy_needs_no_clause_at_all(shapes):

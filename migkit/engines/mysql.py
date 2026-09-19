@@ -148,12 +148,36 @@ class MySQLEngine(Engine):
         """The last component: this engine has no schemas to qualify with."""
         return str(table).split(".")[-1]
 
+    def _unwritable_columns(self, side, db, table):
+        """MySQL refuses a value for a generated column too, with its own
+        wording - measured on 8: `ERROR 3105 (HY000): The value specified
+        for generated column 'total' in table 't' is not allowed.` Omitting
+        it stored `total=20.00` from `price * qty`, the same shape as
+        PostgreSQL.
+
+        Both kinds are excluded. A VIRTUAL column is not stored at all, so
+        writing to it is refused just as flatly as to a STORED one, and
+        `generation_expression` is non-empty for both. Cached per table.
+        """
+        cache = self.__dict__.setdefault("_generated_cache", {})
+        target = self._d(side, db)
+        ident = (side, target, table)
+        if ident not in cache:
+            rows = self._q(side,
+                           "select column_name from information_schema.columns"
+                           " where table_schema = %s and table_name = %s"
+                           " and generation_expression <> ''",
+                           (target, table))
+            cache[ident] = {r[0] for r in rows}
+        return cache[ident]
+
     def _apply_upsert(self, side, db, table, key, values):
         from .. import canon
         table = self.local_table(table)
         row = dict(key)
         row.update(values)
-        names = sorted(row)
+        names = [n for n in sorted(row)
+                 if n not in self._unwritable_columns(side, db, table)]
         cols = ", ".join(f"`{n}`" for n in names)
         marks = ", ".join(["%s"] * len(names))
         sets = ", ".join(f"`{n}` = values(`{n}`)"

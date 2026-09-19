@@ -147,10 +147,10 @@ In order. Each item says what has to be measured before it is written.
    because row-level security filtered both sides, and now say WARN naming
    what they could not see - while a role that sees everything is not
    nagged, the rule having been measured across all four role shapes.
-   **Still open:** `_apply_upsert` cannot write a table with a `GENERATED
-   ALWAYS AS ... STORED` column at all. Unlike the identity case,
-   `OVERRIDING SYSTEM VALUE` does not help - the column has to be left out
-   of the statement entirely.
+   The second is **done** too: `_apply_upsert` could not write a
+   table with a `GENERATED ALWAYS AS ... STORED` column at all, and now
+   leaves those columns to the server on both engines. Unlike the identity
+   case, `OVERRIDING SYSTEM VALUE` did not help - a test pins that.
 9. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

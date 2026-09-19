@@ -276,20 +276,60 @@ class PostgresEngine(Engine):
         into a generated-always column was measured to succeed with no
         clause at all.
         """
-        cache = self.__dict__.setdefault("_identity_always", {})
+        return (" overriding system value"
+                if self._write_rules(side, db, table)["always"] & set(names)
+                else "")
+
+    def _write_rules(self, side, db, table):
+        """Which columns of this table the server insists on owning.
+
+        Two kinds, and they are **not** interchangeable - measured:
+
+            attidentity = 'a'   GENERATED ALWAYS AS IDENTITY
+                                writable with OVERRIDING SYSTEM VALUE
+            attgenerated <> ''  GENERATED ALWAYS AS (expr) STORED
+                                not writable at all; OVERRIDING SYSTEM VALUE
+                                was tried and answered the same error
+
+        One catalog query per table, cached, because both answers come from
+        the same row of `pg_attribute` and asking twice would be two round
+        trips for one fact.
+        """
+        # the cache lives in __dict__, so its name must not be a method's:
+        # `_write_rules` there shadowed `_write_rules` here and every call
+        # answered `'dict' object is not callable`
+        cache = self.__dict__.setdefault("_write_rules_cache", {})
         target = self._d(side, db)
         ident = (side, target, table)
         if ident not in cache:
             sch, tbl = self._split(table)
             ref = f'"{sch}"."{tbl}"'.replace("'", "''")
             out = self._psql(side, target,
-                             "select a.attname from pg_attribute a"
+                             "select a.attname||chr(9)||a.attidentity::text"
+                             "||chr(9)||a.attgenerated::text"
+                             " from pg_attribute a"
                              f" where a.attrelid = to_regclass('{ref}')"
-                             " and a.attidentity = 'a' and a.attnum > 0"
-                             " and not a.attisdropped")
-            cache[ident] = {line for line in out.splitlines() if line}
-        return (" overriding system value"
-                if cache[ident] & set(names) else "")
+                             " and a.attnum > 0 and not a.attisdropped")
+            always, generated = set(), set()
+            for line in out.splitlines():
+                parts = line.split("\t")
+                if len(parts) != 3:
+                    continue
+                name, identity, gen = parts
+                if identity == "a":
+                    always.add(name)
+                if gen:
+                    generated.add(name)
+            cache[ident] = {"always": always, "generated": generated}
+        return cache[ident]
+
+    def _unwritable_columns(self, side, db, table):
+        """`GENERATED ALWAYS AS (expr) STORED` - the server computes these
+        and refuses anybody else's value, so a repair has to leave them out
+        and let it. Measured: an insert omitting `total` stored `total=20`
+        from `price * qty`, which is the right answer arrived at the only
+        way the server allows."""
+        return self._write_rules(side, db, table)["generated"]
 
     def _apply_upsert(self, side, db, table, key, values):
         from .. import canon
@@ -297,7 +337,8 @@ class PostgresEngine(Engine):
         sch, tbl = self._split(table)
         row = dict(key)
         row.update(values)
-        names = sorted(row)
+        names = [n for n in sorted(row)
+                 if n not in self._unwritable_columns(side, db, table)]
         cols = ", ".join(f'"{n}"' for n in names)
         marks = ", ".join(["%s"] * len(names))
         sets = ", ".join(f'"{n}" = excluded."{n}"'

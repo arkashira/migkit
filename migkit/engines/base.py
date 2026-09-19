@@ -353,6 +353,20 @@ class Engine:
         such concept, which is most of them."""
         return ""
 
+    def _unwritable_columns(self, side, db, table):
+        """Columns the server computes and refuses to be told.
+
+        A repair carries a whole row, including the columns a generated
+        expression owns, and has to leave those out rather than argue. An
+        empty set for an engine with no such concept - which is a claim, so
+        an engine that has them says so by overriding this.
+
+        Comparing them stays right either way: a target whose expression
+        differs from the source's should show up as a value difference. It
+        is only the writing that has to give way.
+        """
+        return set()
+
     def _scalar(self, side, db, sql):
         """One row, as text, or **None** when this engine cannot be asked -
         which is not the same as a query that returned nothing."""
