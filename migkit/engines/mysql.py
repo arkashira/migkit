@@ -2127,7 +2127,8 @@ class MySQLEngine(Engine):
             # fall through to the row path and be read as a table name
             raise RuntimeError(f"no way to apply a {action.kind!r} repair")
         t = action.statements[0].split()[3]
-        self._apply_rows(db, t, getattr(self, "_undo_dir", None))
+        self._apply_rows_native(db, t,
+                                getattr(self, "_undo_dir", None))
 
     @staticmethod
     def _drill_keys(path):
@@ -2159,7 +2160,13 @@ class MySQLEngine(Engine):
                 " `migkit check --check data` to write it again before"
                 " syncing")
 
-    def _apply_rows(self, db, t, undo_dir=None):
+    def _apply_rows_native(self, db, t, undo_dir=None):
+        """This engine's own row repair, named apart from the base's
+        `_apply_rows`: that one carries rows between two engines over
+        the neutral contract and takes a different set of arguments,
+        and two methods with one name on the same object is a trap
+        waiting for whoever calls the wrong one.
+        """
         d = self.hop.report_dir(db)
         ddb = self._d("dst", db)
         pks = self._pk_cols(db, t)

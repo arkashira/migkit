@@ -106,7 +106,7 @@ def test_repair_then_restore_is_exact(pair, tmp_path):
     before = _sql(DST, "select * from shop.t order by id").stdout
 
     undo = tmp_path / "undo"
-    eng._apply_rows("shop", "t", str(undo))
+    eng._apply_rows_native("shop", "t", str(undo))
 
     after = _sql(DST, "select * from shop.t order by id").stdout
     assert "extra" not in after          # id 9 deleted

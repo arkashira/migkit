@@ -493,11 +493,17 @@ class GenericEngine(Engine):
         the pair has a moment in which the row is on neither side.
         """
         try:
-            self._apply_rows(db, action)
+            self._apply_rows_borrowed(db, action)
         finally:
             self._close()
 
-    def _apply_rows(self, db, action):
+    def _apply_rows_borrowed(self, db, action):
+        """The row repair this engine does over the driver it borrows
+        from reladiff. Named apart from the base's `_apply_rows`, which
+        carries rows between two engines over the neutral contract and
+        takes a different set of arguments: one name for two methods on
+        the same object is a trap for whoever calls the wrong one.
+        """
         from sqeleton.queries import and_, or_, table, this
         name = action.scope.split(".", 1)[1]
         found = self._drill_tables(db).get(name, {})

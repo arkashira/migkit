@@ -36,6 +36,7 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests.conftest import psql
 
 KEYS = ["plain", "back\\slash", "has\ttab", "line\nbreak", '"quoted"']
 
@@ -294,3 +295,174 @@ def test_sqlite_repairs_them_too(tmp_path):
     con.close()
     assert got == sorted(KEYS), got
     assert eng.check_data("main")[0].status == "ok"
+
+
+# ---- the two engines that do not own their driver --------------------
+
+def test_hetero_carries_such_keys_between_two_engines(pg_pair, mysql_pair,
+                                                       tmp_path):
+    """A cross-engine hop writes the key on one side and matches it on the
+    other, so an encoding that loses a character loses the row."""
+    from migkit.engines.hetero import HeteroEngine
+    rows = ", ".join("($tag${}$tag$, 'v')".format(k) for k in KEYS)
+    got = psql(pg_pair["src"], "drop table if exists hk;"
+                               " create table hk (k text primary key,"
+                               " v text);"
+                               f" insert into hk values {rows};")
+    assert got.returncode == 0, got.stderr
+    assert _mysql(MY2, "drop table if exists app.hk;"
+                       " create table app.hk (k varchar(60) primary key,"
+                       " v varchar(60));"
+                       " insert into app.hk values ('plain','v'),"
+                       " ('stray','z');").returncode == 0
+
+    hop = Hop(name="teeth", engine="hetero",
+              source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
+                              user="postgres", password="test",
+                              options={"database": "postgres"}),
+              target=Endpoint(host="127.0.0.1", port=mysql_pair["dst"],
+                              user="root", password="test",
+                              options={"database": "app"}),
+              options={"source_engine": "postgres",
+                       "target_engine": "mysql"},
+              db_map={"postgres": "app"})
+    hop.report_dir = lambda db=None: tmp_path
+    eng = HeteroEngine(hop)
+    found = [r for r in eng.check_data("postgres") if r.scope.endswith("hk")]
+    assert found[0].status == "diff", found[0].detail
+
+    # as a set: the order in the file is the source's collation, which is
+    # the server's business rather than something to pin here
+    written = (tmp_path / "data-hk.missing").read_text().splitlines()
+    assert {json.loads(l)[0] for l in written} == set(KEYS[1:]), written
+
+    for action in eng.repair_plan("postgres", "rows"):
+        if action.scope.endswith("hk"):
+            eng.apply("postgres", action)
+
+    src_rows = psql(pg_pair["src"], "select md5(k) from hk order by k;"
+                    ).stdout.split()
+    dst_rows = _mysql(MY2, "select md5(k) from app.hk order by k").stdout.split()
+    assert sorted(src_rows) == sorted(dst_rows), (src_rows, dst_rows)
+    after = [r for r in eng.check_data("postgres") if r.scope.endswith("hk")]
+    assert after[0].status == "ok", after[0].detail
+
+
+@pytest.mark.skipif(not __import__("migkit.util", fromlist=["which"]
+                                   ).which("reladiff"),
+                    reason="reladiff is not where migkit would look for it")
+def test_generic_writes_values_holding_them_back_unchanged(pg_pair, tmp_path):
+    """reladiff will not key on a string at all (the test below pins that),
+    so what carries these characters here is the values - and those go back
+    through the borrowed writer as SQL literals."""
+    from migkit.engines.generic import GenericEngine
+    values = ", ".join("({}, $tag${}$tag$)".format(i, v)
+                       for i, v in enumerate(KEYS + ["%s and _ and $x$"], 1))
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        got = psql(port, "drop table if exists nv;"
+                         " create table nv (id bigint primary key, v text);"
+                         f" insert into nv values {values};")
+        assert got.returncode == 0, got.stderr
+    psql(pg_pair["dst"], "update nv set v='WRONG' where id in (2,4);"
+                         " delete from nv where id=3;"
+                         " insert into nv values (99,'extra');")
+
+    def url(port):
+        return f"postgresql://postgres:test@127.0.0.1:{port}/postgres"
+    hop = Hop(name="teeth", engine="generic",
+              source=Endpoint(host="x", port=0, user="", password="",
+                              options={"url": url(pg_pair["src"])}),
+              target=Endpoint(host="x", port=0, user="", password="",
+                              options={"url": url(pg_pair["dst"])}),
+              options={"tables": ["nv"], "key": "id"})
+    hop.report_dir = lambda db=None: tmp_path
+    eng = GenericEngine(hop)
+    assert eng.check_data("-")[0].status == "diff"
+    for action in eng.repair_plan("-", "rows"):
+        eng.apply("-", action)
+
+    def digests(port):
+        return psql(port, "select md5(v) from nv order by id;").stdout.split()
+    assert digests(pg_pair["src"]) == digests(pg_pair["dst"])
+    assert eng.check_data("-")[0].status == "ok"
+
+
+@pytest.mark.skipif(not __import__("migkit.util", fromlist=["which"]
+                                   ).which("reladiff"),
+                    reason="reladiff is not where migkit would look for it")
+def test_generic_says_so_when_one_key_makes_reladiff_refuse_the_table(
+        pg_pair, tmp_path):
+    """Measured on reladiff 0.6.0, and it is the values rather than the
+    declared type that decide it: the same `varchar(60)` key column compares
+    fine while its values are ordinary, and the moment one row's key holds a
+    tab the whole table comes back `Cannot use a column of type Text() as a
+    key`. reladiff samples the column and will not bisect on one it reads as
+    free text.
+
+    That is a real limit of the tool this engine borrows, and what matters
+    here is that the check calls it an error rather than a table that
+    matched, and leaves no drilldown for `sync` to act on.
+    """
+    from migkit.engines.generic import GenericEngine
+
+    def url(port):
+        return f"postgresql://postgres:test@127.0.0.1:{port}/postgres"
+    hop = Hop(name="teeth", engine="generic",
+              source=Endpoint(host="x", port=0, user="", password="",
+                              options={"url": url(pg_pair["src"])}),
+              target=Endpoint(host="x", port=0, user="", password="",
+                              options={"url": url(pg_pair["dst"])}),
+              options={"tables": ["sk"], "key": "k"})
+    hop.report_dir = lambda db=None: tmp_path
+    eng = GenericEngine(hop)
+
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        got = psql(port, "drop table if exists sk;"
+                         " create table sk (k varchar(60) primary key,"
+                         " v text);"
+                         " insert into sk values ('plain','1'),"
+                         " ('also-plain','2');")
+        assert got.returncode == 0, got.stderr
+    ordinary = eng.check_data("-")
+    assert [r.status for r in ordinary] == ["ok"], [r.detail
+                                                    for r in ordinary]
+
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        psql(port, "insert into sk values (E'has\\ttab','3');")
+    refused = eng.check_data("-")
+    assert [r.status for r in refused] == ["error"], [r.detail
+                                                      for r in refused]
+    assert "as a key" in refused[0].detail, refused[0].detail
+    assert not list(tmp_path.glob("data-sk.*")), list(tmp_path.iterdir())
+
+
+def test_no_engine_hides_the_base_row_repair_behind_its_own(tmp_path):
+    """`_apply_rows` on the base carries rows between two engines. Two
+    engines had a method of the same name taking different arguments, which
+    is a trap for whoever calls the wrong one: the mysql one is
+    `_apply_rows_native`, the generic one `_apply_rows_borrowed`."""
+    import inspect
+
+    from migkit.engines import NAMES, engine_named
+    from migkit.engines.base import Engine
+    expected = inspect.signature(Engine._apply_rows)
+    for name in NAMES:
+        cls = type(engine_named(name, _stub_hop(tmp_path)))
+        own = cls.__dict__.get("_apply_rows")
+        if own is None:
+            continue
+        assert inspect.signature(own) == expected, (
+            f"{name} defines its own _apply_rows with a different shape")
+
+
+def _stub_hop(tmp_path):
+    hop = Hop(name="sig", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"),
+              target=Endpoint(host="127.0.0.1", port=1, user="u",
+                              password="p"),
+              options={"source_engine": "postgres",
+                       "target_engine": "mysql"},
+              databases=["x"])
+    hop.report_dir = lambda db=None: tmp_path
+    return hop
