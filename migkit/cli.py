@@ -1060,8 +1060,10 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
     _require_configured(hop)
     eng = get_engine(hop)
     if not hasattr(eng, "delta_verify"):
-        raise SystemExit(f"delta verify not available for {hop.engine} yet"
-                         " (postgres, mysql, mongodb)")
+        from .engines import engines_with
+        raise SystemExit(
+            f"delta verify not available for {hop.engine} yet -"
+            f" {', '.join(engines_with('delta_verify'))} have it")
     dbs = [db] if db else eng.databases()
     if teardown:
         for d in dbs:

@@ -1023,15 +1023,41 @@ class MongoEngine(Engine):
 
     # delta verify: re-check only _ids touched since the saved change-stream
     # token, which advances only on a clean verify (idempotent)
+    #: what a standalone server answers when asked for a change stream
+    NO_CHANGE_STREAM = "only supported on replica sets"
+
+    def _no_stream_result(self, db, check, error):
+        """A standalone MongoDB cannot be tailed, and says so plainly.
+
+        Measured against `mongo:7` started on its own: `$changeStream stage
+        is only supported on replica sets`. A delta reads the oplog through a
+        change stream, and a standalone keeps no oplog, so there is nothing
+        to read - which is a sentence an operator can act on rather than a
+        driver exception arriving from four frames down.
+        """
+        return [Result(check, db, "error",
+                       "this MongoDB is a standalone, so it keeps no oplog"
+                       " and migkit cannot follow its changes"
+                       f" ({str(error).splitlines()[0][:80]})", "",
+                       "run `migkit check` for a full comparison, or make it"
+                       " a single-node replica set (`--replSet` plus"
+                       " `rs.initiate()`) if you want delta and CDC")]
+
     def delta_verify(self, db, limit=20000, log=None):
         from bson.json_util import dumps, loads
+        from pymongo.errors import OperationFailure
         state = self.hop.report_dir(db) / "delta-token.json"
         src = self._client("src")[db]
         dst = self._client("dst")[self._d("dst", db)]
         if not state.exists():
-            with src.watch() as stream:
-                stream.try_next()
-                state.write_text(dumps(stream.resume_token))
+            try:
+                with src.watch() as stream:
+                    stream.try_next()
+                    state.write_text(dumps(stream.resume_token))
+            except OperationFailure as e:
+                if self.NO_CHANGE_STREAM in str(e):
+                    return self._no_stream_result(db, "delta", e)
+                raise
             return [Result("delta", db, "ok",
                            "resume token recorded, changes are tracked"
                            " from this point on")]
@@ -1058,6 +1084,8 @@ class MongoEngine(Engine):
                         touched.setdefault(coll, {})[repr(key)] = key
         except OperationFailure as e:
             msg = str(e).lower()
+            if self.NO_CHANGE_STREAM in str(e):
+                return self._no_stream_result(db, "delta", e)
             if getattr(e, "code", None) == 286 \
                     or "no longer be in the oplog" in msg \
                     or "changestreamhistorylost" in msg:

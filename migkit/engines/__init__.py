@@ -36,6 +36,27 @@ def _class_for(name):
     return None
 
 
+#: every canonical engine name, in the order a report lists them
+NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
+         "hetero", "generic")
+
+
+def engines_with(method):
+    """Canonical names of the engines that implement `method`.
+
+    So a message telling an operator which engines can do something is read
+    off the engines. The hand-written version of this sentence named three
+    engines while six had the method, which is the sort of thing nobody
+    notices until they believe it.
+    """
+    out = []
+    for name in NAMES:
+        cls = _class_for(name)
+        if cls is not None and getattr(cls, method, None) is not None:
+            out.append(name)
+    return out
+
+
 def engine_named(name, hop):
     """Build the engine for `name` on this hop, whatever the hop's own engine.
 
