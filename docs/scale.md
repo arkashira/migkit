@@ -38,6 +38,49 @@ per-row cost inside the measurement.
 | `migkit check` (31 checks, all green) | **9.8 s** | **62.4 s** |
 | check, peak RSS | 328 MB | **333 MB** |
 
+### Large objects, and the two movers
+
+The same measurements again on `bench_lobs`: 50,000 rows whose payload is a
+`bytea` averaging 40 KB of **random** bytes (compressible filler would
+measure the compressor, not the move) plus a TOAST-able text column -
+2,093 MB, of which 2,051 MB is TOAST.
+
+| 2,093 MB of LOB | wall | CPU on the host | rows |
+|---|---|---|---|
+| `migkit move` (`pg_dump -Fd -j2` \| `pg_restore -j2`) | 93.6 s | **82.9 s user** | 50,000 |
+| `pgcopydb copy table-data --table-jobs 2` | **18.2 s** | 0.35 s user | 50,000 |
+
+And on a plain table, 2,000,000 rows / 555 MB:
+
+| 555 MB, no LOB | wall | CPU on the host |
+|---|---|---|
+| `migkit move` (dump/restore) | 11.7 s | 7.6 s user |
+| `pgcopydb copy table-data` | **4.1 s** | 0.15 s user |
+
+**pgcopydb is 2.9x faster on the plain table and 5.2x on the LOB table**,
+and the CPU numbers say why: `pg_dump -Fd` compresses by default, so the
+dump path spends 83 of its 94 seconds gzipping bytes that were random to
+begin with. pgcopydb streams COPY between the two servers and spends
+almost no host CPU at all.
+
+LOBs cost about half the throughput per byte even on the fast path: 48 MB/s
+for the plain table against 22 MB/s for the LOB table through dump/restore.
+
+**Why migkit was not using it.** `movers.pgcopydb_available()` requires the
+`dimitri/pgcopydb` container image rather than a local binary, because
+Homebrew's pgcopydb 0.18 is compiled against PostgreSQL 18 and emits `SET
+transaction_timeout = 0`, which PostgreSQL 16 has never heard of. That was
+measured to make a whole-database `clone` move zero rows while reporting
+each rejection separately.
+
+Re-measured here, the rejection is real and the outcome is not: the target's
+log shows `ERROR: unrecognized configuration parameter
+"transaction_timeout"` during the pgcopydb run, and all 50,000 and then
+2,000,000 rows arrived anyway. The difference is the subcommand - `copy
+table-data` survives the failed SET where `clone` does not. That is a
+narrower constraint than the current availability check enforces, and
+worth 3-5x.
+
 ### What the numbers say
 
 **Throughput is flat.** 172,000 rows/s at one million, 173,000 rows/s at ten
@@ -84,18 +127,21 @@ confirmed to fail without the fix (it reported 100 for a 400-row table).
 
 ## Notes and open questions
 
-- **pgcopydb is installed and the plan did not use it.** For this hop migkit
-  chose `pg_dump -Fd -j2` piped to `pg_restore -j2`. pgcopydb exists
-  precisely because that pair cannot stream between two running servers, and
-  it adds the snapshot-sharing and table-splitting described in
-  [what a migration actually costs](what-a-migration-actually-costs.md).
-  Whether the chooser should prefer it, and by how much it wins here, is the
-  next measurement.
-- **Nothing above involves LOBs**, which the research says is where full
-  loads actually die. A bytea/large-object table is the next thing to add to
-  `bench_rows`.
-- **No comparison against another tool** on this hardware yet. Until that
-  exists migkit makes no claim about being faster or slower than anything.
+- **The chooser should probably prefer pgcopydb, and does not yet.**
+  Measured above: 2.9x on a plain table, 5.2x with LOBs, at a fraction of
+  the host CPU. What stands in the way is `pgcopydb_available()` demanding
+  the container image because a local binary built against a newer
+  PostgreSQL breaks `clone` - a constraint measured here to **not** apply to
+  the `copy table-data` path migkit actually uses. Changing it needs a guard
+  that catches the failure the old note describes (a run that reports
+  success and moves nothing), which is the next piece of work rather than a
+  one-line edit.
+- **LOB numbers are above**, and the shape of the cost is clear: half the
+  throughput per byte, and on the dump path most of the wall clock is host
+  CPU spent compressing incompressible bytes.
+- **Still no comparison against a managed service** (DMS, DTS) on the same
+  hardware. Until that exists migkit makes no claim about being faster than
+  anything except the two movers measured here.
 - The 20 GiB VM disk is the practical ceiling for this harness: ten million
   rows on both sides plus WAL used about 12 GB.
 

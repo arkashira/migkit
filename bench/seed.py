@@ -47,6 +47,19 @@ def pools(seed, size=POOL):
     }
 
 
+#: A table with the thing every migration guide says kills a full load.
+#: `doc` is a TOAST-able text column and `blob` a bytea, both large enough
+#: to be stored out of line, which is what makes them behave like the LOBs
+#: the tools have modes for.
+LOB_DDL = """
+create table if not exists bench_lobs (
+    id      bigint primary key,
+    label   text not null,
+    doc     text,
+    blob    bytea
+);
+"""
+
 DDL = """
 create table if not exists bench_rows (
     id          bigint primary key,
@@ -87,6 +100,54 @@ def rows(count, seed):
         yield (i, name, email, city, note, tag, amount,
                rnd.randrange(0, 1000), "true" if i % 3 else "false",
                created, payload)
+
+
+def lob_rows(count, seed, kb):
+    """Rows whose payload is the size the operator actually has.
+
+    The bytes are random so they do not compress away: a benchmark on
+    compressible filler measures the compressor, not the move.
+    """
+    rnd = random.Random(seed)
+    for i in range(1, count + 1):
+        size = int(kb * 1024 * (0.5 + rnd.random()))      # 50%..150% of kb
+        doc = "".join(rnd.choice("abcdefghij klmnopqrst") for _ in range(200))
+        blob = rnd.randbytes(size)
+        yield (i, f"row-{i}", doc * (size // 4000 + 1),
+               "\\x" + blob.hex())
+
+
+def load_lobs(dsn, count, seed, kb, quiet=False):
+    import psycopg2
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    started = time.monotonic()
+    with conn.cursor() as cur:
+        cur.execute(LOB_DDL)
+        cur.execute("truncate bench_lobs")
+        batch = []
+        for n, row in enumerate(lob_rows(count, seed, kb), 1):
+            batch.append(row)
+            if len(batch) >= 500:
+                _copy_lobs(cur, batch)
+                batch = []
+                if not quiet and n % 5000 == 0:
+                    print(f"  {n:,} lob rows  "
+                          f"{time.monotonic() - started:6.1f}s", flush=True)
+        if batch:
+            _copy_lobs(cur, batch)
+        cur.execute("analyze bench_lobs")
+        cur.execute("select count(*), pg_size_pretty("
+                    "pg_total_relation_size('bench_lobs')) from bench_lobs")
+        got, size = cur.fetchone()
+    conn.close()
+    return {"rows": got, "size": size,
+            "seconds": round(time.monotonic() - started, 1)}
+
+
+def _copy_lobs(cur, batch):
+    buf = io.StringIO(copy_text(batch))
+    cur.copy_expert("copy bench_lobs (id, label, doc, blob) from stdin", buf)
 
 
 def copy_text(batch):
@@ -149,8 +210,15 @@ def main():
     ap.add_argument("--rows", type=int, default=1_000_000)
     ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--lob-kb", type=int, default=0,
+                    help="load bench_lobs instead, with payloads averaging"
+                         " this many KB")
     args = ap.parse_args()
-    got = load(args.dsn, args.rows, args.seed, quiet=args.quiet)
+    if args.lob_kb:
+        got = load_lobs(args.dsn, args.rows, args.seed, args.lob_kb,
+                        quiet=args.quiet)
+    else:
+        got = load(args.dsn, args.rows, args.seed, quiet=args.quiet)
     print(f"loaded {got['rows']:,} rows, {got['size']}, "
           f"{got['seconds']}s")
 
