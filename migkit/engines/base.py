@@ -259,6 +259,63 @@ class Engine:
                       f"{len(tables)} tables, all analyzed since they were"
                       " last written")
 
+    def _invalid_index_result(self, db, broken, partial, total, hint):
+        """Indexes that exist, answer no query, and still send a bill.
+
+        `CREATE INDEX CONCURRENTLY` does not roll back when it fails - a
+        duplicate key, a cancelled session, a `statement_timeout` set for
+        ordinary queries - it leaves the index behind marked invalid. The
+        planner then ignores it, so it shows up in every "unused index"
+        report as something to drop, while the name it holds makes the
+        rebuild that would fix it fail with `already exists`.
+
+        Two states, both measured on PostgreSQL 16 rather than assumed, and
+        they cost differently:
+
+        * **not maintained** (a build that failed before it finished): 0
+          bytes, never grows, pure name collision.
+        * **maintained** (a build cancelled after it finished but before it
+          was validated): 200,000 inserts grew one from 4.5 MB to 12.3 MB
+          while `EXPLAIN` on the indexed column still chose a seq scan.
+          Every write pays for an index no read can use.
+
+        `broken` is [(side, table, index, maintained)]. `partial` is the
+        separate case that is **not** a fault: an index on a partitioned
+        parent is invalid by design until every partition's index has been
+        attached, so it is reported as a warning, because one that stays
+        that way means a partition is missing its index.
+        """
+        def name(side, table, index):
+            return f"{side} {table}.{index}"
+
+        if broken:
+            worst = ", ".join(
+                name(s, t, i) + (" (maintained on every write)" if m else
+                                 " (not maintained - only the name is taken)")
+                for s, t, i, m in broken[:4])
+            return Result(
+                "deep", f"{db} indexes", "diff",
+                f"{len(broken)} indexes exist but answer no query: {worst}"
+                + (" ..." if len(broken) > 4 else "")
+                + " - a CREATE INDEX CONCURRENTLY that failed leaves this"
+                  " behind and does not undo it", "", hint)
+        if partial:
+            worst = ", ".join(name(s, t, i) for s, t, i in partial[:4])
+            return Result(
+                "deep", f"{db} indexes", "warn",
+                f"{len(partial)} partitioned indexes are not valid yet:"
+                f" {worst}"
+                + (" ..." if len(partial) > 4 else "")
+                + " - normal while partitions are still being attached, and a"
+                  " missing partition index if it stays this way", "",
+                "ATTACH the index on every partition, or rebuild the parent"
+                " index so it builds them for you")
+        if not total:
+            return Result("deep", f"{db} indexes", "skip",
+                          "no indexes on either side to check")
+        return Result("deep", f"{db} indexes", "ok",
+                      f"{total} indexes, all valid and usable by the planner")
+
     def check_params(self, db):
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]

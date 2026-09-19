@@ -1281,9 +1281,33 @@ class MySQLEngine(Engine):
                       " the table was written - a verdict from either would"
                       " be guesswork")
 
+    def _invalid_indexes(self, db):
+        """PostgreSQL's half-built index has no MySQL equivalent, and that
+        is a measured answer rather than an assumed one.
+
+        On MySQL 8, `ALTER TABLE ... ADD UNIQUE INDEX` over duplicate rows
+        fails with 1062 and leaves **nothing** behind: `information_schema.
+        statistics` for the schema came back empty, and `innodb_indexes`
+        held only `GEN_CLUST_INDEX`. The control matters as much as the
+        result - a valid index created afterwards did appear in the same
+        query, so the empty answer was the absence of an index and not a
+        query that reads nothing. Atomic DDL, doing what it says.
+
+        The one state MySQL does have is a secondary index InnoDB has
+        marked corrupt, and no catalog column exposes it - it surfaces only
+        as error 1712 when something touches the index. Unknown, not zero.
+        """
+        return Result("deep", f"{db} indexes", "skip",
+                      "no half-built index state on MySQL: measured, a failed"
+                      " ADD UNIQUE INDEX rolled back completely (atomic DDL)"
+                      " while a valid index created next did show up in the"
+                      " same query - and a corrupt index is exposed only as"
+                      " error 1712, with no catalog column to read")
+
     def check_deep(self, db):
         res = [self._planner_stats(db),
-               self._lob_check(db)]
+               self._lob_check(db),
+               self._invalid_indexes(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

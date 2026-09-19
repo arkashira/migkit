@@ -1485,6 +1485,55 @@ class PostgresEngine(Engine):
             " those tables with a path that does not truncate -"
             " `migkit move --go` does not")
 
+    #: Every index on a user table, with the two flags that decide whether it
+    #: is usable and whether it still costs writes. `relkind` separates a
+    #: plain index from a partitioned parent, which is allowed to be invalid.
+    INDEX_FLAGS = (
+        "select n.nspname||'.'||t.relname||chr(9)||c.relname"
+        " ||chr(9)||c.relkind::text||chr(9)||i.indisvalid::int::text"
+        " ||chr(9)||i.indisready::int::text"
+        " from pg_index i"
+        " join pg_class c on c.oid = i.indexrelid"
+        " join pg_class t on t.oid = i.indrelid"
+        " join pg_namespace n on n.oid = t.relnamespace"
+        " where n.nspname not in ('pg_catalog','information_schema')"
+        " and n.nspname not like 'pg\\_%'"
+        " and n.nspname not like '\\_\\_%'"
+        " and t.relname not like 'migkit\\_%'"
+        " order by 1")
+
+    def _invalid_indexes(self, db):
+        """Both sides, because an invalid index is a reason not to migrate
+        yet as much as it is a failed rebuild afterwards. On the source it
+        reads as an index nobody uses; on the target it is the post-load
+        `CREATE INDEX CONCURRENTLY` that died and said so once."""
+        broken, partial, total = [], [], 0
+        for side, name in (("src", db), ("dst", self._d("dst", db))):
+            label = "source" if side == "src" else "target"
+            try:
+                out = self._psql(side, name, self.INDEX_FLAGS)
+            except Exception as e:
+                return Result("deep", f"{db} indexes", "error",
+                              f"could not read the {label}'s indexes:"
+                              f" {str(e).splitlines()[-1][:90]}")
+            for line in out.splitlines():
+                parts = line.split("\t")
+                if len(parts) != 5:
+                    continue
+                table, index, relkind, valid, ready = parts
+                if valid == "1":
+                    total += 1
+                elif relkind == "I":
+                    partial.append((label, table, index))
+                else:
+                    broken.append((label, table, index, ready == "1"))
+        return self._invalid_index_result(
+            db, broken, partial, total,
+            "drop each one and build it again - `DROP INDEX CONCURRENTLY"
+            " <name>` then `CREATE INDEX CONCURRENTLY`, with"
+            " maintenance_work_mem and max_parallel_maintenance_workers"
+            " raised for the rebuild")
+
     def moved_nothing(self, db):
         """Which tables the source has rows in and the target does not."""
         try:
@@ -1606,6 +1655,7 @@ class PostgresEngine(Engine):
 
         res.append(self._planner_stats(db))
         res.append(self._lob_check(db))
+        res.append(self._invalid_indexes(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """

@@ -95,13 +95,13 @@ In order. Each item says what has to be measured before it is written.
    and `python-oracledb` 26 connects in thin mode with no Instant Client -
    so it is testable here. `icr.io/db2_community/db2` is amd64/ppc64le/s390x
    only, so Db2 would be emulation: it goes behind S3 (minio) and Redshift.
-3. **The index nobody can see is broken.** A failed `CREATE INDEX
-   CONCURRENTLY` leaves an invalid index that the planner ignores, writes
-   still pay for, and a rebuild of the same name trips over - and a full
-   `migkit check --deep` against a target holding two of them said the word
-   "invalid" zero times. One query finds them; the nuance is excluding a
-   partitioned parent's index, which is invalid by design until every
-   partition attaches.
+3. ~~**The index nobody can see is broken.**~~ **Done** - `check --deep`
+   reads `indisvalid` on both sides, tells apart the invalid index that costs
+   every write from the one that only holds its name, and warns rather than
+   fails on a partitioned parent. **Still open from this item:** the settings
+   that make the rebuild finish - `migkit move` raises neither
+   `maintenance_work_mem` nor `max_parallel_maintenance_workers`, worth
+   21.99 s against 12.82 s on the same `CREATE INDEX`.
 4. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

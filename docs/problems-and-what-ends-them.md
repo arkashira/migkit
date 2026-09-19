@@ -320,17 +320,45 @@ occupies space, and still blocks creating an index of that name again.
 Migration tooling hits this constantly: a big table plus a low
 `statement_timeout` is the recipe.
 
-**migkit: Not yet, and measured.** A target was left with two invalid
-indexes, one of them sharing a name with a *valid* index on the source. The
-full `migkit check --deep` report mentions the word "invalid" **zero times**.
-The schema diff notices an index the source does not have and says "1 to
-remove", which reads as a spurious index rather than a broken one; when the
-name exists on both sides it says nothing at all.
+**migkit: Ends it** - `tests/test_invalid_indexes.py`. Before the check
+existed this was measured: a target left with two invalid indexes, one of
+them sharing a name with a *valid* index on the source, produced a full
+`migkit check --deep` report that mentioned the word "invalid" **zero
+times**. The schema diff noticed an index the source did not have and said
+"1 to remove", which reads as a spurious index rather than a broken one; when
+the name existed on both sides it said nothing at all.
 
-The detection is one query - `select ... from pg_index where not indisvalid`
-- with one piece of nuance that a naive check would get wrong: a partitioned
-parent's index is invalid **by design** until every partition's index is
-attached, so those have to be excluded rather than reported.
+`migkit check --deep` now reads `indisvalid` on **both** sides, because on
+the source an invalid index is a reason not to migrate yet and on the target
+it is the post-load rebuild that died:
+
+    deep postgres indexes: DIFF 1 indexes exist but answer no query:
+      target public.orders.orders_uniq (not maintained - only the name is
+      taken) - a CREATE INDEX CONCURRENTLY that failed leaves this behind
+      and does not undo it
+
+The two states are told apart because they cost differently, and both were
+produced on a live PostgreSQL 16 rather than assumed. A build that failed
+before it finished (`indisready=f`) stayed at **0 bytes** and never grew. A
+build cancelled after it finished but before it was validated
+(`indisready=t`) grew from **4.5 MB to 12.3 MB over 200,000 inserts** while
+`EXPLAIN` on the indexed column still chose a sequential scan - every write
+paying for an index no read can use. Either way `CREATE INDEX` with that name
+fails with `already exists`.
+
+The nuance a naive check gets wrong is handled rather than ignored: a
+partitioned parent's index (`relkind='I'`) is invalid **by design** until
+every partition's index is attached, so it is a warning that says so, not a
+fault - and a real fault in the same report outranks it.
+
+MySQL answers the same command with a **skip that explains itself**, which is
+a measured answer and not a shrug: a failed `ADD UNIQUE INDEX` over duplicate
+rows rolled back completely - `information_schema.statistics` came back empty
+and `innodb_indexes` held only `GEN_CLUST_INDEX` - while a valid index
+created straight afterwards *did* appear in the same query, so the empty
+answer was real. The one state MySQL does have, a secondary index InnoDB has
+marked corrupt, has no catalog column at all and surfaces only as error 1712.
+Unknown, not zero.
 
 **Also missing:** the settings that make the rebuild finish in the first
 place. The measured difference is not small - the same `CREATE INDEX` took
