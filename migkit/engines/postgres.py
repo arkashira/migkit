@@ -1365,6 +1365,11 @@ class PostgresEngine(Engine):
         " and n.nspname not like '\\_\\_%'"
         " order by 1")
 
+    #: What `assess` asks before anything moves. Each of these is about
+    #: the move that is about to happen rather than the one that did.
+    PREFLIGHT = ("_capacity_gaps", "_temporal_meaning", "_time_zone_rules",
+                 "_collation_versions", "_mojibake")
+
     LARGE_OBJECT_COUNT = "select count(*) from pg_largeobject_metadata"
 
     #: Every user column that could hold a large object reference. The type
@@ -3781,6 +3786,11 @@ class PostgresEngine(Engine):
         items += self._mover_leftovers()
         items += self._client_tool_versions(
             ("pg_dump", "pg_restore", "psql"), dv)
+        # the deep checks that are about the move ahead rather than the one
+        # behind. They live in one implementation and are read from two
+        # places; this is the earlier one, which is the one that can still
+        # change what an operator does.
+        items += self._preflight_items()
         return items
 
     def _mover_leftovers(self):

@@ -166,11 +166,16 @@ In order. Each item says what has to be measured before it is written.
     `pg_largeobject_metadata` on both sides and checks that every oid
     column resolving on the source resolves on the target, while leaving
     alone the oid columns that hold something else entirely.
-11. **The pre-flight the practitioners keep asking for**: before anything
-   moves, report what the target will refuse - unsupported extensions,
-   privileges the account does not have, types with no home on the other
-   side, tables with no key, LOB columns. Everything needed for this is
-   already in `assess`; what is missing is saying it in one place, early.
+11. ~~**The pre-flight the practitioners keep asking for**~~ **Done for
+    the data half** - `assess` now runs the deep checks that predict what
+    the move will do (capacity, temporal meaning, time zone rules,
+    collation versions, mojibake), with the fix hint attached, and leaves
+    out the ones that compare what is on the target because that is empty
+    before a move. **Still open:** what the target will refuse for reasons
+    other than data - unsupported
+    extensions, privileges the account does not have, types with no home
+    on the other side. `assess` reports those today, but scattered rather
+    than in the same section as the rest.
 12. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
 13. **A cutover runbook migkit drives**: freeze, delta, verify, sequence

@@ -1352,6 +1352,61 @@ class Engine:
         if self.CLIENT_TOOLS:
             items += self._client_tool_versions(self.CLIENT_TOOLS, dv)
         items += self._assess_extra()
+        items += self._preflight_items()
+        return items
+
+    #: Deep checks that predict what a move will **do**, as opposed to
+    #: reporting what it did. These run in `assess` as well, because an
+    #: answer that only arrives from the command you run afterwards is an
+    #: answer that arrives too late.
+    #:
+    #: Measured on a pair whose target column had been narrowed and whose
+    #: timestamp had lost its zone: `assess` reported 13 pass, 5 warn, 2
+    #: fail and mentioned neither, while `check --deep` named both. The
+    #: checks existed; the operator could only reach them after the move.
+    #:
+    #: Deliberately not here: the checks that compare what is *on* the
+    #: target - large objects, extension data, duplicate keys, counts. The
+    #: target is empty before a move, so those would report a difference
+    #: every time and teach people to ignore the section.
+    PREFLIGHT = ()
+
+    def _preflight_items(self):
+        """The predictive deep checks, as `assess` rows.
+
+        One implementation, two places to read it. The mapping is the
+        obvious one and the reason matters: a `diff` here is a finding
+        about what the move will hit, so it fails the pre-flight the way
+        any other `fail` does. An `error` is not a finding, it is a check
+        that could not run, and it says so rather than passing.
+        """
+        level_of = {"diff": "fail", "warn": "warn", "error": "warn"}
+        items = []
+        try:
+            dbs = self.databases()
+        except Exception:
+            return items
+        for db in dbs:
+            for name in self.PREFLIGHT:
+                fn = getattr(self, name, None)
+                if fn is None:
+                    continue
+                try:
+                    res = fn(db)
+                except Exception as e:
+                    items.append({
+                        "level": "warn", "scope": "before the move",
+                        "item": f"{name.strip('_')} on {db}",
+                        "detail": f"could not run: {str(e)[:90]}"})
+                    continue
+                items.append({
+                    "level": level_of.get(res.status, "pass"),
+                    "scope": "before the move",
+                    "item": res.scope,
+                    "detail": res.detail
+                              + (f"  [fix] {res.fix_hint}"
+                                 if res.fix_hint and res.status != "ok"
+                                 else "")})
         return items
 
     def _assess_extra(self):

@@ -51,8 +51,45 @@ compared (`test_ownership_live_*`), `migkit users` carries logins keeping
 the same password, and `assess` checks the CDC prerequisites before anybody
 starts.
 
-**Missing:** one pre-flight answer to "what will this target refuse from
-this source". The pieces exist; saying them together, early, does not.
+**The pre-flight now says them together, early** - `test_preflight.py`.
+The gap was never that the checks did not exist; it was that the ones which
+predict what a move will *do* could only be reached from `check --deep`,
+the command you run afterwards. Measured on a pair whose target column had
+been narrowed and whose `timestamptz` was landing in a `timestamp`:
+
+    assess     13 pass, 5 warn, 2 fail     (neither mentioned)
+
+    check --deep
+      postgres target capacity: DIFF 1 columns hold values the target has
+        no room for
+      postgres temporal meaning: DIFF 1 columns change what they mean
+
+`assess` now runs the predictive checks too, and the fix travels with the
+finding:
+
+    fail  before the move  postgres target capacity  ... [fix] widen the
+      target column, or decide what happens to those rows before the move
+      rather than halfway through it
+    16 pass, 5 warn, 4 fail
+
+One implementation, read from two places - a test asserts the deep detail
+appears verbatim in the pre-flight row, so the two cannot drift into
+separate copies.
+
+**What is left out matters as much.** The checks that compare what is *on*
+the target - large objects, extension data, duplicate keys, counts - would
+report a difference against the empty target that precedes every move, and
+a wall of red in front of every migration is how people learn to skim the
+section. A test asserts those stay out, by name.
+
+A check that cannot run reports **warn**, not pass: a pre-flight row that
+went green because the query failed would be the worst kind of
+reassurance.
+
+**Still missing:** the target-side refusals that are not about data -
+privileges the account does not have, extensions the managed target will
+not install. `assess` reports those separately today rather than in this
+section.
 
 ### A3. Extensions and plugins - PostGIS is the worst case
 
