@@ -1144,12 +1144,31 @@ the column really does hold the same integer on both sides. This is the
 third finding of that exact shape, after the RLS filter and counts over
 zero tables, and it is the one that survives a clean report.
 
-**Missing:** comparing `pg_largeobject_metadata` between the two sides, and
-the anti-join that finds an `oid` column pointing at nothing. Both are one
-query. The `lo` module's own advice is the hazard to respect while writing
-it: `vacuumlo` deletes any large object not referenced from a column named
-`oid` or `lo`, so a migration that parked references in a `bigint` loses
-them to the cleanup rather than to the move.
+**Fixed** - `test_large_objects.py`. `check --deep` now compares
+`pg_largeobject_metadata` on both sides and, for every `oid` column,
+whether what it points at is actually there:
+
+    deep postgres large objects: DIFF 1 columns point at large objects the
+      target does not have: public.docs.body 2 of 2 rows - the rows
+      arrived and what they refer to did not
+
+A source holding objects against a target holding none gets its own
+wording, because that is the `-s`/`-n`/`-t` dump and worth naming as such.
+
+**The design risk was the opposite mistake**, and it shaped the check.
+Plenty of `oid` columns hold something that is not a large object - a
+`regclass`, a type oid - and an anti-join would call every one of them
+broken. So a column counts as a large object reference only when the
+**source** resolves it: measured, a column holding `'refs'::regclass::oid`
+resolved 0 rows where a real document column resolved 1. A test keeps that
+column in the fixture and asserts it is never mentioned.
+
+**What it still cannot see is stated in the line itself**, not left
+implied: a reference parked in a plain integer column is invisible to this,
+because the type is what makes it findable. `vacuumlo` has the same blind
+spot and a worse consequence - it *deletes* any large object not referenced
+from an `oid` or `lo` column, so a migration that parked its references in
+a `bigint` loses them to the cleanup rather than to the move.
 
 ### D12. The row changed while it was being compared
 

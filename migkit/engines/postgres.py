@@ -1365,6 +1365,77 @@ class PostgresEngine(Engine):
         " and n.nspname not like '\\_\\_%'"
         " order by 1")
 
+    LARGE_OBJECT_COUNT = "select count(*) from pg_largeobject_metadata"
+
+    #: Every user column that could hold a large object reference. The type
+    #: is the signal - `vacuumlo` uses the same one, and has the same blind
+    #: spot: a reference parked in a `bigint` is invisible to both.
+    OID_COLUMNS = (
+        "select n.nspname||'.'||c.relname||chr(9)||a.attname"
+        " from pg_attribute a"
+        " join pg_class c on c.oid = a.attrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " where a.atttypid = 'oid'::regtype and a.attnum > 0"
+        " and not a.attisdropped and c.relkind = 'r'"
+        " and n.nspname not in ('pg_catalog','information_schema')"
+        " and n.nspname not like 'pg\\_%'"
+        " and n.nspname not like '\\_\\_%'"
+        " and c.relname not like 'migkit\\_%'"
+        " order by 1")
+
+    def _large_objects(self, db):
+        """Compare the objects themselves, not only the integers that name
+        them.
+
+        A column is treated as a large object reference only when the
+        **source** resolves it. Plenty of `oid` columns hold something else
+        - a `regclass`, a type oid - and those resolve on neither side;
+        measured, a column holding `'refs'::regclass::oid` resolved 0 rows
+        while a real document column resolved 1, which is the whole
+        difference between a finding and a false alarm.
+        """
+        dangling, columns = [], 0
+        try:
+            src_total = int(self._psql("src", db,
+                                       self.LARGE_OBJECT_COUNT).strip() or 0)
+            dst_total = int(self._psql("dst", self._d("dst", db),
+                                       self.LARGE_OBJECT_COUNT).strip() or 0)
+            for line in self._psql("src", db, self.OID_COLUMNS).splitlines():
+                parts = line.split("\t")
+                if len(parts) != 2:
+                    continue
+                table, col = parts
+                sch, tbl = self._split(table)
+                ref = (f'"{sch}"."{tbl}"', self._quote_ident(col))
+                resolves = (f"select count(*) from {ref[0]} t"
+                            f" where t.{ref[1]} is not null and exists"
+                            " (select 1 from pg_largeobject_metadata m"
+                            f" where m.oid = t.{ref[1]})")
+                on_source = int(self._psql("src", db, resolves).strip() or 0)
+                if not on_source:
+                    continue          # not a large object column at all
+                columns += 1
+                broken = (f"select count(*) from {ref[0]} t"
+                          f" where t.{ref[1]} is not null and not exists"
+                          " (select 1 from pg_largeobject_metadata m"
+                          f" where m.oid = t.{ref[1]})")
+                try:
+                    missing = int(self._psql("dst", self._d("dst", db),
+                                             broken).strip() or 0)
+                except Exception:
+                    continue          # the table is not on the target; the
+                                      # schema check owns that finding
+                if missing:
+                    dangling.append((f"{table}.{col}", missing, on_source))
+        except Exception as e:
+            return Result("deep", f"{db} large objects", "error",
+                          "could not compare the large objects:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._large_object_result(
+            db, src_total, dst_total, dangling, columns,
+            "carry them explicitly - pg_dump skips large objects whenever"
+            " -s, -n or -t is used, and -b puts them back")
+
     def _content_fingerprint(self, side, db, relation):
         """`count|checksum` for everything in one relation.
 
@@ -2921,6 +2992,7 @@ class PostgresEngine(Engine):
                               else "no non-default extensions"))
 
         res.append(self._extension_data(db))
+        res.append(self._large_objects(db))
         res += self._deep_ownership(db)
 
         pkq = ("select n.nspname||'|'||c.relname||'|'||a.attname"

@@ -331,6 +331,61 @@ class Engine:
                       f"{checked} tables owned by extensions hold the same"
                       " rows on both sides")
 
+    def _large_object_result(self, db, src_total, dst_total, dangling,
+                             columns, hint):
+        """Whether the documents a table only points at came across.
+
+        A PostgreSQL large object does not live in the table. The table
+        holds an `oid`; the bytes live in `pg_largeobject`, and nothing
+        enforces a relationship between the two. Copy the table and you
+        have copied the integer.
+
+        Measured on a pair whose table contents were **byte-identical** -
+        `1contract16391,2invoice16391` on both sides - where the source
+        resolved the oid to a document and the target answered `large
+        object 16391 does not exist`. `counts`, `data` and `deep` all said
+        the migration was correct, because the column really did hold the
+        same integer.
+
+        `dangling` is [(table.column, broken on target, resolved on
+        source)]. Requiring the **source** to resolve a column before
+        reporting the target is what keeps this off the many `oid` columns
+        that hold something else entirely - a `regclass`, say - and would
+        otherwise look broken on both sides.
+        """
+        unsure = ("; references kept in a plain integer column are not found"
+                  " by this - the type is what makes them findable")
+        if dangling:
+            worst = ", ".join(f"{col} {broken} of {ok} rows"
+                              for col, broken, ok in dangling[:4])
+            return Result(
+                "deep", f"{db} large objects", "diff",
+                f"{len(dangling)} columns point at large objects the target"
+                f" does not have: {worst}"
+                + (" ..." if len(dangling) > 4 else "")
+                + " - the rows arrived and what they refer to did not",
+                "", hint)
+        if src_total and not dst_total:
+            return Result(
+                "deep", f"{db} large objects", "diff",
+                f"the source holds {src_total} large objects and the target"
+                " holds none - a dump restricted by schema or table drops"
+                " them silently, and the oid columns still compare equal",
+                "", hint)
+        if src_total != dst_total:
+            return Result(
+                "deep", f"{db} large objects", "diff",
+                f"{src_total} large objects on the source and {dst_total} on"
+                " the target", "", hint)
+        if not src_total and not columns:
+            return Result("deep", f"{db} large objects", "ok",
+                          "no large objects on either side")
+        return Result(
+            "deep", f"{db} large objects", "ok",
+            f"{src_total} large objects on both sides, and every oid column"
+            f" that resolves on the source resolves on the target"
+            f" ({columns} checked){unsure}")
+
     def _trigger_result(self, db, disabled, quieted, hint):
         """What the target's triggers will do to a load, in both
         directions.

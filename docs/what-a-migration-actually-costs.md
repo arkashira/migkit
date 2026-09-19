@@ -162,9 +162,10 @@ In order. Each item says what has to be measured before it is written.
     integrity between them. Measured on a pair whose table contents are
     byte-identical: the source resolves the oid to a document, the target
     answers `large object 16391 does not exist`, and `migkit check` says
-    **`verdict: same`**. `assess` does warn about them beforehand; the
-    verification never looks. Comparing `pg_largeobject_metadata` and
-    anti-joining the oid columns are one query each.
+    **`verdict: same`**. **Done** - the verification now compares
+    `pg_largeobject_metadata` on both sides and checks that every oid
+    column resolving on the source resolves on the target, while leaving
+    alone the oid columns that hold something else entirely.
 11. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
