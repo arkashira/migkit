@@ -1726,6 +1726,63 @@ class Engine:
     #: every time and teach people to ignore the section.
     PREFLIGHT = ()
 
+    def _mapping_items(self):
+        """What the hop's mapping would do, read before the move.
+
+        A mapping is the one piece of a hop whose mistakes are invisible
+        afterwards. A rename that collides leaves a target holding one
+        table's rows under both names; a rule that matches nothing leaves
+        a table exactly where it was while the operator believes it moved.
+        Neither shows up as a difference, because the check would be
+        comparing the wrong pair in the first place.
+
+        Nothing is said when there is no mapping - which is every hop that
+        has not asked for one, and a pre-flight that talks about an empty
+        feature is one people learn to scroll past.
+        """
+        hop = self.hop
+        if not getattr(hop, "mapping", None):
+            return []
+        items = []
+        for dst, srcs in sorted(hop.ambiguous_mapping().items()):
+            items.append({
+                "level": "fail", "scope": "before the move",
+                "item": "mapping", "detail":
+                    f"{len(srcs)} tables are mapped onto {dst}:"
+                    f" {', '.join(srcs)} - whichever is copied second"
+                    " overwrites the first, and the check would then"
+                    " compare one source against a target holding the"
+                    " other  [fix] give them separate names on the target"})
+        ids, why = [], None
+        try:
+            for db in self.databases():
+                ids += list(self.neutral_tables("src", db))
+        except Exception as e:
+            why = str(e).splitlines()[-1][:90]
+        if why is not None:
+            items.append({
+                "level": "warn", "scope": "before the move",
+                "item": "mapping", "detail":
+                    "could not list the source's tables, so whether every"
+                    f" mapping rule matches one is unknown: {why}"})
+        else:
+            for key in hop.unused_mapping(ids):
+                items.append({
+                    "level": "warn", "scope": "before the move",
+                    "item": "mapping", "detail":
+                        f"the rule for {key!r} matches nothing on the"
+                        " source - that table is not renamed, not filtered,"
+                        " and will move exactly as it is"
+                        "  [fix] correct the name or drop the rule"})
+        if not items:
+            items.append({
+                "level": "pass", "scope": "before the move",
+                "item": "mapping", "detail":
+                    f"{len(hop.table_map())} renames and"
+                    f" {len((hop.mapping or {}).get('where') or {})} row"
+                    " filters, every rule matching a table that exists"})
+        return items
+
     def _preflight_items(self):
         """The predictive deep checks, as `assess` rows.
 
@@ -1736,7 +1793,7 @@ class Engine:
         that could not run, and it says so rather than passing.
         """
         level_of = {"diff": "fail", "warn": "warn", "error": "warn"}
-        items = []
+        items = self._mapping_items()
         try:
             dbs = self.databases()
         except Exception:
