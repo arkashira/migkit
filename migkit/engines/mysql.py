@@ -1281,6 +1281,35 @@ class MySQLEngine(Engine):
                       " the table was written - a verdict from either would"
                       " be guesswork")
 
+    def _collation_versions(self, db):
+        """MySQL cannot have this problem, and that is a design difference
+        worth stating rather than a check worth faking.
+
+        PostgreSQL borrows its sort order from the operating system, so a
+        C library upgrade changes it under every text index. MySQL compiles
+        its collations into the server: measured on 8.4, all **286** rows of
+        `information_schema.collations` report `IS_COMPILED = Yes`, and the
+        table has no version column at all - CHARACTER_SET_NAME,
+        COLLATION_NAME, ID, IS_COMPILED, IS_DEFAULT, PAD_ATTRIBUTE, SORTLEN
+        and nothing else. Upgrading the OS underneath it changes nothing.
+
+        The MySQL-shaped version of this risk is the *server* changing the
+        default for new objects - 5.7's `utf8mb4_general_ci` against 8.0's
+        `utf8mb4_0900_ai_ci`, which also differ in padding (measured: PAD
+        SPACE against NO PAD, so `'a '` and `'a'` compare equal under one
+        and not the other). That lands as a per-column collation difference
+        between the two sides, which `{db} collation` already compares and
+        tests for collapse.
+        """
+        return Result("deep", f"{db} collation versions", "skip",
+                      "MySQL compiles its collations into the server"
+                      " (measured: 286 of 286 report IS_COMPILED=Yes, and"
+                      " information_schema.collations has no version column),"
+                      " so no OS upgrade can re-sort an index underneath it"
+                      " - the version-shaped risk here is the server default"
+                      " changing for new objects, which the collation check"
+                      " compares per column")
+
     def _invalid_indexes(self, db):
         """PostgreSQL's half-built index has no MySQL equivalent, and that
         is a measured answer rather than an assumed one.
@@ -1307,7 +1336,8 @@ class MySQLEngine(Engine):
     def check_deep(self, db):
         res = [self._planner_stats(db),
                self._lob_check(db),
-               self._invalid_indexes(db)]
+               self._invalid_indexes(db),
+               self._collation_versions(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

@@ -102,16 +102,22 @@ In order. Each item says what has to be measured before it is written.
    that make the rebuild finish - `migkit move` raises neither
    `maintenance_work_mem` nor `max_parallel_maintenance_workers`, worth
    21.99 s against 12.82 s on the same `CREATE INDEX`.
-4. **The pre-flight the practitioners keep asking for**: before anything
+4. **The sort order that moved.** **Done** - `check --deep` compares the
+   recorded collation version against the one the OS provides now, on both
+   sides, for every collation something is actually sorted by. **Still open
+   from this item:** once drift is found, listing the duplicate rows a
+   broken unique index stopped catching - which has to run with
+   `enable_indexscan = off`, because the index is the thing lying.
+5. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-5. **LOBs**, as correctness first and speed second: find them, size them,
+6. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-6. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+7. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-7. **Then** consider a migkit-owned mover, with the benchmark from item 1
+8. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources

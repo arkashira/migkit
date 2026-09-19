@@ -1485,6 +1485,93 @@ class PostgresEngine(Engine):
             " those tables with a path that does not truncate -"
             " `migkit move --go` does not")
 
+    #: A collation nothing uses cannot have broken anything, and after a real
+    #: glibc upgrade *every* locale the OS ships has drifted - 873 of them on
+    #: the measured image. Restricting to the ones a user column or index
+    #: actually references is the difference between a finding and a wall.
+    COLLATION_IN_USE = (
+        " and (exists (select 1 from pg_attribute a"
+        "   join pg_class t on t.oid = a.attrelid"
+        "   join pg_namespace n on n.oid = t.relnamespace"
+        "   where a.attcollation = c.oid and a.attnum > 0"
+        "   and not a.attisdropped"
+        "   and n.nspname not in ('pg_catalog','information_schema'))"
+        " or exists (select 1 from pg_index i"
+        "   join pg_class t on t.oid = i.indrelid"
+        "   join pg_namespace n on n.oid = t.relnamespace"
+        "   where c.oid = any (i.indcollation)"
+        "   and n.nspname not in ('pg_catalog','information_schema')))")
+
+    #: Collations in use whose recorded version no longer matches what the
+    #: operating system provides. `is distinct from` rather than `<>` so a
+    #: locale that has vanished entirely (actual version NULL) is a finding
+    #: and not a row that quietly drops out of the result.
+    COLLATION_DRIFT = (
+        "select c.collname||chr(9)||c.collversion||chr(9)"
+        "||coalesce(pg_collation_actual_version(c.oid), '')"
+        " from pg_collation c"
+        " where c.collversion is not null and c.collversion <> ''"
+        " and c.collversion is distinct from"
+        " pg_collation_actual_version(c.oid)"
+        + COLLATION_IN_USE + " order by 1")
+
+    COLLATION_COUNT = ("select count(*) from pg_collation c"
+                       " where c.collversion is not null"
+                       " and c.collversion <> ''" + COLLATION_IN_USE)
+
+    #: The database's own default collation, which is the one every text
+    #: column without an explicit COLLATE is sorted by. PostgreSQL 15 is
+    #: where it started recording this per database.
+    DB_COLLATION_DRIFT = (
+        "select datname||chr(9)||coalesce(datcollversion, '')||chr(9)"
+        "||coalesce(pg_database_collation_actual_version(oid), '')"
+        " from pg_database where datname = current_database()")
+
+    def _collation_versions(self, db):
+        """Both sides, because this is a property of the machine underneath
+        each one - and a migration is usually the moment the two machines
+        stop being the same machine."""
+        drifted, missing, checked = [], [], 0
+        for side, name in (("src", db), ("dst", self._d("dst", db))):
+            label = "source" if side == "src" else "target"
+            try:
+                rows = self._psql(side, name, self.COLLATION_DRIFT)
+                checked += int(self._psql(side, name,
+                                          self.COLLATION_COUNT).strip() or 0)
+                if int(self._psql(side, name,
+                                  "select current_setting("
+                                  "'server_version_num')::int").strip()
+                       ) >= 150000:
+                    # the database default sorts every text column that has
+                    # no explicit COLLATE, so it is the one that matters most
+                    default = self._psql(side, name,
+                                         self.DB_COLLATION_DRIFT).strip()
+                    rows += "\n" + default
+                    parts = default.split("\t")
+                    # a C-locale database records no version and has none to
+                    # drift from, so counting it would inflate the all-clear
+                    if len(parts) == 3 and parts[1]:
+                        checked += 1
+            except Exception as e:
+                return Result("deep", f"{db} collation versions", "error",
+                              f"could not read the {label}'s collation"
+                              f" versions: {str(e).splitlines()[-1][:90]}")
+            for line in rows.splitlines():
+                parts = line.split("\t")
+                if len(parts) != 3:
+                    continue
+                coll, stored, actual = parts
+                if stored and not actual:
+                    missing.append((label, coll, stored))
+                elif stored != actual:
+                    drifted.append((label, coll, stored, actual))
+        return self._collation_version_result(
+            db, drifted, missing, checked,
+            "rebuild first, then refresh: REINDEX every index on a text"
+            " column and only then ALTER DATABASE ... REFRESH COLLATION"
+            " VERSION - refreshing first silences the warning and leaves the"
+            " indexes sorted wrong")
+
     #: Every index on a user table, with the two flags that decide whether it
     #: is usable and whether it still costs writes. `relkind` separates a
     #: plain index from a partitioned parent, which is allowed to be invalid.
@@ -1656,6 +1743,7 @@ class PostgresEngine(Engine):
         res.append(self._planner_stats(db))
         res.append(self._lob_check(db))
         res.append(self._invalid_indexes(db))
+        res.append(self._collation_versions(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """

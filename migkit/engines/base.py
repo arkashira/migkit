@@ -259,6 +259,62 @@ class Engine:
                       f"{len(tables)} tables, all analyzed since they were"
                       " last written")
 
+    def _collation_version_result(self, db, drifted, missing, checked, hint):
+        """Whether the sort order an index was built under still exists.
+
+        A text index is a list sorted by rules the operating system owns,
+        not the database. When the C library changes those rules - glibc
+        2.28 rewrote them wholesale, and every distribution crossed that
+        line - the index is still a list, still sorted, and sorted wrong.
+        Lookups walk past the row they wanted. A unique index stops
+        catching duplicates, because the duplicate lands somewhere the
+        search never goes.
+
+        PostgreSQL records the version it built under and compares it on
+        every connection, which is the only reason this is findable at all.
+        The trap measured here is the fix people reach for: `ALTER DATABASE
+        ... REFRESH COLLATION VERSION` silenced the warning **instantly**,
+        without touching a single index. The alarm goes quiet and the
+        indexes stay wrong, so the hint has to put the rebuild first.
+
+        `drifted` is [(side, name, stored, actual)]; `missing` is
+        [(side, name, stored)] for a locale the OS no longer provides at
+        all, which is worse - those indexes cannot even be rebuilt until
+        the locale is installed.
+        """
+        def say(side, name, stored, actual):
+            return f"{side} {name} built under {stored}, now {actual}"
+
+        if missing:
+            worst = ", ".join(f"{s} {n} built under {v}"
+                              for s, n, v in missing[:4])
+            return Result(
+                "deep", f"{db} collation versions", "diff",
+                f"{len(missing)} collations the operating system no longer"
+                f" provides: {worst}"
+                + (" ..." if len(missing) > 4 else "")
+                + " - indexes using them are sorted by rules that are not"
+                  " installed, and cannot be rebuilt until they are", "",
+                "install the missing locale data before touching these"
+                " indexes - rebuilding without it picks a different sort"
+                " order again")
+        if drifted:
+            worst = ", ".join(say(*d) for d in drifted[:4])
+            return Result(
+                "deep", f"{db} collation versions", "diff",
+                f"{len(drifted)} collations changed under their indexes:"
+                f" {worst}"
+                + (" ..." if len(drifted) > 4 else "")
+                + " - a text index sorted by the old rules can walk past the"
+                  " row it wanted, and a unique index can stop catching"
+                  " duplicates", "", hint)
+        if not checked:
+            return Result("deep", f"{db} collation versions", "skip",
+                          "neither side uses a versioned collation")
+        return Result("deep", f"{db} collation versions", "ok",
+                      f"{checked} versioned collations, all still matching"
+                      " the sort order their indexes were built under")
+
     def _invalid_index_result(self, db, broken, partial, total, hint):
         """Indexes that exist, answer no query, and still send a bill.
 

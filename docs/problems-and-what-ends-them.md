@@ -166,13 +166,49 @@ and **unique indexes stop detecting duplicates**. `ALTER COLLATION ...
 REFRESH VERSION` silences the warning without fixing anything, and a clean
 `amcheck` run is not proof of safety.
 
-**migkit: Partly.** Collation is compared between the two sides
-(`test_deep_collation_pg.py`).
+**migkit: Ends it** for detection - `test_deep_collation_pg.py` (the two
+sides' collations) and `test_collation_versions_pg.py` (the versions behind
+them). `check --deep` now reads, on **both** sides, every collation a user
+column or index actually references, plus each database's own default, and
+compares the version recorded against the one the operating system provides
+now:
 
-**Missing:** the *version* comparison - `pg_collation.collversion` against
-the library's current version, and the duplicate hunt that has to run with
-`enable_indexscan = off` because the index itself is the thing lying. Cheap
-to add, and it catches silent data loss.
+    deep postgres collation versions: DIFF 1 collations changed under their
+      indexes: target en_US.utf8 built under 2.17, now 2.41 - a text index
+      sorted by the old rules can walk past the row it wanted, and a unique
+      index can stop catching duplicates
+
+Reproduced by faking the recorded version in the catalog, which produces the
+genuine article: PostgreSQL then prints its own `collation version mismatch`
+warning on every connection, and the test asserts the server says so too
+rather than trusting migkit's opinion of its own output.
+
+Two measurements shaped the check rather than decorating it:
+
+* **The fix everyone copies does not fix anything.** `ALTER DATABASE ...
+  REFRESH COLLATION VERSION` - which is what the server's own HINT tells you
+  to run - was measured silencing the warning **instantly**, rebuilding
+  nothing. So migkit's hint puts `REINDEX` first and says why, and a test
+  asserts that ordering in the text.
+* **After a real glibc upgrade everything drifts at once** - all 873
+  collations this image ships. Reporting them would be a wall rather than a
+  finding, so only collations something is actually sorted by are reported;
+  dropping the table that used one was measured to remove it from the
+  result, and a test pins both directions.
+
+A locale the OS no longer provides at all gets its own, harsher verdict: the
+rules are not merely different, they are gone, and no rebuild can help until
+the locale is installed.
+
+MySQL answers the same command with a **skip that explains itself**: measured
+on 8.4, all **286** rows of `information_schema.collations` report
+`IS_COMPILED = Yes` and the table has no version column at all, so no OS
+upgrade can re-sort an index underneath it. The MySQL-shaped version of this
+risk is [B4](#b4-the-server-changed-its-default-collation-under-you).
+
+**Missing:** the duplicate hunt - once drift is found, listing the rows a
+broken unique index stopped catching, which has to run with
+`enable_indexscan = off` because the index itself is the thing lying.
 
 ### B3. Text that was already broken before you moved it
 
