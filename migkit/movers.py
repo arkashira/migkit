@@ -406,6 +406,37 @@ class _MyIndexWindow:
         return False
 
 
+def pgcopydb_filters(hop, db, tables):
+    """`[exclude-table]` entries for what this hop already excludes, or None.
+
+    `hop.exclude` is patterns - `audit_log`, `public.audit_log`,
+    `appdb.public.*` - and pgcopydb wants concrete `schema.table` names. So
+    the patterns are resolved here against the tables the source actually
+    has, using `hop.excluded()` rather than a second reading of the same
+    rules. A pattern that matches nothing produces nothing, which is the
+    right answer for a filter file.
+
+    Verified against pgcopydb 0.18 on a live source with three tables and
+    `public.audit_log` excluded: `pgcopydb list tables --filters` returned
+    two, and the same command without the file returned three.
+
+    Until now `exclude` was honoured by the check and ignored by the mover,
+    so an excluded table was copied and then never looked at. Filtering it
+    here means it is not carried at all.
+    """
+    if not getattr(hop, "exclude", None):
+        return None
+    out = []
+    for ident in sorted(tables):
+        parts = [p for p in str(ident).split(".") if p]
+        if hop.excluded(db, *parts):
+            out.append(".".join(parts) if len(parts) > 1
+                       else f"public.{parts[0]}")
+    if not out:
+        return None
+    return "[exclude-table]\n" + "\n".join(out) + "\n"
+
+
 def mydumper_defaults(hop, db):
     """The hop's row filters as a mydumper defaults file, or None.
 
@@ -657,6 +688,27 @@ def pgcopydb_move(hop, db, workers, go, log):
            f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
     net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
     how = pgcopydb_runner()
+    # Excluded tables, resolved against what the source actually has.
+    # Asking the source is what turns a pattern into the concrete
+    # `schema.table` names pgcopydb wants; a source that cannot be reached
+    # yet leaves the filter off rather than guessing, and says so in the
+    # steps instead of quietly copying what the hop excludes.
+    filters_path, filters_note = None, ""
+    if getattr(hop, "exclude", None):
+        try:
+            from .engines.postgres import PostgresEngine
+            tables = PostgresEngine(hop).neutral_tables("src", db)
+            text = pgcopydb_filters(hop, db, tables)
+        except Exception as e:
+            text = None
+            filters_note = ("# could not list the source's tables, so the"
+                            f" hop's exclude list is not pushed down: "
+                            f"{str(e).splitlines()[-1][:70]}")
+        if text:
+            filters_path = hop.report_dir(db) / "pgcopydb-filters.ini"
+            filters_path.write_text(text)
+            filters_note = (f"# {text.count(chr(10)) - 1} tables excluded by"
+                            " the hop are filtered out at the source")
     if how == "local":
         # its own directory per run. pgcopydb keeps its state - including the
         # exported snapshot - under /tmp/pgcopydb by default, so a second run
@@ -669,20 +721,28 @@ def pgcopydb_move(hop, db, workers, go, log):
         cmd = ["pgcopydb", "copy", "table-data",
                "--table-jobs", str(workers), "--dir", work,
                "--source", src, "--target", dst]
+        if filters_path:
+            cmd += ["--filters", str(filters_path)]
     else:
         cmd = ["docker", "run", "--rm", "--network", net,
                "-e", f"PGCOPYDB_SOURCE_PGURI={src}",
-               "-e", f"PGCOPYDB_TARGET_PGURI={dst}",
-               PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
-               "--table-jobs", str(workers)]
+               "-e", f"PGCOPYDB_TARGET_PGURI={dst}"]
+        if filters_path:
+            cmd += ["-v", f"{filters_path}:/tmp/migkit-filters.ini:ro"]
+        cmd += [PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
+                "--table-jobs", str(workers)]
+        if filters_path:
+            cmd += ["--filters", "/tmp/migkit-filters.ini"]
     # the password sits *before* the @, so splitting there and keeping the
     # front half kept the secret and threw the host away - the printed steps
     # are what an operator pastes into a ticket
     import re as _re
     shown = [_re.sub(r"(://[^:/@]+:)[^@]*@", r"\1***@", c) for c in cmd]
     steps = ["# truncate all user tables on target (generated from catalog)",
-             "# parallel table copy, source to target, no intermediate file",
-             " ".join(shown)]
+             "# parallel table copy, source to target, no intermediate file"]
+    if filters_note:
+        steps.append(filters_note)
+    steps.append(" ".join(shown))
     if not go:
         return steps + ["# dry-run, add --go to execute"]
 

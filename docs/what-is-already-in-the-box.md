@@ -55,6 +55,12 @@ What that leaves on the floor:
 * **`clone`** - schema, data, indexes, constraints and sequences in one
   pass, in the order pgcopydb already knows is fastest.
 
+`--filters` is now used: the hop's `exclude` list is resolved against the
+tables the source actually has and written as an `[exclude-table]` file, so
+a table the hop excludes is no longer copied and then ignored. Verified on
+pgcopydb 0.18 - `list tables --filters` returned 2 of 3 tables with the
+file, 3 without it.
+
 ### atlas - 1 of ~6 command groups used
 
     used:     schema diff

@@ -158,3 +158,54 @@ def test_a_filter_on_another_database_does_not_block_this_one():
     from migkit import movers
     hop = _hop({"where": {"other.orders": "x"}})
     movers.refuse_unpushable_filters(hop, "appdb", "pgdump")
+
+
+def _pghop(exclude=(), tmp_path=None):
+    hop = Hop(name="pg", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=15545, user="postgres",
+                              password="test"),
+              target=Endpoint(host="127.0.0.1", port=15546, user="postgres",
+                              password="test"),
+              databases=["appdb"], exclude=list(exclude))
+    if tmp_path is not None:
+        hop.report_dir = lambda db=None: tmp_path
+    return hop
+
+
+def test_the_exclude_list_becomes_a_pgcopydb_filter_file():
+    """Verified against pgcopydb 0.18 on a live source: with
+    `[exclude-table] public.audit_log`, `pgcopydb list tables --filters`
+    returned two of the three tables; without the file it returned three.
+    """
+    from migkit import movers
+    got = movers.pgcopydb_filters(
+        _pghop(["audit_log", "public.tmp_*"]), "appdb",
+        ["public.orders", "public.audit_log", "public.tmp_a",
+         "public.people"])
+    assert got.startswith("[exclude-table]\n"), got
+    assert "public.audit_log" in got and "public.tmp_a" in got, got
+    assert "public.orders" not in got and "public.people" not in got, got
+
+
+def test_patterns_are_resolved_by_the_hop_not_re_interpreted():
+    """`exclude` already has a meaning - right-anchored, shell wildcards -
+    and pgcopydb wants concrete names. Resolving through `hop.excluded()`
+    is what keeps one rule instead of two that can disagree."""
+    from migkit import movers
+    hop = _pghop(["appdb.public.*"])
+    got = movers.pgcopydb_filters(hop, "appdb", ["public.orders"])
+    assert "public.orders" in got, got
+    # the same pattern against a different database matches nothing
+    assert movers.pgcopydb_filters(hop, "other", ["public.orders"]) is None
+
+
+def test_a_hop_with_no_exclude_writes_no_filter_file():
+    from migkit import movers
+    assert movers.pgcopydb_filters(_pghop(), "appdb",
+                                   ["public.orders"]) is None
+
+
+def test_a_pattern_matching_nothing_produces_no_file():
+    from migkit import movers
+    assert movers.pgcopydb_filters(_pghop(["ghost"]), "appdb",
+                                   ["public.orders"]) is None
