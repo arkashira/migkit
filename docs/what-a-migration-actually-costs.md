@@ -124,11 +124,11 @@ In order. Each item says what has to be measured before it is written.
    behind them are done too: `check --deep` fingerprints what every named
    zone does at seven probe instants and reports a zone the target cannot
    resolve, a zone whose rules differ, or a server that can resolve none -
-   all three proven live. **Still open from this item:** values the other
-   side will not accept at all (`0000-00-00` is stored by MySQL and
-   rejected outright by PostgreSQL - migkit reports the difference
-   afterwards and does not count the rows beforehand), and which zones the
-   data actually uses.
+   all three proven live. Values the target has no room for are
+   counted before the move too, as rows rather than as a schema opinion.
+   **Still open from this item:** values of the wrong *shape* rather than
+   the wrong size (`0000-00-00` stored by MySQL and refused outright by
+   PostgreSQL), and which zones the data actually uses.
 7. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other

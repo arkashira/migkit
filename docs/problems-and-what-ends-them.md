@@ -381,12 +381,41 @@ Measured both ways on live servers, with `sql_mode` relaxed on the MySQL
 side the way a legacy server has it. The load stops partway, or the mover
 substitutes something and the application starts rendering 1970.
 
-**migkit: Partly, and it does not agree by accident.** The driver hands the
-value back as the string `'0000-00-00'` rather than as NULL or an exception
-- measured through migkit's own connection - so a target holding NULL there
-reads as a difference and is reported. What is missing is saying it
-*before* the move: migkit can count the rows holding a value the other side
-cannot store, and does not.
+**migkit: Partly.** The driver hands the value back as the string
+`'0000-00-00'` rather than as NULL or an exception - measured through
+migkit's own connection - so a target holding NULL there reads as a
+difference and is reported rather than agreed with by accident.
+
+**The general form of the problem is now checked** -
+`test_target_capacity.py`, on both engines. A target column that cannot
+hold what the source column can is found *before* the move, and reported
+as rows rather than as a schema opinion:
+
+    deep postgres target capacity: DIFF 1 columns hold values the target
+      has no room for: public.people.note 2 rows, largest 120 against the
+      target's 50 - the load stops on the first of them, with whatever
+      moved before it already on the target
+
+Narrowing on its own is deliberately **not** a finding: a `varchar(255)`
+rebuilt as `varchar(50)` where every value is short is a non-event, and a
+check that cried wolf on every rebuilt schema is one nobody reads. It says
+so separately - "2 columns are narrower on the target and no row exceeds
+any of them yet" - which is the thing an operator wants to know before it
+becomes true. Characters, bytes, whole numbers and decimal precision are
+all counted, each against the server's own refusal: the tests assert that
+PostgreSQL really does answer `out of range` for the values being flagged.
+
+Two traps it was written around. `text` has no limit to compare, so it
+would fall out of a naive comparison as "nothing to worry about" when it is
+the widest source there is - it is carried as an explicit unlimited rather
+than as unknown. And MySQL's TEXT family is limited in **bytes** while
+`varchar(n)` is limited in **characters**, so a utf8mb4 string of 20,000
+characters can overflow a 65,535-byte TEXT: those pairs are counted and
+reported as not compared rather than quietly passed.
+
+**Missing:** the values that are the wrong *shape* rather than the wrong
+size - `0000-00-00` is the example above, and it needs the hetero path
+rather than a capacity number.
 
 ### B7. The time zone rules are not on both servers
 

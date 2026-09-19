@@ -1485,6 +1485,10 @@ class PostgresEngine(Engine):
             " those tables with a path that does not truncate -"
             " `migkit move --go` does not")
 
+    def _scalar(self, side, db, sql):
+        out = self._psql(side, self._d(side, db), sql).strip()
+        return out.splitlines()[0].split("|") if out else None
+
     def _zone_fingerprints(self, side, db):
         """`at time zone` renders the wall clock that zone shows at each
         probe instant; the md5 of those readings is the zone's behaviour.
@@ -1917,6 +1921,7 @@ class PostgresEngine(Engine):
         res.append(self._duplicate_keys(db, why))
         res.append(self._temporal_meaning(db))
         res.append(self._time_zone_rules(db))
+        res.append(self._capacity_gaps(db))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """

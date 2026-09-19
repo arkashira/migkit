@@ -669,6 +669,124 @@ def time_meaning(engine, declared):
     return TIME_MEANING.get(engine, {}).get(" ".join("".join(name).split()))
 
 
+#: How much a column can hold. A narrower target is not a schema difference
+#: worth arguing about until a row actually exceeds it - and then it is the
+#: thing that stops the load halfway through.
+INT_RANGES = {
+    "postgres": {
+        "smallint": (-32768, 32767), "int2": (-32768, 32767),
+        "integer": (-2147483648, 2147483647),
+        "int4": (-2147483648, 2147483647),
+        "bigint": (-9223372036854775808, 9223372036854775807),
+        "int8": (-9223372036854775808, 9223372036854775807),
+    },
+    "mysql": {
+        "tinyint": (-128, 127), "tinyint unsigned": (0, 255),
+        "smallint": (-32768, 32767), "smallint unsigned": (0, 65535),
+        "mediumint": (-8388608, 8388607),
+        "mediumint unsigned": (0, 16777215),
+        "int": (-2147483648, 2147483647),
+        "int unsigned": (0, 4294967295),
+        "bigint": (-9223372036854775808, 9223372036854775807),
+        "bigint unsigned": (0, 18446744073709551615),
+    },
+}
+
+CHAR_TYPES = {
+    "postgres": ("character varying", "varchar", "character", "char",
+                 "bpchar"),
+    "mysql": ("varchar", "char"),
+}
+
+#: Types with no character limit worth counting. `("chars", None)` rather
+#: than None, because "holds anything" and "migkit never measured this" are
+#: different answers and only one of them is safe to ignore.
+UNLIMITED_CHARS = {"postgres": ("text",)}
+
+#: MySQL's TEXT family is limited in **bytes**, not characters, so a
+#: utf8mb4 string of 20,000 characters can overflow a 65,535-byte TEXT.
+#: Kept as its own kind so it is never quietly compared against a
+#: character limit.
+BYTE_TYPES = {
+    "mysql": {"tinytext": 255, "text": 65535, "mediumtext": 16777215,
+              "longtext": 4294967295},
+}
+
+NUMERIC_TYPES = {
+    "postgres": ("numeric", "decimal"),
+    "mysql": ("decimal", "numeric"),
+}
+
+
+def _split_declared(declared):
+    """('varchar', [50]) from 'varchar(50)', without importing anything."""
+    name, nums, depth, digits = [], [], 0, []
+    for ch in str(declared).lower():
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if digits:
+                nums.append(int("".join(digits)))
+                digits = []
+        elif depth:
+            if ch.isdigit():
+                digits.append(ch)
+            elif ch == "," and digits:
+                nums.append(int("".join(digits)))
+                digits = []
+        else:
+            name.append(ch)
+    return " ".join("".join(name).split()), nums
+
+
+def capacity(engine, declared):
+    """What this column can hold, or None when migkit has not measured it.
+
+    ("chars", n) - at most n characters
+    ("int", lo, hi) - a whole number in that range
+    ("numeric", precision, scale)
+
+    None is returned both for an unlimited type and for one nobody mapped,
+    and the caller treats it the same way: nothing to compare against, so
+    no claim is made.
+    """
+    name, nums = _split_declared(declared)
+    if name in CHAR_TYPES.get(engine, ()) and nums:
+        return ("chars", nums[0])
+    if name in UNLIMITED_CHARS.get(engine, ()):
+        return ("chars", None)
+    if name in BYTE_TYPES.get(engine, {}):
+        return ("bytes", BYTE_TYPES[engine][name])
+    if name in INT_RANGES.get(engine, {}):
+        return ("int",) + INT_RANGES[engine][name]
+    if name in NUMERIC_TYPES.get(engine, ()) and len(nums) >= 1:
+        return ("numeric", nums[0], nums[1] if len(nums) > 1 else 0)
+    return None
+
+
+def narrower(src, dst):
+    """Can a value that fits `src` fail to fit `dst`.
+
+    Two different kinds are not compared here - a type that changed class
+    is `comparable`'s business, and answering both questions in two places
+    is how they end up disagreeing.
+    """
+    if src is None or dst is None or src[0] != dst[0]:
+        return False
+    if src[0] == "chars":
+        if dst[1] is None:
+            return False
+        return src[1] is None or src[1] > dst[1]
+    if src[0] == "bytes":
+        return src[1] > dst[1]
+    if src[0] == "int":
+        return src[1] < dst[1] or src[2] > dst[2]
+    if src[0] == "numeric":
+        return src[1] - src[2] > dst[1] - dst[2] or src[2] > dst[2]
+    raise ValueError(f"no rule for capacity kind {src[0]!r}")
+
+
 def comparable(engine, declared):
     """(class, why-not). Exactly one of the two is set."""
     cls = type_class(engine, declared)

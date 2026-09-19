@@ -1281,6 +1281,18 @@ class MySQLEngine(Engine):
                       " the table was written - a verdict from either would"
                       " be guesswork")
 
+    def _quote_ident(self, name):
+        return "`" + str(name).replace("`", "``") + "`"
+
+    def _qualified(self, side, db, table):
+        return (self._quote_ident(self._d(side, db)) + "."
+                + self._quote_ident(table))
+
+    def _scalar(self, side, db, sql):
+        rows = self._q(side, sql)
+        return [None if v is None else str(v) for v in rows[0]] if rows \
+            else None
+
     def _zone_fingerprints(self, side, db):
         """The same reading as PostgreSQL's, which is why the two engines
         produce the same fingerprint for the same zone.
@@ -1432,7 +1444,8 @@ class MySQLEngine(Engine):
                self._mojibake(db),
                self._duplicate_keys(db),
                self._temporal_meaning(db),
-               self._time_zone_rules(db)]
+               self._time_zone_rules(db),
+               self._capacity_gaps(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

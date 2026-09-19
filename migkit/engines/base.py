@@ -295,6 +295,131 @@ class Engine:
                 return codec, decoded
         return None
 
+    def _quote_ident(self, name):
+        """SQL quoting for one identifier. Doubling the quote character is
+        the rule in both spellings, so only the character differs."""
+        return '"' + str(name).replace('"', '""') + '"'
+
+    def _scalar(self, side, db, sql):
+        """One row, as text, or **None** when this engine cannot be asked -
+        which is not the same as a query that returned nothing."""
+        return None
+
+    #: How a value that is too big for the target is found, per capacity
+    #: kind. One place, because the two engines spell all of these the same
+    #: way - `char_length`, `octet_length` and `abs` are standard.
+    def _capacity_probe(self, col, cap):
+        kind = cap[0]
+        if kind == "chars":
+            return f"char_length({col}) > {cap[1]}", f"max(char_length({col}))"
+        if kind == "bytes":
+            return (f"octet_length({col}) > {cap[1]}",
+                    f"max(octet_length({col}))")
+        if kind == "int":
+            return f"{col} < {cap[1]} or {col} > {cap[2]}", f"max(abs({col}))"
+        if kind == "numeric":
+            limit = 10 ** (cap[1] - cap[2])
+            return f"abs({col}) >= {limit}", f"max(abs({col}))"
+        raise ValueError(f"no capacity probe for kind {kind!r}")
+
+    def _capacity_gaps(self, db):
+        """Rows the target has no room for, counted before anything moves.
+
+        A narrower column on the target is not worth an argument until a row
+        actually exceeds it - and then it is what stops the load halfway
+        through, with half the table moved. So this does not report that
+        `varchar(255)` became `varchar(50)`; it reports that **three rows**
+        are longer than fifty characters and the longest is 120.
+        """
+        from .. import canon
+        engine = self.CANON_ENGINE
+        findings, narrowed, unmeasured = [], 0, 0
+        try:
+            if self._scalar("src", db, "select 1") is None:
+                return Result("deep", f"{db} target capacity", "skip",
+                              "this engine cannot be asked to count rows"
+                              " against the target's limits")
+            src_tables = set(self.neutral_tables("src", db))
+            dst_tables = set(self.neutral_tables("dst", db))
+            for table in sorted(src_tables & dst_tables):
+                dst_types = dict(self.neutral_columns("dst", db, table))
+                for name, src_type in self.neutral_columns("src", db, table):
+                    if name not in dst_types:
+                        continue
+                    src_cap = canon.capacity(engine, src_type)
+                    dst_cap = canon.capacity(engine, dst_types[name])
+                    if src_cap and dst_cap and src_cap[0] != dst_cap[0]:
+                        # a character limit and a byte limit are not
+                        # comparable, and pretending otherwise is how a
+                        # real overflow gets reported as fine
+                        unmeasured += 1
+                        continue
+                    if not canon.narrower(src_cap, dst_cap):
+                        continue
+                    narrowed += 1
+                    col = self._quote_ident(name)
+                    where, worst = self._capacity_probe(col, dst_cap)
+                    got = self._scalar(
+                        "src", db,
+                        f"select count(*), {worst} from"
+                        f" {self._qualified('src', db, table)} where {where}")
+                    if not got:
+                        continue
+                    count, biggest = got
+                    if int(count or 0):
+                        findings.append((table, name, src_type,
+                                         dst_types[name], int(count),
+                                         biggest, dst_cap))
+        except Exception as e:
+            return Result("deep", f"{db} target capacity", "error",
+                          "could not count the rows against the target's"
+                          f" limits: {str(e).splitlines()[-1][:90]}")
+        return self._capacity_result(db, findings, narrowed, unmeasured)
+
+    def _qualified(self, side, db, table):
+        """A table name from `neutral_tables`, quoted and addressable from
+        this engine's connection - which for some engines means carrying the
+        database name and for others means not."""
+        return ".".join(self._quote_ident(p) for p in table.split(".", 1))
+
+    def _capacity_result(self, db, findings, narrowed, unmeasured):
+        """The rows are the finding; the narrowing on its own is not.
+
+        Measured on the pair this was written against: MySQL stores
+        `0000-00-00` happily and `select '0000-00-00'::date` on PostgreSQL
+        answers `ERROR: date/time field value out of range`. Reading a value
+        the other side refuses is not something a checksum can warn about,
+        because by then the load has already stopped.
+        """
+        if findings:
+            worst = ", ".join(
+                f"{t}.{c} {n} rows, largest {big} against the target's"
+                f" {cap[1] if cap[0] != 'int' else cap[2]}"
+                for t, c, _, _, n, big, cap in findings[:4])
+            return Result(
+                "deep", f"{db} target capacity", "diff",
+                f"{len(findings)} columns hold values the target has no room"
+                f" for: {worst}"
+                + (" ..." if len(findings) > 4 else "")
+                + " - the load stops on the first of them, with whatever"
+                  " moved before it already on the target", "",
+                "widen the target column, or decide what happens to those"
+                " rows before the move rather than halfway through it")
+        if unmeasured:
+            return Result(
+                "deep", f"{db} target capacity", "skip",
+                f"{narrowed} narrower columns hold nothing too big, and"
+                f" {unmeasured} pairs measure their limits in different"
+                " units (characters against bytes) so migkit did not"
+                " compare them")
+        if not narrowed:
+            return Result("deep", f"{db} target capacity", "ok",
+                          "no column on the target is narrower than the"
+                          " source's")
+        return Result("deep", f"{db} target capacity", "ok",
+                      f"{narrowed} columns are narrower on the target and no"
+                      " row exceeds any of them yet")
+
     #: Instants to ask every zone about. A zone is its *history*, so asking
     #: only for today's offset would miss the changes that actually break a
     #: migration - Brazil abolished DST in 2019, Iran in 2022. Measured:
