@@ -48,10 +48,14 @@ def test_chunked_total_equals_single_pass(pg_pair, tmp_path, monkeypatch):
     assert rc == 0, whole
     one_pass = [l for l in whole.splitlines() if l.startswith("public.big:")][0]
 
-    # and again in ranges small enough to force several of them
+    # and again in ranges small enough to force several of them. The skip
+    # has to be turned off for this one: the first pass left a proof that
+    # the table was equal, nothing has written to it since, and a second
+    # verify of an unchanged table deliberately reads no rows - which is
+    # the right behaviour and the wrong thing to compare arithmetic with.
     monkeypatch.setattr(PostgresEngine, "CHUNK_MIN_ROWS", 1000)
     monkeypatch.setattr(cp_module, "MAX_CHUNK", 4000)
-    rc, chunked = eng._data_fast_native("postgres")
+    rc, chunked = eng._data_fast_native("postgres", may_skip=False)
     assert rc == 0, chunked
     line = [l for l in chunked.splitlines() if l.startswith("public.big:")][0]
     assert "chunks=" in line, line
@@ -60,6 +64,13 @@ def test_chunked_total_equals_single_pass(pg_pair, tmp_path, monkeypatch):
         return (s.split("rows=")[1].split()[0],
                 s.split("checksum=")[1].split()[0])
     assert nums(line) == nums(one_pass)
+
+    # and with the skip left alone, the proof is used rather than the table
+    rc, again = eng._data_fast_native("postgres")
+    assert rc == 0, again
+    repeat = [l for l in again.splitlines() if l.startswith("public.big:")][0]
+    assert "UNCHANGED since it was last proved equal" in repeat, repeat
+    assert "no rows read this run" in repeat, repeat
 
 
 def test_a_crash_resumes_instead_of_restarting(pg_pair, tmp_path, monkeypatch):

@@ -446,7 +446,20 @@ class PostgresEngine(Engine):
         return [l for l in out.splitlines() if l and not self.hop.excluded(l)]
 
     def _report(self, db):
-        return PGDC_ROOT / self.hop.name / db
+        """Where this engine's evidence goes: the same place as every other
+        engine's.
+
+        It used to be `reports/pgdc/<hop>/<db>`, from before there was an
+        estate to be consistent with, while `hop.report_dir` - which the
+        base's own `params.json` for this very hop uses - is
+        `reports/<hop>/<db>`. One hop wrote into two trees, and the
+        drilldown an operator was told to read was not where every other
+        engine puts it. Both the writer and the reader here go through this
+        one method, so they move together; a check run by an older migkit
+        leaves its files in the old place, and re-running the check writes
+        them where `sync` now looks.
+        """
+        return self.hop.report_dir(db)
 
     def _dump_schema_native(self, side, db):
         ep = self.hop.source if side == "src" else self.hop.target
