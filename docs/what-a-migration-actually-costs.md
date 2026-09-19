@@ -157,16 +157,24 @@ In order. Each item says what has to be measured before it is written.
    every table, and now names the tables it could not read. An empty
    database still reports ok, which is the distinction that made this more
    than a one-line change.
-10. **The pre-flight the practitioners keep asking for**: before anything
+10. **The documents the table only points at.** A large object lives in
+    `pg_largeobject`, not in your table, and there is no referential
+    integrity between them. Measured on a pair whose table contents are
+    byte-identical: the source resolves the oid to a document, the target
+    answers `large object 16391 does not exist`, and `migkit check` says
+    **`verdict: same`**. `assess` does warn about them beforehand; the
+    verification never looks. Comparing `pg_largeobject_metadata` and
+    anti-joining the oid columns are one query each.
+11. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-11. **LOBs**, as correctness first and speed second: find them, size them,
+12. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-12. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+13. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-13. **Then** consider a migkit-owned mover, with the benchmark from item 1
+14. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources

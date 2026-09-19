@@ -1105,6 +1105,74 @@ precisely rather than sweeping into the fix: `select count(*)` needs only
 one readable column, so it answered `100 rows both sides` and that number
 is true. A test pins that it still does.
 
+### D11. The documents were never in the table
+
+**What happens.** A PostgreSQL large object does not live in your table. The
+table holds an `oid`; the bytes live in `pg_largeobject`, with no
+referential integrity between the two. Copy the table and you have copied
+the integer, not the document.
+
+`pg_dump` makes this easy to trip over: it skips large objects whenever
+`-s`, `-n` or `-t` is used - a schema-restricted or table-restricted dump
+produces an archive whose oid columns are intact and whose blobs are
+absent. There is a `-b` to put them back and no inverse.
+
+Measured, with a table whose contents are **byte-identical** on both sides:
+
+    table on both sides   1contract16391,2invoice16391
+    source                lo_get(16391) -> 'the actual contents...'
+    target                ERROR:  large object 16391 does not exist
+
+**migkit: Partly, and the gap is in the part that pronounces.** `assess`
+does name them, before anything moves:
+
+    large objects (a managed service moving table by table leaves them;
+    migkit's own pg_dump path carries them) - 1 in pg_largeobject
+
+That is the right warning in the right place, and it distinguishes the two
+legs rather than blaming the objects.
+
+**But the verification never looks.** On the pair above:
+
+    counts   postgres: OK 1 tables, rows 2==2
+    data     postgres: OK 1 tables, 2 rows, checksums equal both sides
+    verdict: same
+
+and `deep` does not mention large objects at all. Every document in the
+database is gone and migkit certifies the migration as correct - because
+the column really does hold the same integer on both sides. This is the
+third finding of that exact shape, after the RLS filter and counts over
+zero tables, and it is the one that survives a clean report.
+
+**Missing:** comparing `pg_largeobject_metadata` between the two sides, and
+the anti-join that finds an `oid` column pointing at nothing. Both are one
+query. The `lo` module's own advice is the hazard to respect while writing
+it: `vacuumlo` deletes any large object not referenced from a column named
+`oid` or `lo`, so a migration that parked references in a `bigint` loses
+them to the cleanup rather than to the move.
+
+### D12. The row changed while it was being compared
+
+**What happens.** A checksum of a live table races the application writing
+to it. The row hashed on the source at one moment and on the target at
+another differ, and nothing is wrong. AWS DMS treats this as the main
+source of false positives and answers it with time: a CDC validation task
+delays re-validation per changed row, defaulting
+`ValidationQueryCdcDelaySeconds` to **180**, and suspends validation
+entirely once a failure threshold is breached.
+
+**migkit: Ends it, and by a better mechanism.** `_resolve_inflight` splits
+DIFF tables into real differences and in-flight replication -
+**deterministically when a fence is available**, with sleep-settle only as
+the fallback. A fence is an answer rather than a guess: waiting 180 seconds
+and hoping is what you do when you cannot ask the source where it had got
+to. The re-check is narrowed to the keys the drilldown already named rather
+than rehashing the table, and it declines to do it at all beyond 20,000
+keys, which is the point where a "settle" is no longer a settle.
+
+When every difference resolves this way the report says so in those words -
+`all diffs proven in-flight replication` - rather than quietly passing.
+
 ## E. Keeping the two sides in step
 
 ### E1. Sequences do not replicate
@@ -1354,6 +1422,13 @@ Views and column grants:
 [pg_dump emitting REFRESH after ACLs](https://www.postgresql.org/message-id/E1ddNne-0001jw-Vx@gemulon.postgresql.org),
 [column-level security in PostgreSQL](https://www.enterprisedb.com/postgres-tutorials/how-implement-column-and-row-level-security-postgresql),
 [reporting a column-level error when lacking privilege](https://www.postgresql.org/message-id/CAKFQuwaiP%2BkYLCtUh_5Hdd7XKUHHH_Y5JAvb-0x2JQevJevVeA%40mail.gmail.com).
+
+Large objects and live rows:
+[pg_largeobject](https://www.postgresql.org/docs/current/catalog-pg-largeobject.html),
+[excluding large objects from pg_dump](https://postgrespro.com/list/thread-id/1557645),
+[vacuumlo](https://www.postgresql.org/docs/current/vacuumlo.html),
+[the lo module](https://www.postgresql.org/docs/current/lo.html),
+[AWS DMS data validation](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html).
 
 Cutover, aftermath and compliance:
 [zero-downtime patterns](https://launchdarkly.com/blog/3-best-practices-for-zero-downtime-database-migrations/),
