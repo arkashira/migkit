@@ -2427,6 +2427,9 @@ class MySQLEngine(Engine):
                             " saved to undo)")
 
     def apply(self, db, action):
+        if action.kind == "resnapshot":
+            self._apply_resnapshot(action)
+            return
         if action.kind == "sequences":
             conn = self._conn("dst")
             try:

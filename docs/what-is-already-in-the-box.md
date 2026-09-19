@@ -175,8 +175,11 @@ the leg the project advertises, and `generic` is every engine in section 3.
 
 Cheapest first, where "cheap" means no new dependency:
 
-1. Debezium signal channel - one config key, one insert, and a table can be
-   re-snapshotted mid-stream.
+1. ~~Debezium signal channel~~ **done** - and wired into `sync`: when a
+   pipeline is running, the row repair is planned as a re-snapshot through
+   the connector instead of a direct write, because migkit and the
+   connector writing the same keys is a race migkit can lose.
+   `test_repair_through_the_stream.py`.
 2. mydumper `--regex` / `--where`, pgcopydb `--filters`, `pg_dump -t/-T`,
    Debezium `table.include.list` - the mover half of plan item 17, all of it
    already installed.

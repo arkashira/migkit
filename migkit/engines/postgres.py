@@ -3568,6 +3568,8 @@ class PostgresEngine(Engine):
         if action.kind == "sequences":
             self._psql("dst", db,
                        "\n".join(s.split("  --")[0] for s in action.statements))
+        elif action.kind == "resnapshot":
+            self._apply_resnapshot(action)
         elif action.kind == "text":
             # withheld unless MIGKIT_REPAIR_TEXT says otherwise, in which
             # case the note is the whole action - applying it must do

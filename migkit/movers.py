@@ -808,6 +808,30 @@ def resnapshot_message(hop_name, tables, kind="blocking"):
     )
 
 
+def send_resnapshot(out, hop_name, tables, kind="blocking", log=None):
+    """Put the request on the signal topic, through the compose file.
+
+    The broker publishes no port to the host - only the connector's REST
+    API on 8083 is exposed - so the message goes in the way migkit already
+    drives the rest of this stack, with `docker compose exec`. Opening 9092
+    to the host to avoid one exec would widen the pipeline's surface for
+    the convenience of the tool, which is the wrong trade.
+    """
+    topic, key, value = resnapshot_message(hop_name, tables, kind)
+    import json as _json
+    line = f"{key}\t{_json.dumps(value)}\n"
+    cmd = ["docker", "compose", "-f", str(out / "docker-compose.yml"),
+           "exec", "-T", "redpanda",
+           "rpk", "topic", "produce", topic, "-f", "%k\\t%v\\n"]
+    if log:
+        log(f"signalling {kind} snapshot of {', '.join(tables)}")
+    p = run(cmd, check=False, input=line)
+    if p.returncode:
+        raise RuntimeError(
+            f"could not reach the signal topic: {p.stderr[-200:]}")
+    return topic
+
+
 def stream_up(out, log=None):
     _sh(["docker", "compose", "-f", str(out / "docker-compose.yml"),
          "up", "-d"], log=log)
