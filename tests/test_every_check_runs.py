@@ -181,6 +181,27 @@ def _engines(pg_pair, tmp_path):
                                    source=kafka_ep, target=kafka_ep,
                                    db_map={"cluster": "cluster"}))
 
+    # the two that are made of other engines rather than a driver of their
+    # own, and so are the easiest to leave out of a sweep like this
+    from migkit.engines.hetero import HeteroEngine
+    out["hetero"] = HeteroEngine(Hop(
+        name="het", engine="hetero",
+        source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
+                        user="postgres", password="test"),
+        target=ep(tmp_path / "b.db"), databases=["postgres"],
+        options={"source_engine": "postgres", "target_engine": "sqlite"}))
+
+    from migkit.engines.generic import GenericEngine
+    out["generic"] = GenericEngine(Hop(
+        name="gen", engine="generic",
+        source=Endpoint(host="x", port=0, user="", password="", options={
+            "url": f"postgresql://postgres:test@127.0.0.1:{pg_pair['src']}"
+                   "/postgres"}),
+        target=Endpoint(host="x", port=0, user="", password="", options={
+            "url": f"postgresql://postgres:test@127.0.0.1:{pg_pair['dst']}"
+                   "/postgres"}),
+        options={"tables": ["t"], "key": "id"}))
+
     for engine in out.values():
         engine.hop.report_dir = lambda db=None: tmp_path
     return out
@@ -188,7 +209,8 @@ def _engines(pg_pair, tmp_path):
 
 def _db_of(name):
     return {"postgres": "postgres", "sqlite": "main", "redis": "0",
-            "mongodb": "mk_src", "kafka": "cluster"}[name]
+            "mongodb": "mk_src", "kafka": "cluster", "hetero": "postgres",
+            "generic": "-"}[name]
 
 
 def test_every_check_every_engine_has_answers_rather_than_raising(
@@ -267,3 +289,100 @@ def test_the_client_libraries_still_have_what_the_engines_call():
                for cls, names in expected.items()
                for name in names if not hasattr(cls, name)]
     assert not missing, missing
+
+
+# ---- the other things the CLI asks an engine for ------------------------
+
+#: `migkit sync --kind X` passes each of these straight through
+REPAIR_KINDS = ("rows", "sequences", "schema", "all")
+
+
+def test_assess_answers_on_every_engine(pg_pair, servers, tmp_path):
+    """`migkit assess` is the first command anyone runs, and it is the one
+    that has to work when a side is misconfigured."""
+    broken = []
+    for name, engine in sorted(_engines(pg_pair, tmp_path).items()):
+        try:
+            got = engine.assess()
+        except Exception as e:
+            broken.append(f"{name}.assess:"
+                          f" {type(e).__name__}: {str(e)[:110]}")
+            continue
+        if not isinstance(got, list) or not got:
+            broken.append(f"{name}.assess answered {got!r}")
+            continue
+        shape = [row for row in got
+                 if not {"level", "scope", "item", "detail"} <= set(row)]
+        if shape:
+            broken.append(f"{name}.assess row missing fields: {shape[0]}")
+    assert not broken, broken
+
+
+def test_watch_sample_answers_on_every_engine(pg_pair, servers, tmp_path):
+    """`migkit watch` calls this in a loop, so it is the one place a raise
+    becomes a crash in front of somebody watching a cutover."""
+    broken = []
+    for name, engine in sorted(_engines(pg_pair, tmp_path).items()):
+        try:
+            got = engine.watch_sample(_db_of(name))
+        except Exception as e:
+            broken.append(f"{name}.watch_sample:"
+                          f" {type(e).__name__}: {str(e)[:110]}")
+            continue
+        if not isinstance(got, dict) or "ts" not in got:
+            broken.append(f"{name}.watch_sample answered {got!r}")
+        elif "error" not in got and "src_rows" not in got:
+            broken.append(f"{name}.watch_sample gave neither a count nor a"
+                          f" reason: {got!r}")
+    assert not broken, broken
+
+
+def test_every_repair_kind_answers_on_every_engine(pg_pair, servers,
+                                                   tmp_path):
+    """Including the kinds an engine has nothing to say about: an empty list
+    is a fine answer, an exception is not."""
+    broken = []
+    for name, engine in sorted(_engines(pg_pair, tmp_path).items()):
+        for kind in REPAIR_KINDS:
+            try:
+                got = engine.repair_plan(_db_of(name), kind)
+            except Exception as e:
+                broken.append(f"{name}.repair_plan({kind}):"
+                              f" {type(e).__name__}: {str(e)[:110]}")
+                continue
+            if not isinstance(got, list):
+                broken.append(f"{name}.repair_plan({kind}) answered {got!r}")
+    assert not broken, broken
+
+
+def test_setup_and_replication_plans_answer(pg_pair, servers, tmp_path):
+    from migkit.engines import engines_with
+    broken = []
+    engines = _engines(pg_pair, tmp_path)
+    for name, engine in sorted(engines.items()):
+        try:
+            got = engine.setup_target_plan(_db_of(name))
+        except SystemExit as e:
+            # migkit's own refusal channel: a sentence an operator can read
+            # is an answer, an exception from four frames down is not
+            if not str(e).strip():
+                broken.append(f"{name}.setup_target_plan exited silently")
+        except Exception as e:
+            broken.append(f"{name}.setup_target_plan:"
+                          f" {type(e).__name__}: {str(e)[:110]}")
+        else:
+            if not isinstance(got, list):
+                broken.append(f"{name}.setup_target_plan answered {got!r}")
+    for name in engines_with("replicate_sql"):
+        engine = engines.get(name)
+        if engine is None:
+            continue
+        try:
+            plan = engine.replicate_sql(_db_of(name))
+        except Exception as e:
+            broken.append(f"{name}.replicate_sql:"
+                          f" {type(e).__name__}: {str(e)[:110]}")
+            continue
+        if not {"src", "dst", "status"} <= set(plan):
+            broken.append(f"{name}.replicate_sql answered {sorted(plan)}")
+    assert not broken, broken

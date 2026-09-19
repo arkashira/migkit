@@ -1088,13 +1088,37 @@ class HeteroEngine(Engine):
             log(f"stopped after {seen} changes; rerun to resume")
 
     def watch_sample(self, db):
+        """Rows on each side, for any pair rather than one of them.
+
+        This was written when hetero meant MySQL to PostgreSQL and reached
+        straight for `self.my` and `self.pg`. On every other pairing those
+        are None, so `migkit watch` on a cross-engine hop died with
+        `AttributeError: 'NoneType' object has no attribute '_tables'` - on
+        the one command an operator leaves running during a cutover.
+
+        The counts come from the same comparison `check` uses, so a pair that
+        can be compared can be watched. It costs a pass per table per tick,
+        which is what the single-engine watch costs too.
+        """
         import time
-        a = sum(self.my._q("src", f"select count(*) from `{db}`.`{t}`")[0][0]
-                for t in self.my._tables("src", db))
-        try:
-            b = sum(int(self.pg._psql("dst", db,
-                                      f'select count(*) from "{t}"'))
+        if self.my and self.pg:
+            a = sum(self.my._q("src",
+                               f"select count(*) from `{db}`.`{t}`")[0][0]
                     for t in self.my._tables("src", db))
-        except RuntimeError:
-            b = 0
-        return {"db": db, "ts": time.time(), "src_rows": a, "dst_rows": b}
+            try:
+                b = sum(int(self.pg._psql("dst", db,
+                                          f'select count(*) from "{t}"'))
+                        for t in self.my._tables("src", db))
+            except RuntimeError:
+                b = 0
+            return {"db": db, "ts": time.time(), "src_rows": a,
+                    "dst_rows": b}
+        try:
+            rows = self._neutral_rows(db)
+        except Exception as e:
+            return {"db": db, "ts": time.time(),
+                    "error": f"{type(e).__name__}: {str(e).splitlines()[-1][:90]}"}
+        src = sum(n for _, _, _, n, _ in rows if isinstance(n, int))
+        dst = sum(n for _, _, _, _, n in rows if isinstance(n, int))
+        return {"db": db, "ts": time.time(), "src_rows": src,
+                "dst_rows": dst}

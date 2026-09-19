@@ -251,7 +251,18 @@ class Engine:
         return []
 
     def watch_sample(self, db):
-        return {}
+        """One reading for `migkit watch`, or a reason there is none.
+
+        The empty dict this used to return was not a reading and not a
+        refusal: `watch` reads `src_rows` and `dst_rows` with a default, so
+        the first tick printed `src~0 dst~0`, and the second one raised
+        `KeyError: 'ts'` comparing the sample against the one before it. An
+        engine with nothing to show says so and the loop prints it.
+        """
+        import time
+        return {"db": db, "ts": time.time(),
+                "error": f"{type(self).__name__} has no row count to watch"
+                         " - use `migkit check` for this hop"}
 
     # which family of client tools this engine uses, for the version check
     ENGINE_FAMILY = ""
