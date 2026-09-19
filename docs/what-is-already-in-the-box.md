@@ -59,7 +59,10 @@ What that leaves on the floor:
 tables the source actually has and written as an `[exclude-table]` file, so
 a table the hop excludes is no longer copied and then ignored. Verified on
 pgcopydb 0.18 - `list tables --filters` returned 2 of 3 tables with the
-file, 3 without it.
+file, 3 without it. `pg_dump -T` gets the same resolved names (verified:
+`-T public.audit_log --data-only` dumped `COPY public.orders` and nothing
+else), so both PostgreSQL movers and the check exclude one identical set
+rather than three readings of one pattern.
 
 ### atlas - 1 of ~6 command groups used
 

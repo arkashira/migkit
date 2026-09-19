@@ -209,3 +209,75 @@ def test_a_pattern_matching_nothing_produces_no_file():
     from migkit import movers
     assert movers.pgcopydb_filters(_pghop(["ghost"]), "appdb",
                                    ["public.orders"]) is None
+
+
+def test_pg_dump_gets_the_same_excluded_tables(tmp_path, monkeypatch):
+    """`pg_dump -T` verified live: `-T public.audit_log --data-only`
+    dumped `COPY public.orders` and nothing from audit_log.
+
+    It is given resolved names rather than the hop's patterns on purpose.
+    `pg_dump -T` has its own pattern language and pgcopydb's filter file
+    has none, so passing the raw pattern to each would give the two movers
+    two different sets - and `check`, which asks `hop.excluded()`, a third.
+    """
+    from migkit import movers
+    hop = _pghop(["audit_log"], tmp_path)
+
+    class FakeEngine:
+        def __init__(self, hop):
+            pass
+
+        def neutral_tables(self, side, db):
+            return ["public.orders", "public.audit_log"]
+
+    import migkit.engines.postgres as pg
+    monkeypatch.setattr(pg, "PostgresEngine", FakeEngine)
+    steps = movers.pgdump_move(hop, "appdb", 2, False, None)
+    dump = [s for s in steps if s.startswith("pg_dump")][0]
+    assert "-T public.audit_log" in dump, dump
+    assert "-T public.orders" not in dump, dump
+    assert any("1 tables the hop excludes are not dumped" in s
+               for s in steps), steps
+
+
+def test_pg_dump_without_an_exclude_list_is_untouched(tmp_path):
+    from migkit import movers
+    steps = movers.pgdump_move(_pghop([], tmp_path), "appdb", 2, False, None)
+    dump = [s for s in steps if s.startswith("pg_dump")][0]
+    assert " -T " not in dump, dump
+
+
+def test_a_source_that_cannot_be_listed_says_so_instead_of_filtering(
+        tmp_path, monkeypatch):
+    """Silently dumping everything when the hop asked for less is the
+    failure worth a line in the plan."""
+    from migkit import movers
+
+    class Boom:
+        def __init__(self, hop):
+            pass
+
+        def neutral_tables(self, side, db):
+            raise RuntimeError("connection refused")
+
+    import migkit.engines.postgres as pg
+    monkeypatch.setattr(pg, "PostgresEngine", Boom)
+    steps = movers.pgdump_move(_pghop(["audit_log"], tmp_path), "appdb", 2,
+                               False, None)
+    assert any("could not list the source's tables" in s for s in steps), steps
+    dump = [s for s in steps if s.startswith("pg_dump")][0]
+    assert " -T " not in dump, dump
+
+
+def test_both_postgres_movers_exclude_the_same_set(tmp_path):
+    """The point of resolving once. Whatever `check` skips, both movers
+    skip, and they skip it identically."""
+    from migkit import movers
+    hop = _pghop(["audit_log", "public.tmp_*"], tmp_path)
+    tables = ["public.orders", "public.audit_log", "public.tmp_a"]
+    names = movers.excluded_tables(hop, "appdb", tables)
+    ini = movers.pgcopydb_filters(hop, "appdb", tables)
+    assert names == ["public.audit_log", "public.tmp_a"], names
+    for n in names:
+        assert n in ini, (n, ini)
+        assert hop.excluded("appdb", *n.split("."))

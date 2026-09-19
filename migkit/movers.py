@@ -258,13 +258,33 @@ def pgdump_move(hop, db, workers, go, log):
     s, t = hop.source, hop.target
     outdir = hop.report_dir(db) / "pgdump"
     trunc = PG_TRUNCATE_SQL
+    # the same resolution pgcopydb and `check` use, so all three exclude
+    # exactly the same tables rather than three readings of one pattern
+    skip, skip_note = [], ""
+    if getattr(hop, "exclude", None):
+        try:
+            from .engines.postgres import PostgresEngine
+            skip = excluded_tables(hop, db,
+                                   PostgresEngine(hop).neutral_tables("src",
+                                                                      db))
+        except Exception as e:
+            skip_note = ("# could not list the source's tables, so the hop's"
+                         " exclude list is not pushed down: "
+                         + str(e).splitlines()[-1][:70])
+    skip_args = [a for name in skip for a in ("-T", name)]
     steps = [
         f"# truncate all user tables on target {db} (generated from catalog)",
         f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fd"
-        f" -j {workers} --data-only -f {outdir}",
+        f" -j {workers} --data-only -f {outdir}"
+        + ("".join(f" -T {n}" for n in skip) if skip else ""),
         f"pg_restore -h {t.host} -p {t.port} -U {t.user} -d {db}"
         f" --data-only --disable-triggers -j {workers} {outdir}",
     ]
+    if skip_note:
+        steps.insert(1, skip_note)
+    elif skip:
+        steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
+                        " dumped at all")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
@@ -272,16 +292,16 @@ def pgdump_move(hop, db, workers, go, log):
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
     with _IndexWindow(hop, db, workers, log):
-        _pgdump_load(hop, db, s, workers, outdir, env_t, log)
+        _pgdump_load(hop, db, s, workers, outdir, env_t, log, skip_args)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
 
 
-def _pgdump_load(hop, db, s, workers, outdir, env_t, log):
+def _pgdump_load(hop, db, s, workers, outdir, env_t, log, skip_args=()):
     t = hop.target
     _sh(["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
          "-d", db, "-Fd", "-j", str(workers), "--data-only",
-         "-f", str(outdir)],
+         "-f", str(outdir), *skip_args],
         {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
     try:
         _sh(["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
@@ -406,6 +426,29 @@ class _MyIndexWindow:
         return False
 
 
+def excluded_tables(hop, db, tables):
+    """The hop's excluded tables as concrete `schema.table` names.
+
+    One resolution for every mover, and the reason is that the alternative
+    is two. `hop.exclude` is right-anchored fnmatch - `audit_log`,
+    `public.audit_log`, `appdb.public.*`. `pg_dump -T` has its own pattern
+    language and pgcopydb's filter file has none at all, so handing either
+    of them the raw pattern means the dump excludes one set, the other
+    mover excludes a second, and `check` - which asks `hop.excluded()` -
+    uses a third. Resolving here through the same `hop.excluded()` the
+    check uses is what keeps the three answers identical.
+    """
+    if not getattr(hop, "exclude", None):
+        return []
+    out = []
+    for ident in sorted(tables):
+        parts = [p for p in str(ident).split(".") if p]
+        if hop.excluded(db, *parts):
+            out.append(".".join(parts) if len(parts) > 1
+                       else f"public.{parts[0]}")
+    return out
+
+
 def pgcopydb_filters(hop, db, tables):
     """`[exclude-table]` entries for what this hop already excludes, or None.
 
@@ -424,14 +467,7 @@ def pgcopydb_filters(hop, db, tables):
     so an excluded table was copied and then never looked at. Filtering it
     here means it is not carried at all.
     """
-    if not getattr(hop, "exclude", None):
-        return None
-    out = []
-    for ident in sorted(tables):
-        parts = [p for p in str(ident).split(".") if p]
-        if hop.excluded(db, *parts):
-            out.append(".".join(parts) if len(parts) > 1
-                       else f"public.{parts[0]}")
+    out = excluded_tables(hop, db, tables)
     if not out:
         return None
     return "[exclude-table]\n" + "\n".join(out) + "\n"
