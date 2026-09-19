@@ -655,22 +655,33 @@ Two rows, both stamped with today, and the load reported success. The same
 `COPY` under `set session_replication_role = replica` kept `2003-03-03`
 exactly as it was sent.
 
-**migkit: Partly, and facing the other way.** The deep check reports
-triggers that are **disabled** on the target - the after-cutover version of
-this worry, where somebody turned them off for the load and forgot to turn
-them back on. It says nothing about the ones that are **enabled while the
-load runs**, which is the failure that changes data. The repair path does
-set `session_replication_role = replica` (postgres.py), so migkit's own
-row-by-row writes are already protected; a bulk `move` into an existing
-schema is not covered by that.
+**migkit: Ends it for the move** - `test_triggers_during_load.py`. The
+gap was confirmed with a real `migkit move --mode full --go` rather than
+inferred: the two rows above landed stamped with today's date and migkit
+printed `bulk copy complete`. The loading connection now carries
+`session_replication_role = replica`, and the same move lands
+`2001-01-01` and `2002-02-02` untouched.
 
-The verification is not fooled - the values differ, so `migkit check`
-reports the table as different afterwards. But "afterwards" is the whole
-problem: the operator wanted to know before the load, not after it.
+A **connection option, not `ALTER TABLE ... DISABLE TRIGGER`.** Disabling
+triggers is a change to the target that outlives a crash, and a target left
+with disabled triggers is the exact failure this same deep check reports -
+trading one silent corruption for another. A test asserts the trigger is
+still `tgenabled = 'O'` after a move *and* that it still fires, because the
+catalog flag only claims the first.
 
-**Missing:** a pre-move warning naming the enabled triggers on the target
-tables about to be written, and a `move` that quiets them the way the
-repair path already does.
+Measuring the scope kept the change to one line. The `pg_dump`/`pg_restore`
+path was **already** covered - migkit passes `--disable-triggers` there -
+so only pgcopydb was exposed. Both movers are now pinned by tests, so they
+cannot drift apart on something this quiet, and the source URI deliberately
+does *not* get the option: the source is only read.
+
+The control matters as much as the fix: a separate test loads a row through
+an unguarded connection and asserts the trigger **does** rewrite it, so a
+green suite cannot mean the trigger was never firing.
+
+**Missing:** the deep check still only reports triggers that are
+*disabled*. Naming the enabled ones on the tables a move is about to write
+would tell an operator what is being quieted on their behalf.
 
 ### C7. The target refuses the key you are carrying
 

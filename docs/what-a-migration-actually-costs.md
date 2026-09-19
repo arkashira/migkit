@@ -130,11 +130,13 @@ In order. Each item says what has to be measured before it is written.
    the wrong size (`0000-00-00` stored by MySQL and refused outright by
    PostgreSQL), and which zones the data actually uses.
 7. **Two things the target does to the rows as they land**, both
-   measured this tick. A `BEFORE INSERT` trigger on the target rewrote
-   `2001-01-01` to today's date for every row of a plain `COPY`, which
-   reported `COPY 2` and success; `session_replication_role = replica` kept
-   the value intact, and migkit's repair path already sets it while `move`
-   does not. The identity half is **done**: a
+   measured this tick. **Done:** a `BEFORE INSERT` trigger on the target
+   rewrote `2001-01-01` to today's date through a real `migkit move --go`,
+   which reported `bulk copy complete`; the loading connection now carries
+   `session_replication_role = replica` and the values survive. The
+   `pg_dump` path was already covered by `--disable-triggers`, which is why
+   the change is one line. **Still open:** the deep check reports only
+   *disabled* triggers, not the enabled ones a move will quiet. The identity half is **done**: a
    `GENERATED ALWAYS AS IDENTITY` key refused the exact `insert ... on
    conflict` statement migkit's own repair builds, and the repair now emits
    `OVERRIDING SYSTEM VALUE` where the catalog says it is needed. `move`

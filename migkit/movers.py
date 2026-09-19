@@ -451,6 +451,23 @@ def mongodump_move(hop, db, workers, go, log):
 
 
 
+#: What the loading connection asks the server for, so that triggers on the
+#: target do not rewrite the rows as they land.
+#:
+#: Measured, with a real `migkit move --mode full --go`: a `BEFORE INSERT`
+#: trigger setting `updated_at := now()` on the target turned rows carrying
+#: `2001-01-01` and `2002-02-02` into today's timestamp, and migkit printed
+#: `bulk copy complete`. With this on the target URI the same move landed
+#: `2001-01-01` and `2002-02-02` untouched.
+#:
+#: A **connection** option rather than `ALTER TABLE ... DISABLE TRIGGER`,
+#: deliberately: disabling triggers is a change to the target that outlives
+#: a crash, and a target left with disabled triggers is the exact failure
+#: `check --deep` already reports. This lasts as long as the connection and
+#: not one moment longer. It is what migkit's repair path has always done;
+#: the mover was the inconsistent one.
+QUIET_TRIGGERS = "?options=-c%20session_replication_role%3Dreplica"
+
 PGCOPYDB_IMAGE = "dimitri/pgcopydb:latest"
 _PGCOPYDB_OK = None
 
@@ -553,7 +570,7 @@ def pgcopydb_move(hop, db, workers, go, log):
     src = (f"postgresql://{s.user}:{quote(s.password or '', safe='')}"
            f"@{s.host}:{s.port}/{db}")
     dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
-           f"@{t.host}:{t.port}/{ddb}")
+           f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
     net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
     how = pgcopydb_runner()
     if how == "local":
