@@ -999,7 +999,7 @@ class MySQLEngine(Engine):
                 if len(pks) == 1:
                     where = (f"cast(`{pks[0]}` as char) in ("
                              + ", ".join(["%s"] * len(chunk)) + ")")
-                    args = chunk
+                    args = [rowtext.parse(k)[0] for k in chunk]
                 else:
                     tup = ("(" + ", ".join(f"cast(`{c}` as char)"
                                            for c in pks) + ")")
@@ -1059,6 +1059,7 @@ class MySQLEngine(Engine):
             return [Result("delta", db, "ok",
                            f"baseline {pos[0][0]}:{pos[0][1]} recorded,"
                            " changes are tracked from this point on")]
+        from .. import rowtext
         ck = json.loads(state.read_text())
         s = self.hop.source
         stream = BinLogStreamReader(
@@ -1092,8 +1093,11 @@ class MySQLEngine(Engine):
                                               row.get("before_values"))):
                         v = fix(vals)
                         if all(p in v for p in pks):
+                            # the same encoding the check writes, so one
+                            # drilldown file never holds two forms and the
+                            # repair's reader has one thing to read
                             touched.setdefault(t, set()).add(
-                                "\t".join(str(v[p]) for p in pks))
+                                rowtext.encode([v[p] for p in pks]))
                     n += 1
                 if n >= limit:
                     break
@@ -2054,7 +2058,10 @@ class MySQLEngine(Engine):
                 for k in ("missing", "extra", "changed"):
                     f = d / f"data-{t}.{k}"
                     if f.exists():
-                        counts.append(f"{k}={sum(1 for _ in f.open())}")
+                        # counted as keys, not as lines: a key holding a
+                        # newline is one row to repair, and counting the
+                        # lines reported five where there were four
+                        counts.append(f"{k}={len(self._drill_keys(f))}")
                 stmts = [f"resync pks for {t} ({', '.join(counts)})"]
                 if which("pt-table-sync"):
                     s, tg = self.hop.source, self.hop.target
@@ -2122,6 +2129,36 @@ class MySQLEngine(Engine):
         t = action.statements[0].split()[3]
         self._apply_rows(db, t, getattr(self, "_undo_dir", None))
 
+    @staticmethod
+    def _drill_keys(path):
+        """The keys one drilldown file holds, taken apart the way the check
+        put them together.
+
+        These are `rowtext`'s encoding - `2:11`, and `1:3|2:99` for a
+        composite key. The repair read them with `split("\\t")`, which is the
+        very thing `rowtext.parse` was written to replace: there is no tab
+        in them, so every line came back as the single string `2:11`, the
+        `where` compared the key against that, and nothing matched.
+        Measured on MySQL 8 with one row missing, one extra and one changed,
+        `apply` returned without an error, the target was untouched, and the
+        next check reported the same three differences - a repair that
+        reported success and did nothing at all.
+
+        Read by length rather than by line, so a key holding a newline is
+        one key rather than two unreadable halves.
+        """
+        from .. import rowtext
+        if not path.exists():
+            return []
+        try:
+            return [["" if v is None else v for v in row]
+                    for row in rowtext.parse_all(path.read_text())]
+        except ValueError as e:
+            raise SystemExit(
+                f"{path} is not in the form this migkit reads ({e}). Re-run"
+                " `migkit check --check data` to write it again before"
+                " syncing")
+
     def _apply_rows(self, db, t, undo_dir=None):
         d = self.hop.report_dir(db)
         ddb = self._d("dst", db)
@@ -2129,9 +2166,21 @@ class MySQLEngine(Engine):
         cols = self._cols(db, t)
 
         def read(kind):
-            f = d / f"data-{t}.{kind}"
-            return [l.split("\t") for l in
-                    f.read_text().splitlines()] if f.exists() else []
+            """The keys the check wrote, taken apart the way it put them
+            together.
+
+            These lines are `rowtext`'s encoding - `2:11`, and `1:3|2:99`
+            for a composite key - and this read them with `split("\\t")`,
+            which is the very thing `rowtext.parse` was written to replace.
+            There is no tab in them, so every line came back as the single
+            string `2:11`, the `where` compared the key against that, and
+            nothing matched. Measured on MySQL 8 with one row missing, one
+            extra and one changed: `apply` returned without an error, the
+            target was untouched, and the next check reported the same
+            three differences - a repair that reported success and did
+            nothing at all.
+            """
+            return self._drill_keys(d / f"data-{t}.{kind}")
 
         missing, extra, changed = read("missing"), read("extra"), read("changed")
         # keep-target preserves target-changed rows: fix only missing/extra
@@ -2185,11 +2234,27 @@ class MySQLEngine(Engine):
             sconn.close()
             dconn.close()
 
+    #: Characters that make the printed-SQL path unusable, measured on
+    #: MySQL 8 with a text primary key:
+    #:
+    #:   a newline   `pt-table-sync --print` writes one statement that this
+    #:               reads back with `splitlines()`, so half a statement was
+    #:               executed: `SQL syntax ... near ''line'`
+    #:   a backslash MySQL's own escape character inside a string literal,
+    #:               so a `--where` built by doubling quotes alone turns
+    #:               `back\slash` into `backslash` and matches no row
+    #:
+    #: The builtin path below sends the same keys as query parameters, where
+    #: neither is a problem, so this hands over instead of guessing.
+    PT_UNSAFE = ("\n", "\r", "\\")
+
     def _pt_sync_sql(self, db, t, pks, touched):
         if not which("pt-table-sync") \
                 or not self.hop.options.get("pt_apply", True):
             return None
         if len(pks) != 1 or not touched or len(touched) > 1000:
+            return None
+        if any(c in str(k[0]) for k in touched for c in self.PT_UNSAFE):
             return None
         vals = ", ".join("'" + str(k[0]).replace("'", "''") + "'"
                          for k in touched)

@@ -307,12 +307,24 @@ class RedisEngine(Engine):
             f" on the source ({mode}, pipelined)")]
 
     def _write_drilldown(self, db, **kinds):
-        """The keys behind the counts, through the shared writer."""
+        """The keys behind the counts, through the shared writer.
+
+        Written as JSON, which is what the rest of the estate's drilldowns
+        hold and what a Redis key needs: keys are binary-safe, so one can
+        contain the newline these files are separated by. Measured on Redis
+        7 with a key holding a newline, the raw form was written as one line
+        and read back as two, and the repair left the target differing while
+        reporting that it had put the keys right.
+        """
+        import json
         self._write_drill(db, f"db{db}",
-                          **{k: sorted(v) for k, v in kinds.items()})
+                          **{kind: [json.dumps(k) for k in sorted(keys)]
+                             for kind, keys in kinds.items()})
 
     def _read_drilldown(self, db, kind):
-        return self._read_drill(db, f"db{db}", kind)
+        import json
+        return [json.loads(line) for line in
+                self._read_drill(db, f"db{db}", kind)]
 
     def repair_plan(self, db, kind):
         """What `migkit sync --kind rows` would do to this database.

@@ -95,9 +95,13 @@ def test_repair_then_restore_is_exact(pair, tmp_path):
     cfg.REPORTS = tmp_path / "reports"
     eng = MySQLEngine(hop)
     d = eng.hop.report_dir("shop")
-    (d / "data-t.missing").write_text("2\n")
-    (d / "data-t.extra").write_text("9\n")
-    (d / "data-t.changed").write_text("3\n")
+    # written in the encoding the check writes, which is what the repair
+    # reads: a bare `2` was the old raw form, and standing in for the check
+    # with a format it no longer produces tested the repair against a file
+    # it would never be given
+    from migkit import rowtext
+    for kind, pk in (("missing", "2"), ("extra", "9"), ("changed", "3")):
+        (d / f"data-t.{kind}").write_text(rowtext.encode([pk]) + "\n")
 
     before = _sql(DST, "select * from shop.t order by id").stdout
 

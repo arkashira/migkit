@@ -115,6 +115,24 @@ def postgres_row(columns, alias="t"):
     return postgres_row_from([f"{q.format(c)}::text" for c in columns])
 
 
+def encode(values):
+    """The encoding, built in Python rather than by a database.
+
+    The SQL builders above are for expressions a server evaluates; this is
+    for the places migkit already holds the values - a key read out of a
+    binlog, say. Both have to produce the same string, because the same
+    drilldown file is written from either and read by one reader.
+    """
+    parts = []
+    for v in values:
+        if v is None:
+            parts.append(f"{NULL_LEN}:")
+        else:
+            text = v if isinstance(v, str) else str(v)
+            parts.append(f"{len(text)}:{text}")
+    return SEP.join(parts)
+
+
 def parse(encoded):
     """Values back out of an encoded string. The inverse of `join`.
 
@@ -123,7 +141,43 @@ def parse(encoded):
     a WHERE clause. When those two lived apart, the taking-apart was a split
     on a tab - which a tab inside a key value quietly broke.
     """
-    out, i, n = [], 0, len(encoded)
+    values, end = _record(encoded, 0)
+    if end != len(encoded):
+        raise ValueError(f"trailing text after the row: "
+                         f"{encoded[end:end + 20]!r}")
+    return values
+
+
+def parse_all(text, sep="\n"):
+    """Every encoded row in a file, found by its lengths rather than by its
+    line breaks.
+
+    A key value may contain the separator. Measured on MySQL 8, a primary
+    key holding a newline was written to the drilldown as one record and
+    read back by `splitlines()` as two - `10:line` and `break` - so the
+    repair either refused the file or, before it checked, compared the key
+    against a fragment of itself. The lengths already say where each record
+    ends, so this uses them and treats the separator as what follows a
+    record rather than as what defines one.
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith(sep, i):        # a blank line, or a trailing one
+            i += len(sep)
+            continue
+        values, i = _record(text, i)
+        out.append(values)
+        if i < n:
+            if not text.startswith(sep, i):
+                raise ValueError(f"expected a row separator at {i}, found"
+                                 f" {text[i:i + 20]!r}")
+            i += len(sep)
+    return out
+
+
+def _record(encoded, start):
+    """One row's values, and where it ended."""
+    out, i, n = [], start, len(encoded)
     while i <= n:
         mark = encoded.find(":", i)
         if mark < 0:
@@ -145,9 +199,7 @@ def parse(encoded):
                                  f" {encoded[:60]!r}")
             out.append(encoded[mark + 1:end])
             i = end
-        if i >= n:
+        if i >= n or encoded[i] != SEP:
             break
-        if encoded[i] != SEP:
-            raise ValueError(f"expected {SEP!r} at {i} in {encoded[:60]!r}")
         i += 1
-    return out
+    return out, i

@@ -2054,7 +2054,7 @@ class PostgresEngine(Engine):
             else:
                 tup = ", ".join(f'"{p}"::text' for p in pks)
                 vals = ", ".join(
-                    "(" + ", ".join(_esc(x) for x in k.split("\t")) + ")"
+                    "(" + ", ".join(_esc(x) for x in self._pk_parts(k)) + ")"
                     for k in a)
                 where = f"({tup}) in ({vals})"
             qd = (f'select {pkexpr}||\'|\'||"{col}"::text'
