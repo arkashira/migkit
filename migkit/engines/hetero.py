@@ -409,20 +409,6 @@ class HeteroEngine(Engine):
         except Exception:
             return None
 
-    def _drill_tables(self, db):
-        """Tables the last check left a drilldown for, and what it found."""
-        import json
-        found = {}
-        for path in sorted(self.hop.report_dir(db).glob("data-*.*")):
-            name, _, kind = path.name[len("data-"):].rpartition(".")
-            if kind not in ("missing", "changed", "extra") or not name:
-                continue
-            keys = [tuple(json.loads(l)) for l in
-                    path.read_text().splitlines() if l]
-            if keys:
-                found.setdefault(name, {})[kind] = keys
-        return found
-
     def repair_plan(self, db, kind):
         """What `migkit sync --kind rows` would carry across the pair.
 
@@ -432,29 +418,8 @@ class HeteroEngine(Engine):
         """
         if kind not in ("rows", "all"):
             return []
-        actions = []
-        for name, found in sorted(self._drill_tables(db).items()):
-            send = found.get("missing", []) + found.get("changed", [])
-            drop = found.get("extra", [])
-            statements = []
-            if send:
-                statements.append(
-                    f"copy {len(send)} rows from {self.src_name} to"
-                    f" {self.dst_name}: "
-                    + ", ".join("/".join(k) for k in send[:6])
-                    + (" ..." if len(send) > 6 else ""))
-            if drop:
-                statements.append(
-                    f"delete {len(drop)} rows the source does not have: "
-                    + ", ".join("/".join(k) for k in drop[:6])
-                    + (" ..." if len(drop) > 6 else ""))
-            actions.append(RepairAction(
-                f"{db}.{name}", "rows", statements, [],
-                f"{len(found.get('missing', []))} missing,"
-                f" {len(found.get('changed', []))} changed,"
-                f" {len(drop)} extra; every target row this overwrites or"
-                " removes is written to the undo file first"))
-        return actions
+        return self._rows_plan(
+            db, f"from {self.src_name} to {self.dst_name}")
 
     def apply(self, db, action):
         """Carry the rows across, then remove the ones that should not exist.

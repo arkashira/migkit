@@ -156,7 +156,12 @@ def test_the_numbers_the_verdict_avoids_are_the_ones_that_move(pg_pair):
         totals.add((got["rows_a"], got["rows_b"]))
         differences.add((got["only_a"], got["only_b"], got["updated"]))
     assert differences == {(1, 1, 0)}, differences
-    assert len(totals) > 1 or (50, 50) in totals, totals
+    # what is pinned is that these are not a reading of the tables, which
+    # both shapes seen so far satisfy: totals that move between identical
+    # runs, and totals that sit still at something wrong - measured, three
+    # runs in a row answered (0, 1) for two tables of fifty rows. Asking
+    # only that they move made this test fail on the second shape
+    assert totals != {(50, 50)}, totals
 
 
 def test_the_engine_says_what_is_missing_before_it_runs_anything(tmp_path):

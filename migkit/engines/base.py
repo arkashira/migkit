@@ -230,6 +230,37 @@ class Engine:
     def repair_plan(self, db, kind):
         return []
 
+    def _rows_plan(self, db, carry):
+        """The `--kind rows` plan of an engine that keeps a drilldown.
+
+        The rows come from the last check rather than from whatever the two
+        sides disagree about at this moment, so the plan describes what the
+        operator was shown. `carry` is how this engine says where the rows
+        come from, which is the only part that differs between them.
+        """
+        actions = []
+        for name, found in sorted(self._drill_tables(db).items()):
+            send = found.get("missing", []) + found.get("changed", [])
+            drop = found.get("extra", [])
+            statements = []
+            if send:
+                statements.append(
+                    f"copy {len(send)} rows {carry}: "
+                    + ", ".join("/".join(k) for k in send[:6])
+                    + (" ..." if len(send) > 6 else ""))
+            if drop:
+                statements.append(
+                    f"delete {len(drop)} rows the source does not have: "
+                    + ", ".join("/".join(k) for k in drop[:6])
+                    + (" ..." if len(drop) > 6 else ""))
+            actions.append(RepairAction(
+                f"{db}.{name}", "rows", statements, [],
+                f"{len(found.get('missing', []))} missing,"
+                f" {len(found.get('changed', []))} changed,"
+                f" {len(drop)} extra; every target row this overwrites or"
+                " removes is written to the undo file first"))
+        return actions
+
     def prepare_target(self, db):
         """Make whatever the target needs before a first write, or nothing.
 
@@ -504,6 +535,26 @@ class Engine:
         if not path.exists():
             return []
         return [l for l in path.read_text().splitlines() if l]
+
+    def _drill_tables(self, db):
+        """Tables the last check left a drilldown for, and what it found.
+
+        One JSON list per line, each the canonical text of a row's key. The
+        reader is here rather than beside one engine because the files are
+        the handover between a check and `migkit sync`: an engine that wrote
+        them with its own reader would drift from the one that acts on them.
+        """
+        import json
+        found = {}
+        for path in sorted(self.hop.report_dir(db).glob("data-*.*")):
+            name, _, kind = path.name[len("data-"):].rpartition(".")
+            if kind not in ("missing", "changed", "extra") or not name:
+                continue
+            keys = [tuple(json.loads(l)) for l in
+                    path.read_text().splitlines() if l]
+            if keys:
+                found.setdefault(name, {})[kind] = keys
+        return found
 
     @staticmethod
     def _key_of(columns, key, row):
