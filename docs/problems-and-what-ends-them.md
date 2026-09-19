@@ -1031,18 +1031,32 @@ reports it rather than working around it:
 
 which is correct - an unreadable table is not a verified one.
 
-**The narrow thing that is wrong:** in that same run the counts line read
-`OK 0 tables, rows 0==0`. Counts is merged into the checksum pass, so when
-that pass errors on every table there is nothing left to count, and the
-result is a clean verdict computed over nothing. Nobody is misled in a
-default run, because `data` errors beside it and the overall verdict is
-`error`. But "OK, 0 tables" is the same shape as a mover reporting success
-over an empty target, which this project already treats as a bug worth
-refusing.
+**The narrow thing that was wrong is fixed** -
+`test_counts_over_nothing.py`. In that same run the counts line read `OK 0
+tables, rows 0==0`: counts is merged into the checksum pass, so when that
+pass errors on every table there is nothing left to count, and the result
+was a clean verdict computed over nothing. Nobody was badly misled, because
+`data` errored beside it and the overall verdict was `error` - but "OK, 0
+tables" is the same shape as a mover reporting success over an empty
+target, which `moved_nothing` already refuses.
 
-Counts run **alone** is honest here, and that is worth stating precisely:
-`select count(*)` needs only one readable column, so it answered `100 rows
-both sides` and that number is true.
+It now says what it actually knows:
+
+    counts   postgres: ERROR counted 0 tables; 1 could not be read by the
+      pass these counts come from: public.sales - so this is not a count of
+      the database
+
+**An empty database is still `ok`**, and keeping those two apart is the
+whole difficulty: zero tables counted is only alarming when there were
+tables to count. They are told apart by whether any table exists on both
+sides, not by the count being zero, and both directions are pinned by
+tests - along with a control proving the grant really was restrictive, so
+a green suite cannot mean the permission was never enforced.
+
+Counts run **alone** was honest all along, and that is worth stating
+precisely rather than sweeping into the fix: `select count(*)` needs only
+one readable column, so it answered `100 rows both sides` and that number
+is true. A test pins that it still does.
 
 ## E. Keeping the two sides in step
 

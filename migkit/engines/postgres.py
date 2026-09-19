@@ -1372,7 +1372,29 @@ class PostgresEngine(Engine):
             return None
         return [line for line in out.splitlines() if line]
 
+    @staticmethod
+    def _failed_tables(out):
+        """The tables the fast pass could not read at all. One place,
+        because `check_data` and the counts derived from the same output
+        both have to know - and only one of them used to."""
+        return [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
+
     def _counts_from_fast(self, db, out):
+        """Counts ride along with the checksum pass rather than scanning
+        again, which means they can only speak for the tables that pass
+        managed to read.
+
+        Measured with a role holding a column-level grant, so `select *`
+        was refused on the only table in the database: the checksum pass
+        errored on it, nothing was left to count, and this reported `OK 0
+        tables, rows 0==0`. A clean verdict computed over nothing is the
+        same shape as a mover reporting success into an empty target, which
+        `moved_nothing` already refuses - so it is refused here too.
+
+        An empty database still reports ok, because there genuinely is
+        nothing to count and saying otherwise would cry wolf. The two cases
+        are told apart by whether any table exists on both sides.
+        """
         n, rows_src, rows_dst, bad = self._parse_fast(out)
         st = set(self._psql("src", db, self.USER_TABLES).splitlines())
         dt = set(self._psql("dst", db, self.USER_TABLES).splitlines())
@@ -1381,6 +1403,28 @@ class PostgresEngine(Engine):
         if bad:
             return Result("counts", db, "diff", "; ".join(bad[:10]), "",
                           "missing rows show up in check data, fix there")
+        failed = self._failed_tables(out)
+        if failed:
+            return Result(
+                "counts", db, "error",
+                f"counted {n} tables; {len(failed)} could not be read by the"
+                f" pass these counts come from: {', '.join(failed[:5])}"
+                + (" ..." if len(failed) > 5 else "")
+                + " - so this is not a count of the database", "",
+                "see the data check for the error itself; a column-level"
+                " grant is one cause, and it reports the table rather than"
+                " the column")
+        shared = st & dt
+        if not n and shared:
+            return Result(
+                "counts", db, "error",
+                f"{len(shared)} tables exist on both sides and none of them"
+                " was counted - the pass these counts come from returned"
+                " nothing to add up", "",
+                "run the data check: whatever stopped it stopped this too")
+        if not shared:
+            return Result("counts", db, "ok",
+                          "no tables on both sides to count")
         return self._honest_about_filtering(
             Result("counts", db, "ok",
                    f"{n} tables, rows {rows_src:,}=={rows_dst:,}"
@@ -1468,7 +1512,7 @@ class PostgresEngine(Engine):
                        f" checksums equal both sides{extra}",
                        str(ev)), db)]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
-        err = [l.split(":")[0] for l in out.splitlines() if ": ERROR" in l]
+        err = self._failed_tables(out)
         for t in bad:
             self._drilldown_native(db, t)
         if bad:
