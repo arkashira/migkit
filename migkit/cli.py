@@ -10,7 +10,7 @@ from rich.table import Table
 from . import advisors
 from .config import get_hop, load_hops
 from .engines import get_engine
-from .util import Timer, human_int, human_secs, which
+from .util import without_secret, Timer, human_int, human_secs, which
 from . import __version__
 
 console = Console(highlight=False)
@@ -914,7 +914,7 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
         if sql.get("note"):
             console.print(f"  note: {sql['note']}")
         for side, stmt in plan:
-            shown = stmt.replace(hop.source.password, "****")
+            shown = without_secret(stmt, hop.source.password)
             console.print(f"  {side}: {shown}")
             if go:
                 if hasattr(eng, "_psql"):

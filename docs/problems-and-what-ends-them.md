@@ -1647,8 +1647,31 @@ over ordinary client connections; the row data it reads for a drilldown
 stays local, and the evidence files are written locally. Grants are compared
 so temporary ones show up as a difference.
 
-**Missing:** masking. If an operator needs a drilldown that is safe to paste
-into a ticket, migkit does not yet offer one.
+**One thing worth knowing about the native replication path**, measured
+rather than assumed. `CREATE SUBSCRIPTION` carries the source's connection
+string, and the target keeps it:
+
+    select subconninfo from pg_subscription
+    host=10.0.0.5 port=5432 dbname=postgres user=postgres password=CHANGE_ME
+
+Stated at its real size: a plain login role on the target got `permission
+denied for table pg_subscription`, so this is a superuser-on-the-target
+exposure, not a public one. It is still a reason to prefer a path that
+runs from the operator's machine when the target belongs to someone else -
+`pgcopydb follow` is that path, and connects out to both rather than
+asking the target to dial the source.
+
+migkit masks the password in the plan it prints, and **that masking had a
+bug**: `stmt.replace(password, "****")` with an empty password inserts the
+mask between every character, so a hop authenticating by `trust`, `.pgpass`
+or a client certificate - the arrangements that keep a password out of the
+config in the first place - got back
+`****c****r****e****a****t****e****` instead of the statement it was about
+to run. Fixed, with the guard in one shared helper:
+`test_masking_an_empty_password.py`.
+
+**Missing:** masking of *data*. If an operator needs a drilldown that is
+safe to paste into a ticket, migkit does not yet offer one.
 
 ---
 

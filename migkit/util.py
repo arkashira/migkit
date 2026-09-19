@@ -104,6 +104,21 @@ def with_retry(fn, tries=4, base=0.8, label="", log=None):
     raise last
 
 
+def without_secret(text, secret):
+    """`text` with `secret` hidden, and unchanged when there is none.
+
+    The guard is the whole point. `str.replace("", "****")` inserts the
+    mask between every character, so a hop authenticating by `trust` or
+    `.pgpass` - an empty password, and the safer arrangement - turned the
+    plan it was about to run into `****c****r****e****a****t****e****`.
+    The more careful the operator's setup, the less readable migkit made
+    the output.
+    """
+    if not secret:
+        return text
+    return str(text).replace(str(secret), "****")
+
+
 def run(cmd, env=None, input=None, timeout=None, check=True, retries=3):
     """Run a command, retrying only transient connection failures with
     backoff. check=False still returns the (failed) process for callers
