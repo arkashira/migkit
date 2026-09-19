@@ -96,6 +96,43 @@ answers 7.4.0 and KeyDB answers 6.3.4. Tests: `test_variants.py`,
 system-versioned table has no home in MySQL, and migkit does not yet name
 them before the move.
 
+### A5. The mover flattens the partitioning
+
+**What happens.** AWS DMS states plainly that it does not migrate table
+metadata related to partitioning or inheritance: it reports both parent and
+child tables on the source and creates a **plain table** on the target. The
+partitioned target has to be built by hand first, with the task set to "do
+nothing" or "truncate" rather than "drop tables on target". Mapping rules
+differ between phases too - partitions are the source tables for CDC, and
+naming the parent there produces duplicate errors.
+
+**migkit: Ends it.** The deep check compares partitioning between the two
+sides. Measured on a range-partitioned source against a plain target of the
+same name: `deep postgres partitions: DIFF public.events: not partitioned on
+target`. Test: `test_deep_partitions_pg.py`.
+
+**Missing:** it names the table, not the partitions that will be missing at
+the next boundary - `pg_partman`'s own traps (the default partition that has
+to be drained before a child can be created, `async_partitioning_in_progress`
+silently stopping maintenance, a unique key that must include the partition
+key) are not modelled.
+
+### A6. The bill for moving the bytes
+
+**What happens.** Egress is charged when data leaves a provider and ingress
+is free, which is the shape that makes leaving expensive. At $0.09/GB for
+the first 10 TB out of AWS, a 10 TB database with two weeks of continuous
+replication runs $1,200-$1,500 in transfer alone, and 50 TB costs
+$3,500-$7,000. It surprises people because it is spread across line items
+nobody reads as "database replication", and because dual-running pays both
+providers at once.
+
+**migkit: Not yet.** migkit knows exactly how many bytes each table holds -
+it reports them in `check counts` - so the arithmetic an operator is doing
+on a napkin is arithmetic migkit already has the inputs for. It does not do
+it, and it does not warn that a `move` is about to push a measured number of
+gigabytes across a boundary that charges for them.
+
 ---
 
 ## B. Semantics that differ between engines
@@ -153,6 +190,28 @@ as a difference rather than as noise.
 **Missing:** a mojibake detector - a check that samples text columns for the
 `Ã©`/`â€"` signatures and for genuine high-byte latin1, and reports that the
 column has *both* before anybody runs a conversion.
+
+### B4. The server changed its default collation under you
+
+**What happens.** MySQL 5.7 defaulted to `utf8mb4_general_ci`; MySQL 8
+defaults to `utf8mb4_0900_ai_ci`. The upgrade changes nothing that already
+exists and everything created afterwards, so a fleet ends up holding both -
+and then `Illegal mix of collations (utf8mb4_0900_ai_ci,IMPLICIT) and
+(utf8mb4_general_ci,IMPLICIT) for operation '='` arrives at runtime, often
+from inside a stored procedure. The two are not interchangeable: `0900` is
+Unicode 9.0 and NO PAD, `general_ci` is a simplified per-character
+comparison with PAD SPACE, so trailing spaces and accented characters sort
+and compare differently. Converting is its own project - the conversion
+regenerates indexes, and rows that were distinct under the old collation can
+collide under the new one.
+
+**migkit: Partly.** Collation is compared between the two sides for tables
+and columns (`test_deep_collation_pg.py`, `test_charset_encoding_mysql.py`),
+and the server-level settings are compared by `check params`.
+
+**Missing:** the *consequence* - which columns would collide under the
+target's collation, and which comparisons in the schema now mix two of them.
+Both are answerable with a query and neither is asked.
 
 ---
 
@@ -248,6 +307,36 @@ and narrows the work in flight - 7 of 9 engines, including the cross-engine
 path and reladiff's connection count. Tests: `test_throttle_*.py`.
 
 **Missing:** two engines, and a lag-aware brake for replicas specifically.
+
+### C5. The index that exists, is useless, and costs you anyway
+
+**What happens.** `CREATE INDEX CONCURRENTLY` is the only way to add an
+index to a live table, and when it fails - a duplicate for a unique index, a
+cancelled statement, a dropped connection, a `statement_timeout` that was
+set for ordinary queries - the index is **not** rolled back. It stays in the
+catalog marked invalid. The planner ignores it, so it shows zero scans and
+reads as an unused index, while it is still maintained on every write, still
+occupies space, and still blocks creating an index of that name again.
+Migration tooling hits this constantly: a big table plus a low
+`statement_timeout` is the recipe.
+
+**migkit: Not yet, and measured.** A target was left with two invalid
+indexes, one of them sharing a name with a *valid* index on the source. The
+full `migkit check --deep` report mentions the word "invalid" **zero times**.
+The schema diff notices an index the source does not have and says "1 to
+remove", which reads as a spurious index rather than a broken one; when the
+name exists on both sides it says nothing at all.
+
+The detection is one query - `select ... from pg_index where not indisvalid`
+- with one piece of nuance that a naive check would get wrong: a partitioned
+parent's index is invalid **by design** until every partition's index is
+attached, so those have to be excluded rather than reported.
+
+**Also missing:** the settings that make the rebuild finish in the first
+place. The measured difference is not small - the same `CREATE INDEX` took
+21.99 s with `max_parallel_maintenance_workers=2` and 12.82 s with it at 8 -
+and `migkit move` does not raise it, or `maintenance_work_mem`, for the
+rebuild it triggers.
 
 ---
 
@@ -457,6 +546,29 @@ the objects dumped from both sides, the parameters, the differing columns,
 the differing rows, and a proof file recording what was proved equal and
 when. `migkit report` renders it, `migkit history` lists it.
 
+### F4. There is a pooler between you and the database
+
+**What happens.** PgBouncer in transaction mode "breaks client expectations
+of the server by design" - its own words - and nothing about it errors
+loudly. Session-level `pg_advisory_lock` is the trap that matters for
+migrations: the lock is taken on one backend and the unlock may land on
+another, leaking it. Measured by one report against PgBouncer 1.25.2, a
+migration runner's session lock leaked onto a pooled connection and a later
+direct client blocked about 50 seconds until the pooler recycled it. Prepared
+statements fail intermittently for the same reason unless
+`max_prepared_statements` is on (1.21+), replication connections cannot be
+routed through it at all, and a single `SET` outside a transaction pins a
+client to one backend for the rest of its session.
+
+**migkit: Not yet.** migkit connects with whatever the hop names, and a hop
+pointed at a pooler would get CDC, advisory locks and session settings that
+behave differently from the direct connection the checks assume - with no
+warning. The detection is cheap: a PgBouncer connection answers
+`SHOW LISTEN_ADDR` on its admin console, and more usefully the server
+version string and `pg_backend_pid()` behaviour differ from a direct
+connection across two statements. A hop that must not go through a pooler -
+the CDC one especially - should say so before it fails oddly.
+
 ---
 
 ## G. After the data has landed
@@ -542,6 +654,17 @@ Streams and stores:
 [MirrorMaker 2 offset translation](https://lenses.io/blog/2025/10/kafka-replication-mirrormaker2-complexity/),
 [DocumentDB change streams](https://docs.aws.amazon.com/documentdb/latest/devguide/change_streams.html),
 [RedisShake modes](https://tair-opensource.github.io/RedisShake/en/guide/mode.html).
+Later research passes:
+[cloud egress pricing 2026](https://spendark.com/blog/cloud-egress-costs-guide/),
+[AWS DMS with partitioned PostgreSQL tables](https://aws.amazon.com/blogs/database/migrate-data-from-partitioned-tables-in-postgresql-using-aws-dms/),
+[pg_partman online partitioning gotchas](https://medium.com/fresha-data-engineering/divide-and-partition-pg-partman-online-partitioning-gotchas-042b1af626a5),
+[CREATE INDEX documentation](https://www.postgresql.org/docs/current/sql-createindex.html),
+[the hidden cost of invalid indexes](https://postgres.ai/blog/20260106-invalid-index-overhead),
+[making index creation faster](https://techcommunity.microsoft.com/blog/adforpostgresql/postgresql-making-index-creation-faster/4067939),
+[MySQL 8.0 collations: migrating from older collations](https://dev.mysql.com/blog-archive/mysql-8-0-collations-migrating-from-older-collations/),
+[PgBouncer features and limitations](https://www.pgbouncer.org/features.html),
+[prepared statements in transaction mode](https://www.crunchydata.com/blog/prepared-statements-in-transaction-mode-for-pgbouncer).
+
 Cutover, aftermath and compliance:
 [zero-downtime patterns](https://launchdarkly.com/blog/3-best-practices-for-zero-downtime-database-migrations/),
 [post-upgrade statistics](https://techcommunity.microsoft.com/blog/azuredbsupport/azure-postgresql-lesson-learned-8-post-upgrade-performance-surprises-the-one-ste/4471807),

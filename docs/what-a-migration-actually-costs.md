@@ -95,16 +95,23 @@ In order. Each item says what has to be measured before it is written.
    and `python-oracledb` 26 connects in thin mode with no Instant Client -
    so it is testable here. `icr.io/db2_community/db2` is amd64/ppc64le/s390x
    only, so Db2 would be emulation: it goes behind S3 (minio) and Redshift.
-3. **The pre-flight the practitioners keep asking for**: before anything
+3. **The index nobody can see is broken.** A failed `CREATE INDEX
+   CONCURRENTLY` leaves an invalid index that the planner ignores, writes
+   still pay for, and a rebuild of the same name trips over - and a full
+   `migkit check --deep` against a target holding two of them said the word
+   "invalid" zero times. One query finds them; the nuance is excluding a
+   partitioned parent's index, which is invalid by design until every
+   partition attaches.
+4. **The pre-flight the practitioners keep asking for**: before anything
    moves, report what the target will refuse - unsupported extensions,
    privileges the account does not have, types with no home on the other
    side, tables with no key, LOB columns. Everything needed for this is
    already in `assess`; what is missing is saying it in one place, early.
-4. **LOBs**, as correctness first and speed second: find them, size them,
+5. **LOBs**, as correctness first and speed second: find them, size them,
    and refuse to truncate silently.
-5. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
+6. **A cutover runbook migkit drives**: freeze, delta, verify, sequence
    reset, rollback rehearsal - the steps exist as separate commands today.
-6. **Then** consider a migkit-owned mover, with the benchmark from item 1
+7. **Then** consider a migkit-owned mover, with the benchmark from item 1
    as the bar it has to clear.
 
 ## Sources
