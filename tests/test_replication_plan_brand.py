@@ -79,15 +79,23 @@ def servers():
                     f"{MARIA_PORT}:3306", "mariadb:11",
                     "--log-bin=binlog", "--server-id=1"],
                    check=True, capture_output=True)
-    assert _wait(MY_PORT) and _wait(MARIA_PORT)
-    for container, client in ((MY, "mysql"), (MARIA, "mariadb")):
-        for _ in range(60):
-            if run_sql(container, client, "select 1").returncode == 0:
-                break
-            time.sleep(2)
-        else:
-            pytest.fail(f"{container} never answered")
-    yield
+    # from here on the containers exist, so every exit has to go through
+    # the teardown - including the `pytest.fail` below, which used to leave
+    # a MySQL and a MariaDB server running for the rest of the day
+    try:
+        assert _wait(MY_PORT) and _wait(MARIA_PORT)
+        for container, client in ((MY, "mysql"), (MARIA, "mariadb")):
+            for _ in range(60):
+                if run_sql(container, client, "select 1").returncode == 0:
+                    break
+                time.sleep(2)
+            else:
+                pytest.fail(f"{container} never answered")
+        yield
+    finally:
+        for n in (MY, MARIA):
+            subprocess.run(["docker", "rm", "-f", "-v", n],
+                           capture_output=True)
 
 
 def test_gtid_mode_is_a_variable_on_one_and_absent_on_the_other(servers):
