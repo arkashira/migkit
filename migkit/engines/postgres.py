@@ -2136,6 +2136,126 @@ class PostgresEngine(Engine):
                     f" {(p.stderr or '').splitlines()[-1][:90] if p.stderr else 'unknown'}")
         return f"analyzed {target} on the target (in stages)"
 
+    @staticmethod
+    def _crosscheck_verdicts(text):
+        """`{table: same?}` from `pgcopydb compare data` output.
+
+        Its table marks a difference with `!` in the second column, so the
+        parse is the marker and not the checksums - two hex strings that
+        happen to differ is what the marker already means, and reading
+        them twice would be a second opinion about pgcopydb's own answer.
+        """
+        out = {}
+        for line in text.splitlines():
+            parts = [c.strip() for c in line.split("|")]
+            if len(parts) < 4 or not parts[0] or "." not in parts[0]:
+                continue
+            if parts[0].startswith("Table Name") or set(parts[0]) <= set("- "):
+                continue
+            name = parts[0].split(".", 1)[1] if parts[0].count(".") > 1 \
+                else parts[0]
+            out[name] = parts[1] != "!"
+        return out
+
+    def _crosscheck_result(self, db, mine, theirs, ran):
+        """Whether a second implementation reaches migkit's verdict.
+
+        Measured on pgcopydb 0.18 against four pairs before this was
+        written, and it agreed every time: identical data, `numeric` 1.0
+        against 1.00 (both **differ** - equal by `=`, not equal as stored),
+        the same columns declared in a different order (both **same** -
+        each sorts them), and a table with no primary key and a missing row
+        (both **differ**). That agreement is the point: a check nobody has
+        ever audited is the one this project exists to argue against.
+
+        A table only one of them looked at is not a disagreement. Saying so
+        is what keeps this from crying wolf on every filtered hop.
+        """
+        if not ran:
+            return Result("deep", f"{db} cross-check", "skip",
+                          "pgcopydb is not available to give a second"
+                          " opinion on this pair")
+        shared = sorted(set(mine) & set(theirs))
+        clash = [t for t in shared if mine[t] != theirs[t]]
+        if clash:
+            return Result(
+                "deep", f"{db} cross-check", "diff",
+                f"{len(clash)} tables where pgcopydb and migkit disagree:"
+                + ", ".join(f" {t} (migkit says"
+                            f" {'same' if mine[t] else 'differs'},"
+                            f" pgcopydb says"
+                            f" {'same' if theirs[t] else 'differs'})"
+                            for t in clash[:3])
+                + (" ..." if len(clash) > 3 else "")
+                + " - one of the two verifiers is wrong about this table",
+                "", "run `pgcopydb compare data` by hand on the pair and"
+                    " read both row sets before trusting either verdict")
+        if not shared:
+            return Result("deep", f"{db} cross-check", "skip",
+                          "no table was examined by both verifiers")
+        return Result("deep", f"{db} cross-check", "ok",
+                      f"{len(shared)} tables, pgcopydb reaches the same"
+                      " verdict as migkit on every one")
+
+    def _crosscheck(self, db):
+        """Ask pgcopydb the same question and see if it agrees.
+
+        Off unless `MIGKIT_CROSSCHECK` says otherwise: it reads both
+        databases in full a second time, which is a real cost to impose on
+        every run. An environment variable rather than a flag, the same way
+        `MIGKIT_MOVER` is.
+        """
+        import os
+        if os.environ.get("MIGKIT_CROSSCHECK", "").strip().lower() \
+                not in ("1", "true", "yes", "on"):
+            return None
+        from ..movers import pgcopydb_available
+        from ..util import run
+        if not pgcopydb_available():
+            return self._crosscheck_result(db, {}, {}, False)
+        import tempfile
+        from urllib.parse import quote
+        s_, t_ = self.hop.source, self.hop.target
+        src = (f"postgresql://{s_.user}:{quote(s_.password or '', safe='')}"
+               f"@{s_.host}:{s_.port}/{db}")
+        dst = (f"postgresql://{t_.user}:{quote(t_.password or '', safe='')}"
+               f"@{t_.host}:{t_.port}/{self._d('dst', db)}")
+        work = tempfile.mkdtemp(prefix="migkit-crosscheck-")
+        try:
+            p = run(["pgcopydb", "compare", "data", "--dir", work,
+                     "--source", src, "--target", dst], check=False)
+        except Exception as e:
+            return Result("deep", f"{db} cross-check", "error",
+                          "could not run pgcopydb compare:"
+                          f" {str(e).splitlines()[-1][:80]}")
+        theirs = self._crosscheck_verdicts(p.stdout + p.stderr)
+        mine = self._mine_from_evidence(db)
+        if not mine:
+            return Result("deep", f"{db} cross-check", "skip",
+                          "no data-evidence.txt to compare against - the"
+                          " data check has to have run for there to be a"
+                          " migkit verdict to second-guess")
+        return self._crosscheck_result(db, mine, theirs, True)
+
+    def _mine_from_evidence(self, db):
+        """migkit's own per-table verdict, read from the file the data
+        check already wrote rather than by running the pass again.
+
+        Asking twice would be two answers taken at two different moments
+        about the same question, which is the thing this check exists to
+        catch rather than to commit.
+        """
+        out = {}
+        path = self.hop.report_dir(db) / "data-evidence.txt"
+        if not path.exists():
+            return out
+        for line in path.read_text().splitlines():
+            name, _, rest = line.partition(":")
+            if not rest.strip():
+                continue
+            out[name.strip()] = rest.strip().startswith("OK")
+        return out
+
     def _planner_stats(self, db):
         """What the target's own catalog says it knows about its tables.
 
@@ -2237,6 +2357,9 @@ class PostgresEngine(Engine):
                               "every table has a pk or unique index"))
 
         res.append(self._planner_stats(db))
+        cross = self._crosscheck(db)
+        if cross is not None:
+            res.append(cross)
         res.append(self._lob_check(db))
         indexes = self._invalid_indexes(db)
         collations = self._collation_versions(db)

@@ -46,9 +46,14 @@ What that leaves on the floor:
 * **`follow`** - a complete logical-decoding CDC pipeline with resume and
   an end position. migkit has one CDC path (Debezium); this is a second,
   native to PostgreSQL, with no Kafka to stand up.
-* **`compare data` / `compare schema`** - pgcopydb's own verification. Worth
-  running *against* migkit's on the same pair: either it agrees, which is
-  evidence, or it does not, which is a finding.
+* ~~**`compare data`**~~ **done** - run against migkit's own verdict on the
+  same pair under `MIGKIT_CROSSCHECK=1`, and reported as a deep check. It
+  agreed on all four pairs it was tried on: identical rows, `numeric` 1.0
+  against 1.00 (both *differ* - equal by `=`, not as stored), the same
+  columns in a different order (both *same*), and a table with no primary
+  key missing a row (both *differ*). Off by default because it reads both
+  databases a second time. `compare schema` is still unopened.
+  `test_crosscheck_pgcopydb.py`.
 * **`snapshot`** - export one consistent snapshot for every worker to share.
   This is the mechanism behind the concurrency the plan admires in item 2 of
   *what a migration actually costs*, and it is one command away.
