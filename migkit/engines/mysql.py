@@ -1281,6 +1281,36 @@ class MySQLEngine(Engine):
                       " the table was written - a verdict from either would"
                       " be guesswork")
 
+    def _duplicate_keys(self, db, reason=""):
+        """migkit has no measured trigger for this on MySQL, and says so
+        rather than either hunting blindly or implying the database is safe.
+
+        The two states that make a PostgreSQL unique index stop enforcing
+        were both measured absent here: collations are compiled into the
+        server (286 of 286 `IS_COMPILED=Yes`), and a failed index build
+        rolls back completely under atomic DDL.
+
+        The MySQL-shaped candidate is `unique_checks = 0`, which mysqldump
+        writes into the file it hands you - InnoDB is documented as being
+        allowed to skip the check when the index page is not in the buffer
+        pool. Tried on 8.4: the duplicate was **still** rejected with error
+        1062, because a small index is cached. So the risk is real in the
+        documentation and unreproduced in this sandbox, which is not the
+        same as absent - and inventing a trigger from it would mean
+        scanning every table on a guess.
+        """
+        return self._duplicate_hunt_result(
+            db, [], 0, 0, reason,
+            "decide which copy survives, delete the rest, then rebuild the"
+            " index") if reason else Result(
+            "deep", f"{db} duplicate keys", "skip",
+            "no measured way for a MySQL unique index to stop enforcing:"
+            " collations are compiled in and a failed index build rolls"
+            " back - and unique_checks=0, which mysqldump writes, still"
+            " rejected a duplicate here (error 1062) because the index was"
+            " cached. Unreproduced is not absent, so migkit claims nothing"
+            " either way")
+
     TEXT_TYPES = ("char", "varchar", "tinytext", "text", "mediumtext",
                   "longtext")
 
@@ -1385,7 +1415,8 @@ class MySQLEngine(Engine):
                self._lob_check(db),
                self._invalid_indexes(db),
                self._collation_versions(db),
-               self._mojibake(db)]
+               self._mojibake(db),
+               self._duplicate_keys(db)]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified

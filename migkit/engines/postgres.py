@@ -1485,6 +1485,87 @@ class PostgresEngine(Engine):
             " those tables with a path that does not truncate -"
             " `migkit move --go` does not")
 
+    #: Unique indexes over at least one collatable column - the ones a
+    #: change in sort order can break. Partial and expression indexes are
+    #: left out and counted, because grouping by their columns is not the
+    #: same question they answer.
+    UNIQUE_TEXT_INDEXES = (
+        "select n.nspname||'.'||t.relname||chr(9)||c.relname||chr(9)"
+        "||(select string_agg(quote_ident(a.attname), ',' order by k.ord)"
+        "   from unnest(i.indkey) with ordinality k(attnum, ord)"
+        "   join pg_attribute a on a.attrelid = i.indrelid"
+        "    and a.attnum = k.attnum)"
+        "||chr(9)||(i.indpred is not null or i.indexprs is not null)::int"
+        "::text"
+        " from pg_index i"
+        " join pg_class c on c.oid = i.indexrelid"
+        " join pg_class t on t.oid = i.indrelid"
+        " join pg_namespace n on n.oid = t.relnamespace"
+        " where i.indisunique and i.indisvalid and t.relkind = 'r'"
+        " and n.nspname not in ('pg_catalog','information_schema')"
+        " and n.nspname not like 'pg\\_%'"
+        " and n.nspname not like '\\_\\_%'"
+        " and t.relname not like 'migkit\\_%'"
+        " and exists (select 1 from unnest(i.indkey) kk"
+        "   join pg_attribute aa on aa.attrelid = i.indrelid"
+        "    and aa.attnum = kk"
+        "   where aa.atttypid in ('text'::regtype, 'varchar'::regtype,"
+        "                         'bpchar'::regtype))"
+        " order by 1")
+
+    #: The planner must not be allowed to answer this question by reading
+    #: the index that is under suspicion. Measured: left to itself it picks
+    #: an index-only scan and reports no duplicates at all.
+    NO_INDEX_PATHS = ("set enable_indexscan = off;"
+                      " set enable_bitmapscan = off;"
+                      " set enable_indexonlyscan = off; ")
+
+    def _duplicate_keys(self, db, reason, sides=("src", "dst")):
+        """Group by the key with the index paths shut off, and see what the
+        unique index has been letting through."""
+        found, checked, skipped = [], 0, 0
+        if not reason:
+            # nothing has accused an index, so nothing is read: the cost of
+            # this check is a sequential scan per unique index
+            return self._duplicate_hunt_result(db, [], 0, 0, "", "")
+        try:
+            for side in sides:
+                label = "source" if side == "src" else "target"
+                name = db if side == "src" else self._d("dst", db)
+                for line in self._psql(side, name,
+                                       self.UNIQUE_TEXT_INDEXES).splitlines():
+                    parts = line.split("\t")
+                    if len(parts) != 4:
+                        continue
+                    table, index, cols, odd = parts
+                    if odd == "1":
+                        skipped += 1
+                        continue
+                    checked += 1
+                    sch, tbl = table.split(".", 1)
+                    out = self._psql(
+                        side, name,
+                        self.NO_INDEX_PATHS
+                        + f"select row_to_json(s) from (select {cols},"
+                          f" count(*) as migkit_n from"
+                          f' "{sch.replace(chr(34), chr(34) * 2)}".'
+                          f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                          f" group by {cols} having count(*) > 1"
+                          f" limit {self.DUPLICATE_CAP}) s")
+                    groups = [l for l in out.splitlines() if l.strip()]
+                    if groups:
+                        found.append((label, table, index, cols, len(groups),
+                                      groups[0]))
+        except Exception as e:
+            return Result("deep", f"{db} duplicate keys", "error",
+                          "could not hunt for duplicate keys:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._duplicate_hunt_result(
+            db, found, checked, skipped, reason,
+            "these rows were accepted by a constraint that had stopped"
+            " working - decide which copy survives, delete the rest, then"
+            " REINDEX so the constraint means something again")
+
     #: Every text column on a real table, which is where text that was
     #: already broken before the move is hiding.
     TEXT_COLUMNS = (
@@ -1800,9 +1881,20 @@ class PostgresEngine(Engine):
 
         res.append(self._planner_stats(db))
         res.append(self._lob_check(db))
-        res.append(self._invalid_indexes(db))
-        res.append(self._collation_versions(db))
+        indexes = self._invalid_indexes(db)
+        collations = self._collation_versions(db)
+        res.append(indexes)
+        res.append(collations)
         res.append(self._mojibake(db))
+        # the expensive hunt only earns its keep once something else has
+        # said an index cannot be trusted
+        if collations.status == "diff":
+            why = "the sort order an index was built under has changed"
+        elif indexes.status == "diff":
+            why = "an index exists that answers no query"
+        else:
+            why = ""
+        res.append(self._duplicate_keys(db, why))
 
         # orphans only hide behind NOT VALID fks (pg enforces validated ones)
         fks = [l.split("|") for l in self._psql("dst", db, """

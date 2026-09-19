@@ -206,9 +206,39 @@ on 8.4, all **286** rows of `information_schema.collations` report
 upgrade can re-sort an index underneath it. The MySQL-shaped version of this
 risk is [B4](#b4-the-server-changed-its-default-collation-under-you).
 
-**Missing:** the duplicate hunt - once drift is found, listing the rows a
-broken unique index stopped catching, which has to run with
-`enable_indexscan = off` because the index itself is the thing lying.
+**The duplicate hunt that follows** is now part of the same report -
+`test_duplicate_keys_pg.py`. Once something has said an index cannot be
+trusted - a collation that moved, or an index that answers no query -
+`check --deep` groups by every unique text key with the index paths shut
+off and names the rows the constraint has been letting through:
+
+    deep postgres duplicate keys: DIFF 1 unique indexes have duplicate rows
+      underneath them: source public.people.people_email (email) 1
+      duplicated values, e.g. {"email":"a@x.com","migkit_n":2} - the
+      constraint is still there and stopped being enforced
+
+**Why the planner is not allowed to answer.** On a 200,001-row table holding
+one duplicate its unique index never recorded, the planner chose `Index Only
+Scan using big_email` for `group by ... having count(*) > 1` by itself and
+reported **0** duplicates. With `enable_indexscan`, `enable_bitmapscan` and
+`enable_indexonlyscan` off, the same query on the same data reported **1**.
+A hunt that trusts the planner here is a false negative wearing an
+all-clear, and a test pins both numbers.
+
+It runs **only** when something else has complained, because otherwise it is
+a sequential scan of every table to prove a negative - and with no reason it
+returns without opening a connection at all. Partial and expression indexes
+are counted and left alone rather than guessed at, since grouping by their
+columns asks a different question than the index answers.
+
+**MySQL states the gap instead of hunting on a guess.** The two states that
+break a PostgreSQL unique index were both measured absent. The MySQL-shaped
+candidate is `unique_checks = 0`, which mysqldump writes into every dump and
+which InnoDB is documented as being allowed to honour by skipping the check:
+tried on 8.4, the duplicate was **still** rejected with error 1062, because
+a small index is cached. Real in the documentation, unreproduced in this
+sandbox - which is not the same as absent, so migkit claims nothing either
+way.
 
 ### B3. Text that was already broken before you moved it
 

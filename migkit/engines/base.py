@@ -295,6 +295,63 @@ class Engine:
                 return codec, decoded
         return None
 
+    #: Duplicate groups to name per index. Enough to act on, few enough that
+    #: a table which has gone entirely wrong does not produce a report
+    #: nobody can read.
+    DUPLICATE_CAP = 20
+
+    def _duplicate_hunt_result(self, db, found, checked, skipped, reason,
+                               hint):
+        """Rows a unique index should have refused and did not.
+
+        This is the damage the other checks only predict. It runs **only**
+        when something has already said an index cannot be trusted - a
+        collation that changed underneath it, or an index that exists and
+        answers nothing - because otherwise it is a sequential scan of every
+        table to prove a negative.
+
+        The one thing it must not do is ask the broken index. Measured on a
+        200,001-row table holding one duplicate that its unique index never
+        recorded: the planner chose `Index Only Scan using big_email` for
+        `group by ... having count(*) > 1` all by itself and reported **0**
+        duplicates. With index, bitmap and index-only paths disabled, the
+        same query on the same data reported **1**. A hunt that trusts the
+        planner here is a false negative, which is the worst thing this
+        project can ship.
+
+        `found` is [(side, table, index, columns, groups, example)].
+        """
+        if found:
+            worst = ", ".join(
+                f"{s} {t}.{c} ({cols}) {n} duplicated values, e.g. {ex}"
+                for s, t, c, cols, n, ex in found[:4])
+            return Result(
+                "deep", f"{db} duplicate keys", "diff",
+                f"{len(found)} unique indexes have duplicate rows underneath"
+                f" them: {worst}"
+                + (" ..." if len(found) > 4 else "")
+                + " - the constraint is still there and stopped being"
+                  " enforced, so nothing rejected these rows", "", hint)
+        if not reason:
+            return Result(
+                "deep", f"{db} duplicate keys", "skip",
+                "nothing has suggested an index is lying, and hunting"
+                " duplicates means reading every table to prove a negative")
+        if not checked:
+            return Result(
+                "deep", f"{db} duplicate keys", "skip",
+                f"{reason}, but no unique index over a text column was found"
+                " to hunt through"
+                + (f" ({skipped} partial or expression indexes were not"
+                   " checked)" if skipped else ""))
+        return Result(
+            "deep", f"{db} duplicate keys", "ok",
+            f"{reason}, so {checked} unique indexes over text were read"
+            " without the planner being allowed to consult them - no"
+            " duplicate rows underneath any of them"
+            + (f" ({skipped} partial or expression indexes were not checked)"
+               if skipped else ""))
+
     def _mojibake_tally(self, table, columns, rows):
         """Count, per column, how many sampled values are double-encoded and
         how many are simply non-ASCII and fine.

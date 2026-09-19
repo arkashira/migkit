@@ -104,10 +104,12 @@ In order. Each item says what has to be measured before it is written.
    21.99 s against 12.82 s on the same `CREATE INDEX`.
 4. **The sort order that moved.** **Done** - `check --deep` compares the
    recorded collation version against the one the OS provides now, on both
-   sides, for every collation something is actually sorted by. **Still open
-   from this item:** once drift is found, listing the duplicate rows a
-   broken unique index stopped catching - which has to run with
-   `enable_indexscan = off`, because the index is the thing lying.
+   sides, for every collation something is actually sorted by. The duplicate
+   hunt that follows it is done too: once something says an index cannot be
+   trusted, `check --deep` groups by every unique text key with the index
+   paths shut off. Measured on 200,001 rows, the planner left to itself
+   reported 0 duplicates through an index-only scan where the hunt reports
+   1.
 5. **The text that was broken before the move.** **Done** - `check --deep`
    samples every text column on the source and reports which ones hold
    *both* double-encoded and correct rows, because that pair is what makes
