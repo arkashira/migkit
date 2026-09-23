@@ -110,47 +110,57 @@ def test_the_predicate_is_passed_through_unchanged():
     assert f"where = {hairy}" in got, got
 
 
-def test_postgres_movers_have_no_row_filter_and_the_move_refuses():
-    """Measured, not assumed. `pg_dump --help` on 18.6 offers `-t`, `-T`,
-    `--exclude-table-data` and `--filter`; `pgcopydb clone --help` on 0.18
-    offers `--filters`. Every one of them selects *tables*. Neither tool
-    has a row predicate anywhere.
+def test_postgres_bulk_paths_route_a_filtered_table_to_the_copier():
+    """Measured, not assumed: `pg_dump` 18.6 and `pgcopydb` 0.18 select
+    whole tables and have no row predicate anywhere. This used to refuse
+    the whole database. The table copier applies the filter on both sides,
+    so the filtered table is left out of the bulk copy and carried by the
+    copier instead, and every other table still goes the fast way.
 
-    The quiet failure that makes this a refusal rather than a warning: the
-    mover would copy every row, and `check` - reading the same mapping -
-    would then compare a filtered source against a full target and report
-    the difference for ever. The move appears to work and the verification
-    never goes green.
-    """
+    What the refusal protected against still holds: a filter is never
+    silently dropped - it is applied, routed, or refused."""
     from migkit import movers
     hop = _hop({"where": {"orders": "region = 'apac'"}})
+    tables = ["public.orders", "public.people"]
     for via in ("pgdump", "pgcopydb"):
-        with pytest.raises(SystemExit) as e:
-            movers.refuse_unpushable_filters(hop, "appdb", via)
-        said = str(e.value)
-        assert "orders" in said, said
-        assert "never by row" in said or "not rows" in said, said
-        # and it offers the way out rather than only saying no
-        assert "view the hop points at" in said, said
+        movers.refuse_unpushable_filters(hop, "appdb", via, "postgres")
+        assert movers.routed_to_copier(hop, "appdb", via, tables) == \
+            ["public.orders"]
 
 
 def test_the_mover_that_can_do_it_is_not_refused():
     from migkit import movers
     hop = _hop({"where": {"orders": "region = 'apac'"}})
-    movers.refuse_unpushable_filters(hop, "appdb", "mydumper")
+    movers.refuse_unpushable_filters(hop, "appdb", "mydumper", "mysql")
+    assert movers.routed_to_copier(hop, "appdb", "mydumper",
+                                   ["orders", "people"]) == [], \
+        "a path that applies the filter itself has nothing to route"
 
 
-def test_the_builtin_mover_is_refused_too_and_says_so_plainly():
-    """migkit's own copy path applies no predicate either. Naming pg_dump
-    in that message would be telling the operator about a tool that is not
-    running."""
+def test_the_table_copier_applies_it_on_both_sql_engines():
     from migkit import movers
-    with pytest.raises(SystemExit) as e:
-        movers.refuse_unpushable_filters(
-            _hop({"where": {"orders": "x"}}), "appdb", "builtin")
-    said = str(e.value)
-    assert "builtin mover applies no row predicate" in said, said
-    assert "pg_dump" not in said, said
+    hop = _hop({"where": {"orders": "x"}})
+    for engine in ("postgres", "mysql"):
+        movers.refuse_unpushable_filters(hop, "appdb", "builtin", engine)
+
+
+def test_a_path_that_cannot_apply_it_refuses_without_naming_a_program():
+    """Everywhere else the move stops before anything is copied. The old
+    wording named pg_dump and pgcopydb, through a variable the static scan
+    of messages could not see."""
+    from migkit import movers
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
+    for engine, via in (("hetero", "pgloader"), ("mongodb", "mongodump"),
+                        ("hetero", "builtin")):
+        with pytest.raises(SystemExit) as e:
+            movers.refuse_unpushable_filters(
+                _hop({"where": {"orders": "x"}}), "appdb", via, engine)
+        said = str(e.value)
+        assert "orders" in said, said
+        assert "view the hop points at" in said, said
+        low = said.lower()
+        assert not [t for t in TOOLS if t in low], said
+        assert via not in low and "pg_dump" not in low, said
 
 
 def test_a_hop_with_no_row_filters_is_never_refused():

@@ -68,42 +68,72 @@ def chosen(engine, table=""):
 #: Movers that can be given a row predicate per table, measured rather
 #: than assumed. mydumper takes one section per table in a defaults file
 #: (verified: 2 of 3 rows dumped where a rule applied). `pg_dump` 18.6 and
-#: `pgcopydb` 0.18 have `-t`, `-T`, `--exclude-table-data`, `--filter` and
+#: `pgcopydb` 0.18 have `-t`, `-T`, `--exclude-table-data` and `--filter` /
 #: `--filters` between them and **not one row predicate** - their filtering
 #: is table-level throughout.
 ROW_FILTER_MOVERS = ("mydumper",)
 
+#: Bulk paths that can leave a table out, so a table with a row filter can
+#: be carried by the table copier instead.
+ROUTING_MOVERS = ("pgdump", "pgcopydb")
 
-def refuse_unpushable_filters(hop, db, via):
-    """Stop a move whose row filters the chosen mover cannot honour.
+#: Engines whose table copier (`move_table`) applies the row filter on
+#: both ends - reading only what it selects, replacing only what it
+#: selects on the target.
+FILTERING_COPIERS = ("postgres", "mysql")
 
-    The quiet failure this prevents is the expensive one. A mover that
-    ignores the filter copies every row; the check, reading the same
-    mapping, then compares the filtered source against a target holding
-    everything and reports the difference forever. The move looks like it
-    worked and the verification never goes green, which is the worst of
-    both - so it refuses before anything is copied, and names the tables.
-    """
+
+def _filtered_here(hop, db):
+    """The hop's row-filter keys that apply to database `db`."""
     rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
-    if not rules or via in ROW_FILTER_MOVERS:
-        return
-    mine = sorted(k for k in rules
+    return sorted(k for k in rules
                   if len([p for p in str(k).split(".") if p]) < 2
                   or str(k).split(".")[0] == db)
-    if not mine:
+
+
+def routed_to_copier(hop, db, via, tables, qualifier="public"):
+    """The tables a bulk path cannot filter, carried by the table copier.
+
+    `via` copies whole tables; the copier reads and replaces only the rows
+    a filter selects. So a table with a row filter is left out of the bulk
+    copy and moved on its own, and the rest still go the fast way - where
+    this used to refuse the whole database. One answer for the dump, the
+    plan and the move, so none of them can disagree about which tables took
+    which path. Nothing is routed for a path that applies the filter itself.
+    """
+    if via in ROW_FILTER_MOVERS or not _filtered_here(hop, db):
+        return []
+    out = []
+    for ident in sorted(tables):
+        parts = [p for p in str(ident).split(".") if p]
+        if hop.row_filter(db, *parts):
+            out.append(".".join(parts) if len(parts) > 1
+                       else f"{qualifier}.{parts[0]}")
+    return out
+
+
+def refuse_unpushable_filters(hop, db, via, engine=None):
+    """Stop a move whose row filters nothing on its path can apply.
+
+    A filter is never silently dropped. It is applied by the bulk copy
+    (`ROW_FILTER_MOVERS`), or its tables are routed to a table copier that
+    applies it (`routed_to_copier`), or the move stops here - before
+    anything is copied, because a path that ignores the filter copies every
+    row and leaves the check comparing a filtered source against a full
+    target for good.
+    """
+    mine = _filtered_here(hop, db)
+    if not mine or via in ROW_FILTER_MOVERS:
         return
-    why = {
-        "pgdump": "pg_dump 18.6 filters by table (-t, -T,"
-                  " --exclude-table-data, --filter) and never by row",
-        "pgcopydb": "pgcopydb 0.18's --filters selects tables, not rows",
-    }.get(via, f"the {via} mover applies no row predicate")
+    if engine in FILTERING_COPIERS and via in ROUTING_MOVERS + ("builtin",):
+        return
     raise SystemExit(
-        f"the hop maps row filters onto {', '.join(mine)}, and {why}."
-        " Moving anyway would copy every row and leave `check` comparing"
-        " a filtered source against a full target for good. Drop the"
-        " filters, or narrow the source with a view the hop points at"
-        " instead."
-    )
+        f"the hop maps row filters onto {', '.join(mine)}, and nothing on"
+        f" this {engine or 'engine'} path can apply one: neither its bulk"
+        " copy nor its table copier takes a row predicate. Moving anyway"
+        " would copy every row and leave `check` comparing a filtered"
+        " source against a full target for good. Drop the filters, or"
+        " narrow the source with a view the hop points at instead.")
 
 
 def supported(engine, via):
@@ -174,6 +204,13 @@ def _unresolved_note(why):
             f" cannot be pushed down: {why}")
 
 
+def _routed_note(routed):
+    """The plan line for tables the table copier carries instead."""
+    return (f"# {len(routed)} tables with a row filter are copied table by"
+            " table after the bulk copy, the filter applied on both sides:"
+            f" {', '.join(routed[:6])}" + (" ..." if len(routed) > 6 else ""))
+
+
 def _unresolved_exclusion(db, why):
     """Stop a move whose exclusions could not be resolved - before anything.
 
@@ -184,9 +221,9 @@ def _unresolved_exclusion(db, why):
     stop at the same point and say the same thing.
     """
     return SystemExit(
-        f"{db}: the hop excludes tables and the source's table list could not"
-        f" be read ({why}), so the copy cannot be told to skip them. Nothing"
-        " has been changed on the target.")
+        f"{db}: the hop excludes tables or filters their rows, and the"
+        f" source's table list could not be read ({why}), so the copy cannot"
+        " be told to skip them. Nothing has been changed on the target.")
 
 
 def _pg_literal(text):
@@ -419,21 +456,23 @@ def pgdump_move(hop, db, workers, go, log):
     outdir = hop.report_dir(db) / "pgdump"
     # the same resolution pgcopydb and `check` use, so all three exclude
     # exactly the same tables rather than three readings of one pattern
-    skip, unresolved = [], ""
-    if getattr(hop, "exclude", None):
+    skip, routed, unresolved = [], [], ""
+    if getattr(hop, "exclude", None) or _filtered_here(hop, db):
         try:
             from .engines.postgres import PostgresEngine
-            skip = excluded_tables(hop, db,
-                                   PostgresEngine(hop).neutral_tables("src",
-                                                                      db))
+            tables = PostgresEngine(hop).neutral_tables("src", db)
+            skip = excluded_tables(hop, db, tables)
+            routed = [n for n in routed_to_copier(hop, db, "pgdump", tables)
+                      if n not in skip]
         except Exception as e:
             unresolved = str(e).splitlines()[-1][:70] if str(e) \
                 else type(e).__name__
-    skip_args = [a for name in skip for a in ("-T", name)]
+    left_out = skip + routed
+    skip_args = [a for name in left_out for a in ("-T", name)]
     steps = [
         f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fd"
         f" -j {workers} --data-only -f {outdir}"
-        + ("".join(f" -T {n}" for n in skip) if skip else ""),
+        + ("".join(f" -T {n}" for n in left_out) if left_out else ""),
         _truncate_step(hop, db),
         f"pg_restore -h {t.host} -p {t.port} -U {t.user}"
         f" -d {hop.target_db(db)}"
@@ -441,9 +480,12 @@ def pgdump_move(hop, db, workers, go, log):
     ]
     if unresolved:
         steps.insert(1, _unresolved_note(unresolved))
-    elif skip:
-        steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
-                        " dumped at all")
+    else:
+        if routed:
+            steps.insert(1, _routed_note(routed))
+        if skip:
+            steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
+                            " dumped at all")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -626,7 +668,7 @@ def excluded_tables(hop, db, tables, qualifier="public"):
     return out
 
 
-def pgcopydb_filters(hop, db, tables):
+def pgcopydb_filters(hop, db, tables, also=()):
     """`[exclude-table]` entries for what this hop already excludes, or None.
 
     `hop.exclude` is patterns - `audit_log`, `public.audit_log`,
@@ -645,6 +687,9 @@ def pgcopydb_filters(hop, db, tables):
     here means it is not carried at all.
     """
     out = excluded_tables(hop, db, tables)
+    # tables left to the table copier (`routed_to_copier`) are left out of
+    # the bulk copy the same way
+    out += [n for n in also if n not in out]
     if not out:
         return None
     return "[exclude-table]\n" + "\n".join(out) + "\n"
@@ -1109,22 +1154,26 @@ def pgcopydb_move(hop, db, workers, go, log):
     # `schema.table` names pgcopydb wants; a source that cannot be reached
     # yet leaves the filter off rather than guessing, and says so in the
     # steps instead of quietly copying what the hop excludes.
-    filters_path, filters_note = None, ""
-    if getattr(hop, "exclude", None):
+    filters_path, filters_note, unresolved, routed = None, "", "", []
+    if getattr(hop, "exclude", None) or _filtered_here(hop, db):
         try:
             from .engines.postgres import PostgresEngine
             tables = PostgresEngine(hop).neutral_tables("src", db)
-            text = pgcopydb_filters(hop, db, tables)
+            routed = routed_to_copier(hop, db, "pgcopydb", tables)
+            text = pgcopydb_filters(hop, db, tables, also=routed)
         except Exception as e:
             text = None
-            filters_note = ("# could not list the source's tables, so the"
-                            f" hop's exclude list is not pushed down: "
-                            f"{str(e).splitlines()[-1][:70]}")
+            unresolved = (str(e).splitlines()[-1][:70] if str(e)
+                          else type(e).__name__)
+            filters_note = _unresolved_note(unresolved)
         if text:
             filters_path = hop.report_dir(db) / "pgcopydb-filters.ini"
             filters_path.write_text(text)
-            filters_note = (f"# {text.count(chr(10)) - 1} tables excluded by"
-                            " the hop are filtered out at the source")
+            filters_note = (f"# {text.count(chr(10)) - 1 - len(routed)}"
+                            " tables excluded by the hop are filtered out at"
+                            " the source")
+            if routed:
+                filters_note += "\n" + _routed_note(routed)
     if how == "local":
         # its own directory per run. pgcopydb keeps its state - including the
         # exported snapshot - under /tmp/pgcopydb by default, so a second run
@@ -1161,6 +1210,8 @@ def pgcopydb_move(hop, db, workers, go, log):
     steps.append(" ".join(shown))
     if not go:
         return steps + ["# dry-run, add --go to execute"]
+    if unresolved:
+        raise _unresolved_exclusion(db, unresolved)
 
     # Having the image is not the same as being able to reach the databases
     # from inside it: the container has its own network view, and on a laptop

@@ -231,7 +231,23 @@ still holds is an open question to the owner.
 
 **0d. The row filter is honoured by the move and ignored by the check.**
 
-*In progress (2026-09-24): check side written and proved live, commits together with the routing below: before, PostgreSQL said `public.orders src=4 dst=2` and MySQL `missing=2 ...` `kind=rows-missing` for a correctly filtered move. Now every check read goes through one `_scope()` per engine: counts, checksums, chunk ranges, drilldown, and the MySQL second reader's `--where`. Target rows *outside* the filter are counted and reported separately, so narrowing the comparison hides nothing. `test_the_check_reads_the_row_filter.py`: 10 tests, 6 of them fail on the old code. Still open: the routing and the refusal wording below.*
+*Done (2026-09-24), except the logging, which is 0c.*
+* **The check:** before, PostgreSQL said `public.orders src=4 dst=2` and
+  MySQL `missing=2 ...` `kind=rows-missing` for a correctly filtered move.
+  Now every check read goes through one `_scope()` per engine: counts,
+  checksums, chunk ranges, drilldown, the moved-nothing guard, and the
+  MySQL second reader's `--where`. Target rows *outside* the filter are
+  counted and reported separately, so narrowing the comparison hides
+  nothing.
+* **The copiers:** the PostgreSQL and MySQL table copiers read and replace
+  only what the filter selects (MySQL doubles `%` where the statement
+  carries parameters).
+* **The routing:** instead of refusing the whole database, the PostgreSQL
+  bulk paths leave the filtered tables out and `move` hands them to the
+  table copier; every other table still goes the fast way. A path that can
+  apply no filter at all still refuses, without naming a program.
+* `test_the_check_reads_the_row_filter.py`: 12 tests, 8 of which fail on
+  the old code. Full suite: 1391 passed.
 
 `Hop.row_filter()` has no caller anywhere in `migkit/`. Its docstring says
 the predicate is "pushed into the mover's own flag and into the checksum's

@@ -665,7 +665,8 @@ class MySQLEngine(Engine):
 
         def cnt(side, t):
             return self._q(side,
-                           f"select count(*) from `{self._d(side, db)}`.`{t}`")[0][0]
+                           f"select count(*) from {self._scope(side, db, t)}"
+                           )[0][0]
 
         common = sorted(st & dt)
         with ThreadPoolExecutor(max_workers=max(2, self.hop.workers)) as pool:
@@ -677,6 +678,11 @@ class MySQLEngine(Engine):
                 total_b += b
                 if a != b:
                     bad.append(f"{t} src={a} dst={b}")
+                outside = self._outside_filter(db, t)
+                if outside:
+                    bad.append(f"{t} dst holds {outside} rows the hop's row"
+                               " filter excludes - the move does not put"
+                               " them there")
         if bad:
             res.append(Result("counts", db, "diff", "; ".join(bad)))
         return res or [Result("counts", db, "ok",
@@ -836,6 +842,30 @@ class MySQLEngine(Engine):
         # ambiguity as the row hash had, just with rarer characters
         return rowtext.mysql_row(pks)
 
+    def _scope(self, side, db, t):
+        """What a check reads of table `t` on one side, as a FROM item
+        aliased `t`: the whole table, or the rows the hop's row filter
+        selects. The PostgreSQL engine has the same method for the same
+        reason - the filter the move applies was never applied by any check,
+        so a filtered move was reported as missing rows for good. Every read
+        a check makes of a table goes through here."""
+        qt = f"`{self._d(side, db)}`.`{t}`"
+        pred = (self.hop.row_filter(db, t)
+                if hasattr(self.hop, "row_filter") else None)
+        return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
+
+    def _outside_filter(self, db, t):
+        """Target rows the hop's row filter excludes, or None without one.
+        The move puts no row outside the filter on the target, so any count
+        above zero is said; `is not true` counts a NULL predicate too."""
+        pred = (self.hop.row_filter(db, t)
+                if hasattr(self.hop, "row_filter") else None)
+        if not pred:
+            return None
+        return int(self._q("dst", f"select count(*) from"
+                                  f" `{self._d('dst', db)}`.`{t}`"
+                                  f" where ({pred}) is not true")[0][0])
+
     def _checksum(self, side, db, t, expr, where="", key_expr=None):
         cols = ["count(*)", "coalesce(bit_xor(crc32(" + expr + ")), 0)",
                 "coalesce(bit_xor(conv(substring(md5(" + expr + "), 1, 8),"
@@ -844,7 +874,7 @@ class MySQLEngine(Engine):
             cols.append("coalesce(bit_xor(conv(substring(md5(" + key_expr
                         + "), 1, 8), 16, 10)), 0)")
         q = (f"select {', '.join(cols)}"
-             f" from `{self._d(side, db)}`.`{t}` {where}")
+             f" from {self._scope(side, db, t)} {where}")
         return tuple(self._q(side, q)[0])
 
     def _reladiff_url(self, side, db):
@@ -859,6 +889,10 @@ class MySQLEngine(Engine):
                "-j", str(self.hop.workers), "-c", "%"]
         for k in pks:
             cmd += ["-k", k]
+        pred = (self.hop.row_filter(db, t)
+                if hasattr(self.hop, "row_filter") else None)
+        if pred:
+            cmd += ["--where", pred]
         try:
             p = run(cmd, check=False, timeout=3600)
         except Exception:
@@ -898,10 +932,11 @@ class MySQLEngine(Engine):
         from .. import checkpoint as _cp
         pk_ranges, col = [(None, None)], None
         if len(pks) == 1:
-            n = self._q("src", f"select count(*) from `{db}`.`{t}`")[0][0]
+            n = self._q("src", f"select count(*) from"
+                               f" {self._scope('src', db, t)}")[0][0]
             if n > self.hop.slice:
                 mm = self._q("src", f"select min(`{pks[0]}`), max(`{pks[0]}`)"
-                                    f" from `{db}`.`{t}`")[0]
+                                    f" from {self._scope('src', db, t)}")[0]
                 if mm[0] is not None and str(mm[0]).lstrip("-").isdigit():
                     col = pks[0]
                     cp_path = str(self.hop.report_dir(db) / "checkpoint.json")
@@ -980,10 +1015,11 @@ class MySQLEngine(Engine):
         src, dst = {}, {}
         for w in ranges:
             src.update(dict(self._q("src",
-                f"select {pkexpr}, md5({expr}) from `{db}`.`{t}` {w}")))
+                f"select {pkexpr}, md5({expr})"
+                f" from {self._scope('src', db, t)} {w}")))
             dst.update(dict(self._q("dst",
                 f"select {pkexpr}, md5({expr})"
-                f" from `{self._d('dst', db)}`.`{t}` {w}")))
+                f" from {self._scope('dst', db, t)} {w}")))
         missing = sorted(k for k in src if k not in dst)
         extra = sorted(k for k in dst if k not in src)
         changed = sorted(k for k in src if k in dst and src[k] != dst[k])
@@ -1280,10 +1316,10 @@ class MySQLEngine(Engine):
         empty = []
         for t in names:
             try:
-                has_src = bool(self._q("src",
-                                       f"select 1 from `{db}`.`{t}` limit 1"))
-                has_dst = bool(self._q("dst",
-                                       f"select 1 from `{ddb}`.`{t}` limit 1"))
+                has_src = bool(self._q("src", "select 1 from"
+                                       f" {self._scope('src', db, t)} limit 1"))
+                has_dst = bool(self._q("dst", "select 1 from"
+                                       f" {self._scope('dst', db, t)} limit 1"))
             except Exception:
                 return None
             if has_src and not has_dst:
@@ -2944,10 +2980,20 @@ class MySQLEngine(Engine):
         try:
             with dconn.cursor() as dcur, sconn.cursor() as scur:
                 dcur.execute("set foreign_key_checks = 0")
+                # The hop's row filter on both ends, as the PostgreSQL
+                # copier does it: read only what it selects, replace only
+                # what it selects. `%` doubled where the statement also
+                # carries parameters, or a `like 'a%'` filter would be read
+                # as a placeholder.
+                rf = (self.hop.row_filter(db, t)
+                      if hasattr(self.hop, "row_filter") else None)
+                rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
                 if not intpk:
                     log(f"{key}: no single int pk, single-shot copy")
-                    dcur.execute(f"truncate `{ddb}`.`{t}`")
-                    scur.execute(f"select {collist} from `{db}`.`{t}`")
+                    dcur.execute(f"delete from `{ddb}`.`{t}` where ({rf})"
+                                 if rf else f"truncate `{ddb}`.`{t}`")
+                    scur.execute(f"select {collist} from `{db}`.`{t}`"
+                                 + (f" where ({rf})" if rf else ""))
                     while True:
                         rows = scur.fetchmany(5000)
                         if not rows:
@@ -2961,17 +3007,18 @@ class MySQLEngine(Engine):
                     return
                 mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
                              f" coalesce(max(`{intpk}`), 0)"
-                             f" from `{db}`.`{t}`")[0]
+                             f" from `{db}`.`{t}`"
+                             + (f" where ({rf})" if rf else ""))[0]
                 lo, hi = int(mm[0]), int(mm[1])
                 last = st.get("last", lo - 1)
                 while last < hi:
                     nxt = min(last + chunk, hi)
                     dcur.execute(f"delete from `{ddb}`.`{t}`"
-                                 f" where `{intpk}` > %s and `{intpk}` <= %s",
-                                 (last, nxt))
+                                 f" where `{intpk}` > %s and `{intpk}` <= %s"
+                                 + rfp, (last, nxt))
                     scur.execute(f"select {collist} from `{db}`.`{t}`"
-                                 f" where `{intpk}` > %s and `{intpk}` <= %s",
-                                 (last, nxt))
+                                 f" where `{intpk}` > %s and `{intpk}` <= %s"
+                                 + rfp, (last, nxt))
                     while True:
                         rows = scur.fetchmany(5000)
                         if not rows:

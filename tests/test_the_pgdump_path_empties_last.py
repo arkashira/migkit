@@ -137,7 +137,10 @@ def test_both_bulk_paths_stop_the_same_way():
                         and isinstance(node.func, ast.Name)
                         and node.func.id == "_unresolved_exclusion"):
                     callers.add(fn.name)
-    assert callers == {"pgdump_move", "mydumper_move"}, callers
+    # all three bulk paths that read the source's table list: the
+    # streaming copier used to go ahead with only a note in its plan
+    assert callers == {"pgdump_move", "mydumper_move", "pgcopydb_move"}, \
+        callers
 
 
 def test_the_refusal_names_no_tool():

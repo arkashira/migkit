@@ -869,6 +869,32 @@ def movers_pick_and_run(hop, eng, db, go):
             _changelog(hop, {"op": f"move-{via}", "db": d})
 
 
+def _copy_routed(hop, eng, d, via, chunk, log):
+    """Carry the tables the bulk path left to the table copier.
+
+    `movers.routed_to_copier` decides which, and the bulk path already left
+    exactly those out of its copy - one function, so the two cannot
+    disagree. The copier applies the hop's row filter on both sides.
+
+    A fresh checkpoint every time: the bulk path empties these tables on
+    each run, and a checkpoint that remembered one as done would skip it
+    and leave it empty.
+    """
+    from . import movers
+    if not hasattr(eng, "move_table"):
+        return
+    routed = movers.routed_to_copier(hop, d, via, eng.neutral_tables("src", d))
+    if not routed:
+        return
+    path = hop.report_dir(d) / "move-routed.json"
+    path.unlink(missing_ok=True)
+    ck = _Checkpoint(path)
+    for name in routed:
+        sch, _, tbl = name.rpartition(".")
+        eng.move_table(d, sch, tbl, chunk, ck, log)
+        _changelog(hop, {"op": "move-routed", "db": d, "table": name})
+
+
 def _move_full(hop, eng, db, table, chunk, go):
     if not hasattr(eng, "move_table"):
         raise SystemExit(f"move not available for {hop.engine} yet")
@@ -1059,13 +1085,18 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
                 for d in dbs:
                     # before anything is copied: a filter this mover cannot
                     # apply would silently move every row
-                    movers.refuse_unpushable_filters(hop, d, v)
+                    movers.refuse_unpushable_filters(hop, d, v, engine)
                     console.print(f"[bold]{d}[/bold] bulk copy:")
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     for s0 in steps:
                         console.print(f"  {s0}")
                     if go:
+                        # before the "moved nothing" guard: the bulk copy
+                        # left these tables out on purpose, so until the
+                        # copier has run they are empty by design
+                        _copy_routed(hop, eng, d, v, chunk,
+                                     lambda m: chat(f"  {m}"))
                         # an external mover can exit 0 and leave the target
                         # empty; saying "complete" over that is the one
                         # thing a migration tool must never do

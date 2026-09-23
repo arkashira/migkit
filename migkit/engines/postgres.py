@@ -967,7 +967,8 @@ class PostgresEngine(Engine):
         def cnt(side, t):
             sch, tbl = t.split(".", 1)
             return int(self._psql(side, db,
-                                  f'select count(*) from "{sch}"."{tbl}"') or 0)
+                                  f"select count(*) from {self._scope(db, t)}")
+                   or 0)
 
         common = [t for t in st if t in dt]
         total = 0
@@ -979,6 +980,11 @@ class PostgresEngine(Engine):
                 total += a
                 if a != b:
                     bad.append(f"{t} src={a} dst={b}")
+                outside = self._outside_filter(db, t)
+                if outside:
+                    bad.append(f"{t} dst holds {outside} rows the hop's row"
+                               " filter excludes - the move does not put"
+                               " them there")
         if bad:
             return [Result("counts", db, "diff", "; ".join(bad[:10]), "",
                            "missing rows show up in check data, fix there")]
@@ -1103,6 +1109,46 @@ class PostgresEngine(Engine):
             pass    # no estimates = no chunking, never a failure
         return out
 
+    def _scope(self, db, t):
+        """What a check reads of table `t`, as a FROM item aliased `t`.
+
+        The whole table, or only the rows the hop's row filter selects. The
+        filter narrows what the move carries (`mapping.where`), and
+        `Hop.row_filter()` - which says it feeds the checksum's WHERE - had
+        no caller anywhere: the check compared a filtered target against
+        the whole source and called the rows the filter left behind
+        missing, for good. Every read a check makes of a table goes through
+        here, so counts, checksums, chunks and the drilldown cannot
+        disagree about which rows are in scope.
+
+        Rows the filter excludes that are sitting on the target anyway are
+        a separate question, answered by `_outside_filter`.
+        """
+        sch, tbl = t.split(".", 1)
+        qt = f'"{sch}"."{tbl}"'
+        pred = (self.hop.row_filter(db, sch, tbl)
+                if hasattr(self.hop, "row_filter") else None)
+        return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
+
+    def _outside_filter(self, db, t):
+        """Target rows the hop's row filter excludes, or None without one.
+
+        Narrowing the comparison to the filter is right for the rows the
+        move carries, and blind to everything else: a target row outside
+        the filter - left from an earlier load, or written there since - is
+        not compared by anything. The move does not put rows there, so any
+        count above zero is said. `is not true` rather than `not`, so a row
+        where the predicate is NULL is counted too.
+        """
+        sch, tbl = t.split(".", 1)
+        pred = (self.hop.row_filter(db, sch, tbl)
+                if hasattr(self.hop, "row_filter") else None)
+        if not pred:
+            return None
+        return int(self._psql("dst", db,
+                              f'select count(*) from "{sch}"."{tbl}"'
+                              f" where ({pred}) is not true") or 0)
+
     def _data_fast_native(self, db, stream=None, may_skip=True):
         """Per-table checksum on both sides in parallel: commutative
         sum-of-md5 as a Postgres parallel aggregate (no sort, no lock beyond
@@ -1139,7 +1185,7 @@ class PostgresEngine(Engine):
                 keyexpr[t] = self._key_hash_expr("src", db, t)
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather = {w};"
-                f' select {_agg(h, keyexpr[t])} from "{sch}"."{tbl}" t')
+                f" select {_agg(h, keyexpr[t])} from {self._scope(db, t)}")
 
         # A checksum is only a SELECT, which is why nothing used to stop this
         # loop from saturating a small instance that was serving traffic.
@@ -1172,7 +1218,7 @@ class PostgresEngine(Engine):
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather = {w};"
                 f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
-                f'::bit(64)::bigint::numeric), 0) from "{sch}"."{tbl}" t'
+                f"::bit(64)::bigint::numeric), 0) from {self._scope(db, t)}"
                 + (f" where {pred}" if pred else ""))
 
         def table_rows(side, t):
@@ -1180,7 +1226,8 @@ class PostgresEngine(Engine):
             the range's count would otherwise be reported as the table's."""
             sch, tbl = t.split(".", 1)
             return self._psql(side, db,
-                              f'select count(*) from "{sch}"."{tbl}"').strip()
+                              f"select count(*) from {self._scope(db, t)}"
+                              ).strip()
 
         def both(fn, *args):
             """Run the source and target aggregates at the same time.
@@ -1604,7 +1651,7 @@ class PostgresEngine(Engine):
         if not cols:
             return None
         sch, tbl = table.split(".", 1)
-        qt = f'"{sch}"."{tbl}"'
+        scoped = self._scope(db, table)
         pkexpr = self._pk_text_expr(cols)
 
         def fetch(side, where=""):
@@ -1612,18 +1659,18 @@ class PostgresEngine(Engine):
             h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
             for l in self._psql(side, db,
                                 f"select {pkexpr}||'|'||{h}"
-                                f" from {qt} t {where}").splitlines():
+                                f" from {scoped} {where}").splitlines():
                 k, _, hsh = l.rpartition("|")
                 out[k] = hsh
             return out
 
-        n = int(self._psql("src", db, f"select count(*) from {qt}") or 0)
+        n = int(self._psql("src", db, f"select count(*) from {scoped}") or 0)
         intpk = self._int_pk(db, sch, tbl)
         missing, extra, changed = [], [], []
         if n > self.hop.slice and intpk:
             mm = self._psql("src", db,
                             f'select coalesce(min("{intpk}"),0)||\'|\'||'
-                            f'coalesce(max("{intpk}"),0) from {qt}')
+                            f'coalesce(max("{intpk}"),0) from {scoped}')
             lo, hi = (int(x) for x in mm.split("|"))
             step = max(1, (hi - lo) // max(1, n // self.hop.slice) + 1)
             for a in range(lo, hi + 1, step):
@@ -2141,8 +2188,9 @@ class PostgresEngine(Engine):
             return None
         empty = []
         for t in sorted(x for x in src & dst if x):
-            sch, tbl = t.split(".", 1)
-            q = f'select 1 from "{sch}"."{tbl}" limit 1'
+            # through the same scope as every other check read: a table
+            # whose row filter selects nothing is correctly empty
+            q = f"select 1 from {self._scope(db, t)} limit 1"
             try:
                 has_src = bool(self._psql("src", db, q).strip())
                 has_dst = bool(self._psql("dst", self._d("dst", db),
@@ -5297,21 +5345,31 @@ class PostgresEngine(Engine):
             log(f"{key}: done earlier, skip")
             return
         pk = self._int_pk(db, sch, tbl)
+        # The hop's row filter, applied on both ends: only the rows it
+        # selects are read, and only the rows it selects are replaced. A
+        # target row outside the filter is not this copy's to delete - the
+        # check reports it separately (`_outside_filter`).
+        rf = (self.hop.row_filter(db, sch, tbl)
+              if hasattr(self.hop, "row_filter") else None)
         if not pk:
             log(f"{key}: no single int pk, single-shot copy")
             cols = self._copy_cols(db, sch, tbl)
-            self._copy_pipe(db, self._copy_select(qt, cols), qt,
-                            f"truncate {qt}", columns=cols)
+            self._copy_pipe(db, self._copy_select(qt, cols, rf or ""), qt,
+                            f"delete from {qt} where {rf}" if rf
+                            else f"truncate {qt}", columns=cols)
             st["done"] = True
             return
         mm = self._psql("src", db,
                         f'select coalesce(min("{pk}"), 0)||\'|\'||'
-                        f'coalesce(max("{pk}"), 0) from {qt}')
+                        f'coalesce(max("{pk}"), 0) from {qt}'
+                        + (f" where {rf}" if rf else ""))
         lo, hi = (int(x) for x in mm.split("|"))
         last = st.get("last", lo - 1)
         while last < hi:
             nxt = min(last + chunk, hi)
             pred = f'"{pk}" > {last} and "{pk}" <= {nxt}'
+            if rf:
+                pred = f"({pred}) and ({rf})"
             cols = self._copy_cols(db, sch, tbl)
             self._copy_pipe(db, self._copy_select(qt, cols, pred), qt,
                             f"delete from {qt} where {pred}", columns=cols)

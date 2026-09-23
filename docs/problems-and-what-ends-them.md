@@ -1058,6 +1058,29 @@ And `pg_restore -d` named the source's database while the emptying named
 the target's, so a hop with a `db_map` emptied one database and loaded
 another.
 
+### C11. The filter the move applied and the check did not
+
+**What happens.** A hop that moves only some rows of a table (`mapping.
+where`) gets a correct move and a check that calls it wrong for good: the
+check compares the filtered target against the whole source. Measured on a
+move that did exactly what the hop asked:
+
+    PostgreSQL  counts  public.orders src=4 dst=2
+    MySQL       data    missing=2  kind=rows-missing
+
+The table copiers had the opposite fault: they ignored the filter and
+copied every row. And the PostgreSQL bulk paths, which cannot filter rows,
+refused the whole database instead of moving what they could.
+
+**migkit: Ends it** - `test_the_check_reads_the_row_filter.py`. Every read
+the check makes goes through one scope per engine that applies the hop's
+filter; target rows outside the filter are counted and reported on their
+own line, so the narrower comparison hides nothing. The table copiers read
+and replace only the filtered rows. The bulk paths leave the filtered
+tables out and hand them to the table copier, so the rest of the database
+still goes the fast way. A path that can apply no filter refuses before
+anything is copied.
+
 ---
 
 ## D. Proving the data actually landed
