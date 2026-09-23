@@ -121,6 +121,85 @@ This is the ground migkit stands on.
   Nothing a wrapped program prints reaches the operator as that program's
   output.
 
+**0e. One command, one result, every engine.**
+
+*Owner's rule (2026-09-24):* the same hop configuration and the same
+commands give the same result, with the full capability, on every engine
+and every provider - the way DMS and DTS present one task whatever sits
+underneath. How each engine gets there is migkit's business, and it is
+normalised the same way everywhere. Where an engine has no native way, find
+the library or tool that produces the result, wrap it, and measure it.
+
+*Measured from the code on 2026-09-24* (which engine class implements each
+capability itself, plus the movers and `users.py`):
+
+| capability | pg | mysql | mongo | redis | kafka | mssql | sqlite | generic | hetero |
+|---|---|---|---|---|---|---|---|---|---|
+| schema / counts / data / deep | yes | yes | yes | no schema | yes | yes | yes | yes | no deep |
+| bulk move | yes | yes | yes | - | - | - | - | - | yes |
+| table-by-table copy | yes | yes | - | - | - | - | - | - | yes |
+| change stream (CDC) | yes | yes | tail only | - | - | - | - | - | yes |
+| fence before cutover | yes | - | - | - | - | - | - | - | - |
+| delta verification | yes | yes | yes | yes | yes | yes | - | - | - |
+| sequences / auto-increment | yes | yes | - | n/a | n/a | yes | yes | - | - |
+| server parameters | yes | yes | yes | - | - | yes | - | - | - |
+| users and grants | yes | yes | yes | - | - | - | - | - | - |
+| moved-nothing guard, post-load statistics | yes | yes | - | - | - | - | - | - | - |
+| snapshot and rollback | yes | yes | yes | - | - | - | - | - | - |
+
+**The deeper version:**
+* **A declared matrix, not a hidden one.** Every engine states, for every
+  capability, one of: *implemented*, *not applicable* (with the reason),
+  or *not yet* (with the backlog item).
+* **A test holds the declarations against the code**, both ways: a method
+  present must be declared, and a declared one must exist. A gap can
+  neither appear nor disappear unnoticed.
+* **The operator is told in migkit's words when a command is not yet
+  available for an engine**, and what to do instead - never a traceback.
+
+**Filling the gaps, by engine.** Each wrap candidate is measured before it
+is trusted:
+* **Redis:**
+  * move and sync: redis-shake (scan, sync and restore modes; clusters) or
+    RIOT, with native `DUMP`/`RESTORE` as the fallback
+  * fence: replication offset
+  * users: ACL users and their rules
+  * schema: keyspace types, TTL policy and config parity
+* **Kafka:**
+  * move and sync: MirrorMaker 2, whose checkpoints translate consumer
+    offsets (with item 13)
+  * fence: end offsets per partition
+  * users: ACLs and SCRAM credentials
+  * schemas: topic configuration and the schema registry
+* **MongoDB:**
+  * a collection-by-collection copier (the builtin path is missing)
+  * `move --mode cdc` over change streams (`tail_apply` exists; wire it in)
+  * fence: resume token
+  * the guard and post-load index builds
+  * `mongosync` for mongo-to-mongo (item 12)
+* **SQL Server:**
+  * bulk move: `bcp`, or a builtin copier
+  * stream: CDC or Change Tracking (delta already reads Change Tracking)
+  * fence: LSN
+  * users: logins and users
+  * post-load: statistics
+  * snapshot and rollback
+  * depth still needs an x86 runner (item 27)
+* **SQLite:** builtin copier, pragma parity, guard, snapshot.
+* **Generic** (warehouses and the engines reached through the second
+  readers): moves via item 33. Checks exist already.
+* **Hetero** (cross-engine):
+  * deep battery (6-ก)
+  * sequence and auto-increment carried across engines
+  * parameters that mean the same thing on both engines, compared as such
+  * guard, post-load statistics, snapshot
+
+**Transform, in scope here, means migration-time transformation:** rename,
+filter, column subset and rename, type conversion and column expressions.
+It must work identically through every engine's copy, check and repair.
+General-purpose ETL stays out, as the owner set earlier. Whether that
+still holds is an open question to the owner.
+
 **0c. Progress and logs in migkit's own words.**
 * **Today:** `_sh` logs every command line it runs (`$ pg_dump ...`,
   `$ mydumper ...`), and some paths log a program's own message
@@ -183,8 +262,22 @@ container image:
 * its findings are translated into migkit's verdict envelope
 * its name is never printed
 
+**Read in its source (8.9.3) before measuring:**
+* **Results:** with no result handler configured, DVT prints a table to
+  stdout. It also ships a `postgres` result handler that **writes results
+  into a database table**. Pointed at the target, that is a write to the
+  target. `DataValidation(config, result_handler=...)` takes a handler
+  object, so the runner passes one whose `execute(df)` just returns the
+  frame: nothing printed, nothing written, and the frame goes back to
+  migkit as JSON.
+* **Saved state:** named connections live under the directory in
+  `PSO_DV_CONFIG_HOME`, defaulting to one in the user's home. The runner
+  points it at a directory of migkit's own for the run and passes
+  connections inline.
+
 Still to measure:
-* that it writes nothing to either side; results go where migkit tells it
+* that, run that way, it writes nothing to either side: tables and
+  schemas listed before and after, on both
 * its speed against migkit's own checksum on the same pair
 * which of its type mappings disagree with `canon`, where it would call
   equal what migkit calls different
@@ -725,6 +818,9 @@ on trust. Off unless a provider is configured.
 
 ## Order of work
 
+0. **0e runs underneath everything that follows:** the declared matrix
+   and its test first, then each engine's gaps filled as the items that
+   touch them come up, so no item lands for one engine only.
 1. **0d, then 0c:** 0d is a verdict that is wrong today on every hop with a
    row filter; 0c is the owner's rule applied to what already exists.
 2. **0 and 0a together:** the planner is what makes each later wrap
