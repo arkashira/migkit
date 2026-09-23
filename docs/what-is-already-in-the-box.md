@@ -317,8 +317,10 @@ Cheapest first, where "cheap" means no new dependency:
    snapshot for the consistent pass, a CDC path driven from here for a
    target that cannot dial the source, and an independent verifier to check
    migkit's own against. `compare schema` is still unopened.
-4. `GenericEngine` - **schema comparison done**; discovery and the deep
-   battery still open. It declared `checks = ("counts", "data")`, so a hop
+4. `GenericEngine` - **schema comparison and the key battery done**;
+   discovery still open. `HeteroEngine` now has a schema check too (D9c) -
+   it had none, and reported a column the target does not have as a
+   footnote on a green row verdict. It declared `checks = ("counts", "data")`, so a hop
    on any of those nine engines never compared the two schemas at all: a
    target built with `int` where the source has `bigint` matched on counts,
    matched row for row, and overflowed later. The catalogue answers the

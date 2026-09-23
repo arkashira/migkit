@@ -2037,28 +2037,48 @@ class Engine:
             return got
         src_types = declared(src_engine, "src", src_table)
         dst_types = declared(dst_engine, "dst", dst_table)
+        got = self._classify_columns(src_engine, src_types,
+                                     dst_engine, dst_types)
         notes = []
-        both = sorted(set(src_types) & set(dst_types))
-        only_src = sorted(set(src_types) - set(dst_types))
-        only_dst = sorted(set(dst_types) - set(src_types))
-        if only_src:
+        if got["only_src"]:
             notes.append(f"columns only on the source, not compared:"
-                         f" {', '.join(only_src)}")
-        if only_dst:
+                         f" {', '.join(got['only_src'])}")
+        if got["only_dst"]:
             notes.append(f"columns only on the target, not compared:"
-                         f" {', '.join(only_dst)}")
-        src_cols, dst_cols = [], []
-        for name in both:
+                         f" {', '.join(got['only_dst'])}")
+        notes += [f"{name}: {why}" for name, why in got["unreadable"]]
+        src_cols = [(n, s) for n, s, _ in got["pairs"]]
+        dst_cols = [(n, d) for n, _, d in got["pairs"]]
+        return src_cols, dst_cols, notes
+
+    @staticmethod
+    def _classify_columns(src_engine, src_types, dst_engine, dst_types):
+        """Every column of the pair, sorted into what can be said about it.
+
+        Split out because two callers need the same decision and only one of
+        them wants it as prose: the row comparison turns it into a footnote,
+        and the schema check turns it into a verdict. Deciding it twice is
+        how the footnote and the verdict come to disagree.
+
+        `pairs` are sorted by name rather than by the order either server
+        reports, because the row text is positional and two servers agreeing
+        on a set of columns says nothing about the order they list them in.
+        """
+        from .. import canon
+        out = {"pairs": [], "unreadable": [],
+               "only_src": sorted(set(src_types) - set(dst_types)),
+               "only_dst": sorted(set(dst_types) - set(src_types))}
+        for name in sorted(set(src_types) & set(dst_types)):
             scls, swhy = canon.comparable(src_engine.CANON_ENGINE,
                                           src_types[name])
             dcls, dwhy = canon.comparable(dst_engine.CANON_ENGINE,
                                           dst_types[name])
             if not scls or not dcls:
-                notes.append(f"{name}: {swhy or dwhy}")
+                out["unreadable"].append((name, swhy or dwhy))
                 continue
-            src_cols.append((name, scls))
-            dst_cols.append((name, dcls))
-        return src_cols, dst_cols, notes
+            out["pairs"].append((name, scls, dcls))
+        out["src_types"], out["dst_types"] = src_types, dst_types
+        return out
 
     def _drill_rows(self, db, name, src_engine, src_t, src_cols,
                     dst_engine, dst_t, dst_cols):

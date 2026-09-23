@@ -30,7 +30,7 @@ class HeteroEngine(Engine):
     a mover nobody can verify is the thing this tool exists to argue against.
     """
 
-    checks = ("counts", "data")
+    checks = ("schema", "counts", "data")
     counts_from_data = True
     # the in-process binlog tail below needs this driver; without it
     # `move --mode cdc` uses migkit's streaming pipeline instead
@@ -166,6 +166,101 @@ class HeteroEngine(Engine):
         """The base's column plan, over this hop's two engines."""
         return self._comparable_columns(db, self.src_engine, src_table,
                                         self.dst_engine, dst_table)
+
+    def check_schema(self, db):
+        """Whether the two sides hold the same columns at all.
+
+        This engine had no schema check, and the row comparison reports a
+        column that exists on only one side as a footnote on a green
+        verdict. Measured, a SQLite source with `secret` that the PostgreSQL
+        target does not have:
+
+            OK  main.items
+                rows 2 and every compared column equal across
+                sqlite/postgres (digest ...)
+                columns only on the source, not compared: secret
+
+        The sentence is true - every *compared* column was equal - and a
+        migration that dropped a whole column passed. Nobody reading a green
+        report has a reason to look at the tail.
+
+        The comparison is by column name and by the class each side's
+        declared type renders to, because two engines never spell a type the
+        same way and the class is the only thing they can both be held to.
+        """
+        res = []
+        src_ids = self.src_engine.neutral_tables("src", db)
+        dst_ids = self.dst_engine.neutral_tables("dst", db)
+        pairs, src_only, dst_only, _ = self.match_tables(src_ids, dst_ids,
+                                                         self._rename)
+        for t in src_only:
+            res.append(Result("schema", f"{db}.{self._leaf(t)}", "diff",
+                              "this table is on the source and not on the"
+                              " target, so none of its rows were compared",
+                              "", "create it on the target, then run the"
+                                  " check again"))
+        for t in dst_only:
+            res.append(Result("schema", f"{db}.{self._leaf(t)}", "diff",
+                              "this table is on the target and not on the"
+                              " source - nothing put it there as part of"
+                              " this hop", "",
+                              "confirm it belongs before the cutover"))
+        for src_t, dst_t in pairs:
+            scope = f"{db}.{self._leaf(src_t)}"
+            try:
+                got = self._classify_columns(
+                    self.src_engine,
+                    dict(self.src_engine.neutral_columns("src", db, src_t)),
+                    self.dst_engine,
+                    dict(self.dst_engine.neutral_columns("dst", db, dst_t)))
+            except Exception as e:
+                res.append(Result("schema", scope, "error",
+                                  f"cannot read the columns:"
+                                  f" {str(e).splitlines()[-1][:120]}", "",
+                                  "both sides have to be readable before"
+                                  " anything can be compared"))
+                continue
+            res.append(self._schema_result(scope, got))
+        return res
+
+    def _schema_result(self, scope, got):
+        """`got` is what `_classify_columns` returned. Kept apart from the
+        reading so every shape can be exercised without two servers."""
+        parts = []
+        if got["only_src"]:
+            parts.append(f"{len(got['only_src'])} columns the target does"
+                         " not have, so their values were not carried and"
+                         " are not compared: "
+                         + ", ".join(got["only_src"][:6]))
+        if got["only_dst"]:
+            parts.append(f"{len(got['only_dst'])} columns only the target"
+                         " has: " + ", ".join(got["only_dst"][:6]))
+        drift = [f"{n} is {got['src_types'][n]} on the source and"
+                 f" {got['dst_types'][n]} on the target, which are not the"
+                 " same kind of value"
+                 for n, s, d in got["pairs"] if s is not d]
+        parts += drift[:4]
+        blind = got["unreadable"]
+        if parts:
+            tail = ("; " + f"{len(blind)} further columns could not be read"
+                           " on one side or the other, so they are not"
+                           " compared either: "
+                    + ", ".join(n for n, _ in blind[:4])) if blind else ""
+            return Result("schema", scope, "diff", "; ".join(parts) + tail,
+                          "", "align the two sides' columns before trusting"
+                              " any row verdict for this table")
+        if blind:
+            return Result(
+                "schema", scope, "warn",
+                f"{len(got['pairs'])} columns match on both sides, and"
+                f" {len(blind)} could not be compared across these two"
+                " engines (" + ", ".join(n for n, _ in blind[:4])
+                + ") - the row check does not look at those", "",
+                "compare those columns by hand, or accept that they are"
+                " outside what this hop verifies")
+        return Result("schema", scope, "ok",
+                      f"{len(got['pairs'])} columns, same names and the same"
+                      " kind of value on both sides")
 
     def _neutral_rows(self, db, table=None, stream=None):
         """One (scope, status, detail, src_rows, dst_rows) per table.

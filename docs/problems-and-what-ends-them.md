@@ -1152,6 +1152,39 @@ linter reading the SQL alone can only say *might*; migkit asked, so it says
 nobody has measured says that rather than inheriting an answer. Test:
 `test_ddl_that_cannot_be_applied.py`.
 
+### D9c. The green verdict with the column missing from it
+
+**What happens.** The cross-engine check compares the columns both sides
+have, and mentions the ones it skipped in a note at the end of the line -
+on a verdict whose status is **ok**. Measured, a SQLite source with a
+`secret` column the PostgreSQL target does not have:
+
+    OK  main.items
+        rows 2 and every compared column equal across sqlite/postgres
+        (digest 1475545921195705015)
+        columns only on the source, not compared: secret
+
+Every word is true: every *compared* column was equal. And a migration that
+dropped a whole column passed verification, because nobody reading a green
+line reads the tail of it. The engine whose entire job is a pair of
+different engines had `checks = ("counts", "data")` - no schema check at
+all.
+
+**migkit: Ends it.** A column on one side only, a table on one side only,
+and a column whose two declared types render to different classes are each
+reported as a schema difference in their own right. Comparison is by name
+and by rendered class, because two engines never spell a type the same way:
+`INTEGER` against `bigint` is not a finding, `INTEGER` against `text` is. A
+column neither side can render is a **warn** - "we did not look" is not
+"they match", and it is not a difference either, because nothing was
+compared to differ from.
+
+The row check's wording is unchanged and still says `ok`, deliberately: the
+sentence was never false, and the fix is a report that carries the other
+line rather than a sentence that hedges. Both read one classification,
+computed once - deciding it twice is how the footnote and the verdict come
+to disagree. Test: `test_hetero_schema.py`.
+
 ### D10. The role could read the table but not the column
 
 **What happens.** Column-level grants (`GRANT SELECT (id) ON sales TO
