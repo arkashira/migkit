@@ -143,6 +143,8 @@ def compare(hop, say=print):
         tkeys = {f"{d}.{u}" for d, u in t}
         pw = []
     else:
+        from .capabilities import require
+        require(eng, "users")
         raise SystemExit(f"users: engine {eng} not supported")
     missing = sorted(skeys - tkeys)
     extra = sorted(tkeys - skeys)

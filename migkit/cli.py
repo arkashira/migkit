@@ -7,7 +7,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from . import advisors
+from . import advisors, capabilities
 from .config import get_hop, load_hops
 from .engines import get_engine
 from .util import without_secret, Timer, human_int, human_secs, which
@@ -673,9 +673,10 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
     _require_configured(hop)
     hop.options["on_conflict"] = on_conflict
     eng = get_engine(hop)
-    if not hasattr(eng, "snapshot_state"):
-        raise SystemExit(f"--go not available for {hop.engine} yet,"
-                         " use migkit sync --apply")
+    capabilities.require(
+        hop.engine, "snapshot",
+        "use migkit sync --apply, which repairs without the snapshot --go"
+        " takes first")
     store = get_store(hop)
     dbs = [db] if db else eng.databases()
     for d in dbs:
@@ -833,8 +834,9 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
         else:
             console.print("   would start CDC: migkit move"
                           f" {hop_name} --mode cdc --go")
-        if not hasattr(eng, "delta_verify"):
-            console.print("   delta verify not available for this engine")
+        why = capabilities.unavailable(hop.engine, "delta")
+        if why:
+            console.print(f"   {why}")
             return
         n = 0
         while True:
@@ -896,8 +898,7 @@ def _copy_routed(hop, eng, d, via, chunk, log):
 
 
 def _move_full(hop, eng, db, table, chunk, go):
-    if not hasattr(eng, "move_table"):
-        raise SystemExit(f"move not available for {hop.engine} yet")
+    capabilities.require(hop.engine, "table-copy")
     dbs = [db] if db else eng.databases()
     for d in dbs:
         ck = _Checkpoint(hop.report_dir(d) / "move.json")
@@ -1150,8 +1151,10 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
                               " machine does not have - using migkit's"
                               " streaming pipeline instead[/yellow]")
             return _stream(hop, eng, db, do_drop, go, engine)
-        raise SystemExit(f"cdc not available for {hop.engine},"
-                         " see migkit advise")
+        capabilities.require(hop.engine, "stream")
+        raise SystemExit(f"no way to follow a {hop.engine} source is set up"
+                         " on this machine; migkit doctor says what is"
+                         " missing")
     # full+cdc
     if engine == "postgres" and has_repl:
         # a subscription with copy_data=true is the native full+cdc
@@ -1169,19 +1172,18 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
         console.print("then: migkit move --mode cdc --db <db> --go"
                       " to stream changes")
         return
-    raise SystemExit(f"full+cdc not available for {hop.engine},"
-                     " see migkit advise")
+    capabilities.require(hop.engine, "stream")
+    capabilities.require(hop.engine, "table-copy")
+    raise SystemExit(f"moving and then following a {hop.engine} source is"
+                     " not set up on this machine; migkit doctor says what"
+                     " is missing")
 
 
 def _delta_loop(hop_name, db, interval, cycles, teardown):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    if not hasattr(eng, "delta_verify"):
-        from .engines import engines_with
-        raise SystemExit(
-            f"delta verify not available for {hop.engine} yet -"
-            f" {', '.join(engines_with('delta_verify'))} have it")
+    capabilities.require(hop.engine, "delta")
     dbs = [db] if db else eng.databases()
     if teardown:
         for d in dbs:
@@ -1595,8 +1597,8 @@ def tail(hop_name, db, go):
     _require_configured(hop)
     eng = get_engine(hop)
     if not hasattr(eng, "tail_apply"):
-        raise SystemExit("tail is for mongo/hetero hops,"
-                         " use migkit move --mode cdc")
+        raise SystemExit("this hop follows its source through"
+                         " migkit move --mode cdc")
     _tail(hop, eng, db, go)
 
 

@@ -218,3 +218,59 @@ def stale():
     """Declared gaps the code has since closed."""
     return [(n, cap) for n, gaps in GAPS.items() for cap in gaps
             if implemented(n, cap)]
+
+
+#: what the operator can do meanwhile, for each capability
+INSTEAD = {
+    "schema": "compare the schema by hand before cutover",
+    "counts": "compare the row counts by hand before cutover",
+    "data": "compare the data by hand before cutover",
+    "deep": "run migkit check, whose other checks still apply",
+    "sequences": ("set each sequence on the target above the source's"
+                  " highest value before cutover"),
+    "params": "compare the server settings by hand",
+    "bulk-move": "move it table by table, or restore a backup of the source",
+    "table-copy": ("move it with the engine's own backup and restore, and"
+                   " let migkit check prove the result"),
+    "stream": ("stop writes on the source, move it once, and prove it with"
+               " migkit check before cutover"),
+    "fence": ("stop writes on the source and let migkit check prove the"
+              " target before cutover"),
+    "delta": ("run migkit check, which compares everything rather than only"
+              " what changed"),
+    "users": "create the users and their grants on the target by hand",
+    "guard": "run migkit check after the move",
+    "statistics": "refresh the target's statistics by hand after the load",
+    "snapshot": "take a backup of the target yourself before cutover",
+}
+
+
+def unavailable(engine, capability, instead=None):
+    """Why this engine cannot do it, in migkit's words, or None if it can.
+
+    One sentence for every command and every engine, instead of each
+    command wording its own refusal: the refusals this replaces said
+    `--go not available`, `cdc not available`, and listed the engines that
+    could, which tells an operator nothing about what to do. `instead`
+    replaces the general advice where the command has a better one.
+    """
+    from .engines import ALIASES
+    name = ALIASES.get(engine, engine)
+    if name not in GAPS:
+        return f"migkit does not know the engine {engine!r}"
+    if implemented(name, capability):
+        return None
+    words = CAPABILITIES[capability]
+    words = words[0].upper() + words[1:]
+    state, why = GAPS[name].get(capability, (NOT_YET, "0e"))
+    if state == NOT_APPLICABLE:
+        return f"{words} does not apply to {engine} hops: {why}."
+    return (f"{words} is not available for {engine} hops yet (backlog item"
+            f" {why}). Meanwhile, {instead or INSTEAD[capability]}.")
+
+
+def require(engine, capability, instead=None):
+    """Stop with `unavailable`'s sentence when this engine cannot do it."""
+    why = unavailable(engine, capability, instead)
+    if why:
+        raise SystemExit(why)

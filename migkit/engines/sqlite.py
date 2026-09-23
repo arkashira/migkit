@@ -268,7 +268,7 @@ class SQLiteEngine(Engine):
 
     def neutral_create(self, side, db, table, columns, key=()):
         import sqlite3
-        if table in self._tables(side):
+        if table in self._all_tables(side):
             raise SystemExit(f"{table} already exists on the target -"
                              " migkit will not alter or replace a table that"
                              " is already there")
@@ -334,10 +334,22 @@ class SQLiteEngine(Engine):
     def databases(self):
         return ["main"]
 
-    def _tables(self, side):
+    def _all_tables(self, side):
         return [r[0] for r in self._q(side,
                 "select name from sqlite_master where type = 'table'"
                 " and name not like 'sqlite_%' order by name")]
+
+    def _tables(self, side):
+        """Every table migkit verifies, moves and repairs: all of them but
+        the ones the hop excludes.
+
+        This engine used to ignore `exclude` altogether. Measured: with
+        `exclude: [audit]`, `check` reported `audit src=1 dst=2`, and
+        `repair` deleted the target-owned row from it - the one thing the
+        exclude list exists to prevent.
+        """
+        return [t for t in self._all_tables(side)
+                if not self.hop.excluded("main", t)]
 
     #: SQLite's own rules, in the order it applies them. Measured by
     #: inserting the same text into a column of each declared type and
@@ -433,11 +445,13 @@ class SQLiteEngine(Engine):
 
     def check_schema(self, db):
         def dump(side):
-            rows = self._q(side, "select type, name, coalesce(sql, '')"
-                                 " from sqlite_master"
+            rows = self._q(side, "select type, name, tbl_name,"
+                                 " coalesce(sql, '') from sqlite_master"
                                  " where name not like 'sqlite_%'"
                                  " order by type, name")
-            return "\n".join(f"{t} {n}\n{s};" for t, n, s in rows)
+            # an excluded table's indexes and triggers go with it
+            return "\n".join(f"{t} {n}\n{s};" for t, n, owner, s in rows
+                             if not self.hop.excluded("main", owner))
 
         a, b = dump("src"), dump("dst")
         d = self.hop.report_dir(db)
