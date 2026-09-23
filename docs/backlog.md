@@ -130,22 +130,37 @@ underneath. How each engine gets there is migkit's business, and it is
 normalised the same way everywhere. Where an engine has no native way, find
 the library or tool that produces the result, wrap it, and measure it.
 
-*Measured from the code on 2026-09-24* (which engine class implements each
-capability itself, plus the movers and `users.py`):
+*Status (2026-09-24): the declared matrix and its test are done.*
+`migkit/capabilities.py` reads what each engine does off the code (its own
+methods, the movers, `users.py`'s dispatch) and declares only the gaps;
+`tests/test_every_engine_declares_its_gaps.py` fails on an undeclared gap
+and on a declared gap the code has closed. Still open: telling the operator
+in migkit's words when a command is not yet available, and filling the
+gaps below.
+
+The matrix as `capabilities.matrix()` computes it (`-` = not yet, `n/a` =
+declared not applicable with the reason):
 
 | capability | pg | mysql | mongo | redis | kafka | mssql | sqlite | generic | hetero |
 |---|---|---|---|---|---|---|---|---|---|
-| schema / counts / data / deep | yes | yes | yes | no schema | yes | yes | yes | yes | no deep |
-| bulk move | yes | yes | yes | - | - | - | - | - | yes |
-| table-by-table copy | yes | yes | - | - | - | - | - | - | yes |
-| change stream (CDC) | yes | yes | tail only | - | - | - | - | - | yes |
-| fence before cutover | yes | - | - | - | - | - | - | - | - |
-| delta verification | yes | yes | yes | yes | yes | yes | - | - | - |
-| sequences / auto-increment | yes | yes | - | n/a | n/a | yes | yes | - | - |
-| server parameters | yes | yes | yes | - | - | yes | - | - | - |
-| users and grants | yes | yes | yes | - | - | - | - | - | - |
-| moved-nothing guard, post-load statistics | yes | yes | - | - | - | - | - | - | - |
-| snapshot and rollback | yes | yes | yes | - | - | - | - | - | - |
+| comparing the schema | yes | yes | yes | - | yes | yes | yes | yes | yes |
+| comparing row counts | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | - |
+| carrying sequences and auto-increment values | yes | yes | n/a | n/a | n/a | yes | yes | - | - |
+| comparing server settings | yes | yes | yes | - | - | yes | - | - | - |
+| moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes |
+| copying table by table, resumably | yes | yes | - | - | - | - | - | - | yes |
+| keeping the target following the source | yes | yes | yes | - | - | - | n/a | - | yes |
+| proving the target has caught up before cutover | yes | - | - | - | - | - | n/a | - | - |
+| verifying only what changed | yes | yes | yes | yes | yes | yes | n/a | - | - |
+| carrying users and their grants | yes | yes | yes | - | - | - | n/a | - | - |
+| noticing a move that moved nothing | yes | yes | - | - | - | - | - | - | - |
+| refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | - | - | - |
+| snapshotting the target so a cutover can be rolled back | yes | yes | yes | - | - | - | - | - | - |
+
+The first hand-made version of this table said MongoDB's change stream was
+"tail only". It is wired into `move --mode cdc`; the probe read it right.
 
 **The deeper version:**
 * **A declared matrix, not a hidden one.** Every engine states, for every
@@ -173,8 +188,8 @@ is trusted:
   * schemas: topic configuration and the schema registry
 * **MongoDB:**
   * a collection-by-collection copier (the builtin path is missing)
-  * `move --mode cdc` over change streams (`tail_apply` exists; wire it in)
-  * fence: resume token
+  * fence: resume token (the change stream itself is already wired into
+    `move --mode cdc`)
   * the guard and post-load index builds
   * `mongosync` for mongo-to-mongo (item 12)
 * **SQL Server:**
