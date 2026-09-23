@@ -214,10 +214,14 @@ def doctor(install):
             short += missing
     console.print(t)
     if short:
-        console.print("\nto enable everything on this machine:")
-        console.print("  " + _tools.install_hint(short))
-        console.print("  or let migkit do it: [bold]migkit doctor --install"
-                      "[/bold]")
+        console.print("\nto enable everything on this machine:"
+                      " [bold]migkit doctor --install[/bold]")
+        manual = _tools.by_hand(short)
+        if manual:
+            # nothing on this machine can install these, so the names are
+            # the one thing that helps
+            console.print("  it cannot install these here; they need"
+                          f" installing by hand: {', '.join(manual)}")
     for name, hop in load_hops().items():
         for side, ep in (("src", hop.source), ("dst", hop.target)):
             if not ep.configured():

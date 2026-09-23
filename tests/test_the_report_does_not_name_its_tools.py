@@ -262,3 +262,24 @@ def test_no_help_text_names_a_program():
         assert said.strip(), argv
         leaks += [(name or "migkit", t) for t in TOOLS if t in said.lower()]
     assert not leaks, leaks
+
+
+def test_doctor_names_no_program(tmp_path, monkeypatch):
+    """It said `brew install pgloader`: `doctor --install` is the answer,
+    and a name only appears for what nothing here can install."""
+    from click.testing import CliRunner
+
+    import migkit.config as cfg
+    from migkit import cli, tools
+    conf = tmp_path / "hops.yaml"
+    conf.write_text("hops: {}\n")
+    monkeypatch.setattr(cfg, "CONF", str(conf))
+    monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
+    # a machine short of everything, with a package manager to fix it
+    monkeypatch.setattr(tools, "which", lambda n: None)
+    monkeypatch.setattr(tools.shutil, "which",
+                        lambda n: "/bin/brew" if n == "brew" else None)
+    monkeypatch.setattr(tools.platform, "system", lambda: "Darwin")
+    said = CliRunner().invoke(cli.main, ["doctor"]).output
+    assert "migkit doctor --install" in said, said
+    assert not [t for t in TOOLS if t in said.lower()], said

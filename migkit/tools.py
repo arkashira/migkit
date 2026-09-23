@@ -60,11 +60,15 @@ CAPABILITIES = [
     ("SQL Server: verify",
      "compare rows and objects",
      [], ["sqlcmd"]),
+    ("SQLite: verify, repair and copy",
+     "compare rows and schema, repair with undo, copy table by table",
+     [], []),
     ("Redis / Kafka: verify",
      "compare keyspaces and topic offsets",
      [], []),
-    ("Cross-engine (MySQL to PostgreSQL)",
-     "schema transpile, resumable copy, cross-dialect verify",
+    ("Cross-engine (any pair)",
+     "create missing tables, resumable copy, cross-dialect verify;"
+     " MySQL to PostgreSQL also in one bulk pass",
      [], ["pgloader"]),
     ("Change streaming",
      "follow live changes until cutover",
@@ -97,27 +101,23 @@ def capabilities():
     return out
 
 
-def install_hint(programs):
-    """One install line for the given programs, for this machine."""
+def by_hand(programs):
+    """The programs `doctor --install` cannot put in place on this machine.
+
+    The only ones an operator is ever told the names of: with no package
+    manager migkit can drive, or no package for a program, there is no way
+    to get it but by hand, and a name is the one thing that helps.
+    Everything else is `migkit doctor --install`'s business.
+    """
     mac = platform.system() == "Darwin"
     mgr = "brew" if (mac and shutil.which("brew")) else (
         "apt" if shutil.which("apt-get") else None)
-    pkgs, manual = [], []
+    out = []
     for c in programs:
         formula, apt = PROGRAMS.get(c, ("", ""))
-        pkg = formula if mgr == "brew" else apt
-        if mgr and pkg:
-            pkgs.append(pkg)
-        else:
-            manual.append(c)
-    parts = []
-    if pkgs:
-        uniq = sorted(set(pkgs))
-        parts.append("brew install " + " ".join(uniq) if mgr == "brew"
-                     else "sudo apt-get install -y " + " ".join(uniq))
-    if manual:
-        parts.append("install manually: " + ", ".join(sorted(set(manual))))
-    return "; ".join(parts)
+        if not (mgr and (formula if mgr == "brew" else apt)):
+            out.append(c)
+    return sorted(set(out))
 
 
 def install_missing(log=print):
@@ -131,20 +131,22 @@ def install_missing(log=print):
     wanted = []
     for _, _, needs, optional in CAPABILITIES:
         wanted += needs + optional
-    seen = set()
+    pkgs = []
     for cmd in wanted:
-        if which(cmd) or cmd in seen:
+        if which(cmd):
             continue
         formula, apt = PROGRAMS.get(cmd, ("", ""))
         pkg = formula if mgr == "brew" else apt
-        if not mgr or not pkg:
-            continue
-        seen.add(pkg)
-        log(f"installing {pkg} ...")
+        if mgr and pkg and pkg not in pkgs:
+            pkgs.append(pkg)
+    # counted, not named: which package provides a capability is migkit's
+    # business, and the line used to read `installing mydumper ...`
+    for n, pkg in enumerate(pkgs, 1):
+        log(f"installing component {n} of {len(pkgs)} ...")
         cmd_line = (["brew", "install", pkg] if mgr == "brew"
                     else ["sudo", "apt-get", "install", "-y", pkg])
         p = subprocess.run(cmd_line, capture_output=True, text=True)
         if p.returncode != 0:
-            tail = (p.stderr or "").strip().splitlines()[-1:]
-            log(f"  failed: {tail[0] if tail else 'see output'}")
+            log(f"  component {n} did not install; run migkit doctor again"
+                " to see which capability is still short")
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]

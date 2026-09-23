@@ -363,9 +363,36 @@ def test_capabilities_degrade_without_programs(monkeypatch):
     assert states["Any engine: row-level diff"] == "ready"
 
 
-def test_install_hint_names_programs_not_capabilities(monkeypatch):
+
+
+def test_installing_says_how_many_not_which(monkeypatch):
+    """`doctor --install` printed `installing mydumper ...` per package."""
     from migkit import tools
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
+    monkeypatch.setattr(tools, "which", lambda n: None)
     monkeypatch.setattr(tools.shutil, "which",
                         lambda n: "/bin/brew" if n == "brew" else None)
     monkeypatch.setattr(tools.platform, "system", lambda: "Darwin")
-    assert "brew install" in tools.install_hint(["mydumper"])
+    ran = []
+    monkeypatch.setattr(tools.subprocess, "run",
+                        lambda argv, **k: ran.append(argv) or
+                        type("P", (), {"returncode": 1, "stderr": "x"})())
+    said = []
+    tools.install_missing(said.append)
+    assert ran and len([s for s in said if "installing component" in s]) \
+        == len(ran), said
+    low = " ".join(said).lower()
+    assert not [t for t in TOOLS + ("pgloader", "percona") if t in low], said
+
+
+def test_only_what_cannot_be_installed_is_named(monkeypatch):
+    from migkit import tools
+    monkeypatch.setattr(tools.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(tools.shutil, "which",
+                        lambda n: "/bin/brew" if n == "brew" else None)
+    # every one of these has a package: nothing to name
+    assert tools.by_hand(["mydumper", "pgloader", "atlas"]) == []
+    # no package on this machine's manager: the one case a name helps
+    monkeypatch.setattr(tools.shutil, "which", lambda n: None)
+    monkeypatch.setattr(tools.platform, "system", lambda: "Linux")
+    assert tools.by_hand(["mydumper", "docker"]) == ["docker", "mydumper"]
