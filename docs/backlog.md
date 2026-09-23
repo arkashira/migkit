@@ -708,6 +708,50 @@ notifications (Slack, Teams, PagerDuty, generic HTTP) for:
 
 This is the part of CloudWatch alarms that migkit can own.
 
+**44. Failure caused on purpose.**
+
+The paid tools earned trust from years of production failures. The open
+way to earn it is to cause those failures deliberately, in a harness
+anyone can re-run, and publish what happens. Each case, on every engine
+0e declares a move or stream for:
+* migkit killed mid-dump, mid-load, mid-copy, mid-verify
+* the network between source and target cut, then restored
+* the source restarted, and the source failing over to a replica during
+  a change stream
+* the target's disk filling
+* DDL on the source mid-stream (with item 5)
+* the replication slot dropped, the binlog purged, the change-stream
+  resume point expired
+
+Every case ends one of two ways: the run resumes from the last committed
+point, or it stops and says in migkit's words what happened and what to
+do. Either way, `check` afterwards proves the target. An outcome that is
+silently wrong fails the harness.
+
+**45. Proof at size.**
+
+Item 28 measures speed. This measures correctness and resource use at a
+size where the small-sandbox answers can change:
+* terabyte-class runs on an instance the owner rents, with the time and
+  cost stated
+* deep verification at zero differences afterwards
+* memory staying flat as tables grow (every read streamed, never a whole
+  table in memory)
+* a real migration, run end to end with its numbers, as the reference
+  case; its data stays private
+
+**46. Wrapped programs stay wrapped when they change.**
+
+Every wrapped program has already changed underneath migkit once: flags
+missing from the installed build, and a newer build emitting settings an
+older server rejects. So:
+* CI runs the move and check paths against a matrix of each wrapped
+  program's versions
+* each program declares the version range migkit supports, and `assess`
+  says when the installed one is outside it (`_client_tool_versions`
+  exists; extend it to every wrapped program)
+* a release that changes behaviour is caught in CI, not by an operator
+
 ### P2: reach the paid tools have and migkit does not
 
 **33. Targets that are not databases.**
@@ -831,7 +875,9 @@ on trust. Off unless a provider is configured.
    seeing it.
 5. **Then 6-10, and 28** (the benchmark) as soon as there is something
    worth measuring.
-6. **Then 29-32**, the control plane and scale, before the reach items.
+6. **Then 29-32 and 44-46**, the control plane, scale, and the proof
+   that it holds under failure, at size and across versions, before the
+   reach items.
 7. **Then 33-42** by what the next real migration needs; 43 when the
    rest can check what it proposes.
 
