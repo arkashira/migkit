@@ -25,9 +25,16 @@ class GenericEngine(Engine):
         return ["-"]
 
     def _tables(self):
-        tables = self.hop.options.get("tables") or []
-        if not tables:
+        """The hop's listed tables, less the ones it excludes, so a pattern
+        like `tmp_*` means here what it means on every other engine."""
+        listed = self.hop.options.get("tables") or []
+        if not listed:
             raise SystemExit("generic engine needs options.tables: [t1, t2]")
+        tables = [t for t in listed if not self.hop.excluded(*str(t).split("."))]
+        if not tables:
+            raise SystemExit("every table in options.tables is also in the"
+                             " hop's exclude list, so there is nothing to"
+                             " compare")
         return tables
 
     def _key(self):

@@ -12,7 +12,8 @@ class MSSQLEngine(Engine):
     def _q(self, side, db, sql):
         ep = self.hop.source if side == "src" else self.hop.target
         if not which("sqlcmd"):
-            raise SystemExit("sqlcmd not found, brew install sqlcmd")
+            raise SystemExit("the SQL Server client is not installed on"
+                             " this machine: migkit doctor --install")
         p = run(["sqlcmd", "-S", f"{ep.host},{ep.port}", "-U", ep.user,
                  "-P", ep.password, "-d", db, "-C", "-h", "-1", "-W",
                  "-s", "|", "-Q", f"set nocount on; {sql}"])

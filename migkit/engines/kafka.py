@@ -22,7 +22,11 @@ class KafkaEngine(Engine):
         return ["cluster"]
 
     def _topics(self, consumer):
-        return sorted(t for t in consumer.topics() if not t.startswith("__"))
+        """Every topic migkit verifies: internal ones and the ones the hop
+        excludes left out. This engine used to ignore `exclude`."""
+        return sorted(t for t in consumer.topics()
+                      if not t.startswith("__")
+                      and not self.hop.excluded("cluster", t))
 
     def _partitions(self, consumer, topic):
         return sorted(consumer.partitions_for_topic(topic) or [])
@@ -151,8 +155,8 @@ class KafkaEngine(Engine):
         if bad:
             res.append(Result("schema", "topics", "diff",
                               "; ".join(bad[:10]), "",
-                              "align topics/partitions, mirror with"
-                              " mirrormaker2"))
+                              "create the missing topics on the target with"
+                              " the source's partition counts before copying"))
         else:
             res.append(Result("schema", "topics", "ok", f"{len(src)} topics"))
         common = sorted(set(src) & set(dst))
@@ -311,9 +315,9 @@ class KafkaEngine(Engine):
                 f" same thing on both sides: {', '.join(unsure[:6])} - the"
                 " two logs do not start and end together, so migkit will not"
                 " copy a number between them", "",
-                "translate them with MirrorMaker2's checkpoints, or reset the"
-                " target's groups deliberately with kafka-consumer-groups"
-                " --reset-offsets"))
+                "translate each group's position by message time rather than"
+                " by number, or reset the target's groups deliberately with"
+                " kafka-consumer-groups --reset-offsets"))
         return res
 
     def repair_plan(self, db, kind):

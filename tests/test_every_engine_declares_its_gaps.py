@@ -175,3 +175,18 @@ def test_every_command_refuses_in_the_same_words(sqlite_hop, argv, cap):
     assert "Traceback" not in said, said
     low = said.lower()
     assert not [t for t in TOOLS if t in low], said
+
+
+def test_a_method_that_only_refuses_is_not_a_capability(monkeypatch):
+    """Redis had a `delta_verify` whose whole body returned an error, and
+    the matrix counted it as verifying deltas."""
+    from migkit.engines.base import Result
+    from migkit.engines.redis import RedisEngine
+
+    def delta_verify(self, db, limit=20000, log=None):
+        return [Result("delta", db, "error", "cannot")]
+
+    monkeypatch.setattr(RedisEngine, "delta_verify", delta_verify,
+                        raising=False)
+    assert not caps.implemented("redis", "delta")
+    assert caps.implemented("kafka", "delta")

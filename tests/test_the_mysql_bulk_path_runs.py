@@ -171,6 +171,10 @@ def test_the_plan_is_the_command_that_runs(pair, tmp_path):
     planned = movers.mydumper_move(hop, "appdb", 2, False, None)
     ran = movers.mydumper_move(hop, "appdb", 2, True, None)
     assert planned[:-1] == ran, (planned, ran)
+    # the words and the command both: the plan shows one and runs the other
+    assert [getattr(s, "argv", None) for s in planned[:-1]] == \
+        [getattr(s, "argv", None) for s in ran]
+    assert any(getattr(s, "argv", None) for s in ran), ran
     assert planned[-1] == "# dry-run, add --go to execute"
 
 

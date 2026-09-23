@@ -118,23 +118,22 @@ def test_a_dry_run_executes_nothing(pair, tmp_path):
                             " where table_schema='public'") == "0"
 
 
-def test_the_printed_command_does_not_leak_the_password(pair, tmp_path):
+def test_the_plan_shows_neither_the_command_nor_the_password(pair,
+                                                             tmp_path):
+    """The plan used to print the command, redacted. It now says what
+    happens in migkit's words; the command stays on the step, and reaches
+    only the run's debug log - redacted there."""
     from migkit import movers
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
     steps = movers.pgcopydb_move(_hop(tmp_path), "app", 4, False, None)
-    joined = " ".join(steps)
-    # the two connection strings have to be in there somewhere. Which form
-    # depends on how pgcopydb is being run: the container takes them as
-    # `PGCOPYDB_SOURCE_PGURI` environment variables, the local binary as
-    # `--source`/`--target`. Pinning one of those was pinning the runner
-    # rather than the behaviour.
-    assert ("PGCOPYDB_SOURCE_PGURI" in joined or "--source" in joined), joined
-    # the password is the word before the @, which is exactly where a
-    # split-on-@ redaction leaves it
+    joined = " ".join(steps).lower()
     assert ":test@" not in joined, joined
-    assert "***@" in joined, joined
-    # and the endpoints must survive, or the printed command is useless
-    assert f"127.0.0.1:{SRC_PORT}" in joined, joined
-    assert f"127.0.0.1:{DST_PORT}" in joined, joined
+    assert not [t for t in TOOLS if t in joined], joined
+    run = [s for s in steps if getattr(s, "argv", None)]
+    assert len(run) == 1, steps
+    # the command itself still reaches both databases
+    assert f"127.0.0.1:{SRC_PORT}" in run[0].command, run[0].command
+    assert f"127.0.0.1:{DST_PORT}" in run[0].command, run[0].command
 
 
 def test_it_copies_the_rows_into_a_schema_that_already_exists(pair, tmp_path):
@@ -186,14 +185,17 @@ def test_an_unknown_mover_name_refuses(pair, tmp_path):
 
 
 def test_the_logged_command_does_not_leak_the_password_either(pair, tmp_path):
-    """`_sh` echoes the argv it is handed, and the argv carries both URIs -
-    so the log line has to be built from the redacted form, not the real one.
-    """
+    """What the operator reads has no command in it; the debug log has the
+    command, with both passwords taken out and both endpoints kept."""
     from migkit import movers
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
     seen = []
-    movers.pgcopydb_move(_hop(tmp_path), "app", 2, True, seen.append)
+    movers.run_via("pgcopydb", _hop(tmp_path), "app", 2, True, seen.append)
     assert seen, "nothing was logged, so this proves nothing"
     joined = " ".join(seen)
     assert ":test@" not in joined, joined
-    assert "***@" in joined, joined
-
+    assert not [t for t in TOOLS if t in joined.lower()], joined
+    debug = (tmp_path / "commands.log").read_text()
+    assert ":test@" not in debug, debug
+    assert "***@" in debug, debug
+    assert f"127.0.0.1:{SRC_PORT}" in debug, debug

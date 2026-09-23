@@ -157,7 +157,9 @@ def test_the_target_uri_carries_the_option_and_the_source_does_not():
               target=Endpoint(host="127.0.0.1", port=2, user="u",
                               password="p"), databases=["x"], workers=1)
     steps = movers.pgcopydb_move(hop, "x", 1, False, None)
-    line = " ".join(steps)
+    # the connection strings are in the command the step runs; the plan
+    # itself says what happens and carries no command line
+    line = " ".join(s.command for s in steps if getattr(s, "argv", None))
     assert line.count(movers.QUIET_TRIGGERS) == 1, line
     assert f":2/x{movers.QUIET_TRIGGERS}" in line, line
     assert f":1/x{movers.QUIET_TRIGGERS}" not in line, line

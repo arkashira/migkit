@@ -67,8 +67,8 @@ def test_the_dry_run_shows_the_flag_and_says_why(tmp_path):
         _hop({"where": {"orders": "region = 'apac'"}}, tmp_path),
         "appdb", 2, False, None)
     dump = steps[0]
-    assert "--defaults-file" in dump, dump
-    assert "row filters from the hop's mapping" in dump, dump
+    assert "--defaults-file" in dump.command, dump.command
+    assert "1 tables read through the hop's row filter" in dump, dump
 
 
 def test_without_a_mapping_the_command_is_exactly_what_it_was(tmp_path):
@@ -77,15 +77,16 @@ def test_without_a_mapping_the_command_is_exactly_what_it_was(tmp_path):
     from migkit import movers
     steps = movers.mydumper_move(_hop(None, tmp_path), "appdb", 2, False,
                                  None)
-    assert "--defaults-file" not in steps[0], steps[0]
-    assert "--omit-from-file" not in steps[0], steps[0]
+    assert "--defaults-file" not in steps[0].command, steps[0].command
+    assert "--omit-from-file" not in steps[0].command, steps[0].command
     # the consistency flag is spelled however the installed build spells
     # it: this line used to pin `--trx-consistency-only`, which the build
     # installed here rejects at option parsing, so the command it pinned
     # was one that could not run
     trx = movers.tool_flag("mydumper", "--trx-tables",
                            "--trx-consistency-only")
-    assert steps[0].endswith(f"--no-schemas {trx}"), steps[0]
+    assert steps[0].command.endswith(f"--no-schemas {trx}"), \
+        steps[0].command
 
 
 def test_the_config_is_written_beside_the_dump_not_inside_it(tmp_path):
@@ -95,7 +96,7 @@ def test_the_config_is_written_beside_the_dump_not_inside_it(tmp_path):
     hop = _hop({"where": {"orders": "region = 'apac'"}}, tmp_path)
     movers.mydumper_move(hop, "appdb", 2, False, None)
     steps = movers.mydumper_move(hop, "appdb", 2, False, None)
-    path = [w for w in steps[0].split() if w.endswith(".cnf")][0]
+    path = [w for w in steps[0].argv if w.endswith(".cnf")][0]
     assert path.endswith("mydumper-filters.cnf"), path
     assert "/mydumper/" not in path, path
 
@@ -228,6 +229,16 @@ def test_a_pattern_matching_nothing_produces_no_file():
                                    ["public.orders"]) is None
 
 
+def _dump_command(steps):
+    """The dump step's command line. The plan shows migkit's words; the
+    command it runs is kept on the step beside them."""
+    found = [s for s in steps if getattr(s, "argv", None)
+             and s.argv[0] == "pg_dump"]
+    assert len(found) == 1, steps
+    assert not found[0].startswith("pg_dump"), found[0]
+    return found[0].command
+
+
 def test_pg_dump_gets_the_same_excluded_tables(tmp_path, monkeypatch):
     """`pg_dump -T` verified live: `-T public.audit_log --data-only`
     dumped `COPY public.orders` and nothing from audit_log.
@@ -250,7 +261,7 @@ def test_pg_dump_gets_the_same_excluded_tables(tmp_path, monkeypatch):
     import migkit.engines.postgres as pg
     monkeypatch.setattr(pg, "PostgresEngine", FakeEngine)
     steps = movers.pgdump_move(hop, "appdb", 2, False, None)
-    dump = [s for s in steps if s.startswith("pg_dump")][0]
+    dump = _dump_command(steps)
     assert "-T public.audit_log" in dump, dump
     assert "-T public.orders" not in dump, dump
     assert any("1 tables the hop excludes are not dumped" in s
@@ -260,7 +271,7 @@ def test_pg_dump_gets_the_same_excluded_tables(tmp_path, monkeypatch):
 def test_pg_dump_without_an_exclude_list_is_untouched(tmp_path):
     from migkit import movers
     steps = movers.pgdump_move(_pghop([], tmp_path), "appdb", 2, False, None)
-    dump = [s for s in steps if s.startswith("pg_dump")][0]
+    dump = _dump_command(steps)
     assert " -T " not in dump, dump
 
 
@@ -282,7 +293,7 @@ def test_a_source_that_cannot_be_listed_says_so_instead_of_filtering(
     steps = movers.pgdump_move(_pghop(["audit_log"], tmp_path), "appdb", 2,
                                False, None)
     assert any("could not list the source's tables" in s for s in steps), steps
-    dump = [s for s in steps if s.startswith("pg_dump")][0]
+    dump = _dump_command(steps)
     assert " -T " not in dump, dump
 
 

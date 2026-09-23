@@ -254,7 +254,12 @@ def test_every_delta_verify_answers_too(pg_pair, servers, tmp_path):
             continue
         if not isinstance(got, list) or not got:
             broken.append(f"{name}.delta_verify answered {got!r}")
-    assert asked >= 4, f"only {asked} engines were asked for a delta"
+    # every engine here that the capability matrix says verifies deltas was
+    # asked. This read `asked >= 4`, and Redis was the fourth: its method
+    # did nothing but return an error, and is gone
+    from migkit import capabilities
+    have = [n for n in engines if capabilities.implemented(n, "delta")]
+    assert asked == len(have) >= 3, (asked, have)
     assert not broken, broken
 
 

@@ -263,6 +263,8 @@ def test_an_older_target_is_refused_rather_than_half_written(seeded,
     said = str(caught.value)
     assert "payload version" in said, said
     assert "older Redis" in said, said
-    assert "riot replicate" in said or "redis-shake" in said, said
+    # what to do next, in migkit's words: the keys need re-writing value by
+    # value (this line used to name two outside programs)
+    assert "value by value" in said, said
     # the deletions come last, so the stray is still there to be seen
     assert old.exists("stray_on_the_old_one")

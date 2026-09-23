@@ -1071,6 +1071,20 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     the data, migkit verifies it.
 
     Use only over a trusted network (or run migkit on a cloud VM)."""
+    try:
+        return _move(hop_name, db, table, mode, chunk, do_drop, go)
+    except RuntimeError as e:
+        # a program underneath failed: its message keeps the database's
+        # words and loses its own name, and nobody gets a traceback
+        from .movers import DRIVEN
+        from .wording import without_programs
+        raise SystemExit(
+            f"the copy stopped: {without_programs(str(e), DRIVEN)}\n"
+            "Nothing past the last finished table is marked as moved. The"
+            " commands that ran are in the run's commands.log.")
+
+
+def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from . import movers
     hop = get_hop(hop_name)
     _require_configured(hop)

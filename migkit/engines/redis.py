@@ -164,9 +164,26 @@ class RedisEngine(Engine):
         return Health(busy_ratio=busy,
                       note="rewriting to disk" if busy >= BUSY_RATIO else "")
 
+    def _kept(self, db, keys):
+        """The keys migkit verifies and repairs: all but the ones the hop
+        excludes, matched as `db.key` and as `key`. This engine used to
+        ignore `exclude`, so a target-owned key pattern was compared, and
+        repaired away, like any other."""
+        if not self.hop.exclude:
+            return keys
+        return [k for k in keys if not self.hop.excluded(str(db), k)]
+
+    def _count(self, side, db):
+        client = self._client(side, db)
+        if not self.hop.exclude:
+            return client.dbsize()
+        # the server's own count includes the excluded keys, so the kept
+        # ones are counted by walking them
+        return sum(len(b) for b in self._scan_batches(client, 0, True, db))
+
     def check_counts(self, db):
-        a = self._client("src", db).dbsize()
-        b = self._client("dst", db).dbsize()
+        a = self._count("src", db)
+        b = self._count("dst", db)
         if a != b:
             return [Result("counts", f"db{db}", "diff", f"src={a} dst={b}")]
         return [Result("counts", f"db{db}", "ok", f"keys {a:,}=={b:,}")]
@@ -213,12 +230,13 @@ class RedisEngine(Engine):
                 changed.append(k)
         return missing, changed
 
-    def _scan_batches(self, client, sample, deep):
+    def _scan_batches(self, client, sample, deep, db=0):
         """Batches of keys from one side, up to the sample cap."""
         cursor = 0
         seen = 0
         while True:
             cursor, keys = client.scan(cursor, count=1000)
+            keys = self._kept(db, keys)
             if not deep and seen + len(keys) > sample:
                 keys = keys[:max(0, sample - seen)]
             if keys:
@@ -255,7 +273,7 @@ class RedisEngine(Engine):
         src_gate = Throttle(1, probe=lambda: self._health("src"))
         dst_gate = Throttle(1, probe=lambda: self._health("dst"))
         missing, changed = [], []
-        for keys in self._scan_batches(s, sample, deep):
+        for keys in self._scan_batches(s, sample, deep, db):
             with src_gate.unit():
                 gone, differ = self._batch_compare(s, t, keys)
             missing.extend(gone)
@@ -266,7 +284,7 @@ class RedisEngine(Engine):
         bad = len(missing) + len(changed)
         extra = []
         seen_dst = 0
-        for keys in self._scan_batches(t, sample, deep):
+        for keys in self._scan_batches(t, sample, deep, db):
             with dst_gate.unit():
                 pipe = s.pipeline(transaction=False)
                 for k in keys:
@@ -288,8 +306,7 @@ class RedisEngine(Engine):
                               f"{bad}/{checked} keys differ ({mode}):"
                               f" {', '.join(parts)}", "",
                               f"migkit sync {self.hop.name} --db {db}"
-                              " --kind rows --apply, or a full sync with RIOT"
-                              " (riot replicate) or redis-shake"))
+                              " --kind rows --apply"))
         if extra:
             shown = ", ".join(sorted(extra)[:6])
             more = f" (+{len(extra) - 6} more)" if len(extra) > 6 else ""
@@ -414,9 +431,10 @@ class RedisEngine(Engine):
                         f" {str(e)[:90]}. {done} keys were copied before"
                         " this one and nothing has been deleted. A payload"
                         " version error means the target runs an older Redis"
-                        " than the source - migrate with RIOT (riot"
-                        " replicate) or redis-shake, which re-issue values"
-                        " instead of moving RDB payloads")
+                        " than the source: its payloads do not load into an"
+                        " older version, so these keys need re-writing value"
+                        " by value, which migkit does not do yet (backlog"
+                        " item 0e)")
                 done += 1
             for key in extra:
                 remember(raw_t, key, handle)
@@ -436,6 +454,7 @@ class RedisEngine(Engine):
         big = []
         while seen < sample:
             cursor, keys = s.scan(cursor, count=1000)
+            keys = self._kept(db, keys)
             if keys:
                 ps = s.pipeline(transaction=False)
                 pt = t.pipeline(transaction=False)
@@ -490,16 +509,6 @@ class RedisEngine(Engine):
                           "big keys often exceed proxy/mover limits,"
                           " copy them explicitly" if missing_big else ""))
         return res
-
-    def delta_verify(self, db, limit=20000, log=None):
-        # redis has no built-in change log to diff against; honest about it
-        # rather than faking a delta from a full scan
-        return [Result("delta", f"db{db}", "error",
-                       "redis has no native change log for O(changes) delta;"
-                       " enable keyspace notifications (config set"
-                       " notify-keyspace-events KEA) and consume __keyevent__,"
-                       " or use RIOT/redis-shake which stream changes."
-                       " Use check --deep for full-scan verification instead")]
 
     def watch_sample(self, db):
         return {"db": f"db{db}", "ts": time.time(),

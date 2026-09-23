@@ -151,13 +151,41 @@ def stream_supported(engine):
     return engine in ("postgres", "mysql", "hetero")
 
 
+#: the programs the bulk paths drive. Their names never reach the operator:
+#: the command lines go to the run's debug log, and what a failing one said
+#: is passed on with its name taken out.
+DRIVEN = ("pg_dump", "pg_restore", "pgcopydb", "psql", "mydumper",
+          "myloader", "pgloader", "mongodump", "mongorestore")
+#: environment variables whose values are secrets, for the debug log
+_SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
+#: (DebugLog, secrets) for the run in progress, set by `run_via`
+_DEBUG = None
+
+
+def _debug(cmd, env=None):
+    """Write a command line to the run's debug log, secrets removed."""
+    if _DEBUG is not None:
+        secrets = [v for k, v in (env or {}).items() if _SECRET_ENV.search(k)]
+        _DEBUG[0].command(cmd, secrets + list(_DEBUG[1]))
+
+
 def _sh(cmd, env=None, log=None):
-    if log:
-        log("$ " + " ".join(str(c) for c in cmd))
+    """Run one program, and keep its command line off the screen.
+
+    This printed `$ <command line>` to the operator for every program it
+    ran, and let a failing program's own message out as it was
+    (`pg_restore: error: ...`). The command line now goes to the run's
+    debug log with every secret removed, and a failure keeps the
+    database's words and loses the program's name. What the operator reads
+    while the step runs is the phase line its caller logs.
+    """
+    from . import wording
+    _debug(cmd, env)
     p = subprocess.run(cmd, env=tool_env(env), text=True,
                        capture_output=True)
     if p.returncode:
-        raise RuntimeError((p.stderr or p.stdout)[-500:])
+        said = (p.stderr or p.stdout)[-500:]
+        raise RuntimeError(wording.without_programs(said, DRIVEN))
     return p
 
 
@@ -467,17 +495,20 @@ def pgdump_move(hop, db, workers, go, log):
         except Exception as e:
             unresolved = str(e).splitlines()[-1][:70] if str(e) \
                 else type(e).__name__
+    from .wording import Step, phase
     left_out = skip + routed
-    skip_args = [a for name in left_out for a in ("-T", name)]
-    steps = [
-        f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fd"
-        f" -j {workers} --data-only -f {outdir}"
-        + ("".join(f" -T {n}" for n in left_out) if left_out else ""),
-        _truncate_step(hop, db),
-        f"pg_restore -h {t.host} -p {t.port} -U {t.user}"
-        f" -d {hop.target_db(db)}"
-        f" --data-only --disable-triggers -j {workers} {outdir}",
-    ]
+    dump = Step(
+        phase("dump", workers=workers, left_out=len(skip),
+              filtered=len(routed)),
+        ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
+         "-Fd", "-j", workers, "--data-only", "-f", outdir,
+         *[a for name in left_out for a in ("-T", name)]])
+    load = Step(
+        phase("load", workers=workers),
+        ["pg_restore", "-h", t.host, "-p", t.port, "-U", t.user,
+         "-d", hop.target_db(db), "--data-only", "--disable-triggers",
+         "-j", workers, outdir])
+    steps = [dump, _truncate_step(hop, db), load]
     if unresolved:
         steps.insert(1, _unresolved_note(unresolved))
     else:
@@ -493,41 +524,37 @@ def pgdump_move(hop, db, workers, go, log):
     env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
-    _pgdump_dump(hop, db, s, workers, outdir, log, skip_args)
+    if log:
+        log(dump)
+    _sh(dump.argv, {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"},
+        log)
     _pg_truncate_target(hop, db, log)
     with _IndexWindow(hop, db, workers, log):
-        _pgdump_restore(hop, db, workers, outdir, env_t, log)
+        _pgdump_restore(load, env_t, log)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
 
 
-def _pgdump_dump(hop, db, s, workers, outdir, log, skip_args=()):
-    _sh(["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
-         "-d", db, "-Fd", "-j", str(workers), "--data-only",
-         "-f", str(outdir), *skip_args],
-        {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
-
-
-def _pgdump_restore(hop, db, workers, outdir, env_t, log):
-    """Restore into the *target's* name for the database.
+def _pgdump_restore(load, env_t, log):
+    """Run the load step, into the *target's* name for the database.
 
     It used the source's name, while the emptying and the index window
     already used `target_db()` - so a hop whose `db_map` renames the
-    database emptied the right one and loaded into another.
+    database emptied the right one and loaded into another. The name is
+    now in the step itself, built once with the plan.
     """
-    t = hop.target
+    if log:
+        log(load)
     try:
-        _sh(["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", hop.target_db(db), "--data-only", "--disable-triggers",
-             "-j", str(workers), str(outdir)], env_t, log)
+        _sh(load.argv, env_t, log)
     except RuntimeError as e:
-        # newer pg_dump emits SETs older servers reject; pg_restore exits 1
-        # on those even when all rows landed - migkit check is the judge
+        # newer dumps emit SETs older servers reject; the load exits 1 on
+        # those even when all rows landed - migkit check is the judge
         if "errors ignored on restore" not in str(e):
             raise
         if log:
-            log("pg_restore ignored version-mismatch SET statements,"
-                " data restored - verify with migkit check")
+            log("the target rejected settings a newer source version"
+                " writes; the rows were loaded - migkit check confirms it")
 
 
 MY_INDEX_SQL = """
@@ -799,7 +826,8 @@ def _my_truncate_target(hop, db, log=None):
     stmts = ["set foreign_key_checks = 0"] + [
         f"truncate table {ddb}.{eng._quote_ident(n)}" for n in keep]
     if log:
-        log("$ " + "; ".join(stmts))
+        from .wording import phase
+        log(phase("empty", tables=len(keep), left_out=len(skip)))
     conn = eng._conn("dst")
     try:
         with conn.cursor() as cur:
@@ -934,13 +962,15 @@ def mydumper_move(hop, db, workers, go, log):
         except Exception as e:
             unresolved = str(e).strip().splitlines()[0][:100] if str(e) \
                 else type(e).__name__
+    from .wording import Step, phase
     dump, load = _mydumper_commands(hop, db, workers, outdir,
                                     cnf if filters else None,
                                     omit if skip else None)
-    steps = [" ".join(dump)
-             + ("  # row filters from the hop's mapping" if filters else ""),
-             _truncate_step(hop, db),
-             " ".join(load)]
+    dump = Step(phase("dump", workers=workers, left_out=len(skip),
+                      row_filters=len(_filtered_here(hop, db))
+                      if filters else 0), dump)
+    load = Step(phase("load", workers=workers), load)
+    steps = [dump, _truncate_step(hop, db), load]
     if skip:
         steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
                         " dumped at all")
@@ -957,11 +987,15 @@ def mydumper_move(hop, db, workers, go, log):
         cnf.chmod(0o600)
     if skip:
         omit.write_text("".join(f"{n}\n" for n in skip))
-    _sh(dump, {"MYSQL_PWD": hop.source.password}, log)
+    if log:
+        log(dump)
+    _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log)
     from .engines.mysql import MySQLEngine
     _my_truncate_target(hop, db, log)
     with _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
-        _sh(load, {"MYSQL_PWD": hop.target.password}, log)
+        if log:
+            log(load)
+        _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log)
     if skip:
         _my_orphans_left(hop, db, log)
     shutil.rmtree(outdir, ignore_errors=True)
@@ -969,21 +1003,37 @@ def mydumper_move(hop, db, workers, go, log):
 
 
 def pgloader_move(hop, db, workers, go, log):
+    """MySQL to PostgreSQL in one pass, through a load file.
+
+    The load file carries both passwords, so it lives only for the run:
+    written with owner-only permissions, and removed afterwards whether
+    the load worked or not. It named the source's database on the target
+    side too, so a hop whose `db_map` renames the database loaded into the
+    wrong one.
+    """
+    from .wording import Step, phase
     s, t = hop.source, hop.target
     loadfile = hop.report_dir(db) / "pgloader.load"
     body = f"""LOAD DATABASE
   FROM mysql://{s.user}:{quote(s.password, safe='')}@{s.host}:{s.port}/{db}
-  INTO postgresql://{t.user}:{quote(t.password, safe='')}@{t.host}:{t.port}/{db}
+  INTO postgresql://{t.user}:{quote(t.password, safe='')}@{t.host}:{t.port}/{hop.target_db(db)}
 WITH data only, workers = {workers}, concurrency = {min(workers, 4)},
      on error stop
 ALTER SCHEMA '{db}' RENAME TO 'public';
 """
+    copy = Step(phase("stream-copy", workers=workers),
+                ["pgloader", loadfile])
+    steps = [copy]
+    if not go:
+        return steps + ["# dry-run, add --go to execute"]
     loadfile.write_text(body)
     loadfile.chmod(0o600)
-    steps = [f"pgloader {loadfile}   # data only, mysql -> postgres"]
-    if not go:
-        return steps + ["# dry-run, review the load file then add --go"]
-    _sh(["pgloader", str(loadfile)], None, log)
+    try:
+        if log:
+            log(copy)
+        _sh(copy.argv, None, log)
+    finally:
+        loadfile.unlink(missing_ok=True)
     return steps
 
 
@@ -999,30 +1049,62 @@ def _mongo_uri(ep):
 
 
 def mongodump_move(hop, db, workers, go, log):
+    """Dump piped straight into restore, one collection set per database.
+
+    The restore drops each collection it is about to load. It read no
+    exclude list, so a collection the hop excludes - one the target owns -
+    was dropped and replaced with the source's copy whenever the source had
+    one by that name. Excluded collections are now left out of the dump,
+    and out of the restore as well, so the drop cannot reach them. And the
+    restore wrote to the source's database name whatever the hop's
+    `db_map` said.
+    """
+    from .wording import Step, phase
     s, t = hop.source, hop.target
-    steps = [
-        f"mongodump --uri=<src> --db={db} --archive"
-        f" | mongorestore --uri=<dst> --archive --drop"
-        f" --nsInclude='{db}.*' --numParallelCollections={workers}",
-    ]
+    skip, unresolved = [], ""
+    if getattr(hop, "exclude", None):
+        try:
+            from .engines.mongodb import MongoEngine
+            names = MongoEngine(hop)._client("src")[db].list_collection_names()
+            skip = sorted(n for n in names if hop.excluded(db, n))
+        except Exception as e:
+            unresolved = (str(e).strip().splitlines()[0][:100] if str(e)
+                          else type(e).__name__)
+    tdb = hop.target_db(db)
+    dump = ["mongodump", f"--uri={_mongo_uri(s)}", f"--db={db}", "--archive",
+            "--quiet", *[f"--excludeCollection={n}" for n in skip]]
+    restore = ["mongorestore", f"--uri={_mongo_uri(t)}", "--archive",
+               "--drop", f"--nsInclude={db}.*",
+               *[f"--nsExclude={db}.{n}" for n in skip],
+               *([f"--nsFrom={db}.*", f"--nsTo={tdb}.*"] if tdb != db
+                 else []),
+               f"--numParallelCollections={workers}"]
+    copy = Step(phase("stream-copy", workers=workers, left_out=len(skip)),
+                dump + ["|"] + restore)
+    steps = [copy]
+    if unresolved:
+        steps.append(_unresolved_note(unresolved))
     if not go:
         return steps + ["# dry-run, add --go to execute"]
-    dump = subprocess.Popen(
-        ["mongodump", f"--uri={_mongo_uri(s)}", f"--db={db}", "--archive",
-         "--quiet"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=tool_env())
-    restore = subprocess.Popen(
-        ["mongorestore", f"--uri={_mongo_uri(t)}", "--archive", "--drop",
-         f"--nsInclude={db}.*", f"--numParallelCollections={workers}"],
-        stdin=dump.stdout, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, env=tool_env())
+    if unresolved:
+        raise _unresolved_exclusion(db, unresolved)
+    if log:
+        log(copy)
+    _debug(copy.argv)
+    dump = subprocess.Popen(dump, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=tool_env())
+    restore = subprocess.Popen(restore, stdin=dump.stdout,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=tool_env())
     dump.stdout.close()
     _, err_r = restore.communicate()
     _, err_d = dump.communicate()
     if dump.returncode or restore.returncode:
-        raise RuntimeError((err_d + err_r).decode()[-500:])
+        from .wording import without_programs
+        raise RuntimeError(without_programs((err_d + err_r).decode()[-500:],
+                                            DRIVEN))
     if log:
-        log(f"{db}: mongodump | mongorestore complete")
+        log(f"{db}: copied")
     return steps
 
 
@@ -1198,16 +1280,15 @@ def pgcopydb_move(hop, db, workers, go, log):
                 "--table-jobs", str(workers)]
         if filters_path:
             cmd += ["--filters", "/tmp/migkit-filters.ini"]
-    # the password sits *before* the @, so splitting there and keeping the
-    # front half kept the secret and threw the host away - the printed steps
-    # are what an operator pastes into a ticket
-    import re as _re
-    shown = [_re.sub(r"(://[^:/@]+:)[^@]*@", r"\1***@", c) for c in cmd]
-    steps = [_truncate_step(hop),
-             "# parallel table copy, source to target, no intermediate file"]
+    # the plan says what happens; the command, which carries both passwords
+    # in its connection strings, stays on the step and goes only to the
+    # run's debug log, redacted there
+    from .wording import Step, phase
+    copy = Step(phase("stream-copy", workers=workers), cmd)
+    steps = [_truncate_step(hop)]
     if filters_note:
         steps.append(filters_note)
-    steps.append(" ".join(shown))
+    steps.append(copy)
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -1231,18 +1312,16 @@ def pgcopydb_move(hop, db, workers, go, log):
         if log:
             where = ("from its container"
                      f" (network={net})" if how != "local" else "")
-            log(f"pgcopydb cannot reach both endpoints {where}:"
+            log(f"the streaming copy cannot reach both databases {where}:"
                 f" {str(e).splitlines()[-1][:120]}")
-            log("falling back to the pg_dump path")
+            log("copying through a local dump instead")
         return pgdump_move(hop, db, workers, go, log)
 
     _pg_truncate_target(hop, db, log)
-    # logged through the redacted form, never the raw argv: `_sh` would echo
-    # the command as given, and the command carries both passwords
-    if log:
-        log("$ " + " ".join(shown[1:]))
     with _IndexWindow(hop, db, workers, log):
-        _sh(cmd)
+        if log:
+            log(copy)
+        _sh(copy.argv)
     return steps
 
 
@@ -1457,10 +1536,13 @@ def _follow_sentinel(d, env, proc, log=None):
         p = _sp.run(["pgcopydb", "stream", "sentinel"] + args + ["--dir",
                     str(d)], capture_output=True, text=True, env=env)
         if p.returncode:
+            from .wording import without_programs
             raise SystemExit(f"could not set the {why} on the CDC leg:"
-                             f" {(p.stderr or p.stdout)[-200:]}")
+                             + without_programs(
+                                 " " + (p.stderr or p.stdout)[-200:],
+                                 DRIVEN))
         if log:
-            log(f"pgcopydb stream sentinel {' '.join(args)}")
+            log(f"change stream {why} set")
 
 
 def stream_codegen(hop, dbs, engine):
@@ -1772,11 +1854,21 @@ def run_via(via, hop, db, workers, go, log):
              "mongodump": ("mongodump", "mongorestore")}[via]
     missing = [t for t in tools if not which(t)]
     if missing:
-        raise SystemExit(f"the {via} bulk path needs {', '.join(missing)}"
-                         " installed - run: migkit doctor --install")
+        # the names went out through the variables here, where the static
+        # scan of messages could not see them
+        raise SystemExit("this bulk path needs programs this machine does"
+                         " not have - migkit doctor --install puts them in"
+                         " place")
     if via == "pgcopydb" and not pgcopydb_available():
         raise SystemExit("this bulk path needs a component that is not"
                          " available on this machine - migkit doctor says"
                          " what is missing and migkit doctor --install"
                          " puts it in place")
-    return fns[via](hop, db, workers, go, log)
+    global _DEBUG
+    from .wording import DebugLog
+    _DEBUG = (DebugLog(hop.report_dir(db) / "commands.log"),
+              (hop.source.password, hop.target.password))
+    try:
+        return fns[via](hop, db, workers, go, log)
+    finally:
+        _DEBUG = None

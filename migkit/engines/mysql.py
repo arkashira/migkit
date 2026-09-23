@@ -450,7 +450,8 @@ class MySQLEngine(Engine):
     def _dump_schema(self, side, db):
         ep = self.hop.source if side == "src" else self.hop.target
         if not which("mysqldump"):
-            raise SystemExit("mysqldump not found, run bootstrap.sh")
+            raise SystemExit("the MySQL client is not installed on this"
+                             " machine: migkit doctor --install")
         pdb = self._d(side, db)
         p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
                  f"-p{ep.password}", "--no-data", "--routines", "--triggers",
@@ -1445,7 +1446,7 @@ class MySQLEngine(Engine):
             "deep", f"{db} duplicate keys", "skip",
             "no measured way for a MySQL unique index to stop enforcing:"
             " collations are compiled in and a failed index build rolls"
-            " back - and unique_checks=0, which mysqldump writes, still"
+            " back - and unique_checks=0, which a logical dump sets, still"
             " rejected a duplicate here (error 1062) because the index was"
             " cached. Unreproduced is not absent, so migkit claims nothing"
             " either way")
@@ -3006,10 +3007,11 @@ class MySQLEngine(Engine):
                     ck.save()
                     return
                 mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
-                             f" coalesce(max(`{intpk}`), 0)"
+                             f" coalesce(max(`{intpk}`), 0),"
+                             f" min(`{intpk}`) is not null"
                              f" from `{db}`.`{t}`"
                              + (f" where ({rf})" if rf else ""))[0]
-                lo, hi = int(mm[0]), int(mm[1])
+                lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
                 last = st.get("last", lo - 1)
                 while last < hi:
                     nxt = min(last + chunk, hi)
@@ -3031,6 +3033,18 @@ class MySQLEngine(Engine):
                     st["last"] = last
                     ck.save()
                     log(f"{key}: up to {intpk}={last:,} of {hi:,}")
+                # each chunk replaces its own key range, so a target row
+                # outside the source's whole range was in none of them
+                outside = (f"not (`{intpk}` between {lo} and {hi})" if has
+                           else "true")
+                if rf:
+                    outside = f"({outside}) and ({rf})"
+                gone = dcur.execute(f"delete from `{ddb}`.`{t}`"
+                                    f" where {outside}")
+                dconn.commit()
+                if gone:
+                    log(f"{key}: removed {gone:,} target rows the source"
+                        " does not have")
                 st["done"] = True
                 ck.save()
         finally:

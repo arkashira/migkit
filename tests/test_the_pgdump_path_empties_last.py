@@ -117,12 +117,17 @@ def test_the_plan_is_in_the_order_the_run_is(tmp_path):
               databases=["appdb"], db_map={"appdb": "appdb_new"})
     hop.report_dir = lambda db=None, _p=tmp_path: _p
     steps = movers.pgdump_move(hop, "appdb", 2, False, None)
-    dump = next(i for i, s in enumerate(steps) if s.startswith("pg_dump"))
+
+    def runs(program):
+        return next(i for i, s in enumerate(steps)
+                    if getattr(s, "argv", None) and s.argv[0] == program)
+    dump, load = runs("pg_dump"), runs("pg_restore")
     empty = next(i for i, s in enumerate(steps) if "empty" in s)
-    load = next(i for i, s in enumerate(steps) if s.startswith("pg_restore"))
     assert dump < empty < load, steps
-    assert " -d appdb_new " in steps[load], steps[load]
+    assert " -d appdb_new " in steps[load].command, steps[load].command
     assert "CHANGE_ME" not in "\n".join(steps)
+    assert "CHANGE_ME" not in "\n".join(s.command for s in steps
+                                        if getattr(s, "argv", None))
 
 
 def test_both_bulk_paths_stop_the_same_way():
@@ -137,10 +142,12 @@ def test_both_bulk_paths_stop_the_same_way():
                         and isinstance(node.func, ast.Name)
                         and node.func.id == "_unresolved_exclusion"):
                     callers.add(fn.name)
-    # all three bulk paths that read the source's table list: the
-    # streaming copier used to go ahead with only a note in its plan
-    assert callers == {"pgdump_move", "mydumper_move", "pgcopydb_move"}, \
-        callers
+    # every bulk path that reads the source's table list: the streaming
+    # copier used to go ahead with only a note in its plan, and the MongoDB
+    # path, which now reads the collection list for the exclude list, stops
+    # at the same point
+    assert callers == {"pgdump_move", "mydumper_move", "pgcopydb_move",
+                       "mongodump_move"}, callers
 
 
 def test_the_refusal_names_no_tool():

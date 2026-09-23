@@ -41,7 +41,9 @@ from migkit.config import Endpoint, Hop
 #: names of things migkit drives, which an operator has no way to act on
 TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "myloader", "pgloader", "mongodump", "debezium", "redpanda",
-         "atlas", "liquibase")
+         "atlas", "liquibase", "pg_dump", "pg_restore", "mongorestore",
+         "mongosync", "mysqldump", "sqlcmd", "riot", "redis-shake",
+         "mirrormaker", "pgcompare")
 
 
 def _engine(tmp_path):
@@ -147,7 +149,7 @@ def test_what_the_line_still_tells_them(tmp_path):
 
 
 #: call sites whose strings a person driving migkit reads
-FACING = {"Result", "SystemExit", "print"}
+FACING = {"Result", "SystemExit", "print", "log", "chat", "say"}
 
 
 def _facing_strings():

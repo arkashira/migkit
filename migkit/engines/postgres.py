@@ -5361,9 +5361,11 @@ class PostgresEngine(Engine):
             return
         mm = self._psql("src", db,
                         f'select coalesce(min("{pk}"), 0)||\'|\'||'
-                        f'coalesce(max("{pk}"), 0) from {qt}'
+                        f'coalesce(max("{pk}"), 0)||\'|\'||'
+                        f'(min("{pk}") is not null)::int from {qt}'
                         + (f" where {rf}" if rf else ""))
-        lo, hi = (int(x) for x in mm.split("|"))
+        lo, hi, has = mm.split("|")
+        lo, hi = int(lo), int(hi)
         last = st.get("last", lo - 1)
         while last < hi:
             nxt = min(last + chunk, hi)
@@ -5377,6 +5379,19 @@ class PostgresEngine(Engine):
             st["last"] = last
             ck.save()
             log(f"{key}: up to {pk}={last:,} of {hi:,}")
+        # Each chunk replaces its own key range, so a target row whose key
+        # lies outside the source's whole range was never in any chunk and
+        # stayed - a target carrying an earlier attempt kept its strays.
+        outside = (f'not ("{pk}" between {lo} and {hi})' if has == "1"
+                   else "true")
+        if rf:
+            outside = f"({outside}) and ({rf})"
+        gone = self._psql("dst", db, f"with d as (delete from {qt} where"
+                                     f" {outside} returning 1)"
+                                     " select count(*) from d")
+        if gone and gone != "0":
+            log(f"{key}: removed {int(gone):,} target rows the source does"
+                " not have")
         st["done"] = True
         ck.save()
 

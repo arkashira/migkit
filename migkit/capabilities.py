@@ -74,6 +74,7 @@ GAPS = {
         "table-copy": (NOT_YET, "0e"),
         "stream": (NOT_YET, "0e"),
         "fence": (NOT_YET, "0e"),
+        "delta": (NOT_YET, "0e"),
         "users": (NOT_YET, "0e"),
         "guard": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
@@ -131,10 +132,33 @@ GAPS = {
 }
 
 
+def _refuses_only(method):
+    """A method whose whole body is a return of an error or skip result.
+
+    Redis had a `delta_verify` that did nothing but say it could not, so
+    the matrix counted Redis as verifying deltas. A method that only
+    refuses is a gap wearing the method's name.
+    """
+    import textwrap
+    try:
+        fn = ast.parse(textwrap.dedent(inspect.getsource(method))).body[0]
+    except (OSError, TypeError, SyntaxError):
+        return False
+    body = fn.body
+    if body and isinstance(body[0], ast.Expr) \
+            and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    return any(isinstance(n, ast.Constant) and n.value in ("error", "skip")
+               for n in ast.walk(body[0]))
+
+
 def _own(cls, method):
     """The engine does it itself, not the base class's placeholder."""
     found = getattr(cls, method, None)
-    return found is not None and found is not getattr(Engine, method, None)
+    return (found is not None and found is not getattr(Engine, method, None)
+            and not _refuses_only(found))
 
 
 def _users_engines():
@@ -162,7 +186,8 @@ def _bulk(name):
 
 
 def _has(method):
-    return lambda n, c: n in engines_with(method)
+    return lambda n, c: (n in engines_with(method)
+                         and not _refuses_only(getattr(c, method)))
 
 
 def _stream(name):
