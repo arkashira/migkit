@@ -1436,6 +1436,42 @@ addressed on the other side and will not be repaired; and the repair
 refuses them outright rather than reporting a success it did not have.
 Tests: `test_a_key_that_holds_null.py`.
 
+### D12d. The value the source kept and the target will not take
+
+**What happens.** SQLite does not enforce a column's declared type on an
+ordinary table. Measured:
+
+    create table t (id integer primary key, n integer)
+    insert into t values (2, 'not a number')     accepted
+    select typeof(n) from t where id = 2         text
+
+and the same insert into a `STRICT` table:
+
+    cannot store TEXT value in INTEGER column s.n
+
+Every engine migkit moves to behaves like the second one. So a SQLite
+source can be perfectly consistent with itself and still hold the exact
+rows a move will be refused on - discovered part-way through a load, with
+the target half full.
+
+**migkit: Ends it, and with no heuristic of its own.** The thing that makes
+this answerable is that **SQLite already tried**: affinity is applied on
+the way in, so a numeric column converts what it can. Measured, the same
+text inserted into a column of each declared type:
+
+    declared        '5' stored as     'abc' stored as
+    integer / int / bigint / numeric / decimal(10,2)
+                    integer           text
+    real / double   real              text
+    text / varchar / blob / (no type)
+                    text              text
+
+`'5'` became a number wherever the column had numeric affinity. A value
+still sitting there as `text` is one this database itself could not
+convert, so counting them is a reading rather than a judgement. Both sides
+are checked - on the target it means a load already carried them in. Test:
+`test_sqlite_declared_types.py`.
+
 ### D13. The difference you cannot see, and the one the reader ate
 
 **What happens.** Two values print identically and are not equal: `é` as

@@ -339,6 +339,98 @@ class SQLiteEngine(Engine):
                 "select name from sqlite_master where type = 'table'"
                 " and name not like 'sqlite_%' order by name")]
 
+    #: SQLite's own rules, in the order it applies them. Measured by
+    #: inserting the same text into a column of each declared type and
+    #: reading `typeof` back - `'5'` came out `integer` for `integer`,
+    #: `int`, `bigint`, `numeric` and `decimal(10,2)`, `real` for `real` and
+    #: `double`, and `text` for `text`, `varchar(10)`, `blob` and a column
+    #: with no type at all.
+    _AFFINITY = (("INT", "numeric"), ("CHAR", "text"), ("CLOB", "text"),
+                 ("TEXT", "text"), ("BLOB", "blob"), ("REAL", "numeric"),
+                 ("FLOA", "numeric"), ("DOUB", "numeric"))
+
+    @classmethod
+    def _affinity(cls, declared):
+        """What this column converts a value to on the way in."""
+        up = (declared or "").upper()
+        for token, kind in cls._AFFINITY:
+            if token in up:
+                return kind
+        return "blob" if not up.strip() else "numeric"
+
+    def check_deep(self, db):
+        """Values this database kept that a stricter one will not take.
+
+        SQLite does not enforce a column's declared type on an ordinary
+        table - measured, `insert into t (n) values ('not a number')` into
+        a column declared `integer` is accepted, and `typeof(n)` answers
+        `text`. The same insert into a `STRICT` table is refused: *cannot
+        store TEXT value in INTEGER column*.
+
+        What makes this answerable rather than a guess is that **SQLite
+        already tried**. Affinity is applied on the way in: `'5'` put into a
+        numeric column comes back as `integer`, and only a value it could
+        not convert is still sitting there as `text`. So every text value in
+        a numeric column is one this database itself judged not to be a
+        number - no heuristic of migkit's required.
+
+        Every other engine migkit moves to enforces its declared types, so
+        those are the rows that will be refused on the way out.
+        """
+        res = []
+        for side, name in (("src", "source"), ("dst", "target")):
+            try:
+                tables = self._tables(side)
+            except Exception as e:
+                res.append(Result("deep", f"{db} types ({name})", "error",
+                                  f"cannot list the tables:"
+                                  f" {str(e).splitlines()[-1][:120]}", "",
+                                  "the file has to be readable before its"
+                                  " values can be checked"))
+                continue
+            res.append(self._affinity_result(db, side, name, tables))
+        return res
+
+    def _affinity_result(self, db, side, name, tables):
+        findings, looked = [], 0
+        for table in tables:
+            try:
+                cols = self._q(side, f'pragma table_info("{table}")')
+            except Exception:
+                continue
+            for row in cols:
+                col, declared = row[1], row[2]
+                if self._affinity(declared) != "numeric":
+                    continue
+                looked += 1
+                try:
+                    got = self._q(
+                        side, f'select count(*), min("{col}") from "{table}"'
+                              f" where typeof(\"{col}\") in ('text','blob')")
+                except Exception:
+                    continue
+                if got and got[0][0]:
+                    findings.append((f"{table}.{col}", declared, got[0][0],
+                                     got[0][1]))
+        if not findings:
+            return Result("deep", f"{db} types ({name})", "ok",
+                          f"{looked} columns declared as numbers, and every"
+                          " value in them is one")
+        shown = "; ".join(
+            f"{where} is declared {declared} and holds {n}"
+            f" value{'' if n == 1 else 's'} that"
+            f" {'is not a number' if n == 1 else 'are not numbers'}"
+            f" (for example {str(value)[:60]!r})"
+            for where, declared, n, value in findings[:4])
+        return Result(
+            "deep", f"{db} types ({name})", "diff",
+            shown + (" ..." if len(findings) > 4 else "")
+            + " - this database does not enforce a column's declared type"
+              " and the engines migkit moves to do, so these rows are the"
+              " ones that will be refused on the way out", "",
+            "correct those values, or widen the column to text on both"
+            " sides, before the move rather than during it")
+
     def check_schema(self, db):
         def dump(side):
             rows = self._q(side, "select type, name, coalesce(sql, '')"
