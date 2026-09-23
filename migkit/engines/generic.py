@@ -12,7 +12,7 @@ class GenericEngine(Engine):
     oracle, trino, presto, duckdb, vertica and more. Endpoints carry a full
     connection url in options.url, tables listed in hop options."""
 
-    checks = ("counts", "data")
+    checks = ("schema", "counts", "data")
 
     def _url(self, side):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -255,6 +255,123 @@ class GenericEngine(Engine):
                 " looked at here")
         return items
 
+    #: What the catalogue answers for every engine this speaks, and what it
+    #: does not. Measured on PostgreSQL 16 with a deliberately mismatched
+    #: pair - the five columns the schema query selects are
+    #: (name, declared type, datetime precision, numeric precision, scale):
+    #:
+    #:     source id      ('id', 'bigint', None, 64, 0)
+    #:     target id      ('id', 'integer', None, 32, 0)        <- seen
+    #:     source amt     ('amt', 'numeric', None, 12, 2)
+    #:     target amt     ('amt', 'numeric', None, 12, 4)       <- seen
+    #:     source ts      ('ts', 'timestamp with time zone', 6, None, None)
+    #:     target ts      ('ts', 'timestamp without time zone', 6, None, None)
+    #:                                                          <- seen
+    #:     source v       ('v', 'character varying', None, None, None)
+    #:     target v       ('v', 'character varying', None, None, None)
+    #:                       varchar(50) against varchar(200)   <- NOT seen
+    #:     n_null         identical either way, NOT NULL or not <- NOT seen
+    #:
+    #: Length and nullability are not in what the catalogue is asked for, and
+    #: asking for them would mean writing that query once per engine - nine
+    #: of them, eight of which cannot be tried here. So the check says what
+    #: it did not look at, every time it passes. A clean line that quietly
+    #: means "some of the schema" is worse than no line.
+    BLIND_SPOTS = "not compared: string lengths, nullability"
+
+    #: the part of a column's catalogue row that describes its type
+    def _coltype(self, row):
+        return tuple(row[1:5])
+
+    @staticmethod
+    def _describe(row):
+        """A column's type as a person would write it."""
+        _, kind, dt_prec, num_prec, num_scale = row[:5]
+        if num_prec is not None and num_scale not in (None, 0):
+            return f"{kind}({num_prec},{num_scale})"
+        if num_prec is not None:
+            return f"{kind}({num_prec})"
+        return str(kind)
+
+    @staticmethod
+    def _risk(src_row, dst_row):
+        """What the difference costs, when it can be said from these five
+        numbers. Anything else is reported as a difference without a claim
+        about which way the risk runs."""
+        s_kind, d_kind = str(src_row[1]), str(dst_row[1])
+        if ("with time zone" in s_kind) != ("with time zone" in d_kind):
+            if "with time zone" in s_kind:
+                return ("the target drops the offset - every value lands as"
+                        " whatever the session's zone made of it")
+            return "the target keeps an offset the source does not carry"
+        s_p, d_p = src_row[3], dst_row[3]
+        if s_p is not None and d_p is not None and s_p != d_p:
+            return ("narrower on the target - values the source holds will"
+                    " not fit" if d_p < s_p else
+                    "wider on the target, which holds every source value")
+        s_s, d_s = src_row[4], dst_row[4]
+        if s_s is not None and d_s is not None and s_s != d_s:
+            return ("fewer decimal places on the target - values round on"
+                    " the way in" if d_s < s_s else
+                    "more decimal places on the target")
+        return ""
+
+    def check_schema(self, db):
+        """Compare the two sides' columns and their declared types.
+
+        This engine had no schema check at all, so a target built by hand
+        with `int` where the source has `bigint` passed the row counts and
+        the row comparison, and overflowed later - the class of failure that
+        costs nothing to find now and a cutover to find then.
+        """
+        res = []
+        for t in self._tables():
+            scope = f"{db}.{t}" if db != "-" else t
+            try:
+                src = self._raw_schema(self._connect("src"), t)
+                dst = self._raw_schema(self._connect("dst"), t)
+            except SystemExit as e:
+                res.append(Result("schema", scope, "error",
+                                  str(e).split(":", 1)[-1].strip()[:160], "",
+                                  "the schema of both sides has to be"
+                                  " readable before anything can be compared"))
+                continue
+            res.append(self._schema_result(scope, src, dst))
+        self._close()
+        return res
+
+    def _schema_result(self, scope, src, dst):
+        """`src` and `dst` are {column: catalogue row}, as `_schema` returns
+        them. Kept apart from the reading so every shape can be exercised
+        without two servers."""
+        missing = [c for c in src if c not in dst]
+        extra = [c for c in dst if c not in src]
+        drift = []
+        for c in src:
+            if c not in dst:
+                continue
+            if self._coltype(src[c]) != self._coltype(dst[c]):
+                why = self._risk(src[c], dst[c])
+                drift.append(f"{c} is {self._describe(src[c])} on the source"
+                             f" and {self._describe(dst[c])} on the target"
+                             + (f" - {why}" if why else ""))
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} columns the target does not have: "
+                         + ", ".join(sorted(missing)[:6]))
+        if extra:
+            parts.append(f"{len(extra)} columns only the target has: "
+                         + ", ".join(sorted(extra)[:6]))
+        parts += drift[:6]
+        if parts:
+            return Result("schema", scope, "diff",
+                          "; ".join(parts) + f". {self.BLIND_SPOTS}", "",
+                          "align the target's columns with the source's"
+                          " before moving data into them")
+        return Result("schema", scope, "ok",
+                      f"{len(src)} columns, same names and same declared"
+                      f" types on both sides. {self.BLIND_SPOTS}")
+
     def check_counts(self, db):
         bad = []
         blind = []
@@ -418,6 +535,21 @@ class GenericEngine(Engine):
             return (conn.default_schema, parts[0])
         return parts
 
+    def _raw_schema(self, conn, table):
+        """The catalogue's own answer: {column: (name, declared type,
+        datetime precision, numeric precision, numeric scale)}.
+
+        Kept because normalising throws away the differences a migration
+        cares about - measured, `bigint` and `integer` both come back as
+        `Integer`, so the target that will overflow looks identical to the
+        source that will not.
+        """
+        try:
+            return conn.query_table_schema(self._path(conn, table))
+        except Exception as e:
+            raise SystemExit(f"cannot read the columns of {table}:"
+                             f" {str(e).splitlines()[-1][:160]}")
+
     def _schema(self, conn, table):
         """Column names and types, as the classes every dialect shares.
 
@@ -444,11 +576,7 @@ class GenericEngine(Engine):
         anyway.
         """
         path = self._path(conn, table)
-        try:
-            raw = conn.query_table_schema(path)
-        except Exception as e:
-            raise SystemExit(f"cannot read the columns of {table}:"
-                             f" {str(e).splitlines()[-1][:160]}")
+        raw = self._raw_schema(conn, table)
         try:
             return conn._process_table_schema(path, raw)
         except ValueError as e:

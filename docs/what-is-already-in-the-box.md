@@ -303,8 +303,24 @@ Cheapest first, where "cheap" means no new dependency:
    snapshot for the consistent pass, a CDC path driven from here for a
    target that cannot dial the source, and an independent verifier to check
    migkit's own against. `compare schema` is still unopened.
-4. `GenericEngine` discovery + the deep battery - turns nine named engines
-   from "reladiff speaks it" into "migkit supports it".
+4. `GenericEngine` - **schema comparison done**; discovery and the deep
+   battery still open. It declared `checks = ("counts", "data")`, so a hop
+   on any of those nine engines never compared the two schemas at all: a
+   target built with `int` where the source has `bigint` matched on counts,
+   matched row for row, and overflowed later. The catalogue answers the
+   same five columns for every one of them - name, declared type, datetime
+   precision, numeric precision, numeric scale - so one comparison serves
+   all nine, and it names which way the risk runs (`narrower on the target
+   - values the source holds will not fit`, `the target drops the offset`).
+
+   What it cannot see is measured and **said in every verdict, including
+   the clean one**: string lengths and nullability are not in the query the
+   library issues - `varchar(50)` and `varchar(200)` come back identical -
+   and getting them would mean writing that query once per engine, eight of
+   which cannot be tried here. A clean line that quietly means "some of the
+   schema" is worse than no line. The normalised types are unusable for
+   this and that is why the raw rows are read: `bigint` and `integer` both
+   normalise to `Integer`. `test_generic_schema.py`.
 5. atlas `migrate lint` on the DDL migkit already generates.
 6. Decide sqlglot: open it for transformation and DDL translation, or drop
    it from the manifest.
