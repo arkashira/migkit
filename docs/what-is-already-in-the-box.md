@@ -101,8 +101,20 @@ What that leaves on the floor:
   row to show for it. So "pgcopydb says same, migkit says differs" is the
   expected shape, not a clash, and reporting it as one would cry wolf on
   every widened column. Only the other direction is reported as a
-  difference: pgcopydb naming something migkit's schema check passed over
-  means migkit missed it. `test_crosscheck_schema.py`.
+  difference: a second reading naming something the schema check passed
+  over means the target's schema is not verified.
+
+  **None of that reaches the operator as a tool name.** Someone using
+  migkit is moving and verifying a database so their application keeps
+  working; which library read which catalogue is migkit's business, and a
+  verdict saying *"pgcopydb found a difference migkit missed"* hands them a
+  puzzle they cannot act on - they did not install pgcopydb and cannot run
+  it. The information is kept and the brand name is not: *"read two ways,
+  with two answers"*. Pinned across every branch, including the `fix_hint`,
+  by `test_the_report_does_not_name_its_tools.py`. Still leaking and a
+  separate job: report scopes `(atlas)` / `(liquibase)` and the file names
+  `atlas-fix.sql` / `liquibase-diff.txt`.
+  `test_crosscheck_schema.py`.
 * **`snapshot`** - and the interesting part is that migkit does not need
   pgcopydb for it. `pg_export_snapshot` is a PostgreSQL function, and the
   gap it closes is in migkit's *own* verifier: the fast data pass reads

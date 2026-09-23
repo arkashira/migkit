@@ -93,7 +93,7 @@ def test_pgcopydb_finding_what_migkit_passed_is_the_one_difference(tmp_path):
     got = _engine(tmp_path)._crosscheck_schema_result(
         "postgres", True, ["Failed to find table public.b in target"], True)
     assert got.status == "diff", got.detail
-    assert "migkit missed this" in got.detail, got.detail
+    assert "did not report" in got.detail, got.detail
     assert "public.b" in got.detail, got.detail
 
 
@@ -102,7 +102,7 @@ def test_migkit_finding_what_pgcopydb_does_not_look_for_is_not(tmp_path):
     got = _engine(tmp_path)._crosscheck_schema_result(
         "postgres", False, [], False)
     assert got.status == "ok", got.detail
-    assert "not column types" in got.detail, got.detail
+    assert "does not compare column types" in got.detail, got.detail
     assert "Not a disagreement" in got.detail, got.detail
 
 
@@ -117,7 +117,7 @@ def test_agreeing_that_they_match_is_not_a_finding(tmp_path):
     got = _engine(tmp_path)._crosscheck_schema_result("postgres", False, [],
                                                       True)
     assert got.status == "ok", got.detail
-    assert "both read the schemas as matching" in got.detail, got.detail
+    assert "both readings see the schemas as matching" in got.detail, got.detail
 
 
 def test_being_unable_to_ask_is_a_skip_not_a_pass(tmp_path):
@@ -132,7 +132,7 @@ def test_without_migkits_own_verdict_there_is_nothing_to_second_guess(
     got = _engine(tmp_path)._crosscheck_schema_result("postgres", True, ["x"],
                                                       None)
     assert got.status == "skip", got.detail
-    assert "schema-evidence.txt" in got.detail, got.detail
+    assert "schema check has not run" in got.detail, got.detail
 
 
 def test_the_verdict_is_read_from_the_file_the_schema_check_wrote(tmp_path):
@@ -225,7 +225,7 @@ def test_the_narrowness_this_rests_on_is_real(pair, tmp_path, monkeypatch):
             "migkit sees the widened column"
         got = eng._crosscheck_schema("postgres")
         assert got.status == "ok", got.detail
-        assert "not column types" in got.detail, got.detail
+        assert "does not compare column types" in got.detail, got.detail
     finally:
         _sql(ND, "alter table a alter column v type varchar(50)")
 
@@ -247,7 +247,7 @@ def test_two_matching_schemas_read_as_matching(pair, tmp_path, monkeypatch):
     eng.check_schema("postgres")
     got = eng._crosscheck_schema("postgres")
     assert got.status == "ok", got.detail
-    assert "both read the schemas as matching" in got.detail, got.detail
+    assert "both readings see the schemas as matching" in got.detail, got.detail
 
 
 @needs_docker
@@ -267,7 +267,7 @@ def test_the_reported_direction_is_reachable_on_a_real_pair(pair, tmp_path,
         got = eng._crosscheck_schema("postgres")
         assert got.status == "diff", got.detail
         assert "public.b" in got.detail, got.detail
-        assert "migkit missed this" in got.detail, got.detail
+        assert "did not report" in got.detail, got.detail
     finally:
         _sql(ND, "create table b (id int primary key)")
 

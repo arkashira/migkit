@@ -72,10 +72,10 @@ def test_a_disagreement_names_both_verdicts(tmp_path):
     got = eng._crosscheck_result("db", {"public.orders": True},
                                  {"public.orders": False}, True)
     assert got.status == "diff", got.detail
-    assert "migkit says same" in got.detail, got.detail
-    assert "pgcopydb says differs" in got.detail, got.detail
-    assert "one of the two verifiers is wrong" in got.detail, got.detail
-    assert "compare data" in got.fix_hint, got.fix_hint
+    assert "matching one way" in got.detail, got.detail
+    assert "differing the other" in got.detail, got.detail
+    assert "one of the two readings is wrong" in got.detail, got.detail
+    assert "migkit check" in got.fix_hint, got.fix_hint
 
 
 def test_a_table_only_one_of_them_saw_is_not_a_disagreement(tmp_path):
@@ -98,7 +98,7 @@ def test_no_shared_table_is_a_skip_not_a_pass(tmp_path):
 def test_pgcopydb_missing_is_a_skip_that_says_why(tmp_path):
     got = _engine(tmp_path)._crosscheck_result("db", {}, {}, False)
     assert got.status == "skip", got.detail
-    assert "second opinion" in got.detail, got.detail
+    assert "compared once" in got.detail, got.detail
 
 
 def test_migkits_own_verdict_is_read_from_the_file_it_already_wrote(

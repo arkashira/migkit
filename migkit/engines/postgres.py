@@ -2192,29 +2192,30 @@ class PostgresEngine(Engine):
         """
         if not ran:
             return Result("deep", f"{db} cross-check", "skip",
-                          "pgcopydb is not available to give a second"
-                          " opinion on this pair")
+                          "this machine cannot read the pair a second time"
+                          " by an independent route, so these tables were"
+                          " compared once")
         shared = sorted(set(mine) & set(theirs))
         clash = [t for t in shared if mine[t] != theirs[t]]
         if clash:
             return Result(
                 "deep", f"{db} cross-check", "diff",
-                f"{len(clash)} tables where pgcopydb and migkit disagree:"
-                + ", ".join(f" {t} (migkit says"
-                            f" {'same' if mine[t] else 'differs'},"
-                            f" pgcopydb says"
-                            f" {'same' if theirs[t] else 'differs'})"
+                f"{len(clash)} tables read two ways, with two answers:"
+                + ", ".join(f" {t} (matching one way,"
+                            f" differing the other)"
                             for t in clash[:3])
                 + (" ..." if len(clash) > 3 else "")
-                + " - one of the two verifiers is wrong about this table",
-                "", "run `pgcopydb compare data` by hand on the pair and"
-                    " read both row sets before trusting either verdict")
+                + " - one of the two readings is wrong about this table, so"
+                  " the verdict above cannot be relied on for it",
+                "", "migkit check <hop> --drill --table <name> writes the"
+                    " differing rows out; read them before trusting either"
+                    " answer")
         if not shared:
             return Result("deep", f"{db} cross-check", "skip",
-                          "no table was examined by both verifiers")
+                          "no table was read by both routes")
         return Result("deep", f"{db} cross-check", "ok",
-                      f"{len(shared)} tables, pgcopydb reaches the same"
-                      " verdict as migkit on every one")
+                      f"{len(shared)} tables read a second time by an"
+                      " independent route, same verdict on every one")
 
     #: What `pgcopydb compare schema` says when it finds something, measured
     #: on 0.18 by making each difference in turn.
@@ -2262,34 +2263,35 @@ class PostgresEngine(Engine):
         """
         if theirs is None:
             return Result("deep", f"{db} schema cross-check", "skip",
-                          "pgcopydb could not compare the two schemas, so"
-                          " there is no second reading to hold this one"
-                          " against")
+                          "the schemas could not be read a second time by an"
+                          " independent route, so the verdict above stands"
+                          " on one reading")
         if mine is None:
             return Result("deep", f"{db} schema cross-check", "skip",
-                          "no schema-evidence.txt to compare against - the"
-                          " schema check has to have run for there to be a"
-                          " migkit verdict to second-guess")
+                          "the schema check has not run for this database,"
+                          " so there is no verdict to hold this against")
         if theirs and mine:
             return Result(
                 "deep", f"{db} schema cross-check", "diff",
-                "migkit's schema check passed and pgcopydb found a"
-                " difference: " + "; ".join(found or ["(unnamed)"])
-                + " - migkit missed this",
-                "", "run `pgcopydb compare schema` on the pair and compare"
-                    " it against schema-src.sql / schema-dst.sql")
+                "the schemas differ in a way the schema check above did not"
+                " report: " + "; ".join(found or ["(unnamed)"])
+                + " - treat the target's schema as unverified until this is"
+                  " resolved",
+                "", "compare schema-src.sql and schema-dst.sql in the report"
+                    " directory for this database")
         if theirs and not mine:
             return Result("deep", f"{db} schema cross-check", "ok",
-                          "pgcopydb agrees the schemas differ")
+                          "a second, independent reading agrees the schemas"
+                          " differ")
         if not mine:
             return Result(
                 "deep", f"{db} schema cross-check", "ok",
-                "migkit reports a schema difference that pgcopydb does not"
-                " look for - it compares tables, columns and indexes by"
-                " name, not column types, so a widened column passes it."
-                " Not a disagreement")
+                "the schema difference reported above is not one the second"
+                " reading looks for - it matches tables, columns and indexes"
+                " by name and does not compare column types, so a widened"
+                " column passes it. Not a disagreement")
         return Result("deep", f"{db} schema cross-check", "ok",
-                      "both read the schemas as matching")
+                      "both readings see the schemas as matching")
 
     def _crosscheck_schema(self, db):
         """The schema half of the cross-check, behind the same switch."""
