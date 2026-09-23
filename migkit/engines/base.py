@@ -1472,6 +1472,18 @@ class Engine:
             " whether replication is running; printing the statements"
             " without that is how a dead replica looks like a live one")
 
+    def apply_replication_stmt(self, side, db, stmt):
+        """Run one statement of the `replicate_sql` plan.
+
+        Here rather than in the caller because the engine is the only thing
+        that knows which of its own statements reach across to the other
+        server, and therefore which ones need a bound. The caller used to
+        pick by asking `hasattr(eng, "_psql")` - a method only PostgreSQL
+        has - which is how the MySQL path came to crash.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} emits replicate_sql but cannot run it")
+
     def _stream_connector(self):
         """The generated source connector for this hop, or None.
 

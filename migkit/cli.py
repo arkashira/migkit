@@ -917,10 +917,7 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
             shown = without_secret(stmt, hop.source.password)
             console.print(f"  {side}: {shown}")
             if go:
-                if hasattr(eng, "_psql"):
-                    eng._psql(side, d, stmt)
-                else:
-                    eng._q(side, stmt)
+                eng.apply_replication_stmt(side, d, stmt)
         if go and not do_drop:
             console.print("  " + eng.replication_status(d, sql["status"]))
             _changelog(hop, {"op": "replicate", "db": d})

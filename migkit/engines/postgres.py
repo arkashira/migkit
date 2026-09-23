@@ -103,10 +103,11 @@ class PostgresEngine(Engine):
                 f" keepalives_idle={idle} keepalives_interval=10"
                 f" keepalives_count=5")
 
-    def _psql(self, side, db, sql):
+    def _psql(self, side, db, sql, statement_timeout=0):
         ep = self.hop.source if side == "src" else self.hop.target
         env = {"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-               "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO -c statement_timeout=0"}
+               "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO"
+                            f" -c statement_timeout={statement_timeout}"}
         p = run(["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
                  "-d", self._dsn(side, db), "-X", "-At", "-q", "-v",
                  "ON_ERROR_STOP=1", "-c", sql],
@@ -5172,9 +5173,12 @@ class PostgresEngine(Engine):
         st["done"] = True
         ck.save()
 
+    def _repl_name(self):
+        return "migkit_" + self.hop.name.replace("-", "_")
+
     def replicate_sql(self, db, copy_data=True):
         s = self.hop.source
-        name = "migkit_" + self.hop.name.replace("-", "_")
+        name = self._repl_name()
         conn = (f"host={s.host} port={s.port} dbname={db}"
                 f" user={s.user} password={s.password}")
         return {
@@ -5192,6 +5196,91 @@ class PostgresEngine(Engine):
         got = self._psql("dst", db, sql).strip()
         return got or ("no subscription on the target: the statements ran"
                        " but nothing is replicating")
+
+    #: `CREATE SUBSCRIPTION` opens a connection to the source while it runs,
+    #: and there is no way to bound that from inside the statement. Measured
+    #: on PostgreSQL 16 against a target with no route to the source:
+    #:
+    #:     plain conninfo, connect_timeout=10, through psql     10s
+    #:     the same conninfo inside CREATE SUBSCRIPTION        134s
+    #:     ... with connect_timeout=10 in it as well           134s
+    #:     ... under statement_timeout=15s                      15s
+    #:
+    #: `connect_timeout` is enforced by libpq's *synchronous* connect path
+    #: and the walreceiver does not use it, so the parameter is accepted and
+    #: ignored - the worst shape a setting can have. `statement_timeout` is
+    #: the one that works, and nothing is created when it fires, so a
+    #: bounded attempt costs nothing but the wait it saves.
+    DIALS_ACROSS = ("create subscription",)
+    SUBSCRIBE_TIMEOUT = 45
+
+    def apply_replication_stmt(self, side, db, stmt):
+        import os
+        head = stmt.strip().lower()
+        if not any(head.startswith(p) for p in self.DIALS_ACROSS):
+            return self._psql(side, db, stmt)
+        raw = os.environ.get("MIGKIT_SUBSCRIBE_TIMEOUT", "").strip()
+        if raw:
+            # a typo here would otherwise be ignored and the operator would
+            # wait the default while believing they had changed it
+            if not raw.isdigit() or int(raw) <= 0:
+                raise SystemExit(
+                    f"MIGKIT_SUBSCRIBE_TIMEOUT={raw} is not a whole number of"
+                    " seconds greater than zero")
+            secs = int(raw)
+        else:
+            secs = self.SUBSCRIBE_TIMEOUT
+        try:
+            return self._psql(side, db, stmt, statement_timeout=f"{secs}s")
+        except RuntimeError as e:
+            raise SystemExit(self._subscribe_failed(str(e), secs))
+
+    @staticmethod
+    def _worst_line(err):
+        """The line that says what went wrong.
+
+        psql's last line is usually the hint - *"Is the server running on
+        that host and accepting TCP/IP connections?"* - which is the least
+        informative part of the message.
+        """
+        lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+        for want in ("failed:", "error:", "ERROR:"):
+            for ln in lines:
+                if want in ln:
+                    return ln[:200]
+        return lines[-1][:200] if lines else ""
+
+    def _subscribe_failed(self, err, secs):
+        """Say what the failure means, and what it left behind.
+
+        Both shapes - a timeout and a refusal - are one fact: the target has
+        no route to the source. What the operator hits *next* is the part
+        worth spelling out. The publication on the source is created by the
+        statement before this one, so it survives, and PostgreSQL has no
+        `CREATE PUBLICATION ... IF NOT EXISTS` (16 answers with a syntax
+        error), so a second attempt fails on the source with `publication
+        "..." already exists` before it ever reaches the target again.
+        """
+        name = self._repl_name()
+        timed_out = "statement timeout" in err.lower()
+        why = (f"gave up after {secs}s" if timed_out
+               else "could not reach the source")
+        detail = "" if timed_out else f" ({self._worst_line(err)})"
+        return (
+            f"the target {why} while running CREATE SUBSCRIPTION."
+            " That statement runs on the target and dials the source, so"
+            " this is the route from target to source - not migkit, and not"
+            f" the credentials{detail}."
+            " No subscription was created."
+            f" The publication {name} on the source was, by the statement"
+            " before it, and PostgreSQL has no CREATE PUBLICATION IF NOT"
+            " EXISTS - so clear it before retrying, or the next run stops"
+            f" on `publication \"{name}\" already exists`:"
+            " migkit move <hop> --mode cdc --drop --go."
+            " migkit also has a CDC path that needs no route from the"
+            " target at all - it runs from here and connects out to both"
+            " sides: MIGKIT_CDC=follow migkit move <hop> --mode cdc."
+            " To wait longer instead, raise MIGKIT_SUBSCRIBE_TIMEOUT")
 
     def migration_pair(self, db):
         from urllib.parse import quote

@@ -3042,6 +3042,16 @@ class MySQLEngine(Engine):
                 return row[n]
         return None
 
+    def apply_replication_stmt(self, side, db, stmt):
+        """MySQL's half of the contract.
+
+        Nothing here needs bounding the way `CREATE SUBSCRIPTION` does:
+        `START REPLICA` returns at once whether or not the target can reach
+        the source. That is the opposite failure, and `replication_status`
+        is what catches it.
+        """
+        return self._q(side, stmt)
+
     def replication_status(self, db, sql):
         """What `START REPLICA` did not say.
 

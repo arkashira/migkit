@@ -1552,6 +1552,24 @@ changelog entry recording it was written.
 **migkit: Ends it.** `replication_status` is on the engine base as a
 contract every engine that emits `replicate_sql` must answer, and the
 shared path asks the engine instead of reaching for a PostgreSQL method.
+`apply_replication_stmt` is the second half of that contract - the engine
+runs its own statements, because it is the only thing that knows which of
+them reach across to the other server. PostgreSQL bounds that one with
+`statement_timeout` (45s by default, `MIGKIT_SUBSCRIBE_TIMEOUT` to change
+it, and a value that is not a positive whole number is refused rather than
+ignored), so a target with no route to the source is told so in seconds
+instead of 135 of them, per database.
+
+The failure message says the two things that are actually true and not
+obvious. First, which side cannot reach which: the statement runs on the
+target and dials the source, so it is the route, not migkit and not the
+credentials. Second, what survived - **"nothing was created" was the first
+draft and it was false.** The publication on the source is created by the
+statement before this one, PostgreSQL has no `CREATE PUBLICATION ... IF
+NOT EXISTS` (checked: syntax error), and a retry therefore stops on
+`publication "..." already exists` before reaching the target at all. So
+the message names the publication and the `--drop --go` that clears it,
+and points at `MIGKIT_CDC=follow`, which needs no route from the target.
 The MySQL implementation reads `SHOW REPLICA STATUS` **by column name**
 (`_q_named`, since `_q` returns bare tuples and MariaDB spells every one
 of these columns differently), and says `NOT replicating` with the real
