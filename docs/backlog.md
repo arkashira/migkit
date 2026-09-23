@@ -152,7 +152,8 @@ declared not applicable with the reason):
 | moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes |
 | copying table by table, resumably | yes | yes | - | - | - | - | yes | - | yes |
 | keeping the target following the source | yes | yes | yes | - | - | - | n/a | - | yes |
-| proving the target has caught up before cutover | yes | - | - | - | - | - | n/a | - | - |
+| proving the target has caught up before cutover | yes | yes | - | - | - | - | n/a | - | - |
+| telling a difference still arriving from one that is wrong | yes | yes | - | - | - | - | n/a | - | - |
 | verifying only what changed | yes | yes | yes | - | yes | yes | n/a | - | - |
 | carrying users and their grants | yes | yes | yes | - | - | - | n/a | - | - |
 | noticing a move that moved nothing | yes | yes | yes | - | - | - | - | - | - |
@@ -185,7 +186,10 @@ is trusted:
   * move and sync: redis-shake (scan, sync and restore modes; clusters) or
     RIOT, with native `DUMP`/`RESTORE` as the fallback
   * fence: replication offset
-  * users: ACL users and their rules
+  * users: ACL users and their rules - *done (2026-09-24)*: `users test`
+    compares them from `ACL LIST` (passwords by their SHA-256, never
+    read), `create` makes the missing ones with the same password
+    through the hash, and `rollback` removes only what it made
   * schema: keyspace types, TTL policy and config parity
 * **Kafka:**
   * move and sync: MirrorMaker 2, whose checkpoints translate consumer
@@ -339,11 +343,21 @@ container image:
   frame: nothing printed, nothing written, and the frame goes back to
   migkit as JSON.
 * **Saved state:** named connections live under the directory in
-  `PSO_DV_CONFIG_HOME`, defaulting to one in the user's home. The runner
+  `PSO_DV_CONN_HOME` (measured; an earlier note here said `_CONFIG_`), defaulting to one in the user's home. The runner
   points it at a directory of migkit's own for the run and passes
   connections inline.
 
-*Runner written (2026-09-24), not yet measured or wired:*
+*Measured (2026-09-24), not yet wired into `check`:*
+`tests/test_second_reader_live.py`, against a live PostgreSQL pair: the
+catalogue on both sides is identical before and after a count run and a
+row-hash run (nothing written); equal data reads `ok`; one value changed on
+the target reads `diff`. The first run found the state-directory variable
+named wrong in the runner (the reader then made its default directory in
+the user's home and looked for connections there); the runner now reads
+the name from the reader itself, and a test pins that the home directory
+is left alone.
+
+*Runner:*
 `migkit/runners/second_reader.py` runs inside the reader's own
 environment, takes a job as JSON on stdin and answers JSON on stdout. It
 passes a collecting result handler, so nothing is printed and nothing is
@@ -351,8 +365,6 @@ written to a database, and keeps connections in a directory made for the
 run, owner-only, removed at the end.
 
 Still to measure:
-* that, run that way, it writes nothing to either side: tables and
-  schemas listed before and after, on both
 * its speed against migkit's own checksum on the same pair
 * which of its type mappings disagree with `canon`, where it would call
   equal what migkit calls different
@@ -397,6 +409,15 @@ Measure on this pipeline first:
 ## P0: correctness at cutover
 
 **1. Confirm before calling it different.**
+
+*Progress (2026-09-24):* MySQL now has the fence the confirm pass needs -
+`src_lsn` answers with the source's executed GTID set and `fence_wait`
+has the target's server wait for it (`tests/test_mysql_fence.py`, a real
+source and replica). What confirms is still PostgreSQL's own:
+`fenced_recheck` and `_resolve_inflight` live in `postgres.py`. Next: move
+them to the base, driven by each engine's position, fence and key compare,
+so every engine that can fence confirms the same way.
+
 * **Today:** the PostgreSQL LSN fence re-compares only after the consumers
   have flushed past a captured position, and `watch` names hot tables.
   Other engines settle on elapsed time. The verdict does not distinguish
@@ -442,6 +463,15 @@ Measure on this pipeline first:
   can see.
 
 **5. DDL during the move.**
+
+*Progress (2026-09-24):* every move path reads the source's column
+catalogue before and after itself (`migkit/drift.py`; one query on
+PostgreSQL and MySQL, table by table elsewhere) and, when it changed,
+stops short of "complete" and says what changed. Tables the hop excludes
+are not watched. `tests/test_ddl_during_the_move.py`. Still open: reading
+DDL from the change stream where migkit reads one, marking verdicts taken
+across it as stale, and recognising online schema-change temp tables.
+
 * **Today:** a DDL on the source mid-move is invisible until the next
   schema check.
 * **Deeper:**

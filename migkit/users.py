@@ -142,6 +142,14 @@ def compare(hop, say=print):
         skeys = {f"{d}.{u}" for d, u in s}
         tkeys = {f"{d}.{u}" for d, u in t}
         pw = []
+    elif eng == "redis":
+        s = _redis_users(hop.source)
+        t = _redis_users(hop.target)
+        skeys, tkeys = set(s), set(t)
+        # ACL LIST shows each password as its SHA-256 (`#...`), so a
+        # password is compared, and later carried, without being read
+        pw = sorted(u for u in s if u in t
+                    and s[u]["hashes"] != t[u]["hashes"])
     else:
         from .capabilities import require
         require(eng, "users")
@@ -158,7 +166,15 @@ def compare(hop, say=print):
     say(f"hop={hop.name} engine={eng}  source={len(skeys)} target={len(tkeys)}")
     say(f"  missing on target ({len(missing)}): {missing}")
     say(f"  extra on target ({len(extra)}): {extra}")
-    if eng in ("mongodb", "mongo"):
+    if eng == "redis":
+        rd = sorted(u for u in s if u in t and s[u]["rules"] != t[u]["rules"])
+        out["rules_differ"] = rd
+        out["password_differs"] = pw
+        out["result"] = "pass" if not missing and not pw and not rd \
+            else "gap"
+        say(f"  rules differ ({len(rd)}): {rd}")
+        say(f"  password differs ({len(pw)}): {pw}")
+    elif eng in ("mongodb", "mongo"):
         # only roles the source has and the target lacks; a target superset
         # is not a gap
         rd = sorted(f"{d}.{u}" for (d, u) in s
@@ -185,6 +201,35 @@ def compare(hop, say=print):
     json.dump(out, open(jf, "w"), indent=2, ensure_ascii=False)
     say(f"  json: {jf}")
     return out, s
+
+
+# --- redis -----------------------------------------------------------------
+#: the account every Redis has, which the provider owns on a managed one
+REDIS_SYS = ("default",)
+
+
+def _redis_users(ep):
+    """user -> {rules, hashes}, from `ACL LIST`.
+
+    Each line is `user <name> <rule> <rule> ...`. The password rules
+    (`#<sha256>`, `nopass`) are kept apart from the rest, so a user whose
+    permissions match and whose password does not is told apart from one
+    whose permissions differ.
+    """
+    client = _redis_client(ep)
+    out = {}
+    for line in client.acl_list():
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "user" or parts[1] in REDIS_SYS:
+            continue
+        rules = parts[2:]
+        hashes = sorted(r for r in rules if r.startswith("#")
+                        or r == "nopass")
+        out[parts[1]] = {"rules": sorted(r for r in rules
+                                         if r not in hashes),
+                         "hashes": hashes, "line": rules}
+    client.close()
+    return out
 
 
 # --- mongodb ---------------------------------------------------------------
@@ -369,7 +414,74 @@ def _plan(hop, out, s, passwords):
     return plan, skipped, secrets
 
 
+def _redis_client(ep):
+    import redis
+    return redis.Redis(host=ep.host, port=ep.port, username=ep.user or None,
+                       password=ep.password or None, socket_timeout=15,
+                       decode_responses=True)
+
+
+def _redis_create(hop, apply, say):
+    """Create the users the target lacks, exactly as the source has them.
+
+    `ACL SETUSER` takes a password as its SHA-256 (`#...`), which is what
+    `ACL LIST` shows, so each user lands with the password it had without
+    anyone knowing it. Users already on the target are left as they are:
+    their differences are reported, not overwritten.
+    """
+    out, s = compare(hop, say)
+    missing = out["missing_on_target"]
+    if not missing:
+        say("  nothing to create; every source user is on the target")
+        return
+    say(f">> redis: create {len(missing)} user(s), passwords carried as"
+        " their hashes" + ("" if apply else "  (nothing done; add --apply)"))
+    for u in missing:
+        shown = [r for r in s[u]["line"] if not r.startswith("#")]
+        say(f"   {u}: {' '.join(shown)}")
+    if not apply:
+        return
+    client = _redis_client(hop.target)
+    made = []
+    try:
+        for u in missing:
+            client.execute_command("ACL", "SETUSER", u, "reset",
+                                   *s[u]["line"])
+            made.append(u)
+    finally:
+        client.close()
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = json.loads(rec.read_text()) if rec.exists() else []
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": "redis", "created": made})
+    json.dump(prev, open(rec, "w"), indent=2)
+    say(f"  created {len(made)}; recorded at {rec}"
+        f" (undo with users {hop.name} rollback)")
+
+
+def _redis_rollback(hop, apply, say):
+    rec = hop.report_dir() / "user-sync-created.json"
+    made = [u for e in (json.loads(rec.read_text()) if rec.exists() else [])
+            if e.get("engine") == "redis" for u in e.get("created", [])]
+    if not made:
+        say("  no redis users were created by us, nothing to undo")
+        return
+    client = _redis_client(hop.target) if apply else None
+    try:
+        for u in made:
+            if not apply:
+                say(f"   would delete {u}")
+                continue
+            client.execute_command("ACL", "DELUSER", u)
+            say(f"   deleted {u}")
+    finally:
+        if client:
+            client.close()
+
+
 def create(hop, apply=False, passwords=None, say=print):
+    if hop.engine == "redis":
+        return _redis_create(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
         out, s = compare(hop, say)
         t = _mongo_users(hop.target)
@@ -503,6 +615,8 @@ def _mongo_rollback(hop, apply, say):
 
 
 def rollback(hop, apply=False, say=print):
+    if hop.engine == "redis":
+        return _redis_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
         return _mongo_rollback(hop, apply, say)
     rf = hop.report_dir() / "user-sync-created.json"

@@ -347,6 +347,9 @@ def test_capabilities_and_install_selection(monkeypatch):
     assert "atlas" in tools.PROGRAMS
     # every program present -> every capability ready, nothing left to install
     monkeypatch.setattr(tools, "which", lambda n: "/bin/" + n)
+    monkeypatch.setattr(tools, "second_reader_present", lambda: True)
+    monkeypatch.setattr(tools, "install_second_reader",
+                        lambda log=None: pytest.fail("nothing to install"))
     assert {st for _, _, st, _ in tools.capabilities()} == {"ready"}
     assert tools.install_missing(lambda m: None) == []
 
@@ -377,8 +380,13 @@ def test_installing_says_how_many_not_which(monkeypatch):
     monkeypatch.setattr(tools.subprocess, "run",
                         lambda argv, **k: ran.append(argv) or
                         type("P", (), {"returncode": 1, "stderr": "x"})())
+    monkeypatch.setattr(tools, "second_reader_present", lambda: False)
+    built = []
+    monkeypatch.setattr(tools, "install_second_reader",
+                        lambda log: built.append(log) or True)
     said = []
     tools.install_missing(said.append)
+    assert built, "the second reading is part of installing everything"
     assert ran and len([s for s in said if "installing component" in s]) \
         == len(ran), said
     low = " ".join(said).lower()
@@ -396,3 +404,27 @@ def test_only_what_cannot_be_installed_is_named(monkeypatch):
     monkeypatch.setattr(tools.shutil, "which", lambda n: None)
     monkeypatch.setattr(tools.platform, "system", lambda: "Linux")
     assert tools.by_hand(["mydumper", "docker"]) == ["docker", "mydumper"]
+    # the second reading is built by migkit itself on any machine
+    assert tools.by_hand([tools.SECOND_READER]) == []
+
+
+
+def test_the_second_reading_installs_in_migkits_words(monkeypatch, tmp_path):
+    """Its own environment, from this interpreter, at the measured version;
+    and what the operator reads names no package."""
+    from migkit import tools
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
+    monkeypatch.setattr(tools.Path if hasattr(tools, "Path") else
+                        __import__("pathlib").Path, "home",
+                        lambda: tmp_path)
+    ran = []
+    monkeypatch.setattr(tools.subprocess, "run",
+                        lambda argv, **k: ran.append(argv) or
+                        type("P", (), {"returncode": 0})())
+    said = []
+    assert tools.install_second_reader(said.append) is True
+    assert ran[0][1:3] == ["-m", "venv"], ran
+    assert ran[1][-1] == tools.SECOND_READER_PACKAGE, ran
+    low = " ".join(said).lower()
+    assert said and not [t for t in TOOLS + ("validator", "google", "pso")
+                         if t in low], said

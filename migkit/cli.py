@@ -901,6 +901,23 @@ def _copy_routed(hop, eng, d, via, chunk, log):
         _changelog(hop, {"op": "move-routed", "db": d, "table": name})
 
 
+def _stop_if_the_schema_moved(hop, eng, d, before):
+    """Every move path ends here: a DDL on the source during the move means
+    the rows on either side of it belong to two different tables, and
+    saying "complete" over that would be believed."""
+    from . import drift
+    changed = drift.changes(before, drift.shape(eng, "src", d))
+    if not changed:
+        return
+    _changelog(hop, {"op": "move-ddl-seen", "db": d, "changes": changed})
+    raise SystemExit(
+        f"{d}: the source's schema changed while it was being moved - "
+        + "; ".join(changed[:6]) + (" ..." if len(changed) > 6 else "")
+        + ". The rows moved before and after it may not line up. Bring the"
+        " target's schema level with the source's, then move again and run"
+        " migkit check.")
+
+
 def _move_full(hop, eng, db, table, chunk, go):
     capabilities.require(hop.engine, "table-copy")
     dbs = [db] if db else eng.databases()
@@ -922,6 +939,8 @@ def _move_full(hop, eng, db, table, chunk, go):
                     f"resume at {st.get('last'):,}" if "last" in st else "todo"
                 console.print(f"  {sch}.{t}: {mark}")
             continue
+        from . import drift
+        before = drift.shape(eng, "src", d)
         lk = _lock(hop)
         try:
             for sch, t in tables:
@@ -930,6 +949,7 @@ def _move_full(hop, eng, db, table, chunk, go):
                 _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
         finally:
             lk.unlink()
+        _stop_if_the_schema_moved(hop, eng, d, before)
         console.print(f"[green]{d}: move complete[/green],"
                       " run migkit check to verify")
     if not go:
@@ -1106,6 +1126,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     # apply would silently move every row
                     movers.refuse_unpushable_filters(hop, d, v, engine)
                     console.print(f"[bold]{d}[/bold] bulk copy:")
+                    from . import drift
+                    before = drift.shape(eng, "src", d) if go else None
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     for s0 in steps:
@@ -1116,6 +1138,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                         # copier has run they are empty by design
                         _copy_routed(hop, eng, d, v, chunk,
                                      lambda m: chat(f"  {m}"))
+                        _stop_if_the_schema_moved(hop, eng, d, before)
                         # an external mover can exit 0 and leave the target
                         # empty; saying "complete" over that is the one
                         # thing a migration tool must never do

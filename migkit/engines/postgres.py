@@ -123,6 +123,22 @@ class PostgresEngine(Engine):
                          " ('pg_catalog','information_schema') order by 1")
         return [l for l in out.splitlines() if l]
 
+    def column_catalog(self, side, db):
+        """{schema.table: [(column, type), ...]} in one query - what a move
+        reads before and after itself to notice a DDL on the source."""
+        out = {}
+        rows = self._psql(side, self._d(side, db),
+                          "select table_schema||'.'||table_name||'|'||"
+                          "column_name||'|'||data_type"
+                          " from information_schema.columns"
+                          " where table_schema not in"
+                          " ('pg_catalog','information_schema')"
+                          " order by 1")
+        for line in rows.splitlines():
+            t, c, ty = line.split("|", 2)
+            out.setdefault(t, []).append((c, ty))
+        return {t: sorted(cols) for t, cols in out.items()}
+
     def neutral_columns(self, side, db, table):
         """[(name, declared type)] with the type's own numbers attached.
 

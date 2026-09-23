@@ -42,6 +42,18 @@ class MySQLEngine(Engine):
     def neutral_tables(self, side, db):
         return self._tables(side, db)
 
+    def column_catalog(self, side, db):
+        """{table: [(column, type), ...]} in one query - what a move reads
+        before and after itself to notice a DDL on the source."""
+        out = {}
+        for t, c, ty in self._q(side, "select table_name, column_name,"
+                                      " column_type from"
+                                      " information_schema.columns"
+                                      " where table_schema = %s",
+                                (self._d(side, db),)):
+            out.setdefault(str(t), []).append((str(c), str(ty)))
+        return {t: sorted(cols) for t, cols in out.items()}
+
     def neutral_columns(self, side, db, table):
         rows = self._q(side, "select column_name, column_type"
                              " from information_schema.columns"

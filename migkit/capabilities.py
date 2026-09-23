@@ -77,7 +77,6 @@ GAPS = {
         "stream": (NOT_YET, "0e"),
         "fence": (NOT_YET, "0e"),
         "delta": (NOT_YET, "0e"),
-        "users": (NOT_YET, "0e"),
         "guard": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
         "snapshot": (NOT_YET, "0e"),

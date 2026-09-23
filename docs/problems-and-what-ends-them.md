@@ -1150,6 +1150,20 @@ target first, through `neutral_empty`, which every engine that writes
 across engines implements and which refuses a source. The same copier now
 carries SQLite to SQLite table by table, so there is one copier to fix.
 
+### C16. The schema that changed while the rows were moving
+
+**What happens.** An application alters a table on the source while the
+move is running. The rows copied before the change and after it belong to
+two different tables, and the move said `move complete` over both.
+
+**migkit: Partly ends it** - `test_ddl_during_the_move.py`. Every move path
+reads the source's column catalogue before and after itself - one query on
+PostgreSQL and MySQL - and when it changed, the move stops short of
+"complete", names what changed (`people: column name added`), and records
+it in the changelog. A table the hop excludes is not watched. What is left
+is item 5 of the backlog: reading DDL from the change stream, marking
+verdicts taken across it as stale, and online schema-change temp tables.
+
 ---
 
 ## D. Proving the data actually landed
@@ -1593,6 +1607,20 @@ written next to it, and the target's position is exposed separately as
 connected to `postgres` with the only subscription living in `other`, the
 view still lists `pg_16407 | 0/0`, and a `min()` across that would answer
 `0/0` for ever. Test: `test_where_the_target_actually_is.py`.
+
+**On MySQL too (2026-09-24).** The confirm pass lived in the PostgreSQL
+engine, so every other engine called a row still arriving a difference.
+It is the base's now, run by any engine that can say where its source is,
+wait for the target to get there, and compare rows by key. MySQL does all
+three: its position is the source's executed GTID set, and the target's
+server does the waiting (`WAIT_FOR_EXECUTED_GTID_SET`, or
+`MASTER_GTID_WAIT` on MariaDB), asked in short turns so a read timeout
+never cuts it off. A table that converged is read again whole, so its
+count and its checksum both come from after the fence. Measured on a real
+MySQL 8.4 source and replica: rows held back by a stopped applier and
+released while the confirm pass waited read `ok ... still arriving`; a row
+changed on the target alone still reads `diff`. Test:
+`test_mysql_fence.py`.
 
 ### D12b. The key that is not a key
 

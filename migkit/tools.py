@@ -33,6 +33,24 @@ PROGRAMS = {
     "docker": ("", ""),
 }
 
+#: not a program on PATH: the second reader lives in an environment of its
+#: own (`migkit.second_reader`), because it pins an older numeric stack
+SECOND_READER = "second-reader"
+#: the version measured to write nothing to either side
+SECOND_READER_PACKAGE = "google-pso-data-validator==8.9.3"
+
+
+def second_reader_present():
+    from . import second_reader
+    return second_reader.interpreter() is not None
+
+
+def _present(cmd):
+    if cmd == SECOND_READER:
+        return second_reader_present()
+    return which(cmd)
+
+
 # name, what it lets the operator do, programs required, optional faster path.
 # "needs" empty means the capability ships with migkit itself.
 CAPABILITIES = [
@@ -73,6 +91,10 @@ CAPABILITIES = [
     ("Change streaming",
      "follow live changes until cutover",
      [], ["docker"]),
+    ("Independent second reading",
+     "read the data a second way, through different code, where one"
+     " reading is not enough",
+     [], [SECOND_READER]),
     ("Any engine: row-level diff",
      "cross-dialect row comparison and drilldown",
      [], []),
@@ -89,8 +111,8 @@ def capabilities():
     """
     out = []
     for name, what, needs, optional in CAPABILITIES:
-        missing_req = [c for c in needs if not which(c)]
-        missing_opt = [c for c in optional if not which(c)]
+        missing_req = [c for c in needs if not _present(c)]
+        missing_opt = [c for c in optional if not _present(c)]
         if missing_req:
             state = "unavailable"
         elif missing_opt and len(missing_opt) == len(optional):
@@ -114,6 +136,8 @@ def by_hand(programs):
         "apt" if shutil.which("apt-get") else None)
     out = []
     for c in programs:
+        if c == SECOND_READER:
+            continue    # `doctor --install` builds it wherever Python runs
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
             out.append(c)
@@ -133,7 +157,7 @@ def install_missing(log=print):
         wanted += needs + optional
     pkgs = []
     for cmd in wanted:
-        if which(cmd):
+        if cmd == SECOND_READER or which(cmd):
             continue
         formula, apt = PROGRAMS.get(cmd, ("", ""))
         pkg = formula if mgr == "brew" else apt
@@ -149,4 +173,31 @@ def install_missing(log=print):
         if p.returncode != 0:
             log(f"  component {n} did not install; run migkit doctor again"
                 " to see which capability is still short")
+    if not _present(SECOND_READER):
+        install_second_reader(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
+
+
+def install_second_reader(log=print):
+    """Build the second reader its own environment, beside migkit's.
+
+    From this interpreter, so it is the Python migkit already runs on, and
+    at the version measured to write nothing to either side. Said in
+    migkit's words; the package is nobody's business but migkit's.
+    """
+    import sys
+    from pathlib import Path
+    home = Path.home() / ".migkit" / "second-reader"
+    log("installing the independent second reading in its own environment"
+        " (a large download, once) ...")
+    made = subprocess.run([sys.executable, "-m", "venv", str(home)],
+                          capture_output=True, text=True)
+    if made.returncode == 0:
+        made = subprocess.run([str(home / "bin" / "pip"), "install", "-q",
+                               SECOND_READER_PACKAGE],
+                              capture_output=True, text=True)
+    if made.returncode != 0:
+        log("  the second reading did not install; everything else still"
+            " works, and migkit doctor --install tries again")
+        return False
+    return True
