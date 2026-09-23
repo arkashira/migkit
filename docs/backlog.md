@@ -114,6 +114,46 @@ This is the ground migkit stands on.
 * **Tests:** assert the decision per table against real tables built to
   each shape.
 
+**Rule from the owner (2026-09-24), binding on every item from here on:**
+* choosing the tool is migkit's decision, made per task, per engine, and
+  per table: the smartest choice, the best quality, the fastest finish
+* progress and logs are normalised into migkit's own events and words.
+  Nothing a wrapped program prints reaches the operator as that program's
+  output.
+
+**0c. Progress and logs in migkit's own words.**
+* **Today:** `_sh` logs every command line it runs (`$ pg_dump ...`,
+  `$ mydumper ...`), and some paths log a program's own message
+  (`pg_restore ignored version-mismatch SET statements`).
+* **Deeper:**
+  * one progress vocabulary for every path: phase, table, rows, bytes,
+    rate, ETA
+  * each wrapped program's own progress output parsed into it
+  * the command line kept in the run's local log for whoever debugs
+    migkit, never in what the operator reads
+* **Guard:** a test that runs each path against a live pair and scans
+  everything the operator sees for program names. The static scan cannot
+  see names that arrive through a variable.
+
+**0d. The row filter is honoured by the move and ignored by the check.**
+
+*Found by grep on 2026-09-24; live proof pending.*
+
+`Hop.row_filter()` has no caller anywhere in `migkit/`. Its docstring says
+the predicate is "pushed into the mover's own flag and into the checksum's
+`WHERE`". The MySQL mover does apply it, through `mydumper_defaults`. No
+engine's check reads it.
+
+So a filtered move is expected to be reported as missing rows for good,
+which is the exact failure `refuse_unpushable_filters` says it prevents.
+That refusal also names programs, through a variable the static guard
+cannot see (`"pg_dump 18.6 filters by table..."`, `f"the {via} mover..."`).
+
+It is also item 0's first real decision: route the filtered tables through
+a path that can apply the predicate (the builtin copier's `_copy_select`
+already takes one), send the rest down the fast path, and apply the same
+predicate in every check - instead of refusing the whole database.
+
 **0a. Wrap the Data Validation Tool as a second reader.**
 
 DVT (`google-pso-data-validator`, built on Ibis) does:
@@ -371,13 +411,15 @@ offsets, which differ by design.
 
 ## Order of work
 
-1. **0 and 0a together:** the planner is what makes each later wrap
+1. **0d, then 0c:** 0d is a verdict that is wrong today on every hop with a
+   row filter; 0c is the owner's rule applied to what already exists.
+2. **0 and 0a together:** the planner is what makes each later wrap
    worth having.
-2. **0b** once the pipeline can be stood up; the source-write question it
+3. **0b** once the pipeline can be stood up; the source-write question it
    started from is already answered (no).
-3. **Then 1-5:** each one closes a way a cutover goes wrong without anyone
+4. **Then 1-5:** each one closes a way a cutover goes wrong without anyone
    seeing it.
-4. **Then 6-10**, then the rest by what the next rehearsal needs.
+5. **Then 6-10**, then the rest by what the next rehearsal needs.
 
 ## Sources
 
