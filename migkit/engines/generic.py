@@ -422,14 +422,41 @@ class GenericEngine(Engine):
         into `Integer`, so what comes back can be reasoned about without a
         per-database type table - which is the only way one repair can serve
         every engine reladiff speaks.
+
+        **It refuses an empty table**, and an empty table is the ordinary
+        state of a target that has not been loaded yet - which is exactly
+        when a repair is asked for. Measured on PostgreSQL 16, same DDL on
+        both sides, one row on the source and none on the target:
+
+            src   Integer / String_VaryingAlphanum / Decimal / TimestampTZ
+            dst   cannot read the columns of t: Table ('public','t')
+                  appears to be empty
+
+        Reading its source is what makes the fallback safe rather than a
+        guess: `col_dict` is built from `dialect.parse_type` *before* any
+        sampling happens, and the refinement step only sharpens text
+        subtypes from the values it finds. With no rows there is nothing to
+        sharpen, so the same two calls in the same order give the same
+        answer - minus a distinction that does not exist in an empty table
+        anyway.
         """
         path = self._path(conn, table)
         try:
-            return conn._process_table_schema(path,
-                                              conn.query_table_schema(path))
+            raw = conn.query_table_schema(path)
         except Exception as e:
             raise SystemExit(f"cannot read the columns of {table}:"
                              f" {str(e).splitlines()[-1][:160]}")
+        try:
+            return conn._process_table_schema(path, raw)
+        except ValueError as e:
+            if "appears to be empty" not in str(e):
+                raise SystemExit(f"cannot read the columns of {table}:"
+                                 f" {str(e).splitlines()[-1][:160]}")
+        except Exception as e:
+            raise SystemExit(f"cannot read the columns of {table}:"
+                             f" {str(e).splitlines()[-1][:160]}")
+        return {row[0]: conn.dialect.parse_type(path, *row)
+                for row in raw.values()}
 
     @staticmethod
     def _value(coltype, text, column):
