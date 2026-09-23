@@ -858,28 +858,6 @@ its fix. A diagnostics bundle collected by `doctor` with secrets and
 values redacted, so a problem can be reported without handing anything
 over (an environment variable, not a new flag).
 
-**47. One edition, built with its community.**
-
-*Owner's intent (2026-09-24):* when this backlog is done, migkit is
-released to the community to be made stronger together. There is no paid
-edition and no open core: every capability in this file lands in the one
-MIT-licensed repository. What that needs before the release:
-* **The capability matrix as the contribution map.** Every *not yet*
-  cell in `migkit/capabilities.py` is a scoped piece of work with its
-  test already written (the declaration test turns it green by
-  complaining that the gap is stale). Publish the matrix and link each
-  open cell to an issue.
-* **A guide to adding an engine:** the neutral read/write contract, the
-  probes, the parity tests every engine must pass, and the sandbox
-  containers that run them.
-* **CI a contributor can reproduce locally:** the same docker sandbox,
-  with one command.
-* **The roadmap in the open:** this backlog, kept current.
-* **A short governance note:** how changes are reviewed, and that the
-  rules in this project (never write to the source, no false negatives,
-  no program names in front of the operator) apply to every
-  contribution.
-
 ### Soon
 
 **43. AI assistance, any provider.**
