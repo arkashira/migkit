@@ -1566,12 +1566,12 @@ class Engine:
             if send:
                 statements.append(
                     f"copy {len(send)} rows {carry}: "
-                    + ", ".join("/".join(k) for k in send[:6])
+                    + ", ".join(self._key_text(k) for k in send[:6])
                     + (" ..." if len(send) > 6 else ""))
             if drop:
                 statements.append(
                     f"delete {len(drop)} rows the source does not have: "
-                    + ", ".join("/".join(k) for k in drop[:6])
+                    + ", ".join(self._key_text(k) for k in drop[:6])
                     + (" ..." if len(drop) > 6 else ""))
             actions.append(RepairAction(
                 f"{db}.{name}", "rows", statements, [],
@@ -2144,9 +2144,16 @@ class Engine:
                              ("with different values", changed),
                              ("only on the target", extra)):
             if found:
-                shown = ", ".join("/".join(k) for k in found[:4])
+                shown = ", ".join(self._key_text(k) for k in found[:4])
                 parts.append(f"{len(found)} {label} ({shown}"
                              + (" ..." if len(found) > 4 else "") + ")")
+        blind = sum(1 for group in (missing, changed, extra)
+                    for k in group if any(part is None for part in k))
+        if blind:
+            parts.append(
+                f"{blind} of those rows have NULL in the key, so they cannot"
+                " be addressed on the other side - `migkit sync` will not"
+                " repair them and a re-check will keep reporting them")
         clause = "; " + ("; ".join(parts) if parts else
                          "no row differs, so the difference is in a column"
                          " neither side could compare")
@@ -2154,6 +2161,20 @@ class Engine:
             clause += (f"; stopped after {self.DRILL_CAP:,} rows on the "
                        + " and ".join(capped) + ", so there may be more")
         return clause
+
+    @staticmethod
+    def _key_text(key):
+        """A row's key, for a person to read.
+
+        `"/".join(key)` was it, and a key part can be `None`: SQLite accepts
+        a NULL into a non-INTEGER `PRIMARY KEY` - measured, `create table a
+        (id text primary key)` takes `insert (id, v) values (NULL, 'x')` and
+        reports `id is null` - so the drilldown crashed with `TypeError:
+        sequence item 0: expected str instance, NoneType found` and took the
+        whole data check down with it.
+        """
+        return "/".join("NULL" if part is None else str(part)
+                        for part in key)
 
     def _apply_rows(self, db, name, src_engine, src_t, src_cols,
                     dst_engine, dst_t, dst_cols):
@@ -2203,6 +2224,23 @@ class Engine:
 
         send = found.get("missing", []) + found.get("changed", [])
         drop = found.get("extra", [])
+        # A key part that is NULL addresses nothing: `where id = NULL` is
+        # never true, so the row would be reported as carried and nothing
+        # would happen to it. Measured - `canon.from_text(str, None)` comes
+        # back as `None` and goes straight into the predicate. Refused here
+        # rather than attempted, because a repair that silently does nothing
+        # is the one failure this whole path exists to avoid.
+        unaddressable = [k for k in send + drop
+                         if any(part is None for part in k)]
+        if unaddressable:
+            raise SystemExit(
+                f"{len(unaddressable)} rows of {name} have NULL in the key"
+                f" ({', '.join(self._key_text(k) for k in unaddressable[:4])}"
+                + (" ..." if len(unaddressable) > 4 else "")
+                + ") - a row with no key cannot be found on the other side,"
+                  " so repairing it would report success and change nothing."
+                  " Give those rows a key, or key the hop on a column that is"
+                  " always filled")
         # a column with no canonical rendering was left out of the
         # comparison, and writing the row without it would put a row on the
         # target that is missing values the source has - measured on a

@@ -1368,6 +1368,41 @@ and says what each answer costs. Both questions go through the portable
 query builder rather than hand-written SQL, so one implementation serves
 all nine engines. Test: `test_generic_key_is_a_key.py`.
 
+### D12c. A primary key that holds NULL
+
+**What happens.** Every engine reads its comparison key from a real
+constraint - a primary key, or MongoDB's `_id` - and a primary key cannot
+hold NULL. That is true of PostgreSQL and MySQL. It is **not** true of
+SQLite: a non-INTEGER `PRIMARY KEY` takes NULLs unless it also says NOT
+NULL. Measured:
+
+    create table a (id text primary key, v text)
+    insert into a (id, v) values (NULL, 'x')   accepted, id is null
+    create table b (id integer primary key, ...)
+    insert ... (NULL, 'x')                     a rowid is assigned instead
+    create table c (id text primary key not null, ...)
+    insert ... (NULL, 'x')                     NOT NULL constraint failed
+
+Two things followed, both in code every engine shares. **The data check
+crashed** - `"/".join(key)` on a key holding `None` raises `TypeError:
+sequence item 0: expected str instance, NoneType found`, and it took the
+whole check down. The row counts had already found the difference
+correctly (`src=3 dst=2`); the drilldown turned a finding into a
+traceback. The same line existed in two places, so fixing one left the
+other.
+
+**And the repair would have done nothing, quietly.** The key comes back
+out of the drilldown as text and through `canon.from_text`, which answers
+`None` for `None` - measured - and that lands in the predicate as
+`where id = NULL`, never true. The row would have been reported as carried
+with nothing changed.
+
+**migkit: Ends it.** One renderer for keys, with NULL spelled out, so the
+check reports rather than crashes; the verdict says those rows cannot be
+addressed on the other side and will not be repaired; and the repair
+refuses them outright rather than reporting a success it did not have.
+Tests: `test_a_key_that_holds_null.py`.
+
 ### D13. The difference you cannot see, and the one the reader ate
 
 **What happens.** Two values print identically and are not equal: `é` as
