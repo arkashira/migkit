@@ -282,3 +282,40 @@ def test_the_guard_would_have_caught_the_old_call():
     assert _passwords_on_argv(old) == [1]
     new = '_sh(dump, {"MYSQL_PWD": hop.source.password}, log)'
     assert _passwords_on_argv(new) == []
+
+
+# ---- what an excluded table is left pointing at ----
+
+@needs_docker
+@have_tools
+def test_rows_left_pointing_at_nothing_are_reported(pair, tmp_path):
+    """The excluded table keeps its rows - that is the point - but a row of
+    it can reference a row that only the target had. The load replaces the
+    referenced table with the source's rows, that one does not come back,
+    and `check` will never look: the hop excludes the table it is in.
+    Nothing else can say it, so the move does."""
+    _seed()
+    _sql(DST, "insert into appdb.audit_log values (9,'points at a row only"
+              " the target had',99)")
+    lines = []
+    movers.mydumper_move(_hop(tmp_path, ["audit_log"]), "appdb", 2, True,
+                         lines.append)
+    assert _ids("orders") == "1,2,3", "the stale row is still there"
+    orphan = _sql(DST, "select count(*) from appdb.audit_log a left join"
+                       " appdb.orders o on o.id = a.oid"
+                       " where a.oid is not null and o.id is null")
+    assert orphan == "1", "the premise did not hold"
+    said = [ln for ln in lines if "audit_log" in ln and "orders" in ln]
+    assert said, lines
+    assert "1 row" in said[0] and "no longer exist" in said[0], said[0]
+
+
+@needs_docker
+@have_tools
+def test_nothing_is_said_when_every_reference_still_resolves(pair,
+                                                             tmp_path):
+    _seed()
+    lines = []
+    movers.mydumper_move(_hop(tmp_path, ["audit_log"]), "appdb", 2, True,
+                         lines.append)
+    assert not [ln for ln in lines if "no longer exist" in ln], lines

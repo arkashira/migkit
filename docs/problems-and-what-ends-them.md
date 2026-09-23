@@ -1025,6 +1025,10 @@ rebuilds only the carried table's index.
 `test_index_window_mysql.py`. What it leaves is quieter: a row in the
 excluded table can point at a row that existed only on the target and is
 not coming back, and `check` does not look inside a table the hop excludes.
+So the move says it, once the load is done - counted per foreign key, only
+where the referencing table is excluded and the referenced one was
+replaced, and said as "could not look" rather than nothing when the
+catalogue cannot be read. `test_the_mysql_bulk_path_runs.py`.
 
 ### C10. The move that failed and emptied the target anyway
 

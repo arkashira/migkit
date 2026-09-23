@@ -765,6 +765,75 @@ def _my_truncate_target(hop, db, log=None):
     return keep
 
 
+#: One row per column of every foreign key inside one database, in key
+#: order. Grouped in Python rather than with `group_concat`, which would
+#: need a separator no column name can contain.
+MY_FK_COLUMNS_SQL = """
+    select constraint_name, table_name, referenced_table_name,
+           column_name, referenced_column_name
+      from information_schema.key_column_usage
+     where table_schema = %s and referenced_table_schema = %s
+       and referenced_table_name is not null
+     order by constraint_name, table_name, ordinal_position"""
+
+
+def _my_orphans_left(hop, db, log):
+    """Say which rows of an excluded table now point at nothing.
+
+    The excluded table keeps its rows, which is the point of excluding it.
+    But a row of it can reference a row only the target had: the load
+    replaces the referenced table with the source's rows, that one does not
+    come back, and the reference is left pointing at nothing. `check` will
+    never see it - the hop excludes the table it is in - so the move is the
+    only step that can say so. PostgreSQL needs no counterpart: there, an
+    excluded table that references a replaced one stops the move before
+    anything is emptied.
+
+    Returns `(table, referenced, count)` triples, or None when the
+    catalogue could not be read - which is said, not taken as "none".
+    """
+    from .engines.mysql import MySQLEngine
+    eng = MySQLEngine(hop)
+    ddb = eng._d("dst", db)
+    q = eng._quote_ident
+    try:
+        rows = eng._q("dst", MY_FK_COLUMNS_SQL, (ddb, ddb))
+    except Exception as e:
+        if log:
+            log("could not look for rows left pointing at nothing:"
+                f" {str(e).strip()[:100]}")
+        return None
+    keys = {}
+    for name, table, parent, col, pcol in rows:
+        keys.setdefault((name, table, parent), []).append((col, pcol))
+    found = []
+    for (name, table, parent), cols in sorted(keys.items()):
+        if not excluded_tables(hop, db, [table], db) \
+                or excluded_tables(hop, db, [parent], db):
+            continue
+        on = " and ".join(f"c.{q(a)} = p.{q(b)}" for a, b in cols)
+        filled = " and ".join(f"c.{q(a)} is not null" for a, _ in cols)
+        sql = (f"select count(*) from {q(ddb)}.{q(table)} c"
+               f" left join {q(ddb)}.{q(parent)} p on {on}"
+               f" where {filled} and p.{q(cols[0][1])} is null")
+        try:
+            n = int(eng._q("dst", sql)[0][0])
+        except Exception as e:
+            if log:
+                log(f"could not look for rows of {table} left pointing at"
+                    f" nothing: {str(e).strip()[:100]}")
+            continue
+        if n:
+            found.append((table, parent, n))
+            if log:
+                log(f"{table}: {n} {'row points' if n == 1 else 'rows point'}"
+                    f" at {parent} rows that no longer exist - they were only"
+                    f" on the target. The hop excludes {table}, so the check"
+                    " will not look at it; this is the only place it is"
+                    " said")
+    return found
+
+
 def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
     """The dump and load command lines, built once for the plan and the run.
 
@@ -848,6 +917,8 @@ def mydumper_move(hop, db, workers, go, log):
     _my_truncate_target(hop, db, log)
     with _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
         _sh(load, {"MYSQL_PWD": hop.target.password}, log)
+    if skip:
+        _my_orphans_left(hop, db, log)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
 
