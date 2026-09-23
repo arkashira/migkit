@@ -137,7 +137,7 @@ This is the ground migkit stands on.
 
 **0d. The row filter is honoured by the move and ignored by the check.**
 
-*Found by grep on 2026-09-24; live proof pending.*
+*In progress (2026-09-24): check side written and proved live, commits together with the routing below: before, PostgreSQL said `public.orders src=4 dst=2` and MySQL `missing=2 ...` `kind=rows-missing` for a correctly filtered move. Now every check read goes through one `_scope()` per engine: counts, checksums, chunk ranges, drilldown, and the MySQL second reader's `--where`. Target rows *outside* the filter are counted and reported separately, so narrowing the comparison hides nothing. `test_the_check_reads_the_row_filter.py`: 10 tests, 6 of them fail on the old code. Still open: the routing and the refusal wording below.*
 
 `Hop.row_filter()` has no caller anywhere in `migkit/`. Its docstring says
 the predicate is "pushed into the mover's own flag and into the checksum's
@@ -404,7 +404,7 @@ offsets, which differ by design.
 | to measure before wrapping | boto3 Secrets Manager, `mongodump --query/--oplog`, datacompy `all_mismatch()`, mydumper `--regex/--rows` |
 | resumable-dump flag | tell the operator when a restart loses the dump's progress (DTS `DumperResumeCtrl`) |
 | timed start and auto-retry window | low value next to cron |
-| two-way and many-to-one topologies with loop detection | largest item on the list, lowest priority |
+| two-way and many-to-one topologies with loop detection | moved up to item 36 |
 | waiting on the owner | should dry-run plans hide the command lines they print? |
 
 ---
@@ -530,6 +530,199 @@ find an x86 runner, or list it plainly in section H of
 
 ---
 
+## Where the paid tools and the clouds still lead (added 2026-09-24)
+
+From the comparison against GoldenGate + Veridata, Qlik Replicate, Striim,
+Fivetran HVR, AWS DMS, Azure, Google DMS and Tencent/Alibaba DTS.
+
+**The owner's rule for this section:** everything they lead on, migkit
+does too - researched down to the mechanism, and built smarter and
+faster than what it replaces. ETL is out of scope. AI assistance is
+*soon*, and never tied to one vendor.
+
+### P1: without these the claim "as good as the paid tools" is not honest
+
+**28. A benchmark anyone can re-run.**
+
+No speed claim holds until this exists. Build a harness on one machine:
+* a fixed data generator covering the shapes that matter: keyed and
+  key-less tables, wide rows, LOB tables, partitioned tables, a skewed key
+* measure three things:
+  * bulk copy time
+  * change-stream lag at fixed write rates (1k, 10k, 50k tx/s)
+  * verification time
+* run it against migkit and the open engines it could have used instead
+
+The managed services cannot run on a laptop. For them, publish a recipe
+the owner runs on the same instance class, with the cost of the run
+stated. Results are published with the hardware and every setting that
+produced them.
+
+**29. Change apply that keeps up at very high write rates.**
+
+The paid tools lead here because they apply changes in parallel while
+keeping each key's order, and collapse many changes to one row before
+writing. Build it in two steps:
+
+1. **The planner sets the native parallel-apply knobs where the target
+   has them:**
+   * PostgreSQL 16+ `streaming = parallel` on subscriptions
+   * MySQL `replica_parallel_workers` with `WRITESET` dependency tracking
+
+   Measure each against item 28's rates.
+2. **Where migkit owns the apply (the stream path), a migkit applier:**
+   * changes partitioned by table and key hash, so each key stays in order
+   * batches that collapse a row's changes before writing (DMS
+     `BatchApply` semantics)
+   * commit order kept where a table's foreign keys require it
+
+   Lag, throughput and apply errors are reported in migkit's own words.
+
+**30. A control plane.**
+
+HA, resume on another machine, a scheduler, a UI and roles:
+* **State, shared:** the local/S3 state backend already exists. Move every
+  piece of run state onto it - checkpoints, change-stream cursors, locks.
+  Locks become leases with a heartbeat, so a second machine can take over
+  a run whose machine died, from the last committed chunk or cursor.
+* **Scheduling:** run specifications on a schedule, with phases that are
+  safe to repeat.
+* **UI:** the read-only dashboard (`report --serve`) grows into an
+  operations view.
+* **Roles:** viewer, operator, approver. Anything that writes (`--go`,
+  `apply`) needs an approval when the hop says so.
+* **Audit:** an audit trail of who approved what.
+* **Tension to resolve:** the rule against new CLI modes. Keep all of
+  this inside existing verbs and hop options, and say so where it is not
+  possible.
+
+**31. Scale-out across machines.**
+
+A coordinator hands out tables and chunks from a queue in the shared
+store (item 30), and workers lease them. This is DMS Serverless and a
+Striim cluster done the open way. The throttle already scales work
+*down* when the source strains; add scaling *up* when the source has
+headroom.
+
+**32. Alerts, not only metrics.**
+
+Prometheus metrics exist. Add shipped alert rules and webhook
+notifications (Slack, Teams, PagerDuty, generic HTTP) for:
+* change-stream lag
+* WAL or binlog retention filling up
+* a verification finding a difference
+* a run stalling
+
+This is the part of CloudWatch alarms that migkit can own.
+
+### P2: reach the paid tools have and migkit does not
+
+**33. Targets that are not databases.**
+* **Warehouses:** Snowflake, BigQuery, Redshift, ClickHouse. Load through
+  staged Parquet files and each warehouse's own bulk load. Verification
+  already reaches these through the second readers.
+* **Streams:** Kinesis, Pub/Sub, Event Hubs, alongside Kafka.
+
+Measure a wrap candidate before writing a loader, the rule as always.
+
+**34. More engines to move, not only to verify.**
+* **Sources DMS takes that migkit cannot:** Db2, SAP ASE, SQL Server at
+  full depth.
+* **Targets:** S3 (Parquet), DynamoDB, OpenSearch/Elasticsearch,
+  Cassandra.
+
+Order by what a real migration asks for. Every one arrives with its
+verification, or it does not arrive.
+
+**35. Change-stream delivery in the formats consumers expect.**
+
+DTS offers five. migkit should offer:
+* Avro, JSON, Debezium and Canal-compatible formats, with a schema
+  registry (Redpanda ships one)
+* topic and partition rules by table, key or column
+* skipping oversize messages, with a count of what was skipped
+
+**36. Sync in both directions, and other topologies.**
+
+Promoted from the P3 line below. Covers two-way, many-to-one and
+one-to-many:
+* loops are prevented by tagging each change with its origin:
+  PostgreSQL replication origins, MySQL `server_id` and GTID, the
+  stream's own source metadata
+* conflicts are detected per key and resolved by policy: newer-row-wins
+  (item 10), source-wins, or custom
+* every conflict is reported, never silently resolved
+
+SymmetricDS and GoldenGate are the references for the mechanism.
+
+**37. Rollback that loses nothing: live reverse replication.**
+
+At cutover, start a stream from the new target back to the old source,
+positioned at the same fence. If the cutover is abandoned, the old side
+has every write made since. Verify both directions while it runs. This is
+the GoldenGate and Striim failback, with migkit's checks on it.
+
+**38. Accounts and clouds without long-lived passwords.**
+* **Passwordless sign-in to managed databases:** assume-role and workload
+  identity, RDS IAM authentication tokens, Cloud SQL IAM
+* **Secrets:** AWS Secrets Manager, GCP Secret Manager and Azure Key
+  Vault next to the existing Vault
+* **Cross-account access:** the cross-account role pattern DTS uses,
+  done with each cloud's own mechanism
+
+**39. Converting schema and code between engines, wider.**
+
+Ora2Pg covers Oracle. Add:
+* SQL Server T-SQL to PostgreSQL
+* MySQL routines to PostgreSQL
+
+Use sqlglot where SQL is enough. Every converted object stays behind
+migkit's behavioural proof (plan 20): same inputs, same outputs, on both
+sides.
+
+**40. Estimates that rest on measurement.**
+
+SCT estimates effort. migkit refused to guess, because it had nothing to
+calibrate against. Item 7's per-phase timings from real rehearsals are
+that calibration. Estimate time and effort as ranges, and state the runs
+each range came from. Without enough runs, say so instead of guessing.
+
+**41. Trust, the open-source way.**
+
+A vendor sells certifications. What an open tool can offer instead:
+* signed releases, an SBOM and build provenance (SLSA)
+* a written threat model
+* an audit log of every write migkit makes, on either side
+* reports encrypted at rest
+* redaction of values in what is shown and stored (with G2)
+
+**42. Support, without an SLA.**
+
+A troubleshooting guide keyed by every error migkit can raise, each with
+its fix. A diagnostics bundle collected by `doctor` with secrets and
+values redacted, so a problem can be reported without handing anything
+over (an environment variable, not a new flag).
+
+### Soon
+
+**43. AI assistance, any provider.**
+
+One provider interface: any OpenAI-compatible endpoint, Anthropic,
+Google, local models. For:
+* suggesting conversions (items 39 and 20)
+* explaining a finding in plain language
+* drafting a fix
+
+What it produces is treated as a proposal: it goes through the same
+verification and behavioural proof as anything else, and is never applied
+on trust. Off unless a provider is configured.
+
+### Not pursued
+
+* **ETL and transformation**, beyond the mapping migkit already has.
+
+---
+
 ## Order of work
 
 1. **0d, then 0c:** 0d is a verdict that is wrong today on every hop with a
@@ -540,7 +733,11 @@ find an x86 runner, or list it plainly in section H of
    started from is already answered (no).
 4. **Then 1-5:** each one closes a way a cutover goes wrong without anyone
    seeing it.
-5. **Then 6-10**, then the rest by what the next rehearsal needs.
+5. **Then 6-10, and 28** (the benchmark) as soon as there is something
+   worth measuring.
+6. **Then 29-32**, the control plane and scale, before the reach items.
+7. **Then 33-42** by what the next real migration needs; 43 when the
+   rest can check what it proposes.
 
 ## Sources
 
