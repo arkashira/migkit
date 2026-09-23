@@ -1417,27 +1417,35 @@ class Engine:
                        " behavior-critical (memory/paths/limits, see"
                        " params.json)", str(out))]
 
+    #: The schema reading that is schema-aware rather than textual, and so
+    #: gets the last word. Named for what it produces, not for what produces
+    #: it: nobody driving migkit installed that program or can run it.
+    AUTHORITY_SCOPE = "(fix DDL)"
+    OBJECT_SCOPE = "(object changes)"
+
     def _atlas_authoritative(self, res):
-        """atlas is schema-aware and the authoritative differ; when it says
-        clean, demote the noisier textual opinions (native dump diff,
-        liquibase) to informational so the db's verdict follows atlas. The
-        precise object inventory still stands, and so does the structural
-        diff - that one compares objects rather than text, so it is never
-        demoted. Opt out with options.schema_authority != 'atlas'."""
+        """When the schema-aware reading says clean, demote the noisier
+        textual opinions - the native dump diff and the object-change list -
+        to informational, so the database's verdict follows the reading that
+        understands what a schema *is* rather than how it is spelled. The
+        object inventory still stands, and so does the structural diff: that
+        one compares objects rather than text and is never demoted. Opt out
+        with `options.schema_authority` set to anything but `atlas`."""
         if self.hop.options.get("schema_authority", "atlas") != "atlas":
             return res
-        if not any(r.scope.endswith("(atlas)") and r.status == "ok"
+        if not any(r.scope.endswith(self.AUTHORITY_SCOPE) and r.status == "ok"
                    for r in res):
             return res
         for r in res:
-            textual = (r.scope.endswith("(liquibase)")
+            textual = (r.scope.endswith(self.OBJECT_SCOPE)
                        or r.scope == r.scope.split(" ")[0])  # bare "db"
             if (r.check == "schema" and r.status == "diff" and textual
-                    and not r.scope.endswith(("(atlas)", "objects",
+                    and not r.scope.endswith((self.AUTHORITY_SCOPE, "objects",
                                               "(structural)"))):
                 r.status = "ok"
-                r.detail = ("atlas authoritative: clean; textual diff is"
-                            f" cosmetic ({r.detail})")[:200]
+                r.detail = ("the schema-aware comparison reads this as clean;"
+                            f" the textual difference is cosmetic ({r.detail})"
+                            )[:200]
         return res
 
     def check_data(self, db, table=None):

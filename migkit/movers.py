@@ -834,9 +834,9 @@ def follow_selected():
     if want not in ("native", "follow"):
         raise SystemExit(
             f"MIGKIT_CDC={want} is not one of native, follow."
-            " native = CREATE SUBSCRIPTION, which needs the target to dial"
-            " the source; follow = pgcopydb follow, driven from here, which"
-            " does not")
+            " native = the database's own replication, which needs the"
+            " target to dial the source; follow = a leg driven from where"
+            " migkit runs, which connects out to both sides instead")
     return want
 
 
@@ -919,9 +919,11 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
         return steps
     if pgcopydb_runner() != "local":
         raise SystemExit(
-            "pgcopydb follow needs the pgcopydb binary on this machine:"
-            " it runs for the length of the catch-up and keeps its state"
-            f" in {d}. Install pgcopydb, or use MIGKIT_CDC=native")
+            "this CDC path needs a component that is not installed"
+            " on this machine: it runs for the length of the catch-up and"
+            f" keeps its state in {d}. migkit doctor --install puts it in"
+            " place, or use MIGKIT_CDC=native, which needs no component"
+            " here but does need the target to reach the source")
     d.mkdir(parents=True, exist_ok=True)
     env = tool_env({"PGCOPYDB_SOURCE_PGURI": src, "PGCOPYDB_TARGET_PGURI": dst})
     out = d / "follow.log"
@@ -939,9 +941,10 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
             proc.wait(timeout=limit)
         except _sp.TimeoutExpired:
             raise SystemExit(
-                f"pgcopydb follow did not reach its end position in {limit}s."
+                f"the CDC leg did not reach its end position in {limit}s."
                 f" It is still running; its log is {out}. Nothing has been"
-                " marked as caught up")
+                " marked as caught up - raise MIGKIT_FOLLOW_TIMEOUT if the"
+                " backlog is simply larger than that")
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -950,8 +953,8 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
             except _sp.TimeoutExpired:
                 proc.kill()
     if proc.returncode:
-        raise SystemExit(f"pgcopydb follow exited {proc.returncode}; its log"
-                         f" is {out}")
+        raise SystemExit(f"the CDC leg exited {proc.returncode} before it"
+                         f" finished catching up; its log is {out}")
     steps.append(f"target applied up to {eng.applied_lsn(db) or 'nothing'}"
                  " - run migkit check to prove the rows, an LSN is not a"
                  " row count")
@@ -1011,15 +1014,17 @@ def _follow_sentinel(d, env, proc, log=None):
     end = _t.monotonic() + 120
     while _t.monotonic() < end:
         if proc.poll() is not None:
-            raise SystemExit("pgcopydb follow exited before it was told to"
-                             f" apply anything; its log is {d / 'follow.log'}")
+            raise SystemExit("the CDC leg exited before it was told to"
+                             " apply anything, so nothing reached the"
+                             f" target; its log is {d / 'follow.log'}")
         got = _sp.run(["pgcopydb", "stream", "sentinel", "get", "--dir",
                        str(d)], capture_output=True, text=True, env=env)
         if got.returncode == 0 and "apply" in got.stdout:
             break
         _t.sleep(2)
     else:
-        raise SystemExit("pgcopydb follow never produced a sentinel to drive")
+        raise SystemExit("the CDC leg never became ready to be told to apply;"
+                         f" its log is {d / 'follow.log'}")
     for args, why in ((["set", "apply"], "apply"),
                       (["set", "endpos", "--current"], "end position")):
         p = _sp.run(["pgcopydb", "stream", "sentinel"] + args + ["--dir",
@@ -1343,7 +1348,8 @@ def run_via(via, hop, db, workers, go, log):
         raise SystemExit(f"the {via} bulk path needs {', '.join(missing)}"
                          " installed - run: migkit doctor --install")
     if via == "pgcopydb" and not pgcopydb_available():
-        raise SystemExit(f"the pgcopydb bulk path needs the"
-                         f" {PGCOPYDB_IMAGE} image: docker pull"
-                         f" {PGCOPYDB_IMAGE}")
+        raise SystemExit("this bulk path needs a component that is not"
+                         " available on this machine - migkit doctor says"
+                         " what is missing and migkit doctor --install"
+                         " puts it in place")
     return fns[via](hop, db, workers, go, log)

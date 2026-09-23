@@ -46,9 +46,15 @@ def test_schema_repair_aligns_objects(pg_pair, tmp_path):
     assert r.returncode == 1
     assert "DIFF" in r.stdout
 
-    # dry-run shows atlas DDL, no change yet
+    # dry-run shows the DDL it would run, no change yet. What the plan says
+    # is what the statements do, not which program wrote them - someone
+    # driving migkit did not install that program and cannot run it.
     r = _migkit(conf, "sync", "t", "--db", "postgres", "--kind", "schema")
-    assert "atlas" in r.stdout.lower()
+    said = r.stdout.lower()
+    assert "aligns the target's objects with the source" in said, r.stdout
+    assert "extra" in said, "the column it would add is not named"
+    for hidden in ("atlas", "liquibase", "pgcopydb"):
+        assert hidden not in said, hidden
     cols = psql(pg_pair["dst"], "select count(*) from information_schema.columns"
                 " where table_name='t'").stdout.strip()
     assert cols == "2"  # still missing `extra`

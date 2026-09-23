@@ -294,21 +294,21 @@ def test_atlas_authoritative_demotes_textual_diff():
     eng = Engine(_hop())
     res = [
         Result("schema", "db", "diff", "6 changed lines"),            # textual
-        Result("schema", "db (liquibase)", "diff", "Missing table"),  # textual
+        Result("schema", "db (object changes)", "diff", "Missing table"),  # textual
         Result("schema", "db (structural)", "diff", "2 to add"),      # object-aware
         Result("schema", "db objects", "diff", "table 5/4 missing"),  # object-aware
-        Result("schema", "db (atlas)", "ok", "atlas diff clean"),     # authority
+        Result("schema", "db (fix DDL)", "ok", "schemas match"),     # authority
     ]
     out = {r.scope: r.status for r in eng._atlas_authoritative(res)}
     assert out["db"] == "ok"                   # line-diff demoted
-    assert out["db (liquibase)"] == "ok"       # textual opinion demoted
+    assert out["db (object changes)"] == "ok"       # textual opinion demoted
     # object-aware opinions are never demoted: they compare objects, not text
     assert out["db (structural)"] == "diff"
     assert out["db objects"] == "diff"
     # opt-out keeps everything as-is
     eng2 = Engine(_hop(options={"schema_authority": "strict"}))
     res2 = [Result("schema", "db", "diff", "x"),
-            Result("schema", "db (atlas)", "ok", "clean")]
+            Result("schema", "db (fix DDL)", "ok", "clean")]
     assert eng2._atlas_authoritative(res2)[0].status == "diff"
 
 

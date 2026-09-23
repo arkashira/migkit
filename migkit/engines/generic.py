@@ -61,7 +61,11 @@ class GenericEngine(Engine):
 
     def _reladiff(self, table, extra, jobs=None, stats=True):
         if not which("reladiff"):
-            raise SystemExit("reladiff not found, run bootstrap.sh")
+            raise SystemExit(
+                "this engine needs a comparison component that is not"
+                " installed on this machine: migkit doctor --install"
+                " puts it in place, and migkit doctor says what is"
+                " missing")
         return run(self._reladiff_cmd(table, extra, jobs, stats), check=False,
                    timeout=3600)
 
@@ -269,14 +273,13 @@ class GenericEngine(Engine):
         res = []
         if blind:
             res.append(Result("counts", db, "error",
-                              "reladiff did not report on " + "; ".join(
-                                  blind[:6])
+                              "no count came back for " + "; ".join(blind[:6])
                               + " - a table nobody could count is not a table"
                                 " whose counts match"))
         if bad:
             res.append(Result("counts", db, "diff", "; ".join(bad[:10]), "",
                               "counted from the keys on one side only, which"
-                              " is the part of reladiff's output that holds"
+                              " is the part of the comparison that holds"
                               " still between runs"))
         return res or [Result("counts", db, "ok",
                               f"{len(tables)} tables, the same number of rows"
@@ -295,10 +298,10 @@ class GenericEngine(Engine):
                     stream(f"{t}: error")
                 res.append(Result(
                     "data", scope, "error",
-                    f"reladiff did not report: {self._why_no_stats(p)}", "",
-                    "it exits 0 whether it compared anything or not, so the"
-                    " absence of its numbers is the only thing that says it"
-                    " did not"))
+                    f"no comparison came back: {self._why_no_stats(p)}", "",
+                    "the comparison reports success whether it compared"
+                    " anything or not, so the absence of its numbers is the"
+                    " only thing that says it did not"))
                 continue
             parts = [f"{got['only_a']} rows only on the source"
                      if got["only_a"] else "",

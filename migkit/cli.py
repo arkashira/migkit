@@ -336,7 +336,10 @@ def _gen_migration(hop_name, db, out):
     for d in ([db] if db else eng.databases()):
         fwd, undo = eng.migration_pair(d)
         if fwd is None:
-            raise SystemExit("atlas not found, run bootstrap.sh")
+            raise SystemExit(
+                "generating migration DDL needs a component that is not"
+                " installed on this machine: migkit doctor --install"
+                " puts it in place")
         if not fwd:
             console.print(f"{d}: schemas already in sync, nothing to generate")
             continue
@@ -383,7 +386,9 @@ def _drill(hop_name, db, table, limit):
     try:
         import datacompy
     except ImportError:
-        raise SystemExit("pip install datacompy")
+        raise SystemExit(
+            "the row-by-row drilldown needs a component that is not"
+            " installed here: migkit doctor --install puts it in place")
     a = eng.fetch_sample_df("src", db, table, limit)
     b = eng.fetch_sample_df("dst", db, table, limit)
     t = table.split(".", 1)[-1]

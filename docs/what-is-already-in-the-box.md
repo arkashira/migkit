@@ -111,9 +111,21 @@ What that leaves on the floor:
   puzzle they cannot act on - they did not install pgcopydb and cannot run
   it. The information is kept and the brand name is not: *"read two ways,
   with two answers"*. Pinned across every branch, including the `fix_hint`,
-  by `test_the_report_does_not_name_its_tools.py`. Still leaking and a
-  separate job: report scopes `(atlas)` / `(liquibase)` and the file names
-  `atlas-fix.sql` / `liquibase-diff.txt`.
+  by `test_the_report_does_not_name_its_tools.py`, which now scans every
+  string reaching `Result(...)`, `SystemExit(...)` or `print(...)` across
+  the whole package - it found 15 more and they are gone. Report scopes are
+  named for what they tell you: `(fix DDL)` and `(object changes)`, with
+  the files they write renamed to match (`schema-fix.sql`,
+  `schema-fix.revert.sql`, `schema-objects.txt`).
+
+  Two lines were drawn deliberately. The database's own vocabulary stays -
+  `CREATE SUBSCRIPTION`, a replication slot, `wal_level` are PostgreSQL and
+  the DBA acting on the message knows them. And a missing prerequisite used
+  to name the program so it could be installed, which is the one place the
+  name bought something; it buys less than `migkit doctor --install`, which
+  is migkit's own command and installs whatever that machine is short of,
+  so the messages point there and the name goes too. Still to do:
+  `options.schema_authority: atlas` is a config value an operator writes.
   `test_crosscheck_schema.py`.
 * **`snapshot`** - and the interesting part is that migkit does not need
   pgcopydb for it. `pg_export_snapshot` is a PostgreSQL function, and the

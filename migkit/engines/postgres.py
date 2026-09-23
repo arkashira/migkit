@@ -743,17 +743,21 @@ class PostgresEngine(Engine):
             return None
         text = p.stdout.strip()
         if not text or "Schemas are synced" in text:
-            return Result("schema", f"{db} (atlas)", "ok", "atlas diff clean")
-        out = self._report(db) / "atlas-fix.sql"
+            return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "ok",
+                          "the two schemas match, compared as schemas rather"
+                          " than as text")
+        out = self._report(db) / "schema-fix.sql"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text + "\n")
-        return Result("schema", f"{db} (atlas)", "diff",
-                      f"atlas generated {len(text.splitlines())} lines of fix DDL",
-                      str(out), "review then apply atlas-fix.sql on target")
+        return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "diff",
+                      f"{len(text.splitlines())} lines of DDL would bring the"
+                      " target's schema up to the source's",
+                      str(out), "review schema-fix.sql, then apply it to the"
+                                " target")
 
     def check_liquibase(self, db):
         s, t = self.hop.source, self.hop.target
-        out = self._report(db) / "liquibase-diff.txt"
+        out = self._report(db) / "schema-objects.txt"
         out.parent.mkdir(parents=True, exist_ok=True)
         try:
             p = run(["liquibase", "diff",
@@ -778,11 +782,12 @@ class PostgresEngine(Engine):
                and "__" not in l and "migkit_changelog" not in l
                and not any(n in l for n in noise)]
         if bad:
-            return Result("schema", f"{db} (liquibase)", "diff",
+            return Result("schema", f"{db} {self.OBJECT_SCOPE}", "diff",
                           "; ".join(bad[:6]), str(out),
-                          "see liquibase-diff.txt for the full object list")
-        return Result("schema", f"{db} (liquibase)", "ok",
-                      "liquibase diff clean")
+                          "schema-objects.txt lists every object that"
+                          " differs")
+        return Result("schema", f"{db} {self.OBJECT_SCOPE}", "ok",
+                      "no object differs by name between the two schemas")
 
     def check_objects(self, db):
         sides = {}
@@ -2316,7 +2321,7 @@ class PostgresEngine(Engine):
                      "--source", src, "--target", dst], check=False)
         except Exception as e:
             return Result("deep", f"{db} schema cross-check", "error",
-                          "could not run pgcopydb compare schema:"
+                          "the schemas could not be read a second time:"
                           f" {str(e).splitlines()[-1][:80]}")
         theirs, found = self._schema_verdict(p.stdout + p.stderr,
                                              p.returncode)
@@ -2352,7 +2357,7 @@ class PostgresEngine(Engine):
                      "--source", src, "--target", dst], check=False)
         except Exception as e:
             return Result("deep", f"{db} cross-check", "error",
-                          "could not run pgcopydb compare:"
+                          "the pair could not be read a second time:"
                           f" {str(e).splitlines()[-1][:80]}")
         theirs = self._crosscheck_verdicts(p.stdout + p.stderr)
         mine = self._mine_from_evidence(db)
@@ -3812,7 +3817,7 @@ class PostgresEngine(Engine):
             return None
         return RepairAction(db, "schema", fwd.splitlines(),
                             (undo or "").splitlines(),
-                            "atlas-generated DDL to align target objects to"
+                            "DDL that aligns the target's objects with the"
                             " source (review before --apply; runs in one"
                             " transaction, reverse DDL saved to undo)")
 

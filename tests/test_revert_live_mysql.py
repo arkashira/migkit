@@ -122,8 +122,8 @@ def test_an_added_column_round_trips_exactly(pair, tmp_path):
     _fresh(src_extra="alter table t add column extra int")
     before = _shape(DST)
     res = _engine(tmp_path)._atlas("shop")
-    fix = tmp_path / "atlas-fix.sql"
-    rev = tmp_path / "atlas-fix.revert.sql"
+    fix = tmp_path / "schema-fix.sql"
+    rev = tmp_path / "schema-fix.revert.sql"
     assert res.status == "diff", res.detail
     assert fix.exists() and rev.exists(), res.detail
     _apply(DST, fix)
@@ -139,14 +139,14 @@ def test_a_dropped_column_is_named_as_unrecoverable(pair, tmp_path):
                      " update t set doomed = 'keepme'")
     assert _mysql(DST, "select count(*) from t where doomed='keepme'") == "2"
     res = _engine(tmp_path)._atlas("shop")
-    rev = tmp_path / "atlas-fix.revert.sql"
+    rev = tmp_path / "schema-fix.revert.sql"
     assert rev.exists(), res.detail
     head = rev.read_text()
     assert "DROP COLUMN" in head.upper(), head[:400]
     assert "needs a backup, not this file" in head
     assert "take a backup first" in res.detail, res.detail
 
-    _apply(DST, tmp_path / "atlas-fix.sql")
+    _apply(DST, tmp_path / "schema-fix.sql")
     assert _mysql(DST, "select count(*) from information_schema.columns where"
                        " table_schema='shop' and table_name='t'"
                        " and column_name='doomed'") == "0"
@@ -161,10 +161,10 @@ def test_a_dropped_column_is_named_as_unrecoverable(pair, tmp_path):
 def test_identical_schemas_leave_no_stale_undo(pair, tmp_path):
     _fresh(src_extra="alter table t add column extra int")
     _engine(tmp_path)._atlas("shop")
-    assert (tmp_path / "atlas-fix.revert.sql").exists()
+    assert (tmp_path / "schema-fix.revert.sql").exists()
     _mysql(DST, "alter table t add column extra int")
     res = _engine(tmp_path)._atlas("shop")
     assert res.status == "ok", res.detail
-    assert not (tmp_path / "atlas-fix.sql").exists()
-    assert not (tmp_path / "atlas-fix.revert.sql").exists(), \
+    assert not (tmp_path / "schema-fix.sql").exists()
+    assert not (tmp_path / "schema-fix.revert.sql").exists(), \
         "an undo for changes nobody made was left behind"

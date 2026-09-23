@@ -570,17 +570,20 @@ class MySQLEngine(Engine):
         if not text or "Schemas are synced" in text:
             # both files, not just the fix: an undo left behind after the
             # schemas converged is a rollback for changes nobody made
-            for stale in ("atlas-fix.sql", "atlas-fix.revert.sql"):
+            for stale in ("schema-fix.sql", "schema-fix.revert.sql"):
                 (self.hop.report_dir(db) / stale).unlink(missing_ok=True)
-            return Result("schema", f"{db} (atlas)", "ok", "atlas diff clean")
-        out = self.hop.report_dir(db) / "atlas-fix.sql"
+            return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "ok",
+                          "the two schemas match, compared as schemas"
+                          " rather than as text")
+        out = self.hop.report_dir(db) / "schema-fix.sql"
         out.write_text(text + "\n")
-        detail = f"atlas generated {len(text.splitlines())} lines of fix DDL"
+        detail = (f"{len(text.splitlines())} lines of DDL would bring the"
+                  " target's schema up to the source's")
         # The same diff run the other way is the undo of exactly these
         # statements, and it has to be taken now: once the fix is applied the
         # two schemas no longer describe where the target came from.
         from .. import revert as _revert
-        rev = self.hop.report_dir(db) / "atlas-fix.revert.sql"
+        rev = self.hop.report_dir(db) / "schema-fix.revert.sql"
         try:
             rp = run(["atlas", "schema", "diff", "--from", su, "--to", tu,
                       "--exclude", "migkit_changelog"],
@@ -588,7 +591,7 @@ class MySQLEngine(Engine):
             rtext = rp.stdout.strip() if rp.returncode == 0 else ""
         except Exception:
             rtext = ""
-        body = _revert.script(text, rtext, "atlas-fix.sql")
+        body = _revert.script(text, rtext, "schema-fix.sql")
         if body:
             rev.write_text(body)
             detail += "; " + _revert.summary(text, rtext)
@@ -596,9 +599,9 @@ class MySQLEngine(Engine):
             # no undo is a fact worth stating, not a blank to fill in later
             rev.unlink(missing_ok=True)
             detail += "; no undo could be generated - take a backup first"
-        return Result("schema", f"{db} (atlas)", "diff", detail,
-                      str(out), "review then apply atlas-fix.sql on target;"
-                      " atlas-fix.revert.sql undoes it")
+        return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "diff", detail,
+                      str(out), "review schema-fix.sql, then apply it to"
+                      " the target; schema-fix.revert.sql undoes it")
 
     def _tables(self, side, db):
         rows = self._q(side, "select table_name from information_schema.tables"
@@ -2440,7 +2443,7 @@ class MySQLEngine(Engine):
             return None
         return RepairAction(db, "schema", fwd.splitlines(),
                             (undo or "").splitlines(),
-                            "atlas-generated DDL to align target objects to"
+                            "DDL that aligns the target's objects with the"
                             " source (review before --apply; reverse DDL"
                             " saved to undo)")
 

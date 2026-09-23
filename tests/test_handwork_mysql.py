@@ -166,7 +166,7 @@ def test_migkit_sees_the_event_but_cannot_generate_its_ddl(pair, tmp_path):
     # Ask the direct question rather than reading atlas's overall verdict:
     # this fixture has table differences too, so atlas says "diff" for
     # reasons that have nothing to do with the event.
-    fix = tmp_path / "atlas-fix.sql"
+    fix = tmp_path / "schema-fix.sql"
     # The target is missing five tables and a view, so atlas has plenty to
     # write about. Asserting the file exists keeps the next assertion from
     # passing vacuously on an atlas that produced nothing at all.

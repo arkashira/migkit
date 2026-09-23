@@ -17,9 +17,19 @@ This file pins that for the cross-check verdicts, across every branch, and
 for the advice attached to them - a `fix_hint` telling the operator to run
 `pgcopydb compare data` by hand is the same leak wearing a different hat.
 
-Not covered here yet, and a separate job: report *scopes* still carry
-`(atlas)` and `(liquibase)`, and some file names are tool names
-(`atlas-fix.sql`, `liquibase-diff.txt`).
+The line that *is* allowed: the database's own vocabulary. `CREATE
+SUBSCRIPTION` is PostgreSQL, not something migkit bolted on, and an
+operator's DBA knows it. Only the programs migkit drives are hidden.
+
+The other line worth stating: a missing prerequisite used to name the
+program so the operator could install it, which is the one case where the
+name buys something. It buys less than `migkit doctor --install`, which is
+migkit's own command and installs whatever that machine is short of - so
+the messages point there instead, and the name goes too.
+
+The repo-wide scan at the bottom is what keeps this from drifting: every
+string that reaches `Result(...)`, `SystemExit(...)` or `print(...)` is
+checked, not just the two builders this file started with.
 """
 import ast
 import pathlib
@@ -30,7 +40,8 @@ from migkit.config import Endpoint, Hop
 
 #: names of things migkit drives, which an operator has no way to act on
 TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
-         "myloader", "pgloader", "mongodump", "debezium", "redpanda")
+         "myloader", "pgloader", "mongodump", "debezium", "redpanda",
+         "atlas", "liquibase")
 
 
 def _engine(tmp_path):
@@ -133,3 +144,102 @@ def test_what_the_line_still_tells_them(tmp_path):
         "appdb", True, ["Failed to find table public.b"], True)
     assert "public.b" in missed.detail, missed.detail
     assert "unverified" in missed.detail, missed.detail
+
+
+#: call sites whose strings a person driving migkit reads
+FACING = {"Result", "SystemExit", "print"}
+
+
+def _facing_strings():
+    """Every string constant that reaches an operator, with where it is.
+
+    Scoped to the call rather than the file because `movers.py` is mostly
+    argv - `["pgcopydb", "follow", ...]` is how the program is started, not
+    something anybody reads, and banning the word there would ban running
+    it at all.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1] / "migkit"
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = (node.func.id if isinstance(node.func, ast.Name)
+                  else node.func.attr if isinstance(node.func, ast.Attribute)
+                  else "")
+            if fn not in FACING:
+                continue
+            for c in ast.walk(node):
+                if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                    yield path.name, c.lineno, c.value
+
+
+def test_nothing_an_operator_reads_names_a_program_migkit_drives():
+    leaks = [(f, ln, s.strip()[:70], t)
+             for f, ln, s in _facing_strings()
+             for t in TOOLS if t in s.lower()]
+    assert not leaks, "\n".join(f"{f}:{ln} names {t}: {s}"
+                                for f, ln, s, t in leaks)
+
+
+def test_the_scan_would_notice():
+    """A scan that matches nothing would pass for the wrong reason, so the
+    reach is asserted rather than assumed."""
+    found = list(_facing_strings())
+    assert len(found) > 200, len(found)
+    assert any("migkit doctor --install" in s for _, _, s in found), \
+        "the scan is not reaching the strings it claims to read"
+    # a planted leak has to be caught: the same check, over a string the
+    # scan really would see
+    planted = [t for t in TOOLS if t in "this needs pgcopydb installed"]
+    assert planted == ["pgcopydb"], planted
+
+
+def test_the_databases_own_vocabulary_is_not_on_the_list():
+    """`CREATE SUBSCRIPTION`, `wal_level`, a replication slot - those are
+    PostgreSQL, not something migkit bolted on, and hiding them would make
+    the message useless to the DBA who has to act on it."""
+    for word in ("create subscription", "replication slot", "wal_level",
+                 "start replica", "binlog"):
+        assert not [t for t in TOOLS if t in word], word
+
+
+def _facing_messages():
+    """One entry per call, with its string parts joined.
+
+    An f-string split over several lines is several `Constant` nodes, and
+    the sentence the operator reads is all of them - so a message whose
+    advice sits in a later fragment would look like it had none.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1] / "migkit"
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = (node.func.id if isinstance(node.func, ast.Name)
+                  else node.func.attr if isinstance(node.func, ast.Attribute)
+                  else "")
+            if fn not in FACING:
+                continue
+            parts = [c.value for c in ast.walk(node)
+                     if isinstance(c, ast.Constant)
+                     and isinstance(c.value, str)]
+            if parts:
+                yield path.name, node.lineno, " ".join(parts)
+
+
+PREREQ = ("needs a component that is not installed",
+          "needs a component that is not available",
+          "is not installed on this machine",
+          "needs a comparison component that is not")
+
+
+def test_a_missing_prerequisite_points_at_migkits_own_installer():
+    """The one case where naming the program used to buy something. It buys
+    less than a command that installs whatever this machine is short of."""
+    said = [(f, ln, s) for f, ln, s in _facing_messages()
+            if any(p in s for p in PREREQ)]
+    assert len(said) >= 4, said
+    for f, ln, s in said:
+        assert "migkit doctor" in s, f"{f}:{ln} {s}"
