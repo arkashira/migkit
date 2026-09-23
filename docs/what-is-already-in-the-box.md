@@ -217,17 +217,18 @@ file that is not one. `test_a_check_does_not_write_to_the_target.py`.
 
 ### mydumper - the row filter is already there
 
-    used:     --threads, --trx-consistency-only, --no-schemas,
-              --purge-mode, -B -h -P -u -o -d
-    unopened: -x/--regex (db.table matching), --where (dump only
-              selected records), --rows (chunked parallel per table)
+    used:     --threads, --no-schemas, --trx-tables (spelling asked
+              of the installed build), --omit-from-file, --defaults-file,
+              -B -h -P -u -o -d; password in MYSQL_PWD, never on argv
+    unopened: -x/--regex (db.table matching), --rows (chunked parallel
+              per table)
 
 `--where` is now wired: a generated defaults file gives mydumper one
 section per table, verified on a live dump (2 of 3 rows where a rule
 applied, untouched where none did). `--regex` is still unopened.
 
-**Three of the flags in that "used" list do not exist in the installed
-build, and the MySQL bulk path cannot run at all.** Measured against
+**Three of the flags that list used to hold did not exist in the installed
+build, and the MySQL bulk path could not run at all.** Measured against
 mydumper/myloader v1.0.5:
 
 - the password is passed attached, `-p<secret>`, and that build does not
@@ -253,8 +254,22 @@ appears in the help text only inside the description of
 And measured on a data-only dump, **neither `--drop-table=TRUNCATE` nor
 `--drop-table=DELETE` empties the target**; the load appends. The
 PostgreSQL paths never delegated this - they generate the truncate
-themselves - so the MySQL path should do the same rather than ask a flag
-that has changed name twice.
+themselves.
+
+**Closed.** The password travels in `MYSQL_PWD`, which both programs read
+(measured; a wrong one exits 1), so it reaches neither argv, the log, nor
+the process list - and it had reached all three, plus the program's own
+error: with a password containing `-`, the old line died on `Unknown
+option -p<the password>`. Flag spellings are asked of the binary that is
+about to run, from the option column of its `--help` only. migkit empties
+the target itself, leaving what the hop excludes, with
+`foreign_key_checks = 0` in one session - and only once the dump is
+complete, so an unreachable source leaves the target as it was. The dump
+skips excluded tables through `--omit-from-file`, resolved by the same
+`excluded_tables()` as every other mover, and the loader's `-B` is the
+target's name for the database, which `db_map` may change. The plan and
+the run are one command line. `test_the_mysql_bulk_path_runs.py`, on a
+live pair.
 
 **The asymmetry this exposed is worth recording.** `pg_dump` 18.6 offers
 `-t`, `-T`, `--exclude-table-data` and `--filter`; `pgcopydb` 0.18 offers
@@ -364,18 +379,13 @@ Cheapest first, where "cheap" means no new dependency:
    the connector instead of a direct write, because migkit and the
    connector writing the same keys is a race migkit can lose.
    `test_repair_through_the_stream.py`.
-2. **The MySQL bulk path does not run.** Ahead of any new flag: the
-   password is passed in a form the installed build reads as short options,
-   and two of the flags migkit passes were renamed out from under it. The
-   target is not emptied either - the flag that used to do it is gone, and
-   on a data-only dump none of its replacements empty anything, so the load
-   would append. See the mydumper section above for the measurements. The
-   PostgreSQL answer already exists next door (`_pg_truncate_target`) and
-   the MySQL path should use the same shape rather than a flag. `--regex` /
-   `-O` close the exclusion gap once it runs at all: `pg_dump -T` and
-   pgcopydb's filter file honour `hop.exclude` and mydumper is handed
-   nothing, so the same hop excludes a table on one engine and copies it on
-   the other.
+2. ~~**The MySQL bulk path does not run.**~~ **done** - it runs, and on the
+   installed build: password off the command line, flags asked of the
+   binary, the target emptied by migkit after the dump rather than by a
+   loader flag that no longer exists, and `hop.exclude` honoured by the
+   dump and the emptying alike. `test_the_mysql_bulk_path_runs.py`. Still
+   open beside it: the index window drops indexes on excluded tables too,
+   and the pg_dump path still empties the target before it has a dump.
 3. mydumper `--regex` / `--where`, pgcopydb `--filters`, `pg_dump -t/-T`,
    Debezium `table.include.list` - the mover half of plan item 17, all of it
    already installed.

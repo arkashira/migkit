@@ -999,10 +999,9 @@ cascade; it refuses a table another table references:
 
 and with `foreign_key_checks = 0` in the same session it empties the
 referenced table and leaves the referencing one alone - measured, the
-excluded child kept both its rows. So when the MySQL path empties the
-target itself (section 5 of `what-is-already-in-the-box.md`: it does not
-run today), the PostgreSQL refusal has no counterpart to need - nothing the
-hop excludes can be reached. What it leaves is quieter: a row in the
+excluded child kept both its rows. The MySQL path now empties the target
+itself that way, so the PostgreSQL refusal has no counterpart to need -
+nothing the hop excludes can be reached. What it leaves is quieter: a row in the
 excluded table can point at a row that existed only on the target and is
 not coming back, and `check` does not look inside a table the hop excludes.
 

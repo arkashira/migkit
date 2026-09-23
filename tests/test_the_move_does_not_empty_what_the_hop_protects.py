@@ -224,7 +224,8 @@ def test_both_bulk_paths_use_the_one_wording():
     src = (pathlib.Path(__file__).resolve().parents[1] / "migkit" /
            "movers.py").read_text()
     assert "truncate all user tables" not in src, "a second wording is back"
-    assert _callers_of("_truncate_step") == {"pgdump_move", "pgcopydb_move"}
+    assert _callers_of("_truncate_step") == {"pgdump_move", "pgcopydb_move",
+                                             "mydumper_move"}
 
 
 def test_the_exclusion_is_resolved_through_the_shared_reader():

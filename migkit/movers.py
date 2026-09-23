@@ -10,6 +10,8 @@ engine has no native CDC path; callers do not choose it and do not need to
 know what it runs underneath. Third-party components used there are named
 only in the generated compose file. See NOTICE for attribution.
 """
+import functools
+import re
 import subprocess
 from urllib.parse import quote
 
@@ -182,10 +184,10 @@ def _pg_literal(text):
 def _truncate_step(hop, db=""):
     """The plan line for the step that empties the target.
 
-    One wording for both PostgreSQL bulk paths, and it has to track what
-    `_pg_truncate_target` does: a plan that says "all user tables" beside a
-    plan that says the excluded ones are skipped describes a move that
-    empties a table and never refills it.
+    One wording for every bulk path that empties the target before loading
+    it, and it has to track what the emptying does: a plan that says "all
+    user tables" beside a plan that says the excluded ones are skipped
+    describes a move that empties a table and never refills it.
     """
     where = f" {db}" if db else ""
     if getattr(hop, "exclude", None):
@@ -603,39 +605,177 @@ def mydumper_defaults(hop, db):
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
-def mydumper_move(hop, db, workers, go, log):
+@functools.lru_cache(maxsize=None)
+def _long_options(program):
+    """The long options this installed build of `program` really has.
+
+    Read from the option column of its own `--help`, not from the whole
+    text: mydumper 1.0.5 names `--overwrite-tables` inside the description
+    of `--overwrite-unsafe`, and the binary answers `Unknown option
+    --overwrite-tables`. Measured, the column holds 136 options for mydumper
+    and 99 for myloader, and that one is in neither.
+    """
+    p = subprocess.run([program, "--help"], env=tool_env(None), text=True,
+                       capture_output=True)
+    return frozenset(re.findall(
+        r"(?m)^\s+(?:-\w,\s+)?(--[a-z0-9][a-z0-9-]*)(?=\s{2,}|$)",
+        (p.stdout or "") + (p.stderr or "")))
+
+
+def tool_flag(program, *spellings):
+    """The first of `spellings` the installed build accepts.
+
+    Flags get renamed between releases, and the old spelling does not
+    degrade: mydumper's `--trx-consistency-only` became `--trx-tables`,
+    myloader's `--purge-mode` is gone outright, and handed either one the
+    program stops at option parsing. So the spelling is asked of the binary
+    that is about to run rather than remembered from whichever build was
+    installed when the line was written.
+    """
+    have = _long_options(program)
+    for s in spellings:
+        if s in have:
+            return s
+    raise SystemExit(
+        "the installed bulk copy program accepts none of"
+        f" {', '.join(spellings)}, which this move needs -"
+        " `migkit doctor --install` puts a version in place that does")
+
+
+def _my_truncate_target(hop, db, log=None):
+    """Empty the target's tables before a data-only MySQL load.
+
+    The loader used to do this itself, as `--purge-mode TRUNCATE`. The
+    build installed here has no such option; its modes moved to
+    `--drop-table`, and measured on a data-only dump neither
+    `--drop-table=TRUNCATE` nor `--drop-table=DELETE` empties anything - the
+    load appends, and the rows the target already had stay beside the new
+    copy. So the target is emptied here, as the PostgreSQL paths already do
+    it, and through the same `excluded_tables()`.
+
+    `foreign_key_checks = 0` for the session doing it, because MySQL will
+    not truncate a table another table references - it refuses outright:
+
+        ERROR 1701 (42000): Cannot truncate a table referenced in a
+        foreign key constraint
+
+    With the checks off it empties exactly the tables it is given, and no
+    others. Measured: an excluded table referencing a replaced one kept both
+    its rows - which is why this path needs no counterpart to the PostgreSQL
+    cascade refusal. One connection throughout, because the setting belongs
+    to the session and `_q` opens a new one per call.
+    """
+    from .engines.mysql import MySQLEngine
+    eng = MySQLEngine(hop)
+    names = eng._all_tables("dst", db)
+    skip = set(excluded_tables(hop, db, names, qualifier=db))
+    keep = [n for n in names if f"{db}.{n}" not in skip]
+    if not keep:
+        return []
+    ddb = eng._quote_ident(eng._d("dst", db))
+    stmts = ["set foreign_key_checks = 0"] + [
+        f"truncate table {ddb}.{eng._quote_ident(n)}" for n in keep]
+    if log:
+        log("$ " + "; ".join(stmts))
+    conn = eng._conn("dst")
+    try:
+        with conn.cursor() as cur:
+            for stmt in stmts:
+                cur.execute(stmt)
+    finally:
+        conn.close()
+    return keep
+
+
+def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
+    """The dump and load command lines, built once for the plan and the run.
+
+    Neither carries a password. It used to go on as `-p<secret>`, attached,
+    which this build does not accept: the characters after `-p` were read
+    as more short options - `-ptest` is `-p -t -e -s -t`, and the run died
+    on `Error parsing option -t`, naming a flag nobody typed. And `_sh`
+    logs a command line as given, so every run printed the source password
+    before it failed; measured with a distinctive one, a single `move --go`
+    put it on the console once. Both programs read `MYSQL_PWD` - measured,
+    and a wrong one exits 1 - the way the PostgreSQL paths read
+    `PGPASSWORD`, so the secret reaches neither argv, the log, nor the
+    process list.
+
+    `-B` on the loader is the *target's* name for the database, which the
+    hop's `db_map` may make different from the source's.
+    """
+    from .engines.mysql import MySQLEngine
     s, t = hop.source, hop.target
+    dump = ["mydumper", "-h", s.host, "-P", str(s.port), "-u", s.user,
+            "-B", db, "-o", str(outdir), "--threads", str(workers),
+            "--no-schemas",
+            tool_flag("mydumper", "--trx-tables", "--trx-consistency-only")]
+    if cnf:
+        dump += ["--defaults-file", str(cnf)]
+    if omit:
+        dump += [tool_flag("mydumper", "--omit-from-file"), str(omit)]
+    load = ["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
+            "-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
+            "--threads", str(workers)]
+    return dump, load
+
+
+def mydumper_move(hop, db, workers, go, log):
+    """Dump, then empty the target, then load - in that order.
+
+    The target is emptied only once a complete dump is on disk. Emptying it
+    first, and then finding the source unreachable, hands back a target
+    with nothing in it and nothing to load.
+    """
     outdir = hop.report_dir(db) / "mydumper"
     filters = mydumper_defaults(hop, db)
     # beside the dump directory, not inside it: myloader is pointed at
     # that directory and has no reason to meet a file it does not read
     cnf = hop.report_dir(db) / "mydumper-filters.cnf"
-    extra = ["--defaults-file", str(cnf)] if filters else []
-    steps = [
-        f"mydumper -h {s.host} -P {s.port} -u {s.user} -p *** -B {db}"
-        f" -o {outdir} --threads {workers} --no-schemas --trx-consistency-only"
-        + (f" --defaults-file {cnf}  # row filters from the hop's mapping"
-           if filters else ""),
-        f"myloader -h {t.host} -P {t.port} -u {t.user} -p *** -B {db}"
-        f" -d {outdir} --threads {workers} --purge-mode TRUNCATE",
-    ]
+    omit = hop.report_dir(db) / "omit-tables.txt"
+    skip, unresolved = [], ""
+    if getattr(hop, "exclude", None):
+        from .engines.mysql import MySQLEngine
+        try:
+            skip = excluded_tables(hop, db, MySQLEngine(hop)._all_tables(
+                "src", db), qualifier=db)
+        except Exception as e:
+            unresolved = str(e).strip().splitlines()[0][:100] if str(e) \
+                else type(e).__name__
+    dump, load = _mydumper_commands(hop, db, workers, outdir,
+                                    cnf if filters else None,
+                                    omit if skip else None)
+    steps = [" ".join(dump)
+             + ("  # row filters from the hop's mapping" if filters else ""),
+             _truncate_step(hop, db),
+             " ".join(load)]
+    if skip:
+        steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
+                        " dumped at all")
+    if unresolved:
+        steps.insert(1, "# could not list the source's tables, so the hop's"
+                        f" exclude list cannot be pushed down: {unresolved}")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
+    if unresolved:
+        # the target keeps its excluded tables, so a dump that carried them
+        # would load the source's rows on top of the target's own
+        raise SystemExit(
+            f"{db}: the hop excludes tables and the source's table list"
+            f" could not be read ({unresolved}), so the copy cannot be told"
+            " to skip them. Nothing has been changed on the target.")
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
     if filters:
         cnf.write_text(filters)
         cnf.chmod(0o600)
-    _sh(["mydumper", "-h", s.host, "-P", str(s.port), "-u", s.user,
-         f"-p{s.password}", "-B", db, "-o", str(outdir),
-         "--threads", str(workers), "--no-schemas",
-         "--trx-consistency-only"] + extra, None, log)
+    if skip:
+        omit.write_text("".join(f"{n}\n" for n in skip))
+    _sh(dump, {"MYSQL_PWD": hop.source.password}, log)
     from .engines.mysql import MySQLEngine
+    _my_truncate_target(hop, db, log)
     with _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
-        _sh(["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
-             f"-p{t.password}", "-B", db, "-d", str(outdir),
-             "--threads", str(workers), "--purge-mode", "TRUNCATE"],
-            None, log)
+        _sh(load, {"MYSQL_PWD": hop.target.password}, log)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
 

@@ -78,7 +78,14 @@ def test_without_a_mapping_the_command_is_exactly_what_it_was(tmp_path):
     steps = movers.mydumper_move(_hop(None, tmp_path), "appdb", 2, False,
                                  None)
     assert "--defaults-file" not in steps[0], steps[0]
-    assert steps[0].endswith("--no-schemas --trx-consistency-only"), steps[0]
+    assert "--omit-from-file" not in steps[0], steps[0]
+    # the consistency flag is spelled however the installed build spells
+    # it: this line used to pin `--trx-consistency-only`, which the build
+    # installed here rejects at option parsing, so the command it pinned
+    # was one that could not run
+    trx = movers.tool_flag("mydumper", "--trx-tables",
+                           "--trx-consistency-only")
+    assert steps[0].endswith(f"--no-schemas {trx}"), steps[0]
 
 
 def test_the_config_is_written_beside_the_dump_not_inside_it(tmp_path):

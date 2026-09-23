@@ -604,12 +604,24 @@ class MySQLEngine(Engine):
                       str(out), "review schema-fix.sql, then apply it to"
                       " the target; schema-fix.revert.sql undoes it")
 
-    def _tables(self, side, db):
+    def _all_tables(self, side, db):
+        """Every base table on a side, the hop's exclusions included.
+
+        The bulk path needs the excluded ones by name - to tell the dump to
+        skip them and to leave them alone when the target is emptied - and
+        `_tables` has already dropped them by the time it answers. One
+        catalogue query for both, so the two lists cannot disagree about
+        what counts as a table.
+        """
         rows = self._q(side, "select table_name from information_schema.tables"
                              " where table_schema=%s and table_type='BASE TABLE'"
                              " and table_name not like 'migkit%%'"
                              " order by 1", (self._d(side, db),))
-        return [r[0] for r in rows if not self.hop.excluded(db, r[0])]
+        return [r[0] for r in rows]
+
+    def _tables(self, side, db):
+        return [t for t in self._all_tables(side, db)
+                if not self.hop.excluded(db, t)]
 
     def _pk_cols(self, db, t):
         rows = self._q("src",
