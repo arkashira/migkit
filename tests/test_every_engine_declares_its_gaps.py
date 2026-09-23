@@ -114,9 +114,10 @@ def test_not_applicable_says_why():
 
 
 def test_the_name_the_operator_used_is_the_one_said_back():
-    """`mariadb` is MySQL underneath; the operator wrote mariadb."""
-    said = _refused("mariadb", "fence")
-    assert "for mariadb hops" in said, said
+    """`documentdb` is MongoDB underneath; the operator wrote documentdb.
+    (This used MySQL's fence, which MySQL now has.)"""
+    said = _refused("documentdb", "fence")
+    assert "for documentdb hops" in said, said
 
 
 def test_an_unknown_engine_is_refused_not_guessed():

@@ -1,6 +1,7 @@
 import difflib
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -811,17 +812,37 @@ class MySQLEngine(Engine):
             with gate.unit():
                 return self._diff_table(d, tbl)
 
+        per = {}
         with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
             futs = {pool.submit(guarded, db, t): t for t in tables}
             for fu in as_completed(futs):
                 r, ra, rb = fu.result()
                 if stream:
                     stream(f"{futs[fu]}: {r.status}")
-                res.append(r)
-                rows_a += ra
-                rows_b += rb
-                if ra != rb:
-                    bad_counts.append(f"{futs[fu]} src={ra} dst={rb}")
+                per[futs[fu]] = (r, ra, rb)
+        # A table that differs is confirmed before it is called different:
+        # where the target replicates from the source, wait until it has
+        # applied what the source had, and look again. What converged was
+        # still arriving; what did not is a real difference. Without a
+        # replica to fence on, nothing changes here.
+        bad = [t for t, (r, _, _) in per.items() if r.status == "diff"]
+        if bad:
+            _, healed, how = self._resolve_inflight(db, bad, stream)
+            proof = dict(h.split(": ", 1) for h in how)
+            for t in healed:
+                r, ra, rb = self._diff_table(db, t)
+                if r.status == "ok":
+                    r = Result("data", r.scope, "ok",
+                               f"{r.detail}; the difference was still"
+                               f" arriving ({proof.get(t, 'confirmed')})",
+                               r.report)
+                per[t] = (r, ra, rb)
+        for t, (r, ra, rb) in per.items():
+            res.append(r)
+            rows_a += ra
+            rows_b += rb
+            if ra != rb:
+                bad_counts.append(f"{t} src={ra} dst={rb}")
         res = sorted(res, key=lambda r: r.scope)
         self._last_throttle = gate.summary()
         note = gate.line()
@@ -3184,6 +3205,56 @@ class MySQLEngine(Engine):
         if str(io) != "Yes" or str(sq) != "Yes":
             out.append("NOT replicating")
         return ", ".join(out)
+
+    def src_lsn(self, db):
+        """Where the source is now, as its executed GTID set - the same
+        question the PostgreSQL engine answers with a WAL position, under
+        the same name so a caller asks every engine alike.
+
+        None where GTID is off: a file-and-position wait needs the replica
+        to be reading the source's own binary log file names, and nothing
+        but GTID survives a change of which server the target replicates
+        from. No position means no fence, and the caller says so.
+        """
+        brand = self._brands()[0].name
+        on, _ = self._gtid_state(brand)
+        if not on:
+            return None
+        sql = ("select @@gtid_binlog_pos" if brand == "mariadb"
+               else "select @@global.gtid_executed")
+        got = self._q("src", sql)
+        pos = str(got[0][0]).strip() if got and got[0][0] is not None else ""
+        return pos or None
+
+    def fence_wait(self, db, gtids, timeout=300):
+        """Block until the target has applied everything the source had
+        executed at `gtids`. True = fence passed, False = timed out, None =
+        nothing to fence on (no position, or the target is not replicating
+        from anywhere migkit can see).
+
+        The server waits, not migkit: `WAIT_FOR_EXECUTED_GTID_SET` (MySQL)
+        or `MASTER_GTID_WAIT` (MariaDB) returns as soon as the set is
+        applied. It is asked in short turns, so a read timeout on the
+        connection never cuts a long wait off halfway.
+        """
+        if not gtids:
+            return None
+        brand = self._brands()[1].name
+        status = ("show slave status" if brand == "mariadb"
+                  else "show replica status")
+        try:
+            if not self._q("dst", status):
+                return None
+        except Exception:
+            return None
+        ask = ("select master_gtid_wait(%s, %s)" if brand == "mariadb"
+               else "select wait_for_executed_gtid_set(%s, %s)")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            got = self._q("dst", ask, (gtids, 5))
+            if got and got[0][0] is not None and int(got[0][0]) == 0:
+                return True
+        return False
 
     def _gtid_state(self, brand):
         """(whether to replicate by GTID, what to say about it).

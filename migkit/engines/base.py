@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 
 # Engine-independent name for what a finding is about.
@@ -2360,6 +2361,125 @@ class Engine:
         against nothing is not the same as the target being empty.
         """
         return False
+
+    # --- confirming a difference before calling it one -------------------
+    # Written once for every engine that can compare rows by key
+    # (`_compare_pks`, `_write_pk_files`) and, for the fenced proof, can say
+    # where its source is (`src_lsn`) and wait for the target to get there
+    # (`fence_wait`). They lived in the PostgreSQL engine; MySQL had every
+    # piece they need and none of them.
+
+    def _report(self, db):
+        """Where this engine's evidence goes: the same place as every other
+        engine's.
+
+        It used to be `reports/pgdc/<hop>/<db>`, from before there was an
+        estate to be consistent with, while `hop.report_dir` - which the
+        base's own `params.json` for this very hop uses - is
+        `reports/<hop>/<db>`. One hop wrote into two trees, and the
+        drilldown an operator was told to read was not where every other
+        engine puts it. Both the writer and the reader here go through this
+        one method, so they move together; a check run by an older migkit
+        leaves its files in the old place, and re-running the check writes
+        them where `sync` now looks.
+        """
+        return self.hop.report_dir(db)
+
+    def _suspect_keys(self, db, table):
+        """The keys the last check wrote down as differing, all kinds."""
+        d = self._report(db)
+        keys = set()
+        for k in ("missing", "extra", "changed"):
+            f = d / f"data-{table}.{k}"
+            if f.exists():
+                keys |= set(f.read_text().splitlines())
+        keys.discard("")
+        return keys
+
+    def _compare_pks(self, db, table, keys):
+        """(missing, extra, changed) for these keys, or None when this
+        engine cannot compare by key."""
+        return None
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        return None
+
+    def settle_recheck(self, db, table):
+        keys = self._suspect_keys(db, table)
+        if not keys or len(keys) > 20000:
+            return None
+        cmp = self._compare_pks(db, table, keys)
+        if cmp is None:
+            return None
+        missing, extra, changed = cmp
+        self._write_pk_files(db, table, missing, extra, changed)
+        return len(missing), len(extra), len(changed)
+
+    def fenced_recheck(self, db, table, keys):
+        """Convergence proof for suspect rows: capture src LSN, wait for
+        the fence, re-compare. Two rounds ride out rows that stay hot;
+        what survives is a real diff, not replication in flight.
+        Returns (missing, extra, changed, proof) or None if unfenceable."""
+        if not hasattr(self, "fence_wait") or not hasattr(self, "src_lsn"):
+            return None
+        proof = []
+        for rnd in (1, 2):
+            lsn = self.src_lsn(db)
+            ok = self.fence_wait(db, lsn, timeout=int(
+                self.hop.options.get("fence_timeout", 300)))
+            if ok is None:
+                return None
+            proof.append(f"round {rnd}: fence lsn={lsn}"
+                         f" {'passed' if ok else 'TIMEOUT'}")
+            cmp = self._compare_pks(db, table, keys)
+            if cmp is None:
+                return None
+            missing, extra, changed = cmp
+            if not (missing or extra or changed):
+                self._write_pk_files(db, table, [], [], [])
+                return [], [], [], proof
+            keys = set(missing) | set(extra) | set(changed)
+            if not ok:
+                break
+        self._write_pk_files(db, table, missing, extra, changed)
+        return missing, extra, changed, proof
+
+    def _resolve_inflight(self, db, bad, stream=None):
+        """Split DIFF tables into real diffs vs in-flight replication,
+        deterministically when a fence is available, by sleep-settle as
+        the fallback."""
+        still, healed, how = [], [], []
+        settle = int(self.hop.options.get("settle", 0))
+        slept = False
+        for t in bad:
+            keys = self._suspect_keys(db, t)
+            if not keys or len(keys) > 20000:
+                still.append(t)
+                continue
+            r = self.fenced_recheck(db, t, keys)
+            if r is not None:
+                missing, extra, changed, proof = r
+                if missing or extra or changed:
+                    still.append(t)
+                else:
+                    healed.append(t)
+                    how.append(f"{t}: {'; '.join(proof)}")
+                if stream:
+                    stream(f"{t}: fence {'REAL DIFF' if t in still else 'converged'}")
+                continue
+            if not settle:
+                still.append(t)
+                continue
+            if not slept:
+                time.sleep(settle)
+                slept = True
+            s = self.settle_recheck(db, t)
+            if s is None or any(s):
+                still.append(t)
+            else:
+                healed.append(t)
+                how.append(f"{t}: settled after {settle}s (no fence visible)")
+        return still, healed, how
 
     def neutral_empty(self, side, db, table):
         """Remove every row of `table` on the target, keeping the table.

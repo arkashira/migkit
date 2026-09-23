@@ -28,6 +28,8 @@ CAPABILITIES = {
     "table-copy": "copying table by table, resumably",
     "stream": "keeping the target following the source",
     "fence": "proving the target has caught up before cutover",
+    "confirm": ("telling a difference still arriving from one that is"
+                " wrong"),
     "delta": "verifying only what changed",
     "users": "carrying users and their grants",
     "guard": "noticing a move that moved nothing",
@@ -45,10 +47,9 @@ _NO_PLANNER = "the engine keeps no optimiser statistics to refresh"
 #: every gap, by engine: (NOT_APPLICABLE, why) or (NOT_YET, backlog item)
 GAPS = {
     "postgres": {},
-    "mysql": {
-        "fence": (NOT_YET, "0e"),
-    },
+    "mysql": {},
     "mongodb": {
+        "confirm": (NOT_YET, "1"),
         "sequences": (NOT_APPLICABLE,
                       "collections have no sequences or auto-increment"),
         "table-copy": (NOT_YET, "0e"),
@@ -56,6 +57,7 @@ GAPS = {
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "mssql": {
+        "confirm": (NOT_YET, "1"),
         "bulk-move": (NOT_YET, "0e"),
         "table-copy": (NOT_YET, "0e"),
         "stream": (NOT_YET, "0e"),
@@ -66,6 +68,7 @@ GAPS = {
         "snapshot": (NOT_YET, "0e"),
     },
     "redis": {
+        "confirm": (NOT_YET, "1"),
         "schema": (NOT_YET, "0e"),
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
         "params": (NOT_YET, "0e"),
@@ -80,6 +83,7 @@ GAPS = {
         "snapshot": (NOT_YET, "0e"),
     },
     "kafka": {
+        "confirm": (NOT_YET, "1"),
         "sequences": (NOT_APPLICABLE,
                       "offsets are assigned by the broker, not carried"),
         "params": (NOT_YET, "0e"),
@@ -93,6 +97,7 @@ GAPS = {
         "snapshot": (NOT_YET, "0e"),
     },
     "sqlite": {
+        "confirm": (NOT_APPLICABLE, _FILE_DB),
         "params": (NOT_YET, "0e"),
         "bulk-move": (NOT_YET, "0e"),
         "stream": (NOT_APPLICABLE, _FILE_DB),
@@ -104,6 +109,7 @@ GAPS = {
         "snapshot": (NOT_YET, "0e"),
     },
     "hetero": {
+        "confirm": (NOT_YET, "1"),
         "deep": (NOT_YET, "0e"),
         "sequences": (NOT_YET, "0e"),
         "params": (NOT_YET, "0e"),
@@ -115,6 +121,7 @@ GAPS = {
         "snapshot": (NOT_YET, "0e"),
     },
     "generic": {
+        "confirm": (NOT_YET, "33"),
         "sequences": (NOT_YET, "0e"),
         "params": (NOT_YET, "0e"),
         "bulk-move": (NOT_YET, "33"),
@@ -204,6 +211,10 @@ PROBES = {
     "table-copy": _has("move_table"),
     "stream": lambda n, c: _stream(n),
     "fence": _has("fence_wait"),
+    # the confirm pass is the base's; an engine runs it when it can fence
+    # and can compare rows by key
+    "confirm": lambda n, c: (n in engines_with("fence_wait")
+                             and _own(c, "_compare_pks")),
     "delta": _has("delta_verify"),
     "users": lambda n, c: n in _users_engines(),
     "guard": lambda n, c: _own(c, "moved_nothing"),
@@ -259,6 +270,8 @@ INSTEAD = {
                " migkit check before cutover"),
     "fence": ("stop writes on the source and let migkit check prove the"
               " target before cutover"),
+    "confirm": ("stop writes on the source before the final check, so"
+                " nothing is still arriving when it looks"),
     "delta": ("run migkit check, which compares everything rather than only"
               " what changed"),
     "users": "create the users and their grants on the target by hand",

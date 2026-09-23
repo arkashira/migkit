@@ -535,22 +535,6 @@ class PostgresEngine(Engine):
                          " and datname not in ('postgres','rdsadmin') order by 1")
         return [l for l in out.splitlines() if l and not self.hop.excluded(l)]
 
-    def _report(self, db):
-        """Where this engine's evidence goes: the same place as every other
-        engine's.
-
-        It used to be `reports/pgdc/<hop>/<db>`, from before there was an
-        estate to be consistent with, while `hop.report_dir` - which the
-        base's own `params.json` for this very hop uses - is
-        `reports/<hop>/<db>`. One hop wrote into two trees, and the
-        drilldown an operator was told to read was not where every other
-        engine puts it. Both the writer and the reader here go through this
-        one method, so they move together; a check run by an older migkit
-        leaves its files in the old place, and re-running the check writes
-        them where `sync` now looks.
-        """
-        return self.hop.report_dir(db)
-
     def _dump_schema_native(self, side, db):
         ep = self.hop.source if side == "src" else self.hop.target
         p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
@@ -4512,23 +4496,6 @@ class PostgresEngine(Engine):
             elif f.exists():
                 f.unlink()
 
-    def settle_recheck(self, db, table):
-        d = self._report(db)
-        keys = set()
-        for k in ("missing", "extra", "changed"):
-            f = d / f"data-{table}.{k}"
-            if f.exists():
-                keys |= set(f.read_text().splitlines())
-        keys.discard("")
-        if not keys or len(keys) > 20000:
-            return None
-        cmp = self._compare_pks(db, table, keys)
-        if cmp is None:
-            return None
-        missing, extra, changed = cmp
-        self._write_pk_files(db, table, missing, extra, changed)
-        return len(missing), len(extra), len(changed)
-
     # --- consistency by design: any consumer (incl. DTS) holds a slot on
     # the source, so "target applied past LSN X" is observable there ---
 
@@ -5010,76 +4977,6 @@ class PostgresEngine(Engine):
                 return True
             time.sleep(2)
         return False
-
-    def fenced_recheck(self, db, table, keys):
-        """Convergence proof for suspect rows: capture src LSN, wait for
-        the fence, re-compare. Two rounds ride out rows that stay hot;
-        what survives is a real diff, not replication in flight.
-        Returns (missing, extra, changed, proof) or None if unfenceable."""
-        proof = []
-        for rnd in (1, 2):
-            lsn = self.src_lsn(db)
-            ok = self.fence_wait(db, lsn, timeout=int(
-                self.hop.options.get("fence_timeout", 300)))
-            if ok is None:
-                return None
-            proof.append(f"round {rnd}: fence lsn={lsn}"
-                         f" {'passed' if ok else 'TIMEOUT'}")
-            cmp = self._compare_pks(db, table, keys)
-            if cmp is None:
-                return None
-            missing, extra, changed = cmp
-            if not (missing or extra or changed):
-                self._write_pk_files(db, table, [], [], [])
-                return [], [], [], proof
-            keys = set(missing) | set(extra) | set(changed)
-            if not ok:
-                break
-        self._write_pk_files(db, table, missing, extra, changed)
-        return missing, extra, changed, proof
-
-    def _resolve_inflight(self, db, bad, stream=None):
-        """Split DIFF tables into real diffs vs in-flight replication,
-        deterministically when a fence is available, by sleep-settle as
-        the fallback."""
-        still, healed, how = [], [], []
-        settle = int(self.hop.options.get("settle", 0))
-        slept = False
-        for t in bad:
-            d = self._report(db)
-            keys = set()
-            for k in ("missing", "extra", "changed"):
-                f = d / f"data-{t}.{k}"
-                if f.exists():
-                    keys |= set(f.read_text().splitlines())
-            keys.discard("")
-            if not keys or len(keys) > 20000:
-                still.append(t)
-                continue
-            r = self.fenced_recheck(db, t, keys)
-            if r is not None:
-                missing, extra, changed, proof = r
-                if missing or extra or changed:
-                    still.append(t)
-                else:
-                    healed.append(t)
-                    how.append(f"{t}: {'; '.join(proof)}")
-                if stream:
-                    stream(f"{t}: fence {'REAL DIFF' if t in still else 'converged'}")
-                continue
-            if not settle:
-                still.append(t)
-                continue
-            if not slept:
-                time.sleep(settle)
-                slept = True
-            s = self.settle_recheck(db, t)
-            if s is None or any(s):
-                still.append(t)
-            else:
-                healed.append(t)
-                how.append(f"{t}: settled after {settle}s (no fence visible)")
-        return still, healed, how
 
     def _column_fingerprint(self, db, table):
         """One scan, one aggregate per column: which columns actually
