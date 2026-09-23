@@ -402,6 +402,114 @@ class GenericEngine(Engine):
                               f"{len(tables)} tables, the same number of rows"
                               " on both sides")]
 
+    #: how many offending key values a verdict names before it stops
+    DEEP_EXAMPLES = 5
+
+    def check_deep(self, db):
+        """Check the assumption every other verdict on this engine rests on.
+
+        The comparison matches rows by key and the repair addresses them by
+        key, so a key that is not one row per value makes both of them
+        answer about something other than the data. Two ways it breaks, both
+        measured on PostgreSQL 16:
+
+        **A row whose key is NULL is invisible.** Source with four rows, one
+        of them keyed NULL, against a target with the other three:
+
+            3 rows in table A
+            3 rows in table B
+            0 rows exclusive to table A (not present in B)
+            0.00% difference score
+
+        and migkit's own checks on that same pair: counts **OK** (`the same
+        number of rows on both sides`), data **OK** (`no row is on one side
+        only`), schema **OK**. A migration that dropped every NULL-keyed row
+        would be reported as complete.
+
+        **Duplicate key values make the answer stop being repeatable.**
+        Measured across two servers - which is what every real hop is - a
+        source holding `4/y` and `4/z` against a target holding `4/q`, four
+        runs of the same command on the same unchanged pair:
+
+            run 1   0 exclusive A, 0 exclusive B, 1 updated, 20.00%
+            run 2   0 exclusive A, 0 exclusive B, 1 updated, 20.00%
+            run 3   ERROR -           (with no message after it)
+            run 4   ERROR -
+
+        The truth is two rows on the source alone and one on the target
+        alone. Pointing both URLs at the *same* server instead makes it
+        refuse outright with `ERROR - Duplicate primary keys` - the safer
+        failure, and the one a real migration never sees.
+        """
+        res = []
+        key = self._key()
+        for t in self._tables():
+            scope = f"{db}.{t}" if db != "-" else t
+            for side, where in (("source", "src"), ("target", "dst")):
+                try:
+                    res.append(self._deep_key(scope, side, where, t, key))
+                except SystemExit as e:
+                    res.append(Result(
+                        "deep", f"{scope} key ({side})", "error",
+                        str(e).split(":", 1)[-1].strip()[:160], "",
+                        "the key has to be readable on both sides before"
+                        " any verdict about the rows means anything"))
+        self._close()
+        return res
+
+    def _deep_key(self, scope, side, which, t, key):
+        from sqeleton.queries import code, or_, table, this
+        conn = self._connect(which)
+        tbl = table(*self._path(conn, t))
+        named = ", ".join(key)
+
+        # rebuilt per query on purpose: `this.id` is resolved in place the
+        # first time it is compiled, and the same list handed to a second
+        # query raises `Already resolved!`. The repair path documents the
+        # same trap; it is a property of the builder, not of either caller.
+        def cols():
+            return [getattr(this, k) for k in key]
+
+        try:
+            blank = conn.query(
+                tbl.where(or_(*[c == None for c in cols()]))  # noqa: E711
+                   .select(code("count(*)")), list)[0][0]
+            dups = conn.query(
+                tbl.group_by(*cols()).agg(code("count(*)"))
+                   .having(code("count(*) > 1")).limit(self.DEEP_EXAMPLES),
+                list)
+        except Exception as e:
+            raise SystemExit(f"cannot read the key of {t}:"
+                             f" {str(e).splitlines()[-1][:160]}")
+        if blank:
+            return Result(
+                "deep", f"{scope} key ({side})", "diff",
+                f"{blank} rows on the {side} have no value for {named} -"
+                " a row with no key cannot be matched against the other"
+                " side, so it is left out of the comparison entirely and"
+                " every other verdict for this table is reported over a"
+                " smaller table than the one you have", "",
+                "give those rows a key, or key the hop on a column that is"
+                " always filled, then run the check again")
+        if dups:
+            shown = ", ".join("/".join(str(v) for v in row[:len(key)])
+                              for row in dups)
+            return Result(
+                "deep", f"{scope} key ({side})", "diff",
+                f"{named} names more than one row on the {side} ({shown}) -"
+                " rows are matched by key, so with a key that names several"
+                " the comparison cannot say which it matched and stops"
+                " being repeatable. Measured on one unchanged pair, four"
+                " runs in a row: two answered `1 row updated` and two"
+                " failed with an empty error, where the truth was two rows"
+                " on one side and one on the other. No verdict about this"
+                " table's rows means anything until the key is one", "",
+                "key the hop on a column or set of columns that is unique,"
+                " or add a unique index, then run the check again")
+        return Result("deep", f"{scope} key ({side})", "ok",
+                      f"{named} is filled and unique on the {side}, so every"
+                      " row can be matched and addressed")
+
     def check_data(self, db, table=None, stream=None):
         res = []
         gate = self._gate()

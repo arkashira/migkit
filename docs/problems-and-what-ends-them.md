@@ -1296,6 +1296,48 @@ connected to `postgres` with the only subscription living in `other`, the
 view still lists `pg_16407 | 0/0`, and a `min()` across that would answer
 `0/0` for ever. Test: `test_where_the_target_actually_is.py`.
 
+### D12b. The key that is not a key
+
+**What happens.** A row comparison that matches by key is only as good as
+the key. Two ways it stops being one, both measured on the engine migkit
+reaches nine databases through:
+
+**A row whose key is NULL is invisible.** A source of four rows, one keyed
+NULL, against a target holding the other three:
+
+    3 rows in table A
+    3 rows in table B
+    0 rows exclusive to table A (not present in B)
+    0.00% difference score
+
+and migkit's own checks on that same pair, all three green - counts `the
+same number of rows on both sides`, data `no row is on one side only`,
+schema `same names and same declared types`. **Four rows against three,
+reported as complete.** A migration that dropped every NULL-keyed row
+would pass verification, and the first anyone would hear of it is the
+application asking for one of them.
+
+**A repeated key makes the answer stop being repeatable.** Same pair,
+unchanged, four runs of the same command - a source holding `4/y` and
+`4/z` against a target holding `4/q`:
+
+    run 1   0 exclusive A, 0 exclusive B, 1 updated, 20.00%
+    run 2   0 exclusive A, 0 exclusive B, 1 updated, 20.00%
+    run 3   ERROR -        (with nothing after it)
+    run 4   ERROR -
+
+The truth is two rows on the source alone and one on the target alone.
+Pointing both connection strings at the *same* server makes it refuse
+outright instead - `ERROR - Duplicate primary keys` - which is the safer
+failure and the one no real hop ever sees, because a real hop has two
+servers.
+
+**migkit: Ends it.** A deep check asks both sides, before any of it
+matters, whether the key is filled and whether it is one row per value,
+and says what each answer costs. Both questions go through the portable
+query builder rather than hand-written SQL, so one implementation serves
+all nine engines. Test: `test_generic_key_is_a_key.py`.
+
 ### D13. The difference you cannot see, and the one the reader ate
 
 **What happens.** Two values print identically and are not equal: `é` as
