@@ -931,6 +931,36 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
                       " (monitor lag with: migkit watch)")
 
 
+def _follow(hop, eng, db, do_drop, go):
+    """The CDC leg that runs from here rather than from the target.
+
+    Reached by `MIGKIT_CDC=follow`, never by a flag: both paths carry the
+    same changes, and which one is possible is a fact about the network
+    between the two servers, not a preference.
+    """
+    from . import movers
+    dbs = [db] if db else eng.databases()
+    for d in dbs:
+        console.print(f"[bold]{d}[/bold]")
+        if do_drop:
+            for line in movers.follow_teardown(hop, d, go,
+                                               lambda m: chat(f"  {m}")):
+                console.print(f"  {line}")
+            if go:
+                _changelog(hop, {"op": "follow-drop", "db": d})
+            continue
+        for line in movers.pgcopydb_follow(hop, d, go,
+                                           lambda m: chat(f"  {m}")):
+            console.print(f"  {line}")
+        if go:
+            _changelog(hop, {"op": "follow", "db": d})
+    if not go:
+        console.print("\ndry-run, add --go to execute")
+    elif not do_drop:
+        console.print("[green]caught up to the end position[/green] -"
+                      f" verify: migkit check {hop.name}")
+
+
 def _tail(hop, eng, db, go):
     if not db:
         raise SystemExit("cdc tail needs --db")
@@ -1067,6 +1097,8 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     has_tail = hasattr(eng, "tail_apply")
     if mode == "cdc":
         if engine == "postgres" and has_repl:
+            if movers.follow_selected() == "follow":
+                return _follow(hop, eng, db, do_drop, go)
             return _replicate(hop, eng, db, False, do_drop, go)
         if has_tail and _tail_ready(eng):
             return _tail(hop, eng, db, go)

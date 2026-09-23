@@ -4677,6 +4677,23 @@ class PostgresEngine(Engine):
         raw = f"migkit_{self.hop.name}_{db}".replace("-", "_")
         return "".join(c if c.isalnum() or c == "_" else "_" for c in raw)[:63]
 
+    def follow_slot(self, db):
+        """The replication slot that goes with `follow_origin`.
+
+        Same name, lower-cased, because the two namespaces do not accept
+        the same characters. Asked of PostgreSQL 16 rather than assumed:
+
+            select pg_create_logical_replication_slot('migkit_Prod_EU_db', ...)
+            ERROR:  replication slot name "migkit_Prod_EU_db" contains an
+                    invalid character
+            HINT:  Replication slot names may only contain lower case
+                   letters, numbers, and the underscore character.
+
+        A hop named `Prod-EU` would otherwise build a name the server
+        refuses, at the moment the CDC leg starts and not before.
+        """
+        return self.follow_origin(db).lower()
+
     #: origins on the target that belong to the database being fenced.
     #: `pg_replication_origin_status` is cluster-wide: connected to one
     #: database it also lists every other one's. Measured on PostgreSQL 16 -

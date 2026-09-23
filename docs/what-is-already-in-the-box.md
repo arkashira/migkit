@@ -66,14 +66,19 @@ What that leaves on the floor:
     number. A cutover decision read off the source slot would have been
     made against an empty target.
 
-  So the wrap is not "shell out to `follow`": it is to drive the sentinel,
-  bound the run with `--endpos`, and read progress from the *target's*
-  replication origin rather than the mover's own opinion of it. The
-  groundwork for that last part is in: `applied_lsn` and `follow_origin`
-  on the PostgreSQL engine, with the origin named per hop and database
-  because pgcopydb's default is the bare word `pgcopydb` and origins are
-  cluster-wide. What it is **not** is a fence - see D12; that was tried and
-  reverted with the measurement. The mover itself is not built yet.
+  **Done** - `MIGKIT_CDC=follow` on `move --mode cdc`, an environment
+  variable rather than a flag because which path is possible is a fact
+  about the network and not a preference. migkit drives the sentinel
+  (`set apply`, `set endpos --current`), names the slot and the origin per
+  hop and database, keeps the state under the hop's reports rather than
+  `/tmp` - the source releases WAL as soon as pgcopydb has written a change
+  there, so that directory is the only copy until the target has it - and
+  judges the run by the process reaching its end position, not by
+  `applied_lsn >= endpos`, which never comes true (D12, learned twice).
+  `--drop` takes back the slot, the publication and the origin, so an
+  abandoned leg cannot pin WAL (E5). Checked before and after a run: the
+  source gained no schema and no table, only a publication.
+  `test_cdc_driven_from_here.py`.
 * ~~**`compare data`**~~ **done** - run against migkit's own verdict on the
   same pair under `MIGKIT_CROSSCHECK=1`, and reported as a deep check. It
   agreed on all four pairs it was tried on: identical rows, `numeric` 1.0
@@ -254,8 +259,10 @@ Cheapest first, where "cheap" means no new dependency:
 2. mydumper `--regex` / `--where`, pgcopydb `--filters`, `pg_dump -t/-T`,
    Debezium `table.include.list` - the mover half of plan item 17, all of it
    already installed.
-3. pgcopydb `snapshot`, `follow`, `compare` - a consistent snapshot, a
-   second CDC path, and an independent verifier to check ours against.
+3. ~~pgcopydb `snapshot`, `follow`, `compare data`~~ **done** - a shared
+   snapshot for the consistent pass, a CDC path driven from here for a
+   target that cannot dial the source, and an independent verifier to check
+   migkit's own against. `compare schema` is still unopened.
 4. `GenericEngine` discovery + the deep battery - turns nine named engines
    from "reladiff speaks it" into "migkit supports it".
 5. atlas `migrate lint` on the DDL migkit already generates.

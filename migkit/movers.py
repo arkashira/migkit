@@ -819,6 +819,218 @@ def pgcopydb_move(hop, db, workers, go, log):
     return steps
 
 
+def follow_selected():
+    """Which PostgreSQL CDC path `move --mode cdc` should take.
+
+    An environment variable rather than a flag, the way `MIGKIT_MOVER` is,
+    because it is not a choice about *what* to do - both paths replicate the
+    same changes - but about which one this network allows. Unset keeps the
+    path every existing hop already takes.
+    """
+    import os
+    want = os.environ.get("MIGKIT_CDC", "").strip().lower()
+    if not want:
+        return ""
+    if want not in ("native", "follow"):
+        raise SystemExit(
+            f"MIGKIT_CDC={want} is not one of native, follow."
+            " native = CREATE SUBSCRIPTION, which needs the target to dial"
+            " the source; follow = pgcopydb follow, driven from here, which"
+            " does not")
+    return want
+
+
+def follow_dir(hop, db):
+    """Where the CDC leg keeps its state, and why it is not a temp dir.
+
+    pgcopydb confirms flush to the *source* as soon as the receive side has
+    written a change to this directory - so the source releases the WAL for
+    changes the target has not applied yet, and this directory becomes the
+    only copy. Measured on 0.18 with apply held back: the slot's
+    `confirmed_flush_lsn` had advanced to the head with 56 bytes of WAL
+    retained, the target held 0 rows of 200, and everything the source could
+    tell you said "caught up". Put it under the hop's report directory,
+    where it survives a reboot and a `/tmp` sweep.
+    """
+    return hop.report_dir(db) / "follow"
+
+
+def pgcopydb_follow(hop, db, go, log=None, timeout=None):
+    """Carry changes to the target from where migkit runs, and stop at a
+    position that can be named.
+
+    `CREATE SUBSCRIPTION` makes the *target* dial the source, which plenty
+    of migrations cannot do at all, and leaves the source's password in
+    `pg_subscription` when it can. This runs on the operator's machine,
+    opens both connections itself, and writes no credential anywhere.
+
+    Three things measured on pgcopydb 0.18 that a bare `shell out to
+    follow` would get wrong, and that migkit does here so the operator
+    never meets them:
+
+    * **Apply is off by default.** Without `stream sentinel set apply`
+      nothing is ever written to the target; the log says only "Waiting
+      until the pgcopydb sentinel apply is enabled" and the run looks
+      healthy. The sentinel lives in `--dir`, not on the source - checked:
+      the source gained no schema and no table, only a publication, which
+      is the same object the native path already creates.
+    * **It reports progress the target does not have.** `replay_lsn` came
+      back equal to `write_lsn` - fully replayed - while the target held
+      zero rows. So the run is not judged by pgcopydb's own sentinel.
+    * **`--endpos` really does end it**, which is the thing no other CDC
+      path here offers: a stop at a position, rather than a stop when
+      somebody notices. Measured ~2 minutes from setting it to exit.
+
+    What it is *not* judged by either is `applied_lsn >= endpos`. The
+    target's origin records the LSN of the last applied *transaction*, and
+    an endpos is a WAL position that is usually past it - measured, endpos
+    0/156D578 against a final origin of 0/1567D28, on a run that copied
+    every row correctly. Waiting for that comparison would never return.
+    The end of the run is the process exiting; the proof is `migkit check`.
+    """
+    import os
+    import subprocess as _sp
+
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    origin, slot = eng.follow_origin(db), eng.follow_slot(db)
+    d = follow_dir(hop, db)
+    s, t = hop.source, hop.target
+    src = (f"postgresql://{s.user}:{quote(s.password or '', safe='')}"
+           f"@{s.host}:{s.port}/{db}")
+    dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
+           f"@{t.host}:{t.port}/{hop.target_db(db)}")
+    shown = (f"pgcopydb follow --dir {d} --slot-name {slot}"
+             f" --create-slot --origin {origin} --plugin pgoutput"
+             " --not-consistent")
+    steps = [
+        shown,
+        f"pgcopydb stream sentinel set apply --dir {d}"
+        "   (without this nothing is ever applied)",
+        f"pgcopydb stream sentinel set endpos --current --dir {d}"
+        "   (the provable stop)",
+        f"state kept in {d} - the source releases WAL as soon as pgcopydb"
+        " has written it there, so that directory is the only copy until"
+        " the target has it",
+        f"changes from before the slot {slot} existed are not carried;"
+        " the bulk copy and migkit check are what cover those",
+    ]
+    if not go:
+        return steps
+    if pgcopydb_runner() != "local":
+        raise SystemExit(
+            "pgcopydb follow needs the pgcopydb binary on this machine:"
+            " it runs for the length of the catch-up and keeps its state"
+            f" in {d}. Install pgcopydb, or use MIGKIT_CDC=native")
+    d.mkdir(parents=True, exist_ok=True)
+    env = tool_env({"PGCOPYDB_SOURCE_PGURI": src, "PGCOPYDB_TARGET_PGURI": dst})
+    out = d / "follow.log"
+    if log:
+        log(shown)
+    with out.open("ab") as fh:
+        proc = _sp.Popen(
+            ["pgcopydb", "follow", "--dir", str(d), "--slot-name", slot,
+             "--create-slot", "--origin", origin, "--plugin", "pgoutput",
+             "--not-consistent"], stdout=fh, stderr=fh, env=env)
+    try:
+        _follow_sentinel(d, env, proc, log)
+        limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
+        try:
+            proc.wait(timeout=limit)
+        except _sp.TimeoutExpired:
+            raise SystemExit(
+                f"pgcopydb follow did not reach its end position in {limit}s."
+                f" It is still running; its log is {out}. Nothing has been"
+                " marked as caught up")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except _sp.TimeoutExpired:
+                proc.kill()
+    if proc.returncode:
+        raise SystemExit(f"pgcopydb follow exited {proc.returncode}; its log"
+                         f" is {out}")
+    steps.append(f"target applied up to {eng.applied_lsn(db) or 'nothing'}"
+                 " - run migkit check to prove the rows, an LSN is not a"
+                 " row count")
+    return steps
+
+
+def follow_teardown(hop, db, go, log=None):
+    """Take back what the CDC leg left on both servers.
+
+    The slot is the one that matters: an abandoned logical slot pins WAL
+    until the source runs out of disk, which is a source outage caused by
+    the migration tooling (E5). pgcopydb also creates a publication named
+    after the slot, and the origin lives on the target - all three are
+    named by migkit, so all three can be named here.
+    """
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    origin, slot = eng.follow_origin(db), eng.follow_slot(db)
+    plan = [
+        ("src", f"select pg_drop_replication_slot('{slot}')"
+                f" from pg_replication_slots where slot_name = '{slot}'"),
+        ("src", f"drop publication if exists {slot}"),
+        ("dst", f"select pg_replication_origin_drop('{origin}')"
+                " from pg_replication_origin"
+                f" where roname = '{origin}'"),
+    ]
+    steps = [f"{side}: {sql}" for side, sql in plan]
+    if not go:
+        return steps
+    for side, sql in plan:
+        d = db if side == "src" else hop.target_db(db)
+        try:
+            eng._psql(side, d, sql)
+        except RuntimeError as e:
+            # each of the three is independently absent on a leg that never
+            # ran, or that was torn down already; saying which one refused
+            # beats stopping before the slot is dropped
+            steps.append(f"{side}: could not run `{sql[:40]}...`:"
+                         f" {str(e).splitlines()[-1][:120]}")
+        else:
+            if log:
+                log(f"{side}: {sql}")
+    left = follow_dir(hop, db)
+    steps.append(f"state directory left in place: {left} - it is the record"
+                 " of what was carried, and removing it is the operator's"
+                 " call")
+    return steps
+
+
+def _follow_sentinel(d, env, proc, log=None):
+    """Turn the apply on and name the stop, once the run has made its
+    sentinel. `follow` creates it at startup, so this cannot be done before
+    the process exists - which is exactly why it is migkit's job and not a
+    line in a runbook somebody forgets."""
+    import subprocess as _sp
+    import time as _t
+    end = _t.monotonic() + 120
+    while _t.monotonic() < end:
+        if proc.poll() is not None:
+            raise SystemExit("pgcopydb follow exited before it was told to"
+                             f" apply anything; its log is {d / 'follow.log'}")
+        got = _sp.run(["pgcopydb", "stream", "sentinel", "get", "--dir",
+                       str(d)], capture_output=True, text=True, env=env)
+        if got.returncode == 0 and "apply" in got.stdout:
+            break
+        _t.sleep(2)
+    else:
+        raise SystemExit("pgcopydb follow never produced a sentinel to drive")
+    for args, why in ((["set", "apply"], "apply"),
+                      (["set", "endpos", "--current"], "end position")):
+        p = _sp.run(["pgcopydb", "stream", "sentinel"] + args + ["--dir",
+                    str(d)], capture_output=True, text=True, env=env)
+        if p.returncode:
+            raise SystemExit(f"could not set the {why} on the CDC leg:"
+                             f" {(p.stderr or p.stdout)[-200:]}")
+        if log:
+            log(f"pgcopydb stream sentinel {' '.join(args)}")
+
+
 def stream_codegen(hop, dbs, engine):
     """Write the managed streaming pipeline for this hop: a single-broker
     log plus a connector runtime with a source and an upsert sink, sized for

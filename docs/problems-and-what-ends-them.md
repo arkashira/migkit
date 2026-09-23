@@ -1734,8 +1734,12 @@ Stated at its real size: a plain login role on the target got `permission
 denied for table pg_subscription`, so this is a superuser-on-the-target
 exposure, not a public one. It is still a reason to prefer a path that
 runs from the operator's machine when the target belongs to someone else -
-`pgcopydb follow` is that path, and connects out to both rather than
-asking the target to dial the source.
+and **that path now exists**: `MIGKIT_CDC=follow` on `move --mode cdc`
+drives `pgcopydb follow` from where migkit runs, connecting out to both
+sides, so no credential is written to the target and the target never has
+to dial the source. Verified end to end against a pair on two docker
+networks with no route between them - the case a subscription cannot do at
+all. `test_cdc_driven_from_here.py`.
 
 migkit masks the password in the plan it prints, and **that masking had a
 bug**: `stmt.replace(password, "****")` with an empty password inserts the
