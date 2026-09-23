@@ -226,6 +226,36 @@ file that is not one. `test_a_check_does_not_write_to_the_target.py`.
 section per table, verified on a live dump (2 of 3 rows where a rule
 applied, untouched where none did). `--regex` is still unopened.
 
+**Three of the flags in that "used" list do not exist in the installed
+build, and the MySQL bulk path cannot run at all.** Measured against
+mydumper/myloader v1.0.5:
+
+- the password is passed attached, `-p<secret>`, and that build does not
+  accept the attached short form. The characters after `-p` are then read
+  as *short options*: `-ptest` becomes `-p -t -e -s -t`, and the run dies
+  on `Error parsing option -t` - naming a flag migkit passed separately and
+  an operator never typed. With a password whose letters all happen to be
+  valid no-argument flags the parse succeeds and silently turns them on:
+  `-pmd` enables `--no-schemas` and `--no-data`, then fails
+  authentication, because the password was never sent.
+- `--trx-consistency-only` is gone; this build spells it `--trx-tables`.
+- `--purge-mode` is gone from myloader; the modes now live on
+  `--drop-table`, which is an *optional-argument* option - so
+  `--drop-table TRUNCATE` does not take its value and falls back to the
+  documented default, `DROP`.
+
+Worth recording separately: extracting option names from `--help` picks up
+options mentioned in another flag's *description*. `--overwrite-tables`
+appears in the help text only inside the description of
+`--overwrite-unsafe`, and the binary answers `Unknown option
+--overwrite-tables`.
+
+And measured on a data-only dump, **neither `--drop-table=TRUNCATE` nor
+`--drop-table=DELETE` empties the target**; the load appends. The
+PostgreSQL paths never delegated this - they generate the truncate
+themselves - so the MySQL path should do the same rather than ask a flag
+that has changed name twice.
+
 **The asymmetry this exposed is worth recording.** `pg_dump` 18.6 offers
 `-t`, `-T`, `--exclude-table-data` and `--filter`; `pgcopydb` 0.18 offers
 `--filters`. Every one selects *tables*. Neither has a row predicate, so a
@@ -334,14 +364,26 @@ Cheapest first, where "cheap" means no new dependency:
    the connector instead of a direct write, because migkit and the
    connector writing the same keys is a race migkit can lose.
    `test_repair_through_the_stream.py`.
-2. mydumper `--regex` / `--where`, pgcopydb `--filters`, `pg_dump -t/-T`,
+2. **The MySQL bulk path does not run.** Ahead of any new flag: the
+   password is passed in a form the installed build reads as short options,
+   and two of the flags migkit passes were renamed out from under it. The
+   target is not emptied either - the flag that used to do it is gone, and
+   on a data-only dump none of its replacements empty anything, so the load
+   would append. See the mydumper section above for the measurements. The
+   PostgreSQL answer already exists next door (`_pg_truncate_target`) and
+   the MySQL path should use the same shape rather than a flag. `--regex` /
+   `-O` close the exclusion gap once it runs at all: `pg_dump -T` and
+   pgcopydb's filter file honour `hop.exclude` and mydumper is handed
+   nothing, so the same hop excludes a table on one engine and copies it on
+   the other.
+3. mydumper `--regex` / `--where`, pgcopydb `--filters`, `pg_dump -t/-T`,
    Debezium `table.include.list` - the mover half of plan item 17, all of it
    already installed.
-3. ~~pgcopydb `snapshot`, `follow`, `compare data`~~ **done** - a shared
+4. ~~pgcopydb `snapshot`, `follow`, `compare data`~~ **done** - a shared
    snapshot for the consistent pass, a CDC path driven from here for a
    target that cannot dial the source, and an independent verifier to check
    migkit's own against. `compare schema` is still unopened.
-4. `GenericEngine` - **schema comparison and the key battery done**;
+5. `GenericEngine` - **schema comparison and the key battery done**;
    discovery still open. `HeteroEngine` now has a schema check too (D9c) -
    it had none, and reported a column the target does not have as a
    footnote on a green row verdict. It declared `checks = ("counts", "data")`, so a hop
@@ -361,6 +403,6 @@ Cheapest first, where "cheap" means no new dependency:
    schema" is worse than no line. The normalised types are unusable for
    this and that is why the raw rows are read: `bigint` and `integer` both
    normalise to `Integer`. `test_generic_schema.py`.
-5. atlas `migrate lint` on the DDL migkit already generates.
-6. Decide sqlglot: open it for transformation and DDL translation, or drop
+6. atlas `migrate lint` on the DDL migkit already generates.
+7. Decide sqlglot: open it for transformation and DDL translation, or drop
    it from the manifest.

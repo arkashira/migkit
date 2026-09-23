@@ -129,15 +129,70 @@ def _sh(cmd, env=None, log=None):
     return p
 
 
-PG_TRUNCATE_SQL = (
-    "select coalesce('truncate table '||string_agg("
-    "format('%I.%I', n.nspname, c.relname), ', ')||' cascade', '')"
+#: The target's user tables, one per line. This used to assemble the whole
+#: `truncate` statement with `string_agg`, which put "which tables count as
+#: the application's" in SQL while "which tables the hop excludes" stayed in
+#: Python - so the two never met and the excluded ones were emptied.
+PG_USER_TABLES_SQL = (
+    "select format('%I.%I', n.nspname, c.relname)"
     " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
     " where c.relkind = 'r'"
     " and n.nspname not in ('pg_catalog','information_schema')"
     " and n.nspname not like 'pg\\_%'"
     " and n.nspname not like '\\_\\_%'"
-    " and c.relname not like 'migkit\\_%'")
+    " and c.relname not like 'migkit\\_%'"
+    " order by 1")
+
+#: Everything a `truncate ... cascade` of `:names` would empty as well,
+#: through a foreign key at any depth. Leaving a table out of the statement
+#: is not the same as leaving its rows alone: PostgreSQL follows references
+#: into tables nobody named, and announces it as a NOTICE *while it is doing
+#: it*. Asked first, the same catalogue answers in time to stop.
+PG_CASCADE_REACH_SQL = """
+with recursive reached(oid) as (
+    select c.oid from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where format('%I.%I', n.nspname, c.relname)
+           = any (string_to_array({names}, chr(31)))
+    union
+    select con.conrelid from pg_constraint con
+      join reached r on con.confrelid = r.oid
+     where con.contype = 'f'
+)
+select format('%I.%I', n.nspname, c.relname)
+  from reached r
+  join pg_class c on c.oid = r.oid
+  join pg_namespace n on n.oid = c.relnamespace
+"""
+
+
+def _pg_literal(text):
+    """`text` as a PostgreSQL string literal.
+
+    `psql -c` hands the string to the server untouched - it does **not**
+    interpolate `:'var'`, so a query written that way reaches the server with
+    the colon still in it and fails on a syntax error. The value therefore has
+    to arrive already quoted, and a table name is allowed to contain the quote
+    character: `create table "it's"` is legal, and `format('%I.%I', ...)`
+    renders it back with the apostrophe intact.
+    """
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def _truncate_step(hop, db=""):
+    """The plan line for the step that empties the target.
+
+    One wording for both PostgreSQL bulk paths, and it has to track what
+    `_pg_truncate_target` does: a plan that says "all user tables" beside a
+    plan that says the excluded ones are skipped describes a move that
+    empties a table and never refills it.
+    """
+    where = f" {db}" if db else ""
+    if getattr(hop, "exclude", None):
+        return (f"# empty the target's{where} user tables, except the ones"
+                " the hop excludes (generated from catalog)")
+    return (f"# empty all the target's{where} user tables"
+            " (generated from catalog)")
 
 
 def _pg_truncate_target(hop, db, log=None):
@@ -147,17 +202,56 @@ def _pg_truncate_target(hop, db, log=None):
     appends instead of replacing produces a target with every row twice, and
     two versions of "which tables count as the application's" would eventually
     disagree about which ones got emptied.
+
+    **What the hop excludes is not emptied.** `exclude` is documented as
+    protecting tables whose rows are written on the target rather than
+    carried from the source. The dump already skips them - so emptying them
+    here deleted precisely the rows the setting promises to keep, and left
+    nothing to put back. Measured on a target holding two rows no source had:
+
+        # 1 tables the hop excludes are not dumped at all
+        audit_log before: 2 rows
+        audit_log after:  0 rows
+
+    and the move then reported `public.audit_log` as a table the copy had
+    failed to fill, which sent the reader looking at the wrong end of it.
+
+    The set is resolved through the same `excluded_tables()` the dump and
+    `check` use, so all three empty, carry and verify the same tables.
     """
     t = hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
     env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
-    p = _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", ddb, "-X", "-At", "-c", PG_TRUNCATE_SQL], env_t)
-    stmt = p.stdout.strip()
-    if stmt:
-        _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", ddb, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", stmt],
-            env_t, log)
+
+    def psql(*args):
+        return _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
+                    "-d", ddb, "-X"] + list(args), env_t)
+
+    names = [ln for ln in psql("-At", "-c", PG_USER_TABLES_SQL
+                               ).stdout.splitlines() if ln.strip()]
+    skip = set(excluded_tables(hop, db, names))
+    keep = [n for n in names if n not in skip]
+    if not keep:
+        return ""
+    if skip:
+        reached = {ln for ln in psql("-At", "-c", PG_CASCADE_REACH_SQL.format(
+            names=_pg_literal(chr(31).join(keep)))).stdout.splitlines()
+            if ln.strip()}
+        caught = sorted(skip & reached)
+        if caught:
+            raise SystemExit(
+                f"{', '.join(caught)} would be emptied anyway: the table"
+                " references one of the tables this move replaces, and"
+                " emptying a table empties everything pointing at it.\n"
+                "  the hop excludes it, which says its rows are written here"
+                " and not carried, so they cannot be put back afterwards.\n"
+                "  either it is not target-owned after all - take it out of"
+                " the hop's exclude list and let the move carry it - or the"
+                " reference has to go before the move can run.")
+    stmt = "truncate table " + ", ".join(keep) + " cascade"
+    _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
+         "-d", ddb, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", stmt],
+        env_t, log)
     return stmt
 
 
@@ -257,7 +351,6 @@ class _IndexWindow:
 def pgdump_move(hop, db, workers, go, log):
     s, t = hop.source, hop.target
     outdir = hop.report_dir(db) / "pgdump"
-    trunc = PG_TRUNCATE_SQL
     # the same resolution pgcopydb and `check` use, so all three exclude
     # exactly the same tables rather than three readings of one pattern
     skip, skip_note = [], ""
@@ -273,7 +366,7 @@ def pgdump_move(hop, db, workers, go, log):
                          + str(e).splitlines()[-1][:70])
     skip_args = [a for name in skip for a in ("-T", name)]
     steps = [
-        f"# truncate all user tables on target {db} (generated from catalog)",
+        _truncate_step(hop, db),
         f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fd"
         f" -j {workers} --data-only -f {outdir}"
         + ("".join(f" -T {n}" for n in skip) if skip else ""),
@@ -778,7 +871,7 @@ def pgcopydb_move(hop, db, workers, go, log):
     # are what an operator pastes into a ticket
     import re as _re
     shown = [_re.sub(r"(://[^:/@]+:)[^@]*@", r"\1***@", c) for c in cmd]
-    steps = ["# truncate all user tables on target (generated from catalog)",
+    steps = [_truncate_step(hop),
              "# parallel table copy, source to target, no intermediate file"]
     if filters_note:
         steps.append(filters_note)

@@ -917,6 +917,64 @@ difference. Only the writing gives way.
 
 ---
 
+### C9. The table you told it not to touch
+
+**What happens.** A bulk load is data-only, so the target has to be emptied
+first or every row arrives twice. Emptying it is a separate step from
+copying, and the two get told different things. The copy is told which
+tables to skip; the truncate is generated from the catalogue and is told
+nothing - so a table that was deliberately left out of the copy is emptied
+by the step before it and never refilled.
+
+The tables this costs you are the worst ones to pick: a hop excludes a
+table precisely because its rows are written on the target and not carried
+from the source, so there is no source copy to recover from.
+
+Measured, a target holding two rows no source ever had:
+
+    target audit_log before: 2
+    $ migkit move pg --go
+      # 1 tables the hop excludes are not dumped at all
+      pg_dump ... -T public.audit_log
+      pg_restore ...
+      pgdump reported success and appdb is still empty on the target:
+      public.audit_log
+    target audit_log after: 0
+
+Three failures in one run. The rows the setting exists to protect were
+deleted; the plan announced it was protecting the table in the same breath;
+and the closing line blamed the copy for a table the copy had been told to
+skip, which sends the reader to the wrong end of the problem.
+
+**And leaving the table out of the statement is not enough.** The truncate
+carries `cascade`, because the tables being replaced reference each other.
+PostgreSQL follows those references into tables nobody named, and mentions
+it while it is doing it:
+
+    truncate table public.orders cascade;
+    NOTICE:  truncate cascades to table "audit_log"
+
+**migkit: Ends it** -
+`test_the_move_does_not_empty_what_the_hop_protects.py`, on a live pair.
+The excluded set is resolved through the same `excluded_tables()` the dump
+and `check` use, so all three empty, carry and verify the same tables
+rather than three readings of one pattern. The cascade is asked about
+first - the same catalogue that emits that notice answers the question in
+time - and a reachable excluded table stops the move before anything is
+emptied, rather than being emptied and reported.
+
+It **refuses** instead of deciding: both ways out are the operator's call.
+Either the table is not target-owned after all and belongs in the copy, or
+the foreign key into the replaced data has to go first. Choosing either one
+on their behalf destroys something.
+
+The plan line moved with it. It used to read `# truncate all user tables on
+target` in both bulk paths; it now says whether the hop's exclusions apply,
+from one function, because a plan that claims to empty everything beside a
+run that skips some is how a reader concludes the table was refilled.
+
+---
+
 ## D. Proving the data actually landed
 
 This is the part migkit is built around, and the part where the managed
