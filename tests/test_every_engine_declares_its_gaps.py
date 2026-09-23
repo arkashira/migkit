@@ -153,7 +153,6 @@ def sqlite_hop(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("argv,cap", [
-    (["move", "{hop}", "--mode", "full", "--go"], "table-copy"),
     (["move", "{hop}", "--mode", "cdc", "--go"], "stream"),
     (["move", "{hop}", "--mode", "full+cdc", "--go"], "stream"),
     (["watch", "{hop}", "--verify", "--delta", "--count", "1"], "delta"),
@@ -190,3 +189,27 @@ def test_a_method_that_only_refuses_is_not_a_capability(monkeypatch):
                         raising=False)
     assert not caps.implemented("redis", "delta")
     assert caps.implemented("kafka", "delta")
+
+
+def test_a_move_on_an_engine_with_no_copier_refuses_in_the_same_words(
+        tmp_path, monkeypatch):
+    """Redis still has no copier. SQLite, which this used to run on, now
+    copies table by table through the shared copier."""
+    from click.testing import CliRunner
+
+    import migkit.config as cfg
+    from migkit import cli
+    conf = tmp_path / "hops.yaml"
+    conf.write_text(
+        "hops:\n  r:\n    engine: redis\n"
+        "    source: {host: 10.0.0.1, port: 6379, user: x, password: x}\n"
+        "    target: {host: 10.0.0.2, port: 6379, user: x, password: x}\n"
+        "    databases: ['0']\n")
+    monkeypatch.setattr(cfg, "CONF", str(conf))
+    monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
+    got = CliRunner().invoke(cli.main, ["move", "r", "--mode", "full",
+                                        "--go"])
+    said = " ".join((got.output + str(got.exception or "")).split())
+    assert got.exit_code != 0, said
+    assert "Copying table by table, resumably is not available for redis" \
+        " hops yet" in said, said

@@ -169,7 +169,7 @@ def _debug(cmd, env=None):
         _DEBUG[0].command(cmd, secrets + list(_DEBUG[1]))
 
 
-def _sh(cmd, env=None, log=None):
+def _sh(cmd, env=None, log=None, progress=None):
     """Run one program, and keep its command line off the screen.
 
     This printed `$ <command line>` to the operator for every program it
@@ -181,12 +181,56 @@ def _sh(cmd, env=None, log=None):
     """
     from . import wording
     _debug(cmd, env)
-    p = subprocess.run(cmd, env=tool_env(env), text=True,
-                       capture_output=True)
+    if progress is None:
+        p = subprocess.run(cmd, env=tool_env(env), text=True,
+                           capture_output=True)
+        out, err = p.stdout, p.stderr
+    else:
+        # read what the program says as it says it, and turn the lines that
+        # mark progress into migkit's own; the rest is kept only for the
+        # error message if it fails
+        # one stream, so a program that fills the other pipe cannot stall
+        # while this one is being read
+        p = subprocess.Popen(cmd, env=tool_env(env), text=True,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        tail = []
+        for line in p.stdout:
+            said = progress(line)
+            if said and log:
+                log(said)
+            tail.append(line)
+            del tail[:-40]
+        p.wait()
+        out = err = "".join(tail)
     if p.returncode:
-        said = (p.stderr or p.stdout)[-500:]
+        said = (err or out)[-500:]
         raise RuntimeError(wording.without_programs(said, DRIVEN))
-    return p
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+def _tables_done(pattern, verb, total=None):
+    """A progress reader for a program that names each table as it
+    reaches it: `pattern` has a `table` group. Answers migkit's line for a
+    matching line - `public.orders: read (3 of 12 tables)` - and None for
+    everything else."""
+    seen = []
+    rx = re.compile(pattern)
+
+    def read(line):
+        m = rx.search(line)
+        if not m:
+            return None
+        seen.append(m.group("table"))
+        of = f" of {total:,}" if total else ""
+        return f"{m.group('table')}: {verb} ({len(seen):,}{of} tables)"
+    return read
+
+
+#: what the PostgreSQL dump and load say, with `-v`, as they reach each
+#: table
+PG_DUMP_TABLE = r'dumping contents of table "(?P<table>[^"]+)"'
+PG_RESTORE_TABLE = r'processing data for table "(?P<table>[^"]+)"'
 
 
 #: The target's user tables, one per line. This used to assemble the whole
@@ -501,13 +545,13 @@ def pgdump_move(hop, db, workers, go, log):
         phase("dump", workers=workers, left_out=len(skip),
               filtered=len(routed)),
         ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
-         "-Fd", "-j", workers, "--data-only", "-f", outdir,
+         "-Fd", "-j", workers, "--data-only", "-v", "-f", outdir,
          *[a for name in left_out for a in ("-T", name)]])
     load = Step(
         phase("load", workers=workers),
         ["pg_restore", "-h", t.host, "-p", t.port, "-U", t.user,
          "-d", hop.target_db(db), "--data-only", "--disable-triggers",
-         "-j", workers, outdir])
+         "-v", "-j", workers, outdir])
     steps = [dump, _truncate_step(hop, db), load]
     if unresolved:
         steps.insert(1, _unresolved_note(unresolved))
@@ -527,7 +571,7 @@ def pgdump_move(hop, db, workers, go, log):
     if log:
         log(dump)
     _sh(dump.argv, {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"},
-        log)
+        log, progress=_tables_done(PG_DUMP_TABLE, "read"))
     _pg_truncate_target(hop, db, log)
     with _IndexWindow(hop, db, workers, log):
         _pgdump_restore(load, env_t, log)
@@ -546,7 +590,8 @@ def _pgdump_restore(load, env_t, log):
     if log:
         log(load)
     try:
-        _sh(load.argv, env_t, log)
+        _sh(load.argv, env_t, log,
+            progress=_tables_done(PG_RESTORE_TABLE, "loaded"))
     except RuntimeError as e:
         # newer dumps emit SETs older servers reject; the load exits 1 on
         # those even when all rows landed - migkit check is the judge

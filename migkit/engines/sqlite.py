@@ -2,10 +2,10 @@ import difflib
 import hashlib
 import time
 
-from .base import Engine, RepairAction, Result
+from .base import Engine, NeutralCopier, RepairAction, Result
 
 
-class SQLiteEngine(Engine):
+class SQLiteEngine(NeutralCopier, Engine):
     checks = ("schema", "counts", "autoinc", "data")
 
     def _path(self, side):
@@ -257,6 +257,18 @@ class SQLiteEngine(Engine):
             conn.close()
         return len(rows)
 
+    def neutral_empty(self, side, db, table):
+        import sqlite3
+        self._target_only(side, "empty a table")
+        conn = sqlite3.connect(self._path(side))
+        try:
+            gone = conn.execute(
+                f'delete from "{self.local_table(table)}"').rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return gone
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
         defs = [f'"{n}" {canon.ddl_type("sqlite", c, w)}'
@@ -333,6 +345,10 @@ class SQLiteEngine(Engine):
 
     def databases(self):
         return ["main"]
+
+    def target_missing(self, db):
+        import os
+        return not os.path.exists(self._path("dst") or "")
 
     def _all_tables(self, side):
         return [r[0] for r in self._q(side,

@@ -150,17 +150,24 @@ declared not applicable with the reason):
 | carrying sequences and auto-increment values | yes | yes | n/a | n/a | n/a | yes | yes | - | - |
 | comparing server settings | yes | yes | yes | - | - | yes | - | - | - |
 | moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes |
-| copying table by table, resumably | yes | yes | - | - | - | - | - | - | yes |
+| copying table by table, resumably | yes | yes | - | - | - | - | yes | - | yes |
 | keeping the target following the source | yes | yes | yes | - | - | - | n/a | - | yes |
 | proving the target has caught up before cutover | yes | - | - | - | - | - | n/a | - | - |
-| verifying only what changed | yes | yes | yes | yes | yes | yes | n/a | - | - |
+| verifying only what changed | yes | yes | yes | - | yes | yes | n/a | - | - |
 | carrying users and their grants | yes | yes | yes | - | - | - | n/a | - | - |
-| noticing a move that moved nothing | yes | yes | - | - | - | - | - | - | - |
+| noticing a move that moved nothing | yes | yes | yes | - | - | - | - | - | - |
 | refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | - | - | - |
 | snapshotting the target so a cutover can be rolled back | yes | yes | yes | - | - | - | - | - | - |
 
 The first hand-made version of this table said MongoDB's change stream was
 "tail only". It is wired into `move --mode cdc`; the probe read it right.
+The probe then said Redis verified deltas: its `delta_verify` did nothing
+but return an error. That method is gone, and a method whose whole body
+refuses no longer counts as a capability.
+
+Closed since: SQLite copies table by table through the cross-engine copier
+(`NeutralCopier`, the one copier for every engine that reads and writes
+neutrally), and MongoDB notices a move that moved nothing.
 
 **The deeper version:**
 * **A declared matrix, not a hidden one.** Every engine states, for every
@@ -208,6 +215,20 @@ is trusted:
   * sequence and auto-increment carried across engines
   * parameters that mean the same thing on both engines, compared as such
   * guard, post-load statistics, snapshot
+  * **the cross-engine copier only ever upserts.** Measured SQLite to
+    SQLite through it: a row the target held that the source does not
+    was still there after the move, and a key-less table went from 2 rows
+    to 4 when the move ran again. The SQL copiers empty what they are
+    about to replace; this one needs the same, through a neutral
+    "empty this table" every engine implements, with foreign keys handled
+    the way each engine's own copier already handles them.
+
+**`exclude` on every engine (found 2026-09-24).** Only PostgreSQL, MySQL
+and MongoDB read the hop's exclude list. Measured on SQLite: with
+`exclude: [audit]`, `check` still reported `audit`, and `repair` deleted a
+target-owned row from it. SQLite, Redis (key patterns), Kafka (topics) and
+the generic engine now read it; SQL Server still does not, and cannot be
+tested on this machine (item 27).
 
 **Transform, in scope here, means migration-time transformation:** rename,
 filter, column subset and rename, type conversion and column expressions.
@@ -216,6 +237,22 @@ General-purpose ETL stays out, as the owner set earlier. Whether that
 still holds is an open question to the owner.
 
 **0c. Progress and logs in migkit's own words.**
+
+*In progress (2026-09-24):* `migkit/wording.py` holds the vocabulary.
+Every bulk path now builds its plan from `Step`s, each carrying the
+operator's line and the command that runs, built once; `_sh` writes
+command lines to the run's `commands.log` with secrets removed, and a
+failing program's message loses the program's name and keeps the
+database's words. The static guard now reads `log`, `chat` and `say`
+calls too, and knows ten more program names. A failed copy in `move` is a
+sentence, not a traceback. The PostgreSQL dump path reports each table as
+it is read and loaded (`public.orders: loaded (3 tables)`), taken from
+what the programs print as they go. `test_a_real_run_names_no_program.py`
+runs `move` for real down every PostgreSQL path, dry run and `--go`, and
+reads everything it printed; `--help` of every command is scanned too
+(it said "anything reladiff speaks"). Still open: the same per-table
+progress for the MySQL and MongoDB paths, measured against their output
+first.
 * **Today:** `_sh` logs every command line it runs (`$ pg_dump ...`,
   `$ mydumper ...`), and some paths log a program's own message
   (`pg_restore ignored version-mismatch SET statements`).
@@ -305,6 +342,13 @@ container image:
   `PSO_DV_CONFIG_HOME`, defaulting to one in the user's home. The runner
   points it at a directory of migkit's own for the run and passes
   connections inline.
+
+*Runner written (2026-09-24), not yet measured or wired:*
+`migkit/runners/second_reader.py` runs inside the reader's own
+environment, takes a job as JSON on stdin and answers JSON on stdout. It
+passes a collecting result handler, so nothing is printed and nothing is
+written to a database, and keeps connections in a directory made for the
+run, owner-only, removed at the end.
 
 Still to measure:
 * that, run that way, it writes nothing to either side: tables and

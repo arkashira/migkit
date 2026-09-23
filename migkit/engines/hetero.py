@@ -578,14 +578,17 @@ class HeteroEngine(Engine):
             self.src_engine.neutral_tables("src", db),
             self.dst_engine.neutral_tables("dst", db), self._rename)
         match = [d for s_, d in pairs if self._leaf(s_) == leaf]
+        # the name it goes by on the target, through the hop's mapping: a
+        # renamed table that is not there yet is made under its new name
+        want = self._leaf(self._rename(src_t))
         if match:
             dst_t = match[0]
         elif self.dst_engine.CREATES_ON_WRITE:
-            dst_t = leaf
-            log(f"{leaf}: not on the target yet;"
+            dst_t = want
+            log(f"{want}: not on the target yet;"
                 f" {self.dst_name} creates it on the first write")
         else:
-            dst_t = self._create_target(db, src_t, leaf, log)
+            dst_t = self._create_target(db, src_t, want, log)
         src_cols, dst_cols, notes = self._move_columns(src_t, dst_t, db)
         for n in notes:
             log(f"{leaf}: {n}")
@@ -595,6 +598,16 @@ class HeteroEngine(Engine):
             log(f"{key}: done earlier, skip")
             return
         after = tuple(st["last"]) if st.get("last") is not None else None
+        if after is None:
+            # a fresh start, or a table with no key to resume from: what the
+            # target already holds is not this copy's, and writing alone left
+            # it there - measured, a stray row survived the move and a
+            # key-less table doubled when the move ran again
+            gone = self.dst_engine.neutral_empty("dst", db, dst_t)
+            st["moved"] = 0
+            if gone:
+                log(f"{key}: emptied {gone:,} rows the target held before"
+                    " the copy")
         moved = int(st.get("moved", 0))
         absent = 0
         from ..throttle import Throttle
@@ -901,11 +914,24 @@ class HeteroEngine(Engine):
         if not (self.my and self.pg):
             if not self._can_move_neutrally():
                 self._mysql_to_postgres_only("listing tables to move")
-            pairs, _, _, _ = self.match_tables(
-                self.src_engine.neutral_tables("src", db),
-                self.dst_engine.neutral_tables("dst", db), self._rename)
+            there = ([] if self.dst_engine.target_missing(db)
+                     else self.dst_engine.neutral_tables("dst", db))
+            pairs, src_only, _, ambiguous = self.match_tables(
+                self.src_engine.neutral_tables("src", db), there,
+                self._rename)
+            if ambiguous:
+                # one name in two schemas has one place to land on the
+                # target; guessing which is how a copy overwrites the other
+                raise SystemExit(
+                    f"{db}: {', '.join(sorted(ambiguous)[:6])} appear under"
+                    " the same name more than once, so migkit cannot tell"
+                    " which target table each goes to. Rename them in the"
+                    " hop's mapping, or exclude the ones not moving.")
+            # a table the target does not have yet is moved too: the copier
+            # creates it. Only the ones already there used to be listed, so
+            # the rest were left out of the move without a word
             out = []
-            for src_t, _ in pairs:
+            for src_t in [s_ for s_, _ in pairs] + list(src_only):
                 sch, _, tbl = src_t.rpartition(".")
                 out.append((sch, tbl))
             return out

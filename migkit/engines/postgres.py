@@ -231,6 +231,16 @@ class PostgresEngine(Engine):
             conn.commit()
         return len(rows)
 
+    def neutral_empty(self, side, db, table):
+        self._target_only(side, "empty a table")
+        sch, tbl = self._split(table)
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'delete from "{sch}"."{tbl}"')
+                gone = cur.rowcount
+            conn.commit()
+        return gone
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
         sch, tbl = self._split(table)

@@ -115,6 +115,19 @@ class MySQLEngine(Engine):
             conn.close()
         return len(rows)
 
+    def neutral_empty(self, side, db, table):
+        self._target_only(side, "empty a table")
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                gone = cur.execute(
+                    f"delete from {self._quote_ident(self._d(side, db))}"
+                    f".{self._quote_ident(table)}")
+            conn.commit()
+        finally:
+            conn.close()
+        return gone
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
         defs = [f"`{n}` {canon.ddl_type('mysql', c, w)}"

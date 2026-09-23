@@ -2353,6 +2353,32 @@ class Engine:
         """
         raise self._no_canon("write rows")
 
+    def target_missing(self, db):
+        """True when the target is not there yet and the first write makes
+        it - a SQLite file, say. A copy starts from an empty list then; a
+        check still says it could not open the target, because comparing
+        against nothing is not the same as the target being empty.
+        """
+        return False
+
+    def neutral_empty(self, side, db, table):
+        """Remove every row of `table` on the target, keeping the table.
+        Returns how many went.
+
+        What a copy does before it starts a table afresh, so the table ends
+        up holding the source's rows and nothing else. Writing alone does
+        not get there: measured through the cross-engine copier, a row the
+        target already had stayed after the move, and a table without a key
+        doubled when the move ran again. Only ever the target - migkit does
+        not write to a source.
+        """
+        raise self._no_canon("empty a table")
+
+    @staticmethod
+    def _target_only(side, what):
+        if side != "dst":
+            raise SystemExit(f"migkit does not {what} on a source")
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         """The statement that would create this table here, without running it.
 
@@ -2464,3 +2490,36 @@ class Engine:
         rendering had to be pinned down first.
         """
         raise self._no_canon("digest a table")
+
+
+class NeutralCopier:
+    """Table-by-table copy for an engine to itself, through the one copier
+    written for any pair.
+
+    The cross-engine copier reads through `neutral_read` and writes through
+    `neutral_write`/`neutral_empty`, resuming by key. An engine that speaks
+    that contract has everything a same-engine copy needs, so rather than
+    a second copier per engine this views the hop as a pair of the same
+    engine and hands the table to that one. A fix to the copier is then a
+    fix for every engine it serves.
+    """
+
+    def _as_pair(self):
+        import dataclasses
+
+        from .hetero import HeteroEngine
+        name = self.CANON_ENGINE
+        hop = dataclasses.replace(
+            self.hop, engine="hetero",
+            options={**self.hop.options, "source_engine": name,
+                     "target_engine": name})
+        # the report directory is a method the tests and callers may have
+        # replaced on this hop; the pair keeps writing where this one does
+        hop.report_dir = self.hop.report_dir
+        return HeteroEngine(hop)
+
+    def list_move_tables(self, db):
+        return self._as_pair().list_move_tables(db)
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        return self._as_pair().move_table(db, sch, tbl, chunk, ck, log)

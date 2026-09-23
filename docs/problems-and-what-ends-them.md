@@ -1081,6 +1081,75 @@ tables out and hand them to the table copier, so the rest of the database
 still goes the fast way. A path that can apply no filter refuses before
 anything is copied.
 
+### C12. The exclude list that only some engines read
+
+**What happens.** `exclude` is how a hop protects a table the target owns:
+migkit neither verifies nor repairs it. Only PostgreSQL, MySQL and MongoDB
+read it. Measured on SQLite with `exclude: [audit]` and a row only the
+target has in `audit`:
+
+    counts  main        diff  audit src=1 dst=2
+    repair  main.audit  delete 1 rows the source does not have: 7
+
+and after `apply` the target's own row was gone. The MongoDB bulk path read
+no exclude list either, and its restore drops each collection before
+loading it.
+
+**migkit: Ends it, except on SQL Server** -
+`test_every_engine_honours_exclude.py`, `test_redis_honours_exclude.py`,
+`test_kafka_honours_exclude.py`, `test_generic_honours_exclude.py`,
+`test_the_mongo_bulk_path_honours_exclude.py`. SQLite tables, Redis key
+patterns, Kafka topics and the generic engine's listed tables now go
+through the same `hop.excluded()` rule; the MongoDB bulk path leaves an
+excluded collection out of both the dump and the restore. SQL Server still
+ignores the list and cannot be tested on this machine.
+
+### C13. The copier that left the target's strays behind
+
+**What happens.** The keyed table copiers replace one key range per chunk,
+from the source's lowest key to its highest. A target row whose key lies
+outside that range is in no chunk, so it stays: a target carrying an
+earlier attempt keeps its strays, and a source table that is empty leaves
+the target's rows untouched.
+
+**migkit: Ends it** - `test_the_copier_removes_what_the_source_does_not_have.py`.
+Once every chunk is done, the PostgreSQL and MySQL copiers remove the
+target rows outside the source's range, within the hop's row filter only,
+and say how many.
+
+### C14. The password left on disk by a dry run
+
+**What happens.** The one-pass MySQL-to-PostgreSQL path writes a load file
+holding both connection strings, passwords included. It wrote it on a dry
+run too, and never removed it. The same load named the source's database
+on the target side, so a hop whose `db_map` renames the database loaded
+into the wrong one. The MongoDB restore had the same `db_map` fault.
+
+**migkit: Ends it** - `test_progress_in_migkit_words.py`,
+`test_the_mongo_bulk_path_honours_exclude.py`. The load file is written
+only for `--go`, owner-readable, and removed whether the load works or
+not; both paths load into the target's name for the database.
+
+### C15. The cross-engine copy that moved only what the target already had
+
+**What happens.** The copier between two engines listed the tables to move
+by pairing the source's list with the target's, and kept only the pairs.
+Measured SQLite to SQLite, with three source tables and a target holding
+only `log`: the list to move was `log`, and `orders` was left out without a
+word - while the copier had the code to create a missing table all along.
+A target file that did not exist yet stopped the move at the listing. It
+also wrote without emptying: a row the target held before stayed, and a
+key-less table doubled when the move ran again. A renamed table the target
+lacked was created under its old name.
+
+**migkit: Ends it** - `test_the_cross_engine_copier_empties_first.py`.
+Every source table not excluded is listed; a missing one is created under
+the name the hop's mapping gives it; a name that appears in two schemas
+stops the move and says so. A table starting afresh is emptied on the
+target first, through `neutral_empty`, which every engine that writes
+across engines implements and which refuses a source. The same copier now
+carries SQLite to SQLite table by table, so there is one copier to fix.
+
 ---
 
 ## D. Proving the data actually landed

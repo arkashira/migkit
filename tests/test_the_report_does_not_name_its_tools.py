@@ -245,3 +245,20 @@ def test_a_missing_prerequisite_points_at_migkits_own_installer():
     assert len(said) >= 4, said
     for f, ln, s in said:
         assert "migkit doctor" in s, f"{f}:{ln} {s}"
+
+
+def test_no_help_text_names_a_program():
+    """`migkit --help` is the first thing an operator reads, and the static
+    scan never looked at it: it said the generic engine reaches
+    "anything reladiff speaks". Every command's help, hidden ones too."""
+    from click.testing import CliRunner
+
+    from migkit import cli
+    runner = CliRunner()
+    leaks = []
+    for name in [None] + sorted(cli.main.commands):
+        argv = ([name] if name else []) + ["--help"]
+        said = runner.invoke(cli.main, argv).output
+        assert said.strip(), argv
+        leaks += [(name or "migkit", t) for t in TOOLS if t in said.lower()]
+    assert not leaks, leaks

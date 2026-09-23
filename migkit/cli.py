@@ -73,14 +73,14 @@ def _require_configured(hop):
               help="suppress per-table chatter and progress lines,"
                    " keep diffs, errors and summaries")
 def main(quiet):
-    """Database migration toolkit: prepare the target, tell you when to run
-    the mover (managed migration service or native tools), watch the load,
-    validate everything, repair what the mover cannot carry.
+    """Database migration toolkit: prepare the target, move the data,
+    watch the load, prove every row landed, and repair what did not.
 
     \b
-    engines: postgres mysql mssql mongodb redis kafka
-             generic (anything reladiff speaks: snowflake, bigquery,
-             redshift, clickhouse, oracle, trino, duckdb, ...)
+    engines: postgres mysql mssql mongodb redis kafka sqlite
+             any pair of those across engines (hetero)
+             generic (warehouses and other SQL engines: snowflake,
+             bigquery, redshift, clickhouse, oracle, trino, duckdb, ...)
 
     \b
     typical flow:

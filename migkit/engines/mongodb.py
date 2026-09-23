@@ -74,6 +74,36 @@ class MongoEngine(Engine):
                       if not n.startswith("system.")
                       and not self.hop.excluded(db, n))
 
+    def neutral_empty(self, side, db, table):
+        self._target_only(side, "empty a collection")
+        return self._client(side)[self._d(side, db)][table].delete_many(
+            {}).deleted_count
+
+    def moved_nothing(self, db):
+        """Collections the source has documents in and the target has none.
+
+        The guard the SQL engines already had: a bulk copy can finish
+        without an error and leave the target empty, and saying the move
+        is complete over that is the one thing a migration tool must not
+        do. A collection the target does not have at all counts too - this
+        engine creates collections on the first write, so a missing one is
+        one nothing reached. Excluded collections are not listed, so a
+        collection left out on purpose is not reported.
+        """
+        try:
+            dst = set(self.neutral_tables("dst", db))
+            s = self._client("src")[db]
+            t = self._client("dst")[self._d("dst", db)]
+            empty = []
+            for c in self.neutral_tables("src", db):
+                if s[c].find_one({}, {"_id": 1}) is None:
+                    continue
+                if c not in dst or t[c].find_one({}, {"_id": 1}) is None:
+                    empty.append(c)
+            return empty
+        except Exception:
+            return None
+
     def field_types(self, side, db, collection):
         """{field: (types, present_count, null_count)} over the whole
         collection.

@@ -53,7 +53,6 @@ GAPS = {
                       "collections have no sequences or auto-increment"),
         "table-copy": (NOT_YET, "0e"),
         "fence": (NOT_YET, "0e"),
-        "guard": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "mssql": {
@@ -96,7 +95,6 @@ GAPS = {
     "sqlite": {
         "params": (NOT_YET, "0e"),
         "bulk-move": (NOT_YET, "0e"),
-        "table-copy": (NOT_YET, "0e"),
         "stream": (NOT_APPLICABLE, _FILE_DB),
         "fence": (NOT_APPLICABLE, _FILE_DB),
         "delta": (NOT_APPLICABLE, _FILE_DB),
