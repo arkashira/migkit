@@ -139,19 +139,39 @@ Measure first:
 The planner (item 0) uses it where it sees something migkit's own reader
 does not, not everywhere.
 
-**0b. Measure what the change-stream path writes to the source.**
+**0b. Re-snapshot through the stream without pausing it.**
 
-Debezium is already wrapped (`movers.py`, Kafka signal channel), and `sync`
-uses it to re-snapshot the exact keys a check found. Its standard
-incremental snapshot opens and closes each chunk's window by writing
-watermarks to a signalling *table* on the source, even when the request
-arrives over Kafka. Only the read-only variants avoid that: GTID sets on
-MySQL, transaction IDs on PostgreSQL. Measure which one migkit's path
-triggers:
-* if it writes, switch to the read-only mode
-* where no read-only mode exists, refuse with the reason
+*Answered already, and measured: the path does not write to the source.*
 
-migkit does not write to a source, including through a tool it drives.
+Debezium is wrapped (`movers.py`, Kafka signal channel), and `sync` asks it
+to re-read the tables a check found wrong (`resnapshot_message`). Debezium
+refused the standard incremental snapshot on that pipeline. It brackets
+each chunk with watermark rows written to a signalling table **in the
+source**, and without that table:
+
+    Incremental snapshot is not properly configured, either sinalling
+    data collection is not provided or connector-specific snapshotting
+    not set
+
+So migkit sends a *blocking* snapshot instead. Measured: 50 rows re-emitted,
+`snapshot=BLOCKING snapshot_completed=true`, nothing written to the source.
+The price is that streaming stops while the table is re-read.
+
+**Deeper:** the read-only incremental variants. They take the watermarks
+from the server instead of writing them: the executed GTID set on MySQL
+(needs `gtid_mode=ON`), the in-progress transaction ID on PostgreSQL.
+Chunks interleave with the stream, and a conflicting key keeps the
+streamed event (the DBLog rule).
+
+The planner picks per table:
+* read-only incremental where the source allows it
+* blocking where it does not, saying that streaming will pause and for how
+  long, from the table's size and the measured rate
+
+Measure on this pipeline first:
+* that `read.only=true` on the connector version shipped here runs without
+  a signalling table
+* that a key updated during a chunk ends up with the streamed value
 
 ## P0: correctness at cutover
 
@@ -338,10 +358,10 @@ offsets, which differ by design.
 
 ## Order of work
 
-1. **0b first:** it is a measurement, and if the answer is "yes, it writes",
-   migkit is breaking its own first rule today.
-2. **Then 0 and 0a together:** the planner is what makes each later wrap
+1. **0 and 0a together:** the planner is what makes each later wrap
    worth having.
+2. **0b** once the pipeline can be stood up; the source-write question it
+   started from is already answered (no).
 3. **Then 1-5:** each one closes a way a cutover goes wrong without anyone
    seeing it.
 4. **Then 6-10**, then the rest by what the next rehearsal needs.
