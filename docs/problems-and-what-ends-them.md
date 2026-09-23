@@ -1001,7 +1001,28 @@ and with `foreign_key_checks = 0` in the same session it empties the
 referenced table and leaves the referencing one alone - measured, the
 excluded child kept both its rows. The MySQL path now empties the target
 itself that way, so the PostgreSQL refusal has no counterpart to need -
-nothing the hop excludes can be reached. What it leaves is quieter: a row in the
+nothing the hop excludes can be reached.
+
+**The index window was the third step told nothing.** Both bulk paths drop
+the target's secondary indexes for the load and rebuild them after - a
+measured 1.9x on PostgreSQL - and both did it to every table, the excluded
+ones included. On PostgreSQL that includes a unique index built with
+`CREATE UNIQUE INDEX`, which is not a constraint. Measured, with the
+application writing to the table it owns while the window was open:
+
+    3 secondary indexes dropped for the load
+    REBUILD FAILED for audit_ref_u: Key (ref)=(r7) is duplicated.
+    2 of 3 indexes rebuilt; STILL MISSING: audit_ref_u
+
+The table the hop said not to touch lost the constraint that would have
+refused the duplicate, and now held it - and the advice to "recreate them
+before the target is used" could no longer be followed. Nothing is loaded
+into an excluded table, so dropping its indexes never bought anything. Both
+windows now leave them in place, through `excluded_tables()`, and say how
+many they left; the same run refuses the application's duplicate and
+rebuilds only the carried table's index.
+`test_the_move_does_not_empty_what_the_hop_protects.py`,
+`test_index_window_mysql.py`. What it leaves is quieter: a row in the
 excluded table can point at a row that existed only on the target and is
 not coming back, and `check` does not look inside a table the hop excludes.
 

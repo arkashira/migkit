@@ -258,7 +258,8 @@ def _pg_truncate_target(hop, db, log=None):
 
 
 PG_INDEX_SQL = """
-    select i.relname||chr(31)||pg_get_indexdef(x.indexrelid)||chr(31)
+    select n.nspname||'.'||tb.relname||chr(31)||i.relname||chr(31)
+           ||pg_get_indexdef(x.indexrelid)||chr(31)
            ||(c.conname is not null)::text
       from pg_index x
       join pg_class i on i.oid = x.indexrelid
@@ -279,6 +280,34 @@ def _pg_psql(hop, db, sql, log=None):
     return _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
                 "-d", ddb, "-X", "-At", "-v", "ON_ERROR_STOP=1",
                 "-c", sql], env, log).stdout
+
+
+def _outside_exclusion(hop, db, rows, log=None, qualifier="public"):
+    """The index `rows` - table first - on tables the hop does not exclude.
+
+    A table the hop excludes is one the target owns: its rows are written
+    there, often by the application while the move runs. Dropping its
+    indexes for the load's sake was measured to cost it for good. The table
+    kept a unique index built with `CREATE UNIQUE INDEX`, the application
+    wrote a second row with the same key while the window was open, and the
+    rebuild then failed:
+
+        REBUILD FAILED for audit_ref_u: Key (ref)=(r7) is duplicated.
+        2 of 3 indexes rebuilt; STILL MISSING: audit_ref_u
+
+    - the one table migkit was told not to touch, left without the
+    constraint that would have refused the duplicate, and holding it. Its
+    load gains nothing from the drop either, because nothing is loaded into
+    it. Which tables count as excluded is `excluded_tables()`'s answer, not
+    a second reading here.
+    """
+    owned = {t for t in {r[0] for r in rows}
+             if excluded_tables(hop, db, [t], qualifier)}
+    kept = [r for r in rows if r[0] not in owned]
+    if owned and log:
+        log(f"{len(rows) - len(kept)} indexes on {len(owned)} tables the hop"
+            " excludes were left in place")
+    return kept
 
 
 class _IndexWindow:
@@ -304,12 +333,14 @@ class _IndexWindow:
             raw = _pg_psql(self.hop, self.db, PG_INDEX_SQL)
         except Exception:
             return self
-        rows = []
+        found = []
         for line in (raw or "").splitlines():
             parts = line.split("\x1f")
-            if len(parts) == 3:
-                rows.append((parts[0].strip(), parts[1].strip(),
-                             parts[2].strip() == "true"))
+            if len(parts) == 4:
+                found.append((parts[0].strip(), parts[1].strip(),
+                              parts[2].strip(), parts[3].strip() == "true"))
+        rows = [r[1:] for r in
+                _outside_exclusion(self.hop, self.db, found, self.log)]
         drop, ddl = _ix.plan(rows)
         if not drop:
             return self
@@ -463,6 +494,8 @@ class _MyIndexWindow:
             rows = self.eng._q("dst", MY_INDEX_SQL, (ddb,))
         except Exception:
             return self
+        rows = _outside_exclusion(self.hop, self.db, list(rows), self.log,
+                                  qualifier=self.db)
         triples = []
         for tbl, name, cols, is_unique, backs_fk in rows:
             key = f"{tbl}.{name}"

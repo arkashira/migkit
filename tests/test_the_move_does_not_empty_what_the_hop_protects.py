@@ -258,3 +258,57 @@ def test_the_refusal_names_no_tool(pg_pair):
         movers._pg_truncate_target(_hop(pg_pair, ["audit_log"]), "postgres")
     said = str(e.value).lower()
     assert not [t for t in TOOLS if t in said], said
+
+
+# ---- the index window, which touched the same tables ----
+
+def _indexed(pg_pair):
+    _seed(pg_pair)
+    for sql in ("create index orders_v on orders (v)",
+                "create unique index audit_note_u on audit_log (note)"):
+        assert psql(pg_pair["dst"], sql).returncode == 0
+
+
+def test_the_index_window_leaves_an_excluded_table_alone(pg_pair, tmp_path):
+    """Measured before the fix, with the application writing to the table
+    it owns while the window was open:
+
+        REBUILD FAILED for audit_ref_u: Key (ref)=(r7) is duplicated.
+        2 of 3 indexes rebuilt; STILL MISSING: audit_ref_u
+
+    A unique index built with `CREATE UNIQUE INDEX` is not a constraint, so
+    the window took it off the one table the hop said not to touch, let
+    the duplicate in, and could not put it back."""
+    _indexed(pg_pair)
+    lines = []
+    with movers._IndexWindow(_hop(pg_pair, ["audit_log"], tmp_path),
+                             "postgres", 2, lines.append) as w:
+        got = psql(pg_pair["dst"], "insert into audit_log values (9,'own')")
+        assert got.returncode != 0, "the duplicate got in while it was open"
+        assert "duplicate key" in got.stderr, got.stderr
+    assert w.dropped == ["orders_v"], w.dropped
+    assert any("tables the hop excludes were left in place" in ln
+               for ln in lines), lines
+
+
+def test_without_an_exclude_the_window_is_what_it_was(pg_pair, tmp_path):
+    """The hop nobody changed still gets the faster load on every table."""
+    _indexed(pg_pair)
+    with movers._IndexWindow(_hop(pg_pair, (), tmp_path), "postgres", 2,
+                             None) as w:
+        pass
+    assert sorted(w.dropped) == ["audit_note_u", "orders_v"], w.dropped
+
+
+def test_both_index_windows_consult_the_exclusion():
+    """Scoped to the class: both windows name their entry `__enter__`, so a
+    search by function name could not tell which one it had found."""
+    src = (pathlib.Path(__file__).resolve().parents[1] / "migkit" /
+           "movers.py").read_text()
+    tree = ast.parse(src)
+    for cls in ("_IndexWindow", "_MyIndexWindow"):
+        node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.ClassDef) and n.name == cls)
+        calls = {c.func.id for c in ast.walk(node)
+                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        assert "_outside_exclusion" in calls, cls

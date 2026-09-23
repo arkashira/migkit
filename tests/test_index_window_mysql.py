@@ -167,3 +167,22 @@ def test_nothing_is_dropped_when_the_file_cannot_be_written(pair, tmp_path):
     with movers._MyIndexWindow(eng, hop, "d", 2, said.append):
         assert _idx(DST) == before, "dropped without a saved file"
     assert any("could not save" in s for s in said), said
+
+
+def test_a_table_the_hop_excludes_keeps_its_indexes(pair, tmp_path):
+    """The target owns an excluded table and may be writing to it during
+    the move. Its indexes are not the load's to take - nothing is loaded
+    into it - and on PostgreSQL taking them was measured to cost a unique
+    index for good."""
+    from migkit import movers
+    hop, eng = _engine(tmp_path)
+    hop.exclude = ["t"]
+    before = _idx(DST)
+    assert "ix_a" in before, before
+    lines = []
+    with movers._MyIndexWindow(eng, hop, "d", 2, lines.append) as w:
+        assert _idx(DST) == before, _idx(DST)
+    assert w.dropped == [], w.dropped
+    assert any("tables the hop excludes were left in place" in ln
+               for ln in lines), lines
+    assert _idx(DST) == before
