@@ -80,6 +80,79 @@ This is the ground migkit stands on.
 
 ---
 
+## P0: the decision layer underneath everything
+
+**0. Choose per table, from measured facts, and combine.**
+
+* **Today:** one function, `movers.pick()`, chooses the mover per *engine*.
+  It takes the first tool found installed (pgcopydb, pg_dump, mydumper,
+  pgloader, mongodump) and falls back to the builtin copier. It never looks
+  at:
+  * how big the table is
+  * whether it holds LOBs or has a key
+  * the versions on either side
+  * which network path works
+  * whether a change stream has to follow
+
+  Verification works the same way: the builtin checksum always, a second
+  reader only when an environment variable asks for one.
+* **Deeper:** a planner that decides for each table:
+  1. reads the facts once: size, key, LOB columns, types, versions,
+     reachability, the flags each installed tool actually has (`tool_flag`
+     already asks the binary)
+  2. picks a path per table rather than per database. A 40 GB keyed table
+     can go through the parallel copier, a LOB table through a path that
+     carries LOBs whole, and a key-less table through a consistent snapshot.
+  3. combines them in one run
+  4. picks the verification the same way: an independent second reader
+     where the pair is cross-engine, or where the first reader has a known
+     blind spot
+* **What the operator sees:** only what was done and why, in migkit's own
+  words ("copied in parallel chunks: 40 GB, keyed"). Never which program
+  did it.
+* **Wraps it combines:** everything already wrapped, plus item 8's DVT.
+* **Tests:** assert the decision per table against real tables built to
+  each shape.
+
+**0a. Wrap the Data Validation Tool as a second reader.**
+
+DVT (`google-pso-data-validator`, built on Ibis) does:
+* column aggregates, row hash, and schema validation
+* custom-query validation
+* partitioned runs for large tables
+
+It reaches engines migkit does not read natively: Oracle, Teradata, Db2,
+Snowflake, BigQuery, Spanner. Wrapped the way Debezium was:
+* installed by `doctor --install`
+* driven through its Python API rather than its CLI where the API is
+  stable
+* its findings translated into migkit's verdict envelope
+* its name never printed
+
+Measure first:
+* the install footprint (it pulls the Google Cloud clients and a pinned Ibis)
+* that it writes nothing to either side; results go where migkit tells it
+* its speed against migkit's own checksum on the same pair
+* which of its type mappings disagree with `canon`, where it would call
+  equal what migkit calls different
+
+The planner (item 0) uses it where it sees something migkit's own reader
+does not, not everywhere.
+
+**0b. Measure what the change-stream path writes to the source.**
+
+Debezium is already wrapped (`movers.py`, Kafka signal channel), and `sync`
+uses it to re-snapshot the exact keys a check found. Its standard
+incremental snapshot opens and closes each chunk's window by writing
+watermarks to a signalling *table* on the source, even when the request
+arrives over Kafka. Only the read-only variants avoid that: GTID sets on
+MySQL, transaction IDs on PostgreSQL. Measure which one migkit's path
+triggers:
+* if it writes, switch to the read-only mode
+* where no read-only mode exists, refuse with the reason
+
+migkit does not write to a source, including through a tool it drives.
+
 ## P0: correctness at cutover
 
 **1. Confirm before calling it different.**
@@ -265,8 +338,13 @@ offsets, which differ by design.
 
 ## Order of work
 
-P0 in the order listed; each one closes a way a cutover goes wrong without
-anyone seeing it. Then 6-10, then the rest by what the next rehearsal needs.
+1. **0b first:** it is a measurement, and if the answer is "yes, it writes",
+   migkit is breaking its own first rule today.
+2. **Then 0 and 0a together:** the planner is what makes each later wrap
+   worth having.
+3. **Then 1-5:** each one closes a way a cutover goes wrong without anyone
+   seeing it.
+4. **Then 6-10**, then the rest by what the next rehearsal needs.
 
 ## Sources
 
