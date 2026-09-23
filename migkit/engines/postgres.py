@@ -718,6 +718,7 @@ class PostgresEngine(Engine):
         rev_line = _revert.summary(sql, reverse_sql)
         detail += ("; " + rev_line if rev_line else
                    "; no undo could be generated - take a backup first")
+        detail += self._backfill_clause(db, sql)
         return Result("schema", f"{db} (structural)", "diff", detail,
                       str(path),
                       "statements are in dependency order; read"
@@ -2114,6 +2115,21 @@ class PostgresEngine(Engine):
             " <name>` then `CREATE INDEX CONCURRENTLY`, with"
             " maintenance_work_mem and max_parallel_maintenance_workers"
             " raised for the rebuild")
+
+    def rows_present(self, db, tables):
+        ddb = self._d("dst", db)
+        got = set()
+        for name in tables:
+            sch, _, tbl = name.rpartition(".")
+            q = f'select 1 from "{sch or "public"}"."{tbl}" limit 1'
+            try:
+                if self._psql("dst", ddb, q).strip():
+                    got.add(name)
+            except RuntimeError:
+                # a table the target does not have yet cannot have rows in
+                # it, and a permission problem is not an answer either way
+                continue
+        return got
 
     def moved_nothing(self, db):
         """Which tables the source has rows in and the target does not."""

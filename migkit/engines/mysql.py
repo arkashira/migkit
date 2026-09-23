@@ -599,6 +599,7 @@ class MySQLEngine(Engine):
             # no undo is a fact worth stating, not a blank to fill in later
             rev.unlink(missing_ok=True)
             detail += "; no undo could be generated - take a backup first"
+        detail += self._backfill_clause(db, text)
         return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "diff", detail,
                       str(out), "review schema-fix.sql, then apply it to"
                       " the target; schema-fix.revert.sql undoes it")
@@ -1241,6 +1242,18 @@ class MySQLEngine(Engine):
             db, findings, "server's max_allowed_packet",
             "raise the mover's LOB size limit above the biggest value, or"
             " move those tables with a path that does not truncate")
+
+    def rows_present(self, db, tables):
+        ddb = self._d("dst", db)
+        got = set()
+        for name in tables:
+            _, _, tbl = name.rpartition(".")
+            try:
+                if self._q("dst", f"select 1 from `{ddb}`.`{tbl}` limit 1"):
+                    got.add(name)
+            except Exception:
+                continue
+        return got
 
     def moved_nothing(self, db):
         """Which tables the source has rows in and the target does not."""

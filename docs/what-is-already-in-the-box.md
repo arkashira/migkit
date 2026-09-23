@@ -163,10 +163,24 @@ rather than three readings of one pattern.
     unopened: schema inspect, schema apply, migrate (diff, lint,
               validate, hash), tool
 
-`migrate lint` is the interesting one: it reads a migration and reports the
-destructive changes in it. migkit generates DDL for the operator to review
-(`schema --migration`); linting that DDL with the tool already installed is
-a review nobody has to do by hand.
+`migrate lint` **cannot be used and the reason is not a technical one.**
+Measured on the installed atlas v1.2.4:
+
+    atlas migrate lint --dir file:///tmp/mig --dev-url postgres://...
+    Abort: Starting with v0.38, 'atlas migrate lint' is available only to
+    Atlas Pro users.  ...  atlas login
+
+A check migkit runs for every hop cannot sit behind a paid account and an
+interactive login. It also wanted a migration directory in its own format
+plus a scratch database it creates and drops schemas in - which migkit
+would have to stand up, since pointing it at a real target is out.
+
+**What it was wanted for is built instead, and the built version is
+stronger.** A linter reads SQL and can only say a statement *might* be a
+problem; migkit knows whether the target's tables have rows, so it says
+*will*. See `ddl.py` and D9b: `ALTER TABLE ... ADD COLUMN ... NOT NULL`
+with no default, which migkit generates whenever the source has such a
+column, fails outright on PostgreSQL and is silently filled in by MySQL.
 
 ### liquibase - 1 of many
 

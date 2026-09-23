@@ -1480,6 +1480,35 @@ class Engine:
             " whether replication is running; printing the statements"
             " without that is how a dead replica looks like a live one")
 
+    def _backfill_clause(self, db, sql):
+        """The warning about generated DDL that does not say what the rows
+        already on the target should hold, or "". Built here so the two
+        engines that generate DDL phrase it identically, and so the
+        difference between them stays one table in `ddl.BEHAVIOUR` rather
+        than two sentences that can drift."""
+        from .. import ddl as _ddl
+        found = _ddl.needs_backfill(sql)
+        if not found:
+            return ""
+        try:
+            present = self.rows_present(db, sorted({t for t, _, _ in found}))
+        except Exception:
+            return ""
+        said = _ddl.backfill_warning(getattr(self, "ENGINE_FAMILY", ""),
+                                     found, present)
+        return f"; {said}" if said else ""
+
+    def rows_present(self, db, tables):
+        """Of `tables`, the ones the target actually has rows in.
+
+        Asked because the warning it feeds is the difference between a
+        linter and a check: reading generated DDL can only say a statement
+        *might* be a problem, and migkit can look at the target and say
+        whether it *is*. Returns an empty set when the question cannot be
+        put, so the warning is withheld rather than guessed.
+        """
+        return set()
+
     def apply_replication_stmt(self, side, db, stmt):
         """Run one statement of the `replicate_sql` plan.
 

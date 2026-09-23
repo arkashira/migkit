@@ -1122,6 +1122,36 @@ Worth noting alongside: migkit's own target-setup plan now restores
 lives, so the step people drop is a line in the plan rather than an
 implicit side effect.
 
+### D9b. The fix script that cannot be applied
+
+**What happens.** migkit generates DDL to bring the target's schema up to
+the source's and says *review, then apply*. One shape in it does not
+survive a target that already has rows, and the two engines break in
+opposite directions - measured, same statement, same data:
+
+| | |
+|---|---|
+| PostgreSQL 16 | `ERROR: column "note" of relation "t" contains null values` - and nothing after it in the script runs |
+| MySQL 8, `STRICT_TRANS_TABLES` | `Query OK` - every existing row now holds `''`, length 0, not null |
+
+PostgreSQL refuses out loud. MySQL invents a value for every row that was
+already there, which is the quieter failure and the worse one: the column
+exists, the counts match, nothing errors, and the contents are made up.
+
+migkit generates exactly this whenever the source has a `NOT NULL` column
+with no default - a column the application fills. Verified end to end: a
+source with `note text not null` and `tagged text not null default 'x'`
+against a target of three rows produced both statements side by side, and
+only the second could be applied. Nothing in the report said which was
+which.
+
+**migkit: Ends it.** The generated DDL is read back before it is offered,
+and the tables named in it are checked against the target for rows. A
+linter reading the SQL alone can only say *might*; migkit asked, so it says
+*will*, and says what this particular database does about it. An engine
+nobody has measured says that rather than inheriting an answer. Test:
+`test_ddl_that_cannot_be_applied.py`.
+
 ### D10. The role could read the table but not the column
 
 **What happens.** Column-level grants (`GRANT SELECT (id) ON sales TO
