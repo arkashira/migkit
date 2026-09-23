@@ -35,11 +35,11 @@ than a line to leave sitting in the manifest.
 Measured by running each tool's own help, and by grepping every invocation
 in `migkit/`.
 
-### pgcopydb - 2 of 11 commands used
+### pgcopydb - 7 of 11 commands used
 
-    used:     copy table-data, ping
-    unopened: clone, fork, follow, snapshot, compare, dump, restore,
-              list, stream
+    used:     copy table-data, ping, follow, stream sentinel,
+              compare data, compare schema, list tables
+    unopened: clone, fork, snapshot, dump, restore
 
 What that leaves on the floor:
 
@@ -85,8 +85,24 @@ What that leaves on the floor:
   against 1.00 (both *differ* - equal by `=`, not as stored), the same
   columns in a different order (both *same*), and a table with no primary
   key missing a row (both *differ*). Off by default because it reads both
-  databases a second time. `compare schema` is still unopened.
-  `test_crosscheck_pgcopydb.py`.
+  databases a second time. `test_crosscheck_pgcopydb.py`.
+* ~~**`compare schema`**~~ **done, and used in one direction only.** It is
+  not a second opinion the way `compare data` is - it is a *narrower*
+  check. Measured on 0.18 by introducing one difference at a time:
+
+      target missing a column       differ  (names the column)
+      target missing an index       differ
+      target missing a table        differ
+      varchar(50) -> varchar(200)   **successful** - missed
+
+  migkit reports that last one, deliberately: `neutral_columns` reads
+  `format_type` so a target built wider than its source is visible, because
+  a widened column loses a limit the application relied on without losing a
+  row to show for it. So "pgcopydb says same, migkit says differs" is the
+  expected shape, not a clash, and reporting it as one would cry wolf on
+  every widened column. Only the other direction is reported as a
+  difference: pgcopydb naming something migkit's schema check passed over
+  means migkit missed it. `test_crosscheck_schema.py`.
 * **`snapshot`** - and the interesting part is that migkit does not need
   pgcopydb for it. `pg_export_snapshot` is a PostgreSQL function, and the
   gap it closes is in migkit's *own* verifier: the fast data pass reads

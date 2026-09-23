@@ -594,7 +594,25 @@ class PostgresEngine(Engine):
             at = self.check_atlas(db)
             if at:
                 res.append(at)
-        return self._atlas_authoritative(res)
+        res = self._atlas_authoritative(res)
+        # written for the same reason `data-evidence.txt` is: the schema
+        # cross-check must second-guess the verdict this run reached, not
+        # re-derive one of its own a few seconds later
+        (d / "schema-evidence.txt").write_text(
+            "".join(f"{r.scope}: {r.status.upper()}\n" for r in res))
+        return res
+
+    def _schema_from_evidence(self, db):
+        """migkit's own schema verdict for this database: True clean, False
+        differs, None if the schema check has not run."""
+        path = self.hop.report_dir(db) / "schema-evidence.txt"
+        if not path.exists():
+            return None
+        states = [ln.rsplit(":", 1)[-1].strip()
+                  for ln in path.read_text().splitlines() if ln.strip()]
+        if not states:
+            return None
+        return not any(s == "DIFF" for s in states)
 
     # Statements that remove something. The differ emits these happily; only
     # the operator can say whether dropping an object the source no longer has
@@ -2198,6 +2216,111 @@ class PostgresEngine(Engine):
                       f"{len(shared)} tables, pgcopydb reaches the same"
                       " verdict as migkit on every one")
 
+    #: What `pgcopydb compare schema` says when it finds something, measured
+    #: on 0.18 by making each difference in turn.
+    _SCHEMA_FINDINGS = ("has ", "exists on source but not",
+                        "Failed to find")
+
+    @staticmethod
+    def _schema_verdict(out, rc):
+        """(differs, what it named). `differs` is None when it could not be
+        asked at all, which is not the same as agreeing."""
+        if "schema inspection is successful" in out:
+            return False, []
+        if "Schemas on source and target database differ" in out:
+            found = []
+            for ln in out.splitlines():
+                body = ln.split("  ", 1)[-1].strip()
+                body = body.split("compare.c:")[-1].lstrip("0123456789 ")
+                if any(k in body for k in PostgresEngine._SCHEMA_FINDINGS):
+                    found.append(body[:120])
+            return True, found[:6]
+        return None, []
+
+    def _crosscheck_schema_result(self, db, theirs, found, mine):
+        """One direction carries information here, and the other does not.
+
+        `pgcopydb compare schema` is not a second opinion the way
+        `compare data` is - it is a **narrower** check. Measured on 0.18 by
+        introducing one difference at a time:
+
+            target missing a column     differ   (names the column)
+            target missing an index     differ
+            target missing a table      differ
+            varchar(50) -> varchar(200) **successful** - missed
+
+        migkit reports that last one as a difference, deliberately:
+        `neutral_columns` reads `format_type` precisely so a target built
+        wider than its source is visible, because a widened column loses a
+        limit the application relied on without losing a row to show for it.
+
+        So "pgcopydb says same, migkit says differs" is the expected shape
+        and not a clash - reporting it as one would cry wolf on every
+        widened column. The other direction is the finding: if pgcopydb
+        names a difference that migkit's schema check passed over, migkit
+        missed something.
+        """
+        if theirs is None:
+            return Result("deep", f"{db} schema cross-check", "skip",
+                          "pgcopydb could not compare the two schemas, so"
+                          " there is no second reading to hold this one"
+                          " against")
+        if mine is None:
+            return Result("deep", f"{db} schema cross-check", "skip",
+                          "no schema-evidence.txt to compare against - the"
+                          " schema check has to have run for there to be a"
+                          " migkit verdict to second-guess")
+        if theirs and mine:
+            return Result(
+                "deep", f"{db} schema cross-check", "diff",
+                "migkit's schema check passed and pgcopydb found a"
+                " difference: " + "; ".join(found or ["(unnamed)"])
+                + " - migkit missed this",
+                "", "run `pgcopydb compare schema` on the pair and compare"
+                    " it against schema-src.sql / schema-dst.sql")
+        if theirs and not mine:
+            return Result("deep", f"{db} schema cross-check", "ok",
+                          "pgcopydb agrees the schemas differ")
+        if not mine:
+            return Result(
+                "deep", f"{db} schema cross-check", "ok",
+                "migkit reports a schema difference that pgcopydb does not"
+                " look for - it compares tables, columns and indexes by"
+                " name, not column types, so a widened column passes it."
+                " Not a disagreement")
+        return Result("deep", f"{db} schema cross-check", "ok",
+                      "both read the schemas as matching")
+
+    def _crosscheck_schema(self, db):
+        """The schema half of the cross-check, behind the same switch."""
+        import os
+        if os.environ.get("MIGKIT_CROSSCHECK", "").strip().lower() \
+                not in ("1", "true", "yes", "on"):
+            return None
+        from ..movers import pgcopydb_available
+        from ..util import run
+        if not pgcopydb_available():
+            return self._crosscheck_schema_result(db, None, [], None)
+        import tempfile
+        from urllib.parse import quote
+        s_, t_ = self.hop.source, self.hop.target
+        src = (f"postgresql://{s_.user}:{quote(s_.password or '', safe='')}"
+               f"@{s_.host}:{s_.port}/{db}")
+        dst = (f"postgresql://{t_.user}:{quote(t_.password or '', safe='')}"
+               f"@{t_.host}:{t_.port}/{self._d('dst', db)}")
+        work = tempfile.mkdtemp(prefix="migkit-schemacheck-")
+        try:
+            p = run(["pgcopydb", "compare", "schema", "--dir", work,
+                     "--source", src, "--target", dst], check=False)
+        except Exception as e:
+            return Result("deep", f"{db} schema cross-check", "error",
+                          "could not run pgcopydb compare schema:"
+                          f" {str(e).splitlines()[-1][:80]}")
+        theirs, found = self._schema_verdict(p.stdout + p.stderr,
+                                             p.returncode)
+        return self._crosscheck_schema_result(
+            db, theirs, found, self._schema_from_evidence(db))
+
     def _crosscheck(self, db):
         """Ask pgcopydb the same question and see if it agrees.
 
@@ -2361,6 +2484,9 @@ class PostgresEngine(Engine):
         cross = self._crosscheck(db)
         if cross is not None:
             res.append(cross)
+        cross_schema = self._crosscheck_schema(db)
+        if cross_schema is not None:
+            res.append(cross_schema)
         res.append(self._lob_check(db))
         indexes = self._invalid_indexes(db)
         collations = self._collation_versions(db)
