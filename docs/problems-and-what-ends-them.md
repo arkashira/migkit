@@ -1622,6 +1622,24 @@ released while the confirm pass waited read `ok ... still arriving`; a row
 changed on the target alone still reads `diff`. Test:
 `test_mysql_fence.py`.
 
+### D12a. The comparison that was skipped without a word
+
+**What happens.** Kafka's check compares the settings that decide what a
+topic means - retention, cleanup policy, message size - on both sides. The
+reader was written for an older client's response objects. The client in
+use now answers with nested dictionaries; the reader iterated one, got its
+keys as strings, raised, returned "could not read", and the caller, on
+that answer, simply left the comparison out. Measured: one topic kept for
+a day on the source and an hour on the target, and the check said nothing
+about topic settings at all - not a pass, not an error, nothing.
+
+**migkit: Ends it** - `test_kafka_params.py`. The reader parses what this
+client returns (measured on a live broker), asks for every setting and
+not only the ones changed from default, and never carries a sensitive
+value out. A comparison that cannot run is now an error line of its own.
+The same broker settings, read the same way, are compared as Kafka's
+server settings.
+
 ### D12b. The key that is not a key
 
 **What happens.** A row comparison that matches by key is only as good as

@@ -950,6 +950,11 @@ def _move_full(hop, eng, db, table, chunk, go):
         finally:
             lk.unlink()
         _stop_if_the_schema_moved(hop, eng, d, before)
+        # the table copier leaves the statistics behind it exactly as a
+        # bulk load does; only the bulk path used to put them right
+        settled = eng.settle_target(d)
+        if settled:
+            console.print(f"  {settled}")
         console.print(f"[green]{d}: move complete[/green],"
                       " run migkit check to verify")
     if not go:

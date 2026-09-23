@@ -910,6 +910,32 @@ class HeteroEngine(Engine):
                     "   # the same digest on both sides, table by table")
         return plan
 
+    def moved_nothing(self, db):
+        """Source tables with rows whose target table has none.
+
+        The guard every same-engine path has: a bulk copy can finish without
+        an error and leave the target empty. Asked of the one bulk path this
+        engine has, MySQL into PostgreSQL, where the source's tables land in
+        the target's `public` schema under the names the hop's mapping
+        gives them. None when either side cannot be asked - not the same as
+        an empty list, and the caller says so.
+        """
+        if not (self.my and self.pg):
+            return None
+        try:
+            # the target's own probe below reads an error as "no rows", so
+            # whether it can be reached at all is asked first
+            self.pg._psql("dst", self.pg._d("dst", db), "select 1")
+            with_rows = [t for t in self.my._tables("src", db)
+                         if self.my._q("src", f"select 1 from `{db}`.`{t}`"
+                                              " limit 1")]
+            landed = {t: "public." + self._leaf(self._rename(t))
+                      for t in with_rows}
+            present = self.pg.rows_present(db, list(landed.values()))
+        except Exception:
+            return None
+        return sorted(t for t, name in landed.items() if name not in present)
+
     def list_move_tables(self, db):
         if not (self.my and self.pg):
             if not self._can_move_neutrally():

@@ -484,6 +484,44 @@ class SQLiteEngine(NeutralCopier, Engine):
                        str(d / "schema.diff"),
                        "apply DDL from schema-src.sql on target")]
 
+    def settle_target(self, db):
+        """`ANALYZE` the target file after a load, so its query planner has
+        statistics for tables it has never looked at."""
+        import sqlite3
+        conn = sqlite3.connect(self._path("dst"))
+        try:
+            conn.execute("analyze")
+            conn.commit()
+        finally:
+            conn.close()
+        return "refreshed the target's statistics"
+
+    #: settings a SQLite file carries in itself. `user_version` is where
+    #: applications keep their schema version: a target file that carries
+    #: another one gets its migrations run again, or refused
+    PRAGMAS = ("encoding", "user_version", "application_id", "page_size",
+               "auto_vacuum", "journal_mode")
+    CRITICAL_PRAGMAS = ("encoding", "user_version", "application_id")
+
+    def check_params(self, db):
+        """The settings stored in each file, through the report every
+        engine's settings go through."""
+        def pull(side):
+            try:
+                conn = self._open_ro(side)
+                try:
+                    return {p: str(conn.execute(f"pragma {p}").fetchone()[0])
+                            for p in self.PRAGMAS}
+                finally:
+                    conn.close()
+            except Exception as e:
+                return {self.UNREADABLE: str(e).splitlines()[-1][:80]
+                        if str(e) else type(e).__name__}
+        return self._param_result(
+            db, pull("src"), pull("dst"), self.CRITICAL_PRAGMAS,
+            "set the target file's user_version and application_id to the"
+            " source's before the application opens it")
+
     def check_counts(self, db):
         """Both directions: a table only the target has is a finding too.
 

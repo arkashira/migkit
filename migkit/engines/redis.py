@@ -181,6 +181,32 @@ class RedisEngine(Engine):
         # ones are counted by walking them
         return sum(len(b) for b in self._scan_batches(client, 0, True, db))
 
+    #: settings that change what the data means or whether it survives:
+    #: an eviction policy decides which keys vanish under memory pressure,
+    #: and a different number of databases leaves some with nowhere to go
+    CRITICAL_CONFIG = ("maxmemory-policy", "databases", "notify-keyspace-events",
+                       "lua-time-limit", "busy-reply-threshold")
+
+    def check_params(self, db):
+        """The server's own settings, both sides, through the report every
+        engine's settings go through. A target that evicts differently
+        loses different keys under the same load."""
+        def pull(side):
+            try:
+                got = self._client(side, 0).config_get("*")
+                # the file this lands in is evidence people attach to
+                # tickets: nothing that is, or authenticates like, a secret
+                return {str(k): str(v) for k, v in got.items()
+                        if not any(w in str(k).lower()
+                                   for w in ("pass", "auth", "secret",
+                                             "key"))}
+            except Exception as e:
+                return {self.UNREADABLE: str(e).splitlines()[-1][:80]
+                        if str(e) else type(e).__name__}
+        return self._param_result(
+            db, pull("src"), pull("dst"), self.CRITICAL_CONFIG,
+            "align the target's settings - eviction first - before cutover")
+
     def check_counts(self, db):
         a = self._count("src", db)
         b = self._count("dst", db)

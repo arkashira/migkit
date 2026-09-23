@@ -171,3 +171,17 @@ def test_mysql_reads_its_whole_column_catalogue_in_one_query():
     finally:
         subprocess.run(["docker", "rm", "-f", "-v", name],
                        capture_output=True)
+
+
+def test_a_table_by_table_move_leaves_statistics_behind_it(lite, tmp_path):
+    """The table copier left the planner with nothing to go on; only the
+    bulk path used to refresh statistics after a load."""
+    got, said = _move()
+    assert got.exit_code == 0, said
+    assert "refreshed the target's statistics" in said, said
+    con = sqlite3.connect(tmp_path / "b.db")
+    try:
+        stats = con.execute("select count(*) from sqlite_stat1").fetchone()[0]
+    finally:
+        con.close()
+    assert stats > 0

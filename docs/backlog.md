@@ -148,16 +148,16 @@ declared not applicable with the reason):
 | comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | - |
 | carrying sequences and auto-increment values | yes | yes | n/a | n/a | n/a | yes | yes | - | - |
-| comparing server settings | yes | yes | yes | - | - | yes | - | - | - |
+| comparing server settings | yes | yes | yes | yes | yes | yes | yes | - | - |
 | moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes |
 | copying table by table, resumably | yes | yes | - | - | - | - | yes | - | yes |
 | keeping the target following the source | yes | yes | yes | - | - | - | n/a | - | yes |
 | proving the target has caught up before cutover | yes | yes | - | - | - | - | n/a | - | - |
 | telling a difference still arriving from one that is wrong | yes | yes | - | - | - | - | n/a | - | - |
 | verifying only what changed | yes | yes | yes | - | yes | yes | n/a | - | - |
-| carrying users and their grants | yes | yes | yes | - | - | - | n/a | - | - |
-| noticing a move that moved nothing | yes | yes | yes | - | - | - | - | - | - |
-| refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | - | - | - |
+| carrying users and their grants | yes | yes | yes | yes | - | - | n/a | - | - |
+| noticing a move that moved nothing | yes | yes | yes | - | - | - | - | - | yes |
+| refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | yes | - | - |
 | snapshotting the target so a cutover can be rolled back | yes | yes | yes | - | - | - | - | - | - |
 
 The first hand-made version of this table said MongoDB's change stream was
@@ -168,7 +168,12 @@ refuses no longer counts as a capability.
 
 Closed since: SQLite copies table by table through the cross-engine copier
 (`NeutralCopier`, the one copier for every engine that reads and writes
-neutrally), and MongoDB notices a move that moved nothing.
+neutrally), and MongoDB notices a move that moved nothing. Then: MySQL
+fences and confirms; Redis carries users (by password hash) and compares
+its settings; Kafka and SQLite compare their settings; the cross-engine
+bulk path notices an empty move; and a table-by-table move refreshes
+statistics on every engine, SQLite included. The table above is
+regenerated from `capabilities.matrix()`.
 
 **The deeper version:**
 * **A declared matrix, not a hidden one.** Every engine states, for every

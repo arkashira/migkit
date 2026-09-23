@@ -44,26 +44,86 @@ class KafkaEngine(Engine):
                         "compression.type", "delete.retention.ms",
                         "segment.ms")
 
+    @staticmethod
+    def _described(resp):
+        """{resource name: {setting: value}} from `describe_configs`.
+
+        This client answers with nested dicts - measured on kafka-python
+        3.0.11, `{'topic': {'orders': {'retention.ms': {'value': '1000',
+        'config_source': 'DYNAMIC_TOPIC_CONFIG', 'is_sensitive': False,
+        ...}}}}`. The reader written for the 2.x response objects iterated
+        that dict, got its keys as strings, raised, and the topic settings
+        comparison was skipped without a word. A sensitive value is never
+        carried out of here.
+        """
+        out = {}
+        for by_name in resp.values():
+            for name, settings in by_name.items():
+                out[str(name)] = {
+                    str(k): ("***" if (v or {}).get("is_sensitive")
+                             else str((v or {}).get("value")))
+                    for k, v in settings.items()}
+        return out
+
     def _topic_configs(self, side, topics):
         from kafka.admin import ConfigResource, ConfigResourceType
         out = {}
         try:
             admin = self._admin(side)
-            for i in range(0, len(topics), 20):
-                chunk = topics[i:i + 20]
-                resp = admin.describe_configs(
-                    [ConfigResource(ConfigResourceType.TOPIC, t)
-                     for t in chunk])
-                for r in resp:
-                    for res in r.resources:
-                        name = res[3]
-                        entries = {e[0]: e[1] for e in res[4]}
+            try:
+                for i in range(0, len(topics), 20):
+                    got = self._described(admin.describe_configs(
+                        [ConfigResource(ConfigResourceType.TOPIC, t)
+                         for t in topics[i:i + 20]], config_filter="all"))
+                    for name, entries in got.items():
                         out[name] = {k: entries.get(k, "")
                                      for k in self.CRITICAL_CONFIGS}
-            admin.close()
+            finally:
+                admin.close()
         except Exception:
             return None
         return out
+
+    #: broker settings that change what a message or a topic means, rather
+    #: than how fast the broker serves it; a difference in any of these
+    #: fails the check
+    CRITICAL_BROKER = ("auto.create.topics.enable", "log.retention.ms",
+                       "log.retention.hours", "log.cleanup.policy",
+                       "message.max.bytes", "min.insync.replicas",
+                       "default.replication.factor", "num.partitions",
+                       "compression.type", "log.message.timestamp.type")
+
+    def check_params(self, db):
+        """The brokers' own settings, both sides, through the same report
+        every engine's server settings go through. A broker's defaults are
+        what a topic created by a producer - auto-create, a default
+        partition count, a default retention - silently gets, so a target
+        whose defaults differ turns the same traffic into different topics.
+        """
+        from kafka.admin import ConfigResource, ConfigResourceType
+
+        def pull(side):
+            try:
+                admin = self._admin(side)
+                try:
+                    # the attribute is `node_id` on this client (3.x) and
+                    # was `nodeId` on the 2.x one - measured, 3.0.11 has no
+                    # `nodeId` at all
+                    first = list(admin._client.cluster.brokers())[0]
+                    node = str(first.node_id if hasattr(first, "node_id")
+                               else first.nodeId)
+                    resp = admin.describe_configs(
+                        [ConfigResource(ConfigResourceType.BROKER, node)],
+                        config_filter="all")
+                finally:
+                    admin.close()
+                return self._described(resp).get(node, {})
+            except Exception as e:
+                return {self.UNREADABLE: str(e).splitlines()[-1][:80]
+                        if str(e) else type(e).__name__}
+        return self._param_result(
+            db, pull("src"), pull("dst"), self.CRITICAL_BROKER,
+            "align the target brokers' defaults before producers reach it")
 
     ENGINE_FAMILY = "kafka"
 
@@ -162,6 +222,13 @@ class KafkaEngine(Engine):
         common = sorted(set(src) & set(dst))
         ca = self._topic_configs("src", common)
         cb = self._topic_configs("dst", common)
+        if common and (ca is None or cb is None):
+            # not a skip: a comparison that did not happen is said, or it
+            # reads as one that found nothing
+            res.append(Result("schema", "topic-configs", "error",
+                              "the topics' settings could not be read on"
+                              f" {'the source' if ca is None else 'the target'}"
+                              " - retention and cleanup were not compared"))
         if ca is not None and cb is not None:
             drift = []
             for t in common:

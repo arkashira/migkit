@@ -122,3 +122,24 @@ def test_without_an_exclude_list_nothing_changes(seeded):
     said = _said(_engine().check_counts("0") + _engine().check_data("0"))
     assert "src=9 dst=12" in said, said
     assert "cache:user:1" in said, said
+
+
+def test_server_settings_are_compared_and_secrets_left_out(pair, tmp_path):
+    """An eviction policy decides which keys vanish under memory pressure;
+    a target that evicts differently loses different keys."""
+    s, t = pair
+    t.config_set("maxmemory-policy", "allkeys-lru")
+    s.config_set("requirepass", "")
+    try:
+        eng = _engine()
+        eng.hop.report_dir = lambda db=None, _p=tmp_path: _p
+        got = eng.check_params("0")
+        said = " | ".join(f"{r.status} {r.detail}" for r in got)
+        assert any(r.status == "diff" for r in got), said
+        assert "maxmemory-policy" in said, said
+        dumped = " ".join(p.read_text() for p in tmp_path.rglob("*.json"))
+        # the dump was written, so its not holding a secret means something
+        assert "maxmemory-policy" in dumped, dumped[:200]
+        assert "requirepass" not in dumped and "masterauth" not in dumped
+    finally:
+        t.config_set("maxmemory-policy", "noeviction")
