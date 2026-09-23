@@ -299,7 +299,7 @@ Items not already present (each confirmed by grep before it is written):
 | Area | Checks to add |
 |---|---|
 | PostgreSQL | `logical_decoding_work_mem`, `max_slot_wal_keep_size`, `wal_sender_timeout` |
-| MySQL | binlog transaction compression, binlog retention, `binlog_row_image`, `server_id`, `max_allowed_packet` against the largest LOB actually stored |
+| MySQL | binlog transaction compression, binlog retention, `binlog_row_image`, `server_id`, `max_allowed_packet` against the largest LOB actually stored, `gtid_mode` / `enforce_gtid_consistency` mismatch |
 | Any engine | tables differing only by case; ARRAY/JSON/XML/point columns on key-less tables (DTS fails those outright); other replication already reading the same objects (multi-task conflict); more than 10,000 tables in scope |
 | Target | storage needed, WAL included; HA or read replicas on during the load |
 
@@ -406,6 +406,127 @@ offsets, which differ by design.
 | timed start and auto-retry window | low value next to cron |
 | two-way and many-to-one topologies with loop detection | largest item on the list, lowest priority |
 | waiting on the owner | should dry-run plans hide the command lines they print? |
+
+---
+
+## From the project's memory and the old work queue (added 2026-09-24)
+
+Swept from the notes kept across sessions, then checked against the code.
+
+**Already done, so not listed:**
+* float tolerance (`options.float_tolerance`)
+* MongoDB skipping `system.buckets` / `system.views`
+* the local/S3 state backend wired into the CLI
+* parameter comparison (`check_params`)
+* MySQL type narrowing and time-shift
+
+### P1
+
+**14. A network path migkit can open itself.**
+* **What happened on real legs:**
+  * a VPN path black-holed bulk traffic while TCP still opened (an MTU
+    problem)
+  * a VPN-routed path stalled mid-copy, and the fix that worked was a
+    cloud port-forward over the provider's API (SSM)
+  * migkit only prints advice about it (`advisors.py`)
+* **Deeper:**
+  * SSH tunnels and cloud port-forwards as hop options, opened and closed
+    by migkit
+  * `doctor` telling "TCP opens but bulk stalls" apart from "cannot
+    connect"
+* This is the operator-side half of what DTS offers as access types.
+
+**15. Rows the target has and the source does not: who wrote them, and
+when.**
+
+An open question from a real leg. The deep boundary check flags a target
+*ahead* of its source, but cannot say why. The candidates are:
+* a double apply of full load plus CDC
+* a target that was not emptied
+* snapshot rows replayed by CDC
+* deletes that never propagated
+* writes made on the target
+
+Attribute them where the engine can say:
+* PostgreSQL: commit timestamps where `track_commit_timestamp` is on,
+  transaction age otherwise
+* MongoDB: ObjectId time
+* MySQL: the binlog, where it still covers the window
+
+Report each row's age against when the move started.
+
+**16. The side scripts in `tools/` become migkit, or go.**
+
+Twelve standalone scripts sit beside the package. The owner's rule is one
+tool, so each either becomes part of a migkit verb or is deleted where
+migkit already does its job:
+* `check_grants` / `apply_grants`
+* `check_users` / `user_sync`
+* `check_nopk`
+* `check_routines`
+* `full_compare` / `full_compare_mongo`
+* `spot_check` (index-seek sampling)
+* `validate_constraints` (validates NOT VALID constraints: a repair migkit
+  lacks)
+* `param_diff`
+* `gen_changelog`
+
+**17. MySQL events: repaired, not only detected.**
+
+The schema check names a missing event. The schema-fix tool migkit wraps
+does not model MySQL events and calls such a pair clean, so the fix DDL
+never includes them. migkit writes that DDL itself.
+
+**18. Rehearse the undo (F2).**
+
+The undo written beside every schema fix has only ever run in tests.
+Prove it on a scratch copy of the target before anyone relies on it on the
+day.
+
+*Also folded into existing items:*
+* item 6 gains the `gtid_mode` / `enforce_gtid_consistency` mismatch. A
+  target that enforces GTID consistency rejects `CREATE TABLE ... SELECT`
+  and temporary tables inside a transaction.
+* item 7 gains per-phase, per-engine timings recorded on every run and
+  scaled to the production size, which is what a rehearsal is for.
+
+### P2
+
+**19. Canonical rendering for enum, interval, hstore and tsvector.**
+
+Confirm which are already canonical, then add the rest.
+
+**20. The PostgreSQL-only helpers, ported where the idea exists elsewhere.**
+
+`_filtered_tables`, `_extension_data`, `_large_objects`, `_mojibake_repair`.
+
+**21. `setup_target_plan` for MySQL.**
+
+**22. Coverage of `unchanged_since`.** Which checks honour it, and which
+still re-read everything.
+
+**23. The time zone the data actually uses.** Compare it with the time zone
+each server declares.
+
+**24. G1: a target that is correct and slow.** Close what
+`problems-and-what-ends-them.md` G1 leaves open.
+
+**25. Long reads over unstable links.** Sustained MongoDB cursors stalled
+over a tunnel; single-command reads did not. Read in bounded chunks that
+resume from the last key, on every engine.
+
+### P3
+
+**26. Research not yet done**, for the decision layer's list of what can be
+wrapped:
+* Bytebase, Airbyte, sqlpipe, schemachange, Trino
+* Striim, Qlik Replicate, Fivetran HVR
+
+The question is mechanism, not features.
+
+**27. SQL Server depth.** Closed as untestable on this arm64 machine. Either
+find an x86 runner, or list it plainly in section H of
+`problems-and-what-ends-them.md` as a limit.
 
 ---
 
