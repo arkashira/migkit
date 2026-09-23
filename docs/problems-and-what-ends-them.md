@@ -1026,6 +1026,34 @@ rebuilds only the carried table's index.
 excluded table can point at a row that existed only on the target and is
 not coming back, and `check` does not look inside a table the hop excludes.
 
+### C10. The move that failed and emptied the target anyway
+
+**What happens.** A data-only load has to empty the target first, and the
+emptying is the one step that cannot be taken back. If it runs before the
+copy has anything to load, every failure after it - an unreachable source,
+a password that changed, a dump that dies half-way - leaves the target with
+nothing in it. Measured on the pg_dump path, with a source nobody could
+reach:
+
+    move failed: ... Is the server running on that host and accepting
+    TCP/IP connections?
+    target orders: 2 rows before the move, 0 after
+
+**migkit: Ends it** - `test_the_pgdump_path_empties_last.py`,
+`test_the_mysql_bulk_path_runs.py`. Both paths that dump to disk now dump
+first, empty second, load third, so the target is touched only once a
+complete dump exists. The streaming path cannot do that - it has no dump -
+and instead reaches both ends before it empties anything.
+
+Two more faults came out of the same function. A hop that excludes tables,
+on a source whose table list could not be read, went ahead with a note in
+the plan - and since the emptying keeps excluded tables, the unfiltered
+dump would have loaded the source's rows on top of the target's own. Both
+dump paths now stop there with the same refusal, raised from one place.
+And `pg_restore -d` named the source's database while the emptying named
+the target's, so a hop with a `db_map` emptied one database and loaded
+another.
+
 ---
 
 ## D. Proving the data actually landed

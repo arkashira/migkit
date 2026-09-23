@@ -168,6 +168,27 @@ select format('%I.%I', n.nspname, c.relname)
 """
 
 
+def _unresolved_note(why):
+    """The plan line when the source's tables could not be listed."""
+    return ("# could not list the source's tables, so the hop's exclude list"
+            f" cannot be pushed down: {why}")
+
+
+def _unresolved_exclusion(db, why):
+    """Stop a move whose exclusions could not be resolved - before anything.
+
+    The emptying step keeps the tables the hop excludes. A dump that could
+    not be told to skip them carries them anyway, and the load then puts
+    the source's rows on top of the target's own - into exactly the tables
+    the setting exists to protect. Every bulk path raises this one, so they
+    stop at the same point and say the same thing.
+    """
+    return SystemExit(
+        f"{db}: the hop excludes tables and the source's table list could not"
+        f" be read ({why}), so the copy cannot be told to skip them. Nothing"
+        " has been changed on the target.")
+
+
 def _pg_literal(text):
     """`text` as a PostgreSQL string literal.
 
@@ -382,11 +403,23 @@ class _IndexWindow:
 
 
 def pgdump_move(hop, db, workers, go, log):
+    """Dump, then empty the target, then restore - in that order.
+
+    The dump is a directory on disk (`-Fd`), so nothing forces the target to
+    be emptied before it exists. Emptying it first was measured to cost the
+    target everything when the source could not be reached:
+
+        move failed: ... Is the server running on that host and accepting
+        TCP/IP connections?
+        target orders: 2 rows before the move, 0 after
+
+    - a move that failed and still deleted what it had come to replace.
+    """
     s, t = hop.source, hop.target
     outdir = hop.report_dir(db) / "pgdump"
     # the same resolution pgcopydb and `check` use, so all three exclude
     # exactly the same tables rather than three readings of one pattern
-    skip, skip_note = [], ""
+    skip, unresolved = [], ""
     if getattr(hop, "exclude", None):
         try:
             from .engines.postgres import PostgresEngine
@@ -394,44 +427,56 @@ def pgdump_move(hop, db, workers, go, log):
                                    PostgresEngine(hop).neutral_tables("src",
                                                                       db))
         except Exception as e:
-            skip_note = ("# could not list the source's tables, so the hop's"
-                         " exclude list is not pushed down: "
-                         + str(e).splitlines()[-1][:70])
+            unresolved = str(e).splitlines()[-1][:70] if str(e) \
+                else type(e).__name__
     skip_args = [a for name in skip for a in ("-T", name)]
     steps = [
-        _truncate_step(hop, db),
         f"pg_dump -h {s.host} -p {s.port} -U {s.user} -d {db} -Fd"
         f" -j {workers} --data-only -f {outdir}"
         + ("".join(f" -T {n}" for n in skip) if skip else ""),
-        f"pg_restore -h {t.host} -p {t.port} -U {t.user} -d {db}"
+        _truncate_step(hop, db),
+        f"pg_restore -h {t.host} -p {t.port} -U {t.user}"
+        f" -d {hop.target_db(db)}"
         f" --data-only --disable-triggers -j {workers} {outdir}",
     ]
-    if skip_note:
-        steps.insert(1, skip_note)
+    if unresolved:
+        steps.insert(1, _unresolved_note(unresolved))
     elif skip:
         steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
                         " dumped at all")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
+    if unresolved:
+        raise _unresolved_exclusion(db, unresolved)
     env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
-    _pg_truncate_target(hop, db, log)
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
+    _pgdump_dump(hop, db, s, workers, outdir, log, skip_args)
+    _pg_truncate_target(hop, db, log)
     with _IndexWindow(hop, db, workers, log):
-        _pgdump_load(hop, db, s, workers, outdir, env_t, log, skip_args)
+        _pgdump_restore(hop, db, workers, outdir, env_t, log)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
 
 
-def _pgdump_load(hop, db, s, workers, outdir, env_t, log, skip_args=()):
-    t = hop.target
+def _pgdump_dump(hop, db, s, workers, outdir, log, skip_args=()):
     _sh(["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
          "-d", db, "-Fd", "-j", str(workers), "--data-only",
          "-f", str(outdir), *skip_args],
         {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
+
+
+def _pgdump_restore(hop, db, workers, outdir, env_t, log):
+    """Restore into the *target's* name for the database.
+
+    It used the source's name, while the emptying and the index window
+    already used `target_db()` - so a hop whose `db_map` renames the
+    database emptied the right one and loaded into another.
+    """
+    t = hop.target
     try:
         _sh(["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", db, "--data-only", "--disable-triggers",
+             "-d", hop.target_db(db), "--data-only", "--disable-triggers",
              "-j", str(workers), str(outdir)], env_t, log)
     except RuntimeError as e:
         # newer pg_dump emits SETs older servers reject; pg_restore exits 1
@@ -786,17 +831,11 @@ def mydumper_move(hop, db, workers, go, log):
         steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
                         " dumped at all")
     if unresolved:
-        steps.insert(1, "# could not list the source's tables, so the hop's"
-                        f" exclude list cannot be pushed down: {unresolved}")
+        steps.insert(1, _unresolved_note(unresolved))
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
-        # the target keeps its excluded tables, so a dump that carried them
-        # would load the source's rows on top of the target's own
-        raise SystemExit(
-            f"{db}: the hop excludes tables and the source's table list"
-            f" could not be read ({unresolved}), so the copy cannot be told"
-            " to skip them. Nothing has been changed on the target.")
+        raise _unresolved_exclusion(db, unresolved)
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
     if filters:
