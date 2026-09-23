@@ -1071,13 +1071,20 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
                         # thing a migration tool must never do
                         empty = eng.moved_nothing(d)
                         if empty:
+                            # the copy was told to skip what the hop
+                            # excludes, so a table it skipped is not one it
+                            # failed to fill - counting it made a correct
+                            # move report itself failed and go unrecorded
+                            empty = [t for t in empty
+                                     if not hop.excluded(d, *t.split("."))]
+                        if empty:
                             raise SystemExit(
-                                f"{v} reported success and {d} is still"
-                                f" empty on the target: "
+                                f"the bulk copy reported success and {d} is"
+                                f" still empty on the target: "
                                 + ", ".join(empty[:6])
                                 + (" ..." if len(empty) > 6 else "")
                                 + ". Nothing has been marked as moved - look"
-                                  " at the mover's output above, and at the"
+                                  " at the copy's output above, and at the"
                                   " target server's log")
                         if empty is None:
                             chat("  (this engine cannot confirm the rows"

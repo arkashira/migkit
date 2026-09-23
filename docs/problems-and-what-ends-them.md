@@ -973,6 +973,39 @@ target` in both bulk paths; it now says whether the hop's exclusions apply,
 from one function, because a plan that claims to empty everything beside a
 run that skips some is how a reader concludes the table was refilled.
 
+**And the check after the copy had the same blind spot.** Once the copy
+exits, migkit looks for tables the source has rows in and the target has
+none of - the guard against a copy that exits 0 and moves nothing. It
+looked at every table, so an excluded table that is empty on the target
+(a new target-owned table, say) read as a copy that had failed. Measured,
+after a move that did exactly what the hop said:
+
+    target: orders=1 audit_log=0
+    pgdump reported success and appdb is still empty on the target:
+    public.audit_log. Nothing has been marked as moved
+
+A correct move, reported as failed, blamed on the copy, and never recorded.
+The guard now leaves out what the hop excludes - through `hop.excluded()`,
+at its one caller, so it covers every engine - and a carried table left
+empty beside an excluded one is still stopped. That line also named the
+program that ran, from a variable the tool-name scan could not see; it now
+says "the bulk copy". `test_move_moved_something.py`.
+
+MySQL differs here in a way worth writing down. Its `TRUNCATE` does not
+cascade; it refuses a table another table references:
+
+    ERROR 1701 (42000): Cannot truncate a table referenced in a foreign
+    key constraint (`appdb`.`audit_log`, CONSTRAINT `audit_log_ibfk_1`)
+
+and with `foreign_key_checks = 0` in the same session it empties the
+referenced table and leaves the referencing one alone - measured, the
+excluded child kept both its rows. So when the MySQL path empties the
+target itself (section 5 of `what-is-already-in-the-box.md`: it does not
+run today), the PostgreSQL refusal has no counterpart to need - nothing the
+hop excludes can be reached. What it leaves is quieter: a row in the
+excluded table can point at a row that existed only on the target and is
+not coming back, and `check` does not look inside a table the hop excludes.
+
 ---
 
 ## D. Proving the data actually landed
