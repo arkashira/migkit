@@ -188,8 +188,32 @@ column, fails outright on PostgreSQL and is silently filled in by MySQL.
     unopened: diffChangeLog, update, rollback, snapshot, status,
               changelog-sync
 
-`rollback` matters: migkit has its own rollback via state snapshots, and
-liquibase has one for schema. Two mechanisms that should agree.
+`rollback` **cannot be used, and the reason is structural.** It only undoes
+changesets recorded in its own `DATABASECHANGELOG` table, and migkit never
+puts any there - it generates DDL and the operator applies it, so there is
+never anything to roll back. Measured on 4.33.0 against a database it had
+never touched:
+
+    liquibase ... rollback --tag=nope
+    ERROR: Could not find tag 'nope' in the database
+
+    select tablename from pg_tables where schemaname='public'
+    databasechangelog
+    databasechangeloglock
+    t
+
+**Two tracking tables, from a command that failed.** Getting to the point
+where there was something to roll back would mean writing those into
+somebody's target as a side effect of using migkit.
+
+The same probe on `diff`, which the schema check runs on every hop, left
+the target and the source exactly as they were - so that one stays, and a
+test now pins that migkit never reaches for one of the others.
+
+migkit's own undo needs neither: `revert.py` takes the same diff in the
+opposite direction at the same instant, names every forward statement no
+DDL can undo, and says `no undo could be generated` rather than offering a
+file that is not one. `test_a_check_does_not_write_to_the_target.py`.
 
 ### mydumper - the row filter is already there
 
