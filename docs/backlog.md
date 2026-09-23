@@ -122,15 +122,28 @@ DVT (`google-pso-data-validator`, built on Ibis) does:
 * partitioned runs for large tables
 
 It reaches engines migkit does not read natively: Oracle, Teradata, Db2,
-Snowflake, BigQuery, Spanner. Wrapped the way Debezium was:
-* installed by `doctor --install`
-* driven through its Python API rather than its CLI where the API is
-  stable
-* its findings translated into migkit's verdict envelope
-* its name never printed
+Snowflake, BigQuery, Spanner.
 
-Measure first:
-* the install footprint (it pulls the Google Cloud clients and a pinned Ibis)
+**Measured install (8.9.3, into a scratch venv on Python 3.12):** 34 s,
+547 MB, 107 packages. It imports and its CLI starts. It **cannot share
+migkit's environment**; it pins an older stack than the one migkit runs on:
+
+| Package | migkit | DVT |
+|---|---|---|
+| numpy | 2.5.3 | 1.26.4 |
+| pandas | 3.0.5 | 2.3.3 |
+| pyarrow | 25.0.1 | 14.0.2 |
+| sqlglot | 30.18.0 | 19.9.0 (through ibis-framework 7.1.0) |
+
+So the wrap is **out of process**, the way pgcopydb runs from its own
+container image:
+* `doctor --install` builds it a venv of its own
+* migkit drives it through a small runner inside that venv, which calls its
+  Python API and hands back JSON
+* its findings are translated into migkit's verdict envelope
+* its name is never printed
+
+Still to measure:
 * that it writes nothing to either side; results go where migkit tells it
 * its speed against migkit's own checksum on the same pair
 * which of its type mappings disagree with `canon`, where it would call
