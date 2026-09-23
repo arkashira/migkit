@@ -112,3 +112,27 @@ def migkit_cmd():
             if exe.exists():
                 return [str(exe)]
     return [sys.executable, "-m", "migkit.cli"]
+
+
+def verdict(results, scope):
+    """The one result carrying exactly this scope.
+
+    Selecting with `r.scope.endswith(...)` picks the wrong record the moment
+    a second check's name ends with the same word. `f"{db} duplicate keys"`
+    was added beside `f"{db} keys"`, and `endswith("keys")` started answering
+    with whichever the engine happened to append first - the deep battery
+    returns them in the order it runs them, not an order any test chose.
+
+    That one failed loudly, because the two verdicts disagreed. A pair where
+    both read `ok` would have passed on the wrong record, which is the shape
+    this helper exists to make impossible: it takes the scope in full and
+    refuses anything other than exactly one match.
+    """
+    got = [r for r in results if r.scope == scope]
+    if len(got) != 1:
+        tail = scope.rsplit(" ", 1)[-1]
+        near = [r.scope for r in results if r.scope.endswith(tail)]
+        raise AssertionError(
+            f"{len(got)} verdicts with scope {scope!r}"
+            f" - scopes ending in {tail!r}: {near}")
+    return got[0]

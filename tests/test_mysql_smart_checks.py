@@ -8,6 +8,8 @@ import time
 
 import pytest
 
+from tests.conftest import verdict
+
 
 def _docker():
     try:
@@ -96,16 +98,33 @@ def test_mysql_nopk_and_autoinc_verdicts(pair):
     eng = _engine()
 
     deep = eng.check_deep("shop")
-    keys = [r for r in deep if r.scope.endswith("keys")]
-    assert keys and keys[0].status == "diff", [r.__dict__ for r in deep]
-    assert "events" in keys[0].detail
+    keys = verdict(deep, "shop keys")
+    assert keys.status == "diff", [r.__dict__ for r in deep]
+    assert "events" in keys.detail
 
     ai = eng.check_autoinc("shop")
-    usable = [r for r in ai if r.scope.endswith("usable")]
-    parity = [r for r in ai if r.scope.endswith("parity")]
-    assert usable and usable[0].status == "ok", [r.__dict__ for r in ai]
-    assert parity and parity[0].status == "diff", [r.__dict__ for r in ai]
-    assert "orders" in parity[0].detail
+    usable = verdict(ai, "shop usable")
+    parity = verdict(ai, "shop parity")
+    assert usable.status == "ok", [r.__dict__ for r in ai]
+    assert parity.status == "diff", [r.__dict__ for r in ai]
+    assert "orders" in parity.detail
+
+
+def test_the_two_key_checks_are_separate_verdicts(pair):
+    """What broke the selector above, pinned as the fact it is: the deep
+    battery answers two different questions about keys, and a reader - or a
+    test - has to be able to tell them apart. `duplicate keys` asks whether
+    a unique index still enforces; `keys` asks whether there is one at all."""
+    _sql(SRC, "create database if not exists shop;"
+              " create table if not exists shop.events(a int, b int);")
+    _sql(DST, "create database if not exists shop;"
+              " create table if not exists shop.events(a int, b int);")
+    deep = _engine().check_deep("shop")
+    assert verdict(deep, "shop keys").status == "diff"
+    verdict(deep, "shop duplicate keys")
+    loose = sorted(r.scope for r in deep
+                   if r.scope.endswith("keys"))  # deliberately loose
+    assert loose == ["shop duplicate keys", "shop keys"], loose
 
 
 def test_mysql_type_narrowing(pair):

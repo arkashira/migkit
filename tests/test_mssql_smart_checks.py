@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+from tests.conftest import verdict
+
 
 def _docker():
     try:
@@ -104,11 +106,11 @@ def test_mssql_identity_collision_and_nopk(pair):
 
     eng = _engine()
     ai = eng.check_autoinc("shop")
-    usable = [r for r in ai if r.scope.endswith("usable")]
-    assert usable and usable[0].status == "diff", [r.__dict__ for r in ai]
-    assert "orders" in usable[0].detail and "collide" in usable[0].detail.lower()
+    usable = verdict(ai, "shop usable")
+    assert usable.status == "diff", [r.__dict__ for r in ai]
+    assert "orders" in usable.detail and "collide" in usable.detail.lower()
 
     deep = eng.check_deep("shop")
-    keys = [r for r in deep if r.scope.endswith("keys")]
-    assert keys and keys[0].status == "diff", [r.__dict__ for r in deep]
-    assert "events" in keys[0].detail
+    keys = verdict(deep, "shop keys")
+    assert keys.status == "diff", [r.__dict__ for r in deep]
+    assert "events" in keys.detail
