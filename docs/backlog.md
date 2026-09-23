@@ -725,10 +725,11 @@ This is the part of CloudWatch alarms that migkit can own.
 
 **44. Failure caused on purpose.**
 
-The paid tools earned trust from years of production failures. The open
-way to earn it is to cause those failures deliberately, in a harness
-anyone can re-run, and publish what happens. Each case, on every engine
-0e declares a move or stream for:
+This is for day one, not instead of real use: real migrations keep
+teaching after launch, and each failure they show becomes a case here.
+The harness makes sure the failures already known are handled before
+anyone meets them, in a form anyone can re-run. Each case, on every
+engine 0e declares a move or stream for:
 * migkit killed mid-dump, mid-load, mid-copy, mid-verify
 * the network between source and target cut, then restored
 * the source restarted, and the source failing over to a replica during
@@ -745,15 +746,17 @@ silently wrong fails the harness.
 
 **45. Proof at size.**
 
-Item 28 measures speed. This measures correctness and resource use at a
-size where the small-sandbox answers can change:
-* terabyte-class runs on an instance the owner rents, with the time and
-  cost stated
-* deep verification at zero differences afterwards
+*Already done before launch:* migkit verified a real migration of about
+800 GB - MySQL, PostgreSQL, and MongoDB to DocumentDB - that is now in
+production use. Its data stays private.
+
+Item 28 measures speed. What is left here:
+* migkit's own move, not only its verification, at that size and past
+  it, with the time and cost stated
+* terabyte-class runs on an instance the owner rents, re-runnable by
+  anyone with the same recipe
 * memory staying flat as tables grow (every read streamed, never a whole
   table in memory)
-* a real migration, run end to end with its numbers, as the reference
-  case; its data stays private
 
 **46. Wrapped programs stay wrapped when they change.**
 
