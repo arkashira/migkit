@@ -67,8 +67,13 @@ What that leaves on the floor:
     made against an empty target.
 
   So the wrap is not "shell out to `follow`": it is to drive the sentinel,
-  bound the run with `--endpos`, and prove convergence from the *target's*
-  replication origin. Not built yet.
+  bound the run with `--endpos`, and read progress from the *target's*
+  replication origin rather than the mover's own opinion of it. The
+  groundwork for that last part is in: `applied_lsn` and `follow_origin`
+  on the PostgreSQL engine, with the origin named per hop and database
+  because pgcopydb's default is the bare word `pgcopydb` and origins are
+  cluster-wide. What it is **not** is a fence - see D12; that was tried and
+  reverted with the measurement. The mover itself is not built yet.
 * ~~**`compare data`**~~ **done** - run against migkit's own verdict on the
   same pair under `MIGKIT_CROSSCHECK=1`, and reported as a deep check. It
   agreed on all four pairs it was tried on: identical rows, `numeric` 1.0

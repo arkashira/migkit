@@ -4665,10 +4665,111 @@ class PostgresEngine(Engine):
             return None
         return self._psql("src", db, "select pg_current_wal_lsn()")
 
+    def follow_origin(self, db):
+        """The replication origin migkit gives a locally-driven CDC leg.
+
+        pgcopydb's default is the bare name `pgcopydb`, which says nothing
+        about which hop or which database it belongs to - and origins are
+        cluster-wide, so two databases following at once would share one
+        name and overwrite each other's position. Naming it per hop and
+        database is what lets `applied_lsn` attribute it.
+        """
+        raw = f"migkit_{self.hop.name}_{db}".replace("-", "_")
+        return "".join(c if c.isalnum() or c == "_" else "_" for c in raw)[:63]
+
+    #: origins on the target that belong to the database being fenced.
+    #: `pg_replication_origin_status` is cluster-wide: connected to one
+    #: database it also lists every other one's. Measured on PostgreSQL 16 -
+    #: from `postgres`, with the only subscription living in `other`:
+    #:
+    #:     external_id | remote_lsn
+    #:     pgcopydb    | 0/15B9810
+    #:     pg_16407    | 0/0
+    #:
+    #: A fence taking `min(remote_lsn)` across that would wait on a
+    #: subscription for a database nobody asked about, parked at `0/0`
+    #: because it was created a minute ago, and would never pass. A
+    #: subscription is attributable through `pg_subscription.subdbid`; an
+    #: origin migkit made is attributable because migkit named it.
+    _ORIGIN_ROWS = """
+          select o.remote_lsn
+            from pg_replication_origin_status o
+            join pg_subscription s on o.external_id = 'pg_' || s.oid
+           where s.subdbid = (select oid from pg_database
+                               where datname = current_database())
+          union all
+          select o.remote_lsn
+            from pg_replication_origin_status o
+           where o.external_id = '{origin}'"""
+
+    def _origin_rows(self, db):
+        return self._ORIGIN_ROWS.format(origin=self.follow_origin(db))
+
+    def applied_lsn(self, db):
+        """The source LSN the *target* has actually applied, or None.
+
+        The source's `confirmed_flush_lsn` is what the consumer said; this
+        is what the target did. Both native logical replication and
+        pgcopydb write `pg_replication_origin_status` inside the applying
+        transaction, so for either path it means "committed here", and the
+        two numbers disagree in both directions - measured on PostgreSQL 16
+        on one pair under the same insert load:
+
+            native subscription   origin *ahead* of the slot by up to 46 KB
+                                  (the slot is a delayed echo of the apply)
+            pgcopydb follow       slot ahead of the origin while the target
+                                  still held 0 rows
+
+        Read `fence_wait` before reaching for this as a fence: it cannot be
+        one. The origin stops at the last applied transaction while the
+        source's WAL keeps moving, so `origin >= some current LSN` never
+        becomes true on a quiet database.
+
+        What it is good for is saying where the target actually is - in a
+        report, and to a CDC leg migkit drives itself, which needs a
+        position that is not the mover's own opinion of its progress.
+        """
+        q = ("select coalesce(min(o.remote_lsn)::text, '') from ("
+             + self._origin_rows(db) + ") o")
+        try:
+            got = self._psql("dst", self._d("dst", db), q)
+        except RuntimeError:
+            return None
+        got = got.strip()
+        # `0/0` is the absence of a position, not a position. A subscription
+        # that has copied its tables but not yet applied a *streamed*
+        # transaction sits there - measured: `pg_stat_subscription` showed
+        # received_lsn 0/19EB3E8 and the rows were on the target, while the
+        # origin still read 0/0; one insert on the source moved it to
+        # 0/19EB540. Reading that as "applied nothing" would stall the fence
+        # on a database whose only fault is being idle, so it hands back to
+        # the slot, which does carry a position for that subscription.
+        return None if not got or got == "0/0" else got
+
     def fence_wait(self, db, lsn, timeout=300):
         """Block until every active replication consumer of this db has
         confirmed flushing past `lsn`. True = fence passed, False = timed
-        out, None = no slot visible / no source LSN (cannot fence)."""
+        out, None = no slot visible / no source LSN (cannot fence).
+
+        This reads the *source's* slot and not `applied_lsn`, and that is
+        deliberate rather than an oversight. `applied_lsn` is the better
+        number in the sense that it means "committed on the target" - but it
+        can only ever be the LSN of the last transaction that was applied,
+        so on a quiet database it stops and the source's WAL keeps moving.
+        Measured on PostgreSQL 16, one healthy subscription, no writes, five
+        samples three seconds apart:
+
+            pg_current_wal_lsn   0/19EB660
+            confirmed_flush_lsn  0/19EB660   (keepalives carry it to the end)
+            origin remote_lsn    0/19EB540   (288 bytes back, and staying)
+
+        A fence of `origin >= lsn`, or of `origin >= slot`, never passes
+        there. It would time out on every idle pair and fall through to the
+        weaker sleep-settle path without saying so - a fence that quietly
+        stops fencing. The gap is also not a fault signal on its own: it
+        looks the same as a consumer holding changes it has not applied,
+        which is what `check`'s row comparison is for.
+        """
         if lsn is None:
             return None
         if self._psql("src", db,

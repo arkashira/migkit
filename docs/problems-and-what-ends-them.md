@@ -1262,6 +1262,40 @@ keys, which is the point where a "settle" is no longer a settle.
 When every difference resolves this way the report says so in those words -
 `all diffs proven in-flight replication` - rather than quietly passing.
 
+**And the number the fence is built on is the consumer's, not the
+target's.** `confirmed_flush_lsn` is what the replication consumer reported
+back to the source; `pg_replication_origin_status.remote_lsn` on the target
+is what the target committed. They are not the same, and they disagree in
+both directions - measured on PostgreSQL 16, one pair, the same insert load:
+
+| | |
+|---|---|
+| native subscription | origin **ahead** of the slot by up to 46 KB - the slot is a delayed echo of the apply |
+| `pgcopydb follow` | slot **ahead** of the origin while the target still held 0 rows |
+
+The obvious conclusion - fence on the origin, since it is the one that means
+"applied" - was written, measured and reverted. On an idle healthy pair, five
+samples three seconds apart:
+
+    pg_current_wal_lsn   0/19EB660
+    confirmed_flush_lsn  0/19EB660   (keepalives carry it to the end)
+    origin remote_lsn    0/19EB540   (288 bytes back, and staying)
+
+The origin can only ever be the LSN of the last *applied transaction*, so it
+stops while the source's WAL keeps moving. `origin >= lsn` never becomes true
+on a quiet database, and `origin >= slot` never does either. A fence built on
+it times out on every idle pair and falls through to sleep-settle without
+saying so - a fence that quietly stops fencing. Nor is the gap a fault signal
+by itself: an idle pair and a consumer sitting on unapplied changes look the
+same in LSN arithmetic, which is what the row comparison is for.
+
+So `fence_wait` keeps reading the slot, on purpose and with the measurement
+written next to it, and the target's position is exposed separately as
+`applied_lsn` - correctly attributed, because origins are **cluster-wide**:
+connected to `postgres` with the only subscription living in `other`, the
+view still lists `pg_16407 | 0/0`, and a `min()` across that would answer
+`0/0` for ever. Test: `test_where_the_target_actually_is.py`.
+
 ### D13. The difference you cannot see, and the one the reader ate
 
 **What happens.** Two values print identically and are not equal: `é` as
