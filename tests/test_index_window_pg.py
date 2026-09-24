@@ -121,11 +121,14 @@ def test_the_definitions_reach_disk_before_anything_is_dropped(pair,
     hour later, by a person."""
     from migkit import indexes as ix
     from migkit import movers
-    where = tmp_path / "dropped-indexes.json"
     with movers._IndexWindow(_hop(tmp_path), "app", 2, None):
-        assert where.exists(), "nothing was written before the drop"
+        # one file per load, named for its process (`setaside`)
+        written = list(tmp_path.glob("dropped-indexes.*.json"))
+        assert len(written) == 1, "nothing was written before the drop"
+        where = written[0]
         saved = ix.restore_from(where)
-        assert set(saved) == {"ix_a", "ix_ac"}, saved
+        # by schema too: the same name can be an index in each of two
+        assert set(saved) == {"public.ix_a", "public.ix_ac"}, saved
         assert all("CREATE INDEX" in v for v in saved.values()), saved
 
 
@@ -166,3 +169,55 @@ def test_a_real_move_lands_the_rows_and_leaves_the_indexes_intact(pair,
     plan = _sql(DST, "app", "explain (costs off) select * from t"
                             " where a = 'nope'")
     assert "ix_a" in plan or "Index" in plan, plan
+
+
+def test_the_same_index_name_in_two_schemas_is_two_indexes(pair, tmp_path):
+    """The window named each index without its schema. `ix_a` in `public`
+    and `ix_a` in `other` were one name: the drop took whichever the search
+    path found, the second definition overwrote the first, and one of the
+    two indexes did not come back."""
+    from migkit import movers
+    _sql(DST, "app", "create schema if not exists other;"
+                     " create table if not exists other.t (id int primary"
+                     " key, a text); create index if not exists ix_a on"
+                     " other.t (a)")
+    try:
+        def both():
+            return _sql(DST, "app", "select schemaname||'.'||indexname from"
+                                    " pg_indexes where indexname = 'ix_a'"
+                                    " order by 1").splitlines()
+        assert both() == ["other.ix_a", "public.ix_a"], both()
+        inside = {}
+        with movers._IndexWindow(_hop(tmp_path), "app", 2, None):
+            inside["left"] = both()
+        assert inside["left"] == [], inside
+        assert both() == ["other.ix_a", "public.ix_a"], both()
+    finally:
+        _sql(DST, "app", "drop schema other cascade")
+
+
+def test_what_a_killed_load_dropped_is_rebuilt_by_the_next(pair, tmp_path):
+    """A load killed inside the window left the indexes dropped, and the
+    next load saved its own definitions over the file that listed them:
+    nothing said they had ever been there. Each load now keeps its own
+    file, and the next one builds what a dead one's lists and the target
+    lacks - on a table with no index left to drop, too."""
+    import json
+    import sys
+    from migkit import movers
+    before = _idx(DST)
+    # a load that is gone: its process has exited
+    dead = subprocess.run([sys.executable, "-c",
+                           "import os; print(os.getpid())"],
+                          capture_output=True, text=True).stdout.strip()
+    import socket
+    ddl = _sql(DST, "app", "select pg_get_indexdef('ix_a'::regclass)")
+    (tmp_path / f"dropped-indexes.{socket.gethostname()}.{dead}.1.json"
+     ).write_text(json.dumps({"public.ix_a": ddl}))
+    _sql(DST, "app", "drop index ix_a")
+    said = []
+    with movers._IndexWindow(_hop(tmp_path), "app", 2, said.append):
+        pass
+    assert _idx(DST) == before, said
+    assert "an earlier load dropped and did not rebuild" in " ".join(said)
+    assert not list(tmp_path.glob("dropped-indexes.*")), said

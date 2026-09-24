@@ -142,6 +142,21 @@ class Hop:
                 return str(rules[ident])
         return ".".join(str(p) for p in parts if p not in (None, ""))
 
+    def column_rules(self, *parts):
+        """What the hop's `mapping.columns` says about this table's columns:
+        `keep` (only these), `drop` (all but these) and `rename` (source name
+        to target name), matched by the same suffix rule as every other
+        name in the hop. Empty when nothing is said."""
+        rules = (self.mapping or {}).get("columns") or {}
+        for ident in self._ids(*parts):
+            if ident in rules:
+                got = rules[ident] or {}
+                return {"keep": [str(c) for c in got.get("keep") or []],
+                        "drop": [str(c) for c in got.get("drop") or []],
+                        "rename": {str(a): str(b) for a, b in
+                                   (got.get("rename") or {}).items()}}
+        return {}
+
     def row_filter(self, *parts):
         """The predicate that decides which rows of this table move, or None.
 

@@ -84,7 +84,7 @@ def _hop(tmp_path):
     return hop
 
 
-def _seed(target_tables=("a", "b")):
+def _seed(target_tables=("a", "b"), v="text"):
     my("drop database if exists cx; drop database if exists cy;"
        " create database cx; create database cy;"
        " create table cx.a (id int primary key, v text);"
@@ -92,7 +92,7 @@ def _seed(target_tables=("a", "b")):
        " insert into cx.a values (1, 'x'), (2, 'y');"
        " insert into cx.b values (1, 'z');")
     for t in target_tables:
-        my(f"create table cy.{t} (id int primary key, v text)")
+        my(f"create table cy.{t} (id int primary key, v {v})")
 
 
 @pytest.mark.usefixtures("server")
@@ -112,10 +112,12 @@ def test_each_table_is_named_as_it_is_read_and_loaded(tmp_path):
 
 @pytest.mark.usefixtures("server")
 def test_a_failed_load_is_its_message_not_a_machine_log(tmp_path):
-    """The target has no table `b`, so the data-only load cannot land."""
+    """The target's `v` is a number and the source's is text, so the load
+    cannot land. (A target without the table no longer fails: the move
+    creates the tables it lacks.)"""
     from migkit import movers
     from tests.test_the_report_does_not_name_its_tools import TOOLS
-    _seed(target_tables=("a",))
+    _seed(v="int")
     with pytest.raises((RuntimeError, SystemExit)) as e:
         movers.mydumper_move(_hop(tmp_path), "cx", 2, True, lambda m: None)
     said = str(e.value)

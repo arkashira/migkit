@@ -63,9 +63,13 @@ def test_postgres_reads_its_facts_in_one_query(pg_pair):
                               user="postgres", password="test"),
               databases=["postgres"])
     got = PostgresEngine(hop).table_facts("src", "postgres")
-    assert got["public.keyed"] == {"rows": 50, "key": True}, got
+    # and its size on disk, which the plan adds up
+    assert {k: got["public.keyed"][k] for k in ("rows", "key")} == \
+        {"rows": 50, "key": True}, got
+    assert got["public.keyed"]["bytes"] > 0, got
     # never analysed: unknown, not zero
-    assert got["public.bare"] == {"rows": None, "key": False}, got
+    assert {k: got["public.bare"][k] for k in ("rows", "key")} == \
+        {"rows": None, "key": False}, got
 
 
 @needs_docker

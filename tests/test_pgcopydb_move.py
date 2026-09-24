@@ -197,5 +197,33 @@ def test_the_logged_command_does_not_leak_the_password_either(pair, tmp_path):
     assert not [t for t in TOOLS if t in joined.lower()], joined
     debug = (tmp_path / "commands.log").read_text()
     assert ":test@" not in debug, debug
-    assert "***@" in debug, debug
-    assert f"127.0.0.1:{SRC_PORT}" in debug, debug
+    # no password in the connection strings at all now - they were on the
+    # program's command line, where a process listing read them - and the
+    # file that held them for the run is gone with it
+    assert f"postgres@127.0.0.1:{SRC_PORT}" in debug, debug
+    assert not (tmp_path / "streaming.pgpass").exists()
+
+
+def test_the_command_line_holds_no_password(tmp_path, monkeypatch):
+    """What `ps` shows while the copy runs is its command line; the
+    passwords are in a file only this user can read, for the run."""
+    from migkit import movers
+    from migkit.config import Endpoint, Hop
+    monkeypatch.setattr(movers, "pgcopydb_runner", lambda: "local")
+    hop = Hop(name="pw", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=1, user="app",
+                              password="CHANGE_ME-src"),
+              target=Endpoint(host="10.0.0.2", port=2, user="app",
+                              password="CHANGE_ME-dst"),
+              databases=["appdb"])
+    hop.report_dir = lambda db=None: tmp_path
+    steps = movers.pgcopydb_move(hop, "appdb", 2, False, None)
+    argv = " ".join(" ".join(s.argv) for s in steps
+                    if getattr(s, "argv", None))
+    assert argv, steps
+    assert "CHANGE_ME" not in argv, argv
+    movers._pgpass(tmp_path / "p", hop, "appdb", "appdb")
+    assert (tmp_path / "p").stat().st_mode & 0o077 == 0
+    assert (tmp_path / "p").read_text().splitlines() == [
+        "10.0.0.1:1:appdb:app:CHANGE_ME-src",
+        "10.0.0.2:2:appdb:app:CHANGE_ME-dst"]

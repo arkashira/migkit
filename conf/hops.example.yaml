@@ -21,3 +21,6 @@ hops:
     workers: 4
     big_rows: 5000000
     slice: 1000000
+    # options:
+    #   mask: [users.email, ssn]  # values reports show from rows, as salted hashes; `all` masks every value
+    #   transfer_price_per_gb: 0.09   # the plan then says what carrying the rows across costs

@@ -49,11 +49,9 @@ GAPS = {
     "postgres": {},
     "mysql": {},
     "mongodb": {
-        "confirm": (NOT_YET, "1"),
         "sequences": (NOT_APPLICABLE,
                       "collections have no sequences or auto-increment"),
         "table-copy": (NOT_YET, "0e"),
-        "fence": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "mssql": {
@@ -103,14 +101,9 @@ GAPS = {
         "snapshot": (NOT_YET, "0e"),
     },
     "hetero": {
-        "confirm": (NOT_YET, "1"),
-        "deep": (NOT_YET, "0e"),
-        "sequences": (NOT_YET, "0e"),
         "params": (NOT_YET, "0e"),
-        "fence": (NOT_YET, "0e"),
         "delta": (NOT_YET, "0e"),
         "users": (NOT_YET, "0e"),
-        "statistics": (NOT_YET, "0e"),
         "snapshot": (NOT_YET, "0e"),
     },
     "generic": {

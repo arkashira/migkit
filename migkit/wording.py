@@ -28,6 +28,10 @@ from pathlib import Path
 #: are what the operator reads. No wording names a program.
 PHASES = {
     "dump": "reading the source into a local copy",
+    "create": "creating the tables the target does not have yet",
+    "finish-created": "adding the keys, indexes and constraints of the"
+                      " tables it created",
+    "sequences": "setting the target's sequences from the source's",
     "empty": "emptying the target's tables",
     "load": "loading the local copy into the target",
     "stream-copy": "copying tables straight from source to target",
@@ -70,8 +74,8 @@ _FACTS = {
     "tables": lambda v: f"{_n(v)} tables",
     "workers": lambda v: f"{_n(v)} at a time",
     "left_out": lambda v: f"{_n(v)} tables left out as the hop asks",
-    "filtered": lambda v: f"{_n(v)} tables with a row filter copied on"
-                          " their own",
+    "routed": lambda v: f"{_n(v)} tables copied table by table, as the"
+                        " plan says",
     "row_filters": lambda v: f"{_n(v)} tables read through the hop's row"
                              " filter",
     "rows": lambda v: f"{_n(v)} rows",

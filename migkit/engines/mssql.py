@@ -14,9 +14,12 @@ class MSSQLEngine(Engine):
         if not which("sqlcmd"):
             raise SystemExit("the SQL Server client is not installed on"
                              " this machine: migkit doctor --install")
+        # the password in the environment, which the client reads when
+        # `-P` is absent (without either it stops to prompt for one)
         p = run(["sqlcmd", "-S", f"{ep.host},{ep.port}", "-U", ep.user,
-                 "-P", ep.password, "-d", db, "-C", "-h", "-1", "-W",
-                 "-s", "|", "-Q", f"set nocount on; {sql}"])
+                 "-d", db, "-C", "-h", "-1", "-W",
+                 "-s", "|", "-Q", f"set nocount on; {sql}"],
+                env={"SQLCMDPASSWORD": ep.password})
         return [l.split("|") for l in p.stdout.splitlines() if l.strip()]
 
     def databases(self):

@@ -183,7 +183,13 @@ def test_a_resumed_tail_does_not_replay_from_the_beginning(engine, tmp_path):
 
     lines = _tail_briefly(engine, token_path)
     assert any("resuming from" in m for m in lines), lines
-    assert json.loads(token_path.read_text())["token"] == first
+    # never behind where it was; on a quiet log it moves on to where the
+    # log is now (test_cross_engine_confirms_before_diff.py), which it
+    # used not to
+    from migkit.engines.postgres import PostgresEngine
+    again = json.loads(token_path.read_text())["token"]
+    assert PostgresEngine.position_reached(again, first) is True, \
+        (again, first)
     assert my_sql("select count(*) from t where id=6",
                   "cx").stdout.strip() == "1"
 

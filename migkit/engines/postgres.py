@@ -117,6 +117,7 @@ class PostgresEngine(Engine):
         return p.stdout.rstrip("\n")
 
     CANON_ENGINE = "postgres"
+    OWN_PATHS_READ_COLUMN_MAPPING = False
 
     def _all_tables(self, side, db):
         """Every table on a side as `schema.table`, the excluded ones too.
@@ -129,6 +130,155 @@ class PostgresEngine(Engine):
                          " where schemaname not in"
                          " ('pg_catalog','information_schema') order by 1")
         return [l for l in out.splitlines() if l]
+
+    def run_rule(self, side, db, sql):
+        conn = self._conn(side, self._d(side, db))
+        try:
+            # a rule is the operator's SQL: the session cannot write, so a
+            # rule that tries fails instead of changing the source
+            conn.set_session(readonly=True)
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return cur.fetchall()
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def stream_writers(self, db):
+        """Adds the target's own subscriptions in this database: a logical
+        replication apply worker writing beside a repair. The one migkit
+        set up for this hop can be paused for it; any other cannot."""
+        out = super().stream_writers(db)
+        got = self._psql("dst", db,
+                         "select s.subname from pg_subscription s"
+                         " join pg_database d on d.oid = s.subdbid"
+                         " where d.datname = current_database()"
+                         " and s.subenabled order by 1")
+        return out + [(f"subscription {name}", name == self._repl_name())
+                      for name in got.split() if name]
+
+    def canonical_type(self, side, db, declared):
+        """An enum is compared as its label, and a domain as the type it
+        is built on. Measured across PostgreSQL and MySQL before this: an
+        enum and a domain column were left out of the comparison as types
+        with no rendering, and a row whose enum differed on the two sides
+        was reported equal."""
+        cache = self.__dict__.setdefault("_user_types", {})
+        key = (side, db)
+        if key not in cache:
+            kinds = {}
+            for line in self._psql(side, db, """
+                    select format_type(t.oid, null)||chr(31)||t.typtype::text
+                           ||chr(31)||coalesce(format_type(t.typbasetype,
+                                                           t.typtypmod), '')
+                      from pg_type t
+                      join pg_namespace n on n.oid = t.typnamespace
+                     where t.typtype in ('e', 'd')
+                       and n.nspname not in ('pg_catalog',
+                                             'information_schema')"""
+                                 ).splitlines():
+                name, kind, base = (line.split("\x1f") + ["", ""])[:3]
+                kinds[name] = "text" if kind == "e" else base
+            cache[key] = kinds
+        kinds = cache[key]
+        seen = set()
+        # a domain can be built on another domain
+        while declared in kinds and declared not in seen:
+            seen.add(declared)
+            declared = kinds[declared]
+        return declared
+
+    def target_mark(self, db):
+        """The oldest transaction still running on the target as the move
+        begins: a row whose own transaction is older was there before it."""
+        got = self._psql("dst", db, "select (pg_snapshot_xmin("
+                                    "pg_current_snapshot())::text::bigint"
+                                    " % 4294967296)::text").strip()
+        return {"xid": got} if got else {}
+
+    def who_wrote(self, db, table, keys, began):
+        """Measured on PostgreSQL 16: a row the target had before the move,
+        left because the target was not emptied, carries a transaction older
+        than the mark taken as the move began; one the application wrote
+        during the move carries a newer one. Where the target keeps commit
+        timestamps, the times come with it."""
+        mark = (began or {}).get("xid")
+        if not keys:
+            return ""
+        sch, tbl = table.split(".", 1)
+        pkexpr = self._pk_text_expr(self._pk_cols_of(db, table))
+        wanted = ", ".join("'" + k.replace("'", "''") + "'"
+                           for k in keys[:1000])
+        stamps = self._psql("dst", db, "show track_commit_timestamp") == "on"
+        parts = ["count(*)"]
+        if mark:
+            parts.append(f"count(*) filter (where age(xmin) >"
+                         f" age('{int(mark)}'::xid))")
+        if stamps:
+            parts.append("min(pg_xact_commit_timestamp(xmin))::text")
+            parts.append("max(pg_xact_commit_timestamp(xmin))::text")
+        got = self._psql("dst", db, "select " + "||'|'||".join(
+            f"coalesce(({x})::text, '')" for x in parts)
+            + f' from "{sch}"."{tbl}" where {pkexpr} in ({wanted})')
+        vals = got.split("|")
+        n = int(vals[0] or 0)
+        if not n:
+            return ""
+        said = []
+        if mark:
+            before = int(vals[1] or 0)
+            at = (began or {}).get("at", "")
+            said.append(
+                f"{before} written before the move of {at} began - the"
+                " target was not emptied of them" if before else "")
+            if n - before:
+                said.append(f"{n - before} written after it began - by the"
+                            " load itself, a stream applying twice, or"
+                            " something writing to the target")
+        if stamps and vals[-2]:
+            said.append(f"committed between {vals[-2][:19]} and"
+                        f" {vals[-1][:19]}")
+        said = [x for x in said if x]
+        if not said:
+            return (f"{n} rows only on the target; when they were written"
+                    " is not known here: no move of migkit's recorded its"
+                    " start against this target, and it keeps no commit"
+                    " timestamps (track_commit_timestamp)")
+        return f"{n} rows only on the target: " + "; ".join(said)
+
+    def pause_writer(self, db, what, window):
+        """migkit's own subscription, paused for a repair.
+
+        First it is let catch up with the source as it is now, so that
+        nothing the repair is about to write is still on its way. Then it
+        is disabled, and the pause holds once its apply worker has gone.
+        What the source writes meanwhile waits in the slot and is applied,
+        by key, on top of the repair when it is enabled again."""
+        if not what.startswith("subscription "):
+            return super().pause_writer(db, what, window)
+        name = what.split(" ", 1)[1]
+        if name != self._repl_name():
+            raise ValueError(f"{what} is not migkit's")
+        began = time.monotonic()
+        if self.fence_wait(db, self.src_lsn(db), timeout=window) is False:
+            return False
+        self._psql("dst", db, f"alter subscription {name} disable")
+        while time.monotonic() - began < window:
+            if self._psql("dst", db, "select count(*) from"
+                                     " pg_stat_subscription where subname ="
+                                     f" '{name}' and pid is not null") == "0":
+                return True
+            time.sleep(0.5)
+        self._psql("dst", db, f"alter subscription {name} enable")
+        return False
+
+    def resume_writer(self, db, what):
+        if not what.startswith("subscription "):
+            return super().resume_writer(db, what)
+        name = what.split(" ", 1)[1]
+        if name != self._repl_name():
+            raise ValueError(f"{what} is not migkit's")
+        self._psql("dst", db, f"alter subscription {name} enable")
 
     def table_facts(self, side, db):
         """Rows as the planner's statistics estimate them - `null`, not 0,
@@ -143,14 +293,21 @@ class PostgresEngine(Engine):
                          # `true`, not the `t` psql prints for a column
                          "||chr(31)||exists(select 1 from pg_index i"
                          " where i.indrelid = c.oid and i.indisprimary)::int"
+                         # the size on disk, which a plan adds up into
+                         # what the move carries and the room it needs
+                         "||chr(31)||pg_table_size(c.oid)"
+                         "||chr(31)||pg_indexes_size(c.oid)"
                          " from pg_class c join pg_namespace n"
                          " on n.oid = c.relnamespace"
                          " where c.relkind in ('r', 'p') and n.nspname"
                          " not in ('pg_catalog', 'information_schema')")
         for line in got.splitlines():
-            name, rows, key = (line.split("\x1f") + ["", ""])[:3]
+            name, rows, key, size, idx = (line.split("\x1f")
+                                          + ["", "", "", ""])[:5]
             out[name] = {"rows": int(rows) if rows.isdigit() else None,
-                         "key": key == "1"}
+                         "key": key == "1",
+                         "bytes": int(size) if size.isdigit() else None,
+                         "index_bytes": int(idx) if idx.isdigit() else None}
         return out
 
     def neutral_tables(self, side, db):
@@ -215,21 +372,214 @@ class PostgresEngine(Engine):
     def _conn(self, side, db):
         import psycopg2
         ep = self.hop.source if side == "src" else self.hop.target
+        extra = {}
+        if side == "dst" and db in self.__dict__.get("_as_replica", ()):
+            extra["options"] = "-c session_replication_role=replica"
         return psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
                                 password=ep.password, dbname=db,
-                                connect_timeout=15)
+                                connect_timeout=15, **extra)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+    def load_window(self, db, log=None, tables=None):
+        """The target's connections as a replica while rows are written
+        into it, which a trigger does not fire for - the way the bulk paths
+        load, and the way the server's own subscriptions apply.
+
+        Measured before, writing rows and changes from another engine: a
+        `BEFORE INSERT OR UPDATE` trigger appending to the value turned `b`
+        into `b!!` and wrote four audit rows the source never had. Decided
+        once, before anything is written, and refused where the user may
+        not and the tables have triggers.
+        """
+        import contextlib
+
+        from .. import movers
+        mode = movers._pg_quiet_triggers(self.hop, db, tables)
+        on = self.__dict__.setdefault("_as_replica", set())
+        name = self._d("dst", db)
+        if mode not in ("flag", "session") or name in on:
+            return contextlib.nullcontext()
+
+        @contextlib.contextmanager
+        def window():
+            on.add(name)
+            try:
+                yield
+            finally:
+                on.discard(name)
+        return window()
+
+    #: every sequence that owns a column - a serial's, an identity's - as
+    #: sequence, table and column, each already quoted
+    OWNED_SEQUENCES_SQL = """
+        select format('%I.%I', sn.nspname, s.relname) || chr(31)
+               || format('%I.%I', tn.nspname, t.relname) || chr(31)
+               || quote_ident(a.attname) || chr(31) || tn.nspname
+               || '.' || t.relname
+          from pg_depend d
+          join pg_class s on s.oid = d.objid and s.relkind = 'S'
+          join pg_namespace sn on sn.oid = s.relnamespace
+          join pg_sequence q on q.seqrelid = s.oid and q.seqincrement > 0
+          join pg_class t on t.oid = d.refobjid
+          join pg_namespace tn on tn.oid = t.relnamespace
+          join pg_attribute a on a.attrelid = t.oid
+                             and a.attnum = d.refobjsubid
+         where d.classid = 'pg_class'::regclass
+           and d.refclassid = 'pg_class'::regclass
+           and d.deptype in ('a', 'i')"""
+
+    def settle_target(self, db, from_source=True):
+        """The target's sequences past its rows, and its tables analysed.
+
+        The table copier writes each row with the source's key, and a
+        sequence does not move for a key it did not hand out. Measured,
+        through PostgreSQL's own copier and the copier between engines: the
+        first insert after the copy failed on `duplicate key value violates
+        unique constraint`. The bulk paths already carried the source's
+        sequences; now every path does:
+        * the source's values, where the source is PostgreSQL, never below
+          a row the target holds
+        * then, from any engine, each sequence that owns a column is raised
+          to that column's largest value - only raised, never lowered
+        Then the statistics (`_analyze_in_stages`).
+        """
+        said = []
+        if from_source:
+            from .. import movers
+            movers._pg_carry_sequences(self.hop, db)
+        behind = self.sequences_behind(db)
+        if behind:
+            self._psql("dst", db, "\n".join(self._raise_past(behind)))
+            said.append(f"{len(behind)} sequences raised past the rows the"
+                        " copy wrote")
+        said.append(self._analyze_in_stages(db))
+        return "; ".join(said)
+
+    def sequences_behind(self, db):
+        """[(sequence, table, column, the column's largest value)] for each
+        sequence on the target that owns a column and would hand out a
+        value that column already holds. Asked of the target alone, so it
+        answers whatever engine the rows came from."""
+        out = []
+        for line in self._psql("dst", db,
+                               self.OWNED_SEQUENCES_SQL).splitlines():
+            seq, table, col, name = (line.split("\x1f") + ["", "", ""])[:4]
+            if not name or self.hop.excluded(db, *name.split(".", 1)):
+                continue
+            top = self._psql("dst", db,
+                f"select m from (select max({col}) m from {table}) x, {seq} s"
+                " where m is not null and m >= case when s.is_called"
+                " then s.last_value else s.last_value - 1 end").strip()
+            if top:
+                out.append((seq, table, col, top))
+        return out
+
+    @staticmethod
+    def _raise_past(behind):
+        """The statements that move each sequence to its column's largest
+        value, so the next one handed out is past every row."""
+        return [f"select setval('{seq}', {top});"
+                for seq, _, _, top in behind]
+
+    def _fk_orphans(self, db):
+        """Rows on the target whose foreign key points at nothing.
+
+        A validated foreign key was taken to mean there could be none. But
+        every load migkit makes writes as a replica, or with the triggers
+        off, and a foreign key is a trigger: it did not look. Measured, a
+        child row whose parent the hop's row filter left out landed behind
+        a validated key, and the check read "all fk constraints validated,
+        no orphans possible". So every foreign key is scanned, each within
+        `fk_scan_seconds` (default 300); one that runs out is said, not
+        passed."""
+        budget = int(self.hop.options.get("fk_scan_seconds", 300)) * 1000
+        fks = [l.split("|") for l in self._psql("dst", db, """
+            select c.conname
+              ||'|'||c.conrelid::regclass||'|'||c.confrelid::regclass
+              ||'|'||(select string_agg(quote_ident(a.attname), ','
+                                        order by x.ord)
+                      from unnest(c.conkey) with ordinality x(attnum, ord)
+                      join pg_attribute a on a.attrelid = c.conrelid
+                       and a.attnum = x.attnum)
+              ||'|'||(select string_agg(quote_ident(a.attname), ','
+                                        order by x.ord)
+                      from unnest(c.confkey) with ordinality x(attnum, ord)
+                      join pg_attribute a on a.attrelid = c.confrelid
+                       and a.attnum = x.attnum)
+              ||'|'||c.convalidated::text
+            from pg_constraint c
+            join pg_namespace n on n.oid = c.connamespace
+            where c.contype = 'f'
+              and n.nspname not like '\\_\\_%'""").splitlines() if l]
+        orphans, unscanned, pending = [], [], 0
+        for name, child, parent, ckeys, pkeys, valid in fks:
+            if self.hop.excluded(db, *str(child).replace('"', "").split(".")):
+                continue
+            pending += valid != "true"
+            cc = ", ".join(f"c.{k}" for k in ckeys.split(","))
+            pc = ", ".join(f"p.{k}" for k in pkeys.split(","))
+            try:
+                n = self._psql("dst", db,
+                               f"select count(*) from {child} c"
+                               f" where ({cc}) is not null and not exists"
+                               f" (select 1 from {parent} p"
+                               f" where ({pc}) = ({cc}))",
+                               statement_timeout=budget)
+            except RuntimeError as e:
+                unscanned.append(f"{child}.{name}"
+                                 f" ({str(e).splitlines()[-1][:60]})")
+                continue
+            if n != "0":
+                orphans.append(f"{child}.{name}: {n} orphan rows"
+                               + (" behind a validated key" if valid == "true"
+                                  else ""))
+        if orphans:
+            return Result("deep", f"{db} fk", "diff",
+                          "; ".join(orphans[:5])
+                          + (f"; {len(unscanned)} not scanned in time"
+                             if unscanned else ""), "",
+                          "put the parents in place or delete the orphans,"
+                          " then validate the constraints on the target")
+        if unscanned:
+            return Result("deep", f"{db} fk", "warn",
+                          f"{len(unscanned)} foreign keys not scanned within"
+                          " fk_scan_seconds, so unknown rather than clean: "
+                          + "; ".join(unscanned[:3]))
+        return Result("deep", f"{db} fk", "ok",
+                      f"{len(fks)} foreign keys scanned, 0 orphan rows"
+                      + (f"; {pending} are NOT VALID - validate them before"
+                         " cutover" if pending else ""))
+
+    def create_missing(self, db, log=None):
+        """The bulk paths' own: the tables from the source's definition,
+        their keys and constraints once the rows are in."""
+        from .. import movers
+        movers._pg_create_missing(self.hop, db, log)
+
+    def finish_created(self, db, log=None):
+        from .. import movers
+        movers._pg_finish_created(self.hop, db, log)
+
+    def replica_env(self, db):
+        """The environment a target client needs to write as the window's
+        connections do."""
+        if self._d("dst", db) in self.__dict__.get("_as_replica", ()):
+            return {"PGOPTIONS": "-c session_replication_role=replica"}
+        return {}
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
         sch, tbl = self._split(table)
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
-        where, args = "", []
+        resume, args = "", []
         if key and after is not None:
             places = ", ".join(["%s"] * len(key))
             keys = ", ".join(f'"{k}"' for k in key)
-            where = f" where ({keys}) > ({places})"
+            resume = f"({keys}) > ({places})"
             args = list(after)
+        # the driver formats every statement it is given parameters for
+        where = self._where(where, resume, True, percent=True)
         order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
         cap = f" limit {int(limit)}" if key else ""
         with self._conn(side, self._d(side, db)) as conn:
@@ -246,12 +596,14 @@ class PostgresEngine(Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
-    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys,
+                            where=None):
         if not key or not keys:
             return {}
         sch, tbl = self._split(table)
-        sql, args = self._by_key_query(f'"{sch}"."{tbl}"', columns, key,
-                                       list(keys), lambda n: f'"{n}"', "%s")
+        sql, args = self._by_key_query(
+            f'"{sch}"."{tbl}"', columns, key, list(keys), lambda n: f'"{n}"',
+            "%s", where.replace("%", "%%") if where else None)
         with self._conn(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, args)
@@ -285,21 +637,97 @@ class PostgresEngine(Engine):
             conn.commit()
         return len(rows)
 
-    def neutral_empty(self, side, db, table):
+    def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a table")
         sch, tbl = self._split(table)
         with self._conn(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'delete from "{sch}"."{tbl}"')
+                cur.execute(f'delete from "{sch}"."{tbl}"'
+                            + self._where(where))
                 gone = cur.rowcount
             conn.commit()
         return gone
 
+    SQL_DIALECT = "postgres"
+
+    def neutral_column_rules(self, side, db, table):
+        sch, tbl = self._split(table)
+        out = {}
+        for line in self._psql(side, db, f"""
+                select a.attname||chr(31)||(not a.attnotnull)::text
+                       ||chr(31)||coalesce(pg_get_expr(d.adbin, d.adrelid),
+                                           '')
+                       ||chr(31)||(a.attidentity <> '')::text
+                  from pg_attribute a
+                  join pg_class c on c.oid = a.attrelid
+                  join pg_namespace n on n.oid = c.relnamespace
+                  left join pg_attrdef d on d.adrelid = a.attrelid
+                                        and d.adnum = a.attnum
+                 where n.nspname = '{sch}' and c.relname = '{tbl}'
+                   and a.attnum > 0 and not a.attisdropped
+                   and a.attgenerated = ''""").splitlines():
+            name, null, default, ident = (line.split("\x1f") + [""] * 3)[:4]
+            # a serial's default is its own sequence, which is what an
+            # identity is on the engines that have one
+            serial = default.startswith("nextval(")
+            out[name] = {"null": null == "true",
+                         "default": None if serial or not default
+                         else default,
+                         "identity": ident == "true" or serial}
+        return out
+
+    def neutral_indexes(self, side, db, table):
+        sch, tbl = self._split(table)
+        out = []
+        for line in self._psql(side, db, f"""
+                select i.relname||chr(31)||ix.indisunique::text||chr(31)
+                       ||array_to_string(array(
+                           select a.attname
+                             from unnest(ix.indkey) with ordinality k(n, o)
+                             join pg_attribute a on a.attrelid = ix.indrelid
+                                                and a.attnum = k.n
+                            order by k.o), chr(30))||chr(31)
+                       ||(ix.indexprs is null and ix.indpred is null
+                          and 0 <> all(ix.indkey))::text
+                  from pg_index ix
+                  join pg_class i on i.oid = ix.indexrelid
+                  join pg_class t on t.oid = ix.indrelid
+                  join pg_namespace n on n.oid = t.relnamespace
+                 where n.nspname = '{sch}' and t.relname = '{tbl}'
+                   and not ix.indisprimary
+                 order by 1""").splitlines():
+            name, unique, cols, plain = (line.split("\x1f") + [""] * 3)[:4]
+            out.append((name, unique == "true",
+                        [c for c in cols.split("\x1e") if c],
+                        plain == "true"))
+        return out
+
+    def execute_ddl(self, side, db, sql):
+        self._target_only(side, "change a schema")
+        self._psql(side, db, sql)
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        sch, tbl = self._split(table)
+        return (f'create {"unique " if unique else ""}index "{name}"'
+                f' on "{sch}"."{tbl}" ('
+                + ", ".join(f'"{c}"' for c in columns) + ")")
+
+    def default_works(self, side, db, expr, typ=None):
+        try:
+            self._psql(side, db, f"select ({expr})"
+                                 + (f"::{typ}" if typ else ""))
+            return True
+        except RuntimeError:
+            return False
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
         sch, tbl = self._split(table)
-        defs = [f'"{n}" {canon.ddl_type("postgres", c, w)}'
-                for n, c, w in columns]
+        defs = [f'"{col[0]}" {canon.ddl_type("postgres", col[1], col[2])}'
+                + self._column_tail(col[3] if len(col) > 3 else None,
+                                    "postgres")
+                for col in columns]
         if key:
             defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
                         + ")")
@@ -532,10 +960,16 @@ class PostgresEngine(Engine):
             self._psql(side, target,
                        f"select pg_replication_slot_advance('{name}',"
                        f" '{token}')")
+        # up to where the log is now: when that is read whole, the position
+        # moves there even with nothing in it for this hop, so a fence
+        # waiting for the tail to reach the log's end sees it get there. It
+        # stayed at the last change, and on a quiet database never did.
+        upto = self._psql(side, target, "select pg_current_wal_lsn()"
+                          ).strip()
         rows = self._psql(side, target,
                           "select lsn::text || chr(31) || data from"
-                          f" pg_logical_slot_peek_changes('{name}', null,"
-                          f" {int(limit)})")
+                          f" pg_logical_slot_peek_changes('{name}',"
+                          f" '{upto}', {int(limit)})")
         out, last = [], token
         keys = {}
         for line in rows.splitlines():
@@ -563,16 +997,37 @@ class PostgresEngine(Engine):
                         " pg_current_wal_lsn());"
                         "  -- skips everything pending, including this")
             out.append(pgslot.change(parsed, keys[table]))
+        if len(rows.splitlines()) < int(limit) and upto and (
+                last is None or self.position_reached(upto, last)):
+            last = upto
         return out, last
 
-    def neutral_digest(self, side, db, table, columns):
+    def log_position(self, side, db):
+        if self._in_recovery(side, db):
+            return None
+        return self._psql(side, self._d(side, db),
+                          "select pg_current_wal_lsn()").strip() or None
+
+    @staticmethod
+    def position_reached(have, want):
+        """LSNs compare as the 64-bit numbers their two halves make."""
+        def at(lsn):
+            hi, _, lo = str(lsn).partition("/")
+            return (int(hi, 16) << 32) | int(lo, 16)
+        try:
+            return at(have) >= at(want)
+        except (TypeError, ValueError):
+            return None
+
+    def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         sch, tbl = self._split(table)
         row = canon.row_expr("postgres", columns)
         got = self._psql(side, self._d(side, db),
                          "select count(*)::text||chr(31)||"
                          f"{canon.digest_expr('postgres', row)}::text"
-                         f' from "{sch}"."{tbl}"').strip()
+                         f' from "{sch}"."{tbl}"'
+                         + self._where(where)).strip()
         n, _, d = got.partition("\x1f")
         return (int(n), d)
 
@@ -617,13 +1072,38 @@ class PostgresEngine(Engine):
                          " and datname not in ('postgres','rdsadmin') order by 1")
         return [l for l in out.splitlines() if l and not self.hop.excluded(l)]
 
-    def _dump_schema_native(self, side, db):
+    def _left_out_of_schema(self, db, side):
+        """{(schema, table)} on this side that the whole-database schema
+        comparers leave out.
+
+        The tables the hop excludes, which are the target's own and which
+        no other check reads either. And the tables whose columns the hop
+        maps: the pair machinery compares those column by column through
+        the mapping (`_mapped_schema`), where a comparer of whole databases
+        can only call every column the hop drops or renames a
+        difference."""
+        out = {tuple(t.split(".", 1)) for t in self._all_tables(side, db)
+               if self.hop.excluded(db, *t.split(".", 1))}
+        for t in self.mapped_tables(db):
+            sch, _, tbl = t.rpartition(".")
+            sch = sch or "public"
+            if side == "dst":
+                s2, _, t2 = self.hop.target_table(sch, tbl).rpartition(".")
+                sch, tbl = s2 or sch, t2
+            out.add((sch, tbl))
+        return out
+
+    def _dump_schema_native(self, side, db, physical=None):
         ep = self.hop.source if side == "src" else self.hop.target
+        from ..movers import _pg_pattern
+        left = [a for sch, tbl in sorted(self._left_out_of_schema(db, side))
+                for a in ("--exclude-table", _pg_pattern(f"{sch}.{tbl}"))]
         p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", self._d(side, db), "--schema-only", "--no-owner",
+                 "-d", physical or self._d(side, db), "--schema-only",
+                 "--no-owner",
                  "--no-privileges", "--no-security-labels", "--no-tablespaces",
                  "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
-                 "--exclude-table", "*.migkit_changelog*"],
+                 "--exclude-table", "*.migkit_changelog*", *left],
                 env={"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
         noise = self._noise()
         keep = []
@@ -652,14 +1132,20 @@ class PostgresEngine(Engine):
                        src.splitlines(), dst.splitlines(), "src", "dst",
                        lineterm="")
                    if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+        whole = False
         if changed:
             (d / "schema.diff").write_text("\n".join(changed) + "\n")
             status, line = "diff", f"{len(changed)} changed lines"
+            # a table on one side only is never cosmetic, whatever another
+            # comparer read
+            whole = any(l[1:].lstrip().upper().startswith("CREATE TABLE")
+                        for l in changed)
         else:
             (d / "schema.diff").unlink(missing_ok=True)
             status, line = "ok", "schema identical (native pg_dump diff)"
         res = [Result("schema", db, status, line, str(d / "schema.diff"),
                       "review diff, apply missing DDL from schema-src.sql")]
+        res[0].whole_table = whole
         res.append(self.check_structural_diff(db))
         res.append(self.check_objects(db))
         if which("liquibase") and self.hop.options.get("liquibase", True):
@@ -671,6 +1157,9 @@ class PostgresEngine(Engine):
             if at:
                 res.append(at)
         res = self._atlas_authoritative(res)
+        # after the demotion, not before: the schema-aware comparison left
+        # these tables out, so its reading is no authority over them
+        res += self._mapped_schema(db)
         # written for the same reason `data-evidence.txt` is: the schema
         # cross-check must second-guess the verdict this run reached, not
         # re-derive one of its own a few seconds later
@@ -696,6 +1185,35 @@ class PostgresEngine(Engine):
     # silently included in a "just apply this" recommendation.
     _DESTRUCTIVE = re.compile(
         r"^\s*(drop\s|alter\s+table\s+.*\s+drop\s|truncate\s)", re.I | re.M)
+
+    #: what the structural differ holds per object kind; a table's own
+    #: objects name it as `table_name`, the table itself as `name`
+    _DIFF_KINDS = ("tables", "relations", "selectables", "indexes",
+                   "constraints",
+                   "triggers", "rlspolicies", "sequences", "privileges")
+
+    def _leave_out_of_diff(self, db, migration, reverse=False):
+        """Take the tables the pair compares out of both sides the
+        structural differ inspected, with every object that hangs off
+        them. `reverse` is the differ run the other way round."""
+        sides = (("dst", migration.changes.i_from),
+                 ("src", migration.changes.i_target))
+        if reverse:
+            sides = (("src", migration.changes.i_from),
+                     ("dst", migration.changes.i_target))
+        for side, inspected in sides:
+            left = self._left_out_of_schema(db, side)
+            if not left:
+                continue
+            for kind in self._DIFF_KINDS:
+                got = getattr(inspected, kind, None)
+                if not hasattr(got, "items"):
+                    continue
+                for k in [k for k, v in got.items()
+                          if (getattr(v, "schema", None),
+                              getattr(v, "table_name", None)
+                              or getattr(v, "name", None)) in left]:
+                    del got[k]
 
     def check_structural_diff(self, db):
         """Object-by-object schema comparison, in-process.
@@ -724,6 +1242,7 @@ class PostgresEngine(Engine):
             # from target to source: what the target needs in order to match
             sdb, tdb = _results.db(surl), _results.db(turl)
             m = Migration(tdb, sdb)
+            self._leave_out_of_diff(db, m)
             m.add_all_changes_ordered(privileges=True)
             sql = m.sql
             meta = m.result_metadata(options={"privileges": True})
@@ -739,6 +1258,7 @@ class PostgresEngine(Engine):
             # production source every time it runs.
             try:
                 r = Migration(sdb, tdb)
+                self._leave_out_of_diff(db, r, reverse=True)
                 r.add_all_changes_ordered(privileges=True)
                 reverse_sql = r.sql
             except Exception:
@@ -802,18 +1322,27 @@ class PostgresEngine(Engine):
                       " review the removals, then apply on the target."
                       " structural-fix.revert.sql undoes it")
 
-    def check_atlas(self, db):
+    def _schema_urls(self, db):
+        """(source, target) as the schema comparison's URLs."""
         from urllib.parse import quote
         s, t = self.hop.source, self.hop.target
-        su = (f"postgres://{s.user}:{quote(s.password, safe='')}"
-              f"@{s.host}:{s.port}/{db}?sslmode=prefer")
-        tu = (f"postgres://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{self._d('dst', db)}?sslmode=prefer")
+        return (f"postgres://{s.user}:{quote(s.password, safe='')}"
+                f"@{s.host}:{s.port}/{db}?sslmode=prefer",
+                f"postgres://{t.user}:{quote(t.password, safe='')}"
+                f"@{t.host}:{t.port}/{self._d('dst', db)}?sslmode=prefer")
+
+    def _schema_excludes(self, db):
+        """What the schema comparison leaves out: migkit's own objects, and
+        the tables the pair compares through the mapping."""
+        return ["__*", "*.migkit_changelog"] + [
+            f"{sch}.{tbl}" for side in ("src", "dst")
+            for sch, tbl in sorted(self._left_out_of_schema(db, side))]
+
+    def check_atlas(self, db):
+        from ..movers import schema_diff
+        su, tu = self._schema_urls(db)
         try:
-            p = run(["atlas", "schema", "diff", "--from", tu, "--to", su,
-                     "--exclude", "__*",
-                     "--exclude", "*.migkit_changelog"],
-                    check=False, timeout=180)
+            p = schema_diff(tu, su, self._schema_excludes(db))
         except Exception:
             return None
         if p.returncode != 0:
@@ -832,19 +1361,42 @@ class PostgresEngine(Engine):
                       str(out), "review schema-fix.sql, then apply it to the"
                                 " target")
 
+    @staticmethod
+    def _liquibase_sections(text):
+        """[(heading, [object])] from a schema comparison's text report:
+        `Missing Column(s):` and the objects indented under it, one per
+        line; a heading that ends `NONE` holds nothing."""
+        out, cur = [], None
+        for line in text.splitlines():
+            m = re.match(r"^((?:Missing|Unexpected|Changed) .+?\(s\)):"
+                         r"\s*(NONE)?\s*$", line)
+            if m:
+                cur = None if m.group(2) else (m.group(1), [])
+                if cur:
+                    out.append(cur)
+            elif cur and line.startswith("     ") \
+                    and not line.startswith("          ") and line.strip():
+                cur[1].append(line.strip())
+            elif not line.startswith(" "):
+                cur = None
+        return out
+
     def check_liquibase(self, db):
         s, t = self.hop.source, self.hop.target
         out = self._report(db) / "schema-objects.txt"
         out.parent.mkdir(parents=True, exist_ok=True)
         try:
+            # the passwords in the environment, which it reads as well as
+            # its flags (measured), not on a command line anyone can list
             p = run(["liquibase", "diff",
                      f"--url=jdbc:postgresql://{t.host}:{t.port}/"
                      f"{self._d('dst', db)}?sslmode=prefer",
-                     f"--username={t.user}", f"--password={t.password}",
+                     f"--username={t.user}",
                      f"--referenceUrl=jdbc:postgresql://{s.host}:{s.port}/{db}"
                      f"?sslmode=prefer",
-                     f"--referenceUsername={s.user}",
-                     f"--referencePassword={s.password}"],
+                     f"--referenceUsername={s.user}"],
+                    env={"LIQUIBASE_COMMAND_PASSWORD": t.password,
+                         "LIQUIBASE_COMMAND_REFERENCE_PASSWORD": s.password},
                     check=False, timeout=180)
         except Exception:
             return None
@@ -852,12 +1404,22 @@ class PostgresEngine(Engine):
             return None
         out.write_text(p.stdout)
         noise = self._noise()
-        bad = [l.strip() for l in p.stdout.splitlines()
-               if (l.startswith("Missing") or l.startswith("Unexpected")
-                   or l.startswith("Changed"))
-               and not l.rstrip().endswith("NONE")
-               and "__" not in l and "migkit_changelog" not in l
-               and not any(n in l for n in noise)]
+        left = {f"{sch}.{tbl}" for side in ("src", "dst")
+                for sch, tbl in self._left_out_of_schema(db, side)}
+        bad = []
+        for head, items in self._liquibase_sections(p.stdout):
+            # the database's own name is the hop's db_map, not a difference
+            if "Catalog" in head:
+                continue
+            items = [i for i in items
+                     if "__" not in i and "migkit_changelog" not in i
+                     and not any(n in i for n in noise)
+                     and not any(re.search(rf"(^|[\s(]){re.escape(t)}"
+                                           rf"($|[.(\[\s])", i)
+                                 for t in left)]
+            if items:
+                bad.append(f"{head}: " + ", ".join(items[:4])
+                           + (" ..." if len(items) > 4 else ""))
         if bad:
             return Result("schema", f"{db} {self.OBJECT_SCOPE}", "diff",
                           "; ".join(bad[:6]), str(out),
@@ -866,13 +1428,34 @@ class PostgresEngine(Engine):
         return Result("schema", f"{db} {self.OBJECT_SCOPE}", "ok",
                       "no object differs by name between the two schemas")
 
+    def _objects_left_out_of_schema(self, db, side):
+        """The inventory's names for the tables the pair compares and
+        everything on them: the table, its constraints and triggers
+        (`schema.table.name`), and its indexes, which are named apart."""
+        left = self._left_out_of_schema(db, side)
+        if not left:
+            return lambda name: False
+        pairs = ", ".join(f"('{sch}', '{tbl}')" for sch, tbl in sorted(left))
+        idx = set(self._psql(side, db,
+            "select n.nspname||'.'||ci.relname from pg_index i"
+            " join pg_class ci on ci.oid = i.indexrelid"
+            " join pg_class ct on ct.oid = i.indrelid"
+            " join pg_namespace n on n.oid = ct.relnamespace"
+            f" where (n.nspname::text, ct.relname::text) in ({pairs})"
+            ).splitlines())
+        whole = {f"{sch}.{tbl}" for sch, tbl in left}
+        return lambda name: (name in whole or name in idx
+                             or name.rsplit(".", 1)[0] in whole)
+
     def check_objects(self, db):
         sides = {}
         for side in ("src", "dst"):
             m = {}
+            left = self._objects_left_out_of_schema(db, side)
             for line in self._psql(side, db, INVENTORY_SQL).splitlines():
                 t, _, name = line.partition("|")
-                m.setdefault(t, set()).add(name)
+                if not left(name):
+                    m.setdefault(t, set()).add(name)
             sides[side] = m
         inv = {}
         for t in sorted(set(sides["src"]) | set(sides["dst"])):
@@ -1232,7 +1815,8 @@ class PostgresEngine(Engine):
         drilldown and counts merge consume."""
         tables = [t for t in
                   self._psql("src", db, self.USER_TABLES).splitlines()
-                  if t and self._keep_tbl(db, t)]
+                  if t and self._keep_tbl(db, t)
+                  and not self.through_pair(db, t)]
         w = int(self.hop.options.get("checksum_workers", 8))
 
         # The key hash rides along in the same scan. The row is already being
@@ -1766,6 +2350,17 @@ class PostgresEngine(Engine):
 
     def check_data(self, db, table=None, stream=None, with_counts=False,
                    consistent=False):
+        if table and self.through_pair(db, table):
+            return self.columns_pair().check_data(db, table, stream)
+        got = self._own_check_data(db, table, stream, with_counts, consistent)
+        if table:
+            return got
+        return got + self._mapped_data(
+            db, stream, " - read as it is now, not inside the consistent"
+                        " snapshot" if consistent else "")
+
+    def _own_check_data(self, db, table=None, stream=None, with_counts=False,
+                        consistent=False):
         if table:
             r = self._drilldown_native(db, table)
             status = "ok" if r and not any(r) else "diff" if r else "error"
@@ -1787,7 +2382,12 @@ class PostgresEngine(Engine):
         ev = self.hop.report_dir(db) / "data-evidence.txt"
         ev.write_text(out + "\n")
         pre = [self._counts_from_fast(db, out)] if with_counts else []
-        mode = "consistent snapshot, " if consistent else ""
+        mode = ""
+        if consistent:
+            import re as _re
+            held = _re.search(r"source snapshot held ([\d,]+)s", out)
+            mode = (f"consistent snapshot, held on the source"
+                    f" {held.group(1)}s, " if held else "consistent snapshot, ")
         if rc == 0:
             import re as _re
             rows = sum(int(m) for m in _re.findall(r"rows=(\d+)", out))
@@ -1822,8 +2422,23 @@ class PostgresEngine(Engine):
                     fps.append(f"{t} -> {', '.join(cols[:6])}")
             if fps:
                 detail += "; drift localized to columns: " + "; ".join(fps)
+            whose = []
+            began = self._move_began(db)
+            for t in bad[:5]:
+                keys = self._drill_keys(db, t, "extra")
+                try:
+                    said = self.who_wrote(db, t, keys, began) if keys else ""
+                except RuntimeError:
+                    said = ""
+                if said:
+                    whose.append(f"{t}: {said}")
+            if whose:
+                detail += "; " + "; ".join(whose)
         if err:
             detail += f" errors: {', '.join(err)}"
+        stopped = [l for l in out.splitlines() if l.startswith("stopped: ")]
+        if stopped:
+            detail = (detail + " " + stopped[0]).strip()
         return pre + [Result("data", db, "diff" if bad else "error", detail,
                              str(self._report(db)),
                              f"migkit sync {self.hop.name} --db {db} --kind rows")]
@@ -2263,21 +2878,24 @@ class PostgresEngine(Engine):
         except Exception:
             return None
         empty = []
-        for t in sorted(x for x in src & dst if x):
+        # every source table, not only the ones both sides have: a table the
+        # target does not have at all received nothing either, and asking
+        # only about the shared ones passed a target with no tables
+        for t in sorted(x for x in src if x):
             # through the same scope as every other check read: a table
             # whose row filter selects nothing is correctly empty
             q = f"select 1 from {self._scope(db, t)} limit 1"
             try:
                 has_src = bool(self._psql("src", db, q).strip())
-                has_dst = bool(self._psql("dst", self._d("dst", db),
-                                          q).strip())
+                has_dst = t in dst and bool(self._psql(
+                    "dst", self._d("dst", db), q).strip())
             except Exception:
                 return None
             if has_src and not has_dst:
                 empty.append(t)
         return empty
 
-    def settle_target(self, db):
+    def _analyze_in_stages(self, db):
         """Analyze the target after a load, in stages.
 
         `--analyze-in-stages` does three passes of increasing accuracy, so
@@ -2653,45 +3271,7 @@ class PostgresEngine(Engine):
         res.append(self._time_zone_rules(db))
         res.append(self._capacity_gaps(db))
 
-        # orphans only hide behind NOT VALID fks (pg enforces validated ones)
-        fks = [l.split("|") for l in self._psql("dst", db, """
-            select c.conname
-              ||'|'||c.conrelid::regclass||'|'||c.confrelid::regclass
-              ||'|'||(select string_agg(quote_ident(a.attname), ','
-                                        order by x.ord)
-                      from unnest(c.conkey) with ordinality x(attnum, ord)
-                      join pg_attribute a on a.attrelid = c.conrelid
-                       and a.attnum = x.attnum)
-              ||'|'||(select string_agg(quote_ident(a.attname), ','
-                                        order by x.ord)
-                      from unnest(c.confkey) with ordinality x(attnum, ord)
-                      join pg_attribute a on a.attrelid = c.confrelid
-                       and a.attnum = x.attnum)
-            from pg_constraint c
-            join pg_namespace n on n.oid = c.connamespace
-            where c.contype = 'f' and not c.convalidated
-              and n.nspname not like '\\_\\_%'""").splitlines() if l]
-        orphans = []
-        for name, child, parent, ckeys, pkeys in fks:
-            cc = ", ".join(f"c.{k}" for k in ckeys.split(","))
-            pc = ", ".join(f"p.{k}" for k in pkeys.split(","))
-            n = self._psql("dst", db,
-                           f"select count(*) from {child} c"
-                           f" where ({cc}) is not null and not exists"
-                           f" (select 1 from {parent} p where ({pc}) = ({cc}))")
-            if n != "0":
-                orphans.append(f"{child}.{name}: {n} orphan rows")
-        if orphans:
-            res.append(Result("deep", f"{db} fk", "diff",
-                              "; ".join(orphans[:5]), "",
-                              "fix orphans, then alter table ..."
-                              " validate constraint on target"))
-        else:
-            res.append(Result("deep", f"{db} fk", "ok",
-                              f"{len(fks)} NOT VALID fks scanned, 0 orphans;"
-                              " validate them before cutover" if fks
-                              else "all fk constraints validated, no orphans"
-                                   " possible"))
+        res.append(self._fk_orphans(db))
 
         # NOT VALID check constraints enforce new writes but never scanned the
         # existing rows, and the planner distrusts them - a load-time speed
@@ -3563,7 +4143,7 @@ class PostgresEngine(Engine):
             return None
         return _u.marker(row.split("\x1f")) if row else None
 
-    def _unvalidated_checks(self, db):
+    def _unvalidated_checks(self, db, kinds="c", side="dst"):
         """[(table, constraint, definition)] left NOT VALID on the target.
 
         One computation for the check and the repair. The definition comes
@@ -3573,12 +4153,13 @@ class PostgresEngine(Engine):
         NOT VALID, so the recreated constraint is the same object in the same
         state.
         """
-        rows = self._psql("dst", self._d("dst", db), """
+        want = ", ".join(f"'{k}'" for k in kinds)
+        rows = self._psql(side, self._d(side, db), f"""
             select conrelid::regclass::text||chr(31)||conname||chr(31)
                    ||pg_get_constraintdef(c.oid)
               from pg_constraint c
               join pg_namespace n on n.oid = c.connamespace
-             where c.contype = 'c' and not c.convalidated
+             where c.contype in ({want}) and not c.convalidated
                and n.nspname not like '\\_\\_%'
              order by 1""").splitlines()
         return [tuple(r.split("\x1f", 2)) for r in rows if r.count("\x1f") == 2]
@@ -3597,7 +4178,13 @@ class PostgresEngine(Engine):
         changes nothing. So this needs no pre-scan of its own - the server
         already performs one, and failing is the correct outcome.
         """
-        nv = self._unvalidated_checks(db)
+        # foreign keys too, which a load leaves NOT VALID for the same
+        # reason; and only where the source's own is validated - one the
+        # source keeps NOT VALID on purpose is left as the source has it
+        left = {(t, n) for t, n, _ in
+                self._unvalidated_checks(db, "cf", side="src")}
+        nv = [c for c in self._unvalidated_checks(db, "cf")
+              if (c[0], c[1]) not in left]
         if not nv:
             return None
         stmts, undo = [], []
@@ -3609,8 +4196,8 @@ class PostgresEngine(Engine):
             undo.append(f'ALTER TABLE {tbl} ADD CONSTRAINT "{name}"'
                         f' {definition};')
         return RepairAction(db, "constraints", stmts, undo,
-                            f"{len(nv)} check constraints the load left"
-                            " unvalidated")
+                            f"{len(nv)} check and foreign key constraints"
+                            " the load left unvalidated")
 
     def _grant_gaps(self, db):
         """(missing, extra, missing_sequence, n_seen, n_seq_seen), or None.
@@ -3854,6 +4441,7 @@ class PostgresEngine(Engine):
             text = self._mojibake_repair(db)
             if text:
                 actions.append(text)
+            actions += self._mapped_repairs(db, kind)
         if kind in ("schema", "all"):
             # GRANT is DDL and belongs with the schema repair, so no new
             # choice is added to --kind: a plain `migkit sync --apply` now
@@ -3944,6 +4532,81 @@ class PostgresEngine(Engine):
         return RepairAction(db, "text", stmts if enabled else [],
                             undo if enabled else [], note)
 
+    def rehearse(self, db, action):
+        """Run a schema fix and then its undo on a scratch copy of the
+        target's schema, before either goes near the target itself.
+
+        The undo written beside every fix had only ever run in tests. Here
+        it runs on the day, on a database made for it on the target's own
+        server and dropped afterwards: the target's schema is restored into
+        it, the fix applied, the undo applied, and the schema compared with
+        what it was. Returns (usable, sentence): usable is False when the
+        fix itself fails, which it would on the target too.
+        """
+        if action.kind != "schema":
+            return True, ""
+        from .. import movers
+        t = self.hop.target
+        tdb = self._d("dst", db)
+        scratch = re.sub(r"[^a-z0-9_]", "_",
+                         f"migkit_rehearsal_{self.hop.name}".lower())[:63]
+        env = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+        dump = self.hop.report_dir(db) / "rehearsal.dump"
+        try:
+            self._psql("dst", db, f'drop database if exists "{scratch}"')
+            self._psql("dst", db, f'create database "{scratch}"')
+        except RuntimeError as e:
+            return True, ("the undo was not rehearsed: a scratch database"
+                          " could not be made on the target ("
+                          + str(e).strip().splitlines()[-1][:100] + ")")
+        try:
+            run(["pg_dump", "-h", t.host, "-p", str(t.port), "-U", t.user,
+                 "-d", tdb, "--schema-only", "-Fc", "-f", str(dump)],
+                env=env)
+            movers._restore(["pg_restore", "-h", t.host, "-p", str(t.port),
+                             "-U", t.user, "-d", scratch, "--no-owner",
+                             "--no-privileges", str(dump)], env, None,
+                            "the rehearsal copy", existing_ok=True)
+            before = self._dump_schema_native("dst", db, physical=scratch)
+            try:
+                self._psql("dst", scratch, "begin;\n"
+                           + "\n".join(action.statements) + "\ncommit;")
+            except RuntimeError as e:
+                return False, ("the fix fails on a copy of the target's"
+                               " schema, so it was not applied: "
+                               + str(e).strip().splitlines()[-1][:160])
+            if not action.undo:
+                return True, ("the fix applies on a copy of the target's"
+                              " schema; it has no undo")
+            try:
+                self._psql("dst", scratch, "begin;\n"
+                           + "\n".join(action.undo) + "\ncommit;")
+            except RuntimeError as e:
+                return True, ("the undo FAILS on a copy of the target's"
+                              " schema - keep a backup before applying: "
+                              + str(e).strip().splitlines()[-1][:160])
+            after = self._dump_schema_native("dst", db, physical=scratch)
+            import difflib
+            changed = [l for l in difflib.unified_diff(
+                before.splitlines(), after.splitlines(), lineterm="")
+                if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+            if changed:
+                (self.hop.report_dir(db) / "rehearsal.diff").write_text(
+                    "\n".join(changed) + "\n")
+                return True, (f"the undo does NOT return the schema exactly"
+                              f" ({len(changed)} lines differ, in"
+                              " rehearsal.diff) - keep a backup before"
+                              " applying")
+            return True, ("rehearsed on a copy of the target's schema: the"
+                          " fix applies, and the undo returns the schema"
+                          " exactly")
+        finally:
+            dump.unlink(missing_ok=True)
+            try:
+                self._psql("dst", db, f'drop database if exists "{scratch}"')
+            except RuntimeError:
+                pass
+
     def _schema_repair_action(self, db):
         """DDL that makes the target's objects (columns, indexes, PK/FK,
         views, functions, procedures, triggers, sequences-as-objects) match
@@ -3962,6 +4625,8 @@ class PostgresEngine(Engine):
                             " transaction, reverse DDL saved to undo)")
 
     def apply(self, db, action):
+        if action.by == "pair":
+            return self.columns_pair().apply(db, action)
         if action.kind == "sequences":
             self._psql("dst", db,
                        "\n".join(s.split("  --")[0] for s in action.statements))
@@ -4029,6 +4694,9 @@ class PostgresEngine(Engine):
         # differing row. source-wins (default) reconciles everything.
         keep = self.hop.options.get("on_conflict") == "keep-target"
         chg = "" if keep else read("changed")
+        col = self.newer_wins_column()
+        if col and chg.strip():
+            chg = self._newer_split(db, t, sch, tbl, pks, col, chg, d)
         copy_pks = read("missing") + chg
         del_pks = read("extra") + chg
         work = Path(tempfile.mkdtemp())
@@ -4063,6 +4731,55 @@ class PostgresEngine(Engine):
         finally:
             import shutil as _sh
             _sh.rmtree(work, ignore_errors=True)
+
+    def _newer_split(self, db, t, sch, tbl, pks, col, lines, d):
+        """The changed keys to overwrite under `newer_wins`, as the key
+        file's own lines; the ones whose target row is newer are kept and
+        written to `data-<table>.kept-newer`."""
+        for side in ("src", "dst"):
+            if not self._psql(side, db,
+                              "select 1 from information_schema.columns"
+                              f" where table_schema = '{sch}'"
+                              f" and table_name = '{tbl}'"
+                              f" and column_name = '{col}'").strip():
+                raise SystemExit(
+                    f"{t}: newer_wins names {col}, and it is not on both"
+                    " sides, so which row is newer cannot be told. Nothing"
+                    " was repaired on this table.")
+        keys = [line for line in lines.splitlines() if line]
+        cond = " and ".join(f't."{pks[i]}"::text = p.c{i + 1}'
+                            for i in range(len(pks)))
+
+        def at(side, wanted):
+            # the keys as a VALUES list: a read-only session may not create
+            # even a temporary table
+            conn = self._conn(side, self._d(side, db))
+            names = ", ".join(f"c{i + 1}" for i in range(len(pks)))
+            got = ", ".join(f"p.c{i + 1}" for i in range(len(pks)))
+            out = {}
+            try:
+                conn.set_session(readonly=True)
+                with conn.cursor() as cur:
+                    for i in range(0, len(wanted), 1000):
+                        rows = [line.split("\t") for line in wanted[i:i + 1000]]
+                        vals = ", ".join(
+                            "(" + ", ".join(["%s"] * len(pks)) + ")"
+                            for _ in rows)
+                        cur.execute(
+                            f'select {got}, t."{col}" from "{sch}"."{tbl}" t'
+                            f" join (values {vals}) as p({names}) on {cond}",
+                            [v for r in rows for v in r])
+                        out.update({"\t".join(r[:-1]): r[-1]
+                                    for r in cur.fetchall()})
+                return out
+            finally:
+                conn.rollback()
+                conn.close()
+        overwrite, kept = self._keep_the_newer(t, keys, at)
+        if kept:
+            (d / f"data-{t}.kept-newer").write_text(
+                "".join(k + "\n" for k in kept))
+        return "".join(k + "\n" for k in overwrite)
 
     def setup_target_plan(self, db):
         """The steps an operator runs by hand, in the order the measurements
@@ -4214,6 +4931,14 @@ class PostgresEngine(Engine):
                          " and now() - xact_start > interval '10 minutes'")
         add("pass" if lrt == "0" else "warn", "instance",
             "transactions open longer than 10 minutes", lrt)
+        held = self.oldest_snapshot("src")
+        if held:
+            age, secs, who = held
+            add("warn" if secs > 600 else "pass", "instance",
+                "the oldest snapshot on the source",
+                f"{age:,} transactions old, held {secs:,.0f}s by"
+                f" {who or 'an unnamed session'} - vacuum can remove nothing"
+                " newer than it while it is open")
 
         # pg_authid has the real hash (pg_roles masks it); needs superuser,
         # fall back to name-only when blocked
@@ -4304,7 +5029,90 @@ class PostgresEngine(Engine):
         # places; this is the earlier one, which is the one that can still
         # change what an operator does.
         items += self._preflight_items()
+        items += self._stream_capacity()
+        items += self._unmatchable_rows()
+        items += self._scope_items()
         return items
+
+    #: key-less tables holding a column whose type has no `=`: a replica
+    #: that must find an updated or deleted row by comparing every column
+    #: cannot compare these (arrays count by their element type)
+    UNMATCHABLE_SQL = (
+        "select n.nspname||'.'||c.relname||'|'||string_agg(a.attname||' '"
+        "||format_type(a.atttypid, a.atttypmod), ', ' order by a.attnum)"
+        " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+        " join pg_attribute a on a.attrelid = c.oid and a.attnum > 0"
+        " and not a.attisdropped"
+        " join pg_type ty on ty.oid = a.atttypid"
+        " where c.relkind in ('r', 'p')"
+        " and n.nspname not in ('pg_catalog', 'information_schema')"
+        " and not exists (select 1 from pg_index i where i.indrelid = c.oid"
+        " and (i.indisprimary or (i.indisunique and i.indimmediate)))"
+        " and not exists (select 1 from pg_operator o where o.oprname = '='"
+        " and o.oprleft = case when ty.typelem <> 0 and ty.typlen = -1"
+        " then ty.typelem else ty.oid end"
+        " and o.oprright = o.oprleft)"
+        " group by n.nspname, c.relname order by 1")
+
+    def _unmatchable_rows(self):
+        """Tables whose updates and deletes a replica cannot apply.
+
+        Without a key, logical replication finds the row on the target by
+        comparing every column, and a type with no equality operator -
+        `json`, `point`, `xml`, arrays of them - cannot be compared. DTS
+        fails such tables outright; the fix is a key, or a unique index the
+        table can use as its replica identity.
+        """
+        out = []
+        for db in self.databases():
+            try:
+                got = self._psql("src", db, self.UNMATCHABLE_SQL)
+            except RuntimeError as e:
+                # said, not skipped: a question that could not be asked is
+                # not a clean answer - skipping it hid a broken query here
+                out.append({"level": "warn", "scope": db,
+                            "item": "key-less tables a replica cannot match",
+                            "detail": "could not be read: "
+                                      + str(e).strip().splitlines()[-1][:100]})
+                continue
+            for line in got.splitlines():
+                if not line:
+                    continue
+                table, cols = line.split("|", 1)
+                out.append({
+                    "level": "fail", "scope": f"{db}.{table}",
+                    "item": "a key-less table a replica cannot match rows in",
+                    "detail": f"{cols} have no equality - updates and"
+                              " deletes will stop the change stream. Add a"
+                              " primary key, or a unique index and"
+                              f" `alter table {table} replica identity using"
+                              " index <it>`"})
+        return out
+
+    def _stream_capacity(self):
+        """Room on the source for the change streams this hop would open,
+        with the value to set rather than only the verdict: one slot and
+        one sender per database in scope, on top of what is already used."""
+        out = []
+        dbs = len(self.databases())
+        got = self._psql("src", "postgres",
+                         "select (select count(*) from pg_replication_slots)"
+                         "||'|'||current_setting('max_replication_slots')"
+                         "||'|'||(select count(*) from pg_stat_replication)"
+                         "||'|'||current_setting('max_wal_senders')").strip()
+        used, slots, senders, max_senders = (int(x) for x in got.split("|"))
+        for what, have, busy in (("max_replication_slots", slots, used),
+                                 ("max_wal_senders", max_senders, senders)):
+            need = busy + dbs
+            out.append({
+                "level": "pass" if have >= need else "fail",
+                "scope": "instance",
+                "item": f"{what} leaves room for this hop's streams",
+                "detail": f"{have} set, {busy} in use, {dbs} needed" + (
+                    "" if have >= need else
+                    f" - set {what} = {need} (a restart; on a managed"
+                    " server, in its parameter group)")})
+        return out
 
     def _mover_leftovers(self):
         """What a mover added to the source and did not take away.
@@ -4567,6 +5375,13 @@ class PostgresEngine(Engine):
                          if k in src and k in dst and src[k] != dst[k])
         return missing, extra, changed
 
+    def _drill_keys(self, db, table, kind):
+        f = self._report(db) / f"data-{table}.{kind}"
+        try:
+            return [k for k in f.read_text().splitlines() if k]
+        except OSError:
+            return []
+
     def _write_pk_files(self, db, table, missing, extra, changed):
         d = self._report(db)
         d.mkdir(parents=True, exist_ok=True)
@@ -4735,6 +5550,42 @@ class PostgresEngine(Engine):
         lines.append(f"set local max_parallel_workers_per_gather = {workers};")
         return lines
 
+    @staticmethod
+    def _run_lanes(procs, deadline=None):
+        """Feed every lane its script at once and wait for all of them:
+        [(returncode, stdout, stderr)] in lane order, or None once
+        `deadline` has passed, with every lane ended.
+
+        They were fed one after another - each lane's script was written
+        only when the one before it had finished - so the lanes that share
+        a snapshot to read in parallel read in turn."""
+        import threading
+        got = [None] * len(procs)
+
+        def run(i, proc, sql):
+            left = None if deadline is None else max(
+                deadline - time.time(), 0.001)
+            try:
+                out, err = proc.communicate(sql, timeout=left)
+                got[i] = (proc.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                got[i] = "late"
+        threads = [threading.Thread(target=run, args=(i, pr, sql))
+                   for i, (pr, sql) in enumerate(procs)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if any(g == "late" for g in got):
+            for pr, _ in procs:
+                pr.kill()
+                try:
+                    pr.communicate(timeout=10)
+                except Exception:
+                    pass
+            return None
+        return got
+
     def _export_snapshot(self, side, db):
         """Open a transaction, export its snapshot, and hand back both.
 
@@ -4802,12 +5653,11 @@ class PostgresEngine(Engine):
                     " 'standby (read replica, no fence)' else"
                     " pg_current_wal_lsn()::text end;")
             for t in bucket:
-                sch, tbl = t.split(".", 1)
                 h = self._row_hash_expr("src", db, t)
                 lines.append(
                     f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
                     f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
-                    f' from "{sch}"."{tbl}" t;')
+                    f" from {self._scope(db, t)};")
             lines.append("commit;")
             out.append("\n".join(lines))
         return out
@@ -4817,8 +5667,14 @@ class PostgresEngine(Engine):
         transaction per side: no intra-db skew (every table of a side is
         the same instant), and the src LSN captured in-snapshot gives the
         fence for convergence proofs."""
+        # the same tables and the same rows as every other pass reads
+        # (`_keep_tbl`, `_scope`): this one read every table whole, so a
+        # table the hop excludes and a table under a row filter both came
+        # out different on a target that was exactly what the hop asked for
         st = [l for l in self._psql("src", db,
-                                    self.USER_TABLES).splitlines() if l]
+                                    self.USER_TABLES).splitlines()
+              if l and self._keep_tbl(db, l)
+              and not self.through_pair(db, l)]
         dt = set(l for l in self._psql("dst", db,
                                        self.USER_TABLES).splitlines() if l)
         both = [t for t in st if t in dt]
@@ -4831,7 +5687,6 @@ class PostgresEngine(Engine):
                      " 'standby (read replica, no fence)' else"
                      " pg_current_wal_lsn()::text end;"]
             for t in both:
-                sch, tbl = t.split(".", 1)
                 # named from the source for both sides, so the two scripts
                 # hash the same columns in the same order whatever order the
                 # two servers store them in
@@ -4839,7 +5694,7 @@ class PostgresEngine(Engine):
                 lines.append(
                     f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
                     f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
-                    f' from "{sch}"."{tbl}" t;')
+                    f" from {self._scope(db, t)};")
             lines.append("commit;")
             return "\n".join(lines)
 
@@ -4851,32 +5706,43 @@ class PostgresEngine(Engine):
         # script rather than reading without one - an inconsistent
         # "consistent" pass is the answer this mode exists to avoid.
         lanes = max(1, int(self.hop.workers or 1))
-        outs, holders = {}, []
-        try:
-            for side in ("src", "dst"):
-                conn, snap = (self._export_snapshot(side, db)
-                              if lanes > 1 and len(both) > 1 else (None, None))
-                if conn is not None:
-                    holders.append(conn)
+        # the hop's bound on how long a side's snapshot may be held, in
+        # seconds; unset, the pass takes as long as it takes
+        limit = float(self.hop.options.get("snapshot_limit") or 0)
+        outs, held = {}, {}
+        for side in ("src", "dst"):
+            began = time.time()
+            conn, snap = (self._export_snapshot(side, db)
+                          if lanes > 1 and len(both) > 1 else (None, None))
+            try:
                 scripts = ([script(side)] if not snap
                            else self._snapshot_scripts(side, db, both, snap,
                                                        lanes, w))
-                procs = [self._psql_script(side, db, sc) for sc in scripts]
-                text = []
-                for proc, sql in procs:
-                    stdout, stderr = proc.communicate(sql)
-                    if proc.returncode:
-                        return 1, (f"consistent pass failed on {side}:"
-                                   f" {stderr[-300:]}")
-                    text.append(stdout)
-                outs[side] = "\n".join(text)
-        finally:
-            for conn in holders:
-                try:
-                    conn.rollback()
-                    conn.close()
-                except Exception:
-                    pass
+                got = self._run_lanes(
+                    [self._psql_script(side, db, sc) for sc in scripts],
+                    began + limit if limit else None)
+            finally:
+                # released as soon as this side's lanes are done, not after
+                # the other side's: it used to be held through both
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                        conn.close()
+                    except Exception:
+                        pass
+            if got is None:
+                return 1, (f"stopped: the pass had held the {side}'s snapshot"
+                           f" for {limit:,.0f}s, the most `snapshot_limit`"
+                           " allows, and had not finished, so it was ended"
+                           " and nothing it read is a verdict. Check without"
+                           " --consistent, which reads table by table, or"
+                           " raise snapshot_limit")
+            for rc, stdout, stderr in got:
+                if rc:
+                    return 1, (f"consistent pass failed on {side}:"
+                               f" {stderr[-300:]}")
+            outs[side] = "\n".join(stdout for _, stdout, _ in got)
+            held[side] = time.time() - began
 
         def parse(text):
             lsn, rows = "", {}
@@ -4892,6 +5758,9 @@ class PostgresEngine(Engine):
         dst_lsn, dst_rows = parse(outs["dst"])
         out = [f"consistent snapshot: one repeatable-read txn per side,"
                f" src lsn={src_lsn} dst lsn={dst_lsn}"]
+        # how long this pass kept the source from cleaning up after itself:
+        # nothing newer than its snapshot could be vacuumed meanwhile
+        out.append(f"source snapshot held {held.get('src', 0):,.0f}s")
         rc = 0
         for t in both:
             a, b = src_rows.get(t, ""), dst_rows.get(t, "")
@@ -4906,6 +5775,23 @@ class PostgresEngine(Engine):
                 rc = 1
                 out.append(f"{t}: ERROR missing on target")
         return rc, "\n".join(out)
+
+    def oldest_snapshot(self, side):
+        """(age in transactions, seconds held, who) of the session whose
+        snapshot is oldest, or None when none is open. That snapshot is the
+        horizon: vacuum removes nothing newer while it lasts."""
+        got = self._psql(side, "postgres",
+                         "select age(backend_xmin)||'|'||extract(epoch from"
+                         " now() - xact_start)::bigint||'|'"
+                         "||coalesce(nullif(application_name, ''), usename,"
+                         " '') from pg_stat_activity"
+                         " where backend_xmin is not null"
+                         " and pid <> pg_backend_pid()"
+                         " order by age(backend_xmin) desc limit 1").strip()
+        if not got:
+            return None
+        age, secs, who = (got.split("|") + ["", ""])[:3]
+        return int(age), float(secs or 0), who
 
     def _in_recovery(self, side, db="postgres"):
         """True if this endpoint is a standby / read replica (read-only).
@@ -5084,7 +5970,9 @@ class PostgresEngine(Engine):
             f"{rowtext.postgres_row([c], alias='')}"
             f"),1,16))::bit(64)::bigint::numeric), 0)"
             for c in cols)
-        q = f'select {expr} from "{sch}"."{tbl}"'
+        # the rows the check compared, not the whole table: under a row
+        # filter the whole source differs from the target in every column
+        q = f"select {expr} from {self._scope(db, f'{sch}.{tbl}')}"
         try:
             a = self._psql("src", db, q).split("|")
             b = self._psql("dst", db, q).split("|")
@@ -5191,7 +6079,13 @@ class PostgresEngine(Engine):
         res = []
         clean = True
         for t, keys in sorted(touched.items()):
-            cmp = self._compare_pks(db, t, keys)
+            if not self._keep_tbl(db, t):
+                # the target's own: nothing else compares it either
+                continue
+            # a mapped table is compared by the pair, through the mapping,
+            # and the pair keeps its own drilldown
+            pair = self.through_pair(db, t)
+            cmp = self._delta_compare(db, t, keys)
             if cmp is None:
                 res.append(Result("delta", f"{db}.{t}", "error",
                                   "pk lookup failed"))
@@ -5200,7 +6094,8 @@ class PostgresEngine(Engine):
             missing, extra, changed = cmp
             if missing or extra or changed:
                 clean = False
-                self._write_pk_files(db, t, missing, extra, changed)
+                if not pair:
+                    self._write_pk_files(db, t, missing, extra, changed)
                 res.append(Result(
                     "delta", f"{db}.{t}", "diff",
                     f"of {len(keys)} touched rows: missing={len(missing)}"
@@ -5302,7 +6197,21 @@ class PostgresEngine(Engine):
         """
         s, t = self.hop.source, self.hop.target
         env_s = tool_env({"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"})
-        env_t = tool_env({"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"})
+        quiet = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+        # as a replica, which a trigger does not fire for - the way the bulk
+        # paths load. Measured before: a `BEFORE INSERT` trigger stamping
+        # `now()` rewrote every row this copied. Asked once per database,
+        # and refused where the user may not and the table has triggers.
+        cache = self.__dict__.setdefault("_quiet_triggers", {})
+        name = qt.replace('"', "")
+        quiet.update(self.replica_env(db))
+        if not quiet.get("PGOPTIONS") and (db, name) not in cache:
+            from .. import movers
+            cache[(db, name)] = movers._pg_quiet_triggers(self.hop, db,
+                                                          [name])
+        if cache.get((db, name)) in ("flag", "session"):
+            quiet["PGOPTIONS"] = "-c session_replication_role=replica"
+        env_t = tool_env(quiet)
         collist = ""
         if columns:
             collist = " (" + ", ".join(f'"{c}"' for c in columns) + ")"
@@ -5387,15 +6296,28 @@ class PostgresEngine(Engine):
     def _repl_name(self):
         return "migkit_" + self.hop.name.replace("-", "_")
 
-    def replicate_sql(self, db, copy_data=True, secret=None):
+    def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
         # the subscription signs in as the hop's own source user, so there
         # is no replication user for `secret` to be the password of
         s = self.hop.source
         name = self._repl_name()
         conn = (f"host={s.host} port={s.port} dbname={db}"
                 f" user={s.user} password={s.password}")
-        return {
-            "src": [f"create publication {name} for all tables;"],
+        note = {}
+        if copied:
+            # its slot is made now, and the log before now is not in it
+            note = {"note": f"{db} was copied on {copied['at']}; a"
+                            " subscription made now carries only what the"
+                            " source changes from now on, and what it"
+                            " changed since that copy is carried by"
+                            " nothing - move with --mode full+cdc, which"
+                            " copies under the subscription"}
+        return {**note,
+            # a second `--mode cdc` found the first one's publication and
+            # stopped on `already exists`
+            "src": ["do $$ begin if not exists (select 1 from pg_publication"
+                    f" where pubname = '{name}') then create publication"
+                    f" {name} for all tables; end if; end $$;"],
             "dst": [f"create subscription {name} connection '{conn}'"
                     f" publication {name} with (copy_data ="
                     f" {'true' if copy_data else 'false'});"],
@@ -5446,6 +6368,10 @@ class PostgresEngine(Engine):
         try:
             return self._psql(side, db, stmt, statement_timeout=f"{secs}s")
         except RuntimeError as e:
+            if "already exists" in str(e):
+                # the stream a first run started: making it again stopped
+                # on this, and the status printed next says how it is doing
+                return ""
             raise SystemExit(self._subscribe_failed(str(e), secs))
 
     @staticmethod
@@ -5496,20 +6422,16 @@ class PostgresEngine(Engine):
             " To wait longer instead, raise MIGKIT_SUBSCRIBE_TIMEOUT")
 
     def migration_pair(self, db):
-        from urllib.parse import quote
+        from ..movers import schema_diff
         if not which("atlas"):
             return None, None
-        s, t = self.hop.source, self.hop.target
-        su = (f"postgres://{s.user}:{quote(s.password, safe='')}"
-              f"@{s.host}:{s.port}/{db}?sslmode=prefer")
-        tu = (f"postgres://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{self._d('dst', db)}?sslmode=prefer")
+        su, tu = self._schema_urls(db)
+        # a mapped table's schema is the mapping's, and aligning it with the
+        # source would put back the columns the hop drops
+        excludes = self._schema_excludes(db)
 
         def diff(a, b):
-            p = run(["atlas", "schema", "diff", "--from", a, "--to", b,
-                     "--exclude", "__*",
-                     "--exclude", "*.migkit_changelog"],
-                    check=False, timeout=180)
+            p = schema_diff(a, b, excludes)
             text = p.stdout.strip()
             if p.returncode or "Schemas are synced" in text:
                 return ""

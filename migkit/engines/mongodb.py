@@ -74,8 +74,11 @@ class MongoEngine(Engine):
                       if not n.startswith("system.")
                       and not self.hop.excluded(db, n))
 
-    def neutral_empty(self, side, db, table):
+    def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a collection")
+        if where:
+            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
+                             " narrow this collection another way")
         return self._client(side)[self._d(side, db)][table].delete_many(
             {}).deleted_count
 
@@ -151,7 +154,8 @@ class MongoEngine(Engine):
         """`_id`, which MongoDB guarantees on every document."""
         return ["_id"]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
         """Documents as rows, with a missing field marked rather than nulled.
 
         `canon.ABSENT` is not None: MongoDB distinguishes a field that is not
@@ -159,29 +163,43 @@ class MongoEngine(Engine):
         would destroy the distinction before the mover could count what the
         target does to it.
         """
+        if where:
+            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
+                             " narrow this collection another way")
         from .. import canon
         coll = self._client(side)[self._d(side, db)][table]
         names = [n for n, _ in columns]
         projection = {f: 1 for f in names}
         projection.setdefault("_id", 1 if "_id" in names else 0)
-        flt = {"_id": {"$gt": after[0]}} if after else {}
+        # `$gt` in a query compares within one type only, so resuming from
+        # a number never reached a string or an ObjectId: measured, a chunked
+        # read of seven documents keyed 1, 2, 2.5, "a", "b" and two
+        # ObjectIds stopped after the three numbers, and a copy through it
+        # moved three of seven without a word. An expression compares in
+        # the order the sort uses, across types.
+        flt = ({"$expr": {"$gt": ["$_id", after[0]]}} if after else {})
         cursor = coll.find(flt, projection).sort("_id", 1).limit(int(limit))
         rows, last = [], None
         for doc in cursor:
             rows.append([doc.get(n, canon.ABSENT) if n in doc
                          else canon.ABSENT for n in names])
-            last = doc.get("_id", last)
+            last = doc.get("_id")
         if not rows:
             return ([], None)
-        return (rows, (last,) if last is not None else None)
+        # a document can be keyed null, and ending on one is not the end
+        return (rows, (last,))
 
-    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys,
+                            where=None):
         """The same lookup, expressed as a filter instead of a select.
 
         A field that is not there still comes back as `canon.ABSENT` rather
         than None, for the same reason the ordered read does: the two mean
         different things here and only one of them is a value.
         """
+        if where:
+            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
+                             " narrow this collection another way")
         from .. import canon
         if not key or not keys:
             return {}
@@ -300,6 +318,8 @@ class MongoEngine(Engine):
             "    Re-run the full load for that collection, then"
             " start the tail again from a token taken after it")
 
+    CHANGE_POINT_READS_ONLY = True
+
     def change_point(self, side, db):
         """A resume token for now, read without taking any event off the
         stream: the server answers an empty first batch with the position it
@@ -402,7 +422,7 @@ class MongoEngine(Engine):
             stream.close()
         return out, (last or {}).get("_data") if last else token
 
-    def neutral_digest(self, side, db, table, columns):
+    def neutral_digest(self, side, db, table, columns, where=None):
         """(count, digest) folded here rather than in the server.
 
         MongoDB has no hashing operator at all - measured on 7.0, `$md5`,
@@ -418,26 +438,47 @@ class MongoEngine(Engine):
         network to produce it, and `check` says so rather than letting the
         number imply otherwise.
         """
+        if where:
+            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
+                             " narrow this collection another way")
         from .. import canon, rowtext
         coll = self._client(side)[self._d(side, db)][table]
         fields = [name for name, _ in columns]
         classes = dict(columns)
+        from ..util import with_retry
         total, n = 0, 0
         projection = {f: 1 for f in fields}
-        projection.setdefault("_id", 1 if "_id" in fields else 0)
-        for doc in coll.find({}, projection):
-            parts = []
-            for name in fields:
-                value = doc.get(name)
-                text = (None if value is None
-                        else canon.render_value(classes[name], value))
-                if text is None:
-                    parts.append(f"{rowtext.NULL_LEN}:")
-                else:
-                    parts.append(f"{len(text)}:{text}")
-            total = canon.digest_step(total, rowtext.SEP.join(parts))
-            n += 1
+        # the key rides along to resume from, whether or not it is compared
+        projection["_id"] = 1
+        # In chunks, each its own short query resumed from the last key,
+        # not one cursor held open for the whole collection: sustained
+        # cursors stalled over a tunnel where single reads did not. A chunk
+        # that fails on the way is read again rather than ending the pass.
+        after, started = None, False
+        while True:
+            flt = {"$expr": {"$gt": ["$_id", after]}} if started else {}
+            docs = with_retry(lambda: list(
+                coll.find(flt, projection).sort("_id", 1)
+                .limit(self.DIGEST_CHUNK)), label="mongo read")
+            if not docs:
+                break
+            for doc in docs:
+                parts = []
+                for name in fields:
+                    value = doc.get(name)
+                    text = (None if value is None
+                            else canon.render_value(classes[name], value))
+                    if text is None:
+                        parts.append(f"{rowtext.NULL_LEN}:")
+                    else:
+                        parts.append(f"{len(text)}:{text}")
+                total = canon.digest_step(total, rowtext.SEP.join(parts))
+                n += 1
+            after, started = docs[-1]["_id"], True
         return (n, str(total))
+
+    #: documents per read of the digest pass
+    DIGEST_CHUNK = 5000
 
     def _shape(self, side, db):
         d = self._client(side)[self._d(side, db)]
@@ -650,6 +691,24 @@ class MongoEngine(Engine):
             if stream:
                 stream(f"{name}: {r.status}")
             res.append(r)
+        bad = [r.scope.split(".", 1)[1] for r in res
+               if r.check == "data" and r.status == "diff"]
+        if bad:
+            # confirm before calling it different: a change the tail has not
+            # applied yet is still arriving, not wrong
+            _, healed, how = self._resolve_inflight(db, bad, stream)
+            proof = dict(h.split(": ", 1) for h in how)
+            for i, r in enumerate(res):
+                name = r.scope.split(".", 1)[1] if "." in r.scope else ""
+                if r.check == "data" and name in healed:
+                    again = self._drilldown(db, name)
+                    if again.status == "ok":
+                        again = Result("data", again.scope, "ok",
+                                       f"{again.detail}; the difference was"
+                                       " still arriving"
+                                       f" ({proof.get(name, 'confirmed')})",
+                                       again.report)
+                    res[i] = again
         self._last_throttle = gate.summary()
         note = gate.line()
         if note and stream:
@@ -675,6 +734,142 @@ class MongoEngine(Engine):
                               " by data hash (no extra count scan)")
             res.insert(0, cres)
         return res
+
+    # --- the confirm pass (base `fenced_recheck`) ---------------------------
+
+    def _compare_pks(self, db, table, keys):
+        """(missing, extra, changed) among these `_id`s, as the key files
+        write them - read again from both sides, now."""
+        from bson import BSON
+        from bson.json_util import dumps, loads
+        ids = [loads(k) for k in keys]
+        src = self._client("src")[db][table]
+        dst = self._client("dst")[self._d("dst", db)][table]
+
+        def read(coll):
+            out = {}
+            for i in range(0, len(ids), 1000):
+                for doc in coll.find({"_id": {"$in": ids[i:i + 1000]}}):
+                    out[dumps(doc["_id"])] = BSON.encode(doc)
+            return out
+        a, b = read(src), read(dst)
+        missing = [k for k in a if k not in b]
+        extra = [k for k in b if k not in a]
+        changed = [k for k in a if k in b and a[k] != b[k]]
+        # a key gone from both sides has converged: pgCompare's lesson
+        return missing, extra, changed
+
+    def who_wrote(self, db, table, keys, began):
+        """An ObjectId carries the second it was made, which is when the
+        document was written unless its writer chose its own id. Of the
+        documents only the target has, those made after the move began
+        were written to the target while it ran."""
+        from bson import ObjectId
+        from bson.json_util import loads
+        ids = []
+        for k in keys:
+            try:
+                ids.append(loads(k))
+            except Exception:
+                continue
+        made = [i.generation_time.timestamp() for i in ids
+                if isinstance(i, ObjectId)]
+        if not ids:
+            return ""
+        other = len(ids) - len(made)
+        said = []
+        since = (began or {}).get("epoch")
+        if made and since:
+            after = sum(1 for t in made if t >= since)
+            if len(made) - after:
+                said.append(f"{len(made) - after} with ids made before the"
+                            f" move of {began.get('at')} began - there"
+                            " before it, or brought from elsewhere")
+            if after:
+                said.append(f"{after} with ids made after it began - written"
+                            " to the target while it ran")
+        elif made:
+            import datetime
+            first = datetime.datetime.fromtimestamp(min(made),
+                                                    datetime.timezone.utc)
+            last = datetime.datetime.fromtimestamp(max(made),
+                                                   datetime.timezone.utc)
+            said.append(f"ids made between {first:%Y-%m-%d %H:%M} and"
+                        f" {last:%Y-%m-%d %H:%M} UTC")
+        if other:
+            said.append(f"{other} with ids that carry no time")
+        return f"{len(ids)} documents only on the target: " + "; ".join(said)
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        d = self.hop.report_dir(db)
+        for bucket, keys in (("missing", missing), ("extra", extra),
+                             ("changed", changed)):
+            p = d / f"data-{table}.{bucket}"
+            if keys:
+                p.write_text("\n".join(keys) + "\n")
+            elif p.exists():
+                p.unlink()
+
+    def src_lsn(self, db):
+        """The source's cluster time now, or None on a server that keeps
+        none (a standalone) - there is nothing a tail could have read up
+        to there."""
+        got = self._client("src").admin.command("hello")
+        return got.get("operationTime")
+
+    def log_position(self, side, db):
+        """The cluster time now, which a resume token carries too."""
+        got = self._client(side).admin.command("hello")
+        return got.get("operationTime")
+
+    @classmethod
+    def position_reached(cls, have, want):
+        at = cls._token_time(have)
+        if at is None or want is None:
+            return None
+        return at >= want
+
+    @staticmethod
+    def _token_time(token):
+        """The cluster time a resume token stands at. The token's first
+        byte marks a timestamp and the next eight are its seconds and
+        increment - measured on MongoDB 7 against the times of the events
+        the tokens came from."""
+        from bson.timestamp import Timestamp
+        raw = bytes.fromhex(str(token)[:18])
+        if len(raw) < 9 or raw[0] != 0x82:
+            return None
+        return Timestamp(int.from_bytes(raw[1:5], "big"),
+                         int.from_bytes(raw[5:9], "big"))
+
+    def _tail_position(self, db):
+        """How far migkit's own tail has applied, from the position it
+        saved - either tail's file - or None when no tail has saved one."""
+        import json as _json
+        path = self.hop.report_dir(db) / "tail-token.json"
+        try:
+            saved = _json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        token = saved.get("token") if "token" in saved else saved.get("_data")
+        return self._token_time(token) if token else None
+
+    def fence_wait(self, db, at, timeout=300):
+        """Wait until migkit's tail has applied the source up to `at`.
+
+        True when it has, False on timeout, None when there is nothing to
+        wait on - no cluster time, or no tail of migkit's saving a
+        position - so the caller falls back rather than waiting blind.
+        """
+        if at is None or self._tail_position(db) is None:
+            return None
+        end = time.time() + timeout
+        while time.time() < end:
+            got = self._tail_position(db)
+            if got is not None and got >= at:
+                return True
+            time.sleep(1)
+        return False
 
     def _id_plan(self, coll, docs):
         """Ranges that split this collection by `_id`, one BSON type at a time.
@@ -832,12 +1027,15 @@ class MongoEngine(Engine):
         kind = difference_kind_from_counts(len(found["missing"]),
                                            len(found["extra"]),
                                            len(found["changed"]))
+        whose = self.who_wrote(db, name, [dumps(i) for i in found["extra"]],
+                               self._move_began(db))
         return Result("data", scope, "diff",
                       f"missing={len(found['missing'])}"
                       f" extra={len(found['extra'])}"
                       f" changed={len(found['changed'])}"
                       f" over {len(ranges)} ranges"
-                      + (f" kind={kind}" if kind else ""), str(d),
+                      + (f" kind={kind}" if kind else "")
+                      + (f"; {whose}" if whose else ""), str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
 
     def _client_hashes(self, coll, flt=None):
@@ -1423,6 +1621,12 @@ class MongoEngine(Engine):
             " or mongodump --oplog | mongorestore --oplogReplay",
         ]
 
+    def tail_seed(self, db, token_path, point):
+        """Start the tail from `point`, a resume token taken earlier."""
+        from bson.json_util import dumps
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(dumps({"_data": point}))
+
     def tail_apply(self, db, go, token_path, log):
         """Same-engine change tail, carrying each document as BSON.
 
@@ -1452,12 +1656,32 @@ class MongoEngine(Engine):
         kwargs = {"full_document": "updateLookup"}
         if resume:
             kwargs["resume_after"] = resume
+        from .. import tailctl
         n, applied = 0, None
+        running = tailctl.Running(token_path.parent) if go else None
         try:
+            if running:
+                running.__enter__()
             with src.watch(**kwargs) as stream:
                 log("tailing change stream, ctrl-c to stop"
                     + ("" if go else " (count-only, add --go to apply)"))
-                for ev in stream:
+                while True:
+                    if go and (token_path.parent / tailctl.PAUSE).exists():
+                        # hold still only with everything applied so far
+                        # saved, so the resume replays from here
+                        if applied is not None:
+                            token_path.write_text(dumps(applied))
+                        tailctl.hold_if_asked(token_path.parent, log)
+                    ev = stream.try_next()
+                    if ev is None:
+                        # nothing left before this point: the stream's own
+                        # position is how far the target is now, and saving
+                        # it is what lets `check` fence on this tail
+                        if go and stream.resume_token:
+                            applied = stream.resume_token
+                            token_path.write_text(dumps(applied))
+                        time.sleep(1)
+                        continue
                     op = ev["operationType"]
                     coll = (ev.get("ns") or {}).get("coll")
                     if coll and self.hop.excluded(db, coll):
@@ -1483,6 +1707,8 @@ class MongoEngine(Engine):
         finally:
             if applied is not None:
                 token_path.write_text(dumps(applied))
+            if running:
+                running.__exit__(None, None, None)
 
     def watch_sample(self, db):
         a = self._client("src")[db].command("dbStats")

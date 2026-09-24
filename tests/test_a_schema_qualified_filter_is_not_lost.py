@@ -32,11 +32,13 @@ def test_the_filtered_table_is_routed_to_the_copier():
 
 
 def test_a_path_that_cannot_filter_refuses_it():
+    """A pair's copier reads through the filter now
+    (`test_the_pair_honours_the_row_filter.py`); MongoDB's cannot."""
     from migkit import movers
     with pytest.raises(SystemExit) as e:
         movers.refuse_unpushable_filters(
             _hop({"public.orders": "region = 'apac'"}), "appdb", "builtin",
-            "hetero")
+            "mongodb")
     assert "public.orders" in str(e.value), e.value
 
 

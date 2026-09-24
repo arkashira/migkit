@@ -71,11 +71,16 @@ def test_closing_a_gap_is_noticed(monkeypatch):
 
 def test_the_base_class_placeholder_is_not_a_capability(monkeypatch):
     """`Engine.check_deep` only says there are no deep checks. An engine
-    inheriting it has none."""
-    from migkit.engines.hetero import HeteroEngine
+    inheriting it has none. (The pair used to be that engine; it has deep
+    checks of its own now - the target's set-aside objects, orphans, zero
+    dates.)"""
     from migkit.engines.base import Engine
-    assert HeteroEngine.check_deep is Engine.check_deep
-    assert not caps.implemented("hetero", "deep")
+
+    class Bare(Engine):
+        pass
+    assert Bare.check_deep is Engine.check_deep
+    assert not caps._own(Bare, "check_deep")
+    assert caps.implemented("hetero", "deep")
 
 
 def test_users_is_read_from_its_dispatch():
@@ -115,8 +120,8 @@ def test_not_applicable_says_why():
 
 def test_the_name_the_operator_used_is_the_one_said_back():
     """`documentdb` is MongoDB underneath; the operator wrote documentdb.
-    (This used MySQL's fence, which MySQL now has.)"""
-    said = _refused("documentdb", "fence")
+    (This used MySQL's fence, then MongoDB's; both have one now.)"""
+    said = _refused("documentdb", "table-copy")
     assert "for documentdb hops" in said, said
 
 

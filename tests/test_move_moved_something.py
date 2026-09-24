@@ -247,3 +247,14 @@ def test_the_refusal_does_not_name_the_program_that_ran(pg_pair, tmp_path,
         # having looked
         assert via not in said, said
         assert not [t for t in TOOLS if t in said], said
+
+
+def test_a_table_the_target_does_not_have_is_named(pg_pair, tmp_path):
+    """Asking only about the tables both sides have passed a target with
+    none of them: nothing had arrived, and nothing was said."""
+    _both(pg_pair, "drop table if exists public.moved;")
+    psql(pg_pair["src"], "create table public.moved (id bigint primary key);"
+                         " insert into public.moved values (1)")
+    eng = _engine(pg_pair, tmp_path)
+    assert eng.moved_nothing("postgres") == ["public.moved"]
+    psql(pg_pair["src"], "drop table public.moved")

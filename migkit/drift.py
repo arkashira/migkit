@@ -10,6 +10,29 @@ says what changed.
 """
 
 
+import re
+
+#: the working tables of an online schema change: gh-ost's ghost, changelog
+#: and deleted tables, pt-online-schema-change's new and old. They come and
+#: go while the tool works; what matters is the real table's shape once it
+#: swaps them in, and that is what a shape comparison sees.
+ONLINE_SCHEMA_CHANGE = re.compile(r"^_.+_(gho|ghc|del|new|old)$")
+
+
+def transient(table):
+    """True for a table an online schema change is working in."""
+    return bool(ONLINE_SCHEMA_CHANGE.match(str(table).split(".")[-1]))
+
+
+def reader(engine):
+    """The engine that reads the source's whole column catalogue in one
+    query, or None. A cross-engine hop reads it through its source's
+    engine; a document store's shape is a scan of every document, which
+    nothing that only watches may cost."""
+    src = getattr(engine, "src_engine", None) or engine
+    return src if hasattr(src, "column_catalog") else None
+
+
 def shape(engine, side, db):
     """{table: [(column, type), ...]} as the engine sees it now, or None
     when it cannot be read - never an exception: a move is not stopped by
@@ -28,9 +51,10 @@ def shape(engine, side, db):
     except Exception:
         return None
     # a table the hop leaves alone is not moved, so its DDL is not the
-    # move's business
+    # move's business; nor is the scaffolding of an online schema change
     return {t: cols for t, cols in got.items()
-            if not engine.hop.excluded(db, *str(t).split("."))}
+            if not engine.hop.excluded(db, *str(t).split("."))
+            and not transient(t)}
 
 
 def changes(before, after):
@@ -51,3 +75,13 @@ def changes(before, after):
         if parts:
             out.append(f"{t}: {', '.join(parts)}")
     return out
+
+
+def changed_tables(before, after):
+    """The tables whose shape differs between two shapes: altered,
+    created or dropped."""
+    if before is None or after is None:
+        return set()
+    return {t for t in set(before) | set(after)
+            if dict(before.get(t) or []) != dict(after.get(t) or [])
+            or (t in before) != (t in after)}

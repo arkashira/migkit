@@ -1,10 +1,17 @@
 import csv
 import io
 import re
+import signal
 import subprocess
+import sys
+import time
 
-from ..util import run, tool_env, which
+from ..util import tool_env
 from .base import Engine, RepairAction, Result
+
+
+def _stop_on_term(signum, frame):
+    raise KeyboardInterrupt
 
 
 class HeteroEngine(Engine):
@@ -30,7 +37,7 @@ class HeteroEngine(Engine):
     a mover nobody can verify is the thing this tool exists to argue against.
     """
 
-    checks = ("schema", "counts", "data")
+    checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = True
     # the in-process binlog tail below needs this driver; without it
     # `move --mode cdc` uses migkit's streaming pipeline instead
@@ -52,6 +59,11 @@ class HeteroEngine(Engine):
         # refuse anything else rather than pretending
         self.my = self.src_engine if self.src_name == "mysql" else None
         self.pg = self.dst_engine if self.dst_name == "postgres" else None
+        # a target that keeps no counter apart from its rows has nothing
+        # for the sequence check to ask
+        if not hasattr(self.dst_engine, "sequences_behind"):
+            self.checks = tuple(c for c in type(self).checks
+                                if c != "autoinc")
         # only a MySQL source needs the binlog driver; saying otherwise sent
         # the CLI down its fallback path for pairs that never wanted it
         if self.src_engine.CANON_ENGINE != "mysql":
@@ -167,7 +179,7 @@ class HeteroEngine(Engine):
         return self._comparable_columns(db, self.src_engine, src_table,
                                         self.dst_engine, dst_table)
 
-    def check_schema(self, db):
+    def check_schema(self, db, only=None):
         """Whether the two sides hold the same columns at all.
 
         This engine had no schema check, and the row comparison reports a
@@ -193,6 +205,13 @@ class HeteroEngine(Engine):
         dst_ids = self.dst_engine.neutral_tables("dst", db)
         pairs, src_only, dst_only, _ = self.match_tables(src_ids, dst_ids,
                                                          self._rename)
+        if only is not None:
+            # the tables a same-engine hop leaves to this comparison; the
+            # others are its own comparers' to report
+            want = {self._leaf(t) for t in only}
+            pairs = [p for p in pairs if self._leaf(p[0]) in want]
+            src_only = [t for t in src_only if self._leaf(t) in want]
+            dst_only = []
         for t in src_only:
             res.append(Result("schema", f"{db}.{self._leaf(t)}", "diff",
                               "this table is on the source and not on the"
@@ -208,11 +227,14 @@ class HeteroEngine(Engine):
         for src_t, dst_t in pairs:
             scope = f"{db}.{self._leaf(src_t)}"
             try:
+                def declared(engine, side, table):
+                    return {n: engine.canonical_type(side, db, t) for n, t
+                            in engine.neutral_columns(side, db, table)}
                 got = self._classify_columns(
                     self.src_engine,
-                    dict(self.src_engine.neutral_columns("src", db, src_t)),
-                    self.dst_engine,
-                    dict(self.dst_engine.neutral_columns("dst", db, dst_t)))
+                    self._mapped_types(db, src_t, declared(
+                        self.src_engine, "src", src_t))[0],
+                    self.dst_engine, declared(self.dst_engine, "dst", dst_t))
             except Exception as e:
                 res.append(Result("schema", scope, "error",
                                   f"cannot read the columns:"
@@ -220,13 +242,69 @@ class HeteroEngine(Engine):
                                   "both sides have to be readable before"
                                   " anything can be compared"))
                 continue
-            res.append(self._schema_result(scope, got))
+            res.append(self._schema_result(
+                scope, got, self._rules_drift(db, src_t, dst_t)))
         return res
 
-    def _schema_result(self, scope, got):
-        """`got` is what `_classify_columns` returned. Kept apart from the
-        reading so every shape can be exercised without two servers."""
-        parts = []
+    def _rules_drift(self, db, src_t, dst_t):
+        """What the target does not keep of the source's column rules - a
+        column the engine numbers, a default, NOT NULL - which is what the
+        application meets on its first insert after cutover. Only where
+        both engines can say (`neutral_column_rules`); a default is
+        compared by being there, because the same default is spelled
+        differently in two dialects."""
+        try:
+            s = self.src_engine.neutral_column_rules("src", db, src_t)
+            d = self.dst_engine.neutral_column_rules("dst", db, dst_t)
+        except Exception:
+            return []
+        if not s or not d:
+            return []
+        _, back = self._mapped_types(db, src_t, {n: None for n in s})
+        out = []
+        for target, source in sorted(back.items()):
+            a, b = s.get(source), d.get(target)
+            if not a or not b:
+                continue
+            if a.get("identity") and not b.get("identity"):
+                out.append(f"{target} is numbered by the source and not by"
+                           " the target - an insert that leaves it out is"
+                           " refused there")
+            if (a.get("default") is not None and not a.get("identity")
+                    and b.get("default") is None):
+                out.append(f"{target} defaults to {a['default']} on the"
+                           " source and to nothing on the target - an insert"
+                           " that leaves it out stores NULL")
+            if a.get("null") is False and b.get("null") is True:
+                out.append(f"{target} is NOT NULL on the source and takes"
+                           " NULL on the target")
+            if a.get("null") is True and b.get("null") is False:
+                out.append(f"{target} takes NULL on the source and not on"
+                           " the target - a NULL the source holds is"
+                           " refused")
+        try:
+            forward = {v: k for k, v in back.items()}
+            want = {frozenset(forward[c] for c in cols)
+                    for _, unique, cols, plain in
+                    self.src_engine.neutral_indexes("src", db, src_t)
+                    if unique and plain and cols
+                    and all(c in forward for c in cols)}
+            have = {frozenset(cols) for _, unique, cols, _ in
+                    self.dst_engine.neutral_indexes("dst", db, dst_t)
+                    if unique}
+        except Exception:
+            want = have = set()
+        for cols in sorted(want - have, key=sorted):
+            out.append(f"unique over ({', '.join(sorted(cols))}) on the"
+                       " source and not on the target - a duplicate the"
+                       " source refuses is taken")
+        return out
+
+    def _schema_result(self, scope, got, drift=()):
+        """`got` is what `_classify_columns` returned; `drift` is
+        `_rules_drift`. Kept apart from the reading so every shape can be
+        exercised without two servers."""
+        parts = list(drift)[:4]
         if got["only_src"]:
             parts.append(f"{len(got['only_src'])} columns the target does"
                          " not have, so their values were not carried and"
@@ -275,9 +353,14 @@ class HeteroEngine(Engine):
         pairs, src_only, dst_only, ambiguous = self.match_tables(
             src_ids, dst_ids, self._rename)
         if table:
+            # one table asked about: the others, on either side, are not
+            # this answer's to report
             pairs = [p for p in pairs if self._leaf(p[0]) == self._leaf(table)]
             src_only = [t for t in src_only
                         if self._leaf(t) == self._leaf(table)]
+            dst_only = []
+            ambiguous = [t for t in ambiguous
+                         if self._leaf(t) == self._leaf(table)]
         rows = []
         for t in src_only:
             want = self._rename(t)
@@ -313,8 +396,29 @@ class HeteroEngine(Engine):
                              " these two engines" + tail, None, None))
                 continue
             try:
-                a = self.src_engine.neutral_digest("src", db, src_t, src_cols)
-                b = self.dst_engine.neutral_digest("dst", db, dst_t, dst_cols)
+                wheres = self._row_scope(db, src_t)
+                a = self.src_engine.neutral_digest(
+                    "src", db, src_t, src_cols,
+                    **({"where": wheres[0]} if wheres[0] else {}))
+                b = self.dst_engine.neutral_digest(
+                    "dst", db, dst_t, dst_cols,
+                    **({"where": wheres[1]} if wheres[1] else {}))
+                if wheres[1]:
+                    # narrowing the comparison to the filter hides nothing:
+                    # a target row outside it is one the move never put
+                    # there, and is said
+                    out, _ = self.dst_engine.neutral_digest(
+                        "dst", db, dst_t, dst_cols,
+                        where=f"({wheres[1]}) is not true")
+                    if out:
+                        tail += (f"; {out:,} rows on the target lie outside"
+                                 " the hop's row filter, which the move does"
+                                 " not put there")
+            except SystemExit as e:
+                # a filter that cannot be read through on one side: this
+                # table's answer, not the whole check's
+                rows.append((scope, "error", str(e)[:200], None, None))
+                continue
             except Exception as e:
                 rows.append((scope, "error",
                              str(e).splitlines()[-1][:120], None, None))
@@ -342,10 +446,12 @@ class HeteroEngine(Engine):
     #: how many rows per side a drilldown will walk before saying it stopped
 
     def _drill(self, db, src_t, dst_t, src_cols, dst_cols):
-        """The base's walk, over this hop's two engines."""
+        """The base's walk, over this hop's two engines, through the hop's
+        row filter on each side."""
         return self._drill_rows(db, self._leaf(src_t),
                                 self.src_engine, src_t, src_cols,
-                                self.dst_engine, dst_t, dst_cols)
+                                self.dst_engine, dst_t, dst_cols,
+                                self._row_scope(db, src_t))
 
     def _neutral_compare(self, db, table=None, stream=None):
         return [Result("data", scope, status, detail)
@@ -403,8 +509,15 @@ class HeteroEngine(Engine):
         for side, name, engine in (("source", self.src_name, self.src_engine),
                                    ("target", self.dst_name,
                                     self.dst_engine)):
+            other = "target" if side == "source" else "source"
             try:
-                for row in engine.assess():
+                for row in self._one_side(engine, side).assess():
+                    # what compares the two sides, or is about the other
+                    # one, means nothing asked of one server alone; the
+                    # pair's own rows below answer for the pairing
+                    item = str(row.get("item", "")).lower()
+                    if other in item or " match" in item:
+                        continue
                     row = dict(row)
                     row["scope"] = f"{side} ({name}) {row.get('scope', '')}"
                     row["item"] = f"{side}: {row.get('item', '')}"
@@ -414,7 +527,69 @@ class HeteroEngine(Engine):
                     f"{str(e).splitlines()[-1][:110]} - unknown, not clean")
 
         items += self._pair_capabilities()
+        try:
+            dbs = self.databases()
+        except Exception:
+            dbs = []
+        for db in dbs:
+            got = self._zero_date_result(db)
+            if got is not None:
+                items.append({"level": "fail" if got.status == "diff"
+                              else "pass", "scope": "pair",
+                              "item": f"{db} zero dates",
+                              "detail": got.detail})
         return items
+
+    def _zero_date_result(self, db):
+        """The source's zero dates, where the target has no such date
+        (B6).
+
+        Measured, MySQL into PostgreSQL: `'0000-00-00'` comes back from the
+        driver as that string, and PostgreSQL answers `date/time field value
+        out of range` - the copy stops at the first one, with everything
+        before it already written. Named here, by column and count, before
+        the move reads a row. None where the pair cannot have them."""
+        reader = getattr(self.src_engine, "zero_dates", None)
+        if reader is None or getattr(self.dst_engine, "zero_dates", None):
+            return None
+        try:
+            got = reader("src", db)
+        except Exception as e:
+            return Result("deep", f"{db} zero dates", "error",
+                          "could not be read, so unknown rather than none:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        if not got:
+            return Result("deep", f"{db} zero dates", "ok",
+                          "no zero dates in the source's date columns")
+        return Result(
+            "deep", f"{db} zero dates", "diff",
+            f"{sum(n for _, _, n in got):,} rows hold a date with a zero"
+            f" year, month or day, which {self.dst_name} has no value for:"
+            + ", ".join(f" {t}.{c} {n:,}" for t, c, n in got[:5])
+            + (" ..." if len(got) > 5 else "")
+            + " - the copy stops at the first one", "",
+            "decide what each means - NULL, or a real date - and set it on"
+            " the source, or in a view the hop reads, before the move")
+
+    def _one_side(self, engine, side):
+        """`engine` looking at one side's server as both of its own.
+
+        An engine's assess compares its two sides, and in a pair its other
+        side is the other engine's server. Measured, a MySQL source's
+        assess asked the PostgreSQL target for MySQL's greeting and waited
+        on it - an hour per connection under the read timeout, fifteen
+        seconds and retries after that was bounded - so `assess` on a
+        cross-engine hop never finished. Pointed at its own server twice,
+        it answers in a second; what compares the two sides is then
+        dropped by the caller."""
+        import dataclasses
+        ep = self.hop.source if side == "source" else self.hop.target
+        dbs = [self.hop.target_db(d) if side == "target" else d
+               for d in (self.hop.databases or [])]
+        hop = dataclasses.replace(self.hop, source=ep, target=ep,
+                                  databases=dbs, db_map={})
+        hop.report_dir = self.hop.report_dir
+        return type(engine)(hop)
 
     def _health(self, side):
         """The load of whichever server this side actually is.
@@ -440,16 +615,27 @@ class HeteroEngine(Engine):
         what the operator was shown rather than whatever the two sides happen
         to disagree about at this moment.
         """
+        out = []
+        behind = getattr(self.dst_engine, "sequences_behind", None)
+        if kind in ("sequences", "all") and behind is not None:
+            got = behind(db)
+            if got:
+                out.append(RepairAction(
+                    db, "sequences", self.dst_engine._raise_past(got), [],
+                    f"{len(got)} sequences raised past their column's rows"))
         if kind not in ("rows", "all"):
-            return []
-        return self._rows_plan(
+            return out
+        return out + self._rows_plan(
             db, f"from {self.src_name} to {self.dst_name}")
 
     def apply(self, db, action):
         """What a pair has to settle before the base can carry the rows:
         that the two engines can move rows at all, and which table on the
-        target the drilldown's table means.
+        target the drilldown's table means. A sequence is the target's own
+        business, done by its own engine.
         """
+        if action.kind == "sequences":
+            return self.dst_engine.apply(db, action)
         if not self._can_move_neutrally():
             raise SystemExit(
                 f"this pair cannot repair rows: {self.src_name} ->"
@@ -469,8 +655,9 @@ class HeteroEngine(Engine):
                              " rows the last check listed cannot be placed")
         src_t, dst_t = match[0]
         src_cols, dst_cols, _ = self._column_plan(src_t, dst_t, db)
-        self._apply_rows(db, name, self.src_engine, src_t, src_cols,
-                         self.dst_engine, dst_t, dst_cols)
+        with self.dst_engine.load_window(db, None, {dst_t}):
+            self._apply_rows(db, name, self.src_engine, src_t, src_cols,
+                             self.dst_engine, dst_t, dst_cols)
 
     def _pair_capabilities(self):
         """What this combination can do, answered from the classes.
@@ -536,8 +723,8 @@ class HeteroEngine(Engine):
         and a value that cannot be compared can still be carried. What is not
         carried is a column the target does not have, and that is named.
         """
-        src_types = dict(self.src_engine.neutral_columns("src", db,
-                                                         src_table))
+        src_types, back = self._mapped_types(db, src_table, dict(
+            self.src_engine.neutral_columns("src", db, src_table)))
         try:
             dst_types = dict(self.dst_engine.neutral_columns("dst", db,
                                                              dst_table))
@@ -558,7 +745,7 @@ class HeteroEngine(Engine):
         from .. import canon
         src_cols, dst_cols = [], []
         for name in both:
-            src_cols.append((name, canon.type_class(
+            src_cols.append((back.get(name, name), canon.type_class(
                 self.src_engine.CANON_ENGINE, src_types[name])))
             dst_cols.append((name, canon.type_class(
                 self.dst_engine.CANON_ENGINE, dst_types[name])))
@@ -598,12 +785,17 @@ class HeteroEngine(Engine):
             log(f"{key}: done earlier, skip")
             return
         after = tuple(st["last"]) if st.get("last") is not None else None
+        src_where, dst_where = self._row_scope(db, src_t)
+        read_scope = {"where": src_where} if src_where else {}
         if after is None:
             # a fresh start, or a table with no key to resume from: what the
             # target already holds is not this copy's, and writing alone left
             # it there - measured, a stray row survived the move and a
-            # key-less table doubled when the move ran again
-            gone = self.dst_engine.neutral_empty("dst", db, dst_t)
+            # key-less table doubled when the move ran again. Under a row
+            # filter only the rows it selects are this copy's.
+            gone = self.dst_engine.neutral_empty(
+                "dst", db, dst_t, **({"where": dst_where} if dst_where
+                                     else {}))
             st["moved"] = 0
             if gone:
                 log(f"{key}: emptied {gone:,} rows the target held before"
@@ -616,7 +808,7 @@ class HeteroEngine(Engine):
         while True:
             with gate.unit():
                 rows, last = self.src_engine.neutral_read(
-                    "src", db, src_t, src_cols, after, chunk)
+                    "src", db, src_t, src_cols, after, chunk, **read_scope)
             if not rows:
                 break
             rows, flattened = self._flatten_absent(rows)
@@ -649,14 +841,19 @@ class HeteroEngine(Engine):
         can write the table themselves.
         """
         from .. import canon
-        declared = self.src_engine.neutral_columns("src", db, src_table)
+        # built under the target's names, without the columns the hop drops
+        mapped, back = self._mapped_types(db, src_table, dict(
+            self.src_engine.neutral_columns("src", db, src_table)))
+        declared = list(mapped.items())
+        rules = self._carried_rules(db, src_table, back)
         columns, unknown = [], []
         for name, typ in sorted(declared):
             cls = canon.type_class(self.src_engine.CANON_ENGINE, typ)
             if cls is None:
                 unknown.append(f"{name} ({typ})")
                 continue
-            columns.append((name, cls, canon.params(typ)))
+            columns.append((name, cls, canon.params(typ),
+                            rules.get(name) or {}))
         if unknown:
             raise SystemExit(
                 f"{leaf} is not on the target and migkit cannot build it:"
@@ -664,12 +861,178 @@ class HeteroEngine(Engine):
                 " Create the table yourself and run this again - guessing a"
                 " column type is how a migration arrives complete and wrong")
         try:
-            key = [k for k in self.src_engine.neutral_key("src", db,
-                                                          src_table)
-                   if k in {n for n, _, _ in columns}]
+            forward = {v: k for k, v in back.items()}
+            key = [forward.get(k, k) for k in
+                   self.src_engine.neutral_key("src", db, src_table)
+                   if forward.get(k, k) in {c[0] for c in columns}]
         except Exception:
             key = []
         return columns, key
+
+    def create_missing(self, db, log=None):
+        """The tables the target lacks, built the way the copier builds
+        them, before any is filled. The copier from MySQL to PostgreSQL
+        filled tables and built none: onto an empty target it stopped on
+        `relation "t" does not exist`."""
+        if self.dst_engine.CREATES_ON_WRITE or not self._can_compare_neutrally():
+            return
+        log = log or (lambda m: None)
+        made = self.dst_engine.prepare_target(db)
+        if made:
+            log(f"{self.dst_name}: {made}")
+        there = ([] if self.dst_engine.target_missing(db)
+                 else self.dst_engine.neutral_tables("dst", db))
+        _, src_only, _, _ = self.match_tables(
+            self.src_engine.neutral_tables("src", db), there, self._rename)
+        for src_t in src_only:
+            if not self.hop.excluded(db, *str(src_t).split(".")):
+                self._create_target(db, src_t,
+                                    self._leaf(self._rename(src_t)), log)
+
+    def finish_created(self, db, log=None):
+        """The source's indexes on the tables this pair built, once their
+        rows are in - the faster order, as on every other path.
+
+        A built table had none: every query the application made after
+        cutover read it whole, and a unique index the source kept was not
+        there to refuse the duplicate it refuses. One over an expression, a
+        predicate or a part of a column cannot be given to another engine
+        as it is, and is named instead."""
+        import json as _json
+        log = log or (lambda m: None)
+        record = self.hop.report_dir(db) / "built-tables.json"
+        try:
+            built = _json.loads(record.read_text())
+        except (OSError, ValueError):
+            return
+        for leaf, src_t in sorted(built.items()):
+            try:
+                indexes = self.src_engine.neutral_indexes("src", db, src_t)
+                names = [n for n, _ in
+                         self.src_engine.neutral_columns("src", db, src_t)]
+            except Exception as e:
+                log(f"{leaf}: its indexes could not be read:"
+                    f" {str(e).splitlines()[-1][:90]}")
+                continue
+            _, back = self._mapped_types(db, src_t, {n: None for n in names})
+            forward = {v: k for k, v in back.items()}
+            for name, unique, cols, plain in indexes:
+                if not plain or not cols or any(c not in forward
+                                                for c in cols):
+                    log(f"{leaf}: index {name} not carried - it is over an"
+                        " expression, a predicate, part of a column, or a"
+                        " column the hop does not carry")
+                    continue
+                self._build_index(db, leaf, name, unique,
+                                  [forward[c] for c in cols], log)
+        record.unlink(missing_ok=True)
+
+    def _build_index(self, db, leaf, name, unique, cols, log):
+        """One index on the target, under the source's name, or under the
+        table's name before it where that one is taken - an index name is
+        the whole schema's on some engines and one table's on others."""
+        for attempt in (name, f"{leaf}_{name}"[:63]):
+            sql = self.dst_engine.neutral_create_index_sql(
+                "dst", db, leaf, attempt, unique, cols)
+            try:
+                self.dst_engine.execute_ddl("dst", db, sql)
+                log(f"{leaf}: {sql}")
+                return
+            except Exception as e:
+                err = str(e).splitlines()[-1][:120] if str(e) else ""
+                if "exist" in err.lower() and attempt == name:
+                    continue
+                log(f"{leaf}: index {name} not built: {err}")
+                return
+
+    def _carried_rules(self, db, src_table, back):
+        """{target column: rule} - what `neutral_column_rules` says of the
+        source's columns, with each default in the target's own SQL.
+
+        A default is an expression in the source's dialect: `uuid()` on
+        MySQL is `gen_random_uuid()` on PostgreSQL. It is translated, then
+        asked of the target, and one the target does not take is left off
+        and named in `self.rules_not_carried` rather than guessed at - the
+        table is still built, and the check reports the default missing."""
+        self.rules_not_carried = []
+        try:
+            got = self.src_engine.neutral_column_rules("src", db, src_table)
+        except Exception:
+            return {}
+        out = {}
+        for target, source in back.items():
+            rule = dict(got.get(source) or {})
+            if not rule:
+                continue
+            default = rule.get("default")
+            if default is not None and not rule.get("identity"):
+                rule["default"] = self._default_here(db, default)
+                if rule["default"] is None:
+                    self.rules_not_carried.append(f"{target} default"
+                                                  f" {default}")
+            out[target] = rule
+        return out
+
+    def _row_scope(self, db, src_table):
+        """The hop's row filter for this table, in each side's SQL:
+        (the source's, the target's), or (None, None) without one.
+
+        The filter is written in the source's SQL against the source's
+        column names. For the target it is translated into that engine's
+        SQL, with each column under the name the hop's mapping gives it -
+        the check has always read both sides through the filter, and on a
+        pair the two sides do not speak the same SQL or use the same
+        names. One that cannot be translated stops everything that would
+        read through it, before anything is read."""
+        pred = self.hop.row_filter(db, *str(src_table).split("."))
+        if not pred:
+            return None, None
+        src = self.src_engine.SQL_DIALECT
+        dst = self.dst_engine.SQL_DIALECT
+        if not (src and dst):
+            raise SystemExit(
+                f"{src_table} moves under a row filter, which is SQL, and"
+                f" {self.src_name if not src else self.dst_name} takes none."
+                " Drop the filter, or exclude the table from this hop")
+        names = [n for n, _ in
+                 self.src_engine.neutral_columns("src", db, src_table)]
+        _, back = self._mapped_types(db, src_table, {n: None for n in names})
+        forward = {v: k for k, v in back.items()}
+        try:
+            import sqlglot
+            from sqlglot import exp
+            tree = sqlglot.parse_one(pred, read=src)
+            for col in tree.find_all(exp.Column):
+                if col.name in forward and forward[col.name] != col.name:
+                    col.set("this", exp.to_identifier(forward[col.name]))
+            there = tree.sql(dialect=dst,
+                             unsupported_level=sqlglot.ErrorLevel.RAISE)
+        except Exception as e:
+            raise SystemExit(
+                f"the row filter on {src_table} ({pred}) has no translation"
+                f" into {self.dst_name}'s SQL"
+                f" ({str(e).splitlines()[0][:80]}), so the target cannot be"
+                " read through it. Write it so both engines accept it")
+        return pred, there
+
+    def _default_here(self, db, expr):
+        """The source's default in the target's SQL, or None where it has
+        no translation the target accepts."""
+        src = self.src_engine.SQL_DIALECT
+        dst = self.dst_engine.SQL_DIALECT
+        if not (src and dst):
+            return None
+        said = expr
+        if src != dst:
+            try:
+                import sqlglot
+                said = sqlglot.transpile(
+                    expr, read=src, write=dst,
+                    unsupported_level=sqlglot.ErrorLevel.RAISE)[0]
+            except Exception:
+                return None
+        return said if self.dst_engine.default_works("dst", db, said) \
+            else None
 
     def _create_target(self, db, src_table, leaf, log):
         """Build the table the rows are about to land in, and say what it ran.
@@ -685,8 +1048,20 @@ class HeteroEngine(Engine):
         narrower can, so the direction of the guess is not a coin toss.
         """
         columns, key = self._target_shape(db, src_table, leaf)
+        # recorded before it is made: a copy that dies after this still has
+        # the table's indexes added by the next run's `finish_created`
+        import json as _json
+        record = self.hop.report_dir(db) / "built-tables.json"
+        try:
+            built = _json.loads(record.read_text())
+        except (OSError, ValueError):
+            built = {}
+        built[leaf] = str(src_table)
+        record.write_text(_json.dumps(built))
         ddl = self.dst_engine.neutral_create("dst", db, leaf, columns, key)
         log(f"{leaf}: not on the target, created it - {ddl}")
+        for lost in getattr(self, "rules_not_carried", []):
+            log(f"{leaf}: not carried, the target has no equivalent: {lost}")
         if not key:
             log(f"{leaf}: created without a primary key, because the source"
                 " has none - the rows still move, and a restart starts over")
@@ -773,6 +1148,51 @@ class HeteroEngine(Engine):
                        f" {self.src_name}/{self.dst_name},"
                        f" {len(rows)} tables")]
 
+    def check_autoinc(self, db):
+        """Whether the target's sequences are past its rows, asked of the
+        target alone: the change tail writes each row with the source's key
+        too, and a sequence does not move for a key it did not hand out, so
+        the first insert after cutover would collide with a row the tail
+        wrote. Skipped where the target keeps no such counter apart from
+        the rows (MySQL moves its own on every insert)."""
+        behind = getattr(self.dst_engine, "sequences_behind", None)
+        if behind is None:
+            return super().check_autoinc(db)
+        got = behind(db)
+        if not got:
+            return [Result("autoinc", db, "ok",
+                           "every sequence on the target is past the rows"
+                           " of its column")]
+        return [Result(
+            "autoinc", db, "diff",
+            f"{len(got)} sequences on the target would hand out a key a row"
+            " already holds: " + ", ".join(
+                f"{seq} (largest {table}.{col} is {top})"
+                for seq, table, col, top in got[:4])
+            + (" ..." if len(got) > 4 else ""), "",
+            f"migkit sync {self.hop.name} --db {db} --kind sequences"
+            " --apply")]
+
+    def settle_target(self, db, from_source=True):
+        """The target's own, with the source's counters only where the
+        source is the same engine and so can be read by it."""
+        return self.dst_engine.settle_target(
+            db, from_source and self.src_name == self.dst_name)
+
+    def check_deep(self, db):
+        """What the target's own engine set aside for the pair's loads and
+        tail and has not put back."""
+        out = [r for r in (self.dst_engine.set_aside(db),
+                           self._zero_date_result(db),
+                           self.dst_engine._fk_orphans(db)) if r]
+        return out or super().check_deep(db)
+
+    def load_window(self, db, log=None, tables=None):
+        """The target's own, over the names the tables have there."""
+        if tables is not None:
+            tables = {self._leaf(self._rename(t)) for t in tables}
+        return self.dst_engine.load_window(db, log, tables)
+
     def planned_checks(self):
         """A second reading, where it can be had.
 
@@ -782,11 +1202,16 @@ class HeteroEngine(Engine):
         and speaks both engines, and never for pairs it cannot read.
         """
         from .. import second_reader
+        more = super().planned_checks()
         if (second_reader.interpreter()
                 and self.src_name in second_reader.READER_TYPES
                 and self.dst_name in second_reader.READER_TYPES):
-            return ("second",)
-        return ()
+            return ("second",) + more
+        return more
+
+    def run_rule(self, side, db, sql):
+        engine = self.src_engine if side == "src" else self.dst_engine
+        return engine.run_rule(side, db, sql)
 
     def check_second(self, db):
         """Every paired table read a second way: counts, and the sum,
@@ -849,11 +1274,83 @@ class HeteroEngine(Engine):
             got = self._no_rendering("data")
             return [Result("data", db, got.status, got.detail)]
         rows = self._neutral_rows(db, table, stream)
+        rows = self._confirm_in_flight(db, rows, stream)
         res = [Result("data", scope, status, detail)
                for scope, status, detail, _, _ in rows]
         if with_counts:
             res = self._counts_rows(db, rows) + res
         return res
+
+    # --- the confirm pass, where migkit's own tail carries the changes ------
+    # A difference found while the tail is running may be a change it has
+    # read and not applied yet. Before calling it one, wait until the tail
+    # has read as far as the source's log is now, then look again: what
+    # converged was still arriving.
+
+    def _tail_path(self, db):
+        return self.hop.report_dir(db) / "tail-token.json"
+
+    def src_lsn(self, db):
+        from .. import tailctl
+        if not tailctl.alive(self.hop.report_dir(db)):
+            return None
+        try:
+            return self.src_engine.log_position("src", db)
+        except Exception:
+            return None
+
+    def fence_wait(self, db, lsn, timeout=300):
+        if lsn is None:
+            return None
+        began = time.monotonic()
+        while time.monotonic() - began < timeout:
+            try:
+                have = self._saved_token(self._tail_path(db))
+            except SystemExit:
+                return None
+            if have is not None:
+                reached = self.src_engine.position_reached(have, lsn)
+                if reached is None:
+                    return None
+                if reached:
+                    return True
+            time.sleep(1)
+        return False
+
+    def _compare_pks(self, db, table, keys):
+        """Walk the table again, both sides, and say what still differs."""
+        pairs, _, _, _ = self.match_tables(
+            self.src_engine.neutral_tables("src", db),
+            self.dst_engine.neutral_tables("dst", db), self._rename)
+        match = [(s_, d_) for s_, d_ in pairs if self._leaf(s_) == table]
+        if not match:
+            return None
+        src_t, dst_t = match[0]
+        src_cols, dst_cols, _ = self._column_plan(src_t, dst_t, db)
+        self._drill(db, src_t, dst_t, src_cols, dst_cols)
+        return tuple(self._read_drill(db, table, kind)
+                     for kind in ("missing", "extra", "changed"))
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        self._write_drill(db, table, missing=missing, extra=extra,
+                          changed=changed)
+
+    def _confirm_in_flight(self, db, rows, stream=None):
+        bad = [scope.split(".", 1)[1] for scope, status, *_ in rows
+               if status == "diff" and "." in scope]
+        if not bad or self.src_lsn(db) is None:
+            return rows
+        _, healed, how = self._resolve_inflight(db, bad, stream)
+        proof = dict(h.split(": ", 1) for h in how)
+        out = []
+        for scope, status, detail, a, b in rows:
+            leaf = scope.split(".", 1)[-1]
+            if leaf in healed:
+                status, detail = "ok", (f"the difference was still arriving"
+                                        f" through migkit's change tail"
+                                        f" ({proof.get(leaf, 'confirmed')})")
+            out.append((scope, status, detail, a, b))
+        return out
 
     def convert_ddl(self, db):
         """The statements that would build the target, for every source table.
@@ -897,14 +1394,13 @@ class HeteroEngine(Engine):
         """
         hop = self.hop.name
         if self.my and self.pg:
+            # migkit's steps only: a program it wraps is its business, and
+            # named here it was a second way to run the move that none of
+            # migkit's checks or records would know about
             plan = []
-            if which("pgloader"):
-                plan.append(f"pgloader mysql://user@{self.hop.source.host}"
-                            f"/{db} postgresql://user@"
-                            f"{self.hop.target.host}/{db}"
-                            "  # schema+data+indexes in one shot")
             plan.append(f"migkit convert-schema {hop} --db {db}"
-                        "   # sqlglot DDL conversion, review then --apply")
+                        "   # the target's tables from the source's,"
+                        " review then --apply")
             plan.append(f"migkit move {hop} --db {db} --go"
                         "   # resumable chunked data copy")
             plan.append(f"cross-engine CDC: migkit move {hop} --mode cdc --go"
@@ -1014,7 +1510,10 @@ class HeteroEngine(Engine):
         return [("", t) for t in self.my._tables("src", db)]
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
-        if not (self.my and self.pg):
+        # the copier written for MySQL to PostgreSQL copies each table under
+        # its source's column names; a table the hop's mapping reshapes
+        # goes the way that reads the mapping
+        if not (self.my and self.pg) or self.hop.column_rules(db, sch, tbl):
             if not self._can_move_neutrally():
                 self._mysql_to_postgres_only("moving a table")
             # before anything is read from the target: some targets are not
@@ -1036,6 +1535,12 @@ class HeteroEngine(Engine):
         cols = self.my._cols(db, t)
         collist_my = ", ".join(f"`{c}`" for c in cols)
         collist_pg = ", ".join(f'"{c}"' for c in cols)
+        # the hop's row filter on both ends: only the rows it selects are
+        # read, and only the rows it selects are replaced
+        src_where, dst_where = self._row_scope(db, t)
+        my_and = f" and ({src_where.replace('%', '%%')})" if src_where \
+            else ""
+        pg_and = f" and ({dst_where})" if dst_where else ""
         pks = self.my._pk_cols(db, t)
         intpk = None
         if len(pks) == 1:
@@ -1055,9 +1560,12 @@ class HeteroEngine(Engine):
                             v.hex() if isinstance(v, (bytes, bytearray))
                             else v for v in row])
             tgt = self.hop.target
-            env = tool_env({"PGPASSWORD": tgt.password})
-            pre = f'delete from "{dst_t}" where {pred_pg};' if pred_pg \
-                else f'truncate "{dst_t}";'
+            env = tool_env({"PGPASSWORD": tgt.password,
+                            **self.pg.replica_env(db)})
+            pre = (f'delete from "{dst_t}" where ({pred_pg}){pg_and};'
+                   if pred_pg else
+                   f'delete from "{dst_t}" where {dst_where};' if dst_where
+                   else f'truncate "{dst_t}";')
             p = subprocess.run(
                 ["psql", "-h", tgt.host, "-p", str(tgt.port),
                  "-U", tgt.user, "-d", self.pg._d("dst", db), "-X", "-q",
@@ -1070,7 +1578,8 @@ class HeteroEngine(Engine):
 
         if not intpk:
             log(f"{key}: no single int pk, single-shot copy")
-            rows = self.my._q("src", f"select {collist_my} from `{db}`.`{t}`")
+            rows = self.my._q("src", f"select {collist_my} from `{db}`.`{t}`"
+                              + (f" where {src_where}" if src_where else ""))
             push(rows, "")
             st["done"] = True
             ck.save()
@@ -1078,15 +1587,16 @@ class HeteroEngine(Engine):
         mm = self.my._q("src", f"select coalesce(min(`{intpk}`), 0),"
                         f" coalesce(max(`{intpk}`), 0),"
                         f" min(`{intpk}`) is not null"
-                        f" from `{db}`.`{t}`")[0]
+                        f" from `{db}`.`{t}`"
+                        + (f" where {src_where}" if src_where else ""))[0]
         lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
         last = st.get("last", lo - 1)
         while last < hi:
             nxt = min(last + chunk, hi)
             rows = self.my._q("src",
                               f"select {collist_my} from `{db}`.`{t}`"
-                              f" where `{intpk}` > %s and `{intpk}` <= %s",
-                              (last, nxt))
+                              f" where `{intpk}` > %s and `{intpk}` <= %s"
+                              + my_and, (last, nxt))
             push(rows, f'"{intpk}" > {last} and "{intpk}" <= {nxt}')
             last = nxt
             st["last"] = last
@@ -1103,17 +1613,10 @@ class HeteroEngine(Engine):
         a copy that a tail was meant to follow, not after it."""
         from .base import Engine
         if db is not None:
-            filtered = [t for t in self.src_engine.neutral_tables("src", db)
-                        if self.hop.row_filter(db, *str(t).split("."))]
-            if filtered:
-                # the filter is SQL the source evaluates; a change record
-                # carries values, and every change used to be applied
-                # whether or not its row was one the filter selects
-                raise SystemExit(
-                    f"{', '.join(filtered[:6])} move under a row filter, and"
-                    " the change tail cannot apply one yet - it would carry"
-                    " changes to rows the filter leaves out. Move these"
-                    " tables without CDC, or exclude them from this hop")
+            # a filter the tail could not read through stops it here,
+            # before it starts, rather than at the first change
+            for t in self.src_engine.neutral_tables("src", db):
+                self._row_scope(db, t)
         if type(self.src_engine).neutral_changes is Engine.neutral_changes:
             raise SystemExit(
                 f"{self.src_name} has no change log migkit can read, so"
@@ -1161,11 +1664,160 @@ class HeteroEngine(Engine):
             out[self._leaf(s_)] = self._leaf(self._rename(s_))
         return out
 
+    def _in_scope(self, db, changes):
+        """The changes, with every insert or update of a row the hop's row
+        filter does not select turned into a delete of it.
+
+        A change record carries values, and the filter is SQL the source
+        evaluates, so the source is asked which of the changed rows it
+        selects now - one read per table per batch. Asking the row's state
+        now rather than at the change converges: a row that moved into the
+        filter and out again in one batch is gone from the target, as it
+        is from the filter. A row the source no longer has is gone too, and
+        its own delete follows."""
+        by_table = {}
+        for c in changes:
+            if c.get("op") in ("insert", "update"):
+                by_table.setdefault(c["table"], []).append(c)
+        if not by_table:
+            return changes
+        out_of_scope = set()
+        for table, rows in by_table.items():
+            src_where, _ = self._row_scope(db, table)
+            if not src_where:
+                continue
+            key = sorted(rows[0]["key"])
+            keys = []
+            for c in rows:
+                values = c.get("values") or {}
+                keys.append(tuple(values.get(k, c["key"][k]) for k in key))
+            cols = [(k, None) for k in key]
+            try:
+                classes = dict(self.src_engine.neutral_columns("src", db,
+                                                               table))
+                from .. import canon
+                cols = [(k, canon.type_class(self.src_engine.CANON_ENGINE,
+                                             classes.get(k)))
+                        for k in key]
+            except Exception:
+                pass
+            seen = self.src_engine.neutral_rows_by_key(
+                "src", db, table, cols, key, keys, where=src_where)
+            for c, k in zip(rows, keys):
+                if self._key_of(cols, key, list(k)) not in seen:
+                    out_of_scope.add(id(c))
+        out = []
+        for c in changes:
+            if id(c) not in out_of_scope:
+                out.append(c)
+                continue
+            now = {k: (c.get("values") or {}).get(k, v)
+                   for k, v in c["key"].items()}
+            out.append({"op": "delete", "table": c["table"], "key": now})
+            if now != c["key"]:
+                # an update that moved the key as well: the row's old
+                # address goes too, as the apply would have removed it
+                out.append({"op": "delete", "table": c["table"],
+                            "key": dict(c["key"])})
+        return out
+
+    def _mapped_change(self, db, change):
+        """A change with `mapping.columns` applied as the copy applied it:
+        dropped columns left out, renamed ones under their target names.
+
+        Measured before: with `name` renamed to `label`, the first insert
+        the tail applied stopped it on `Unknown column 'name'`, and a
+        target that had both would have been written in the wrong one."""
+        out = dict(change)
+        for part in ("key", "values"):
+            if change.get(part):
+                out[part] = self._mapped_types(db, change["table"],
+                                               change[part])[0]
+        if len(out.get("key") or {}) != len(change.get("key") or {}):
+            raise SystemExit(
+                f"{change['table']}: mapping.columns leaves out part of its"
+                " key, so a change cannot be placed on the target by it."
+                " Keep the key's columns.")
+        return out
+
     def _tail_target(self, targets, table):
         # a table made on the source after the tail began goes by its
         # mapped name, as the move would have sent it
         return (targets.get(self._leaf(table))
                 or self._leaf(self._rename(table)))
+
+    def _shape_gate(self, db, token_path, position):
+        """The source's column shape the tail may apply under, or None
+        where it cannot be read cheaply.
+
+        A change log carries rows, not a DDL a reader can rely on, so the
+        catalogue is asked directly: once as the tail starts and again
+        before each batch, against the shape saved beside the position -
+        which is how a DDL made while the tail was stopped is seen as well.
+        A changed shape is accepted once the target has every column the
+        source now has on the tables it touched; until then the tail stops,
+        and says what changed. Only where the catalogue is one query: a
+        document store's shape is a scan of every document, and its stream
+        names its own drops and renames.
+        """
+        import json as _json
+
+        from .. import drift
+        if drift.reader(self) is None:
+            return None
+        now = drift.shape(self.src_engine, "src", db)
+        if now is None:
+            return None
+        path = token_path.parent / "tail-shape.json"
+        try:
+            saved = {t: [tuple(c) for c in cols] for t, cols in
+                     _json.loads(path.read_text()).items()}
+        except (OSError, ValueError):
+            saved = None
+        moved = drift.changes(saved, now) if saved is not None else []
+        if moved:
+            behind = self._target_lacks(db, saved, now)
+            if behind:
+                raise SystemExit(
+                    f"{db}: the source's schema changed under the tail - "
+                    + "; ".join(moved[:6])
+                    + (" ..." if len(moved) > 6 else "")
+                    + f". The target does not have {', '.join(behind[:6])}"
+                    f" yet, so nothing after {str(position)[:60]} was"
+                    " applied. Bring the target's schema level with the"
+                    " source's, then run the tail again; it resumes from"
+                    " there.")
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(now))
+        return now
+
+    def _target_lacks(self, db, before, after):
+        """`table.column` the source has now, on tables whose shape changed,
+        that the target does not."""
+        out = []
+        targets = self._tail_targets(db)
+        for t, cols in sorted(after.items()):
+            if dict(cols) == dict(before.get(t, [])):
+                continue
+            dst_t = self._tail_target(targets, t)
+            try:
+                have = {str(n).lower() for n, _ in
+                        self.dst_engine.neutral_columns("dst", db, dst_t)}
+            except Exception:
+                have = set()
+            out += [f"{dst_t}.{n}" for n, _ in cols
+                    if str(n).lower() not in have]
+        return out
+
+    def target_mark(self, db):
+        return self.dst_engine.target_mark(db)
+
+    def tail_seed(self, db, token_path, point):
+        """Start the tail from `point`, a position taken earlier."""
+        import json as _json
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(_json.dumps({"token": point}))
+        (token_path.parent / "tail-shape.json").unlink(missing_ok=True)
 
     def tail_start(self, db, token_path):
         """Fix where the tail will begin, before the copy it follows.
@@ -1181,6 +1833,8 @@ class HeteroEngine(Engine):
         point = self.src_engine.change_point("src", db)
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(_json.dumps({"token": point}))
+        (token_path.parent / "tail-shape.json").unlink(missing_ok=True)
+        self._shape_gate(db, token_path, point)
         return True
 
     def tail_apply(self, db, go, token_path, log):
@@ -1214,15 +1868,54 @@ class HeteroEngine(Engine):
         log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)")
             + (f", resuming from {str(token)[:40]}" if token else ""))
+        from .. import drift, tailctl
         seen = 0
+        saved_token = token
         targets = self._tail_targets(db)
+        # the source's shape the tail last applied under, saved beside its
+        # position, so a DDL made while it was stopped is seen too
+        known = self._shape_gate(db, token_path, saved_token)
+        running = tailctl.Running(token_path.parent) if go else None
+        # the target's triggers held off for as long as changes are applied,
+        # as the servers' own replication applies them: what the source's
+        # triggers wrote is in the log with the rest, and the target's
+        # firing again rewrote the rows and wrote them twice
+        window = (self.dst_engine.load_window(db, log, set(targets.values()))
+                  if go else None)
+        # a service manager stops a process with SIGTERM, which ends it
+        # without unwinding: taken as ctrl-c, so what the tail set aside on
+        # the target goes back and its marker comes down
+        term = None
+        if go:
+            try:
+                term = signal.signal(signal.SIGTERM, _stop_on_term)
+            except ValueError:
+                pass
         try:
+            if running:
+                running.__enter__()
+            if window:
+                window.__enter__()
             while True:
+                # between batches, never inside one: everything read so far
+                # is applied and its position saved before it holds still
+                tailctl.hold_if_asked(token_path.parent, log)
                 changes, token = self.src_engine.neutral_changes(
                     "src", db, token, limit=1000)
+                # an online schema change's working tables are not on the
+                # target and are not the application's data
+                changes = [c for c in changes
+                           if not drift.transient(c["table"])]
+                if changes and known is not None:
+                    # before the batch is applied: rows on both sides of a
+                    # DDL may be in it, and its position is not saved yet
+                    known = self._shape_gate(db, token_path, saved_token)
                 if changes:
-                    changes = [dict(c, table=self._tail_target(targets,
-                                                               c["table"]))
+                    changes = self._in_scope(db, changes)
+                if changes:
+                    changes = [dict(self._mapped_change(db, c),
+                                    table=self._tail_target(targets,
+                                                            c["table"]))
                                for c in changes]
                     changes, flattened = self._flatten_changes(changes)
                     if flattened:
@@ -1235,12 +1928,28 @@ class HeteroEngine(Engine):
                     if go:
                         token_path.parent.mkdir(parents=True, exist_ok=True)
                         token_path.write_text(_json.dumps({"token": token}))
+                        saved_token = token
                     log(f"{seen} changes"
                         + ("" if go else " seen (nothing applied)"))
                 else:
+                    if go and token != saved_token:
+                        # the log moved on with nothing to apply: the new
+                        # position is how far the target is, which is what
+                        # a fence reads
+                        token_path.write_text(_json.dumps({"token": token}))
+                        saved_token = token
                     _time.sleep(1)
         except KeyboardInterrupt:
             log(f"stopped after {seen} changes; rerun to resume")
+        finally:
+            try:
+                if window:
+                    window.__exit__(*sys.exc_info())
+            finally:
+                if running:
+                    running.__exit__(None, None, None)
+                if term is not None:
+                    signal.signal(signal.SIGTERM, term)
 
     def watch_sample(self, db):
         """Rows on each side, for any pair rather than one of them.

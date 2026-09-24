@@ -336,17 +336,21 @@ def test_migkit_bounds_it_and_says_which_side_cannot_reach_which(pair,
 
 
 @needs_docker
-def test_a_retry_really_does_collide_on_the_publication(pair, tmp_path):
-    """Which is why the message names it. PostgreSQL has no
+def test_a_retry_no_longer_collides_on_the_publication(pair, tmp_path):
+    """It did: a retry stopped on `already exists`. PostgreSQL has no
     `CREATE PUBLICATION ... IF NOT EXISTS` - checked, it is a syntax
-    error - so this cannot be papered over in the statement."""
+    error - so the statement makes it only where it is missing."""
     eng = _engine(tmp_path)
     sql = eng.replicate_sql("postgres", copy_data=False)
     eng.apply_replication_stmt("src", "postgres", sql["src"][0])
     try:
-        with pytest.raises(RuntimeError) as e:
-            eng.apply_replication_stmt("src", "postgres", sql["src"][0])
-        assert "already exists" in str(e.value), str(e.value)
+        eng.apply_replication_stmt("src", "postgres", sql["src"][0])
+        got = subprocess.run(
+            ["docker", "exec", NS, "psql", "-U", "postgres", "-At", "-c",
+             "select count(*) from pg_publication"
+             " where pubname = 'migkit_unreach'"],
+            capture_output=True, text=True)
+        assert got.stdout.strip() == "1", got
         bad = subprocess.run(
             ["docker", "exec", NS, "psql", "-U", "postgres", "-c",
              "create publication z if not exists for all tables;"],
@@ -354,3 +358,37 @@ def test_a_retry_really_does_collide_on_the_publication(pair, tmp_path):
         assert bad.returncode != 0 and "syntax" in bad.stderr.lower(), bad
     finally:
         _sql(NS, "drop publication if exists migkit_unreach")
+
+
+def test_a_second_cdc_run_finds_what_the_first_set_up(pg_pair, tmp_path):
+    """Setting up the stream twice stopped on `already exists`: the
+    publication is made only where it is missing, and a subscription that
+    is already there is left to run."""
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.postgres import PostgresEngine
+    from tests.conftest import psql
+    hop = Hop(name="twice", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
+                              user="postgres", password="test"),
+              target=Endpoint(host="127.0.0.1", port=pg_pair["dst"],
+                              user="postgres", password="test"),
+              databases=["postgres"])
+    eng = PostgresEngine(hop)
+    name = eng._repl_name()
+    sql = eng.replicate_sql("postgres", copy_data=False)
+    try:
+        for _ in range(2):
+            for stmt in sql["src"]:
+                eng.apply_replication_stmt("src", "postgres", stmt)
+        assert psql(pg_pair["src"], "select count(*) from pg_publication"
+                    f" where pubname = '{name}'").stdout.strip() == "1"
+        # a subscription already there: nothing is made again, nothing fails
+        psql(pg_pair["dst"], f"create subscription {name} connection"
+                             " 'host=127.0.0.1 port=1 dbname=x' publication"
+                             f" {name} with (connect = false)")
+        assert eng.apply_replication_stmt("dst", "postgres",
+                                          sql["dst"][0]) == ""
+    finally:
+        psql(pg_pair["dst"], f"alter subscription {name} set (slot_name ="
+                             f" none); drop subscription if exists {name}")
+        psql(pg_pair["src"], f"drop publication if exists {name}")

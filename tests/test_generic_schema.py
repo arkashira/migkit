@@ -24,14 +24,13 @@ PostgreSQL 16 against a deliberately mismatched pair:
                    varchar(50) against varchar(200)         NOT seen
     n_null      identical whether or not it is NOT NULL     NOT seen
 
-Length and nullability are simply not in the query the library issues -
-read its source: it selects those five and nothing else, per dialect. Asking
-for more would mean writing that query nine times, eight of them against
-engines that cannot be tried here.
-
-So the check reports what it can see and **says what it did not look at,
-every time, including when it passes**. A clean line that quietly means
-"some of the schema" is the kind of reassurance this tool exists to refuse.
+Length and nullability are not in the query the library issues: it selects
+those five and nothing else, per dialect. Its FROM and WHERE are the part
+that knows each catalogue, so the same place is now asked for the other
+two, in the standard spelling and then Oracle's. Where a catalogue has
+neither spelling, the check still **says what it did not look at, including
+when it passes**. A clean line that quietly means "some of the schema" is
+the kind of reassurance this tool exists to refuse.
 
 The normalised types are not usable for this and that is the reason the raw
 rows are read: `bigint` and `integer` both come back as `Integer`, so the
@@ -222,23 +221,31 @@ def test_it_finds_all_of_that_on_two_real_servers(mismatched, tmp_path):
 
 
 @needs_lib
-def test_what_it_misses_is_really_missed_and_really_said(mismatched,
-                                                         tmp_path):
-    """The blind spots are asserted against the servers, not quoted from
-    the library's docs. `v` is varchar(50) on the source and varchar(200)
-    on the target, and `n_null` is NOT NULL on one side only - neither
-    shows up, which is why every verdict says so."""
+def test_lengths_and_nullability_are_read_from_the_same_catalogue(
+        mismatched, tmp_path):
+    """They were blind spots: `v` is varchar(50) on the source and
+    varchar(200) on the target, `n_null` NOT NULL on one side only, and
+    neither showed. The library's own query selects five columns; the same
+    catalogue is now asked for the other two."""
     got = _engine(mismatched, tmp_path).check_schema("-")[0]
-    assert "v is" not in got.detail, got.detail
-    assert "n_null" not in got.detail, got.detail
-    assert "string lengths, nullability" in got.detail, got.detail
-    # and the premise: the two really are declared differently
-    assert psql(mismatched["src"], "select character_maximum_length from"
-                " information_schema.columns where table_name='gsch'"
-                " and column_name='v'").stdout.strip() == "50"
-    assert psql(mismatched["dst"], "select character_maximum_length from"
-                " information_schema.columns where table_name='gsch'"
-                " and column_name='v'").stdout.strip() == "200"
+    assert "v holds 50 characters on the source and 200 on the target" \
+        in got.detail, got.detail
+    assert "n_null is NOT NULL on the source and takes NULL on the" \
+        " target" in got.detail, got.detail
+    assert "compared too" in got.detail, got.detail
+    assert "not compared" not in got.detail, got.detail
+
+
+def test_a_narrower_string_and_a_refused_null_are_named():
+    from migkit.engines.generic import GenericEngine
+    eng = GenericEngine.__new__(GenericEngine)
+    got = eng._schema_result(
+        "t", {"v": _row("v", "character varying")},
+        {"v": _row("v", "character varying")},
+        ({"v": (200, True)}, {"v": (50, False)}))
+    assert got.status == "diff", got.detail
+    assert "values longer than that will not fit" in got.detail, got.detail
+    assert "a NULL the source holds is refused" in got.detail, got.detail
 
 
 @needs_lib

@@ -66,6 +66,39 @@ def chosen(engine, table=""):
     return pick(engine, table)
 
 
+def fitted(hop, engine, via):
+    """`via`, or the table copier where `via` cannot carry what this hop
+    asks of it - with the reason, in words, or None.
+
+    The one-pass cross-engine load is chosen for every cross-engine hop
+    once it is installed, and the load file migkit writes for it reads
+    MySQL into PostgreSQL, the whole database, with nothing else: no
+    exclude list, no table or column mapping, no row filter. For any
+    other pair it reads the wrong server as the wrong kind; on a hop with
+    an exclude list it loads the tables the target owns. The table copier
+    carries all of those, so the decision is made here, from the hop.
+    """
+    if via != "pgloader":
+        return via, None
+    from .engines import ALIASES
+    opts = hop.options or {}
+    pair = tuple(ALIASES.get(n, n) for n in (
+        opts.get("source_engine", "mysql"),
+        opts.get("target_engine", "postgres")))
+    mapping = getattr(hop, "mapping", None) or {}
+    if pair != ("mysql", "postgres"):
+        why = "the one-pass load reads MySQL into PostgreSQL only"
+    elif getattr(hop, "exclude", None):
+        why = ("the one-pass load has no way to leave out the tables the"
+               " hop excludes")
+    elif any(mapping.get(k) for k in ("tables", "columns", "where")):
+        why = ("the one-pass load reads no table, column or row mapping,"
+               " and the hop has one")
+    else:
+        return via, None
+    return "builtin", why
+
+
 #: Movers that can be given a row predicate per table, measured rather
 #: than assumed. mydumper takes one section per table in a defaults file
 #: (verified: 2 of 3 rows dumped where a rule applied). `pg_dump` 18.6 and
@@ -80,8 +113,18 @@ ROUTING_MOVERS = ("pgdump", "pgcopydb")
 
 #: Engines whose table copier (`move_table`) applies the row filter on
 #: both ends - reading only what it selects, replacing only what it
-#: selects on the target.
-FILTERING_COPIERS = ("postgres", "mysql")
+#: selects on the target. The pair's copier does it in each side's own
+#: SQL, for a hop between engines and for every engine that copies
+#: through the pair; a side that speaks no SQL is refused by it.
+FILTERING_COPIERS = ("postgres", "mysql", "hetero", "sqlite")
+
+
+def _routes_any(hop, db):
+    """Whether a table of `db` may leave the bulk path: excluded, under a
+    row filter, or with its columns mapped. The table list is asked for
+    only then; `routed_to_copier` decides table by table."""
+    return bool(getattr(hop, "exclude", None) or _filtered_here(hop, db)
+                or (getattr(hop, "mapping", None) or {}).get("columns"))
 
 
 def _filtered_here(hop, db):
@@ -494,6 +537,15 @@ PG_INDEX_SQL = """
      order by 1"""
 
 
+#: every index on the target, as `schema.name` - what a load that died
+#: dropped is only rebuilt where it is not there now
+PG_INDEX_NAMES_SQL = """
+    select n.nspname||'.'||i.relname
+      from pg_index x
+      join pg_class i on i.oid = x.indexrelid
+      join pg_namespace n on n.oid = i.relnamespace"""
+
+
 def _pg_psql(hop, db, sql, log=None):
     t = hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
@@ -545,13 +597,17 @@ class _IndexWindow:
     """
 
     def __init__(self, hop, db, workers, log):
+        from .setaside import SetAside
         self.hop, self.db, self.workers, self.log = hop, db, workers, log
         self.dropped, self.ddl = [], {}
+        self.record = SetAside(hop, db, "dropped-indexes")
 
     def __enter__(self):
         from . import indexes as _ix
         try:
             raw = _pg_psql(self.hop, self.db, PG_INDEX_SQL)
+            there = set(_pg_psql(self.hop, self.db, PG_INDEX_NAMES_SQL
+                                 ).split())
         except Exception:
             return self
         found = []
@@ -560,20 +616,35 @@ class _IndexWindow:
             if len(parts) == 4:
                 found.append((parts[0].strip(), parts[1].strip(),
                               parts[2].strip(), parts[3].strip() == "true"))
-        rows = [r[1:] for r in
+        # each index by its schema too: the same name in two schemas is two
+        # indexes, and the bare name dropped whichever the search path
+        # found first - the other's definition overwrote it, and one of
+        # them was never rebuilt
+        rows = [(f"{t.split('.', 1)[0]}.{name}", definition, isc)
+                for t, name, definition, isc in
                 _outside_exclusion(self.hop, self.db, found, self.log)]
         drop, ddl = _ix.plan(rows)
-        if not drop:
+        # what a load that died dropped and the target still lacks: built
+        # at the end of this one, with the rest
+        left, stale = self.record.left_behind(there)
+        if not drop and not left:
             return self
-        where = self.hop.report_dir(self.db) / "dropped-indexes.json"
-        if not _ix.saved(where, ddl):
+        if not self.record.save({**left, **ddl}, stale):
             if self.log:
                 self.log("could not save the index definitions, so none were"
                          " dropped - the load runs with them in place")
             return self
+        where = self.record.path
+        self.dropped, self.ddl = list(left), dict(left)
+        if left and self.log:
+            self.log(f"{len(left)} indexes an earlier load dropped and did"
+                     " not rebuild are built at the end of this one")
         for name in drop:
+            sch, _, idx = name.partition(".")
+            quoted = ".".join('"' + x.replace('"', '""') + '"'
+                              for x in (sch, idx))
             try:
-                _pg_psql(self.hop, self.db, f'drop index "{name}"')
+                _pg_psql(self.hop, self.db, f"drop index {quoted}")
                 self.dropped.append(name)
                 self.ddl[name] = ddl[name]
             except Exception as e:
@@ -599,6 +670,8 @@ class _IndexWindow:
                              f" {str(e).splitlines()[-1][:100]}")
         if self.log:
             self.log(_ix.summary(self.dropped, rebuilt, failed))
+        if not failed:
+            self.record.done()
         return False            # never swallow the load's own exception
 
 
@@ -620,7 +693,7 @@ def pgdump_move(hop, db, workers, go, log):
     # the same resolution pgcopydb and `check` use, so all three exclude
     # exactly the same tables rather than three readings of one pattern
     skip, routed, unresolved = [], [], ""
-    if getattr(hop, "exclude", None) or _filtered_here(hop, db):
+    if _routes_any(hop, db):
         try:
             from .engines.postgres import PostgresEngine
             tables = PostgresEngine(hop)._all_tables("src", db)
@@ -634,7 +707,7 @@ def pgdump_move(hop, db, workers, go, log):
     left_out = skip + routed
     dump = Step(
         phase("dump", workers=workers, left_out=len(skip),
-              filtered=len(routed)),
+              routed=len(routed)),
         ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
          "-Fd", "-j", workers, "--data-only", "-v", "-f", outdir,
          *[a for name in left_out for a in ("-T", name)]])
@@ -644,6 +717,9 @@ def pgdump_move(hop, db, workers, go, log):
          "-d", hop.target_db(db), "--data-only", "--disable-triggers",
          "-v", "-j", workers, outdir])
     steps = [dump, _truncate_step(hop, db), load]
+    note = _create_note(lambda: _pg_missing_tables(hop, db)[0])
+    if note:
+        steps.insert(1, note)
     if unresolved:
         steps.insert(1, _unresolved_note(unresolved))
     else:
@@ -657,17 +733,111 @@ def pgdump_move(hop, db, workers, go, log):
     if unresolved:
         raise _unresolved_exclusion(db, unresolved)
     env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    from .engines.postgres import PostgresEngine
+    quiet = _pg_quiet_triggers(
+        hop, db, [n for n in PostgresEngine(hop)._all_tables("src", db)
+                  if n not in left_out])
+    if quiet != "flag":
+        load.argv.remove("--disable-triggers")
+    if quiet == "session":
+        env_t["PGOPTIONS"] = "-c session_replication_role=replica"
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
     if log:
         log(dump)
     _sh(dump.argv, {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"},
         log, progress=_tables_done(PG_DUMP_TABLE, "read"))
+    _pg_create_missing(hop, db, log)
     _pg_truncate_target(hop, db, log)
     with _IndexWindow(hop, db, workers, log):
         _pgdump_restore(load, env_t, log)
+    _pg_finish_created(hop, db, log)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
+
+
+class _RestoreLog:
+    """Reads a restore's output as it runs: the tables it names, every
+    statement the target refused, and how many refusals it counted.
+
+    A newer dump writes session settings an older server does not have
+    (`SET transaction_timeout = 0` against PostgreSQL 16), and the restore
+    exits 1 over them with every row in place. Those, and only those, are
+    tolerated. This used to tolerate any restore that ended in `errors
+    ignored on restore`, which is how every failure of it ends: measured
+    onto a target without the tables, all 12 statements failed - the
+    settings, and every `COPY` with `relation "public.parent" does not
+    exist` - and the move said `bulk copy complete` with nothing loaded.
+    """
+
+    #: the two ways it says the target refused a statement; its other
+    #: error lines are context (`from TOC entry ...`), and in a parallel
+    #: restore they arrive interleaved with the refusals they belong to
+    REFUSED = re.compile(r'error: (?:could not execute query|COPY failed for'
+                         r' table "[^"]*"): (?P<what>ERROR:.*)')
+    IGNORED = re.compile(r"errors ignored on restore: (?P<n>\d+)")
+
+    def __init__(self):
+        self.tables = _tables_done(PG_RESTORE_TABLE, "loaded")
+        self.refused = []
+        self.ignored = None
+
+    def __call__(self, line):
+        m = self.REFUSED.search(line)
+        if m:
+            self.refused.append(" ".join(m.group("what").split()))
+            return None
+        m = self.IGNORED.search(line)
+        if m:
+            self.ignored = int(m.group("n"))
+            return None
+        return self.tables(line)
+
+    @staticmethod
+    def _a_setting(what):
+        # raised only by SET, SHOW and set_config: a setting this server
+        # does not have, whichever statement it came in
+        return "unrecognized configuration parameter" in what
+
+    @staticmethod
+    def _there_already(what):
+        return "already exists" in what
+
+    def real(self, existing_ok=False):
+        """What the target refused besides settings it does not have - and,
+        with `existing_ok`, besides objects it already has. When the
+        restore counted more refusals than were read, the difference counts
+        as real too - never as tolerated."""
+        out = [w for w in self.refused if not self._a_setting(w)
+               and not (existing_ok and self._there_already(w))]
+        settings = len(self.refused) - len(out)
+        if self.ignored is not None and self.ignored > settings + len(out):
+            out.append(f"{self.ignored - settings - len(out)} more the"
+                       " restore counted and did not say")
+        return out
+
+
+def _restore(argv, env, log, what, existing_ok=False):
+    """Run a restore, tolerating only the settings an older server lacks
+    (`_RestoreLog`) - and, with `existing_ok`, the objects the target
+    already has, which a step that creates only what is missing leaves as
+    they are. True when it had to tolerate some."""
+    from . import wording
+    reader = _RestoreLog()
+    try:
+        _sh(argv, env, log, progress=reader)
+    except RuntimeError as e:
+        real = reader.real(existing_ok)
+        if "errors ignored on restore" not in str(e) or real:
+            if not real:
+                raise
+            said = list(dict.fromkeys(real))
+            raise RuntimeError(wording.without_programs(
+                f"the target refused {len(real)} statements of {what}: "
+                + "; ".join(said[:4]) + (" ..." if len(said) > 4 else ""),
+                DRIVEN)) from e
+        return True
+    return False
 
 
 def _pgdump_restore(load, env_t, log):
@@ -680,17 +850,261 @@ def _pgdump_restore(load, env_t, log):
     """
     if log:
         log(load)
+    if _restore(load.argv, env_t, log, "the load") and log:
+        log("the target rejected settings a newer source version"
+            " writes, and nothing else; migkit check confirms the rows")
+
+
+def _within(ask, seconds=8):
+    """`ask()`'s answer, or None when it fails or takes longer than
+    `seconds`. For what a dry run would like to say but need not: a target
+    that is not reachable yet is retried for a minute and more by the
+    engine's own connection, and a plan should not wait for that."""
+    import threading
+    got = {}
+
+    def run():
+        try:
+            got["answer"] = ask()
+        except Exception:
+            got["answer"] = None
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    return got.get("answer")
+
+
+def _create_note(missing):
+    """The plan's line for the tables the target lacks: how many, when the
+    target can be asked (`missing` is how to ask); said without a number
+    when it cannot; nothing when none are missing."""
+    got = _within(missing)
+    n = None if got is None else len(got)
+    if n == 0:
+        return None
+    return ("# create the tables the target does not have yet, from the"
+            " source's definition" + (f": {n}" if n else ""))
+
+
+def _pg_pattern(name):
+    """`schema.table` as a dump's table pattern that matches it and
+    nothing else: each part quoted, so case is kept and no character in
+    it is read as a wildcard."""
+    sch, _, tbl = str(name).partition(".")
+    return ".".join('"' + p.replace('"', '""') + '"' for p in (sch, tbl))
+
+
+def _pg_missing_tables(hop, db):
+    """The tables in scope the target does not have, and whether it has
+    no tables at all."""
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    have = set(eng._all_tables("dst", db))
+    # a table whose columns the hop maps is built by the pair's copier,
+    # under the names and without the columns the mapping says
+    want = [t for t in eng._all_tables("src", db)
+            if not hop.excluded(db, *t.split(".", 1))
+            and not eng.through_pair(db, t)]
+    return [t for t in want if t not in have], not have
+
+
+def _pg_schema(hop, db, section, tables, whole, log=None):
+    """One section of the source's schema, restored onto the target.
+
+    `whole` is a target with no tables at all: everything the source's
+    section holds - its types, functions, sequences, tables, views - but
+    the tables the hop excludes. Otherwise only `tables`, whose types and
+    functions the target has to have already; a definition it cannot take
+    stops the move with the server's words. Without owners or grants: the
+    roles are `migkit users`' business, and `check` names the grants that
+    differ.
+    """
+    from .engines.postgres import PostgresEngine
+    s, t = hop.source, hop.target
+    if whole:
+        eng = PostgresEngine(hop)
+        every = eng._all_tables("src", db)
+        skip = excluded_tables(hop, db, every) + [
+            n for n in every if eng.through_pair(db, n)]
+        pick = [a for n in skip for a in ("-T", _pg_pattern(n))]
+    else:
+        pick = [a for n in tables for a in ("-t", _pg_pattern(n))]
+    out = hop.report_dir(db) / f"schema-{section}.dump"
+    dump = ["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
+            "-d", db, "-Fc", "--schema-only", f"--section={section}",
+            *pick, "-f", str(out)]
+    load = ["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
+            "-d", hop.target_db(db), f"--section={section}", "--no-owner",
+            "--no-privileges", str(out)]
     try:
-        _sh(load.argv, env_t, log,
-            progress=_tables_done(PG_RESTORE_TABLE, "loaded"))
-    except RuntimeError as e:
-        # newer dumps emit SETs older servers reject; the load exits 1 on
-        # those even when all rows landed - migkit check is the judge
-        if "errors ignored on restore" not in str(e):
-            raise
-        if log:
-            log("the target rejected settings a newer source version"
-                " writes; the rows were loaded - migkit check confirms it")
+        _sh(dump, {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
+        # a target with no tables can still have the schemas, types or
+        # extensions someone made ready for it; those are left as they are
+        _restore(load, {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"},
+                 log, "the schema", existing_ok=True)
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def _pg_created_path(hop, db):
+    return hop.report_dir(db) / "created-tables.json"
+
+
+def _pg_create_missing(hop, db, log=None):
+    """Create on the target the tables it lacks, from the source's
+    definition, before a data-only load; their keys, indexes and
+    constraints come after it (`_pg_finish_created`), which is also the
+    faster order.
+
+    Measured onto a target without the tables: the load was refused on
+    every one, and before `_restore` read its refusals, the move said
+    complete. What was created is recorded before anything is created, so
+    a load that fails still has its keys added on the next run, when the
+    tables are no longer missing.
+    """
+    import json
+    missing, whole = _pg_missing_tables(hop, db)
+    if not missing:
+        return
+    record = _pg_created_path(hop, db)
+    record.write_text(json.dumps({"tables": missing, "whole": whole}))
+    if log:
+        from .wording import phase
+        log(phase("create", tables=len(missing)))
+    _pg_schema(hop, db, "pre-data", missing, whole, log)
+
+
+def _pg_finish_created(hop, db, log=None):
+    """The keys, indexes and constraints of the tables `_pg_create_missing`
+    made, once their rows are in."""
+    import json
+    record = _pg_created_path(hop, db)
+    try:
+        made = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return
+    if log:
+        from .wording import phase
+        log(phase("finish-created", tables=len(made["tables"])))
+    _pg_schema(hop, db, "post-data", made["tables"], made["whole"], log)
+    record.unlink()
+
+
+#: Every foreign key on the target, as the table it references and the
+#: table it is on, where those are two tables.
+PG_REFERENCES_SQL = """
+    select format('%I.%I', rn.nspname, r.relname) || chr(31)
+           || format('%I.%I', cn.nspname, c.relname)
+      from pg_constraint k
+      join pg_class r on r.oid = k.confrelid
+      join pg_namespace rn on rn.oid = r.relnamespace
+      join pg_class c on c.oid = k.conrelid
+      join pg_namespace cn on cn.oid = c.relnamespace
+     where k.contype = 'f' and k.confrelid <> k.conrelid"""
+
+
+def _pg_references_into(hop, db, routed=()):
+    """The target's foreign keys into a table the streaming copy would
+    empty - every table in scope but the ones routed to the table copier -
+    as `referenced <- referencing`. [] when there are none, or when the
+    target cannot be asked (the copy then says for itself)."""
+    try:
+        raw = _pg_psql(hop, db, PG_REFERENCES_SQL)
+    except Exception:
+        return []
+    out = []
+    for line in raw.splitlines():
+        ref, _, by = line.partition(chr(31))
+        if not by or ref in routed:
+            continue
+        if hop.excluded(db, *ref.replace('"', "").split(".", 1)):
+            continue
+        out.append(f"{ref} <- {by}")
+    return sorted(set(out))
+
+
+#: The target's triggers of every kind - the foreign keys' own included -
+#: on tables outside the catalogues, as `schema.table`.
+PG_TRIGGERED_SQL = """
+    select distinct n.nspname || '.' || c.relname
+      from pg_trigger g
+      join pg_class c on c.oid = g.tgrelid
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname not in ('pg_catalog', 'information_schema')
+       and n.nspname not like 'pg\\_%' and c.relname not like 'migkit\\_%'
+     order by 1"""
+
+
+def _pg_quiet_triggers(hop, db, tables):
+    """How the load keeps the target's triggers from firing, from what the
+    target's user may do.
+
+    `flag` - a superuser: the restore disables every trigger itself, as it
+    always has. `session` - allowed `session_replication_role`, which a
+    managed service's admin user is: the load's own connections run as a
+    replica, with no change to any table. `none` - neither, and nothing to
+    keep quiet among `tables`. Anything else stops the move before the
+    target is emptied: measured as a plain owner, the restore's own attempt
+    was refused on the foreign keys' system triggers (`permission denied:
+    "RI_ConstraintTrigger_c_16399" is a system trigger`) and the child
+    table's rows were then refused on its foreign key - 100 of 100 rows
+    missing - which the load used to report as complete.
+    """
+    t = hop.target
+    ask = ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
+           "-d", hop.target_db(db), "-X", "-At", "-v", "ON_ERROR_STOP=1"]
+    env = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    if _sh(ask + ["-c", "select rolsuper from pg_roles"
+                        " where rolname = current_user"],
+           env).stdout.strip() == "t":
+        return "flag"
+    try:
+        _sh(ask + ["-c", "set session_replication_role = replica"], env)
+        return "session"
+    except RuntimeError:
+        pass
+    triggered = set(_sh(ask + ["-c", PG_TRIGGERED_SQL], env
+                        ).stdout.split())
+    # by `schema.table` or by the bare name, which is all some callers have
+    # - a bare name matches it in every schema, which can only refuse more
+    hit = sorted(t for t in triggered
+                 if tables is None or t in tables
+                 or t.rpartition(".")[2] in tables)
+    if not hit:
+        return "none"
+    raise SystemExit(
+        f"{db}: {', '.join(hit[:5])}" + (" ..." if len(hit) > 5 else "")
+        + f" have triggers on the target - foreign keys among them - and"
+        f" {t.user} can neither turn them off for the load nor load as a"
+        " replica. Loading anyway would either be refused row by row or"
+        " let the triggers rewrite what arrives. Nothing has been written."
+        f" Grant it with `GRANT SET ON PARAMETER session_replication_role"
+        f" TO {t.user}` (PostgreSQL 15 and later), or move as the managed"
+        " service's admin user.")
+
+
+def _pg_carry_sequences(hop, db, log=None):
+    """Set the target's sequences from the source's after a copy that
+    carries rows and not sequences.
+
+    Measured, a streaming copy of 52 rows: the target's sequence stayed at
+    1, and the application's first insert after cutover failed on
+    `duplicate key ... Key (id)=(1) already exists`. The copy program's own
+    sequence command, run on its own, read 0 sequences and reset the
+    target's. The engine's sequence repair decides the value instead - the
+    source's, never below a row the target holds - and refuses a target
+    already ahead of the source, which it says.
+    """
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    for action in eng.repair_plan(db, "sequences"):
+        if action.statements:
+            if log:
+                from .wording import phase
+                log(phase("sequences"))
+            _pg_psql(hop, db, "\n".join(action.statements))
+        if log and action.note:
+            log(action.note)
 
 
 MY_INDEX_SQL = """
@@ -710,6 +1124,153 @@ MY_INDEX_SQL = """
        and s.index_name <> 'PRIMARY'
        and s.table_name not like 'migkit%%'
      group by s.table_name, s.index_name"""
+
+
+TRIGGERS_SET_ASIDE = "dropped-triggers"
+
+
+def triggers_set_aside(hop, db):
+    """The triggers migkit took off this database's target for a load and
+    has not put back: [(file, its process still running, {name: saved
+    definition} or None where the file cannot be read)] - one file per
+    load (`setaside`)."""
+    from .setaside import SetAside
+    return SetAside(hop, db, TRIGGERS_SET_ASIDE).records()
+
+
+def _trigger_parts(text):
+    """sql_mode, statement, charset, collation, from how they were saved."""
+    lines = text.split("\n")
+    return [lines[0], "\n".join(lines[1:-2]), lines[-2], lines[-1]]
+
+
+class _MyTriggerWindow:
+    """Take the target's triggers off the tables a MySQL load writes, and
+    put them back afterwards.
+
+    MySQL has no way to keep a trigger from firing for one session, which
+    is what PostgreSQL's replica role does. Measured on 8.4, a `BEFORE
+    INSERT` trigger setting `updated_at = now()` on the target: rows the
+    source dated 2001 and 2002 landed dated the day of the move, through the
+    bulk load and through the table copier both, and the move said
+    complete. So the triggers go for the load, their definitions saved to
+    disk first, and come back on the way out whether the load worked or
+    not.
+
+    A trigger defined by another account comes back only for a user allowed
+    to set its definer. Where the load's user is not, nothing is dropped and
+    the move stops before loading, naming them - rather than taking away
+    what it cannot put back.
+
+    A change tail holds the window for as long as it runs, which is days,
+    and a process killed that long is not unusual. What a run that died
+    took off goes back at the end of the next load into the database, and
+    `check` names it until then.
+    """
+
+    def __init__(self, hop, db, log=None, tables=None):
+        from .setaside import SetAside
+        self.hop, self.db, self.log = hop, db, log
+        # a trigger's table has no schema here; a pair's names may
+        self.tables = (None if tables is None
+                       else {str(t).rpartition(".")[2] for t in tables})
+        self.defs, self.dropped = {}, []
+        self.record = SetAside(hop, db, TRIGGERS_SET_ASIDE)
+
+    def __enter__(self):
+        from .engines.mysql import MySQLEngine
+        eng = MySQLEngine(self.hop)
+        self.eng, self.tdb = eng, eng._d("dst", self.db)
+        on = eng._q("dst", "select trigger_name, event_object_table, definer"
+                           " from information_schema.triggers"
+                           " where trigger_schema = %s", (self.tdb,))
+        there = {str(r[0]) for r in on}
+        rows = [r for r in on
+                if not self.hop.excluded(self.db, str(r[1]))
+                and (self.tables is None or str(r[1]) in self.tables)]
+        # what a load that died took off: back at the end of this one,
+        # whichever tables this one writes. Held by a running one: off, as
+        # this load needs them, and that one puts them back.
+        left, stale = self.record.left_behind(there)
+        adopted = {n: _trigger_parts(t) for n, t in left.items()}
+        if not rows and not adopted:
+            for path in stale:
+                path.unlink(missing_ok=True)
+            return self
+        me = str(eng._q("dst", "select current_user()")[0][0])
+        grants = " ".join(str(g[0]) for g in eng._q("dst", "show grants"))
+        may = any(p in grants for p in ("SET_USER_ID", "SUPER",
+                                        "ALL PRIVILEGES ON *.*"))
+        foreign = [f"{n} on {t} (defined by {d})" for n, t, d in rows
+                   if str(d) != me and not may]
+        if foreign:
+            raise SystemExit(
+                f"{self.db}: " + ", ".join(foreign[:5])
+                + (" ..." if len(foreign) > 5 else "")
+                + " would fire for every row the load writes, and could"
+                f" rewrite them; {me} cannot create them again as their"
+                " definer after taking them off. Nothing has been loaded."
+                " Load as an account allowed to set a definer (SET_USER_ID),"
+                " or take them off and put them back yourself.")
+        q = eng._quote_ident
+        for name, table, _ in rows:
+            got = eng._q("dst", f"show create trigger {q(self.tdb)}"
+                                f".{q(name)}")[0]
+            # Trigger, sql_mode, SQL Original Statement, charset, collation
+            self.defs[str(name)] = [str(got[1]), str(got[2]), str(got[3]),
+                                    str(got[4])]
+        self.defs.update(adopted)
+        if not self.record.save({k: "\n".join(v)
+                                 for k, v in self.defs.items()}, stale):
+            raise SystemExit(
+                f"{self.db}: the target's triggers could not be saved before"
+                " taking them off for the load, so nothing was loaded")
+        self.dropped = list(adopted)
+        for name, _, _ in rows:
+            eng._q("dst", f"drop trigger if exists {q(self.tdb)}"
+                          f".{q(str(name))}")
+            self.dropped.append(str(name))
+        if self.log:
+            if adopted:
+                self.log(f"{len(adopted)} triggers an earlier load took off"
+                         " and did not put back go back at the end of this"
+                         " one: " + ", ".join(sorted(adopted)[:5]))
+            self.log(f"{len(self.dropped) - len(adopted)} triggers taken off"
+                     f" for the load; definitions saved to"
+                     f" {self.record.path}")
+        return self
+
+    def __exit__(self, exc_type, *exc):
+        failed = []
+        for name in self.dropped:
+            mode, stmt, charset, collation = self.defs[name]
+            conn = self.eng._conn("dst")
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"use {self.eng._quote_ident(self.tdb)}")
+                    cur.execute("set session sql_mode = %s", (mode,))
+                    cur.execute(f"set names {charset} collate {collation}")
+                    cur.execute(stmt)
+            except Exception as e:
+                # 1359: put back already, by hand
+                if getattr(e, "args", [None])[0] != 1359:
+                    failed.append(name)
+                    if self.log:
+                        self.log(f"TRIGGER NOT PUT BACK: {name}:"
+                                 f" {str(e).splitlines()[-1][:100]}")
+            finally:
+                conn.close()
+        if self.dropped and self.log:
+            self.log(f"{len(self.dropped) - len(failed)} of"
+                     f" {len(self.dropped)} triggers put back")
+        if not failed:
+            self.record.done()
+        if failed and exc_type is None:
+            raise SystemExit(
+                f"{self.db}: {len(failed)} triggers were not put back:"
+                f" {', '.join(failed)}. Their definitions are in"
+                f" {self.record.path}")
+        return False
 
 
 class _MyIndexWindow:
@@ -732,9 +1293,11 @@ class _MyIndexWindow:
     """
 
     def __init__(self, engine, hop, db, workers, log):
+        from .setaside import SetAside
         self.eng, self.hop, self.db = engine, hop, db
         self.workers, self.log = workers, log
         self.dropped, self.ddl = [], {}
+        self.record = SetAside(hop, db, "dropped-indexes")
 
     def __enter__(self):
         from . import indexes as _ix
@@ -742,6 +1305,10 @@ class _MyIndexWindow:
             else self.db
         try:
             rows = self.eng._q("dst", MY_INDEX_SQL, (ddb,))
+            there = {f"{t}.{n}" for t, n in self.eng._q(
+                "dst", "select distinct table_name, index_name from"
+                       " information_schema.statistics"
+                       " where table_schema = %s", (ddb,))}
         except Exception:
             return self
         rows = _outside_exclusion(self.hop, self.db, list(rows), self.log,
@@ -764,14 +1331,21 @@ class _MyIndexWindow:
                    f" ({cols})")
             triples.append((key, ddl, bool(is_unique)))
         drop, ddl = _ix.plan(triples)
-        if not drop:
+        # what a load that died dropped and the target still lacks: built
+        # at the end of this one, with the rest
+        left, stale = self.record.left_behind(there)
+        if not drop and not left:
             return self
-        where = self.hop.report_dir(self.db) / "dropped-indexes.json"
-        if not _ix.saved(where, ddl):
+        if not self.record.save({**left, **ddl}, stale):
             if self.log:
                 self.log("could not save the index definitions, so none were"
                          " dropped - the load runs with them in place")
             return self
+        where = self.record.path
+        self.dropped, self.ddl = list(left), dict(left)
+        if left and self.log:
+            self.log(f"{len(left)} indexes an earlier load dropped and did"
+                     " not rebuild are built at the end of this one")
         for key in drop:
             tbl, name = key.split(".", 1)
             try:
@@ -801,6 +1375,8 @@ class _MyIndexWindow:
                     self.log(f"REBUILD FAILED for {key}: {str(e)[:100]}")
         if self.log:
             self.log(_ix.summary(self.dropped, rebuilt, failed))
+        if not failed:
+            self.record.done()
         return False
 
 
@@ -858,6 +1434,96 @@ def pgcopydb_filters(hop, db, tables, also=()):
     return "[exclude-table]\n" + "\n".join(out) + "\n"
 
 
+#: the schema comparison's config: both URLs read from the environment
+SCHEMA_DIFF_CONFIG = """variable "from" {
+  type    = string
+  default = getenv("MIGKIT_SCHEMA_FROM")
+}
+variable "to" {
+  type    = string
+  default = getenv("MIGKIT_SCHEMA_TO")
+}
+env "migkit" {
+  url = var.from
+  src = var.to
+}
+"""
+
+
+def schema_diff(frm, to, excludes=(), timeout=180):
+    """The DDL that takes database URL `frm` to `to`, with the URLs handed
+    over in the environment. On the command line, their passwords were
+    readable by every process listing on the machine. Measured: the
+    comparison reads both through a config file of its own and finds the
+    same difference, and a wrong password is still refused."""
+    import os
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="migkit-")
+    try:
+        cfg = os.path.join(d, "schema.hcl")
+        with open(cfg, "w") as f:
+            f.write(SCHEMA_DIFF_CONFIG)
+        return run(["atlas", "schema", "diff", "--config", f"file://{cfg}",
+                    "--env", "migkit", "--from", "env://url",
+                    "--to", "env://src",
+                    *[a for e in excludes for a in ("--exclude", e)]],
+                   env={"MIGKIT_SCHEMA_FROM": frm, "MIGKIT_SCHEMA_TO": to},
+                   check=False, timeout=timeout)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+class client_defaults:
+    """A defaults file per endpoint, holding its password, for a MySQL
+    client program that takes its connection as a DSN (`F=` names the
+    file): the password on its command line is readable by every process
+    listing on the machine. Measured: the table sync reads `[client]
+    password` from `F=` and produces the same statements. Private to this
+    user, and gone when the block ends."""
+
+    def __init__(self, *endpoints):
+        self.endpoints, self.dir = endpoints, None
+
+    def __enter__(self):
+        import os
+        import tempfile
+        self.dir = tempfile.mkdtemp(prefix="migkit-")
+        paths = []
+        for i, ep in enumerate(self.endpoints):
+            path = os.path.join(self.dir, f"{i}.cnf")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write("[client]\npassword=" + str(ep.password or "")
+                        + "\n")
+            paths.append(path)
+        return paths
+
+    def __exit__(self, *exc):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+        return False
+
+
+def mydumper_session(hop, db):
+    """The dump's defaults file: its session's sql_mode, then the hop's
+    row filters.
+
+    The dump writes its session's sql_mode at the head of every data file,
+    and the load runs under it. Left to itself it takes the source's mode
+    without its strict part. Measured on 8.4, onto a target column of the
+    wrong type, length or kind: `'z'` landed as `0`, `'12345678901'` as
+    `'12345'`, `'2026-13-45'` as `0000-00-00`, and a date the source held,
+    `2026-00-15`, as `0000-00-00` too - and the move said complete. The
+    mode every write of migkit's runs under (`WRITE_SQL_MODE`) stops on the
+    first such row instead, and keeps the source's own values.
+    """
+    from .engines.mysql import MySQLEngine
+    return ("[mydumper_session_variables]\nsql_mode ="
+            f" '{MySQLEngine.WRITE_SQL_MODE}'\n"
+            + (mydumper_defaults(hop, db) or ""))
+
+
 def mydumper_defaults(hop, db):
     """The hop's row filters as a mydumper defaults file, or None.
 
@@ -903,8 +1569,12 @@ def _long_options(program):
     """
     p = subprocess.run([program, "--help"], env=tool_env(None), text=True,
                        capture_output=True)
+    # the option column: the flag, then the column gap, the end of the
+    # line, or its `=VALUE`. Measured, the MongoDB tools spell theirs in
+    # camelCase with `=<value>` (`--bypassDocumentValidation`), and the old
+    # lower-case, gap-only pattern found 6 of mongodump's 37 flags
     return frozenset(re.findall(
-        r"(?m)^\s+(?:-\w,\s+)?(--[a-z0-9][a-z0-9-]*)(?=\s{2,}|$)",
+        r"(?m)^\s+(?:-\w,\s+)?(--[a-zA-Z0-9][a-zA-Z0-9-]*)(?=\s{2,}|$|=|\[=)",
         (p.stdout or "") + (p.stderr or "")))
 
 
@@ -972,6 +1642,86 @@ def _my_truncate_target(hop, db, log=None):
     finally:
         conn.close()
     return keep
+
+
+def _my_missing_tables(hop, db):
+    """The tables in scope the target does not have yet, and whether the
+    database itself is missing there."""
+    from .engines.mysql import MySQLEngine
+    eng = MySQLEngine(hop)
+    have = set(eng._all_tables("dst", db))
+    # a table whose columns the hop maps is built by the pair's copier,
+    # under the names and without the columns the mapping says
+    want = [t for t in eng._tables("src", db)
+            if t not in have and not eng.through_pair(db, t)]
+    gone = not have and not eng._q(
+        "dst", "select 1 from information_schema.schemata"
+               " where schema_name = %s", (eng._d("dst", db),))
+    return want, gone
+
+
+def _my_create_missing(hop, db, log=None):
+    """Create on the target the tables it does not have, from the source's
+    own definition, before a data-only load.
+
+    The load carries rows, not tables. Measured, onto a target without
+    them: the move emptied nothing, loaded nothing, and stopped on
+    `ERROR 1146: Table 'appdb.small' doesn't exist` - where the
+    cross-engine copier creates what is missing. A table the
+    target already has is left exactly as it is; the database is created,
+    in the source's character set and collation, only when it is not there.
+
+    One session, with foreign key checks off so that a table may reference
+    one created after it, and the sql_mode a dump of the schema would use,
+    so that a definition the source accepted is accepted here.
+    """
+    from .engines.mysql import MySQLEngine
+    eng = MySQLEngine(hop)
+    want, gone = _my_missing_tables(hop, db)
+    if not want and not gone:
+        return []
+    ddb = eng._quote_ident(eng._d("dst", db))
+    stmts = ["set foreign_key_checks = 0",
+             "set session sql_mode = 'NO_AUTO_VALUE_ON_ZERO'"]
+    if gone:
+        cs = eng._q("src", "select default_character_set_name,"
+                           " default_collation_name from"
+                           " information_schema.schemata"
+                           " where schema_name = %s", (db,))
+        stmts.append(f"create database if not exists {ddb}"
+                     + (f" character set {cs[0][0]} collate {cs[0][1]}"
+                        if cs else ""))
+    src = eng._quote_ident(db)
+    stmts.append(f"use {ddb}")
+    # a MariaDB table kept with its history is a table there and nothing
+    # else here: MySQL has no system versioning, so it is made as a plain
+    # one - the rows it holds now arrive, the history does not, and that
+    # is said (assess names it before the move)
+    keeps_history = eng._brands()[1].name == "mariadb"
+    plain = []
+    for t in want:
+        got = eng._q("src", f"show create table {src}.{eng._quote_ident(t)}")
+        ddl = got[0][1]
+        if not keeps_history and re.search(r"\bWITH SYSTEM VERSIONING\b",
+                                           ddl, re.I):
+            ddl = re.sub(r"\s+WITH(OUT)? SYSTEM VERSIONING\b", "", ddl,
+                         flags=re.I)
+            plain.append(t)
+        stmts.append(ddl)
+    if log:
+        from .wording import phase
+        log(phase("create", tables=len(want)))
+        for t in plain:
+            log(f"{t}: made without its history - the target keeps none;"
+                " its rows as they are now are carried")
+    conn = eng._conn("dst")
+    try:
+        with conn.cursor() as cur:
+            for stmt in stmts:
+                cur.execute(stmt)
+    finally:
+        conn.close()
+    return want
 
 
 #: One row per column of every foreign key inside one database, in key
@@ -1073,12 +1823,37 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
     load = ["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
             "-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
             "--threads", str(workers)]
+    if _my_target_logs(hop):
+        # the loader turns the binlog off for its own sessions unless told
+        # otherwise. Measured on 8.4: a replica of the target received the
+        # tables the move created and none of their 300,000 rows, and said
+        # nothing - and a point-in-time restore of the target, which
+        # replays the same log, would not have them either
+        load.append(tool_flag("myloader", "--enable-binlog"))
     # one JSON object per event, table by table - what the progress lines
     # are read from. A build without it just gives no per-table lines.
     for cmd, program in ((dump, "mydumper"), (load, "myloader")):
         if "--machine-log-json" in _long_options(program):
             cmd += ["--machine-log-json", "-v", "3"]
     return dump, load
+
+
+def _my_target_logs(hop):
+    """Whether the target writes a binlog, which its replicas and its
+    point-in-time recovery read. Asked quickly: a plan against a target
+    not reachable yet says it would not, and the run asks again."""
+    from .engines.mysql import MySQLEngine
+
+    def ask():
+        eng = MySQLEngine(hop)
+        conn = eng._conn("dst", retry=False)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select @@log_bin")
+                return str(cur.fetchone()[0]) == "1"
+        finally:
+            conn.close()
+    return bool(_within(ask))
 
 
 def mydumper_move(hop, db, workers, go, log):
@@ -1089,29 +1864,37 @@ def mydumper_move(hop, db, workers, go, log):
     with nothing in it and nothing to load.
     """
     outdir = hop.report_dir(db) / "mydumper"
-    filters = mydumper_defaults(hop, db)
+    settings = mydumper_session(hop, db)
     # beside the dump directory, not inside it: myloader is pointed at
     # that directory and has no reason to meet a file it does not read
     cnf = hop.report_dir(db) / "mydumper-filters.cnf"
     omit = hop.report_dir(db) / "omit-tables.txt"
-    skip, unresolved = [], ""
-    if getattr(hop, "exclude", None):
+    skip, routed, unresolved = [], [], ""
+    if _routes_any(hop, db):
         from .engines.mysql import MySQLEngine
         try:
-            skip = excluded_tables(hop, db, MySQLEngine(hop)._all_tables(
-                "src", db), qualifier=db)
+            every = MySQLEngine(hop)._all_tables("src", db)
+            skip = excluded_tables(hop, db, every, qualifier=db)
+            # the table copier carries these after the load (the dump
+            # applies row filters itself, so only mapped columns route)
+            routed = [n for n in routed_to_copier(hop, db, "mydumper", every,
+                                                  qualifier=db)
+                      if n not in skip]
         except Exception as e:
             unresolved = str(e).strip().splitlines()[0][:100] if str(e) \
                 else type(e).__name__
     from .wording import Step, phase
-    dump, load = _mydumper_commands(hop, db, workers, outdir,
-                                    cnf if filters else None,
-                                    omit if skip else None)
+    dump, load = _mydumper_commands(hop, db, workers, outdir, cnf,
+                                    omit if skip or routed else None)
     dump = Step(phase("dump", workers=workers, left_out=len(skip),
+                      routed=len(routed),
                       row_filters=len(_filtered_here(hop, db))
-                      if filters else 0), dump)
+                      if mydumper_defaults(hop, db) else 0), dump)
     load = Step(phase("load", workers=workers), load)
     steps = [dump, _truncate_step(hop, db), load]
+    note = _create_note(lambda: _my_missing_tables(hop, db)[0])
+    if note:
+        steps.insert(1, note)
     if skip:
         steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
                         " dumped at all")
@@ -1123,19 +1906,20 @@ def mydumper_move(hop, db, workers, go, log):
         raise _unresolved_exclusion(db, unresolved)
     import shutil
     shutil.rmtree(outdir, ignore_errors=True)
-    if filters:
-        cnf.write_text(filters)
-        cnf.chmod(0o600)
-    if skip:
-        omit.write_text("".join(f"{n}\n" for n in skip))
+    cnf.write_text(settings)
+    cnf.chmod(0o600)
+    if skip or routed:
+        omit.write_text("".join(f"{n}\n" for n in skip + routed))
     if log:
         log(dump)
     _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
         progress=_my_dump_progress())
     from .engines.mysql import MySQLEngine
+    _my_create_missing(hop, db, log)
     _my_truncate_target(hop, db, log)
     summary = {}
-    with _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
+    with _MyTriggerWindow(hop, db, log), \
+            _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
         if log:
             log(load)
         _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
@@ -1146,8 +1930,34 @@ def mydumper_move(hop, db, workers, go, log):
         raise RuntimeError(f"the load counted {int(errors):,} errors")
     if skip:
         _my_orphans_left(hop, db, log)
+    _my_dump_position(hop, db, outdir)
     shutil.rmtree(outdir, ignore_errors=True)
     return steps
+
+
+def _my_dump_position(hop, db, outdir):
+    """Keep the position the dump was a snapshot at, for a replica that
+    follows this copy (`replicate_sql`). The dump records it in its
+    metadata, commented out:
+
+        [source]
+        # executed_gtid_set = "c95d739d-...:1-12"
+        # SOURCE_LOG_FILE = "binlog.000002"
+        # SOURCE_LOG_POS = 2087
+    """
+    import json
+    try:
+        text = (outdir / "metadata").read_text()
+    except OSError:
+        return
+    got = dict(re.findall(r"(?m)^#?\s*(SOURCE_LOG_FILE|SOURCE_LOG_POS|"
+                          r"executed_gtid_set)\s*=\s*\"?([^\"\n]*)\"?\s*$",
+                          text))
+    if "SOURCE_LOG_FILE" in got and "SOURCE_LOG_POS" in got:
+        (hop.report_dir(db) / "dump-position.json").write_text(json.dumps({
+            "log_file": got["SOURCE_LOG_FILE"].strip(),
+            "log_pos": int(got["SOURCE_LOG_POS"]),
+            "gtid_set": got.get("executed_gtid_set", "").strip()}))
 
 
 def pgloader_move(hop, db, workers, go, log):
@@ -1403,10 +2213,15 @@ def pgcopydb_move(hop, db, workers, go, log):
     from urllib.parse import quote
     s, t = hop.source, hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
-    src = (f"postgresql://{s.user}:{quote(s.password or '', safe='')}"
+    # no password in either connection string: they went on the program's
+    # command line, where any process listing on the machine read them
+    # while it ran. The passwords go in a password file only this user can
+    # read, for the run's length.
+    src = (f"postgresql://{quote(s.user or '', safe='')}"
            f"@{s.host}:{s.port}/{db}")
-    dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
+    dst = (f"postgresql://{quote(t.user or '', safe='')}"
            f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
+    passfile = hop.report_dir(db) / "streaming.pgpass"
     net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
     how = pgcopydb_runner()
     # Excluded tables, resolved against what the source actually has.
@@ -1415,7 +2230,7 @@ def pgcopydb_move(hop, db, workers, go, log):
     # yet leaves the filter off rather than guessing, and says so in the
     # steps instead of quietly copying what the hop excludes.
     filters_path, filters_note, unresolved, routed = None, "", "", []
-    if getattr(hop, "exclude", None) or _filtered_here(hop, db):
+    if _routes_any(hop, db):
         try:
             from .engines.postgres import PostgresEngine
             tables = PostgresEngine(hop)._all_tables("src", db)
@@ -1434,6 +2249,7 @@ def pgcopydb_move(hop, db, workers, go, log):
                             " the source")
             if routed:
                 filters_note += "\n" + _routed_note(routed)
+    uris = {}
     if how == "local":
         # its own directory per run. pgcopydb keeps its state - including the
         # exported snapshot - under /tmp/pgcopydb by default, so a second run
@@ -1449,24 +2265,52 @@ def pgcopydb_move(hop, db, workers, go, log):
         if filters_path:
             cmd += ["--filters", str(filters_path)]
     else:
+        # the container still takes them in its environment: whether it
+        # can read a file mounted from here depends on the user it runs as,
+        # which this machine cannot measure without the image. Named on
+        # the command line and valued from this process's environment
+        # (`-e NAME`), which docker passes through - measured - so the
+        # passwords are not on a command line anyone can list.
+        def full(ep, name, tail=""):
+            return (f"postgresql://{quote(ep.user or '', safe='')}"
+                    f":{quote(ep.password or '', safe='')}"
+                    f"@{ep.host}:{ep.port}/{name}{tail}")
+        uris = {"PGCOPYDB_SOURCE_PGURI": full(s, db),
+                "PGCOPYDB_TARGET_PGURI": full(t, ddb, QUIET_TRIGGERS)}
         cmd = ["docker", "run", "--rm", "--network", net,
-               "-e", f"PGCOPYDB_SOURCE_PGURI={src}",
-               "-e", f"PGCOPYDB_TARGET_PGURI={dst}"]
+               "-e", "PGCOPYDB_SOURCE_PGURI", "-e", "PGCOPYDB_TARGET_PGURI"]
         if filters_path:
             cmd += ["-v", f"{filters_path}:/tmp/migkit-filters.ini:ro"]
         cmd += [PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
                 "--table-jobs", str(workers)]
         if filters_path:
             cmd += ["--filters", "/tmp/migkit-filters.ini"]
-    # the plan says what happens; the command, which carries both passwords
-    # in its connection strings, stays on the step and goes only to the
-    # run's debug log, redacted there
+    # the plan says what happens; the command stays on the step and goes
+    # only to the run's debug log
     from .wording import Step, phase
+    # the run has to know; a plan says what it can find out quickly
+    blocked = (_pg_references_into(hop, db, routed) if go else
+               _within(lambda: _pg_references_into(hop, db, routed)) or [])
+    if blocked:
+        # measured: the streaming copy empties each table it loads on its
+        # own, one at a time, and the target refuses to empty a table
+        # another one references - `cannot truncate a table referenced in
+        # a foreign key constraint` - so on such a target it can only fail
+        if log:
+            log(f"the target's foreign keys ({', '.join(blocked[:3])}"
+                + (" ..." if len(blocked) > 3 else "") + ") keep the"
+                " streaming copy from emptying the tables it loads, so this"
+                " goes through a local copy instead")
+        return pgdump_move(hop, db, workers, go, log)
     copy = Step(phase("stream-copy", workers=workers), cmd)
     steps = [_truncate_step(hop)]
+    note = _create_note(lambda: _pg_missing_tables(hop, db)[0])
+    if note:
+        steps.insert(0, note)
     if filters_note:
         steps.append(filters_note)
     steps.append(copy)
+    steps.append("# set the target's sequences from the source's")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -1484,9 +2328,12 @@ def pgcopydb_move(hop, db, workers, go, log):
         ping = ["pgcopydb", "ping", "--source", src, "--target", dst]
     else:
         ping = cmd[:cmd.index(PGCOPYDB_IMAGE) + 1] + ["pgcopydb", "ping"]
+    _pgpass(passfile, hop, db, ddb)
+    env = {"PGPASSFILE": str(passfile), **uris}
     try:
-        _sh(ping)
+        _sh(ping, env)
     except Exception as e:
+        passfile.unlink(missing_ok=True)
         if log:
             where = ("from its container"
                      f" (network={net})" if how != "local" else "")
@@ -1495,12 +2342,34 @@ def pgcopydb_move(hop, db, workers, go, log):
             log("copying through a local dump instead")
         return pgdump_move(hop, db, workers, go, log)
 
-    _pg_truncate_target(hop, db, log)
-    with _IndexWindow(hop, db, workers, log):
-        if log:
-            log(copy)
-        _sh(copy.argv)
+    try:
+        _pg_create_missing(hop, db, log)
+        _pg_truncate_target(hop, db, log)
+        with _IndexWindow(hop, db, workers, log):
+            if log:
+                log(copy)
+            _sh(copy.argv, env)
+    finally:
+        passfile.unlink(missing_ok=True)
+    _pg_finish_created(hop, db, log)
+    _pg_carry_sequences(hop, db, log)
     return steps
+
+
+def _pgpass(path, hop, db, ddb):
+    """A password file holding the source's and the target's passwords,
+    readable by this user only. `:` and `\\` in a field are escaped, as
+    the file's format asks."""
+    def field(v):
+        return str(v).replace("\\", "\\\\").replace(":", "\\:")
+    s, t = hop.source, hop.target
+    lines = [":".join(field(x) for x in (e.host, e.port, name, e.user,
+                                         e.password or ""))
+             for e, name in ((s, db), (t, ddb))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(mode=0o600)
+    path.chmod(0o600)
+    path.write_text("\n".join(lines) + "\n")
 
 
 def follow_selected():
@@ -1767,6 +2636,11 @@ def stream_codegen(hop, dbs, engine):
                 "redpanda:9092",
             "schema.history.internal.kafka.topic": f"{name}-history",
         })
+        if _gtid_on(hop):
+            # re-reading a table then interleaves with the stream instead of
+            # pausing it, and needs nothing written to the source: the
+            # watermarks come from the server's executed GTID set
+            source["config"]["read.only"] = "true"
     else:
         source["config"].update({
             "database.dbname": dbs[0] if dbs else "postgres",
@@ -1918,10 +2792,13 @@ def resnapshot_message(hop_name, tables, kind="blocking"):
     watermark moving 50 -> 100, `snapshot=BLOCKING snapshot_completed=true`.
 
     What blocking costs is honest and worth stating where the operator
-    sees it: streaming pauses while the table is re-read. Pass
-    `kind="incremental"` to ask for the other one anyway - it works the
-    moment a signalling table exists and `signal.data.collection` names
-    it, which is a decision about the source, not about migkit.
+    sees it: streaming pauses while the table is re-read. The exception is
+    a MySQL source running GTID. There the connector takes its watermarks
+    from the executed GTID set (`read.only=true`), and incremental needs no
+    table. Measured on this pipeline: 50 rows re-read, the stream running
+    throughout, and a key changed before its chunk carried the new value.
+    `stream_codegen` turns it on where the source allows, and the repair
+    asks for `kind="incremental"` wherever the pipeline has it.
 
     Returns the pieces rather than sending them, so the caller can be
     tested without a broker.
@@ -1934,6 +2811,35 @@ def resnapshot_message(hop_name, tables, kind="blocking"):
          "data": {"data-collections": list(tables),
                   "type": kind.upper()}},
     )
+
+
+def _gtid_on(hop):
+    """Whether a MySQL source replicates by GTID - what the read-only
+    re-snapshot takes its watermarks from. Anything short of a plain `ON`,
+    or a server that cannot be asked, is no."""
+    from .engines.mysql import MySQLEngine
+    try:
+        conn = MySQLEngine(hop)._conn("src", retry=False)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select @@gtid_mode")
+                got = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    return bool(got) and str(got[0]).upper() == "ON"
+
+
+def stream_reads_again_in_place(out):
+    """Whether the pipeline in `out` can re-read a table without pausing
+    the stream, from the connector configuration migkit wrote there."""
+    import json as _json
+    try:
+        cfg = _json.loads((out / "source-connector.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return str(cfg.get("config", {}).get("read.only", "")).lower() == "true"
 
 
 def send_resnapshot(out, hop_name, tables, kind="blocking", log=None):

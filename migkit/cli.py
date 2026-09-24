@@ -243,6 +243,17 @@ def doctor(install):
                               f" ({ep.host}, {note}){role}")
             except Exception as e:
                 console.print(f"{name} {side}: [red]FAIL[/red] {e}")
+        # read from what the freeze recorded, so it is said even when the
+        # target cannot be reached right now
+        from . import freeze
+        for d in (hop.databases or []):
+            held = freeze.state(hop, d)
+            if held and held.get("roles"):
+                console.print(f"{name} dst: {d} is kept from the"
+                              " application's writes -"
+                              f" {', '.join(sorted(held['roles']))};"
+                              " tearing the stream down at cutover, or"
+                              " rollback --apply, gives them back")
 
 
 @main.command()
@@ -407,14 +418,18 @@ def _drill(hop_name, db, table, limit):
                 " and i.indisprimary").splitlines() if c]
     if not keys:
         raise SystemExit(f"{table} has no primary key for joining")
-    cmp = datacompy.PandasCompare(a, b,
+    # compared as shown: a masked column's values are tokens, equal where
+    # the values are, so the rows still line up and still differ
+    from . import masking
+    cmp = datacompy.PandasCompare(masking.frame(hop, table, a),
+                                  masking.frame(hop, table, b),
                                   join_columns=[k.lower() for k in keys],
                                   df1_name="source", df2_name="target")
     console.print(cmp.report())
     # datacompy counts the differing rows; it prints the values as they are,
     # which for an invisible difference is two identical-looking strings.
     # The count was never the hard part.
-    extra = eng._invisible_section(a, b, keys)
+    extra = eng._invisible_section(a, b, keys, table)
     if extra:
         console.print(extra)
 
@@ -498,10 +513,35 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
             console.print(f"  [{d}] {line}")
         return s
 
+    from . import drift
+    from . import verdict as _verdict
+
     def run_db(d):
         out = []
+        # the source's shape before and after this database's checks, where
+        # it is one query: an answer a DDL overtook is taken back, and a
+        # resumed run reuses nothing the source has changed under since
+        watch = (drift.reader(eng)
+                 if set(local_map[d]) & set(_verdict.TAKEN_ACROSS) else None)
+        before = drift.shape(watch, "src", d) if watch else None
+        shape_file = hop.report_dir(d) / "check-shape.json"
+        reuse = dict(prev)
+        if prev and before is not None:
+            try:
+                saved = {t: [tuple(c) for c in cols] for t, cols in
+                         json.loads(shape_file.read_text()).items()}
+            except (OSError, ValueError):
+                saved = None
+            since = drift.changes(saved, before)
+            if since:
+                reuse = {}
+                console.print(f"  [{d}] the source's schema changed since"
+                              " the run being resumed ("
+                              + "; ".join(since[:3])
+                              + ("; ..." if len(since) > 3 else "")
+                              + "), so nothing of it is reused")
         for c in local_map[d]:
-            if prev.get((c, d)) == "ok":
+            if reuse.get((c, d)) == "ok":
                 out.append({"check": c, "scope": d, "status": "ok",
                             "detail": "resume: skipped, was ok"})
                 continue
@@ -528,6 +568,16 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
             except Exception as e:
                 rs = [{"check": c, "scope": d, "status": "error", "detail": str(e)}]
             out.extend(rs)
+        if before is not None:
+            after = drift.shape(watch, "src", d)
+            moved = drift.changed_tables(before, after)
+            if moved:
+                said = drift.changes(before, after)
+                _verdict.mark_stale(out, d, moved, "; ".join(said[:3])
+                                    + ("; ..." if len(said) > 3 else ""))
+            if after is not None:
+                shape_file.parent.mkdir(parents=True, exist_ok=True)
+                shape_file.write_text(json.dumps(after))
         return out
 
     console.print(f"checking {hop_name}: {len(dbs)} dbs x {checks},"
@@ -561,7 +611,6 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
             return bool(db) and not r.get("scope", "").startswith(db)
 
         results = [r for r in prev_all if keep(r)] + results
-    from . import verdict as _verdict
     was_same = _verdict.unchanged_since(hop, results)
     summary_path.write_text(json.dumps(results, indent=1, default=str))
     # What this run did *not* look at, for the file a CI job reads. Only
@@ -596,6 +645,13 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
                       f" {ld['concurrency_from']} -> {ld['concurrency_to']}"
                       "[/yellow]")
     console.print(f"report: {report_path}")
+    stale = [r for r in results if r.get("stale")]
+    if stale:
+        console.print(f"[yellow]{len(stale)} answers were overtaken by a"
+                      " schema change on the source while they were being"
+                      " taken, so they are not a verdict: "
+                      + ", ".join(sorted({str(r["scope"]) for r in stale})[:6])
+                      + ". Check again once the change has settled.[/yellow]")
     if bad:
         console.print(f"[yellow]{len(bad)} problems, summary: {summary_path}[/yellow]")
         data_dbs = sorted({r["scope"].split()[0].split(".")[0] for r in bad
@@ -613,6 +669,8 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
                           " then apply them yourself")
             console.print(f"  migkit schema {hop_name} --migration"
                           f"   # writes migrations/V*.sql per db")
+        raise SystemExit(1)
+    if stale:
         raise SystemExit(1)
     console.print(f"[green]all green ({len(results)} checks,"
                   f" {human_secs(timer.elapsed())})[/green]")
@@ -655,6 +713,49 @@ def _repair_one(hop, eng, db, kind, do_apply):
         return
     undo_dir = hop.report_dir(db) / "undo"
     undo_dir.mkdir(parents=True, exist_ok=True)
+    paused = _make_room_for_rows(hop, eng, db, actions) if do_apply else []
+    try:
+        _apply_actions(hop, eng, db, actions, do_apply, undo_dir)
+    finally:
+        for what in paused:
+            eng.resume_writer(db, what)
+            console.print(f"  {what} was asked to resume; it carries on from"
+                          " where it paused, on top of the repair")
+
+
+def _make_room_for_rows(hop, eng, db, actions):
+    """Rows written by a repair while another writer applies changes to the
+    same target race it, and whichever lands last survives. migkit's own
+    tail is paused for the repair (DMS's shape: pause, repair, resume) and
+    replays afterwards; replication migkit does not drive is named, and the
+    repair refuses. Returns what was paused, to be resumed."""
+    if not any(a.kind == "rows" for a in actions):
+        return []
+    writers = eng.stream_writers(db)
+    foreign = [w for w, pausable in writers if not pausable]
+    if foreign:
+        raise SystemExit(
+            f"{db}: {', '.join(foreign)} is writing to this target, and a"
+            " row repair beside it would race it - the row that survives is"
+            " whichever lands last. Nothing was applied. Stop it, repair,"
+            " and start it again, or let it catch up and check again.")
+    window = int((hop.options or {}).get("repair_window", 300))
+    paused = []
+    for what in [w for w, _ in writers]:
+        console.print(f"  {what} is running; asking it to pause for the"
+                      " repair")
+        if not eng.pause_writer(db, what, window):
+            for back in paused:
+                eng.resume_writer(db, back)
+            raise SystemExit(
+                f"{db}: {what} did not pause within {window}s (hop option"
+                " repair_window), so nothing was applied. It has been told"
+                " to carry on.")
+        paused.append(what)
+    return paused
+
+
+def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
     for i, a in enumerate(actions):
         console.print(f"\n[bold]{a.kind} on {a.scope}[/bold]  {a.note}")
         for s in a.statements[:20]:
@@ -663,6 +764,14 @@ def _repair_one(hop, eng, db, kind, do_apply):
             console.print(f"  ... {len(a.statements) - 20} more")
         if not do_apply:
             continue
+        # the fix and its undo, run on a scratch copy first where the
+        # engine can make one
+        usable, said = (eng.rehearse(db, a) if hasattr(eng, "rehearse")
+                        else (True, ""))
+        if said:
+            console.print(f"  {said}")
+        if not usable:
+            raise SystemExit(f"{db}: {said}")
         if a.undo:
             ts = time.strftime("%Y%m%d-%H%M%S")
             undo_file = undo_dir / f"{ts}-{a.kind}-{i}.sql"
@@ -842,7 +951,9 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
         from .engines import ALIASES
         engine = ALIASES.get(hop.engine, hop.engine)
         if go:
-            if engine == "postgres" and hasattr(eng, "replicate_sql"):
+            if eng.maps_columns() and db and _tail_pair(eng):
+                _tail(hop, _tail_pair(eng), db, True)
+            elif engine == "postgres" and hasattr(eng, "replicate_sql"):
                 _replicate(hop, eng, db, True, False, True)
             elif hasattr(eng, "tail_apply") and db:
                 _tail(hop, eng, db, True)
@@ -913,7 +1024,22 @@ def _table_plan(hop, eng, d, via):
     decisions = planner.plan(hop, d, via, tables,
                              "public" if engine == "postgres" else None,
                              facts)
-    return ["  by table:"] + planner.lines(decisions)
+    rows = sum(int(f.get("rows") or 0) for f in facts.values()
+               if isinstance(f, dict))
+    size = planner.size_line(decisions, facts, engine,
+                             (hop.options or {}).get("transfer_price_per_gb"))
+    return (["  by table:"] + planner.lines(decisions)
+            + [f"  time: {planner.estimate(hop, via, rows)}"]
+            + ([f"  size: {size}"] if size else []))
+
+
+def _source_rows(eng, d):
+    """The source's own row estimate for a database, 0 when it has none."""
+    try:
+        return sum(int(f.get("rows") or 0)
+                   for f in eng.table_facts("src", d).values())
+    except Exception:
+        return 0
 
 
 def _copy_routed(hop, eng, d, via, chunk, log):
@@ -936,10 +1062,29 @@ def _copy_routed(hop, eng, d, via, chunk, log):
     path = hop.report_dir(d) / "move-routed.json"
     path.unlink(missing_ok=True)
     ck = _Checkpoint(path)
-    for name in routed:
-        sch, _, tbl = name.rpartition(".")
-        eng.move_table(d, sch, tbl, chunk, ck, log)
-        _changelog(hop, {"op": "move-routed", "db": d, "table": name})
+    with eng.load_window(d, log, {n.rpartition(".")[2] for n in routed}):
+        for name in routed:
+            sch, _, tbl = name.rpartition(".")
+            _copy_table(eng, d, sch, tbl, chunk, ck, log)
+            _changelog(hop, {"op": "move-routed", "db": d, "table": name})
+
+
+def _copy_table(eng, d, sch, t, chunk, ck, log):
+    """One table by the engine's own copier, or through the pair machinery
+    where the hop maps its columns and the own copier would carry the whole
+    row. The pair's writes go through its own target driver, so it opens
+    the target's load window for itself; nested inside the engine's, it
+    finds nothing left to set aside."""
+    if not eng.through_pair(d, f"{sch}.{t}" if sch else t):
+        return eng.move_table(d, sch, t, chunk, ck, log)
+    pair = eng.columns_pair()
+    src = next((n for n in pair.src_engine.neutral_tables("src", d)
+                if pair._leaf(n) == t), t)
+    psch, _, ptbl = src.rpartition(".")
+    with pair.load_window(d, log, {src}):
+        pair.move_table(d, psch, ptbl, chunk, ck, log)
+    # a table the pair built gets its indexes once its rows are in
+    pair.finish_created(d, log)
 
 
 def _stop_if_the_schema_moved(hop, eng, d, before):
@@ -985,18 +1130,41 @@ def _move_full(hop, eng, db, table, chunk, go):
                 mark = "done" if st.get("done") else \
                     f"resume at {st.get('last'):,}" if "last" in st else "todo"
                 console.print(f"  {sch}.{t}: {mark}")
+            from . import planner
+            console.print("  time: " + planner.estimate(
+                hop, "builtin", _source_rows(eng, d)))
             continue
         from . import drift
         before = drift.shape(eng, "src", d)
+        began, rows = time.time(), _source_rows(eng, d)
+        point = _position_before_copy(eng, d) if not table else None
+        _mark_move(hop, eng, d)
         lk = _lock(hop)
         try:
-            for sch, t in tables:
-                eng.move_table(d, sch, t, chunk, ck,
-                               lambda m: console.print(f"  {m}"))
-                _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
+            # the table copier fills tables and made none: measured onto an
+            # empty target, the move stopped on `relation ... does not
+            # exist`, where the bulk paths create what is missing
+            if not table:
+                eng.create_missing(d, lambda m: console.print(f"  {m}"))
+            with eng.load_window(d, lambda m: console.print(f"  {m}"),
+                                 {t for _, t in tables}):
+                for sch, t in tables:
+                    _copy_table(eng, d, sch, t, chunk, ck,
+                                lambda m: console.print(f"  {m}"))
+                    _changelog(hop, {"op": "move", "db": d,
+                                     "table": f"{sch}.{t}"})
+            if not table:
+                eng.finish_created(d, lambda m: console.print(f"  {m}"))
         finally:
             lk.unlink()
+        if not table:
+            # a whole database's rows over its time; one table's run is not
+            # a rate for the rest
+            from . import planner
+            planner.record_rate(hop, "builtin", rows, time.time() - began)
         _stop_if_the_schema_moved(hop, eng, d, before)
+        if not table:
+            _record_copy(hop, d, point)
         # the table copier leaves the statistics behind it exactly as a
         # bulk load does; only the bulk path used to put them right
         settled = eng.settle_target(d)
@@ -1010,12 +1178,39 @@ def _move_full(hop, eng, db, table, chunk, go):
 
 def _replicate(hop, eng, db, copy_data, do_drop, go):
     import secrets
+    if eng.maps_columns() and not do_drop:
+        # a subscription or a replica applies whole rows by the source's
+        # column names: the first change to a mapped table stops it on a
+        # column the target does not have, or lands in the wrong one
+        raise SystemExit(
+            "the hop maps columns (mapping.columns), and the server's own"
+            " replication carries whole rows under the source's names."
+            " Nothing was set up. `migkit move --mode cdc` follows this hop"
+            " with migkit's own change tail, which applies the mapping.")
     dbs = [db] if db else eng.databases()
-    for d in dbs:
-        # a plan that is only shown keeps the placeholder for the person
-        # who will run it; one migkit runs gets a password nobody has seen
-        secret = secrets.token_urlsafe(24) if go and not do_drop else None
-        sql = eng.replicate_sql(d, copy_data=copy_data, secret=secret)
+    # a plan that is only shown keeps the placeholder for the person who
+    # will run it; one migkit runs gets a password nobody has seen - one per
+    # run: it was drawn per database, and the second database's plan gave
+    # the source's replication user a password the replica set up for the
+    # first no longer had
+    secret = secrets.token_urlsafe(24) if go and not do_drop else None
+    once = getattr(eng, "REPLICATES_THE_SERVER", False)
+    for i, d in enumerate(dbs):
+        if once and i:
+            # one replica per server, scoped to every database of the hop;
+            # setting it up again for the next one failed on a replica
+            # that was already running
+            console.print(f"[bold]{d}[/bold]\n  carried by the replica"
+                          f" {'removed' if do_drop else 'set up'} for {dbs[0]}"
+                          " - there is one per server")
+            continue
+        # a stream started on its own, after a copy migkit made: the plan is
+        # told about that copy, so it can start where it ended - or say it
+        # cannot
+        copied = (_copy_record(hop, d)
+                  if not copy_data and not do_drop else None)
+        sql = eng.replicate_sql(d, copy_data=copy_data, secret=secret,
+                                copied=copied)
         console.print(f"[bold]{d}[/bold]")
         if do_drop:
             plan = [("dst", x) for x in sql["drop_dst"]] + \
@@ -1034,6 +1229,8 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
         if go and not do_drop:
             console.print("  " + eng.replication_status(d, sql["status"]))
             _changelog(hop, {"op": "replicate", "db": d})
+            if copied:
+                _copy_record_used(hop, d)
         if go and do_drop:
             _changelog(hop, {"op": "replicate-drop", "db": d})
     if not go:
@@ -1077,9 +1274,80 @@ def _tail_token(hop, db):
     return hop.report_dir(db) / "tail-token.json"
 
 
+def _mark_move(hop, eng, d):
+    """What the target says about now, kept for the check that asks later
+    who wrote the rows only the target has (`who_wrote`)."""
+    try:
+        mark = eng.target_mark(d)
+    except Exception:
+        mark = {}
+    (hop.report_dir(d) / "move-began.json").write_text(json.dumps(
+        {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "epoch": time.time(),
+         **(mark or {})}))
+
+
+def _position_before_copy(eng, d):
+    """Where the source's change log is, taken before a full copy, where
+    asking costs the source nothing - so that a later `--mode cdc` can start
+    from it rather than from whenever it happens to be run."""
+    src = getattr(eng, "src_engine", None) or eng
+    if not getattr(src, "CHANGE_POINT_READS_ONLY", False):
+        return None
+    try:
+        return src.change_point("src", d)
+    except (Exception, SystemExit):
+        return None
+
+
+def _copy_record_path(hop, d):
+    return hop.report_dir(d) / "copy-position.json"
+
+
+def _record_copy(hop, d, before):
+    """What a later `--mode cdc` needs to know about the copy that just
+    finished: when, the change position taken before it, and - where the
+    copy was a snapshot at a position of its own - that position."""
+    rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "before": before}
+    dumped = hop.report_dir(d) / "dump-position.json"
+    if dumped.exists():
+        try:
+            rec["exact"] = json.loads(dumped.read_text())
+        except ValueError:
+            pass
+        dumped.unlink()
+    _copy_record_path(hop, d).write_text(json.dumps(rec))
+
+
+def _copy_record(hop, d):
+    try:
+        return json.loads(_copy_record_path(hop, d).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _copy_record_used(hop, d):
+    """A position is where one stream starts, once: a second `--mode cdc`
+    started from it would replay what the first already applied."""
+    path = _copy_record_path(hop, d)
+    if path.exists():
+        path.rename(path.with_name("copy-position.used.json"))
+
+
 def _tail(hop, eng, db, go):
     path = _tail_token(hop, db)
-    if not path.exists() and _Checkpoint(hop.report_dir(db) / "move.json"):
+    rec = _copy_record(hop, db)
+    if not path.exists() and rec and rec.get("before") is not None \
+            and hasattr(eng, "tail_seed"):
+        # the position taken before the copy: what changed while it ran
+        # and since is replayed by key on top of it, which converges
+        if go:
+            eng.tail_seed(db, path, rec["before"])
+            _copy_record_used(hop, db)
+        console.print(f"  {db}: starting from where the source's log was"
+                      f" before the copy of {rec['at']}, so what changed"
+                      " during it and since is carried too")
+    elif not path.exists() and (rec or _Checkpoint(
+            hop.report_dir(db) / "move.json")):
         # a copy with no position is the hole full+cdc closes; on its own,
         # cdc can only say it is there
         console.print(
@@ -1199,15 +1467,52 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     Use only over a trusted network (or run migkit on a cloud VM)."""
     try:
         return _move(hop_name, db, table, mode, chunk, do_drop, go)
-    except RuntimeError as e:
-        # a program underneath failed: its message keeps the database's
-        # words and loses its own name, and nobody gets a traceback
+    except Exception as e:
+        # a program underneath failed, or a server refused a row: the
+        # message keeps the database's words and loses any program's name,
+        # and nobody gets a traceback
+        if not (isinstance(e, RuntimeError) or _refused_by_a_server(e)):
+            raise
         from .movers import DRIVEN
         from .wording import without_programs
+        if _refused_by_a_server(e) and len(e.args) == 2 \
+                and isinstance(e.args[0], int):
+            e = RuntimeError(f"ERROR {e.args[0]}: {e.args[1]}")
+        try:
+            why = get_engine(get_hop(hop_name)).why_it_stopped(str(e))
+        except Exception:
+            why = ""
         raise SystemExit(
             f"the copy stopped: {without_programs(str(e), DRIVEN)}\n"
-            "Nothing past the last finished table is marked as moved. The"
+            + (f"{why}\n" if why else "")
+            + "Nothing past the last finished table is marked as moved. The"
             " commands that ran are in the run's commands.log.")
+
+
+def _refused_by_a_server(e):
+    """An error a database driver raised: the server's own refusal, whose
+    words are the message, not a fault in migkit to show a traceback for."""
+    return (type(e).__module__ or "").split(".")[0] in (
+        "pymysql", "psycopg", "psycopg2", "pymongo", "sqlite3", "pymssql",
+        "pyodbc", "redis", "kafka")
+
+
+def _protect_target(hop, eng, db, release=False):
+    """The hop's `protect_target`: the application's roles cannot write to
+    the target while migkit moves data into it, and can again once the
+    stream is torn down at cutover (or on `rollback --apply`)."""
+    from . import freeze
+    if not (hop.options or {}).get("protect_target"):
+        return
+    if not freeze.supported(hop):
+        raise SystemExit(
+            f"protect_target is set, and keeping the application from"
+            f" writing to the target is not available for {hop.engine} hops"
+            " yet - nothing has been copied. Remove the option to move"
+            " without it.")
+    for d in ([db] if db else eng.databases()):
+        (freeze.thaw if release else freeze.freeze)(
+            hop, eng, d, lambda m: console.print(f"  {m}"))
 
 
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
@@ -1215,10 +1520,17 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
+    if go:
+        # before anything is copied, so no write of the application's lands
+        # between the copy and the check; released by tearing the stream
+        # down, which is the cutover
+        _protect_target(hop, eng, db, release=do_drop and mode == "cdc")
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     if mode == "full":
-        v = movers.chosen(engine, table)
+        v, why = movers.fitted(hop, engine, movers.chosen(engine, table))
+        if why:
+            console.print(f"  {why}, so the tables are copied one by one")
         if v != "builtin":
             dbs = [db] if db else eng.databases()
             lk = _lock(hop) if go else None
@@ -1232,8 +1544,15 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     before = drift.shape(eng, "src", d) if go else None
                     for line in _table_plan(hop, eng, d, v):
                         console.print(line)
+                    began, rows = time.time(), _source_rows(eng, d) if go else 0
+                    point = _position_before_copy(eng, d) if go else None
+                    if go:
+                        _mark_move(hop, eng, d)
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
+                    if go:
+                        from . import planner
+                        planner.record_rate(hop, v, rows, time.time() - began)
                     for s0 in steps:
                         console.print(f"  {s0}")
                     if go:
@@ -1267,6 +1586,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                             chat("  (this engine cannot confirm the rows"
                                  " landed; `migkit check` is what proves it)")
                         _changelog(hop, {"op": f"move-{v}", "db": d})
+                        _record_copy(hop, d, point)
                         # the load left the statistics behind it; the engine
                         # puts them right before anybody queries the target
                         settled = eng.settle_target(d)
@@ -1281,6 +1601,13 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return _move_full(hop, eng, db, table, chunk, go)
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
+    if mode == "cdc" and eng.maps_columns():
+        # the servers' own replication carries whole rows; the pair's tail
+        # applies the mapping to every change (`_replicate` says the same)
+        tailer = _tail_pair(eng)
+        if tailer is None:
+            capabilities.require(hop.engine, "stream")
+        return _tail(hop, tailer, db, go)
     if mode == "cdc":
         if engine == "postgres" and has_repl:
             if movers.follow_selected() == "follow":
@@ -1301,7 +1628,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                          " on this machine; migkit doctor says what is"
                          " missing")
     # full+cdc
-    if engine == "postgres" and has_repl:
+    if engine == "postgres" and has_repl and not eng.maps_columns():
         # a subscription with copy_data=true is the native full+cdc
         return _replicate(hop, eng, db, True, do_drop, go)
     # MySQL used to print a replica plan here, from a position taken before
@@ -1621,6 +1948,16 @@ def rollback(hop_name, db, state_ts, do_apply):
     from .state import get_store
     hop = get_hop(hop_name)
     eng = get_engine(hop)
+    from . import freeze
+    if freeze.state(hop, db):
+        # what migkit took from the application's roles comes back with
+        # everything else it changed on the target
+        if do_apply:
+            freeze.thaw(hop, eng, db, lambda m: console.print(f"  {m}"))
+        else:
+            console.print("  the application's roles are still kept from"
+                          " writing to the target; --apply gives their"
+                          " writes back")
     store = get_store(hop)
     states = sorted(m.get("ts", "") for m in store.list(db))
     if not states:

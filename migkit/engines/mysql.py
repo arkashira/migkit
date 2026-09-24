@@ -16,7 +16,17 @@ class MySQLEngine(Engine):
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = True
 
-    def _conn(self, side):
+    #: The sql_mode every write to the target runs under, whatever the
+    #: server's own is: strict, so a value the column cannot hold stops the
+    #: write instead of being cut to fit, and without `NO_ZERO_DATE` and
+    #: `NO_ZERO_IN_DATE`, so a zero date the source holds lands as it is.
+    #: `NO_AUTO_VALUE_ON_ZERO` keeps a key of 0 a 0. Measured on a target
+    #: whose own mode was lax (`NO_ENGINE_SUBSTITUTION`, a managed 5.7's
+    #: default): the table copier wrote `'12345678901'` into a varchar(5)
+    #: as `'12345'` and said nothing.
+    WRITE_SQL_MODE = "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES"
+
+    def _conn(self, side, retry=True):
         ep = self.hop.source if side == "src" else self.hop.target
         try:
             import pymysql
@@ -29,34 +39,78 @@ class MySQLEngine(Engine):
         rt = int(os.environ.get("MIGKIT_READ_TIMEOUT", "3600"))
 
         def _open():
+            # the greeting is read under the read timeout, so a server that
+            # does not speak MySQL - measured, a PostgreSQL port - held the
+            # connect for the whole hour of it; the handshake gets the
+            # connect's 15 seconds and the queries after it the hour
             c = pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
                                 password=ep.password, charset="utf8mb4",
                                 connect_timeout=15,
-                                read_timeout=rt, write_timeout=rt)
+                                read_timeout=15, write_timeout=rt,
+                                init_command=(
+                                    "set session sql_mode ="
+                                    f" '{self.WRITE_SQL_MODE}'"
+                                    if side == "dst" else None))
+            c._read_timeout = rt
             _keepalive(getattr(c, "_sock", None))
             return c
-        return with_retry(_open, label=f"mysql connect {side}")
+        # a probe that only decides an option asks once: retrying a server
+        # that is not there only delays saying "no"
+        return (with_retry(_open, label=f"mysql connect {side}") if retry
+                else _open())
 
     CANON_ENGINE = "mysql"
+    OWN_PATHS_READ_COLUMN_MAPPING = False
 
     def neutral_tables(self, side, db):
         return self._tables(side, db)
 
+    def run_rule(self, side, db, sql):
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"use {self._my_ident(self._d(side, db))}")
+                # read-only: a rule that tries to write fails, and the
+                # source is not written to whatever the rule says
+                cur.execute("start transaction read only")
+                cur.execute(sql)
+                return cur.fetchall()
+        finally:
+            conn.rollback()
+            conn.close()
+
+    @staticmethod
+    def _my_ident(name):
+        return "`" + str(name).replace("`", "``") + "`"
+
+    def stream_writers(self, db):
+        """Adds the target's replica applier, when its SQL thread runs."""
+        out = super().stream_writers(db)
+        for row in self._q_named("dst", "show replica status"):
+            sql = self._repl_field(row, self._REPL_FIELDS["sql"])
+            host = self._repl_field(row, self._REPL_FIELDS["host"])
+            if str(sql).lower() == "yes":
+                out.append((f"the replica applying from {host}", False))
+        return out
+
     def table_facts(self, side, db):
         """InnoDB's own row estimate and whether a primary key exists."""
         out = {}
-        for name, rows, key in self._q(
+        for name, rows, key, size, idx in self._q(
                 side, "select t.table_name, t.table_rows,"
                       " exists(select 1 from information_schema"
                       ".table_constraints c where c.table_schema ="
                       " t.table_schema and c.table_name = t.table_name"
-                      " and c.constraint_type = 'PRIMARY KEY')"
+                      " and c.constraint_type = 'PRIMARY KEY'),"
+                      " t.data_length, t.index_length"
                       " from information_schema.tables t"
                       " where t.table_schema = %s"
-                      " and t.table_type = 'BASE TABLE'",
+                      " and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')",
                 (self._d(side, db),)):
             out[name] = {"rows": None if rows is None else int(rows),
-                         "key": bool(key)}
+                         "key": bool(key),
+                         "bytes": None if size is None else int(size),
+                         "index_bytes": None if idx is None else int(idx)}
         return out
 
     def column_catalog(self, side, db):
@@ -80,24 +134,21 @@ class MySQLEngine(Engine):
         return [(r[0], r[1]) for r in rows]
 
     def neutral_key(self, side, db, table):
-        rows = self._q(side,
-                       "select column_name from information_schema"
-                       ".key_column_usage where table_schema=%s"
-                       " and table_name=%s and constraint_name='PRIMARY'"
-                       " order by ordinal_position",
-                       (self._d(side, db), table))
-        return [r[0] for r in rows]
+        return [r[0] for r in self._q(side, self.PK_SQL,
+                                      (self._d(side, db), table))]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
         names = [n for n, _ in columns]
         cols = ", ".join(f"`{n}`" for n in names)
         key = self.neutral_key(side, db, table)
-        where, args = "", []
+        resume, args = "", []
         if key and after is not None:
             places = ", ".join(["%s"] * len(key))
             keys = ", ".join(f"`{k}`" for k in key)
-            where = f" where ({keys}) > ({places})"
+            resume = f"({keys}) > ({places})"
             args = list(after)
+        where = self._where(where, resume, bool(args), percent=True)
         order = (" order by " + ", ".join(f"`{k}`" for k in key)) if key else ""
         cap = f" limit {int(limit)}" if key else ""
         rows = [list(r) for r in self._q(
@@ -110,12 +161,14 @@ class MySQLEngine(Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
-    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys,
+                            where=None):
         if not key or not keys:
             return {}
         sql, args = self._by_key_query(
             f"`{self._d(side, db)}`.`{table}`", columns, key, list(keys),
-            lambda n: f"`{n}`", "%s")
+            lambda n: f"`{n}`", "%s",
+            where.replace("%", "%%") if where else None)
         rows = [list(r) for r in self._q(side, sql, args)]
         return self._by_key_map(columns, key, rows)
 
@@ -145,23 +198,90 @@ class MySQLEngine(Engine):
             conn.close()
         return len(rows)
 
-    def neutral_empty(self, side, db, table):
+    def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a table")
         conn = self._conn(side)
         try:
             with conn.cursor() as cur:
                 gone = cur.execute(
                     f"delete from {self._quote_ident(self._d(side, db))}"
-                    f".{self._quote_ident(table)}")
+                    f".{self._quote_ident(table)}" + self._where(where))
             conn.commit()
         finally:
             conn.close()
         return gone
 
+    SQL_DIALECT = "mysql"
+
+    #: types whose default is written as a bare number
+    NUMERIC_TYPES = {"tinyint", "smallint", "mediumint", "int", "integer",
+                     "bigint", "decimal", "numeric", "float", "double",
+                     "real"}
+
+    def neutral_column_rules(self, side, db, table):
+        rows = self._q(side, "select column_name, is_nullable,"
+                             " column_default, extra, data_type"
+                             " from information_schema.columns"
+                             " where table_schema=%s and table_name=%s",
+                       (self._d(side, db), table))
+        out = {}
+        for name, null, default, extra, typ in rows:
+            extra = str(extra or "").lower()
+            if default is None:
+                shown = None
+            elif "default_generated" in extra:
+                # an expression, which the catalogue keeps as written
+                shown = str(default)
+            elif str(typ).lower() in self.NUMERIC_TYPES:
+                shown = str(default)
+            else:
+                # a literal, which the catalogue keeps without its quotes
+                shown = "'" + str(default).replace("'", "''") + "'"
+            out[str(name)] = {"null": str(null).upper() == "YES",
+                              "default": shown,
+                              "identity": "auto_increment" in extra}
+        return out
+
+    def default_works(self, side, db, expr, typ=None):
+        try:
+            self._q(side, f"select ({expr})")
+            return True
+        except Exception:
+            return False
+
+    def neutral_indexes(self, side, db, table):
+        rows = self._q(side, "select index_name, non_unique, column_name,"
+                             " sub_part, expression"
+                             " from information_schema.statistics"
+                             " where table_schema=%s and table_name=%s"
+                             " and index_name <> 'PRIMARY'"
+                             " order by index_name, seq_in_index",
+                       (self._d(side, db), table))
+        got = {}
+        for name, non_unique, col, part, expr in rows:
+            one = got.setdefault(str(name), [not non_unique, [], True])
+            if expr is not None or col is None or part is not None:
+                one[2] = False
+            if col is not None:
+                one[1].append(str(col))
+        return [(n, u, c, ok) for n, (u, c, ok) in sorted(got.items())]
+
+    def execute_ddl(self, side, db, sql):
+        self._target_only(side, "change a schema")
+        self._q(side, sql)
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        return (f"create {'unique ' if unique else ''}index `{name}`"
+                f" on `{self._d(side, db)}`.`{table}` ("
+                + ", ".join(f"`{c}`" for c in columns) + ")")
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
-        defs = [f"`{n}` {canon.ddl_type('mysql', c, w)}"
-                for n, c, w in columns]
+        defs = [f"`{col[0]}` {canon.ddl_type('mysql', col[1], col[2])}"
+                + self._column_tail(col[3] if len(col) > 3 else None,
+                                    "mysql")
+                for col in columns]
         if key:
             defs.append("primary key (" + ", ".join(f"`{k}`" for k in key)
                         + ")")
@@ -281,6 +401,36 @@ class MySQLEngine(Engine):
                 out[k] = v
         return out
 
+    #: binlog events that carry rows the reader cannot open, and the
+    #: setting that writes them: MySQL's compressed transaction, and
+    #: MariaDB's compressed row events (both kinds of each)
+    COMPRESSED_ROWS = {0x28: "binlog_transaction_compression",
+                       **{t: "log_bin_compress" for t in range(166, 172)}}
+
+    @classmethod
+    def _compressed_stop(cls, token, event_type):
+        """Measured, MySQL 8.4 with `binlog_transaction_compression = ON`
+        and MariaDB 11 with `log_bin_compress = ON`: an insert, an update
+        and a delete were written compressed, and the reader skipped all
+        three - no change returned, the position not moved, nothing said.
+        A tail on it would have called itself caught up for ever."""
+        raise SystemExit(cls._compressed_said(token, event_type, "applied"))
+
+    @classmethod
+    def _compressed_said(cls, token, event_type, done):
+        name = cls.COMPRESSED_ROWS[event_type]
+        return (
+            f"the source writes rows into its binlog compressed ({name}),"
+            " and migkit's binlog reader cannot read them; reading on would"
+            f" skip them without a trace. Nothing after"
+            f" {token.get('log_file')}, position {token.get('log_pos')}, was"
+            f" {done}. On the source: set global {name} = OFF (in the"
+            " parameter group on a managed service)"
+            + (", and in any application session that turns it on for"
+               " itself" if name == "binlog_transaction_compression" else "")
+            + ". What was already written compressed stays unreadable, so"
+            " move again with --mode full+cdc once it is off")
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of the binlog, as neutral records.
 
@@ -295,6 +445,7 @@ class MySQLEngine(Engine):
         """
         import pymysql
         from pymysqlreplication import BinLogStreamReader
+        from pymysqlreplication.event import NotImplementedEvent
         from pymysqlreplication.row_event import (DeleteRowsEvent,
                                                   UpdateRowsEvent,
                                                   WriteRowsEvent)
@@ -322,6 +473,7 @@ class MySQLEngine(Engine):
                     f"    set global {name} = 'FULL';   -- self-managed\n"
                     f"    {name}=FULL                   -- parameter group")
         token = dict(token or {}) or self.change_point(side, db)
+        start = dict(token)
         stream = BinLogStreamReader(
             connection_settings={"host": ep.host, "port": ep.port,
                                  "user": ep.user, "passwd": ep.password},
@@ -329,10 +481,18 @@ class MySQLEngine(Engine):
             blocking=False, resume_stream=True,
             log_file=token.get("log_file"), log_pos=token.get("log_pos"),
             only_schemas=[self._d(side, db)],
-            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent])
+            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
+                         NotImplementedEvent],
+            filter_non_implemented_events=False)
         out, skipped = [], set()
         try:
             for ev in stream:
+                if isinstance(ev, NotImplementedEvent):
+                    if ev.event_type in self.COMPRESSED_ROWS:
+                        # nothing of this batch is handed back, so the
+                        # tail stays where it was asked to read from
+                        self._compressed_stop(start, ev.event_type)
+                    continue
                 table = ev.table
                 if self.hop.excluded(db, table):
                     # the target owns it: the move left it alone, so the
@@ -367,6 +527,16 @@ class MySQLEngine(Engine):
                          "log_pos": stream.log_pos}
                 if len(out) >= limit:
                     break
+            else:
+                # read to the end of the log: everything up to here has been
+                # seen, including what was left out - other databases, tables
+                # the hop excludes - so the position moves past it too. It
+                # stayed at the last row of this database, and a fence waiting
+                # for the tail to reach the log's end never saw it get there
+                # on a server busy elsewhere.
+                if stream.log_file and stream.log_pos:
+                    token = {"log_file": stream.log_file,
+                             "log_pos": stream.log_pos}
         except pymysql.err.OperationalError as e:
             # measured on 8.4 after `purge binary logs`: 1236, "Could not
             # find first log file name in binary log index file"
@@ -412,6 +582,28 @@ class MySQLEngine(Engine):
             return None
         return None
 
+    CHANGE_POINT_READS_ONLY = True
+
+    def load_window(self, db, log=None, tables=None):
+        """The target's triggers, off for the load (`_MyTriggerWindow`)."""
+        from ..movers import _MyTriggerWindow
+        return _MyTriggerWindow(self.hop, db, log, tables)
+
+    def log_position(self, side, db):
+        return self.change_point(side, db)
+
+    @staticmethod
+    def position_reached(have, want):
+        """Binlog positions compare by file, then by offset in it."""
+        def at(pos):
+            f = str(pos["log_file"])
+            seq = f.rsplit(".", 1)[-1]
+            return (int(seq) if seq.isdigit() else 0, int(pos["log_pos"]))
+        try:
+            return at(have) >= at(want)
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def change_point(self, side, db):
         """Where the binlog is now, as the token `neutral_changes` resumes
         from."""
@@ -422,13 +614,26 @@ class MySQLEngine(Engine):
                 " log to read - turn on log_bin, or move without CDC")
         return {"log_file": pos[0], "log_pos": pos[1]}
 
-    def neutral_digest(self, side, db, table, columns):
+    def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         row = canon.row_expr("mysql", columns)
         r = self._q(side, f"select count(*),"
                           f" {canon.digest_expr('mysql', row)}"
-                          f" from `{self._d(side, db)}`.`{table}`")
+                          f" from `{self._d(side, db)}`.`{table}`"
+                          + self._where(where))
         return (int(r[0][0]), str(r[0][1]))
+
+    def purge_backlog(self, side):
+        """InnoDB's history list length - the undo not yet purged, which is
+        what an open snapshot holds back - or None where it cannot be
+        read."""
+        try:
+            got = self._q(side, "select count from information_schema"
+                                ".innodb_metrics"
+                                " where name = 'trx_rseg_history_len'")
+        except Exception:
+            return None
+        return int(got[0][0]) if got else None
 
     def _brand_probes(self):
         """`version()` and `@@version_comment` per side, in one round trip.
@@ -532,17 +737,22 @@ class MySQLEngine(Engine):
                       and not r[0].startswith("__")
                       and not self.hop.excluded(r[0]))
 
-    def _dump_schema(self, side, db):
+    def _dump_schema(self, side, db, physical=None):
         ep = self.hop.source if side == "src" else self.hop.target
         if not which("mysqldump"):
             raise SystemExit("the MySQL client is not installed on this"
                              " machine: migkit doctor --install")
-        pdb = self._d(side, db)
+        pdb = physical or self._d(side, db)
+        left = [f"--ignore-table={pdb}.{t}"
+                for t in sorted(self._left_out_of_schema(db, side))]
+        # the password in the environment: on the command line every
+        # process listing on the machine could read it
         p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
-                 f"-p{ep.password}", "--no-data", "--routines", "--triggers",
+                 "--no-data", "--routines", "--triggers",
                  "--events", "--skip-comments", "--skip-dump-date",
                  "--column-statistics=0",
-                 f"--ignore-table={pdb}.migkit_changelog", pdb], check=False)
+                 f"--ignore-table={pdb}.migkit_changelog", *left, pdb],
+                check=False, env={"MYSQL_PWD": ep.password})
         if p.returncode != 0:
             raise RuntimeError(p.stderr.strip())
         text = self._canon_ddl(p.stdout)
@@ -552,6 +762,19 @@ class MySQLEngine(Engine):
                  and "SQL_LOG_BIN" not in l
                  and l.strip()]
         return "\n".join(lines) + "\n"
+
+    def _left_out_of_schema(self, db, side):
+        """The tables on this side the whole-database schema comparers
+        leave out: those the hop excludes, which are the target's own, and
+        those whose columns the hop maps, which the pair machinery compares
+        through the mapping (`_mapped_schema`)."""
+        out = {t for t in self._all_tables(side, db)
+               if self.hop.excluded(db, t)}
+        for t in self.mapped_tables(db):
+            leaf = t.rpartition(".")[2]
+            out.add(self.hop.target_table(db, leaf).rpartition(".")[2]
+                    if side == "dst" else leaf)
+        return out
 
     def check_schema(self, db):
         d = self.hop.report_dir(db)
@@ -570,21 +793,30 @@ class MySQLEngine(Engine):
         else:
             (d / "schema.diff").write_text("\n".join(diff))
             sample = "; ".join(sorted(set(l.strip() for l in changed))[:3])
-            res.append(Result("schema", db, "diff",
-                              f"{len(changed)} changed lines, e.g. {sample}",
-                              str(d / "schema.diff"),
-                              "apply missing DDL from schema-src.sql on target"))
+            r = Result("schema", db, "diff",
+                       f"{len(changed)} changed lines, e.g. {sample}",
+                       str(d / "schema.diff"),
+                       "apply missing DDL from schema-src.sql on target")
+            # a table on one side only is never cosmetic, whatever another
+            # comparer read: measured, the schema-aware one did not see a
+            # MariaDB system-versioned table at all and called the two
+            # schemas the same
+            r.whole_table = any(l[1:].lstrip().upper().startswith(
+                "CREATE TABLE") for l in changed)
+            res.append(r)
         res.append(self.check_objects(db))
         if which("atlas") and self.hop.options.get("atlas", True):
             at = self._atlas(db)
             if at:
                 res.append(at)
-        return self._atlas_authoritative(res)
+        # after the demotion, not before: the schema-aware comparison left
+        # these tables out, so its reading is no authority over them
+        return self._atlas_authoritative(res) + self._mapped_schema(db)
 
     def check_objects(self, db):
         queries = {
             "table": "select table_name from information_schema.tables"
-                     " where table_schema=%s and table_type='BASE TABLE'",
+                     " where table_schema=%s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')",
             "view": "select table_name from information_schema.tables"
                     " where table_schema=%s and table_type='VIEW'",
             "function": "select routine_name from information_schema.routines"
@@ -600,9 +832,18 @@ class MySQLEngine(Engine):
                      " where table_schema=%s group by table_name, index_name",
         }
         inv = {}
+        # a mapped table's indexes are over the columns the mapping names
+        left = {side: self._left_out_of_schema(db, side)
+                for side in ("src", "dst")}
+
+        def kept(side, typ, name):
+            return not (typ == "index"
+                        and str(name).split(".", 1)[0] in left[side])
         for typ, sql in queries.items():
-            a = {r[0] for r in self._q("src", sql, (db,))}
-            b = {r[0] for r in self._q("dst", sql, (self._d("dst", db),))}
+            a = {r[0] for r in self._q("src", sql, (db,))
+                 if kept("src", typ, r[0])}
+            b = {r[0] for r in self._q("dst", sql, (self._d("dst", db),))
+                 if kept("dst", typ, r[0])}
             inv[typ] = {"src": len(a), "dst": len(b),
                         "missing": sorted(a - b)[:50],
                         "extra": sorted(b - a)[:50]}
@@ -637,17 +878,28 @@ class MySQLEngine(Engine):
             return
         (state_dir / "dst-schema.sql").write_text(self._dump_schema("dst", db))
 
-    def _atlas(self, db):
+    def _schema_urls(self, db):
+        """(source, target) as the schema comparison's URLs."""
         from urllib.parse import quote
         s, t = self.hop.source, self.hop.target
-        su = (f"mysql://{s.user}:{quote(s.password, safe='')}"
-              f"@{s.host}:{s.port}/{db}")
-        tu = (f"mysql://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{self._d('dst', db)}")
+        return (f"mysql://{s.user}:{quote(s.password, safe='')}"
+                f"@{s.host}:{s.port}/{db}",
+                f"mysql://{t.user}:{quote(t.password, safe='')}"
+                f"@{t.host}:{t.port}/{self._d('dst', db)}")
+
+    def _schema_excludes(self, db):
+        """What the schema comparison leaves out: migkit's own table, and
+        the tables the pair compares through the mapping."""
+        return ["migkit_changelog"] + [
+            name for side in ("src", "dst")
+            for name in sorted(self._left_out_of_schema(db, side))]
+
+    def _atlas(self, db):
+        from ..movers import schema_diff
+        su, tu = self._schema_urls(db)
+        excludes = self._schema_excludes(db)
         try:
-            p = run(["atlas", "schema", "diff", "--from", tu, "--to", su,
-                     "--exclude", "migkit_changelog"],
-                    check=False, timeout=180)
+            p = schema_diff(tu, su, excludes)
         except Exception:
             return None
         if p.returncode != 0:
@@ -671,9 +923,7 @@ class MySQLEngine(Engine):
         from .. import revert as _revert
         rev = self.hop.report_dir(db) / "schema-fix.revert.sql"
         try:
-            rp = run(["atlas", "schema", "diff", "--from", su, "--to", tu,
-                      "--exclude", "migkit_changelog"],
-                     check=False, timeout=180)
+            rp = schema_diff(su, tu, excludes)
             rtext = rp.stdout.strip() if rp.returncode == 0 else ""
         except Exception:
             rtext = ""
@@ -700,7 +950,7 @@ class MySQLEngine(Engine):
         what counts as a table.
         """
         rows = self._q(side, "select table_name from information_schema.tables"
-                             " where table_schema=%s and table_type='BASE TABLE'"
+                             " where table_schema=%s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                              " and table_name not like 'migkit%%'"
                              " order by 1", (self._d(side, db),))
         return [r[0] for r in rows]
@@ -709,13 +959,19 @@ class MySQLEngine(Engine):
         return [t for t in self._all_tables(side, db)
                 if not self.hop.excluded(db, t)]
 
+    #: a primary key's columns, only the ones the table shows: MariaDB adds
+    #: a system-versioned table's hidden `row_end` to its key, and a check
+    #: that selected it stopped on `Unknown column 'row_end'`
+    PK_SQL = ("select k.column_name from information_schema.key_column_usage k"
+              " join information_schema.columns c"
+              " on c.table_schema = k.table_schema"
+              " and c.table_name = k.table_name"
+              " and c.column_name = k.column_name"
+              " where k.table_schema=%s and k.table_name=%s"
+              " and k.constraint_name='PRIMARY' order by k.ordinal_position")
+
     def _pk_cols(self, db, t):
-        rows = self._q("src",
-                       "select column_name from information_schema.key_column_usage"
-                       " where table_schema=%s and table_name=%s"
-                       " and constraint_name='PRIMARY' order by ordinal_position",
-                       (db, t))
-        return [r[0] for r in rows]
+        return [r[0] for r in self._q("src", self.PK_SQL, (db, t))]
 
     def _cols(self, db, t):
         rows = self._q("src", "select column_name from information_schema.columns"
@@ -859,17 +1115,33 @@ class MySQLEngine(Engine):
             busy = running / max(limit, 1.0)
         except Exception:
             return None
-        # Replication lag needs the column names, which `_q` does not return,
-        # and `performance_schema.replication_applier_status_by_worker` is the
-        # modern source for it. Left as busy-ratio only rather than reaching
-        # for a cursor description that this helper does not expose: a partial
-        # signal is fine here, because lag is None on an unreplicated server
-        # anyway and the latency signal covers what this misses.
-        return Health(busy_ratio=busy)
+        # Where this side is itself a replica - a reader the check was
+        # pointed at to spare the primary - its lag is the other signal: a
+        # heavy read there makes it fall behind. By name, through
+        # `_q_named`, since the columns differ between MySQL and MariaDB.
+        lag = None
+        try:
+            rows = self._q_named(side, "show replica status")
+        except Exception:
+            rows = []
+        if rows:
+            got = self._repl_field(rows[0], self._REPL_FIELDS["lag"])
+            try:
+                lag = None if got is None else float(got)
+            except (TypeError, ValueError):
+                lag = None
+        return Health(busy_ratio=busy, lag_seconds=lag)
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
+        if table and self.through_pair(db, table):
+            return self.columns_pair().check_data(db, table, stream)
+        got = self._own_check_data(db, table, stream, with_counts)
+        return got if table else got + self._mapped_data(db, stream)
+
+    def _own_check_data(self, db, table=None, stream=None, with_counts=False):
         st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
-        tables = [table] if table else sorted(st & dt)
+        tables = [table] if table else sorted(
+            t for t in st & dt if not self.through_pair(db, t))
         res = []
         rows_a = rows_b = 0
         bad_counts = []
@@ -1234,6 +1506,7 @@ class MySQLEngine(Engine):
     def delta_verify(self, db, limit=20000, log=None):
         try:
             from pymysqlreplication import BinLogStreamReader
+            from pymysqlreplication.event import NotImplementedEvent
             from pymysqlreplication.row_event import (DeleteRowsEvent,
                                                       UpdateRowsEvent,
                                                       WriteRowsEvent)
@@ -1264,13 +1537,27 @@ class MySQLEngine(Engine):
             resume_stream=True, blocking=False,
             log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
             only_schemas=[db],
-            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent])
+            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
+                         NotImplementedEvent],
+            filter_non_implemented_events=False)
         touched = {}
         nopk = set()
         n = 0
         try:
             for ev in stream:
+                if isinstance(ev, NotImplementedEvent):
+                    # the rows of a compressed transaction are not read,
+                    # and the delta said "0 changes" over them: the
+                    # position stays where it was, and the error says why
+                    if ev.event_type in self.COMPRESSED_ROWS:
+                        return [Result("delta", db, "error",
+                                       self._compressed_said(
+                                           ck, ev.event_type, "verified"))]
+                    continue
                 t = ev.table
+                if self.hop.excluded(db, t):
+                    # the target's own: nothing else compares it either
+                    continue
                 pks = self._pk_cols(db, t)
                 if not pks:
                     nopk.add(t)
@@ -1306,7 +1593,10 @@ class MySQLEngine(Engine):
         res = []
         clean = True
         for t, keys in sorted(touched.items()):
-            cmp = self._compare_pks(db, t, keys)
+            # a mapped table is compared by the pair, through the mapping,
+            # and the pair keeps its own drilldown
+            pair = self.through_pair(db, t)
+            cmp = self._delta_compare(db, t, keys)
             if cmp is None:
                 res.append(Result("delta", f"{db}.{t}", "error",
                                   "pk lookup failed"))
@@ -1315,7 +1605,8 @@ class MySQLEngine(Engine):
             missing, extra, changed = cmp
             if missing or extra or changed:
                 clean = False
-                self._write_pk_files(db, t, missing, extra, changed)
+                if not pair:
+                    self._write_pk_files(db, t, missing, extra, changed)
                 res.append(Result(
                     "delta", f"{db}.{t}", "diff",
                     f"of {len(keys)} touched rows: missing={len(missing)}"
@@ -1392,6 +1683,197 @@ class MySQLEngine(Engine):
             "raise the mover's LOB size limit above the biggest value, or"
             " move those tables with a path that does not truncate")
 
+    #: room around the largest row for the rest of its statement: its
+    #: other columns, the INSERT text, and the small rows a loader packs in
+    #: beside it (a loader closes a statement once it passes about 1 MB)
+    PACKET_MARGIN = 2 * 1024 * 1024
+    #: the most `max_allowed_packet` takes
+    PACKET_CEILING = 1024 ** 3
+
+    def _file_sizes(self, db):
+        """{table: bytes on disk} for tables in a file of their own, the
+        partitions summed. What no row of the table can be larger than,
+        read from the file itself rather than from statistics that lag the
+        rows. {} where the server does not say."""
+        for view in ("innodb_tablespaces", "innodb_sys_tablespaces"):
+            try:
+                rows = self._q("src", f"select name, file_size from"
+                                      f" information_schema.{view}"
+                                      " where name like %s", (f"{db}/%",))
+                break
+            except Exception:
+                continue
+        else:
+            return {}
+        out = {}
+        for name, size in rows:
+            table = re.split(r"#[pP]#", str(name).split("/", 1)[1])[0]
+            if size:
+                out[table] = out.get(table, 0) + int(size)
+        return out
+
+    def _row_sizes(self, db, fits_under, deadline):
+        """[(table, kind, bytes)] for each table in scope with large
+        columns: "bounded" where the table's whole file is under
+        `fits_under`, so no row of it can be larger; "measured", the
+        largest row's large columns, read before `deadline`; "unknown"
+        where the time ran out first."""
+        cols = {}
+        for t, c in self._q("src", "select table_name, column_name"
+                                   " from information_schema.columns"
+                                   " where table_schema = %s and data_type"
+                                   " in (" + ", ".join(["%s"] * len(
+                                       self.LOB_TYPES)) + ")"
+                                   " order by table_name, ordinal_position",
+                            (db, *self.LOB_TYPES)):
+            if not self.hop.excluded(db, str(t)):
+                cols.setdefault(str(t), []).append(str(c))
+        files = self._file_sizes(db) if cols else {}
+        # a compressed table's file is no bound on its rows: measured, an
+        # 8 MiB value in a ROW_FORMAT=COMPRESSED table left a 73,728-byte
+        # file. Page and column compression are read as rows too.
+        if files:
+            for (t,) in self._q(
+                    "src", "select table_name from information_schema.tables"
+                           " where table_schema = %s and (row_format ="
+                           " 'Compressed' or lower(create_options) like"
+                           " '%%compress%%') union select table_name from"
+                           " information_schema.columns where table_schema"
+                           " = %s and lower(column_type) like"
+                           " '%%compressed%%'", (db, db)):
+                files.pop(str(t), None)
+        mariadb = self._brands()[0].name == "mariadb"
+        out = []
+        # the largest files first: they are the likeliest to hold the row
+        # that does not fit, and the time may run out before the rest
+        for t in sorted(cols, key=lambda t: -files.get(t, 1 << 62)):
+            if files.get(t) and files[t] < fits_under:
+                out.append((t, "bounded", files[t]))
+                continue
+            left = deadline - time.monotonic()
+            if left <= 0:
+                out.append((t, "unknown", None))
+                continue
+            size = "+".join(f"coalesce(length(`{c.replace('`', '``')}`), 0)"
+                            for c in cols[t])
+            table = f"`{db.replace('`', '``')}`.`{t.replace('`', '``')}`"
+            sql = (f"set statement max_statement_time = {left:.3f} for"
+                   f" select max({size}) from {table}" if mariadb else
+                   f"select /*+ MAX_EXECUTION_TIME({max(int(left * 1000), 1)})"
+                   f" */ max({size}) from {table}")
+            try:
+                got = self._q("src", sql)
+            except Exception as e:
+                if "interrupted" not in str(e).lower() and \
+                        "execution time" not in str(e).lower():
+                    raise
+                out.append((t, "unknown", None))
+                continue
+            out.append((t, "measured", int(got[0][0] or 0)))
+        return out
+
+    def _packet_to_set(self, largest):
+        """The target's `max_allowed_packet` that carries a row whose large
+        columns are `largest` bytes: twice that, since a loader escapes
+        binary values and a value of zero bytes comes out twice as long
+        (measured: an 8 MiB value of zero bytes stopped a load a 9 MiB
+        packet carried in letters), plus the rest of its statement, in
+        whole MiB, at most the ceiling."""
+        mib = 1024 * 1024
+        want = 2 * largest + self.PACKET_MARGIN
+        return min(-(-want // mib) * mib, self.PACKET_CEILING)
+
+    def _packet_items(self):
+        """Does the largest row on the source fit the target's
+        `max_allowed_packet`.
+
+        Measured on 8.4: a row whose value was 8 MiB, loaded into a target
+        with a 4 MiB packet, stopped the copy with `Lost connection` and
+        nothing else - no word of the packet, the table emptied for the
+        load and left empty. The largest row is read per table, only its
+        large columns and only where the table's file on disk is big
+        enough to hold such a row, within `lob_scan_seconds` (default 60)
+        for the whole source; what the time did not reach is said.
+        """
+        item = "largest row against the target's max_allowed_packet"
+        try:
+            limit = int(self._q("dst", "select @@global.max_allowed_packet"
+                                )[0][0])
+        except Exception as e:
+            return [{"level": "warn", "scope": "instance", "item": item,
+                     "detail": "could not read the target's"
+                               f" max_allowed_packet: {str(e)[-90:]} -"
+                               " unknown, not clean"}]
+        deadline = time.monotonic() + float(
+            self.hop.options.get("lob_scan_seconds", 60))
+        how = ("set persist max_allowed_packet = {} on the target (in the"
+               " parameter group on a managed service)")
+        items = []
+        for db in self.databases():
+            def add(level, detail):
+                items.append({"level": level, "scope": db, "item": item,
+                              "detail": detail})
+            try:
+                sizes = self._row_sizes(
+                    db, (limit - self.PACKET_MARGIN) / 2, deadline)
+            except Exception as e:
+                add("warn", f"could not size the rows: {str(e)[-90:]} -"
+                            " unknown, not clean")
+                continue
+            if not sizes:
+                continue
+            measured = sorted(((n, t) for t, k, n in sizes
+                               if k == "measured"), reverse=True)
+            unknown = [t for t, k, _ in sizes if k == "unknown"]
+            largest = measured[0][0] if measured else 0
+            over = [(n, t) for n, t in measured if n + 65536 > limit]
+            tight = [(n, t) for n, t in measured
+                     if (n, t) not in over
+                     and 2 * n + self.PACKET_MARGIN > limit]
+            said = ", ".join(f"{t} {n:,} bytes"
+                             for n, t in (over or tight)[:4])
+            if over:
+                add("fail", f"{said}: larger than the target's"
+                            f" max_allowed_packet of {limit:,}, and the"
+                            " copy stops on such a row with a lost"
+                            " connection - "
+                            + how.format(self._packet_to_set(largest)))
+            elif tight:
+                add("warn", f"{said}: within the target's"
+                            f" max_allowed_packet of {limit:,}, but a"
+                            " binary value can double once escaped for"
+                            " the load - "
+                            + how.format(self._packet_to_set(largest)))
+            if unknown:
+                add("warn", f"{len(unknown)} tables with large columns not"
+                            f" measured within lob_scan_seconds:"
+                            f" {', '.join(unknown[:5])}"
+                            + (" ..." if len(unknown) > 5 else "")
+                            + " - unknown, not clean")
+            if not (over or tight or unknown):
+                add("pass", f"{len(sizes)} tables with large columns; the"
+                            " largest row"
+                            + (f" measured is {largest:,} bytes" if measured
+                               else "s are bounded by their files on disk")
+                            + f", within the target's {limit:,} even"
+                              " escaped")
+        return items
+
+    def why_it_stopped(self, message):
+        """A load that loses its connection says nothing else; a row
+        larger than the target's packet is the cause measured, so it is
+        looked for."""
+        if "lost connection" not in str(message).lower():
+            return ""
+        try:
+            items = self._packet_items()
+        except Exception:
+            return ""
+        hit = [i for i in items if i["level"] in ("fail", "warn")
+               and "max_allowed_packet =" in i["detail"]]
+        return (f"The likely cause, in {hit[0]['scope']}: {hit[0]['detail']}."
+                if hit else "")
+
     def rows_present(self, db, tables):
         ddb = self._d("dst", db)
         got = set()
@@ -1410,8 +1892,9 @@ class MySQLEngine(Engine):
         try:
             names = [r[0] for r in self._q(
                 "src", "select table_name from information_schema.tables"
-                       " where table_schema = %s and table_type = 'BASE TABLE'"
+                       " where table_schema = %s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                        " order by 1", (db,))]
+            there = set(self._all_tables("dst", db))
         except Exception:
             return None
         empty = []
@@ -1419,15 +1902,18 @@ class MySQLEngine(Engine):
             try:
                 has_src = bool(self._q("src", "select 1 from"
                                        f" {self._scope('src', db, t)} limit 1"))
-                has_dst = bool(self._q("dst", "select 1 from"
-                                       f" {self._scope('dst', db, t)} limit 1"))
+                # a table the target does not have received nothing: asking
+                # it anyway failed, and the guard gave up on the whole move
+                has_dst = t in there and bool(self._q(
+                    "dst", "select 1 from"
+                           f" {self._scope('dst', db, t)} limit 1"))
             except Exception:
                 return None
             if has_src and not has_dst:
                 empty.append(t)
         return empty
 
-    def settle_target(self, db):
+    def settle_target(self, db, from_source=True):
         """`ANALYZE TABLE` every table that was just loaded.
 
         Measured on MySQL 8: after loading 50,000 rows the stored estimate
@@ -1439,7 +1925,7 @@ class MySQLEngine(Engine):
         try:
             tables = [r[0] for r in self._q(
                 "dst", "select table_name from information_schema.tables"
-                       " where table_schema = %s and table_type = 'BASE TABLE'"
+                       " where table_schema = %s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                        " order by 1", (ddb,))]
         except Exception as e:
             return f"could not list {ddb} to analyze: {str(e)[:80]}"
@@ -1569,7 +2055,7 @@ class MySQLEngine(Engine):
                                 " on t.table_schema = c.table_schema"
                                 " and t.table_name = c.table_name"
                                 " where c.table_schema = %s"
-                                " and t.table_type = 'BASE TABLE'"
+                                " and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                                 " and c.table_name not like 'migkit%%'"
                                 f" and c.data_type in ({place})"
                                 " order by 1, 2",
@@ -1667,7 +2153,7 @@ class MySQLEngine(Engine):
         # guardrails). Check the source tables that are about to be migrated.
         nopk = [r[0] for r in self._q("src",
                 "select t.table_name from information_schema.tables t"
-                " where t.table_schema=%s and t.table_type='BASE TABLE'"
+                " where t.table_schema=%s and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                 " and t.table_name not like 'migkit%%'"
                 " and not exists (select 1 from"
                 " information_schema.table_constraints tc"
@@ -1685,35 +2171,7 @@ class MySQLEngine(Engine):
             res.append(Result("deep", f"{db} keys", "ok",
                               "every table has a pk or unique index"))
 
-        # loads run with foreign_key_checks=0, so target orphans are possible
-        rows = self._q("dst",
-                       "select constraint_name, table_name, column_name,"
-                       " referenced_table_name, referenced_column_name"
-                       " from information_schema.key_column_usage"
-                       " where table_schema=%s"
-                       " and referenced_table_name is not null"
-                       " order by constraint_name, ordinal_position", (ddb,))
-        fks = {}
-        for con, t, c, rt, rc in rows:
-            fk = fks.setdefault((con, t, rt), ([], []))
-            fk[0].append(c)
-            fk[1].append(rc)
-        orphans = []
-        for (con, t, rt), (cols, rcols) in sorted(fks.items()):
-            nn = " and ".join(f"c.`{c}` is not null" for c in cols)
-            join = " and ".join(f"p.`{r}` = c.`{c}`"
-                                for c, r in zip(cols, rcols))
-            n = self._q("dst", f"select count(*) from `{ddb}`.`{t}` c"
-                               f" where {nn} and not exists"
-                               f" (select 1 from `{ddb}`.`{rt}` p"
-                               f" where {join})")[0][0]
-            if n:
-                orphans.append(f"{t}.{con}: {n} orphan rows")
-        res.append(Result("deep", f"{db} fk", "diff" if orphans else "ok",
-                          "; ".join(orphans[:5]) if orphans
-                          else f"{len(fks)} fks scanned, 0 orphan rows", "",
-                          "reload the child rows or delete orphans"
-                          if orphans else ""))
+        res.append(self._fk_orphans(db))
 
         colq = ("select concat(table_name, '.', column_name), column_type,"
                 " is_nullable, coalesce(column_default, ''),"
@@ -2065,7 +2523,97 @@ class MySQLEngine(Engine):
         res += self._deep_unenforced_checks(db, ddb)
         res += self._check_grants(db)
         res += self._deep_ownership(db, ddb)
+        res += [r for r in (self.set_aside(db),) if r]
         return res
+
+    def _fk_orphans(self, db):
+        """Rows on the target whose foreign key points at nothing: loads run
+        with foreign_key_checks=0, so the key never looked."""
+        ddb = self._d("dst", db)
+        rows = self._q("dst",
+                       "select constraint_name, table_name, column_name,"
+                       " referenced_table_name, referenced_column_name"
+                       " from information_schema.key_column_usage"
+                       " where table_schema=%s"
+                       " and referenced_table_name is not null"
+                       " order by constraint_name, ordinal_position", (ddb,))
+        fks = {}
+        for con, t, c, rt, rc in rows:
+            fk = fks.setdefault((con, t, rt), ([], []))
+            fk[0].append(c)
+            fk[1].append(rc)
+        orphans = []
+        for (con, t, rt), (cols, rcols) in sorted(fks.items()):
+            if self.hop.excluded(db, str(t)):
+                continue
+            nn = " and ".join(f"c.`{c}` is not null" for c in cols)
+            join = " and ".join(f"p.`{r}` = c.`{c}`"
+                                for c, r in zip(cols, rcols))
+            n = self._q("dst", f"select count(*) from `{ddb}`.`{t}` c"
+                               f" where {nn} and not exists"
+                               f" (select 1 from `{ddb}`.`{rt}` p"
+                               f" where {join})")[0][0]
+            if n:
+                orphans.append(f"{t}.{con}: {n} orphan rows")
+        return Result("deep", f"{db} fk", "diff" if orphans else "ok",
+                      "; ".join(orphans[:5]) if orphans
+                      else f"{len(fks)} fks scanned, 0 orphan rows", "",
+                      "reload the child rows or delete orphans"
+                      if orphans else "")
+
+    def create_missing(self, db, log=None):
+        """The bulk path's own: each missing table from the source's `show
+        create table`, and the database when it is not there at all."""
+        from .. import movers
+        movers._my_create_missing(self.hop, db, log)
+
+    def set_aside(self, db):
+        """The target's triggers a load took off and has not put back.
+
+        Held by a load still running - a change tail, for as long as it
+        runs - they are off on purpose and go back when it stops. Held by
+        one whose process is gone, they are simply missing: the
+        application's cutover onto this target would run without them, and
+        nothing else in the check compares a target's own triggers.
+        """
+        from .. import movers
+        held, lost, unread = [], [], []
+        there = None
+        for path, alive, defs in movers.triggers_set_aside(self.hop, db):
+            if defs is None:
+                unread.append(str(path))
+            elif alive:
+                held += sorted(defs)
+            else:
+                if there is None:
+                    there = {str(r[0]) for r in self._q(
+                        "dst", "select trigger_name from information_schema"
+                               ".triggers where trigger_schema = %s",
+                        (self._d("dst", db),))}
+                lost += [(n, str(path)) for n in sorted(defs)
+                         if n not in there]
+        scope = f"{db} triggers set aside"
+        if lost or unread:
+            said = []
+            if lost:
+                said.append(f"{len(lost)} triggers a load took off the"
+                            " target and never put back: "
+                            + ", ".join(n for n, _ in lost[:5])
+                            + " - definitions in "
+                            + ", ".join(sorted({p for _, p in lost})))
+            if unread:
+                said.append("a record of triggers taken off cannot be"
+                            " read: " + ", ".join(unread))
+            return Result("deep", scope, "diff", "; ".join(said), "",
+                          "the next `migkit move` into this database puts"
+                          " them back; or run the statements in that file")
+        if held:
+            return Result("deep", scope, "ok",
+                          f"{len(held)} triggers are off the target while"
+                          " a migkit load runs into it ("
+                          + ", ".join(held[:5]) + "); they go back when it"
+                          " stops")
+        return None
 
     OWNED = (("views", "table_schema", "table_name"),
              ("routines", "routine_schema", "routine_name"),
@@ -2407,6 +2955,86 @@ class MySQLEngine(Engine):
                    r"\1<db>\2", t, flags=re.I)
         return t.rstrip(";")
 
+    def _events(self, side, db):
+        """{event: (time_zone, sql_mode, CREATE EVENT)} as the server shows
+        each one."""
+        name = self._d(side, db)
+        out = {}
+        for (ev,) in self._q(side, "select event_name from"
+                                   " information_schema.events where"
+                                   " event_schema = %s", (name,)):
+            row = self._q(side, f"show create event {self._my_ident(name)}"
+                                f".{self._my_ident(ev)}")[0]
+            # Event, sql_mode, time_zone, Create Event, ...
+            out[str(ev)] = (str(row[2]), str(row[1]), str(row[3]))
+        return out
+
+    @staticmethod
+    def _event_body(create):
+        """An event's definition without what the move changes on purpose:
+        who defined it, and whether it is switched on."""
+        text = re.sub(r"DEFINER=\S+\s+", "", create)
+        return re.sub(r"\s(ENABLE|DISABLE( ON (SLAVE|REPLICA))?)\s+(?=(COMMENT|DO)\b)",
+                      " ", text)
+
+    @staticmethod
+    def _disabled(create):
+        """The same CREATE EVENT, switched off: an event running on the
+        target while the move still carries rows rewrites them under it."""
+        text = re.sub(r"\s(ENABLE|DISABLE( ON (SLAVE|REPLICA))?)\s+(?=(COMMENT|DO)\b)",
+                      " DISABLE ", create, count=1)
+        return text if " DISABLE " in text else text.replace(" DO ",
+                                                              " DISABLE DO ",
+                                                              1)
+
+    def _event_repair(self, db):
+        """Create the events the target lacks, and redefine the ones that
+        differ, switched off until cutover.
+
+        The schema check names a missing event, and the tool that writes
+        the rest of the fix DDL does not model events: measured, it called
+        a pair clean where the target had no event at all, so the event was
+        found and never made. Each is created in the time zone and sql_mode
+        the source defined it in, since both change what it does."""
+        try:
+            src, dst = self._events("src", db), self._events("dst", db)
+        except Exception:
+            return None
+        stmts, undo, made, redone = [], [], [], []
+
+        def create(ev):
+            tz, mode, ddl = ev
+            return [f"SET SESSION time_zone = {self._quote_literal(tz)}",
+                    f"SET SESSION sql_mode = {self._quote_literal(mode)}",
+                    ddl]
+        for name in sorted(src):
+            q = self._my_ident(name)
+            if name not in dst:
+                stmts += create((src[name][0], src[name][1],
+                                 self._disabled(src[name][2])))
+                undo.append(f"DROP EVENT IF EXISTS {q}")
+                made.append(name)
+            elif self._event_body(src[name][2]) != \
+                    self._event_body(dst[name][2]):
+                stmts += [f"DROP EVENT {q}"] + create(
+                    (src[name][0], src[name][1],
+                     self._disabled(src[name][2])))
+                undo += [f"DROP EVENT IF EXISTS {q}"] + create(dst[name])
+                redone.append(name)
+        if not stmts:
+            return None
+        said = []
+        if made:
+            said.append(f"{len(made)} events the target lacks:"
+                        f" {', '.join(made[:5])}")
+        if redone:
+            said.append(f"{len(redone)} events defined differently:"
+                        f" {', '.join(redone[:5])}")
+        return RepairAction(db, "events", stmts, undo,
+                            "; ".join(said) + " - created switched off;"
+                            " switch them on at cutover (ALTER EVENT ..."
+                            " ENABLE)")
+
     def _constraint_repair(self, db):
         """Turn NOT ENFORCED check constraints back on.
 
@@ -2552,6 +3180,9 @@ class MySQLEngine(Engine):
             c = self._constraint_repair(db)
             if c:
                 actions.append(c)
+            ev = self._event_repair(db)
+            if ev:
+                actions.append(ev)
         if kind in ("rows", "all"):
             d = self.hop.report_dir(db)
             tables = sorted({f.name.split(".")[0][len("data-"):]
@@ -2572,27 +3203,123 @@ class MySQLEngine(Engine):
                 stmts = [f"resync pks for {t} ({', '.join(counts)})"]
                 if which("pt-table-sync"):
                     s, tg = self.hop.source, self.hop.target
-                    p = run(["pt-table-sync", "--print",
-                             f"h={s.host},P={s.port},u={s.user},"
-                             f"p={s.password},D={db},t={t}",
-                             f"h={tg.host},P={tg.port},u={tg.user},"
-                             f"p={tg.password},D={self._d('dst', db)}"],
-                            check=False, timeout=300)
+                    from ..movers import client_defaults
+                    with client_defaults(s, tg) as (fs, ft):
+                        p = run(["pt-table-sync", "--print",
+                                 f"h={s.host},P={s.port},u={s.user},"
+                                 f"F={fs},D={db},t={t}",
+                                 f"h={tg.host},P={tg.port},u={tg.user},"
+                                 f"F={ft},D={self._d('dst', db)}"],
+                                check=False, timeout=300)
                     sql = [l for l in p.stdout.splitlines()
                            if l and not l.startswith("#")]
                     if sql:
                         stmts += [f"  {l}" for l in sql[:10]]
                         if len(sql) > 10:
-                            stmts.append(f"  ... {len(sql) - 10} more (pt-table-sync)")
+                            stmts.append(f"  ... {len(sql) - 10} more")
                 actions.append(RepairAction(
                     db, "rows", stmts,
                     [], f"{t}: delete extra/changed on target (saved to undo"
                         " first), reinsert from source"))
+            actions += self._mapped_repairs(db, kind)
         if kind in ("schema", "all"):
             act = self._schema_repair_action(db)
             if act:
                 actions.append(act)
         return actions
+
+    def _target_client(self, physical, sql):
+        """Run a script on the target's database `physical` through the
+        client, which handles routine and trigger bodies (DELIMITER). The
+        password in the environment, not on the command line, where every
+        process listing on the machine could read it."""
+        tg = self.hop.target
+        return run(["mysql", "-h", tg.host, "-P", str(tg.port),
+                    "-u", tg.user, physical], input=sql,
+                   env={"MYSQL_PWD": tg.password})
+
+    def rehearse(self, db, action):
+        """Run a schema fix and then its undo on a scratch copy of the
+        target's schema, before either goes near the target itself - as
+        PostgreSQL's does, on a database made for it on the target's own
+        server and dropped afterwards.
+
+        MySQL runs DDL outside any transaction, so a fix that fails part of
+        the way through on the target is left half applied there. Found on
+        the copy first, it is not applied at all. Returns (usable,
+        sentence).
+        """
+        if action.kind != "schema":
+            return True, ""
+        import difflib
+        import re as _re
+        scratch = _re.sub(r"[^a-z0-9_]", "_",
+                          f"migkit_rehearsal_{self.hop.name}".lower())[:64]
+        q = self._quote_ident(scratch)
+        try:
+            self._q("dst", f"drop database if exists {q}")
+            cs = self._q("dst", "select default_character_set_name,"
+                                " default_collation_name from"
+                                " information_schema.schemata"
+                                " where schema_name = %s",
+                         (self._d("dst", db),))
+            self._q("dst", f"create database {q}"
+                           + (f" character set {cs[0][0]} collate {cs[0][1]}"
+                              if cs else ""))
+        except Exception as e:
+            return True, ("the undo was not rehearsed: a scratch database"
+                          " could not be made on the target ("
+                          + str(e).strip().splitlines()[-1][:100] + ")")
+        try:
+            try:
+                ep = self.hop.target
+                copy = run(["mysqldump", "-h", ep.host, "-P", str(ep.port),
+                            "-u", ep.user, "--no-data", "--routines",
+                            "--triggers", "--events", "--skip-comments",
+                            "--column-statistics=0", self._d("dst", db)],
+                           env={"MYSQL_PWD": ep.password})
+                self._target_client(scratch, "set foreign_key_checks = 0;\n"
+                                    + copy.stdout)
+            except Exception as e:
+                return True, ("the undo was not rehearsed: the target's"
+                              " schema could not be copied ("
+                              + str(e).strip().splitlines()[-1][:100] + ")")
+            before = self._dump_schema("dst", db, physical=scratch)
+            try:
+                self._target_client(scratch, "\n".join(action.statements)
+                                    + "\n")
+            except Exception as e:
+                return False, ("the fix fails on a copy of the target's"
+                               " schema, so it was not applied: "
+                               + str(e).strip().splitlines()[-1][:160])
+            if not action.undo:
+                return True, ("the fix applies on a copy of the target's"
+                              " schema; it has no undo")
+            try:
+                self._target_client(scratch, "\n".join(action.undo) + "\n")
+            except Exception as e:
+                return True, ("the undo FAILS on a copy of the target's"
+                              " schema - keep a backup before applying: "
+                              + str(e).strip().splitlines()[-1][:160])
+            after = self._dump_schema("dst", db, physical=scratch)
+            changed = [l for l in difflib.unified_diff(
+                before.splitlines(), after.splitlines(), lineterm="")
+                if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+            if changed:
+                (self.hop.report_dir(db) / "rehearsal.diff").write_text(
+                    "\n".join(changed) + "\n")
+                return True, (f"the undo does NOT return the schema exactly"
+                              f" ({len(changed)} lines differ, in"
+                              " rehearsal.diff) - keep a backup before"
+                              " applying")
+            return True, ("rehearsed on a copy of the target's schema: the"
+                          " fix applies, and the undo returns the schema"
+                          " exactly")
+        finally:
+            try:
+                self._q("dst", f"drop database if exists {q}")
+            except Exception:
+                pass
 
     def _schema_repair_action(self, db):
         """atlas-generated DDL to align the target's objects (columns,
@@ -2610,6 +3337,8 @@ class MySQLEngine(Engine):
                             " saved to undo)")
 
     def apply(self, db, action):
+        if action.by == "pair":
+            return self.columns_pair().apply(db, action)
         if action.kind == "resnapshot":
             self._apply_resnapshot(action)
             return
@@ -2623,22 +3352,37 @@ class MySQLEngine(Engine):
             finally:
                 conn.close()
             return
+        if action.kind == "events":
+            # one statement at a time over one session: an event's body is
+            # full of semicolons, and the SETs before each CREATE belong to
+            # the session that runs it
+            conn = self._conn("dst")
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"use {self._my_ident(self._d('dst', db))}")
+                    for s in action.statements:
+                        cur.execute(s)
+            finally:
+                conn.close()
+            return
         if action.kind in ("schema", "grants", "constraints"):
             # mysql CLI handles routine/trigger bodies (DELIMITER) correctly
             tg = self.hop.target
             ddl = "\n".join(action.statements) + "\n"
             if action.kind == "grants":
                 ddl += "flush privileges;\n"
-            run(["mysql", "-h", tg.host, "-P", str(tg.port), "-u", tg.user,
-                 f"-p{tg.password}", self._d("dst", db)], input=ddl)
+            self._target_client(self._d("dst", db), ddl)
             return
         if action.kind != "rows":
             # the same trap the postgres side had: an unhandled kind used to
             # fall through to the row path and be read as a table name
             raise RuntimeError(f"no way to apply a {action.kind!r} repair")
         t = action.statements[0].split()[3]
-        self._apply_rows_native(db, t,
-                                getattr(self, "_undo_dir", None))
+        # the repaired rows are the source's, and the target's triggers
+        # would rewrite them as they land, as they would a load's
+        with self.load_window(db, None, {t}):
+            self._apply_rows_native(db, t,
+                                    getattr(self, "_undo_dir", None))
 
     @staticmethod
     def _drill_keys(path):
@@ -2703,6 +3447,34 @@ class MySQLEngine(Engine):
         # keep-target preserves target-changed rows: fix only missing/extra
         if self.hop.options.get("on_conflict") == "keep-target":
             changed = []
+        col = self.newer_wins_column()
+        if col and changed:
+            have = {side: {str(r[0]).lower() for r in self._q(
+                        side, "select column_name from information_schema"
+                              ".columns where table_schema = %s"
+                              " and table_name = %s",
+                        (db if side == "src" else ddb, t))}
+                    for side in ("src", "dst")}
+            if not all(col.lower() in h for h in have.values()):
+                raise SystemExit(
+                    f"{t}: newer_wins names {col}, and it is not on both"
+                    " sides, so which row is newer cannot be told. Nothing"
+                    " was repaired on this table.")
+            key_cond = " and ".join(f"cast(`{c}` as char) = %s" for c in pks)
+
+            def at(side, keys):
+                name = db if side == "src" else ddb
+                out = {}
+                for k in keys:
+                    got = self._q(side, f"select `{col}` from `{name}`.`{t}`"
+                                        f" where {key_cond}", k)
+                    if got:
+                        out[self._key_id(k)] = got[0][0]
+                return out
+            changed, kept = self._keep_the_newer(t, changed, at)
+            if kept:
+                log_kept = d / f"data-{t}.kept-newer"
+                log_kept.write_text("".join(f"{k}\n" for k in kept))
         to_delete = extra + changed
         to_copy = missing + changed
         cond = " and ".join(f"cast(`{c}` as char) = %s" for c in pks)
@@ -2776,13 +3548,15 @@ class MySQLEngine(Engine):
         vals = ", ".join("'" + str(k[0]).replace("'", "''") + "'"
                          for k in touched)
         s, tg = self.hop.source, self.hop.target
-        p = run(["pt-table-sync", "--print",
-                 "--where", f"`{pks[0]}` in ({vals})",
-                 f"h={s.host},P={s.port},u={s.user},p={s.password},"
-                 f"D={db},t={t}",
-                 f"h={tg.host},P={tg.port},u={tg.user},p={tg.password},"
-                 f"D={self._d('dst', db)}"],
-                check=False, timeout=600)
+        from ..movers import client_defaults
+        with client_defaults(s, tg) as (fs, ft):
+            p = run(["pt-table-sync", "--print",
+                     "--where", f"`{pks[0]}` in ({vals})",
+                     f"h={s.host},P={s.port},u={s.user},F={fs},"
+                     f"D={db},t={t}",
+                     f"h={tg.host},P={tg.port},u={tg.user},F={ft},"
+                     f"D={self._d('dst', db)}"],
+                    check=False, timeout=600)
         if p.returncode not in (0, 2):
             return None
         sql = [l for l in p.stdout.splitlines()
@@ -2839,19 +3613,61 @@ class MySQLEngine(Engine):
         sv = self._q("src", "select version()")[0][0]
         dv = self._q("dst", "select version()")[0][0]
         items.append(self._version_row(sv, dv, parts=2))
-        for name, want, lvl in (("log_bin", "ON", "fail"),
-                                ("binlog_format", "ROW", "fail"),
-                                ("binlog_row_image", "FULL", "warn")):
+        # each with the value to set, not only the verdict
+        for name, want, lvl, fix in (
+                ("log_bin", "ON", "fail",
+                 "start the server with log-bin (a restart)"),
+                ("binlog_format", "ROW", "fail",
+                 "set global binlog_format = 'ROW'"),
+                ("binlog_row_image", "FULL", "warn",
+                 "set global binlog_row_image = 'FULL'"),
+                # the change tail refuses without it - measured, the reader
+                # otherwise cannot tell a varbinary from a varchar
+                ("binlog_row_metadata", "FULL", "warn",
+                 "set global binlog_row_metadata = 'FULL'")):
             v = var("src", name)
-            add("pass" if v == want else lvl, "instance",
-                f"{name}={want} on source (CDC requirement)", v)
+            add("pass" if str(v).upper() == want else lvl, "instance",
+                f"{name}={want} on source (CDC requirement)",
+                v if str(v).upper() == want else f"{v} - {fix}")
         ret = var("src", "binlog_expire_logs_seconds")
         try:
             ok = int(ret) >= 86400
         except ValueError:
             ok = False
         add("pass" if ok else "warn", "instance",
-            "binlog retention at least 24h", ret)
+            "binlog retention at least 24h",
+            ret if ok else
+            f"{ret} - set global binlog_expire_logs_seconds = 604800, or"
+            " on RDS call mysql.rds_set_configuration('binlog retention"
+            " hours', 168)")
+        for name in ("binlog_transaction_compression", "log_bin_compress"):
+            zc = str(var("src", name)).upper()
+            # "?" is a server without it: the first is MySQL's (8.0.20 and
+            # later), the second MariaDB's
+            if zc in ("?", ""):
+                continue
+            add("pass" if zc == "OFF" else "fail", "instance",
+                f"{name}=OFF on source (the change tail cannot read"
+                " compressed rows)",
+                zc if zc == "OFF" else
+                f"{zc} - set global {name} = OFF"
+                + ("; a session can still turn it on for itself, and the"
+                   " tail stops if one does"
+                   if name == "binlog_transaction_compression" else ""))
+        sid = var("src", "server_id")
+        add("pass" if str(sid) not in ("0", "") else "fail", "instance",
+            "server_id set on source (a binlog reader needs it)",
+            sid if str(sid) not in ("0", "") else
+            f"{sid} - set global server_id = 1")
+        gm = str(var("src", "gtid_mode")).upper()
+        ge = str(var("src", "enforce_gtid_consistency")).upper()
+        # "?" is a server with no such variable (MariaDB has no
+        # gtid_mode), which is not a mismatch
+        if gm not in ("", "?", "OFF") and ge != "ON":
+            add("warn", "instance", "gtid_mode and enforce_gtid_consistency",
+                f"gtid_mode {gm} with enforce_gtid_consistency {ge} -"
+                " set global enforce_gtid_consistency = ON before relying"
+                " on GTID positions")
 
         # a long-running open transaction pins InnoDB purge and stalls CDC
         # (the target lags for as long as it stays open); flag by age
@@ -2863,6 +3679,13 @@ class MySQLEngine(Engine):
         add("pass" if age < 900 else "warn" if age < 3600 else "fail",
             "instance", "long-running transactions blocking CDC/purge",
             f"{n} open, oldest {age}s" if n else "none")
+        backlog = self.purge_backlog("src")
+        if backlog is not None:
+            add("pass" if backlog < 1_000_000 else "warn", "instance",
+                "undo the source has not purged yet",
+                f"{backlog:,} transactions in the history list - it grows"
+                " while an old snapshot stays open, and every read of a"
+                " changed row walks it")
         for db in self.databases():
             cs = self._q("src", "select default_character_set_name,"
                          " default_collation_name from"
@@ -2905,7 +3728,136 @@ class MySQLEngine(Engine):
         items += inv.rows() + inv.summary()
         items += self._mover_leftovers()
         items += self._client_tool_versions(("mysqldump", "mysql"), dv)
+        items += self._packet_items()
+        items += self._collations_unknown()
+        items += self._fork_objects()
+        items += self._scope_items()
         return items
+
+    #: what only MariaDB keeps, by how its catalogue says so: the table type
+    #: of a sequence or a system-versioned table, and the column types MySQL
+    #: has no name for
+    MARIADB_ONLY = (
+        ("sequences", "select table_schema, table_name from"
+                      " information_schema.tables where table_type ="
+                      " 'SEQUENCE'"),
+        ("system-versioned tables", "select table_schema, table_name from"
+                                    " information_schema.tables where"
+                                    " table_type = 'SYSTEM VERSIONED'"),
+        ("columns of a type MySQL does not have",
+         "select table_schema, concat(table_name, '.', column_name,"
+         " ' (', data_type, ')') from information_schema.columns where"
+         " data_type in ('uuid', 'inet4', 'inet6')"),
+    )
+
+    #: date and time types that can hold MySQL's zero date
+    ZERO_DATE_TYPES = ("date", "datetime", "timestamp")
+
+    def zero_dates(self, side, db):
+        """[(table, column, rows)] holding a date with a zero year, month or
+        day - `0000-00-00`, `2020-00-15` - which a legacy `sql_mode` lets
+        in and no other engine has. Read on this server, whose own
+        `month()` and `dayofmonth()` answer 0 for them."""
+        tables = set(self._tables(side, db))
+        cols = [(str(t), str(c)) for t, c in self._q(
+            side, "select table_name, column_name from"
+                  " information_schema.columns where table_schema = %s"
+                  " and data_type in ('date', 'datetime', 'timestamp')",
+            (self._d(side, db),)) if str(t) in tables]
+        out = []
+        q = self._quote_ident
+        for t, c in cols:
+            n = self._q(side, f"select count(*) from"
+                              f" {q(self._d(side, db))}.{q(t)} where"
+                              f" year({q(c)}) = 0 or month({q(c)}) = 0"
+                              f" or dayofmonth({q(c)}) = 0")[0][0]
+            if n:
+                out.append((t, c, int(n)))
+        return out
+
+    def _collations_unknown(self):
+        """Collations the source's tables, columns and databases use that the
+        target does not have.
+
+        Measured, MariaDB 11 into MySQL 8.4: MariaDB's default is
+        `utf8mb4_uca1400_ai_ci`, and the move stopped on `ERROR 1273:
+        Unknown collation`. MySQL 8's `utf8mb4_0900_ai_ci` into 5.7 is the
+        same shape. Which collation should stand in is a decision about how
+        the application's text sorts and compares, so it is named rather
+        than chosen."""
+        item = "collations the target does not have"
+        dbs = sorted(set(self.databases()))
+        if not dbs:
+            return []
+        marks = ", ".join(["%s"] * len(dbs))
+        try:
+            used = {str(r[0]) for r in self._q(
+                "src", "select collation_name from information_schema"
+                       f".columns where table_schema in ({marks})"
+                       " and collation_name is not null"
+                       " union select table_collation from"
+                       " information_schema.tables where table_schema in"
+                       f" ({marks}) and table_collation is not null"
+                       " union select default_collation_name from"
+                       " information_schema.schemata where schema_name in"
+                       f" ({marks})", tuple(dbs) * 3)}
+            have = {str(r[0]) for r in self._q(
+                "dst", "select collation_name from"
+                       " information_schema.collations")}
+        except Exception as e:
+            return [{"level": "warn", "scope": "instance", "item": item,
+                     "detail": "could not be read, so unknown rather than"
+                               f" none: {str(e)[:80]}"}]
+        missing = sorted(used - have)
+        if missing:
+            return [{"level": "fail", "scope": "instance", "item": item,
+                     "detail": f"{len(missing)} used in scope and unknown to"
+                               " the target, where creating a table with one"
+                               " stops the move: " + ", ".join(missing[:6])}]
+        return [{"level": "pass", "scope": "instance", "item": item,
+                 "detail": f"all {len(used)} collations in scope exist on"
+                           " the target"}]
+
+    def _fork_objects(self):
+        """What a MariaDB source holds that a MySQL target has no home for,
+        named before the move rather than found after it.
+
+        Measured on MariaDB 11 into MySQL 8.4: the move said `complete` and
+        the check read `counts OK 1 tables` over a database that held a
+        system-versioned table and a sequence as well - both were left out
+        of every list of tables, because neither is a `BASE TABLE`. A
+        system-versioned table is now carried, as a plain table with the
+        rows it holds now; its history, which the application may read
+        with `FOR SYSTEM_TIME`, has no home here. A sequence has none
+        either, and a `uuid` or `inet6` column no type of that name."""
+        src, dst = self._brands()
+        if src.name != "mariadb" or dst.name == "mariadb":
+            return []
+        dbs = set(self.databases())
+        out = []
+        for what, sql in self.MARIADB_ONLY:
+            try:
+                got = [f"{r[0]}.{r[1]}" for r in self._q("src", sql)
+                       if r[0] in dbs]
+            except Exception as e:
+                out.append({"level": "warn", "scope": "brand",
+                            "item": f"MariaDB {what}",
+                            "detail": "could not be read, so unknown rather"
+                                      f" than none: {str(e)[:80]}"})
+                continue
+            if got:
+                out.append({"level": "fail", "scope": "brand",
+                            "item": f"MariaDB {what}",
+                            "detail": f"{len(got)} with no home on"
+                                      f" {dst.label()}: "
+                                      + ", ".join(got[:6])
+                                      + (" ..." if len(got) > 6 else "")})
+        if not out:
+            out.append({"level": "pass", "scope": "brand",
+                        "item": "MariaDB-only objects",
+                        "detail": "no sequences, system-versioned tables or"
+                                  " MariaDB-only column types in scope"})
+        return out
 
     def _mover_leftovers(self):
         """What a mover added to the source and did not take away.
@@ -2962,10 +3914,11 @@ class MySQLEngine(Engine):
         "not dumped". Measured against MySQL 8 with a source holding one event
         and a target holding none: `_dump_schema` does include it (it passes
         `--events`), and the object check names it - `event 1/0 missing: ev`.
-        What does not happen is the repair. atlas, which is what writes the
-        fix DDL, reported `atlas diff clean` for that same pair: it does not
-        model MySQL events at all. So a missing event is found and never
-        fixed, and creating it is hands work.
+        What did not happen was the repair. atlas, which writes the fix
+        DDL, reported `atlas diff clean` for that same pair: it does not
+        model MySQL events at all. migkit's own schema repair makes them now
+        (`_event_repair`), switched off, so what is left by hand is
+        switching them on at cutover.
         """
         from .. import handwork
         inv = handwork.Inventory()
@@ -2978,7 +3931,7 @@ class MySQLEngine(Engine):
                 rows = self._q("src",
                     "select t.table_name from information_schema.tables t"
                     " where t.table_schema = %s"
-                    " and t.table_type = 'BASE TABLE'"
+                    " and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                     " and not exists (select 1 from information_schema"
                     ".statistics s where s.table_schema = t.table_schema"
                     " and s.table_name = t.table_name and s.non_unique = 0"
@@ -2987,7 +3940,7 @@ class MySQLEngine(Engine):
 
                 eng = self._q("src",
                     "select table_name, engine from information_schema.tables"
-                    " where table_schema = %s and table_type = 'BASE TABLE'"
+                    " where table_schema = %s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                     " and engine is not null and engine <> 'InnoDB'", (db,))
                 # MEMORY empties on restart and MyISAM has no transactions, so
                 # neither can be handed over by a consistent snapshot
@@ -2997,16 +3950,14 @@ class MySQLEngine(Engine):
                 ev = self._q("src",
                     "select event_name, status from information_schema.events"
                     " where event_schema = %s", (db,))
-                # detected by the object check, never written into the fix
-                # DDL - see this method's docstring for the measurement
-                inv.add("not-carried", db, "scheduled events (detected, but"
-                        " no tool generates the DDL to recreate them)",
-                        [r[0] for r in ev])
                 if ev:
-                    # an event enabled on the target rewrites rows while the
-                    # sync is still running - the same hazard as a TTL index
+                    # the schema repair makes them switched off
+                    # (`_event_repair`): one enabled on the target rewrites
+                    # rows while the sync is still running - the same hazard
+                    # as a TTL index - so switching them on is the cutover's
                     inv.add("decide-then-apply", db,
-                            "events that must stay disabled until cutover",
+                            "events to switch on at cutover (the schema"
+                            " repair makes them switched off)",
                             [r[0] for r in ev if str(r[1]).upper() == "ENABLED"])
             except Exception as e:
                 inv.unknown("no-row-key", db, f"catalogue query failed: {e}")
@@ -3151,7 +4102,69 @@ class MySQLEngine(Engine):
             sconn.close()
             dconn.close()
 
-    def replicate_sql(self, db, copy_data=True, secret=None):
+    #: a replica follows a whole server, so one serves every database of
+    #: the hop (`_replica_filters` scopes it)
+    REPLICATES_THE_SERVER = True
+
+    def _replica_filters(self):
+        """What a native replica of this hop may write on the target, as
+        rules in the target's names: every table of the hop's databases,
+        none of the tables it excludes, and each database under the name
+        the hop maps it to.
+
+        Measured on 8.4 without them: a write into a database the hop does
+        not name arrived on the target, and so did a row for a table the
+        hop excludes - which stopped the replica on a key the target
+        already had. With them the first was not applied, and neither was
+        a DROP of the excluded table. Rules name the target's databases:
+        a rewrite is applied before them."""
+        rewrite, do, ignore = [], [], []
+        for d in self.databases():
+            tdb = self._d("dst", d)
+            if tdb != d:
+                rewrite.append((d, tdb))
+            do.append(f"{tdb}.%")
+            if not getattr(self.hop, "exclude", None):
+                continue
+            # the tables it excludes as they are named now; a table created
+            # later under an excluded pattern is not in the list
+            ignore += [f"{tdb}.{t}" for t in self._all_tables("src", d)
+                       if self.hop.excluded(d, t)]
+        return rewrite, do, ignore
+
+    def _replica_filter_sql(self, brand):
+        """The filters as the target takes them, and the lines its
+        configuration needs for them to outlive a restart. Measured: after
+        the target restarted, the replica started again by itself with no
+        filters at all - set for the channel or not."""
+        rewrite, do, ignore = self._replica_filters()
+        conf = ([f"replicate-rewrite-db = {a}->{b}" for a, b in rewrite]
+                + [f"replicate-wild-do-table = {r}" for r in do]
+                + [f"replicate-ignore-table = {r}" for r in ignore])
+        if brand == "mariadb":
+            stmts = [f"set global replicate_rewrite_db ="
+                     f" '{','.join(f'{a}->{b}' for a, b in rewrite)}';"
+                     ] if rewrite else []
+            stmts += [f"set global replicate_wild_do_table ="
+                      f" '{','.join(do)}';"]
+            if ignore:
+                stmts.append(f"set global replicate_ignore_table ="
+                             f" '{','.join(ignore)}';")
+            return stmts, conf
+        parts = []
+        if rewrite:
+            parts.append("REPLICATE_REWRITE_DB = ("
+                         + ", ".join(f"({a}, {b})" for a, b in rewrite)
+                         + ")")
+        parts.append("REPLICATE_WILD_DO_TABLE = ("
+                     + ", ".join(f"'{r}'" for r in do) + ")")
+        if ignore:
+            parts.append("REPLICATE_IGNORE_TABLE = (" + ", ".join(ignore)
+                         + ")")
+        return [f"change replication filter {', '.join(parts)}"
+                " for channel '';"], conf
+
+    def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
         """The statements that make the target a replica of the source.
 
         `secret` is the replication user's password. A plan printed for a
@@ -3169,6 +4182,24 @@ class MySQLEngine(Engine):
         coords = f"file {pos[0]} pos {pos[1]}" if pos else "unknown"
         brand = self._brands()[0].name
         gtid_on, gtid_note = self._gtid_state(brand)
+        exact = (copied or {}).get("exact")
+        if exact:
+            # the copy migkit made was a snapshot at this position, and a
+            # replica started here applies exactly what came after it -
+            # measured on 8.4 with GTID on: an insert and an update made
+            # after the dump arrived, and the replica kept running. By file
+            # and position, since the target's own GTID set does not hold
+            # the source's and would ask for everything again.
+            pos, gtid_on = (exact["log_file"], int(exact["log_pos"])), False
+            coords = (f"the position the copy of {copied['at']} was taken"
+                      f" at, file {pos[0]} pos {pos[1]}")
+        elif copied:
+            gtid_note += (
+                f"; the copy of {copied['at']} was not taken at a position"
+                " of its own, so a replica started now misses what the"
+                " source changed since, and one started earlier stops on"
+                " rows the copy already carried - move with --mode"
+                " full+cdc instead")
         src_cmds = [
             "create user if not exists 'migkit_repl'@'%'"
             f" identified by '{secret}';",
@@ -3177,7 +4208,18 @@ class MySQLEngine(Engine):
             f"alter user 'migkit_repl'@'%' identified by '{secret}';",
             "grant replication slave on *.* to 'migkit_repl'@'%';",
         ]
+        filters, conf = self._replica_filter_sql(brand)
+        keep = ("; these scope the replica to the hop and last only until"
+                " the target restarts - add them to its configuration"
+                + (" (the parameter group)" if "rds.amazonaws.com"
+                   in (t.host or "") else "")
+                + ": " + "; ".join(conf))
         if "rds.amazonaws.com" in (t.host or ""):
+            # a managed target takes filters from its parameter group only
+            filters = []
+            keep = ("; set these in the target's parameter group before"
+                    " starting it, or the replica writes every database and"
+                    " table of the source: " + "; ".join(conf))
             dst_cmds = [
                 f"call mysql.rds_set_external_source ('{s.host}', {s.port},"
                 f" 'migkit_repl', '{secret}',"
@@ -3193,15 +4235,20 @@ class MySQLEngine(Engine):
             # error, so the two are not interchangeable in either direction.
             auto = ("MASTER_USE_GTID = current_pos" if gtid_on else
                     (f"MASTER_LOG_FILE = '{pos[0]}',"
-                     f" MASTER_LOG_POS = {pos[1]}" if pos else ""))
+                     f" MASTER_LOG_POS = {pos[1]}"
+                     + (", MASTER_USE_GTID = no" if exact else "")
+                     if pos else ""))
             dst_cmds = [
                 f"change master to MASTER_HOST = '{s.host}',"
                 f" MASTER_PORT = {s.port}, MASTER_USER = 'migkit_repl',"
                 f" MASTER_PASSWORD = '{secret}', {auto};",
+                *filters,
                 "start slave;",
             ]
         else:
-            auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else                 (f"SOURCE_LOG_FILE = '{pos[0]}',"
+            auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else \
+                ((f"SOURCE_AUTO_POSITION = 0, " if exact else "")
+                 + f"SOURCE_LOG_FILE = '{pos[0]}',"
                  f" SOURCE_LOG_POS = {pos[1]}" if pos else "")
             dst_cmds = [
                 f"change replication source to SOURCE_HOST = '{s.host}',"
@@ -3209,6 +4256,7 @@ class MySQLEngine(Engine):
                 f" SOURCE_PASSWORD = '{secret}',"
                 # MySQL 8 only: MariaDB has no such option
                 f" GET_SOURCE_PUBLIC_KEY = 1, {auto};",
+                *filters,
                 "start replica;",
             ]
         stop = ["stop slave;", "reset slave all;"] if brand == "mariadb" \
@@ -3220,7 +4268,8 @@ class MySQLEngine(Engine):
                            else "show replica status"),
                 "note": f"written for {brand}; binlog now at {coords},"
                         f" {gtid_note},"
-                        " run move first then replicate from these coords"}
+                        " run move first then replicate from these coords"
+                        + keep}
 
     # `SHOW REPLICA STATUS` on MySQL 8 and `SHOW SLAVE STATUS` on MariaDB
     # answer the same facts under different column names. Asked in this
@@ -3278,6 +4327,15 @@ class MySQLEngine(Engine):
                 out.append(f"{key} {err[:160]}")
         if str(io) != "Yes" or str(sq) != "Yes":
             out.append("NOT replicating")
+        # the filters are gone after a restart of the target, and the
+        # replica starts again without them
+        _, do, _ = self._replica_filters()
+        have = str(r.get("Replicate_Wild_Do_Table") or "")
+        missing = [x for x in do if x not in have.split(",")]
+        if missing:
+            out.append(f"NOT limited to this hop: no rule for"
+                       f" {', '.join(missing)} - it writes every database and"
+                       " table of the source")
         return ", ".join(out)
 
     def src_lsn(self, db):
@@ -3371,19 +4429,16 @@ class MySQLEngine(Engine):
         ]
 
     def migration_pair(self, db):
-        from urllib.parse import quote
+        from ..movers import schema_diff
         if not which("atlas"):
             return None, None
-        s, t = self.hop.source, self.hop.target
-        su = (f"mysql://{s.user}:{quote(s.password, safe='')}"
-              f"@{s.host}:{s.port}/{db}")
-        tu = (f"mysql://{t.user}:{quote(t.password, safe='')}"
-              f"@{t.host}:{t.port}/{self._d('dst', db)}")
+        su, tu = self._schema_urls(db)
+        # a mapped table's schema is the mapping's, and aligning it with the
+        # source would put back the columns the hop drops
+        excludes = self._schema_excludes(db)
 
         def diff(a, b):
-            p = run(["atlas", "schema", "diff", "--from", a, "--to", b,
-                     "--exclude", "migkit_changelog"],
-                    check=False, timeout=180)
+            p = schema_diff(a, b, excludes)
             text = p.stdout.strip()
             if p.returncode or "Schemas are synced" in text:
                 return ""

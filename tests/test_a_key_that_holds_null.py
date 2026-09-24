@@ -103,7 +103,10 @@ def test_the_other_engines_take_their_key_from_a_constraint():
                        ("mysql", "PRIMARY"),
                        ("mongodb", "_id"),
                        ("sqlite", "table_info")):
-        src = inspect.getsource(_class_for(name).neutral_key)
+        cls = _class_for(name)
+        src = inspect.getsource(cls.neutral_key)
+        # MySQL's reads the key through the one query its own paths use
+        src += getattr(cls, "PK_SQL", "")
         assert must in src, (name, src)
 
 

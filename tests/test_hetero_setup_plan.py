@@ -78,7 +78,10 @@ def test_a_pair_with_no_row_shaped_path_says_so_rather_than_listing_steps():
 def test_the_mysql_to_postgres_plan_still_reads_as_it_did():
     text = _joined(_plan("mysql", "postgres"))
     assert "migkit convert-schema demo --db shop" in text
-    assert "sqlglot DDL conversion" in text
+    assert "the target's tables from the source's" in text
+    # migkit's own steps, not the programs it wraps
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
+    assert not [t for t in TOOLS + ("sqlglot",) if t in text.lower()], text
     assert "resumable chunked data copy" in text
     assert "migkit move demo --mode cdc --go" in text
 

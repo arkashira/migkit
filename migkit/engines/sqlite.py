@@ -42,6 +42,21 @@ class SQLiteEngine(NeutralCopier, Engine):
         self._register(conn)
         return conn
 
+    def table_facts(self, side, db):
+        """Rows counted outright - a SQLite file keeps no estimate, and a
+        count of a local file is cheap - and whether there is a key."""
+        out = {}
+        for t in self._tables(side):
+            rows = self._q(side, f'select count(*) from "{t}"')[0][0]
+            key = any(r[5] for r in self._q(side,
+                                            f'pragma table_info("{t}")'))
+            out[t] = {"rows": int(rows), "key": bool(key)}
+        return out
+
+    def run_rule(self, side, db, sql):
+        # the file is opened read-only, so a rule cannot write to it
+        return self._q(side, sql)
+
     def _q(self, side, sql):
         conn = self._open_ro(side)
         try:
@@ -186,6 +201,18 @@ class SQLiteEngine(NeutralCopier, Engine):
     def neutral_tables(self, side, db):
         return self._tables(side)
 
+    def column_catalog(self, side, db):
+        """{table: [(column, type), ...]} in one query."""
+        out = {}
+        for t, c, ty in self._q(side,
+                                "select m.name, p.name, p.type"
+                                " from sqlite_master m,"
+                                " pragma_table_info(m.name) p"
+                                " where m.type = 'table'"
+                                " and m.name not like 'sqlite_%'"):
+            out.setdefault(str(t), []).append((str(c), str(ty)))
+        return {t: sorted(cols) for t, cols in out.items()}
+
     def neutral_columns(self, side, db, table):
         return [(r[1], r[2]) for r in
                 self._q(side, f'pragma table_info("{table}")')]
@@ -194,17 +221,19 @@ class SQLiteEngine(NeutralCopier, Engine):
         return [r[1] for r in
                 self._q(side, f'pragma table_info("{table}")') if r[5]]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
-        where = ""
+        resume = ""
         if key and after is not None:
             places = ", ".join(repr(v) if not isinstance(v, str)
                                else "'" + v.replace("'", "''") + "'"
                                for v in after)
             keys = ", ".join(f'"{k}"' for k in key)
-            where = f" where ({keys}) > ({places})"
+            resume = f"({keys}) > ({places})"
+        where = self._where(where, resume)
         order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
         cap = f" limit {int(limit)}" if key else ""
         rows = [list(r) for r in
@@ -217,12 +246,12 @@ class SQLiteEngine(NeutralCopier, Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
-    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
-        import sqlite3
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys,
+                            where=None):
         if not key or not keys:
             return {}
         sql, args = self._by_key_query(f'"{table}"', columns, key, list(keys),
-                                       lambda n: f'"{n}"', "?")
+                                       lambda n: f'"{n}"', "?", where)
         conn = self._reader(side)
         try:
             rows = [list(r) for r in conn.execute(sql, args).fetchall()]
@@ -259,22 +288,76 @@ class SQLiteEngine(NeutralCopier, Engine):
             conn.close()
         return len(rows)
 
-    def neutral_empty(self, side, db, table):
+    def neutral_empty(self, side, db, table, where=None):
         import sqlite3
         self._target_only(side, "empty a table")
         conn = sqlite3.connect(self._path(side))
         try:
             gone = conn.execute(
-                f'delete from "{self.local_table(table)}"').rowcount
+                f'delete from "{self.local_table(table)}"'
+                + self._where(where)).rowcount
             conn.commit()
         finally:
             conn.close()
         return gone
 
+    SQL_DIALECT = "sqlite"
+
+    def neutral_column_rules(self, side, db, table):
+        rows = self._q(side, f'pragma table_info("{table}")')
+        keys = [r for r in rows if r[5]]
+        out = {}
+        for cid, name, typ, notnull, default, pk in rows:
+            out[str(name)] = {
+                "null": not notnull and not pk,
+                "default": None if default is None else str(default),
+                # one INTEGER key is the row's own number here
+                "identity": bool(pk) and len(keys) == 1
+                and str(typ).upper() == "INTEGER"}
+        return out
+
+    def default_works(self, side, db, expr, typ=None):
+        try:
+            self._q(side, f"select ({expr})")
+            return True
+        except Exception:
+            return False
+
+    def neutral_indexes(self, side, db, table):
+        out = []
+        for _, name, unique, origin, partial in self._q(
+                side, f'pragma index_list("{table}")'):
+            if origin == "pk":
+                continue
+            cols = [r[2] for r in self._q(side,
+                                          f'pragma index_info("{name}")')]
+            out.append((str(name), bool(unique),
+                        [str(c) for c in cols if c is not None],
+                        not partial and None not in cols))
+        return sorted(out)
+
+    def execute_ddl(self, side, db, sql):
+        import sqlite3
+        self._target_only(side, "change a schema")
+        conn = sqlite3.connect(self._path(side))
+        try:
+            conn.execute(sql)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        return (f'create {"unique " if unique else ""}index "{name}"'
+                f' on "{table}" (' + ", ".join(f'"{c}"' for c in columns)
+                + ")")
+
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
-        defs = [f'"{n}" {canon.ddl_type("sqlite", c, w)}'
-                for n, c, w in columns]
+        defs = [f'"{col[0]}" {canon.ddl_type("sqlite", col[1], col[2])}'
+                + self._column_tail(col[3] if len(col) > 3 else None,
+                                    "sqlite")
+                for col in columns]
         if key:
             defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
                         + ")")
@@ -338,11 +421,11 @@ class SQLiteEngine(NeutralCopier, Engine):
         finally:
             conn.close()
 
-    def neutral_digest(self, side, db, table, columns):
+    def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         row = canon.row_expr("sqlite", columns)
         got = self._q(side, f"select count(*), {canon.digest_expr('sqlite', row)}"
-                            f' from "{table}"')[0]
+                            f' from "{table}"' + self._where(where))[0]
         return (int(got[0]), str(got[1]))
 
     def databases(self):
@@ -467,10 +550,16 @@ class SQLiteEngine(NeutralCopier, Engine):
                                  " coalesce(sql, '') from sqlite_master"
                                  " where name not like 'sqlite_%'"
                                  " order by type, name")
-            # an excluded table's indexes and triggers go with it
+            # an excluded table's indexes and triggers go with it; a table
+            # whose columns the hop maps is compared through the mapping
             return "\n".join(f"{t} {n}\n{s};" for t, n, owner, s in rows
-                             if not self.hop.excluded("main", owner))
+                             if not self.hop.excluded("main", owner)
+                             and owner not in mapped)
 
+        mapped = {t for t in self._tables("src")
+                  if self.hop.column_rules(db, t)}
+        extra = ([r for r in self._as_pair().check_schema(db)
+                  if r.scope.split(".", 1)[-1] in mapped] if mapped else [])
         a, b = dump("src"), dump("dst")
         d = self.hop.report_dir(db)
         (d / "schema-src.sql").write_text(a)
@@ -480,13 +569,14 @@ class SQLiteEngine(NeutralCopier, Engine):
                 if l[:1] in "+-" and not l.startswith(("+++", "---"))]
         if not diff:
             return [Result("schema", db, "ok",
-                           "tables, indexes, views, triggers identical")]
+                           "tables, indexes, views, triggers identical")] \
+                + extra
         (d / "schema.diff").write_text("\n".join(diff))
         return [Result("schema", db, "diff", f"{len(diff)} changed lines",
                        str(d / "schema.diff"),
-                       "apply DDL from schema-src.sql on target")]
+                       "apply DDL from schema-src.sql on target")] + extra
 
-    def settle_target(self, db):
+    def settle_target(self, db, from_source=True):
         """`ANALYZE` the target file after a load, so its query planner has
         statistics for tables it has never looked at."""
         import sqlite3
@@ -760,6 +850,14 @@ class SQLiteEngine(NeutralCopier, Engine):
                                   "missing on target", "",
                                   "create and copy the table, sqlite files"
                                   " are cheap"))
+                continue
+            if self.hop.column_rules(db, t) or self.hop.row_filter(db, t):
+                # the whole-row hash cannot know a column was dropped or
+                # renamed on purpose, or that a row is outside the hop's
+                # filter; the pair's comparison reads both, as the copier
+                # that moved the rows did
+                res += [r for r in self._as_pair().check_data(db, t, stream)
+                        if r.check == "data"]
                 continue
             ha, na, ea = self._hash("src", t)
             hb, nb, eb = self._hash("dst", t)

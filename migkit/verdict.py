@@ -73,6 +73,43 @@ def difference_kind_from_counts(missing, extra, changed):
     return ""
 
 
+#: the checks whose answer is about the tables' shape or contents, which a
+#: DDL on the source in the middle of the run leaves describing a table
+#: that is no longer there
+TAKEN_ACROSS = ("schema", "counts", "data")
+
+
+def mark_stale(records, db, tables, said):
+    """Take back the answers a DDL on the source overtook.
+
+    `records` are one database's. Every schema answer, since each is
+    about the database's shape, and every count and data answer about
+    `db` as a whole or about one of `tables`, stops being a verdict: its
+    status becomes `skip` and the record carries `stale` with what
+    changed, and what it had read. migration-verifier fails the whole run
+    for the same reason; count and data answers about tables the DDL did
+    not touch keep their verdicts. An `error` stays an error, and a
+    `skip` has nothing to take back.
+    """
+    for r in records:
+        if r.get("check") not in TAKEN_ACROSS or \
+                r.get("status") not in ("ok", "diff", "warn"):
+            continue
+        scope = str(r.get("scope", ""))
+        if r["check"] != "schema" and scope != db and not any(
+                scope.endswith("." + t)
+                                   or scope.endswith(" " + t)
+                                   for t in tables):
+            continue
+        r["stale"] = said
+        r["detail"] = (f"taken while the source's schema changed ({said});"
+                       " this is no longer an answer - check again once"
+                       f" it has settled. It read: {r.get('status')}"
+                       + (f", {r['detail']}" if r.get("detail") else ""))
+        r["status"] = "skip"
+    return records
+
+
 def _counts(records, key):
     out = {}
     for r in records:
@@ -117,8 +154,13 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     found, not everything looked at". `has_differences` stays `false`,
     because no difference *was* found and saying otherwise would be a
     second lie in the other direction.
+
+    A run whose answers a DDL on the source overtook (`mark_stale`) is
+    `incomplete` for the same reason, and names them under `stale`.
     """
     totals = {s: 0 for s in STATUSES}
+    stale = sorted({str(r.get("scope", "")) for r in records
+                    if r.get("stale")})
     for r in records:
         st = r.get("status", "unknown")
         totals[st] = totals.get(st, 0) + 1
@@ -128,12 +170,13 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         status = "different"
     elif totals.get("skip") and not (totals.get("ok") or totals.get("warn")):
         status = "incomplete"
-    elif coverage:
+    elif coverage or stale:
         status = "incomplete"
     else:
         status = "same"
     return {
         **({"coverage": coverage} if coverage else {}),
+        **({"stale": stale} if stale else {}),
         "format_version": FORMAT_VERSION,
         "tool": "migkit",
         "tool_version": __version__,
@@ -155,7 +198,7 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
              "report": r.get("report", ""),
              "fix_hint": r.get("fix_hint", "")}
             for r in records
-            if r.get("status") not in ("ok", "skip")
+            if r.get("status") not in ("ok", "skip") or r.get("stale")
         ],
     }
 

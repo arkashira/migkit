@@ -175,3 +175,35 @@ def test_the_lock_report_says_validation_blocks_nothing(pg, tmp_path):
         'ALTER TABLE t VALIDATE CONSTRAINT "ck_pos";')
     assert mode == "ShareUpdateExclusiveLock"
     assert "without blocking reads or writes" in meaning
+
+
+def _fk(src_not_valid=False):
+    for db in ("srcdb", "dstdb"):
+        _sql(db, "create table p (id int primary key);"
+                 " insert into p values (5), (7);"
+                 " create table c (id int primary key, p int)")
+        _sql(db, "insert into c values (1, 5)")
+    _sql("srcdb", "alter table c add constraint c_p foreign key (p)"
+                  " references p (id)" + (" not valid" if src_not_valid
+                                          else ""))
+    _sql("dstdb", "alter table c add constraint c_p foreign key (p)"
+                  " references p (id) not valid")
+
+
+def test_a_foreign_key_the_load_left_unvalidated_is_validated(pg, tmp_path):
+    """The side script this replaces validated foreign keys as well as
+    checks; the repair only did checks."""
+    _fresh(not_valid=False)
+    _fk()
+    plan = _plan(tmp_path)
+    assert plan is not None and any("c_p" in s for s in plan.statements), \
+        plan
+    _engine(tmp_path).apply("srcdb", plan)
+    assert _sql("dstdb", "select convalidated from pg_constraint"
+                         " where conname = 'c_p'") == "t"
+
+
+def test_one_the_source_keeps_unvalidated_is_left_alone(pg, tmp_path):
+    _fresh(not_valid=False)
+    _fk(src_not_valid=True)
+    assert _plan(tmp_path) is None

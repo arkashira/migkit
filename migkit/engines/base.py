@@ -101,6 +101,8 @@ class RepairAction:
     statements: list = field(default_factory=list)
     undo: list = field(default_factory=list)
     note: str = ""
+    #: "pair" where the pair machinery carries it out (`through_pair`)
+    by: str = ""
 
 
 class Engine:
@@ -201,8 +203,11 @@ class Engine:
         """
         return None
 
-    def settle_target(self, db):
+    def settle_target(self, db, from_source=True):
         """Leave the target usable after a bulk load, or say nothing.
+
+        `from_source` is False where the source is another engine, whose
+        own counters this one cannot read.
 
         A load leaves the statistics behind it, and the planner then picks
         plans for a table it has never looked at. pgcopydb runs `VACUUM
@@ -410,7 +415,7 @@ class Engine:
     #: than the sample it explains stops being an explanation.
     INVISIBLE_CAP = 20
 
-    def _invisible_section(self, src_df, dst_df, keys):
+    def _invisible_section(self, src_df, dst_df, keys, table=None):
         """The part of a drilldown a reader could not otherwise act on.
 
         A count of differing rows is not a finding anybody can work with
@@ -445,8 +450,15 @@ class Engine:
                 if len(found) >= self.INVISIBLE_CAP:
                     more += 1
                     continue
-                key = " ".join(f"{k}={row[k]}" for k in on)
-                found.append((key, name, row[left], row[right], why))
+                from .. import masking
+                hide = masking.keys(self.hop, table)
+                key = " ".join(
+                    f"{k}={masking.token(self.hop, row[k]) if hide else row[k]}"
+                    for k in on)
+                found.append((key, name,
+                              masking.shown(self.hop, table, name, row[left]),
+                              masking.shown(self.hop, table, name,
+                                            row[right]), why))
         if not found:
             return ""
         out = ["", "Differences You Cannot See",
@@ -1001,8 +1013,11 @@ class Engine:
         `found` is [(side, table, index, columns, groups, example)].
         """
         if found:
+            from .. import masking
             worst = ", ".join(
-                f"{s} {t}.{c} ({cols}) {n} duplicated values, e.g. {ex}"
+                f"{s} {t}.{c} ({cols}) {n} duplicated values, e.g. "
+                + (str(masking.token(self.hop, ex))
+                   if masking.keys(self.hop, t) else f"{ex}")
                 for s, t, c, cols, n, ex in found[:4])
             return Result(
                 "deep", f"{db} duplicate keys", "diff",
@@ -1080,10 +1095,18 @@ class Engine:
         """
         mixed = [f for f in findings if f[2] and f[3]]
         broken = [f for f in findings if f[2] and not f[3]]
+        from .. import masking
+
+        def example(t, c, ex, dec):
+            # the text itself is the finding, and a token of it says
+            # nothing, so a masked column's example is left out
+            if masking.column(self.hop, t, c):
+                return "(the hop masks this column's values)"
+            return f"(e.g. {ex!r} is really {dec!r})"
         if mixed:
             worst = ", ".join(
                 f"{t}.{c} {s} double-encoded and {k} genuinely accented"
-                f" (e.g. {ex!r} is really {dec!r})"
+                f" {example(t, c, ex, dec)}"
                 for t, c, s, k, ex, dec in mixed[:3])
             return Result(
                 "deep", f"{db} mojibake", "diff",
@@ -1097,7 +1120,7 @@ class Engine:
                 " corrupts the rows that were never broken")
         if broken:
             worst = ", ".join(
-                f"{t}.{c} {s} rows (e.g. {ex!r} is really {dec!r})"
+                f"{t}.{c} {s} rows {example(t, c, ex, dec)}"
                 for t, c, s, _, ex, dec in broken[:3])
             return Result(
                 "deep", f"{db} mojibake", "diff",
@@ -1349,16 +1372,172 @@ class Engine:
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
 
+    def stream_writers(self, db):
+        """[(what, pausable)] writing into this target database besides a
+        repair: migkit's own change tail (which can be paused), and
+        whatever replication the engine can see on the target."""
+        from .. import tailctl
+        if tailctl.alive(self.hop.report_dir(db)):
+            return [("migkit's change tail", True)]
+        return []
+
+    #: whether `change_point` only reads: where it does, a plain full copy
+    #: can note the position before itself for a later `--mode cdc`. On
+    #: PostgreSQL it makes a replication slot, which a copy that was not
+    #: asked to be followed has no business leaving on the source.
+    CHANGE_POINT_READS_ONLY = False
+
+    def load_window(self, db, log=None, tables=None):
+        """What has to be set aside on the target while rows are loaded
+        into it, as a context manager; nothing, where the engine needs
+        nothing."""
+        import contextlib
+        return contextlib.nullcontext()
+
+    def create_missing(self, db, log=None):
+        """Make on the target the tables in scope it lacks, from the
+        source's definition, before the table copier fills them - nothing,
+        where the engine's copier makes its own or makes none."""
+        return None
+
+    def finish_created(self, db, log=None):
+        """What `create_missing` leaves until the rows are in: keys,
+        indexes and constraints, where the engine builds them after."""
+        return None
+
+    def _fk_orphans(self, db):
+        """The target's rows whose foreign key points at nothing, as a check
+        result, or None where the engine has no foreign keys to scan."""
+        return None
+
+    def set_aside(self, db):
+        """What a load took off this hop's target and has not put back, as
+        a check result - None where nothing is, or the engine sets nothing
+        aside."""
+        return None
+
+    def log_position(self, side, db):
+        """Where this engine's change log is now, in the form its tail
+        saves a position in, or None where that cannot be compared."""
+        return None
+
+    @staticmethod
+    def position_reached(have, want):
+        """Whether a tail at `have` has read at least as far as `want`."""
+        return None
+
+    def canonical_type(self, side, db, declared):
+        """The type a cross-engine comparison classifies a column by: the
+        declared one, except where the engine knows a type of the
+        database's own stands for a built-in one."""
+        return declared
+
+    def target_mark(self, db):
+        """Something on the target that tells later what was written before
+        this moment and what after, recorded as a move begins; {} where the
+        time alone has to do."""
+        return {}
+
+    def _move_began(self, db):
+        """What `target_mark` recorded as the last move of this database
+        began, with when; None when no move of migkit's has."""
+        import json
+        try:
+            return json.loads((self.hop.report_dir(db) / "move-began.json")
+                              .read_text())
+        except (OSError, ValueError):
+            return None
+
+    def who_wrote(self, db, table, keys, began):
+        """Of the rows only the target has (`keys`, as the drilldown wrote
+        them), when they were written against when the move began - a
+        sentence, or "" where this engine cannot say."""
+        return ""
+
+    def pause_writer(self, db, what, window):
+        """Pause `what`, one of `stream_writers`' pausable writers, for a
+        repair: True once it has stopped writing, False if it did not
+        within `window` seconds."""
+        from .. import tailctl
+        if what == "migkit's change tail":
+            return tailctl.pause(self.hop.report_dir(db), window)
+        raise ValueError(f"{what} cannot be paused here")
+
+    def resume_writer(self, db, what):
+        from .. import tailctl
+        if what == "migkit's change tail":
+            return tailctl.resume(self.hop.report_dir(db))
+        raise ValueError(f"{what} cannot be resumed here")
+
     def table_facts(self, side, db):
         """{table: {"rows": estimate or None, "key": bool}} from the
         catalogue, in one query - what the planner decides from. Empty where
         an engine has no cheap way to say."""
         return {}
 
+    def why_it_stopped(self, message):
+        """What on the servers explains a copy that stopped with
+        `message`, as a sentence, or "" where nothing is known. A program
+        underneath says what broke; this says why, where the engine can
+        tell."""
+        return ""
+
     def planned_checks(self):
         """Checks added to this hop's battery from what can be seen about
-        it, on top of `checks` - none unless an engine knows better."""
-        return ()
+        it, on top of `checks`: the operator's own business rules, when the
+        hop carries any."""
+        from .. import rules
+        return ("rules",) if rules.configured(self.hop) else ()
+
+    def newer_wins_column(self):
+        """The column `newer_wins` names, when it decides changed rows.
+
+        A hop option rather than a choice on the command line: which column
+        both sides keep up to date is a fact about the application, the
+        same on every run. `--on-conflict keep-target` still keeps every
+        target row it was asked to keep.
+        """
+        if self.hop.options.get("on_conflict") == "keep-target":
+            return None
+        col = self.hop.options.get("newer_wins")
+        return str(col) if col else None
+
+    def _keep_the_newer(self, table, changed, read):
+        """Split changed keys into (overwrite, keep): the target's row is
+        kept where its `newer_wins` column is later than the source's.
+
+        `read(side, keys)` answers {key: value} for this table. A key whose
+        value either side does not have is overwritten - the source is the
+        truth whenever the rows cannot say otherwise. DTS's `ConditionCover`
+        and pglogical's `last_update_wins` make the same comparison.
+        """
+        col = self.newer_wins_column()
+        if not col or not changed:
+            return list(changed), []
+        src, dst = read("src", changed), read("dst", changed)
+        overwrite, keep = [], []
+        for k in changed:
+            a, b = src.get(self._key_id(k)), dst.get(self._key_id(k))
+            try:
+                newer = a is not None and b is not None and b > a
+            except TypeError:
+                newer = False
+            (keep if newer else overwrite).append(k)
+        return overwrite, keep
+
+    @staticmethod
+    def _key_id(key):
+        return tuple(key) if isinstance(key, (list, tuple)) else key
+
+    def check_rules(self, db):
+        from .. import rules
+        return rules.check(self, db)
+
+    def run_rule(self, side, db, sql):
+        """The rows one side answers to a rule, read in a transaction that
+        cannot write."""
+        raise RuntimeError("business rules are SQL, and this engine does not"
+                           " answer SQL")
 
     #: what an engine puts in a settings mapping it could not read
     UNREADABLE = "_error"
@@ -1456,6 +1635,7 @@ class Engine:
             textual = (r.scope.endswith(self.OBJECT_SCOPE)
                        or r.scope == r.scope.split(" ")[0])  # bare "db"
             if (r.check == "schema" and r.status == "diff" and textual
+                    and not getattr(r, "whole_table", False)
                     and not r.scope.endswith((self.AUTHORITY_SCOPE, "objects",
                                               "(structural)"))):
                 r.status = "ok"
@@ -1582,12 +1762,14 @@ class Engine:
             if send:
                 statements.append(
                     f"copy {len(send)} rows {carry}: "
-                    + ", ".join(self._key_text(k) for k in send[:6])
+                    + ", ".join(self._key_text(k, self.hop, name)
+                                for k in send[:6])
                     + (" ..." if len(send) > 6 else ""))
             if drop:
                 statements.append(
                     f"delete {len(drop)} rows the source does not have: "
-                    + ", ".join(self._key_text(k) for k in drop[:6])
+                    + ", ".join(self._key_text(k, self.hop, name)
+                                for k in drop[:6])
                     + (" ..." if len(drop) > 6 else ""))
             actions.append(RepairAction(
                 f"{db}.{name}", "rows", statements, [],
@@ -1611,17 +1793,22 @@ class Engine:
         table on the source - measured, and written up in
         `resnapshot_message`.
         """
+        from ..movers import stream_reads_again_in_place
         counts = (f"{len(found.get('missing', []))} missing,"
                   f" {len(found.get('changed', []))} changed,"
                   f" {len(found.get('extra', []))} extra")
+        pause = ("The table is read in chunks between the stream's own"
+                 " events, so the stream keeps running"
+                 if stream_reads_again_in_place(
+                     self.hop.report_dir() / "stream")
+                 else "The stream pauses while the table is read")
         return RepairAction(
             f"{db}.{name}", "resnapshot", [f"execute-snapshot {name}"], [],
             f"{counts}; a stream is running on this hop, so the repair is"
             " sent through it - the connector reads the table again and the"
             " sink upserts what arrives. Writing these rows directly would"
-            " race the connector on the same keys. The stream pauses while"
-            " the table is read, and `check` afterwards is what proves it"
-            " landed")
+            f" race the connector on the same keys. {pause}, and `check`"
+            " afterwards is what proves it landed")
 
     def _apply_resnapshot(self, action):
         """Put the request on the signal topic.
@@ -1630,14 +1817,16 @@ class Engine:
         function for every engine that streams, so the way to talk to it
         is one function too.
         """
-        from ..movers import send_resnapshot
+        from ..movers import send_resnapshot, stream_reads_again_in_place
         out = self.hop.report_dir() / "stream"
         if not (out / "docker-compose.yml").exists():
             raise RuntimeError(
                 "no streaming pipeline for this hop - run"
                 f" `migkit move {self.hop.name} --mode cdc --go` first")
         table = action.scope.split(".", 1)[1]
-        return send_resnapshot(out, self.hop.name, [table])
+        kind = ("incremental" if stream_reads_again_in_place(out)
+                else "blocking")
+        return send_resnapshot(out, self.hop.name, [table], kind)
 
     def prepare_target(self, db):
         """Make whatever the target needs before a first write, or nothing.
@@ -1799,7 +1988,88 @@ class Engine:
             items += self._client_tool_versions(self.CLIENT_TOOLS, dv)
         items += self._assess_extra()
         items += self._preflight_items()
+        items += self._scope_items()
         return items
+
+    #: past this many tables in scope, managed services warn (DMS says so
+    #: outright); a per-table plan and a per-table verdict both grow with it
+    MANY_TABLES = 10_000
+
+    def _scope_items(self):
+        """What the tables in scope say about themselves, on any engine:
+        how many there are, and names that differ only by case - one table
+        on a target that folds case, and a copy that writes one over the
+        other."""
+        items = []
+        try:
+            dbs = self.databases()
+        except Exception as e:
+            # an unreachable source is said by the checks above; this one
+            # says it could not look, and does not take assess down with it
+            return [{"level": "warn", "scope": "instance",
+                     "item": "tables in scope",
+                     "detail": "could not be listed: "
+                               + (str(e).strip().splitlines() or [""])[-1][:80]
+                               + " - unknown, not clean"}]
+        for db in dbs:
+            try:
+                tables = self.neutral_tables("src", db)
+            except Exception as e:
+                items.append({"level": "warn", "scope": db,
+                              "item": "tables in scope",
+                              "detail": f"could not be listed: {str(e)[:80]}"})
+                continue
+            items.append({"level": "warn" if len(tables) > self.MANY_TABLES
+                          else "pass", "scope": db,
+                          "item": "tables in scope",
+                          "detail": f"{len(tables):,}"
+                          + (f" - more than {self.MANY_TABLES:,}: split the"
+                             " hop by schema or by database"
+                             if len(tables) > self.MANY_TABLES else "")})
+            folded = {}
+            for t in tables:
+                folded.setdefault(str(t).lower(), []).append(str(t))
+            clash = [names for names in folded.values() if len(names) > 1]
+            if clash:
+                items.append({
+                    "level": "fail", "scope": db,
+                    "item": "table names that differ only by case",
+                    "detail": "; ".join(" / ".join(c) for c in clash[:6])
+                    + " - a target that folds case keeps one of each pair;"
+                      " rename one, or map it to a new name in the hop"})
+            items += self._writer_items(db)
+        return items
+
+    def _writer_items(self, db):
+        """Replication that already writes into this target database.
+
+        DTS fails a task whose objects another task is writing to; two
+        writers on one table race, and whichever lands last survives. What
+        `stream_writers` names beside a repair is named here before the
+        move, where it still costs nothing to stop. migkit's own tail is
+        not a stranger, and a target that cannot be asked is said to be
+        unknown rather than clear."""
+        item = "no other replication writes into the target"
+        if type(self).stream_writers is Engine.stream_writers:
+            # nothing on this engine's target can be asked; "none found"
+            # would be a claim, not an answer
+            return []
+        try:
+            writers = self.stream_writers(db)
+        except Exception as e:
+            return [{"level": "warn", "scope": db, "item": item,
+                     "detail": "could not ask the target: "
+                               + (str(e).strip().splitlines() or [""])[-1][:80]
+                               + " - unknown, not clean"}]
+        foreign = [w for w, pausable in writers if not pausable]
+        if not foreign:
+            return [{"level": "pass", "scope": db, "item": item,
+                     "detail": "none found"}]
+        return [{"level": "fail", "scope": db, "item": item,
+                 "detail": ", ".join(foreign[:4])
+                 + " already writes into it; a move beside it races it"
+                   " table by table, and whichever lands last survives."
+                   " Stop it, or leave this database to it"}]
 
     #: Deep checks that predict what a move will **do**, as opposed to
     #: reporting what it did. These run in `assess` as well, because an
@@ -1970,7 +2240,8 @@ class Engine:
         """
         raise self._no_canon("find a key")
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000):
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
         """(rows, last_key) - values as Python objects, in key order.
 
         Objects rather than the canonical text: the text exists so two
@@ -1986,7 +2257,8 @@ class Engine:
         """
         raise self._no_canon("read rows")
 
-    def neutral_rows_by_key(self, side, db, table, columns, key, keys):
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys,
+                            where=None):
         """{canonical key: row} for the rows carrying these key values.
 
         Reading by key rather than walking the two sides in step is what
@@ -2034,6 +2306,25 @@ class Engine:
         return tuple(canon.render_value(cls, value)
                      for (_, cls), value in zip(columns, row))
 
+    def _mapped_types(self, db, table, src_types):
+        """The source's columns as the target is meant to have them:
+        `mapping.columns` applied - kept or dropped, and renamed.
+
+        Returns ({target name: source type}, {target name: source name}).
+        One place, so the copy, the comparison and the schema check cannot
+        disagree about which source column lands where.
+        """
+        rules = self.hop.column_rules(db, *str(table).split("."))
+        keep, drop = set(rules.get("keep") or []), set(rules.get("drop") or [])
+        rename = rules.get("rename") or {}
+        virtual, back = {}, {}
+        for name, typ in src_types.items():
+            if (keep and name not in keep) or name in drop:
+                continue
+            target = rename.get(name, name)
+            virtual[target], back[target] = typ, name
+        return virtual, back
+
     def _comparable_columns(self, db, src_engine, src_table,
                             dst_engine, dst_table):
         """What to hash on each side, and everything that is not hashable.
@@ -2049,9 +2340,10 @@ class Engine:
         def declared(engine, side, table):
             got = {}
             for name, typ in engine.neutral_columns(side, db, table):
-                got[name] = typ
+                got[name] = engine.canonical_type(side, db, typ)
             return got
-        src_types = declared(src_engine, "src", src_table)
+        src_types, back = self._mapped_types(
+            db, src_table, declared(src_engine, "src", src_table))
         dst_types = declared(dst_engine, "dst", dst_table)
         got = self._classify_columns(src_engine, src_types,
                                      dst_engine, dst_types)
@@ -2063,7 +2355,8 @@ class Engine:
             notes.append(f"columns only on the target, not compared:"
                          f" {', '.join(got['only_dst'])}")
         notes += [f"{name}: {why}" for name, why in got["unreadable"]]
-        src_cols = [(n, s) for n, s, _ in got["pairs"]]
+        # read by the source's own name, written and compared by the target's
+        src_cols = [(back.get(n, n), s) for n, s, _ in got["pairs"]]
         dst_cols = [(n, d) for n, _, d in got["pairs"]]
         return src_cols, dst_cols, notes
 
@@ -2097,7 +2390,7 @@ class Engine:
         return out
 
     def _drill_rows(self, db, name, src_engine, src_t, src_cols,
-                    dst_engine, dst_t, dst_cols):
+                    dst_engine, dst_t, dst_cols, wheres=(None, None)):
         """Which rows differ, written to the estate's files, as a clause.
 
         A digest says a table is wrong; this says which rows, which is what
@@ -2134,6 +2427,12 @@ class Engine:
         capped = []
         at = [names.index(k) for k in key]
 
+        def scope(side):
+            # the hop's row filter in that side's SQL: a row outside it is
+            # not one the two sides are meant to agree on
+            w = wheres[0] if side == "src" else wheres[1]
+            return {"where": w} if w else {}
+
         def walk(engine, side, table, cols, other, other_side, other_table,
                  other_cols, on_absent, on_differs):
             seen = 0
@@ -2141,13 +2440,15 @@ class Engine:
             while seen < self.DRILL_CAP:
                 got, after = engine.neutral_read(side, db, table, cols, after,
                                                  min(1000,
-                                                     self.DRILL_CAP - seen))
+                                                     self.DRILL_CAP - seen),
+                                                 **scope(side))
                 if not got:
                     return False
                 seen += len(got)
                 raw = [tuple(row[i] for i in at) for row in got]
                 theirs = other.neutral_rows_by_key(other_side, db, other_table,
-                                                   other_cols, key, raw)
+                                                   other_cols, key, raw,
+                                                   **scope(other_side))
                 for row in got:
                     text = self._key_of(cols, key, row)
                     if text not in theirs:
@@ -2180,7 +2481,8 @@ class Engine:
                              ("with different values", changed),
                              ("only on the target", extra)):
             if found:
-                shown = ", ".join(self._key_text(k) for k in found[:4])
+                shown = ", ".join(self._key_text(k, self.hop, name)
+                                  for k in found[:4])
                 parts.append(f"{len(found)} {label} ({shown}"
                              + (" ..." if len(found) > 4 else "") + ")")
         blind = sum(1 for group in (missing, changed, extra)
@@ -2199,8 +2501,9 @@ class Engine:
         return clause
 
     @staticmethod
-    def _key_text(key):
-        """A row's key, for a person to read.
+    def _key_text(key, hop=None, table=None):
+        """A row's key, for a person to read - masked where the hop's
+        `mask` says (`masking.keys`).
 
         `"/".join(key)` was it, and a key part can be `None`: SQLite accepts
         a NULL into a non-INTEGER `PRIMARY KEY` - measured, `create table a
@@ -2209,8 +2512,11 @@ class Engine:
         sequence item 0: expected str instance, NoneType found` and took the
         whole data check down with it.
         """
-        return "/".join("NULL" if part is None else str(part)
-                        for part in key)
+        from .. import masking
+        hide = hop is not None and masking.keys(hop, table)
+        return "/".join("NULL" if part is None
+                        else masking.token(hop, part) if hide
+                        else str(part) for part in key)
 
     def _apply_rows(self, db, name, src_engine, src_t, src_cols,
                     dst_engine, dst_t, dst_cols):
@@ -2271,7 +2577,8 @@ class Engine:
         if unaddressable:
             raise SystemExit(
                 f"{len(unaddressable)} rows of {name} have NULL in the key"
-                f" ({', '.join(self._key_text(k) for k in unaddressable[:4])}"
+                " (" + ", ".join(self._key_text(k, self.hop, name)
+                                 for k in unaddressable[:4])
                 + (" ..." if len(unaddressable) > 4 else "")
                 + ") - a row with no key cannot be found on the other side,"
                   " so repairing it would report success and change nothing."
@@ -2341,11 +2648,13 @@ class Engine:
         return {self._key_of(columns, key, row): row for row in rows}
 
     @staticmethod
-    def _by_key_query(quoted_table, columns, key, keys, quote, mark):
+    def _by_key_query(quoted_table, columns, key, keys, quote, mark,
+                      scope=None):
         """The select every SQL engine here needs, written once.
 
         A single-column key uses `in (...)`; a composite one uses a row
-        value, which PostgreSQL, MySQL and SQLite all accept.
+        value, which PostgreSQL, MySQL and SQLite all accept. `scope` is a
+        row filter in this engine's SQL: a row outside it is not there.
         """
         from .. import canon
         cols = ", ".join(quote(n) for n, _ in columns)
@@ -2357,7 +2666,21 @@ class Engine:
             one = "(" + ", ".join([mark] * len(key)) + ")"
             where = f"{left} in ({', '.join([one] * len(keys))})"
             args = [canon.sql_value(v) for k in keys for v in k]
+        if scope:
+            where = f"({where}) and ({scope})"
         return f"select {cols} from {quoted_table} where {where}", args
+
+    @staticmethod
+    def _where(where, after_clause="", has_args=False, percent=False):
+        """` where ...` joining a resume point and a row filter, either of
+        which may be absent. `percent` doubles `%` in the filter, for a
+        driver that reads it as a placeholder where the statement carries
+        parameters (MySQL's)."""
+        if where and percent and has_args:
+            where = where.replace("%", "%%")
+        parts = [p for p in (after_clause, f"({where})" if where else "")
+                 if p]
+        return (" where " + " and ".join(parts)) if parts else ""
 
     def neutral_write(self, side, db, table, columns, rows):
         """Write rows read from another engine. Returns how many landed.
@@ -2496,7 +2819,7 @@ class Engine:
                 how.append(f"{t}: settled after {settle}s (no fence visible)")
         return still, healed, how
 
-    def neutral_empty(self, side, db, table):
+    def neutral_empty(self, side, db, table, where=None):
         """Remove every row of `table` on the target, keeping the table.
         Returns how many went.
 
@@ -2513,6 +2836,63 @@ class Engine:
     def _target_only(side, what):
         if side != "dst":
             raise SystemExit(f"migkit does not {what} on a source")
+
+    #: what the SQL translator calls this engine's dialect, where it has one
+    SQL_DIALECT = None
+
+    def neutral_column_rules(self, side, db, table):
+        """{column: {"null": takes NULL, "default": its default as this
+        engine writes it or None, "identity": numbered by the engine}} -
+        {} where the engine cannot say.
+
+        What a table migkit builds on another engine has to keep beyond the
+        column types. Measured before, a MySQL table built on PostgreSQL:
+        `status varchar(10) not null default 'new'` arrived as `status
+        varchar(10)`, and `id int auto_increment` as `id integer`. The
+        application's first insert after cutover that left out `status`
+        stored NULL, and one that left out `id` was refused."""
+        return {}
+
+    def neutral_indexes(self, side, db, table):
+        """[(name, unique, [columns], carried)] for the table's indexes
+        other than its primary key. `carried` is False for one over an
+        expression, a predicate or a part of a column, which another
+        engine cannot be given as it is. [] where the engine cannot say."""
+        return []
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        """The statement that makes one index here."""
+        raise self._no_canon("create an index")
+
+    def execute_ddl(self, side, db, sql):
+        """Run one statement that changes this side's schema."""
+        raise self._no_canon("change a schema")
+
+    def default_works(self, side, db, expr, typ=None):
+        """Whether this engine accepts `expr` as a default, asked of the
+        server rather than assumed."""
+        return False
+
+    @staticmethod
+    def _column_tail(rule, style):
+        """` not null default ...`, as `style` writes it: `postgres`,
+        `mysql` or `sqlite`."""
+        if not rule:
+            return ""
+        out = ""
+        if rule.get("identity"):
+            out += {"postgres": " generated by default as identity",
+                    "mysql": " auto_increment"}.get(style, "")
+        if rule.get("null") is False:
+            out += " not null"
+        if rule.get("default") is not None and not rule.get("identity"):
+            d = rule["default"]
+            # MySQL takes any expression, and any default on a TEXT or
+            # BLOB column, only in parentheses
+            out += f" default ({d})" if style in ("mysql", "sqlite") \
+                else f" default {d}"
+        return out
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         """The statement that would create this table here, without running it.
@@ -2553,10 +2933,32 @@ class Engine:
         """
         raise self._no_canon("read a change log")
 
-    def _as_pair(self):
+    #: whether this engine's own copier, hash and replication read
+    #: `mapping.columns`. Where they copy and hash whole rows, a table whose
+    #: columns the hop maps goes through the pair machinery instead - the
+    #: copier, comparison, repair and change tail that pair columns by name
+    #: and read the mapping in one place (`_mapped_types`).
+    OWN_PATHS_READ_COLUMN_MAPPING = True
+
+    def through_pair(self, db, table):
+        """Whether this table's columns are mapped and this engine's own
+        paths would copy and hash it whole."""
+        return (not self.OWN_PATHS_READ_COLUMN_MAPPING
+                and bool(self.hop.column_rules(db, *str(table).split("."))))
+
+    def maps_columns(self):
+        """Whether any table of this hop goes through the pair machinery."""
+        return (not self.OWN_PATHS_READ_COLUMN_MAPPING
+                and bool((self.hop.mapping or {}).get("columns")))
+
+    def _as_pair(self, within=None):
         """This hop seen as a pair of the same engine, so the machinery
         written for any pair - the copier, the change tail - serves a
-        same-engine hop too, instead of a second copy of it per engine."""
+        same-engine hop too, instead of a second copy of it per engine.
+
+        `within` is a directory under this hop's reports for the pair's own
+        evidence, where it would otherwise share file names with this
+        engine's and each would read the other's as its own."""
         import dataclasses
 
         from .hetero import HeteroEngine
@@ -2567,8 +2969,79 @@ class Engine:
                      "target_engine": name})
         # the report directory is a method the tests and callers may have
         # replaced on this hop; the pair keeps writing where this one does
-        hop.report_dir = self.hop.report_dir
+        own = self.hop.report_dir
+        if within:
+            def report_dir(db=None):
+                d = own(db) / within
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+            hop.report_dir = report_dir
+        else:
+            hop.report_dir = own
         return HeteroEngine(hop)
+
+    def columns_pair(self):
+        """The pair machinery that carries, compares and repairs the tables
+        whose columns the hop maps (`through_pair`). Its drilldown and
+        evidence are kept in their own directory: the two write the same
+        file names in two formats."""
+        pair = self.__dict__.get("_columns_pair")
+        if pair is None:
+            pair = self.__dict__["_columns_pair"] = self._as_pair(
+                within="mapped-columns")
+        return pair
+
+    def _mapped_data(self, db, stream=None, note=""):
+        """The data results for the tables this engine's own pass leaves to
+        the pair machinery, one per table."""
+        out = []
+        for t in self.mapped_tables(db):
+            for r in self.columns_pair().check_data(db, t, stream):
+                if note:
+                    r.detail = f"{r.detail}{note}"
+                out.append(r)
+        return out
+
+    def _delta_compare(self, db, table, keys):
+        """(missing, extra, changed) for the keys a delta cycle saw change.
+
+        A table whose columns the hop maps is compared by the pair, which
+        reads the mapping; this engine's own comparison hashes whole rows
+        under the source's names, and on the target those names are not
+        there. The pair walks the whole table rather than the keys, which
+        is slower and still right."""
+        if self.through_pair(db, table):
+            return self.columns_pair()._compare_pks(
+                db, str(table).rpartition(".")[2], keys)
+        return self._compare_pks(db, table, keys)
+
+    def _mapped_schema(self, db):
+        """The schema results for the tables this engine's whole-database
+        comparers leave to the pair machinery: their columns, compared
+        through the mapping."""
+        tables = self.mapped_tables(db)
+        if not tables:
+            return []
+        return self.columns_pair().check_schema(db, only=tables)
+
+    def _mapped_repairs(self, db, kind):
+        """The row repairs for the tables whose columns the hop maps, planned
+        from the pair's own drilldown and carried out by it."""
+        if kind not in ("rows", "all") or not self.maps_columns():
+            return []
+        acts = self.columns_pair().repair_plan(db, "rows")
+        for a in acts:
+            a.by = "pair"
+        return acts
+
+    def mapped_tables(self, db):
+        """The source's tables, by the pair's names, that go through the
+        pair machinery on this hop."""
+        if not self.maps_columns():
+            return []
+        pair = self.columns_pair()
+        return [t for t in pair.src_engine.neutral_tables("src", db)
+                if self.through_pair(db, t)]
 
     def change_point(self, side, db):
         """A token for *now* in this engine's change log, in the shape
@@ -2646,7 +3119,7 @@ class Engine:
         """Remove the row at that key, whether or not it is there."""
         raise self._no_canon("apply changes")
 
-    def neutral_digest(self, side, db, table, columns):
+    def neutral_digest(self, side, db, table, columns, where=None):
         """(row count, digest) over `[(name, canon class)]`.
 
         Computed inside the server: only the two numbers cross the network,

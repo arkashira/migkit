@@ -161,18 +161,18 @@ declared not applicable with the reason):
 | comparing the schema | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | comparing row counts | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | - |
-| carrying sequences and auto-increment values | yes | yes | n/a | n/a | n/a | yes | yes | - | - |
+| the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| carrying sequences and auto-increment values | yes | yes | n/a | n/a | n/a | yes | yes | - | yes |
 | comparing server settings | yes | yes | yes | yes | yes | yes | yes | - | - |
 | moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes |
 | copying table by table, resumably | yes | yes | - | - | - | - | yes | - | yes |
 | keeping the target following the source | yes | yes | yes | - | - | - | n/a | - | yes |
-| proving the target has caught up before cutover | yes | yes | - | - | - | - | n/a | - | - |
-| telling a difference still arriving from one that is wrong | yes | yes | - | - | - | - | n/a | - | - |
+| proving the target has caught up before cutover | yes | yes | yes | - | - | - | n/a | - | yes |
+| telling a difference still arriving from one that is wrong | yes | yes | yes | - | - | - | n/a | - | yes |
 | verifying only what changed | yes | yes | yes | - | yes | yes | n/a | - | - |
 | carrying users and their grants | yes | yes | yes | yes | - | - | n/a | - | - |
 | noticing a move that moved nothing | yes | yes | yes | - | - | - | - | - | yes |
-| refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | yes | - | - |
+| refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | yes | - | yes |
 | snapshotting the target so a cutover can be rolled back | yes | yes | yes | - | - | - | - | - | - |
 
 The first hand-made version of this table said MongoDB's change stream was
@@ -324,16 +324,30 @@ path. Today the lines are per table.
   apply no filter at all still refuses, without naming a program.
 * `test_the_check_reads_the_row_filter.py`: 12 tests, 8 of which fail on
   the old code. Full suite: 1391 passed.
-* **Still open:** the table-by-table path and the change tail now refuse a
-  filter they cannot apply, instead of carrying every row. The next step
-  is to apply the filter:
-  * in the cross-engine copier, by reading through the source's filtered
-    select
-  * in the tail, by writing each change and then removing the row from
-    the target if the predicate, evaluated there, no longer selects it
-
-  Evaluating on the target assumes the predicate is valid in the target's
-  dialect. The check already assumes this when it filters both sides.
+* **Done for the pair too (2026-09-25).** A hop between engines, and
+  SQLite, which copies through the pair, used to refuse a row filter.
+  They now apply it:
+  * The copier reads through the filter on the source. On the target it
+    replaces only what the filter selects there, so the target's own rows
+    outside it stay.
+  * The comparison reads both sides through the filter and counts the
+    target rows outside it separately.
+  * The tail asks the source which of the changed rows the filter selects
+    now, one read per table per batch. An insert or update outside it
+    becomes a delete: a row updated out of the filter leaves the target,
+    and one moved in and out within a batch ends up gone. Asking the
+    source's current state rather than the change's converges the same
+    way a replay does.
+  * The filter is SQL for the source. For the target, sqlglot translates
+    it into that engine's SQL, with each column under the name the hop's
+    mapping gives it. A filter it cannot translate stops the move, the
+    tail and that table's check before anything is read. A side that
+    speaks no SQL (MongoDB) refuses a filter.
+  * The copier written for MySQL to PostgreSQL applies the filter too. It
+    used to write a column-mapped table under the source's column names;
+    such a table now goes through the copier that reads the mapping.
+  (`tests/test_the_pair_honours_the_row_filter.py`: `like 'ap%'` through
+  a renamed column, both copiers, the tail.)
 
 `Hop.row_filter()` has no caller anywhere in `migkit/`. Its docstring says
 the predicate is "pushed into the mover's own flag and into the checksum's
@@ -476,23 +490,67 @@ anywhere:* with `read.only=true` on the source connector, an
 snapshot refused on this pipeline for want of a table in the source. So the
 read-only variant needs no write to the source.
 
-Still to measure, at a size the sandbox holds (the first try at 3,000 rows
-with one-row chunks took the machine down with it):
-* the number of rows it re-emits
-* that a key updated during a chunk ends up with the streamed value
+*Measured again at 50 rows, and done for MySQL (2026-09-24):* the initial
+snapshot put 50 messages on the topic. The incremental re-read added 50
+more, next to the one streamed update, for 101. A key changed before its
+chunk was read came out as the new value both in the stream and in the
+re-read (`49 -> -1 -> -1`). The connector stayed `RUNNING` throughout.
+`stream_codegen` now sets `read.only=true` when the source answers
+`gtid_mode = ON`, with a single attempt so that a source that cannot be
+asked keeps the pause rather than guessing. The repair asks for the
+incremental kind wherever the pipeline has it, and says whether the stream
+will pause (`tests/test_reading_again_without_pausing.py`).
+
+Still open:
+* a key changed *inside* a chunk's window. At this size the chunks finish
+  too fast to land a write in one. The first try at 3,000 one-row chunks
+  took the sandbox down with it.
 * PostgreSQL's read-only variant
 
 ## P0: correctness at cutover
 
 **1. Confirm before calling it different.**
 
-*Progress (2026-09-24):* MySQL now has the fence the confirm pass needs -
-`src_lsn` answers with the source's executed GTID set and `fence_wait`
-has the target's server wait for it (`tests/test_mysql_fence.py`, a real
-source and replica). What confirms is still PostgreSQL's own:
-`fenced_recheck` and `_resolve_inflight` live in `postgres.py`. Next: move
-them to the base, driven by each engine's position, fence and key compare,
-so every engine that can fence confirms the same way.
+*Progress (2026-09-24):* the confirm pass (`fenced_recheck`,
+`_resolve_inflight`) lives in the base. Each engine drives it with its own
+position, fence and key compare:
+* PostgreSQL: the LSN.
+* MySQL: the executed GTID set (`tests/test_mysql_fence.py`).
+* MongoDB: the source's cluster time, against the position migkit's own
+  tail has applied up to. That position is read out of the tail's saved
+  resume token, which carries its cluster time after its first byte. Both
+  tails now save their position when idle too, so it says how far the
+  target is even when nothing is changing. A change the tail had not yet
+  applied reads `ok ... still arriving`. A change made on the target alone
+  still reads `diff` (`tests/test_mongo_confirms_before_diff.py`).
+
+*Cross-engine hops (2026-09-24), from a MySQL source:* where migkit's own
+tail is running, the check waits until the tail has read as far as the
+source's log is at that moment. It then walks the differing tables again,
+and what converged reads `ok ... still arriving`. A difference made on the
+target alone still reads `diff`. With the confirm pass switched off, the
+same test reports the in-flight row as a difference.
+
+Found on the way: the MySQL tail's position did not move past what it left
+out (other databases, excluded tables), so on a server busy elsewhere it
+never reached the log's end, and a fence waiting for that could never pass.
+It now moves to the end of what it has read
+(`tests/test_cross_engine_confirms_before_diff.py`).
+
+*And from PostgreSQL and MongoDB sources (2026-09-24):* the PostgreSQL
+tail reads its slot up to where the log is now, and once it has read that
+much whole, its position moves there even with nothing in it for the hop.
+It stayed at the last change, so on a quiet database a fence never passed.
+The MongoDB stream's own token already moves on with the cluster, and its
+cluster time is the fence. Both are measured the same way as MySQL: a
+change read and not yet applied reads `ok ... still arriving`, and reads
+`diff` with the confirm pass switched off
+(`tests/test_cross_engine_confirms_before_diff.py`,
+`tests/test_cross_engine_confirms_from_mongo.py`).
+
+Still open:
+* SQL Server
+* a fence for replication migkit does not drive itself
 
 * **Today:** the PostgreSQL LSN fence re-compares only after the consumers
   have flushed past a captured position, and `watch` names hot tables.
@@ -510,6 +568,41 @@ so every engine that can fence confirms the same way.
 * **Wrap:** none needed; the queue is migkit's own drilldown key files.
 
 **2. Hold the source snapshot for a bounded time.**
+
+*Progress (2026-09-24): measured, not yet bounded.*
+* `check --consistent` says how long it held the source's snapshot, in its
+  verdict and in its progress lines.
+* On PostgreSQL, `assess` names the oldest snapshot on the source: its age
+  in transactions, how long it has been held, and which session holds it.
+  Measured with a report job holding a repeatable-read transaction open:
+  the report named `report-job`, and nothing was reported once it closed.
+* On MySQL, `assess` reports InnoDB's history list length, the undo the
+  source has not yet purged (`tests/test_what_holds_the_source_back.py`).
+
+*Found on the way (2026-09-24):* the consistent pass made its own list of
+tables and read each one whole. Every other pass reads through the hop's
+exclude list and row filters. So on a target that was exactly what the hop
+asked for, a table the target owns and a table under a row filter both
+came out different. It reads the same tables and rows as the others now,
+in the single script and in the lanes sharing a snapshot
+(`tests/test_a_consistent_check_reads_what_the_hop_asks.py`).
+
+*The bound (2026-09-24):* the hop option `snapshot_limit` (seconds) ends a
+consistent pass once a side has held its snapshot that long. The snapshot
+is released, and the verdict is an error saying so rather than a verdict.
+Two things found while bounding it, both measured:
+* The lanes that share a snapshot so they can read in parallel were fed
+  their scripts one after another, so they read in turn: 8 s where 4 s was
+  due. They now run together.
+* The source's exported snapshot stayed open until the target's side had
+  finished too. It is now released as soon as the source's lanes are done.
+
+(`tests/test_the_snapshot_is_held_for_a_bounded_time.py`)
+
+Still open: restarting a table's pass from its last chunk under a fresh
+snapshot instead of ending it. A consistent pass cannot do that without
+giving up the single instant it exists for; the table-by-table pass
+already reads each table on its own.
 * **Today:** `check --consistent` opens one repeatable-read transaction per
   side for the whole pass. On a large table that holds back vacuum
   (PostgreSQL) or purge (InnoDB history list) for as long as the pass takes.
@@ -519,6 +612,68 @@ so every engine that can fence confirms the same way.
   and `innodb_history_list_length` while it runs.
 
 **3. Stop the application writing to the target before cutover.**
+
+*Measured (2026-09-24), PostgreSQL 16, before choosing a mechanism:*
+* `ALTER ROLE app SET default_transaction_read_only = on` stops a **new**
+  session of `app`: `cannot execute INSERT in a read-only transaction`.
+* An `app` session **already connected** when it lands keeps writing. Its
+  setting still read `off`, and its insert went in. A pooled application
+  would not notice the freeze until its connections were recycled.
+* The setting is not a boundary. The application can turn it off for its
+  own later transactions.
+
+So the role setting alone is not a freeze. The candidates are:
+* revoke the write privileges the hop's roles hold on the target, which
+  takes effect on the next statement of every session, with the grants
+  recorded first so `rollback` restores exactly those. This does not stop
+  a role that owns its tables.
+* the role setting plus ending the sessions already connected, which is
+  intrusive
+* both
+
+*Done for PostgreSQL (2026-09-24), the owner's call: the best, smartest
+way that people actually use, decided per role (`migkit/freeze.py`).*
+* **On:** the hop option `protect_target: true`. `move --go` freezes before
+  it copies anything. Tearing the stream down at cutover
+  (`move --mode cdc --drop --go`) gives the writes back, and so does
+  `rollback --apply`. `doctor` says which databases are frozen and for
+  which roles, from the record, so it can say it even when the target is
+  unreachable.
+* **Which roles:** `app_roles`, or else the login roles present on both
+  sides, which are the application's accounts carried across by
+  `migkit users`. Cloud system accounts and migkit's own accounts are
+  never included.
+* **Per role, from the catalogue:**
+  * The write grants the role holds directly are revoked, and recorded
+    before anything is changed.
+  * If the role can still write afterwards (it owns the table, inherits
+    the privilege, or the privilege is granted to everyone), it is also
+    made read-only by default in that database, and its open sessions are
+    ended.
+  * It says which of the two it did, for each role.
+* **Thaw** grants back exactly what was revoked, and restores the role's
+  own earlier setting if it had one.
+* An engine without the freeze refuses before anything is copied
+  (`tests/test_the_target_is_kept_from_the_app.py`: a direct grant, an
+  inherited one, an owner with a session already open; all stopped, all
+  given back).
+
+*MySQL, measured on 8.4 and then done the same way:*
+* A table-level revoke stopped a connected session on its next statement.
+* A database-level revoke did not. A session that had already chosen the
+  database kept inserting, and only new sessions were refused.
+* `read_only` stopped the application and left an administrator writing.
+  But it is one switch for the whole server, so a per-database hop may
+  not reach for it.
+
+So each account's write grants on the database, at both database and
+table level, are revoked and recorded. Its open sessions are then ended,
+so that the database-level revokes reach them. Privileges an account holds
+server-wide, or through a role, cannot be taken back for one database
+without taking them everywhere. Those are named and left as they are.
+Live test: an account with database-level grants and a session open, one
+with table-level grants, one with server-wide privileges, one writing
+through a role.
 * **Today:** nothing sets it. DTS has `IsDstReadOnly`.
 * **Deeper:** read-only for the application's roles, not for the load:
   * PostgreSQL: `ALTER ROLE ... SET default_transaction_read_only`, applied
@@ -528,6 +683,46 @@ so every engine that can fence confirms the same way.
 * Reported in `doctor`, reverted by `rollback`.
 
 **4. A repair that knows the stream is running.**
+
+*Done (2026-09-24) for what migkit drives, and refused beside what it
+does not:*
+* **migkit's own change tail** (the cross-engine tail and MongoDB's)
+  marks itself running (`tail.pid`). It can be asked to pause
+  (`migkit/tailctl.py`), and acknowledges only between batches, with
+  everything it has read applied and its position saved. A row repair
+  pauses it, repairs, and tells it to resume. It then replays from its
+  saved position on top of the repair, by key, which is the order that
+  converges. The hop option `repair_window` (default 300 s) bounds the
+  wait for the pause.
+* **Replication migkit does not drive**, meaning a subscription on a
+  PostgreSQL target or a running replica applier on MySQL, is named, and
+  the repair refuses before writing anything.
+* **The generated streaming pipeline** already re-reads the table through
+  the stream instead of writing beside it (0b).
+
+`tests/test_repair_beside_a_stream.py`: a tail paused, the repair landed,
+and the tail carried a new change afterwards; a real subscription stopped
+the repair with nothing applied.
+
+*The subscription migkit set up (2026-09-24):* on PostgreSQL the
+subscription `migkit move --mode cdc` creates for this hop is now paused
+for a repair, not refused beside it.
+* It is first let catch up with the source as it is at that moment,
+  through the same fence the confirm pass uses. So nothing the repair is
+  about to write is still on its way, and the key conflict (an insert
+  queued in the slot for a key the repair has just written) cannot come
+  from the stretch being repaired.
+* It is then disabled until its apply worker has gone, and enabled again
+  after the repair.
+* What the source wrote meanwhile arrives by key on top of the repair.
+
+Any other subscription is still refused.
+(`tests/test_repair_beside_a_stream.py`: a row lost on the target alone,
+repaired while the source inserted one row and updated the repaired one;
+both arrived afterwards.)
+
+Still open: a MySQL replica migkit set up, which has no name to tell it
+from anyone else's.
 * **Today:** the rule "no data repair while CDC runs" lives in the runbook,
   not in the code.
 * **Deeper:** DMS's shape, where migkit owns the stream:
@@ -544,9 +739,73 @@ so every engine that can fence confirms the same way.
 catalogue before and after itself (`migkit/drift.py`; one query on
 PostgreSQL and MySQL, table by table elsewhere) and, when it changed,
 stops short of "complete" and says what changed. Tables the hop excludes
-are not watched. `tests/test_ddl_during_the_move.py`. Still open: reading
-DDL from the change stream where migkit reads one, marking verdicts taken
-across it as stale, and recognising online schema-change temp tables.
+are not watched. `tests/test_ddl_during_the_move.py`.
+
+*The tail too (2026-09-24):* a binlog or a logical slot carries rows, not
+a DDL the tail could rely on. The tail therefore keeps the source's column
+shape beside its saved position, reads it again (one query) before each
+batch it would apply, and compares.
+* A change stops the tail before that batch. Its position is not moved,
+  and it names what changed.
+* A DDL made while the tail was stopped is seen the same way.
+* A changed shape is accepted once the target has every column the source
+  now has on the tables it touched. The tail then carries on from where it
+  stopped.
+* The working tables of an online schema change (`_x_gho`, `_x_ghc`,
+  `_x_del`, `_x_new`, `_x_old`) are not carried, and their appearing is not
+  a change. What the swap does to the real table is.
+
+Measured before: a column added mid-tail arrived as an insert naming a
+column the target lacked (`UndefinedColumn`), and a ghost table's rows
+went to a table the target does not have
+(`tests/test_the_tail_stops_at_a_ddl.py`).
+
+*Verdicts across a DDL (2026-09-24):* `check` reads the source's column
+catalogue before and after each database's checks, where that is one
+query (PostgreSQL, MySQL, SQLite, and the cross-engine hops through their
+source). When it changed:
+* every schema answer for the database, and every count and data answer
+  about the database as a whole or about a table the DDL touched, is taken
+  back. Its status becomes `skip`, the record says what changed and what
+  it had read, and `verdict.json` is `incomplete` with the scopes under
+  `stale`. Answers about the tables it did not touch keep their verdicts.
+* the run exits non-zero and says to check again once the change has
+  settled; `has_differences` stays false, since no difference was found.
+* `check --resume` keeps the shape it ended on, and reuses nothing from a
+  run the source's schema has changed under since.
+
+Measured before: a column added between the count pass and the data pass
+left `schema main: OK ... identical` in the verdict. On PostgreSQL, where
+a clean database is one data record, a column added after the data pass
+ended in `all green`. A `--resume` after a column was added reused the
+schema check's `OK` (`tests/test_verdicts_a_ddl_overtook.py`).
+
+*MySQL native replication kept to the hop (2026-09-24):* the replica
+migkit set up had no filters. Measured on 8.4:
+* a write into a database the hop does not name arrived on the target
+* a row for a table the hop excludes was applied, and stopped the replica
+  on a key the target already had
+
+The plan now scopes the replica with filters in the target's names: the
+hop's databases (`REPLICATE_WILD_DO_TABLE`), the renames its `db_map`
+makes (`REPLICATE_REWRITE_DB`), and the tables it excludes
+(`REPLICATE_IGNORE_TABLE`). With them, neither write arrived, and neither
+did a DROP of the excluded table.
+* **Restarts:** the filters do not survive one. Measured, the replica came
+  back by itself with none, set for the channel or not. So the plan names
+  the configuration lines, and the replica's status says `NOT limited to
+  this hop` when they are missing.
+* **Managed and MariaDB targets:** a managed target is told the parameter
+  group settings, and MariaDB is given its own statements.
+* **One replica per run:** a hop of several databases now sets up one
+  replica, with one password. It used to set one up per database: the
+  second failed on a running replica, and gave the replication user a
+  password the first no longer had.
+
+(`tests/test_the_native_replica_stays_in_the_hop.py`)
+
+Still open: which kinds of DDL a native replica applies, beyond the scope
+above. It applies every DDL inside the hop's databases, as a replica does.
 
 * **Today:** a DDL on the source mid-move is invisible until the next
   schema check.
@@ -577,16 +836,215 @@ different points.**
   share converges instead of stopping. Any engine with its own change log
   and an applier gets this. `tests/test_mysql_full_cdc.py` (fails on the
   old code).
-* **Still open:** native replication (faster, and runs without migkit).
-  It needs a copy that *is* a snapshot at a position:
-  * the dump's own recorded position and GTID set
-  * `gtid_purged` on the target where GTID is on
-  * `--mode cdc` on its own still takes a new position, after whatever
-    loaded the target
+* **`--mode cdc` after a separate `--mode full` (2026-09-24):** every full
+  copy now records when it ran, and where asking costs the source nothing
+  (MySQL, MongoDB) where the log was before it (`copy-position.json`). The
+  MySQL bulk copy also records the position its dump is a snapshot at,
+  from the dump's own metadata. `--mode cdc` then:
+  * starts a native replica exactly at the dump's position, by file and
+    position even with GTID on, since the target's GTID set does not hold
+    the source's. Measured on 8.4 with GTID on: an insert and an update
+    made after the dump arrived, and the replica kept running.
+  * starts a change tail from the position taken before the copy, and
+    replays by key. A row written between the copy and the tail used to be
+    carried by nothing; now it arrives.
+  * says plainly, on PostgreSQL, that a subscription made now carries only
+    what changes from now on, and points at `--mode full+cdc`.
+  * uses a recorded position once, since a second stream from it would
+    replay what the first applied.
+
+  `tests/test_cdc_after_a_separate_copy.py` and
+  `tests/test_full_cdc_misses_nothing.py`. Still open: a native replica
+  for a copy that was not a snapshot at a position (the table copier's).
 
 ## P1: before the move - one assessment that answers every managed service's list
 
 **6. Pre-checks with the value to set, not just the verdict.**
+
+*Progress (2026-09-24):*
+* **Every engine:** `assess` gives the number of tables in scope, warning
+  above 10,000 with the advice to split the hop. It fails on table names
+  that differ only by case, since a target that folds case keeps one of
+  each pair.
+* **PostgreSQL:** `max_replication_slots` and `max_wal_senders` are checked
+  against what is in use plus one per database in scope, and the
+  number to set is given.
+* **MySQL:** each binlog requirement comes with the statement to run. This
+  now includes `binlog_row_metadata=FULL`, which the change tail needs, and
+  the RDS form of the retention setting. `server_id` is checked, and so is
+  `gtid_mode` without `enforce_gtid_consistency` (not on MariaDB, which
+  has no `gtid_mode`) (`tests/test_assess_says_what_to_set.py`).
+
+* **Binlog compression (MySQL and MariaDB):** measured, MySQL 8.4 with
+  `binlog_transaction_compression = ON` and MariaDB 11 with
+  `log_bin_compress = ON`. An insert, an update and a delete went into the
+  binlog compressed, and the change reader skipped all three: no change,
+  the position not moved, nothing said. A tail on such a source called
+  itself caught up for as long as it ran. Now:
+  * the tail stops on the first compressed event and says which setting
+    wrote it. The position stays where it was.
+  * `assess` fails either setting with the statement to run.
+  * An application session that turns compression on for itself, which
+    `assess` cannot see, stops the tail too.
+  * `tests/test_a_compressed_binlog_stops_the_tail.py`.
+  * Still open: reading compressed transactions instead of stopping on
+    them.
+* **The largest row against the target's `max_allowed_packet` (MySQL):**
+  measured on 8.4. An 8 MiB value loaded into a target with a 4 MiB packet
+  stopped the copy with `Lost connection` and nothing else. An 8 MiB value
+  of zero bytes stopped a load that a 9 MiB packet carried when the value
+  was letters: the loader escapes binary, and a zero byte comes out twice
+  as long. Now:
+  * `assess` reads the largest row's large columns per table. It skips any
+    table whose file on disk is too small to hold a row over the limit,
+    and it spends at most `lob_scan_seconds` (default 60) on the whole
+    source. Anything it did not reach is `unknown, not clean`. A
+    compressed table's file is no bound on its values (measured: 73,728
+    bytes on disk for an 8 MiB value in `ROW_FORMAT=COMPRESSED`), so a
+    table with row, page or column compression is always read.
+  * It fails a row the packet cannot carry and warns on one that fits only
+    unescaped. Both give the value to set: twice the row plus 2 MiB, in
+    whole MiB. That value carried the zero-byte row through a real move.
+  * A move that stops with a lost connection says the likely cause.
+  * `tests/test_the_largest_row_fits_the_packet.py`.
+* **PostgreSQL key-less tables that replication cannot match:** done
+  earlier (`tests/test_rows_a_replica_cannot_match.py`).
+
+* **Other replication writing into the target:** `assess` names a
+  subscription on a PostgreSQL target, or a running replica applier on a
+  MySQL one, and fails the item: two writers on one table race, and
+  whichever lands last survives. DTS fails such a task. On an engine
+  whose target cannot be asked, the item is left out rather than passed
+  (`tests/test_assess_names_other_writers.py`).
+
+Still open: `logical_decoding_work_mem` and `wal_sender_timeout` (only
+with a measured reason for each value), and target storage with WAL
+included.
+
+*Found on the way, and done (2026-09-24):* a MySQL `move --mode full` onto
+a target without the tables stopped at the load on `ERROR 1146 ... doesn't
+exist`. The bulk path loads data only, and nothing created what the target
+lacked; the cross-engine copier did. The move now
+creates exactly the tables the target does not have, from the source's
+`SHOW CREATE TABLE`:
+* in one session with foreign key checks off, so a child can be created
+  before the table it references
+* under the sql_mode a schema dump uses, so a definition the source
+  accepted is accepted (measured: a zero-date default a strict target
+  refuses when typed in plainly)
+* the database too when it is missing, in the source's character set and
+  collation
+
+A table the target already has is left as it is, and so is one the hop
+excludes. The plan says how many it will create
+(`tests/test_the_mysql_move_creates_what_the_target_lacks.py`). Views,
+routines, triggers and events are still `migkit schema`'s plan.
+
+*Found on the way, and done (2026-09-24):* on PostgreSQL the dump path
+called a move onto a target without the tables `bulk copy complete`, with
+nothing loaded. Two causes:
+* The load's exit 1 was tolerated whenever it ended in `errors ignored on
+  restore`. Only a setting the server lacks is tolerated now; any other
+  refusal stops the move with the server's words.
+* The guard after the move asked only about tables both sides have. It
+  now names a source table with rows that the target does not have, on
+  PostgreSQL and MySQL (`tests/test_the_restore_says_what_it_refused.py`,
+  `tests/test_move_moved_something.py`).
+
+*And then done (2026-09-24), with two more found on the way:*
+* **Tables the target lacks.** Both PostgreSQL bulk paths create them
+  from the source's definition before the load, and add their keys,
+  indexes and constraints after it, which is also the faster order.
+  * A target with no tables at all gets every object in the source's
+    pre-data (types, functions, sequences, tables, views) except the
+    tables the hop excludes.
+  * Otherwise only the missing tables are created.
+  * The objects are created without owners or grants.
+  * What was created is recorded first, so a load that fails still gets
+    its keys added on the next run.
+* **The streaming copy and foreign keys.** Measured: it empties each
+  table it loads by itself, and a target with a foreign key refused with
+  `cannot truncate a table referenced in a foreign key constraint`. So
+  every schema with a foreign key failed on the default path. Such a
+  target now goes through the local copy, and says why.
+* **The streaming copy and sequences.** Measured, 52 rows copied: the
+  target's sequence stayed at 1, and the first insert failed on
+  `duplicate key ... (id)=(1)`. The copy program's own sequence command,
+  run alone, read 0 sequences and reset the target's. The engine's
+  sequence repair now sets them after the copy.
+
+`tests/test_the_postgres_move_creates_what_the_target_lacks.py`. Still
+open: a foreign-key window, dropping and restoring the keys around the
+streaming copy the way the index window does. That keeps its speed on such
+targets instead of falling back.
+
+*Found on the way, and done (2026-09-24):* the PostgreSQL dump path's load
+could only be run by a superuser. As a plain owner, the foreign keys'
+system triggers refused the restore's switch, and the child rows were
+refused on the key. That was 100 of 100 rows missing, reported as complete.
+* A superuser keeps the switch.
+* A user allowed `session_replication_role` loads as a replica.
+* A user with neither is stopped before anything is emptied, with the
+  grant named.
+
+(`tests/test_the_load_keeps_triggers_quiet_without_superuser.py`)
+
+*Found on the way, and done (2026-09-24):* the target's triggers fired for
+rows loaded by the PostgreSQL table copier and by both MySQL paths. A
+`BEFORE INSERT` stamping `now()` rewrote every row, and the move said
+complete.
+* PostgreSQL's copier now loads as a replica, as the bulk paths do.
+* MySQL, which has no such mode, takes the triggers off for the load with
+  their definitions saved first, and puts them back after. It refuses to
+  start where it could not put one back as its definer (C6 in the problems
+  file).
+* The same held for everything else that writes rows onto a target: the
+  change tail, the pair copier, and row repairs, in both directions. That
+  is now done the same way:
+  * PostgreSQL writes as a replica.
+  * MySQL takes the triggers off for the tail's lifetime.
+  * A per-process record of what was taken off lets `check` name what a
+    killed process left off, and the next load puts it back.
+  * SIGTERM stops the tail cleanly.
+* ~~Left open: the index windows' `dropped-indexes.json` has the same
+  crash hole.~~ Done (2026-09-25). The trigger and index windows now share
+  one record (`migkit/setaside.py`), with one file per load. A later load
+  builds what a dead one dropped and the target still lacks, including on
+  a table where it has nothing of its own to drop
+  (`test_index_window_pg.py`).
+
+*Found on the way, and done (2026-09-24):* the MySQL bulk load left the
+target's binlog without its rows. The loader turns the binlog off for its
+own sessions by default. Measured with a replica following the target: it
+got the tables and none of their 300,000 rows. A point-in-time restore of
+the target would have missed them too. The load now writes the binlog
+wherever the target keeps one
+(`tests/test_the_targets_replicas_get_the_load.py`).
+
+*Found on the way, and done (2026-09-24):* the one-pass cross-engine
+load was chosen for every cross-engine hop once installed. The load file
+migkit writes for it reads MySQL into PostgreSQL, the whole database, and
+nothing else, so:
+* any other pair was read from the wrong server as the wrong kind
+* a hop with an exclude list had the target's own tables loaded over
+* a table, column or row mapping was ignored
+
+`movers.fitted` now keeps it to the hops it can carry and sends the rest
+through the table copier, saying why
+(`tests/test_the_one_pass_load_is_fitted_to_the_hop.py`; the load itself
+is not installed here, so its own behaviour is not measured).
+
+*Found on the way, and done (2026-09-24):* the MySQL load changed values
+to fit instead of stopping on them. Measured:
+* `'z'` became `0`, `'12345678901'` became `'12345'`, and `'2026-13-45'`
+  became `0000-00-00`
+* a source date `2026-00-15` became `0000-00-00` as well
+* the table copier cut text to fit on a target whose own mode was lax
+
+Every write to a MySQL target now runs strict, through the dump's session
+and every target connection (`MySQLEngine.WRITE_SQL_MODE`). What a lax
+source legitimately holds still lands as it is
+(`tests/test_the_mysql_load_is_strict.py`).
 
 Merge the AWS, Google, Azure and DTS lists into `assess`. Each check prints
 the value to set, computed from what the server reports. For example,
@@ -603,6 +1061,34 @@ Items not already present (each confirmed by grep before it is written):
 
 **7. What the move will cost (A6, *Not yet*).**
 
+*The time part, from measurement (2026-09-24):* every finished copy
+records the rows it carried and the time it took, per path and per hop
+(`throughput.json`). The dry run of the next move divides the rows it is
+about to carry, from the source's own estimate, by the latest rate
+measured on the same path. Before any copy has been measured, it says so
+and gives no number (`tests/test_time_from_measured_rates.py`). Transfer
+and storage cost are still open.
+
+*Size and room (2026-09-24):* the plan also says how much the move
+carries, from the source's catalogue. It gives the tables' and indexes'
+size on disk for the tables it carries (not the ones the hop leaves
+alone), the room the target needs for them, and what the target's log
+grows by while it loads.
+* The log figure is the measured rate: PostgreSQL wrote 79 MB of WAL
+  loading 78 MB of table and index, and MySQL a 42.8 MB binlog loading
+  52 MB of table data.
+* Measuring the MySQL figure found the load was not writing the target's
+  binlog at all (item 6, and C16c in the problems file).
+
+(`tests/test_the_plan_says_the_size.py`)
+
+*Transfer cost (2026-09-25):* migkit cannot read a price. The hop option
+`transfer_price_per_gb` gives one, and the plan then says what carrying
+the tables' rows across costs at it. It prices only the rows, because the
+indexes are built on the target. Without the option, the plan names no
+cost. Still open: the target's free space, which neither engine reports
+over SQL.
+
 Bytes per table are already known. Add the transfer cost for the network
 path the hop uses, the target storage, and the time from the measured
 throughput of the chosen path.
@@ -610,6 +1096,24 @@ throughput of the chosen path.
 ## P1: verification the operator can extend
 
 **8. Business-rule and aggregate checks (D7, *Partly*).**
+
+*Done for the SQL engines (2026-09-24), `migkit/rules.py`:* the hop option
+`rules` holds named SQL, either one statement for both sides or a
+`{source, target}` pair. `check` runs them whenever the hop has any, with
+no flag.
+* Each runs on both sides in a transaction that cannot write. A rule that
+  tries to write fails as an error, and the source is untouched
+  (PostgreSQL's session is read-only, MySQL's transaction is
+  `read only`, SQLite's file is opened read-only).
+* Answers are compared by value, not text: `1.5000` meets `1.5`, `3` meets
+  `3.0`.
+* Rows are compared as a set, and a difference names the rows found on
+  one side only.
+* Cross-engine hops run each side on its own engine
+  (`tests/test_business_rules.py`).
+
+Still open: MongoDB, whose questions are aggregation pipelines rather than
+SQL.
 
 A hop option holding named SQL pairs (`sum(amount) by day`, `count by
 status`). Both sides run them and the results are compared through `canon`,
@@ -625,11 +1129,172 @@ validation is the model.
 
 **9. Column subset and column rename in the mapping.**
 
+*Done where columns are paired by name (2026-09-24):* `mapping.columns`
+takes, per table, `keep` (only these), `drop` (all but these) and
+`rename` (source name to target name), matched by suffix like every other
+name in the hop.
+* One function (`_mapped_types`) applies it for the cross-engine copier,
+  for the table it builds on the target, for the comparison and for the
+  schema check. SQLite, whose copies go through the same copier, compares
+  its mapped tables through it too.
+* A renamed column is read under its source name, and written and compared
+  under its target name. A dropped column is neither carried nor reported
+  as missing (`tests/test_column_mapping.py`).
+* PostgreSQL and MySQL hops copy and hash whole rows on their own paths,
+  so there the mapping is refused before anything is copied or compared,
+  rather than ignored.
+
+*Done on PostgreSQL's and MySQL's own paths (2026-09-25):* a table whose
+columns the hop maps goes through the pair machinery. That machinery
+already reads the mapping in one place, so none of it is written a second
+time for each engine. Every other table keeps the fast path.
+* The plan routes it out of every bulk copy (the dump, the streaming copy
+  and the MySQL dump), the same way it routes filtered tables. The pair's
+  copier builds it under the mapped names if the target lacks it, and
+  fills it.
+* `check` compares it through the pair: data, with drilldown, and schema,
+  column by column. The whole-database schema comparers leave it out:
+  * the dump diffs, with `--exclude-table` and `--ignore-table`
+  * the structural differ, whose inspected objects are filtered
+  * the object inventory
+  * the external schema comparers, through their exclude options, or
+    item by item from their report
+  The schema-aware comparison's authority no longer demotes the pair's
+  findings, because it never read those tables. The test caught this: a
+  column dropped from a mapped table was waved through as "cosmetic".
+* `sync --kind rows` plans and applies the pair's repairs for it. Writers
+  are still paused around the repair, as for any row repair.
+* `--mode cdc` follows the hop with the pair's change tail, which now
+  applies the mapping to every change. The server's own replication
+  carries whole rows under the source's names, so it is refused for such
+  a hop, with the reason.
+* The tail used to stop on the first change to a mapped table, on
+  `Unknown column 'name'`, cross-engine hops included. If the target had
+  both columns, it would have written the wrong one.
+  (`tests/test_column_mapping_on_own_paths.py`)
+
+Left open:
+* The pair's copier builds a missing mapped table from neutral classes.
+  It keeps NOT NULL, defaults and identity (see below), but numbers widen
+  (`int` becomes `bigint`) and it gets no secondary indexes. Where exact
+  types matter, make the table on the target first.
+* ~~`watch` and the delta loop still hash whole rows on the own paths.~~
+  Done: the delta loop sends a mapped table's comparison to the pair. The
+  pair walks the whole table rather than only the keys that changed,
+  which is slower and still right. `watch` reads only row counts, so the
+  mapping does not change anything there.
+* *Found on the way, and done:*
+  * The MySQL delta loop read the binlog with the same reader as the tail.
+    It said `0 changes since last verified position` over a compressed
+    transaction, then moved its position past it. It now stops where it
+    is, names the setting, and does not advance.
+  * Both delta loops compared the tables the hop excludes. Nothing else
+    compares those tables, so they left a difference nothing would clear.
+* ~~The own table copier (`MIGKIT_MOVER=builtin`) fills tables and
+  creates none.~~ Done: a whole-database copy creates what the target
+  lacks, the same way the bulk paths do. On PostgreSQL the keys and
+  constraints are added after the rows.
+* ~~The whole-database schema comparers do not leave out tables the hop
+  excludes.~~ Done: an excluded table is the target's own. Every schema
+  comparer now leaves it out, and so does the fix DDL. On a target that
+  kept its own differently-shaped `audit`, the check used to report a
+  difference nothing could clear, and the fix would have rebuilt the
+  table in the source's shape
+  (`tests/test_the_schema_check_leaves_what_the_hop_excludes.py`).
+
+*Found on the way, and done (2026-09-25):* passwords on command lines. The
+guard written for the MySQL bulk path covered one file. The same mistake
+was in five other places:
+* the MySQL schema dump took `-p<password>`
+* the table sync took `p=<password>` in both connection strings
+* the object comparison took both passwords as flags
+* the schema comparison took both URLs, passwords inside
+* the SQL Server client took `-P`
+
+Each was measured before it was changed, and each now hands the password
+over another way:
+* the environment: `MYSQL_PWD`, the comparison's own password variables,
+  `SQLCMDPASSWORD`
+* a private defaults file named by `F=`
+* a config file that reads the URLs from the environment
+
+The streaming copy's container took both connection URIs as `-e
+NAME=value` on the docker command line. It is now given `-e NAME` only,
+and docker takes the value from migkit's environment (measured). The
+guard now covers every module and every way a program is started
+(`tests/test_no_program_is_handed_a_password.py`). The table sync's plan
+also no longer names the program.
+
+*Found on the way, and done (2026-09-25):* sequences behind the rows.
+The table copier writes each row with the source's key, and a PostgreSQL
+sequence does not move for a key it did not hand out. Measured, through
+PostgreSQL's own copier and through the copier between engines: the first
+insert after the copy failed on `duplicate key value violates unique
+constraint`. The change tail between engines does the same with every row
+it inserts, and a cross-engine hop had no sequence check at all. Now:
+* Every copy ends by settling the target. Where the source is also
+  PostgreSQL, the source's sequence values are carried. From any engine,
+  each sequence that owns a column is raised to that column's largest
+  value; a sequence is only ever raised, never lowered. The statistics
+  are then analysed, as before.
+* A cross-engine hop into PostgreSQL has the `autoinc` check. It is asked
+  of the target alone and names each sequence that would hand out a key a
+  row already holds. `sync --kind sequences` raises them. A target whose
+  counter moves with every insert (MySQL) has no such check to run.
+(`tests/test_the_target_is_usable_after_the_table_copier.py`)
+
+*Found on the way, and done (2026-09-25):* tables built on another engine
+lost their columns' rules. Measured, a MySQL table built on PostgreSQL:
+`status varchar(10) not null default 'new'` arrived as `status
+varchar(10)`, and `id int auto_increment` arrived as `id integer`. After
+cutover, an insert that left out `status` stored NULL, and one that left
+out `id` was refused. The cross-engine schema check compared only names
+and kinds, so it called the two tables the same. The copier from MySQL to
+PostgreSQL built no tables at all, and onto an empty target it stopped.
+Now:
+* A built table keeps NOT NULL.
+* It keeps its defaults. Each is translated into the target's SQL and
+  asked of the target first; one the target refuses is named.
+* It keeps the engine numbering its key: an identity on PostgreSQL,
+  `auto_increment` on MySQL.
+* It gets the source's indexes, unique ones included, once its rows are
+  in. Before this, a built table had none: every query read it whole, and
+  a unique index the source kept was not there to refuse a duplicate. An
+  index over an expression, a predicate or a column prefix is named, not
+  carried.
+* The check reports a lost identity, default, NOT NULL or unique index,
+  both ways.
+* Every copy between engines builds the missing tables first.
+(`tests/test_tables_built_across_engines_keep_their_rules.py`)
+
+*Found on the way, and done (2026-09-25):* orphans behind a validated
+foreign key. PostgreSQL's orphan scan read only NOT VALID keys, assuming a
+validated key cannot have orphans under it. But every migkit load writes
+as a replica or with the triggers off, and a foreign key is a trigger. Row
+filters and excluded parents make orphans possible. Measured: under a
+filter that kept one parent and both children, the orphaned child sat
+behind a validated key, and the check read "all fk constraints validated,
+no orphans possible". Every key is now scanned, each within
+`fk_scan_seconds`. One that runs out of time is reported as unknown, not
+clean. A cross-engine hop scans its target the same way
+(`tests/test_orphans_behind_a_validated_key.py`).
+
 `mapping` reads only `where` and `tables` today. Add `columns` - keep or
 drop, and rename - read by the mover, the check and the repair alike. The
 DTS and DMS transformation rules are the model.
 
 **10. Newer-row-wins conflict policy.**
+
+*Done for PostgreSQL and MySQL (2026-09-24):* the hop option
+`newer_wins: <column>` splits the changed rows. Where the target's value
+in that column is later than the source's, the target row is kept, and it
+is listed in `data-<table>.kept-newer`. Every other changed row is
+overwritten from the source, including a row whose column either side has
+empty, because the source is the truth when the rows cannot say otherwise.
+A column missing from either side refuses the table before anything is
+repaired. `--on-conflict keep-target` still keeps everything it was asked
+to keep. The source side is read in a read-only session
+(`tests/test_the_newer_row_wins.py`).
 
 `--on-conflict` has `source-wins` and `keep-target`. Add a hop option for
 DTS's `ConditionCover` and pglogical's `last_update_wins`: compare a named
@@ -674,10 +1339,10 @@ offsets, which differ by design.
 
 * **A1** scope
 * **A2** privileges down to columns (with **D10**)
-* **A4** fork identity
+* ~~**A4** fork identity~~ done (2026-09-25): MariaDB objects MySQL has no home for
 * **B1** type mappings that change values
-* **B4** default collation changes
-* **B6** values the target refuses
+* **B4** default collation changes (the collapse is asked; mixed collations inside stored code are not)
+* ~~**B6** values the target refuses~~ done (2026-09-25): zero dates named before a move between engines
 * **C1** speed
 * **C3** resume after a crash
 * **C4** load on the source
@@ -685,20 +1350,20 @@ offsets, which differ by design.
 * **E4** change streams vs oplog
 * **F1** dual writes
 * **F4** poolers (*Not yet*)
-* **G2** masking what the drilldown shows
+* ~~**G2** masking what the drilldown shows~~ done (2026-09-25): hop option `mask`
 
 ## P3: carried over from the work loop
 
 | Item | Note |
 |---|---|
-| pgcopydb receives passwords in URIs on its command line | the log is redacted; `ps` is not |
-| PostgreSQL index window names indexes without their schema | an index outside `public` cannot be dropped; equal names in two schemas collide |
-| `create publication` | not idempotent |
+| pgcopydb receives passwords in URIs on its command line | done (2026-09-24/25): no password in the local copy's URIs (a password file), and the container's URIs come from the environment through `-e NAME` |
+| PostgreSQL index window names indexes without their schema | done (2026-09-24): schema-qualified and quoted |
+| `create publication` | done (2026-09-24): made only where it is missing, and a subscription a first run made is left to run - a second `--mode cdc` stopped on `already exists` (`tests/test_bounding_the_subscription.py`) |
 | `follow` | ends at the current position; there is no long-running mode |
-| generic engine | does not compare string length or nullability |
-| MySQL `_health` | ignores replication lag; `_q_named` exists now |
+| generic engine | done (2026-09-25): string length and nullability are read from the same catalogue the comparison library asks, in the standard spelling and then Oracle's; where neither answers, the verdict still says they were not compared (`tests/test_generic_schema.py`) |
+| MySQL `_health` | done (2026-09-24): a side that is itself a replica reports how far behind it is, by column name on MySQL and MariaDB, and the throttle backs off on it (`tests/test_mysql_fence.py`) |
 | hetero | has no deep battery |
-| sqlglot | declared and never imported: open it for DDL translation or drop it |
+| sqlglot | decided (2026-09-25): kept, for what a type map cannot do. It translates each column default into the target's SQL: `uuid()` becomes `gen_random_uuid()`, `now()` becomes `CURRENT_TIMESTAMP()`. The target is then asked whether it takes the result, and a default it refuses is named rather than guessed at |
 | to measure before wrapping | boto3 Secrets Manager, `mongodump --query/--oplog`, datacompy `all_mismatch()`, mydumper `--regex/--rows` |
 | resumable-dump flag | tell the operator when a restart loses the dump's progress (DTS `DumperResumeCtrl`) |
 | timed start and auto-retry window | low value next to cron |
@@ -753,7 +1418,41 @@ Attribute them where the engine can say:
 
 Report each row's age against when the move started.
 
+*Done for PostgreSQL and MongoDB (2026-09-24):* a move now records, as it
+begins, what the target says about that moment (`move-began.json`). On
+PostgreSQL that is the oldest transaction still running there. The data
+check then says, of the rows only the target has:
+* on PostgreSQL, how many were written before the move began (the target
+  was not emptied of them) and how many after it (the load, a stream
+  applying twice, or something writing to the target). Where the target
+  keeps commit timestamps, it also gives when they were committed.
+* on MongoDB, the same split by the second each ObjectId was made, and how
+  many carry ids with no time in them
+* that it cannot tell, where no move of migkit's marked the target and it
+  keeps no timestamps
+
+(`tests/test_who_wrote_the_rows_only_the_target_has.py`). Still open:
+MySQL, from the binlog where it still covers the window.
+
 **16. The side scripts in `tools/` become migkit, or go.**
+
+*Done (2026-09-24):* every migration script is gone, each because migkit
+already does its job.
+* **Grants:** the grant checks and repairs cover `check_grants` and
+  `apply_grants`.
+* **Users:** `migkit users` and `assess` cover `check_users` and
+  `user_sync`.
+* **Objects:** the object checks cover `check_routines`.
+* **Tables with no key:** every table's whole-table checksum covers
+  `check_nopk`, key or not.
+* **Comparisons:** `check` covers `full_compare`, `full_compare_mongo`,
+  `param_diff` and `spot_check`.
+* **Constraints:** the constraint repair now validates foreign keys as
+  well as checks, and only where the source's own is validated. That
+  covers `validate_constraints` (`tests/test_constraint_repair_pg.py`).
+
+`check_no_secrets` and `gen_changelog` stay: they are the repository's
+release tooling, not migration scripts.
 
 Twelve standalone scripts sit beside the package. The owner's rule is one
 tool, so each either becomes part of a migkit verb or is deleted where
@@ -771,15 +1470,49 @@ migkit already does its job:
 
 **17. MySQL events: repaired, not only detected.**
 
-The schema check names a missing event. The schema-fix tool migkit wraps
-does not model MySQL events and calls such a pair clean, so the fix DDL
-never includes them. migkit writes that DDL itself.
+*Done (2026-09-24):* the schema repair (`sync --kind schema`) now creates
+the events the target lacks from the source's own `SHOW CREATE EVENT`. It
+redefines the ones defined differently; who defined an event and whether
+it is on are not counted as differences.
+* Each is made in the time zone and sql_mode the source defined it in,
+  since both change what it does.
+* Each is made **switched off**. An event running on the target while rows
+  are still being carried rewrites them under the move, so switching them
+  on is left to the cutover, and the inventory says so.
+* Statements run one at a time in one session, since an event's body is
+  full of semicolons.
+* The undo drops what was made and puts back the target's own definition.
+* Found on the way: the schema repair handed the target's password to the
+  MySQL client on its command line, where any process listing could read
+  it. It goes through the environment now.
+
+(`tests/test_mysql_events_are_repaired.py`)
 
 **18. Rehearse the undo (F2).**
 
 The undo written beside every schema fix has only ever run in tests.
 Prove it on a scratch copy of the target before anyone relies on it on the
 day.
+
+*Done for PostgreSQL (2026-09-24):* `sync --kind schema --apply` first runs
+the fix and then its undo on a scratch database on the target's own
+server, holding a copy of the target's schema. It compares the schema
+with what it was, then drops the scratch database whatever happened.
+* A fix that fails there is not applied to the target.
+* An undo that does not return the schema exactly is said, with the lines
+  in `rehearsal.diff`. Example: a dropped column put back without its
+  default and NOT NULL.
+* A target where no scratch database can be made says the undo was not
+  rehearsed, and carries on as before.
+
+(`tests/test_the_undo_is_rehearsed.py`)
+
+*Done for MySQL (2026-09-25):* `sync --kind schema --apply` already
+applies MySQL's fix DDL. It is now rehearsed the same way, on a scratch
+database in the target's character set and collation. This matters more
+on MySQL than on PostgreSQL, because MySQL's DDL runs outside any
+transaction. Before this, a fix whose second statement failed left its
+first statement applied on the target.
 
 *Also folded into existing items:*
 * item 6 gains the `gtid_mode` / `enforce_gtid_consistency` mismatch. A
@@ -794,6 +1527,20 @@ day.
 
 Confirm which are already canonical, then add the rest.
 
+*Enums and domains (2026-09-24):* PostgreSQL's enums and domains are types
+of the database's own, and the cross-engine comparison classified columns
+by type name. Measured PostgreSQL to MySQL before this: both columns were
+left out as types with no rendering. A row whose enum was `sad` on one side
+and `ok` on the other came out `ok`, with a footnote. Now an enum compares
+as its label, and a domain as the type it is built on, following domains
+built on domains (`Engine.canonical_type`,
+`tests/test_enums_and_domains_across_engines.py`). MySQL's `enum` and
+`set` were already text.
+
+Still open: `interval`, `hstore` and `tsvector` have no counterpart on the
+other engines migkit pairs PostgreSQL with. They stay out of the
+comparison, and the footnote says so.
+
 **20. The PostgreSQL-only helpers, ported where the idea exists elsewhere.**
 
 `_filtered_tables`, `_extension_data`, `_large_objects`, `_mojibake_repair`.
@@ -802,6 +1549,13 @@ Confirm which are already canonical, then add the rest.
 
 **22. Coverage of `unchanged_since`.** Which checks honour it, and which
 still re-read everything.
+
+*Answered (2026-09-24):* only PostgreSQL's data pass honours it (version 15
+and later, from its shared-memory statistics and `relfilenode`), and its
+verdict names the tables it did not read. Every other engine, and
+PostgreSQL's consistent pass, re-reads everything. That is the safe side:
+no other engine has a marker that has been measured to move on every
+change, TRUNCATE included, and a marker that does not is a false negative.
 
 **23. The time zone the data actually uses.** Compare it with the time zone
 each server declares.
@@ -812,6 +1566,23 @@ each server declares.
 **25. Long reads over unstable links.** Sustained MongoDB cursors stalled
 over a tunnel; single-command reads did not. Read in bounded chunks that
 resume from the last key, on every engine.
+
+*MongoDB, and a false negative found on the way (2026-09-24):*
+* **The digest** read one cursor over the whole collection. It now reads
+  in chunks of 5,000, each its own short query resumed from the last key,
+  and retries a chunk that fails on the way. It gives the same answer at
+  any chunk size.
+* **The chunked read** resumed with `$gt` on `_id`, and a query's `$gt`
+  compares within one type only. Measured: seven documents keyed 1, 2,
+  2.5, "a", "b" and two ObjectIds, read two at a time, came back as the
+  three numbers. So the cross-engine copier and the row walk built on it
+  moved and compared three of seven, without a word. It now resumes with
+  an expression, which compares in the order the sort uses across types
+  and still walks the `_id` index.
+* A document keyed null no longer reads as the end of the collection.
+
+(`tests/test_mongo_reads_every_key_type.py`) The SQL engines already read
+in key-ordered chunks through `neutral_read`.
 
 ### P3
 
@@ -960,6 +1731,17 @@ Item 28 measures speed. What is left here:
   table in memory)
 
 **46. Wrapped programs stay wrapped when they change.**
+
+*Started (2026-09-24):* `tests/test_wrapped_flags_exist.py` reads the
+command lines each bulk path builds for its dry run, and holds every long
+flag against the installed program's own `--help` option column: the
+MySQL, MongoDB and PostgreSQL dump and load programs. Run in a CI matrix,
+it is the check that catches a renamed or removed flag before an operator
+does. It found a gap in the option reader first. The MongoDB tools spell
+their flags in camelCase with `=<value>`, and the reader, written for
+lower-case flags followed by a column gap, saw 6 of mongodump's 37 flags.
+It now reads them all, and still does not take a flag named inside
+another option's description for a real one.
 
 Every wrapped program has already changed underneath migkit once: flags
 missing from the installed build, and a newer build emitting settings an

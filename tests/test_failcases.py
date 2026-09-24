@@ -165,8 +165,14 @@ def test_credential_drift_detected(pg_pair, tmp_path):
     # same role name, different password: the DTS failure mode
     psql(pg_pair["src"], "create role appuser login password 'secret_v1'")
     psql(pg_pair["dst"], "create role appuser login password 'secret_v2'")
-    r = _run(conf, "assess", "t")
-    out = r.stdout + r.stderr
-    assert "password" in out.lower()
-    # appuser hash differs -> should be flagged, not passed silently
-    assert "appuser" in out
+    try:
+        r = _run(conf, "assess", "t")
+        out = r.stdout + r.stderr
+        assert "password" in out.lower()
+        # appuser hash differs -> should be flagged, not passed silently
+        assert "appuser" in out
+    finally:
+        # the servers are shared by the session; a login role left behind
+        # is one every later test that lists the application's roles finds
+        for port in (pg_pair["src"], pg_pair["dst"]):
+            psql(port, "drop role if exists appuser")

@@ -140,9 +140,11 @@ def test_the_definitions_reach_disk_first(pair, tmp_path):
     from migkit import indexes as ix
     from migkit import movers
     hop, eng = _engine(tmp_path)
-    where = tmp_path / "dropped-indexes.json"
     with movers._MyIndexWindow(eng, hop, "d", 2, None):
-        assert where.exists(), "nothing was written before the drop"
+        # one file per load, named for its process (`setaside`)
+        written = list(tmp_path.glob("dropped-indexes.*.json"))
+        assert len(written) == 1, "nothing was written before the drop"
+        where = written[0]
         saved = ix.restore_from(where)
         assert all("ADD INDEX" in v for v in saved.values()), saved
 

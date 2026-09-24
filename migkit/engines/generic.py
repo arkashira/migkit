@@ -343,14 +343,59 @@ class GenericEngine(Engine):
                                   "the schema of both sides has to be"
                                   " readable before anything can be compared"))
                 continue
-            res.append(self._schema_result(scope, src, dst))
+            more = (self._lengths_and_nulls(self._connect("src"), t),
+                    self._lengths_and_nulls(self._connect("dst"), t))
+            res.append(self._schema_result(
+                scope, src, dst, more if all(m is not None for m in more)
+                else None))
         self._close()
         return res
 
-    def _schema_result(self, scope, src, dst):
+    #: a column's length and whether it takes NULL, as the catalogues
+    #: name them: the standard `information_schema.columns`, and Oracle's
+    #: `ALL_TAB_COLUMNS`
+    LENGTH_AND_NULLS = (("character_maximum_length", "is_nullable"),
+                        ("char_length", "nullable"))
+
+    def _lengths_and_nulls(self, conn, table):
+        """{column: (length or None, takes NULL)}, or None where the
+        catalogue does not answer.
+
+        The comparison library's own schema query selects five columns and
+        not these two, per dialect. Its FROM and WHERE are the part that
+        knows each catalogue's table and naming, so this asks the same
+        place for the two columns it leaves out, in the standard spelling
+        and then Oracle's. Measured on PostgreSQL 16: `varchar(50)` against
+        `varchar(200)` and a NOT NULL on one side only, neither of which
+        the five columns show. On a catalogue that has neither spelling
+        the question fails, and the verdict keeps saying what it did not
+        compare."""
+        import re as _re
+        try:
+            base = conn.select_table_schema(self._path(conn, table))
+        except Exception:
+            return None
+        at = _re.search(r"\sFROM\s", base, _re.I)
+        if not at:
+            return None
+        for length, nulls in self.LENGTH_AND_NULLS:
+            try:
+                rows = conn.query(f"SELECT column_name, {length}, {nulls}"
+                                  f"{base[at.start():]}", list)
+            except Exception:
+                continue
+            if rows:
+                return {str(r[0]): (None if r[1] is None else int(r[1]),
+                                    str(r[2]).strip().upper()
+                                    in ("YES", "Y", "TRUE", "1"))
+                        for r in rows}
+        return None
+
+    def _schema_result(self, scope, src, dst, more=None):
         """`src` and `dst` are {column: catalogue row}, as `_schema` returns
-        them. Kept apart from the reading so every shape can be exercised
-        without two servers."""
+        them; `more` is each side's `_lengths_and_nulls`, or None where
+        either catalogue did not answer. Kept apart from the reading so
+        every shape can be exercised without two servers."""
         missing = [c for c in src if c not in dst]
         extra = [c for c in dst if c not in src]
         drift = []
@@ -362,6 +407,9 @@ class GenericEngine(Engine):
                 drift.append(f"{c} is {self._describe(src[c])} on the source"
                              f" and {self._describe(dst[c])} on the target"
                              + (f" - {why}" if why else ""))
+            if more:
+                drift += self._length_and_null_drift(c, more[0].get(c),
+                                                     more[1].get(c))
         parts = []
         if missing:
             parts.append(f"{len(missing)} columns the target does not have: "
@@ -370,14 +418,38 @@ class GenericEngine(Engine):
             parts.append(f"{len(extra)} columns only the target has: "
                          + ", ".join(sorted(extra)[:6]))
         parts += drift[:6]
+        blind = (" String lengths and nullability compared too." if more
+                 else f" {self.BLIND_SPOTS}")
         if parts:
             return Result("schema", scope, "diff",
-                          "; ".join(parts) + f". {self.BLIND_SPOTS}", "",
+                          "; ".join(parts) + "." + blind, "",
                           "align the target's columns with the source's"
                           " before moving data into them")
         return Result("schema", scope, "ok",
                       f"{len(src)} columns, same names and same declared"
-                      f" types on both sides. {self.BLIND_SPOTS}")
+                      f" types on both sides." + blind)
+
+    @staticmethod
+    def _length_and_null_drift(column, src, dst):
+        """What differs in a column's length and nullability, and which way
+        the risk runs."""
+        if not src or not dst:
+            return []
+        out = []
+        (s_len, s_null), (d_len, d_null) = src, dst
+        if s_len is not None and d_len is not None and s_len != d_len:
+            out.append(f"{column} holds {s_len} characters on the source and"
+                       f" {d_len} on the target - "
+                       + ("values longer than that will not fit"
+                          if d_len < s_len else
+                          "wider on the target, which holds every source"
+                          " value"))
+        if s_null != d_null:
+            out.append(f"{column} " + (
+                "takes NULL on the source and not on the target - a NULL the"
+                " source holds is refused" if s_null else
+                "is NOT NULL on the source and takes NULL on the target"))
+        return out
 
     def check_counts(self, db):
         bad = []

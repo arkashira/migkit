@@ -139,11 +139,13 @@ def test_a_unique_not_null_index_counts_as_a_key(inv):
     assert "keyed" not in d, d
 
 
-def test_an_event_is_reported_as_left_behind(inv):
-    d = _row(inv, "not-carried")["detail"]
-    assert "ev" in d and "scheduled events" in d, d
-    # the reason has to travel with the finding, or the next reader guesses
-    assert "no tool generates the DDL" in d, d
+def test_an_event_is_left_for_the_cutover_to_switch_on(inv):
+    """The schema repair makes the event now, switched off
+    (`test_mysql_events_are_repaired.py`); switching it on is the hands
+    work left, and it is not reported as something migkit leaves behind."""
+    d = _row(inv, "decide-then-apply")["detail"]
+    assert "ev" in d and "switch on at cutover" in d, d
+    assert "scheduled events" not in _row(inv, "not-carried")["detail"]
 
 
 def test_migkit_sees_the_event_but_cannot_generate_its_ddl(pair, tmp_path):
@@ -175,8 +177,8 @@ def test_migkit_sees_the_event_but_cannot_generate_its_ddl(pair, tmp_path):
     text = fix.read_text().upper()
     assert "CREATE TABLE" in text, text[:300]
     assert "EVENT" not in text, (
-        "atlas now generates DDL for events - they are carried, and the "
-        "inventory entry must be removed")
+        "atlas now generates DDL for events - migkit's own event repair "
+        "and this one would both make them")
 
 
 def test_a_memory_table_is_reported_as_not_carried(inv):

@@ -77,8 +77,13 @@ def test_without_a_mapping_the_command_is_exactly_what_it_was(tmp_path):
     from migkit import movers
     steps = movers.mydumper_move(_hop(None, tmp_path), "appdb", 2, False,
                                  None)
-    assert "--defaults-file" not in steps[0].command, steps[0].command
     assert "--omit-from-file" not in steps[0].command, steps[0].command
+    from migkit.engines.mysql import MySQLEngine
+    # every hop reads its dump strict (test_the_mysql_load_is_strict.py),
+    # through a defaults file that, with no mapping, holds nothing else
+    assert movers.mydumper_session(_hop(None, tmp_path), "appdb") == (
+        "[mydumper_session_variables]\nsql_mode ="
+        f" '{MySQLEngine.WRITE_SQL_MODE}'\n")
     # the consistency flag is spelled however the installed build spells
     # it: this line used to pin `--trx-consistency-only`, which the build
     # installed here rejects at option parsing, so the command it pinned
@@ -88,7 +93,9 @@ def test_without_a_mapping_the_command_is_exactly_what_it_was(tmp_path):
     # the machine log the progress lines are read from is not a mapping
     # flag; it is there for every hop the installed build can give it to
     command = steps[0].command.removesuffix(" --machine-log-json -v 3")
-    assert command.endswith(f"--no-schemas {trx}"), steps[0].command
+    cnf = str(tmp_path / "mydumper-filters.cnf")
+    assert command.endswith(f"--no-schemas {trx} --defaults-file {cnf}"), \
+        steps[0].command
 
 
 def test_the_config_is_written_beside_the_dump_not_inside_it(tmp_path):
@@ -141,9 +148,11 @@ def test_the_mover_that_can_do_it_is_not_refused():
 
 
 def test_the_table_copier_applies_it_on_both_sql_engines():
+    """And the pair's copier, for a hop between engines and for SQLite,
+    which copies through it (`test_the_pair_honours_the_row_filter.py`)."""
     from migkit import movers
     hop = _hop({"where": {"orders": "x"}})
-    for engine in ("postgres", "mysql"):
+    for engine in ("postgres", "mysql", "hetero", "sqlite"):
         movers.refuse_unpushable_filters(hop, "appdb", "builtin", engine)
 
 
@@ -154,7 +163,7 @@ def test_a_path_that_cannot_apply_it_refuses_without_naming_a_program():
     from migkit import movers
     from tests.test_the_report_does_not_name_its_tools import TOOLS
     for engine, via in (("hetero", "pgloader"), ("mongodb", "mongodump"),
-                        ("hetero", "builtin")):
+                        ("mongodb", "builtin")):
         with pytest.raises(SystemExit) as e:
             movers.refuse_unpushable_filters(
                 _hop({"where": {"orders": "x"}}), "appdb", via, engine)

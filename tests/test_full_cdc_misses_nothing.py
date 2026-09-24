@@ -253,13 +253,20 @@ def test_a_saved_position_is_kept_on_the_next_run(tmp_path, monkeypatch):
 def test_cdc_after_a_copy_with_no_position_says_what_it_cannot_carry(
         tmp_path, monkeypatch):
     """`--mode cdc` on its own cannot recopy anything, and starting from now
-    after a copy is the hole; it says so rather than tailing in silence."""
+    after a copy is the hole; it says so rather than tailing in silence.
+    (A copy that noted where the log was before it no longer leaves the
+    hole - `test_a_separate_cdc_starts_before_the_copy` below - so the note
+    is taken away here to reach the case it cannot.)"""
+    import json
     _fresh("mysql")
     _conf(tmp_path, monkeypatch, "mysql")
     monkeypatch.setenv("MIGKIT_MOVER", "builtin")
     got, said = _move(monkeypatch, "full")
     assert got.exit_code == 0, said
     assert "carried by nothing" not in said, said
+    record = next((tmp_path / "reports").rglob("copy-position.json"))
+    record.write_text(json.dumps({**json.loads(record.read_text()),
+                                  "before": None}))
     got, said = _move(monkeypatch, "cdc")
     assert got.exit_code == 0, said
     assert "carried by nothing" in said, said
@@ -332,20 +339,27 @@ def test_the_tail_writes_where_the_move_wrote(src, tmp_path, monkeypatch):
 @pytest.mark.parametrize("mode", ["full", "full+cdc"])
 @pytest.mark.usefixtures("servers")
 @docker
-def test_a_row_filter_nothing_can_apply_stops_before_the_copy(
+def test_a_row_filter_is_applied_by_the_copy_and_the_tail(
         mode, tmp_path, monkeypatch):
-    """Neither cross-engine copier takes a predicate, and the tail cannot
-    judge a change against one: every row moved, under "complete"."""
+    """Neither cross-engine copier took a predicate, and the tail could
+    not judge a change against one, so this used to stop before the copy.
+    Both read through the filter now: the copy carries only what it
+    selects, and a change the tail meets outside it is not applied
+    (`test_the_pair_honours_the_row_filter.py` has the tail's cases)."""
     _fresh("mysql")
     _conf(tmp_path, monkeypatch, "mysql",
           "    mapping: {where: {a: 'id > 5'}}\n")
     monkeypatch.setenv("MIGKIT_MOVER", "builtin")
-    copied = []
-    got, said = _move(monkeypatch, mode, copied.append)
-    assert got.exit_code != 0, said
-    assert "row filter" in said, said
-    assert copied == []
-    assert pg("select count(*) from a") == "0"
+
+    def during(table):
+        if table == "a":
+            my("insert into a values (0, 'out'), (30, 'in')")
+    got, said = _move(monkeypatch, mode, during)
+    assert got.exit_code == 0, said
+    # 6..20 by the copy; 30 only where the tail ran after it
+    want = "16" if mode == "full+cdc" else "15"
+    assert pg("select count(*) from a") == want, said
+    assert pg("select count(*) from a where id <= 5") == "0", said
 
 
 def test_an_unreadable_position_is_not_read_as_none(tmp_path):
@@ -572,3 +586,23 @@ def test_the_cross_engine_mongo_reader_leaves_it_alone_too(mongo):
                    " db.q.insertOne({_id: 901})").returncode == 0
     got, _ = eng.neutral_changes("src", "cx", point)
     assert [(c["table"], c["key"]["_id"]) for c in got] == [("q", 901)], got
+
+
+@pytest.mark.usefixtures("servers")
+@docker
+def test_a_separate_cdc_starts_before_the_copy(tmp_path, monkeypatch):
+    """A full copy on its own notes where the source's log was before it;
+    a `--mode cdc` run later starts there, so a row written between the two
+    arrives instead of being carried by nothing."""
+    _fresh("mysql")
+    _conf(tmp_path, monkeypatch, "mysql")
+    monkeypatch.setenv("MIGKIT_MOVER", "builtin")
+    got, said = _move(monkeypatch, "full")
+    assert got.exit_code == 0, said
+    my("insert into a values (301, 'gap')")
+    got, said = _move(monkeypatch, "cdc")
+    assert got.exit_code == 0, said
+    assert "before the copy of" in said, said
+    assert "carried by nothing" not in said, said
+    assert pg("select v from a where id = 301") == \
+        "gap"

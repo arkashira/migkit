@@ -107,6 +107,29 @@ def _engine():
         databases=["appdb"]))
 
 
+def test_a_replica_side_reports_its_lag_to_the_throttle(replica):
+    """The throttle's probe read only the share of sessions in use; on a
+    replica, falling behind is the other signal, and it was left out."""
+    import time
+    eng = _engine()
+    # first in the file: the tests after it stop the applier, and one
+    # leaves it stopped on a row written on the target alone
+    for _ in range(20):
+        lag = eng._health("dst").lag_seconds
+        if lag is not None:
+            break
+        time.sleep(0.5)
+    # a number of seconds while it applies - not necessarily 0 - and none
+    # on the source, which replicates from nothing
+    assert isinstance(lag, float) and 0 <= lag < 120, lag
+    assert eng._health("src").lag_seconds is None
+    _my(DST, "stop replica sql_thread;")
+    try:
+        assert eng._health("dst").lag_seconds is None
+    finally:
+        _my(DST, "start replica sql_thread;")
+
+
 def test_the_fence_passes_once_the_target_has_applied_it(replica):
     eng = _engine()
     _my(SRC, "insert into appdb.t values (1), (2), (3);")
@@ -170,3 +193,4 @@ def test_no_replication_is_nothing_to_fence_on_not_a_pass(replica):
     eng = _engine()
     _my(DST, "stop replica; reset replica all;")
     assert eng.fence_wait("appdb", eng.src_lsn("appdb"), timeout=5) is None
+

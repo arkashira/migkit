@@ -286,7 +286,8 @@ def test_the_index_window_leaves_an_excluded_table_alone(pg_pair, tmp_path):
         got = psql(pg_pair["dst"], "insert into audit_log values (9,'own')")
         assert got.returncode != 0, "the duplicate got in while it was open"
         assert "duplicate key" in got.stderr, got.stderr
-    assert w.dropped == ["orders_v"], w.dropped
+    # by schema too (test_index_window_pg.py)
+    assert w.dropped == ["public.orders_v"], w.dropped
     assert any("tables the hop excludes were left in place" in ln
                for ln in lines), lines
 
@@ -297,7 +298,8 @@ def test_without_an_exclude_the_window_is_what_it_was(pg_pair, tmp_path):
     with movers._IndexWindow(_hop(pg_pair, (), tmp_path), "postgres", 2,
                              None) as w:
         pass
-    assert sorted(w.dropped) == ["audit_note_u", "orders_v"], w.dropped
+    assert sorted(w.dropped) == ["public.audit_note_u", "public.orders_v"], \
+        w.dropped
 
 
 def test_both_index_windows_consult_the_exclusion():
