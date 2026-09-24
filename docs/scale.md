@@ -108,6 +108,69 @@ naming rows instead of only counting them, and it is bounded by
 `DRILL_CAP`, but 814 MB is worth watching: it is the one number here that
 moved with the data.
 
+## The harness anyone can re-run (2026-09-25)
+
+`bench/run.py` does all of the above by itself, for PostgreSQL 16 or
+MySQL 8.4:
+* starts a disposable source and target
+* builds six table shapes inside the source: keyed, key-less, forty
+  columns wide, 20 KB binary payloads, a skewed composite key, and range
+  partitions
+* times each path `migkit move` can take, then `migkit check`
+* times the same copy through the open programs run directly, with no
+  migkit in between
+* with `--cdc-rate`, measures how far behind migkit's change tail is when
+  a writer at that rate stops
+* writes the numbers, the hardware and the versions to
+  `reports/bench/<time>.json`
+
+    .venv/bin/python bench/run.py --engine postgres --rows 100000 \
+        --cdc-rate 500 --cdc-seconds 20
+
+On the machine above, at 100,000 rows per shape:
+
+| step | path | seconds |
+|---|---|---|
+| move | table copier | 4.27 |
+| move | dump and restore | 4.89 |
+| copy, no migkit | the dump programs run directly, 2 jobs | 1.57 |
+| check | every check | 21.5 |
+| change tail | 472 rows/s for 20 s | 0.68 behind at the end |
+
+At this size migkit's own work around the copy is most of its time: about
+three seconds of planning, reading the catalogues before and after, the
+trigger and sequence decisions, and statistics. It does not grow with the
+rows (compare the ten-million-row move above). The check's verdict is
+`different` on purpose: the key-less shape is one a change stream cannot
+carry, and the check names it.
+
+**The harness found a bug on its first run.** MySQL's change tail opened a
+connection for every change it applied. At 190 rows a second it was still
+15 seconds behind when the writer stopped. A batch is now one transaction
+on one connection, and the same run ends 2.9 seconds behind.
+
+**Running it again at a higher rate found a second bug.** At 472 rows a
+second, the MySQL tail ended 38.26 seconds behind. This time the cause
+was the reader, not the applier. It looked up the table's key for every
+binlog event, each time on a new connection, which held it to about 160
+rows a second. It now looks the key up once per batch, and the same run
+ends 0.73 seconds behind.
+
+The applier was changed in the same round. Rows that are next to each
+other in a batch, in the same table and with the same columns, are now
+written by one statement of up to 1,000 rows, instead of one statement
+per row. Measured on PostgreSQL 16 with 20,000 upserts, that took 0.06
+seconds instead of 3.9.
+
+The highest rate the writer reached on this machine was:
+
+| tail | writer | behind when the writer stopped |
+|---|---|---|
+| MySQL into MySQL | 1,030 rows/s for 20 s | 0.13 s |
+| PostgreSQL into PostgreSQL | 1,150 rows/s for 20 s | 0.72 s |
+
+At that rate the writer is the limit, not the tail.
+
 ## What the benchmark found
 
 Running at ten million rows found a bug that no test in the suite could

@@ -824,40 +824,61 @@ class PostgresEngine(Engine):
         way the server allows."""
         return self._write_rules(side, db, table)["generated"]
 
+    #: Rows in one applied statement (`Engine._apply_each`).
+    APPLY_ROWS = 1000
+
     def _apply_upsert(self, side, db, table, key, values):
+        self._apply_upserts(side, db, table, [(key, values)])
+
+    def _apply_upserts(self, side, db, table, rows):
+        from psycopg2.extras import execute_values
+
         from .. import canon
         table = self.local_table(table)
         sch, tbl = self._split(table)
-        row = dict(key)
-        row.update(values)
-        names = [n for n in sorted(row)
+        key = rows[0][0]
+        full = [{**k, **v} for k, v in rows]
+        names = [n for n in sorted(full[0])
                  if n not in self._unwritable_columns(side, db, table)]
         cols = ", ".join(f'"{n}"' for n in names)
-        marks = ", ".join(["%s"] * len(names))
         sets = ", ".join(f'"{n}" = excluded."{n}"'
                          for n in names if n not in key)
         conflict = ", ".join(f'"{k}"' for k in sorted(key))
         tail = (f" on conflict ({conflict}) do update set {sets}" if sets
                 else f" on conflict ({conflict}) do nothing")
         override = self._insert_override(side, db, table, names)
-        with self._conn(side, self._d(side, db)) as conn:
+        with self._writer(side, db) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'insert into "{sch}"."{tbl}" ({cols})'
-                            f"{override} values ({marks}){tail}",
-                            [canon.sql_value(row[n]) for n in names])
-            conn.commit()
+                execute_values(cur, f'insert into "{sch}"."{tbl}" ({cols})'
+                                    f"{override} values %s{tail}",
+                               [[canon.sql_value(r[n]) for n in names]
+                                for r in full],
+                               page_size=self.APPLY_ROWS)
 
     def _apply_delete(self, side, db, table, key):
+        self._apply_deletes(side, db, table, [key])
+
+    def _apply_deletes(self, side, db, table, keys):
+        from psycopg2.extras import execute_values
+
         from .. import canon
         table = self.local_table(table)
         sch, tbl = self._split(table)
-        names = sorted(key)
-        where = " and ".join(f'"{n}" = %s' for n in names)
-        with self._conn(side, self._d(side, db)) as conn:
+        names = sorted(keys[0])
+        cols = ", ".join(f'"{n}"' for n in names)
+        # a list of rows rather than `in (values ...)`: those values are
+        # typed as text and do not compare with an integer key
+        with self._writer(side, db) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'delete from "{sch}"."{tbl}" where {where}',
-                            [canon.sql_value(key[n]) for n in names])
-            conn.commit()
+                execute_values(cur, f'delete from "{sch}"."{tbl}"'
+                                    f" where ({cols}) in (%s)",
+                               [[canon.sql_value(k[n]) for n in names]
+                                for k in keys],
+                               page_size=self.APPLY_ROWS)
+
+    def _open_writer(self, side, db):
+        self._target_only(side, "apply changes")
+        return self._conn(side, self._d(side, db))
 
     PLUGIN = "test_decoding"
 
@@ -5030,6 +5051,7 @@ class PostgresEngine(Engine):
         # change what an operator does.
         items += self._preflight_items()
         items += self._stream_capacity()
+        items += self._decoding_spills()
         items += self._unmatchable_rows()
         items += self._scope_items()
         return items
@@ -5113,6 +5135,50 @@ class PostgresEngine(Engine):
                     f" - set {what} = {need} (a restart; on a managed"
                     " server, in its parameter group)")})
         return out
+
+    def _decoding_spills(self):
+        """Whether the source's change streams have been decoding
+        transactions too large for `logical_decoding_work_mem`, with the
+        value that ends it.
+
+        What does not fit is written to disk on the source and read back,
+        which slows the stream and costs the source's disk. Measured on 16,
+        a 3.3 MB transaction decoded with the setting at 64kB: `spill_txns
+        1, spill_bytes 3,460,000`. At 4MB the same transaction spilled
+        nothing, and at 2MB it did. So the value named is the next power
+        of two at least the average spilled transaction, and never less
+        than twice the current setting. The count is the server's own,
+        since its statistics were last reset (PostgreSQL 14 and later)."""
+        item = "change streams decode within logical_decoding_work_mem"
+        try:
+            got = self._psql("src", "postgres",
+                             "select coalesce(sum(spill_txns), 0)||'|'||"
+                             "coalesce(sum(spill_bytes), 0)||'|'||"
+                             "coalesce(string_agg(slot_name, ',') filter"
+                             " (where spill_txns > 0), '')||'|'||"
+                             "pg_size_bytes(current_setting("
+                             "'logical_decoding_work_mem'))"
+                             " from pg_stat_replication_slots").strip()
+            txns, spilled, slots, setting = got.split("|")
+            txns, spilled, setting = int(txns), int(spilled), int(setting)
+        except (RuntimeError, ValueError):
+            return [{"level": "warn", "scope": "instance", "item": item,
+                     "detail": "not asked: the server keeps no count of it"
+                               " before PostgreSQL 14"}]
+        if not txns:
+            return [{"level": "pass", "scope": "instance", "item": item,
+                     "detail": "no transaction decoded by a stream here has"
+                               " spilled to disk"}]
+        want = max(spilled // txns, 2 * setting)
+        mb = 1
+        while mb * 2 ** 20 < want:
+            mb *= 2
+        return [{"level": "warn", "scope": "instance", "item": item,
+                 "detail": f"{txns:,} transactions decoded for {slots}"
+                           f" spilled {spilled / 2 ** 20:.1f} MB to the"
+                           " source's disk - set logical_decoding_work_mem"
+                           f" = {mb}MB (a reload; on a managed server, in"
+                           " its parameter group)"}]
 
     def _mover_leftovers(self):
         """What a mover added to the source and did not take away.
@@ -6303,6 +6369,7 @@ class PostgresEngine(Engine):
         name = self._repl_name()
         conn = (f"host={s.host} port={s.port} dbname={db}"
                 f" user={s.user} password={s.password}")
+        streaming = self._subscription_streaming(db)
         note = {}
         if copied:
             # its slot is made now, and the log before now is not in it
@@ -6320,12 +6387,54 @@ class PostgresEngine(Engine):
                     f" {name} for all tables; end if; end $$;"],
             "dst": [f"create subscription {name} connection '{conn}'"
                     f" publication {name} with (copy_data ="
-                    f" {'true' if copy_data else 'false'});"],
+                    f" {'true' if copy_data else 'false'}"
+                    + (f", streaming = {streaming}" if streaming else "")
+                    + ");"],
             "drop_src": [f"drop publication if exists {name};"],
             "drop_dst": [f"drop subscription if exists {name};"],
             "status": "select subname, received_lsn, latest_end_lsn,"
                       " latest_end_time from pg_stat_subscription",
         }
+
+    def _subscription_streaming(self, db):
+        """How the subscription takes a transaction too large for the
+        source's decoding memory: streamed while it is still running,
+        rather than written to the source's disk and sent at commit.
+
+        Measured on 16, 3.3 MB in one transaction, the source's
+        `logical_decoding_work_mem` at 64kB: without it the source spilled
+        3,460,000 bytes to disk; with `streaming = parallel` it spilled
+        nothing and streamed the same 3,460,000 bytes, and all 20,000 rows
+        arrived. `parallel` from 16 on the target, `on` from 14; the
+        source has to be 14 as well, to send it. None - the server's own
+        default - where either side cannot be asked."""
+        src = self._server_version("src", db)
+        dst = self._server_version("dst", self._d("dst", db))
+        if not src or not dst or src < 140000 or dst < 140000:
+            return None
+        return "parallel" if dst >= 160000 else "on"
+
+    def _server_version(self, side, db):
+        """`server_version_num` of one side, or None where it cannot be
+        asked. One attempt with a short wait: this decides an option, and
+        a plan should not stall a minute on a server that is down."""
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+        try:
+            conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+                                    password=ep.password, dbname=db,
+                                    connect_timeout=5)
+        except Exception:
+            return None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select current_setting('server_version_num')"
+                            "::int")
+                return cur.fetchone()[0]
+        except psycopg2.Error:
+            return None
+        finally:
+            conn.close()
 
     def replication_status(self, db, sql):
         got = self._psql("dst", db, sql).strip()

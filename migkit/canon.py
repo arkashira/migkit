@@ -64,7 +64,14 @@ A row migkit did not verify is a number in the report, never a silence.
 # the rendering is chosen from the class, so adding an engine is a mapping
 # rather than a new set of pairwise rules.
 CLASSES = ("integer", "decimal", "float", "boolean", "text", "bytes",
-           "date", "timestamp", "time", "json")
+           "date", "timestamp", "time", "json", "own text")
+
+#: A type with no rendering shared across engines - an interval, a range, a
+#: text search vector - compared between two servers of the same engine by
+#: that engine's own text of it. Only ever given to a column when both sides
+#: are the same engine and declare the same type: across engines the two
+#: texts were never checked to agree, and that is what `None` says.
+OWN = "own text"
 
 # Where the fixed-decimal rendering of a binary float is exact on both sides.
 #
@@ -397,6 +404,10 @@ def render_value(cls, value):
     if cls == "time":
         # `to_char(t, 'HH24:MI:SS.US')` and `time_format(t, '%H:%i:%s.%f')`
         return value.strftime("%H:%M:%S.%f")
+    if cls == OWN:
+        # both sides came through the same driver, so the same value is the
+        # same Python object and the same text
+        return value if isinstance(value, str) else str(value)
     raise ValueError(f"no in-process rendering for class {cls!r}")
 
 
@@ -413,6 +424,7 @@ def render_value(cls, value):
 # value; creating one narrower can, and this file will not do that.
 DDL = {
     "postgres": {
+        OWN: ("text", "{0}"),
         "integer": ("bigint", "bigint"),
         "decimal": ("numeric", "numeric({0},{1})"),
         "float": ("double precision", "double precision"),
@@ -425,6 +437,7 @@ DDL = {
         "json": ("jsonb", "jsonb"),
     },
     "mysql": {
+        OWN: ("text", "{0}"),
         "integer": ("bigint", "bigint"),
         "decimal": ("decimal(65,10)", "decimal({0},{1})"),
         "float": ("double", "double"),
@@ -441,6 +454,7 @@ DDL = {
         "json": ("json", "json"),
     },
     "sqlite": {
+        OWN: ("text", "{0}"),
         "integer": ("integer", "integer"),
         "decimal": ("numeric", "numeric({0},{1})"),
         "float": ("real", "real"),

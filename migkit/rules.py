@@ -9,6 +9,9 @@ and migkit cannot guess, so the hop carries them:
       orders by status: select status, count(*) from orders group by status
       revenue: {source: "select sum(amount) from sales",
                 target: "select sum(amount) from public.sales"}
+      orders by status (MongoDB):
+        {collection: orders,
+         pipeline: [{$group: {_id: "$status", n: {$sum: 1}}}]}
 
 Each runs on both sides inside a read-only transaction, so a rule can never
 write - the source is not written to, whatever the rule says. The answers
@@ -22,15 +25,24 @@ from .engines.base import Result
 
 
 def configured(hop):
-    """{name: (source sql, target sql)} from the hop's `rules`."""
+    """{name: (source question, target question)} from the hop's `rules`.
+
+    A question is SQL, or - for MongoDB, whose questions are aggregation
+    pipelines - a `{collection, pipeline}` mapping, carried as JSON to the
+    engine that runs it. A mapping with `source` and `target` asks each
+    side its own."""
+    import json
     out = {}
+
+    def text(q):
+        return json.dumps(q) if isinstance(q, (dict, list)) else str(q)
     for name, rule in ((hop.options or {}).get("rules") or {}).items():
-        if isinstance(rule, dict):
+        if isinstance(rule, dict) and ("source" in rule or "target" in rule):
             src, dst = rule.get("source"), rule.get("target")
         else:
             src = dst = rule
         if src and dst:
-            out[str(name)] = (str(src), str(dst))
+            out[str(name)] = (text(src), text(dst))
     return out
 
 

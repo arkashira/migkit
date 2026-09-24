@@ -144,7 +144,35 @@ def test_same_engine_compares_the_whole_row(cmp_pair, tmp_path):
                            " pt='(1,2)', rng='[1,5)', h='k=>v' where id=1;")
 
 
-def test_the_cross_engine_path_refuses_seventeen_of_them(cmp_pair, tmp_path):
+def _elsewhere(eng, monkeypatch):
+    """The same catalogue read as if the other side were another engine:
+    what a pair across engines is left with from PostgreSQL's side. (The
+    same engine on both sides compares every column by its own text now;
+    the next test.)"""
+    from migkit import canon
+    monkeypatch.setitem(canon.TYPES, "elsewhere", canon.TYPES["postgres"])
+    monkeypatch.setitem(canon.BUILDERS, "elsewhere",
+                        canon.BUILDERS["postgres"])
+
+    class Elsewhere(type(eng)):
+        CANON_ENGINE = "elsewhere"
+    return Elsewhere(eng.hop)
+
+
+def test_the_same_engine_on_both_sides_compares_all_of_them(cmp_pair,
+                                                            tmp_path):
+    """A pair of one engine - a column mapping on a PostgreSQL hop goes
+    through the pair - compares a type with no shared rendering by the
+    engine's own text of it, so nothing is left out."""
+    eng = _engine(cmp_pair, tmp_path)
+    src, dst, notes = eng._comparable_columns("postgres", eng, "public.wide",
+                                              eng, "public.wide")
+    assert notes == [], notes
+    assert len(src) == len(dst) == 37, (len(src), len(dst))
+
+
+def test_the_cross_engine_path_refuses_seventeen_of_them(cmp_pair, tmp_path,
+                                                         monkeypatch):
     """The size of the refusal, which the docs described without measuring.
 
     Not an exact-number assertion on the excluded list - a new canonical
@@ -153,8 +181,9 @@ def test_the_cross_engine_path_refuses_seventeen_of_them(cmp_pair, tmp_path):
     the argument for closing the gap.
     """
     eng = _engine(cmp_pair, tmp_path)
-    src, dst, notes = eng._comparable_columns("postgres", eng, "public.wide",
-                                              eng, "public.wide")
+    src, dst, notes = eng._comparable_columns(
+        "postgres", eng, "public.wide", _elsewhere(eng, monkeypatch),
+        "public.wide")
     assert len(src) == len(dst), (len(src), len(dst))
     assert len(src) + len(notes) == 37, (len(src), len(notes))
     # the honest part: every refusal is named, none is dropped quietly
@@ -168,13 +197,15 @@ def test_the_cross_engine_path_refuses_seventeen_of_them(cmp_pair, tmp_path):
     assert "e" in {n for n, _ in src}, src
 
 
-def test_a_refused_column_is_not_quietly_dropped(cmp_pair, tmp_path):
+def test_a_refused_column_is_not_quietly_dropped(cmp_pair, tmp_path,
+                                                monkeypatch):
     """The failure this design exists to avoid: a column that is neither
     compared nor mentioned. Every name that is not in the compared list
     must appear in the notes."""
     eng = _engine(cmp_pair, tmp_path)
-    src, _, notes = eng._comparable_columns("postgres", eng, "public.wide",
-                                            eng, "public.wide")
+    src, _, notes = eng._comparable_columns(
+        "postgres", eng, "public.wide", _elsewhere(eng, monkeypatch),
+        "public.wide")
     compared = {n for n, _ in src}
     named = {n.split(":")[0] for n in notes}
     declared = set(q(cmp_pair["src"],

@@ -847,8 +847,17 @@ class HeteroEngine(Engine):
         declared = list(mapped.items())
         rules = self._carried_rules(db, src_table, back)
         columns, unknown = [], []
+        same = self.src_engine.CANON_ENGINE == self.dst_engine.CANON_ENGINE
         for name, typ in sorted(declared):
             cls = canon.type_class(self.src_engine.CANON_ENGINE, typ)
+            if same:
+                # the same engine on both sides takes the source's own type
+                # as it is written. Through the classes, a `timestamptz`
+                # was built as `timestamp(6)` - the offset gone - and an
+                # `int` as `bigint`
+                columns.append((name, canon.OWN, (typ,),
+                                rules.get(name) or {}))
+                continue
             if cls is None:
                 unknown.append(f"{name} ({typ})")
                 continue

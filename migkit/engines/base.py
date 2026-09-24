@@ -2377,11 +2377,21 @@ class Engine:
         out = {"pairs": [], "unreadable": [],
                "only_src": sorted(set(src_types) - set(dst_types)),
                "only_dst": sorted(set(dst_types) - set(src_types))}
+        same = (src_engine.CANON_ENGINE == dst_engine.CANON_ENGINE
+                and canon.renders(src_engine.CANON_ENGINE))
         for name in sorted(set(src_types) & set(dst_types)):
             scls, swhy = canon.comparable(src_engine.CANON_ENGINE,
                                           src_types[name])
             dcls, dwhy = canon.comparable(dst_engine.CANON_ENGINE,
                                           dst_types[name])
+            if (not scls or not dcls) and same and \
+                    str(src_types[name]).lower() == \
+                    str(dst_types[name]).lower():
+                # one engine on both sides, one type: its own text of the
+                # value is the same text on both - measured, an interval
+                # and a range left out of a same-engine comparison hid a
+                # changed value behind "every compared column equal"
+                scls = dcls = canon.OWN
             if not scls or not dcls:
                 out["unreadable"].append((name, swhy or dwhy))
                 continue
@@ -3069,32 +3079,160 @@ class Engine:
         would be one bug fix away from behaving differently on one target.
         """
         n = 0
+        with self._apply_session(side, db):
+            n = self._apply_each(side, db, changes)
+        return n
+
+    def _open_writer(self, side, db):
+        """A connection that writes, for engines whose appliers take one;
+        None where each statement makes its own way."""
+        return None
+
+    def _apply_session(self, side, db):
+        """One connection and one transaction for a batch of changes.
+
+        Each applied change used to open a connection of its own and commit
+        on it. Measured by the benchmark (`bench/run.py`), MySQL into MySQL
+        at 190 rows a second: the tail was still 15 seconds behind when the
+        writer stopped after ten. A batch is now one transaction on one
+        connection; a batch that fails is rolled back whole, and the tail,
+        whose position is saved only after the batch, replays it - which
+        the appliers are idempotent for."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def session():
+            conn = self._open_writer(side, db)
+            if conn is None:
+                yield
+                return
+            self.__dict__["_session"] = conn
+            try:
+                yield
+                conn.commit()
+            except BaseException:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                self.__dict__.pop("_session", None)
+                conn.close()
+        return session()
+
+    def _writer(self, side, db):
+        """The connection one applied statement uses: the batch's, or one
+        of its own, committed and closed after it."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def one():
+            held = self.__dict__.get("_session")
+            if held is not None:
+                yield held
+                return
+            conn = self._open_writer(side, db)
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
+        return one()
+
+    def _apply_each(self, side, db, changes):
+        """Consecutive rows of one table, one kind and one set of columns
+        go to the engine together, in the order the batch left them.
+
+        Measured on PostgreSQL 16, 20,000 upserts in one transaction: one
+        statement a row took 3.9s; the same rows 1,000 to a statement took
+        0.06s. Only runs of rows next to each other are joined, so a parent
+        written before its child still is. A key seen again ends the run:
+        one statement cannot write the same row twice on every engine."""
+        run, shape, keys = [], None, set()
+        for table, (kind, key, values) in self._collapsed(changes):
+            this = (table, kind, tuple(sorted(key)),
+                    tuple(sorted({**key, **values})))
+            ident = tuple(sorted((n, str(v)) for n, v in key.items()))
+            if run and (this != shape or ident in keys):
+                self._apply_run(side, db, shape, run)
+                run, keys = [], set()
+            shape = this
+            keys.add(ident)
+            run.append((key, values))
+        if run:
+            self._apply_run(side, db, shape, run)
+        return len(changes)
+
+    def _apply_run(self, side, db, shape, rows):
+        table, kind = shape[0], shape[1]
+        if kind == "delete":
+            self._apply_deletes(side, db, table, [k for k, _ in rows])
+        else:
+            self._apply_upserts(side, db, table, rows)
+
+    def _apply_upserts(self, side, db, table, rows):
+        """[(key, values)] of one table and one set of columns: one
+        statement for many rows where the engine writes it; one a row
+        where it does not."""
+        for key, values in rows:
+            self._apply_upsert(side, db, table, key, values)
+
+    def _apply_deletes(self, side, db, table, keys):
+        for key in keys:
+            self._apply_delete(side, db, table, key)
+
+    @staticmethod
+    def _collapsed(changes):
+        """What a batch of changes leaves each row as, in the order the rows
+        were first touched: [(table, (upsert|delete, key, values))].
+
+        A row changed ten times in a batch is written once, with what the
+        last change left - the batching the managed services call batch
+        apply. The batch is one transaction, so nothing between the first
+        change and the last was ever visible on the target anyway. Changes
+        that carry only some columns (an update the log wrote without an
+        unchanged large value) are merged, later over earlier, so a column
+        one change did not carry is not written as empty; a delete in
+        between starts the row again. An update that moved the key leaves
+        its old address and arrives at the new one."""
+        net, order = {}, []
+
+        def touch(table, kind, key, values):
+            ident = (table, tuple(sorted((n, repr(v))
+                                         for n, v in key.items())))
+            have = net.get(ident)
+            if have is None:
+                order.append(ident)
+                net[ident] = [kind, dict(key), dict(values)]
+            elif kind == "delete":
+                net[ident] = ["delete", dict(key), {}]
+            elif have[0] == "upsert":
+                have[2].update(values)
+            else:
+                net[ident] = ["upsert", dict(key), dict(values)]
         for c in changes:
             op = c.get("op")
             if op == "delete":
-                self._apply_delete(side, db, c["table"], c["key"])
+                touch(c["table"], "delete", c["key"], {})
             elif op in ("insert", "update"):
                 values = c.get("values") or {}
-                table = c["table"]
-                moved = any(k in values and values[k] != v
-                            for k, v in c["key"].items())
-                if moved:
+                key = c["key"]
+                if any(k in values and values[k] != v
+                       for k, v in key.items()):
                     # the UPDATE changed the primary key, so the row has to
-                    # leave its old address as well as arrive at the new one.
-                    # Write first, delete second: interrupted between the two
-                    # leaves a duplicate, which is visible, rather than
-                    # nothing, which is not.
-                    self._apply_upsert(side, db, table,
-                                       {k: values[k] for k in c["key"]},
-                                       values)
-                    self._apply_delete(side, db, table, c["key"])
+                    # leave its old address as well as arrive at the new
+                    # one - in one transaction, so there is no moment with
+                    # neither
+                    touch(c["table"], "delete", key, {})
+                    touch(c["table"], "upsert",
+                          {k: values[k] for k in key}, values)
                 else:
-                    self._apply_upsert(side, db, table, c["key"], values)
+                    touch(c["table"], "upsert", key, values)
             else:
                 raise ValueError(f"unknown change op {op!r} on"
                                  f" {c.get('table')!r}")
-            n += 1
-        return n
+        return [(ident[0], tuple(net[ident])) for ident in order]
 
     def local_table(self, table):
         """A table name from another engine, in this engine's own terms.

@@ -129,6 +129,10 @@ def test_the_hops_exclude_list_reaches_the_connector(tmp_path, monkeypatch):
         def _all_tables(self, side, db):
             return ["public.orders", "public.audit_log"]
 
+        # a source whose version cannot be read keeps the pause
+        def _server_version(self, side, db):
+            return None
+
     import migkit.engines.postgres as pg
     monkeypatch.setattr(pg, "PostgresEngine", Fake)
     hop = Hop(name="sig", engine="postgres",
@@ -197,6 +201,9 @@ def test_a_source_that_cannot_be_listed_leaves_the_stream_unfiltered(
 
         def _all_tables(self, side, db):
             raise RuntimeError("connection refused")
+
+        def _server_version(self, side, db):
+            return None
 
     import migkit.engines.postgres as pg
     monkeypatch.setattr(pg, "PostgresEngine", Boom)

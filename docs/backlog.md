@@ -501,11 +501,28 @@ asked keeps the pause rather than guessing. The repair asks for the
 incremental kind wherever the pipeline has it, and says whether the stream
 will pause (`tests/test_reading_again_without_pausing.py`).
 
-Still open:
-* a key changed *inside* a chunk's window. At this size the chunks finish
-  too fast to land a write in one. The first try at 3,000 one-row chunks
-  took the sandbox down with it.
-* PostgreSQL's read-only variant
+*Done for PostgreSQL (2026-09-25).* This was measured with the connector
+shipped here (3.0.8), PostgreSQL 16, 50 rows, and no signalling table
+anywhere:
+* Without `read.only`, the incremental re-read was refused, the same way
+  as on MySQL.
+* With it, the connector read the table again beside the stream (`will
+  end at position [50]`, then `finished`), taking its watermarks from the
+  server's own snapshot of transactions in flight.
+* A row updated before its chunk came out as the new value in the stream
+  and in the re-read (`49 -> -1 -> -1`). The connector stayed `RUNNING`,
+  and nothing was written to the source.
+* The option is missing from the connector's advertised configuration,
+  so it was measured, not looked up.
+
+The pipeline now sets it wherever the source runs PostgreSQL 13 or later,
+which is where `pg_current_snapshot()` exists. It asks once, and a source
+it cannot ask keeps the pause
+(`tests/test_reading_again_without_pausing.py`).
+
+Still open: a key changed *inside* a chunk's window. At this size the
+chunks finish too fast to land a write in one, and the first try at 3,000
+one-row chunks took the sandbox down with it.
 
 ## P0: correctness at cutover
 
@@ -721,8 +738,20 @@ Any other subscription is still refused.
 repaired while the source inserted one row and updated the repaired one;
 both arrived afterwards.)
 
-Still open: a MySQL replica migkit set up, which has no name to tell it
-from anyone else's.
+*The MySQL replica migkit sets up (2026-09-25).* It had no name to tell it
+from anyone else's, so every repair beside it stopped. It signs in as
+migkit's own replication account, and that account is the name. It is
+paused the way the subscription is:
+* First it catches up with the source as it is now, by GTID where the
+  source runs it and by binary log position otherwise. A change still in
+  the relay log, applied after the repair, would put back an older value.
+* Then its applier stops while the receiver keeps fetching.
+* After the repair it starts again, and what the source wrote meanwhile
+  lands on top.
+
+A replica signed in under any other account still stops the repair
+(`tests/test_a_repair_pauses_migkits_own_mysql_replica.py`, two MySQL 8.4
+servers).
 * **Today:** the rule "no data repair while CDC runs" lives in the runbook,
   not in the code.
 * **Deeper:** DMS's shape, where migkit owns the stream:
@@ -917,9 +946,20 @@ different points.**
   whose target cannot be asked, the item is left out rather than passed
   (`tests/test_assess_names_other_writers.py`).
 
-Still open: `logical_decoding_work_mem` and `wal_sender_timeout` (only
-with a measured reason for each value), and target storage with WAL
-included.
+*`logical_decoding_work_mem` (2026-09-25):* a transaction too large for
+it is written to the source's disk while it is decoded, and read back.
+Measured on 16, for a 3.3 MB transaction:
+* at 64kB it spilled 3,460,000 bytes
+* at 4MB it spilled nothing
+* at 2MB it spilled again
+
+`assess` now reads the server's own count (PostgreSQL 14 and later) and
+names the slots that spilled. The value it gives is the next power of two
+at least the average spilled transaction, and never less than twice the
+current setting (`tests/test_decoding_that_spills_is_named.py`).
+
+Still open: `wal_sender_timeout`, only with a measured reason for a
+value, and target storage with WAL included.
 
 *Found on the way, and done (2026-09-24):* a MySQL `move --mode full` onto
 a target without the tables stopped at the load on `ERROR 1146 ... doesn't
@@ -1112,8 +1152,15 @@ no flag.
 * Cross-engine hops run each side on its own engine
   (`tests/test_business_rules.py`).
 
-Still open: MongoDB, whose questions are aggregation pipelines rather than
-SQL.
+*MongoDB (2026-09-25):* its questions are aggregation pipelines, so a rule
+there is `{collection, pipeline}`. Each document is a row, with its values
+in the order the pipeline writes them and a grouped `_id` spread into its
+fields. That is the same shape a SQL `group by` gives on the other side of
+a pair, and `1.50` and `1.5000` as Decimal128 still meet.
+
+MongoDB has no transaction that cannot write, so a pipeline holding
+`$out` or `$merge` anywhere is refused before it runs. SQL handed to it
+says what a MongoDB rule is (`tests/test_business_rules.py`).
 
 A hop option holding named SQL pairs (`sum(amount) by day`, `count by
 status`). Both sides run them and the results are compared through `canon`,
@@ -1174,10 +1221,12 @@ time for each engine. Every other table keeps the fast path.
   (`tests/test_column_mapping_on_own_paths.py`)
 
 Left open:
-* The pair's copier builds a missing mapped table from neutral classes.
-  It keeps NOT NULL, defaults and identity (see below), but numbers widen
-  (`int` becomes `bigint`) and it gets no secondary indexes. Where exact
-  types matter, make the table on the target first.
+* ~~The pair's copier builds a missing mapped table from neutral
+  classes.~~ Done (2026-09-25). Between two servers of one engine, the
+  table is built with every column's type exactly as the source wrote it.
+  Through the classes, a `timestamptz` had been built as `timestamp(6)`,
+  with its offset gone, and an `int` as `bigint`. It keeps NOT NULL,
+  defaults, identity and the source's indexes (see below).
 * ~~`watch` and the delta loop still hash whole rows on the own paths.~~
   Done: the delta loop sends a mapped table's comparison to the pair. The
   pair walks the whole table rather than only the keys that changed,
@@ -1537,15 +1586,56 @@ built on domains (`Engine.canonical_type`,
 `tests/test_enums_and_domains_across_engines.py`). MySQL's `enum` and
 `set` were already text.
 
-Still open: `interval`, `hstore` and `tsvector` have no counterpart on the
-other engines migkit pairs PostgreSQL with. They stay out of the
-comparison, and the footnote says so.
+*The same engine on both sides (2026-09-25):* the pair machinery now also
+compares same-engine tables: a column mapping on a PostgreSQL or MySQL
+hop, and SQLite's own. There, a type with no shared rendering was still
+left out, so a changed interval read "every compared column equal". When
+both sides are one engine and declare one type, the column is now compared
+by that engine's own text of the value. All 37 columns of the wide test
+table are compared this way, and a table the pair builds keeps those types
+as the source wrote them
+(`tests/test_same_engine_types_with_no_shared_rendering.py`).
+
+Still open: across engines, `interval`, `hstore` and `tsvector` have no
+counterpart on the other engines migkit pairs PostgreSQL with. They stay
+out of the comparison, and the footnote says so.
 
 **20. The PostgreSQL-only helpers, ported where the idea exists elsewhere.**
 
 `_filtered_tables`, `_extension_data`, `_large_objects`, `_mojibake_repair`.
 
+*Done where the idea exists (2026-09-25):*
+* `_mojibake_repair` now runs on MySQL too. MySQL's mojibake check had
+  always asked for a row-by-row repair, and only PostgreSQL could do it.
+  Which values to touch is decided in one shared place
+  (`_mojibake_updates`). MySQL reads the rows on the target and applies
+  the repair in one transaction. Only the values that re-encode to valid
+  UTF-8 change (`cafÃ©` becomes `café`, while a real `café` stays), and
+  the undo restores the old values exactly (`tests/test_mysql_text_repair.py`).
+* The other three have no counterpart on the engines migkit can run here:
+  * MySQL and MongoDB have no row-level security
+  * neither keeps data inside extensions
+  * MySQL stores large values inline rather than as large objects
+
+  SQL Server has row-level security (security policies). It waits on the
+  same hardware as item 27.
+
 **21. `setup_target_plan` for MySQL.**
+
+*Done (2026-09-25):* the old plan loaded the whole schema before the data,
+so every secondary index was maintained row by row through the load. It
+also created the database as `utf8mb4`, whatever the source used. The new
+plan creates the database in the source's own character set and
+collation, read from the source; a source it cannot read is said, not
+guessed. The rest is said as migkit's commands:
+* the move creates the tables the target lacks, sets the secondary indexes
+  aside and builds them once after the load (1.41x, measured), and keeps
+  the target's triggers off
+* routines, views, triggers and events go through `schema --migration`,
+  with events carried disabled
+* accounts go through `users`
+
+(`tests/test_setup_target_plan_mysql.py`)
 
 **22. Coverage of `unchanged_since`.** Which checks honour it, and which
 still re-read everything.
@@ -1627,7 +1717,115 @@ the owner runs on the same instance class, with the cost of the run
 stated. Results are published with the hardware and every setting that
 produced them.
 
+*The harness (2026-09-25):* `bench/run.py` does the following on one
+machine:
+* starts a disposable PostgreSQL or MySQL pair
+* builds the six shapes (keyed, key-less, wide, LOB, skewed, partitioned)
+  inside the source
+* times each move path and the check
+* times the same copy through the open programs directly
+* with `--cdc-rate`, measures the change tail's lag at a fixed rate
+
+It writes the numbers with the hardware and versions to
+`reports/bench/`, and `docs/scale.md` has the first run. Still open: the
+10k and 50k tx/s rates, which this laptop VM cannot produce, and the
+recipe for the managed services.
+
 **29. Change apply that keeps up at very high write rates.**
+
+*First step (2026-09-25), found by the harness:* every change the tail
+applied opened a connection of its own and committed on it. MySQL into
+MySQL at 190 rows a second was still 15 seconds behind when the writer
+stopped after ten. A batch is now one transaction on one connection, and
+the same run ends 2.9 seconds behind. A batch that fails is rolled back
+whole and replayed (`tests/test_changes_apply_as_one_batch.py`).
+
+*Rows collapsed in a batch (2026-09-25):* a row changed several times in
+one batch is written once, with what the batch left it as:
+* the later change's values override the earlier one's
+* a change that carries only some columns (an update written without an
+  unchanged large value) is merged rather than blanking the others
+* a row made and removed within the batch is not written at all
+* a moved key leaves its old address and arrives at the new one, in the
+  same transaction
+
+The rows keep the order in which they were first touched, so a parent
+made before its child is still written before it.
+
+*A run of rows in one statement (2026-09-25):* rows next to each other in
+a batch, in the same table and with the same columns, are written by one
+statement of up to 1,000 rows on PostgreSQL and MySQL. Other engines
+still write one statement per row. Measured on PostgreSQL 16 with 20,000
+upserts: 3.9 seconds one row at a time, 0.06 seconds in runs.
+
+Only neighbouring rows are joined, so the order is kept. A key seen again
+starts a new statement, because PostgreSQL refuses one statement that
+writes the same row twice.
+
+On MySQL, a row made of nothing but its key used to be a plain insert.
+Replaying it was error 1062, and a tail that replays a failed batch
+stopped on that error every time. It is now left as it is.
+
+The benchmark then found the tail's reader was the limit. It looked up
+the table's key on a new connection for every event, and 472 one-row
+transactions a second left it 38 seconds behind. It now ends 0.73
+seconds behind, and 0.13 seconds behind at 1,030 a second, which is the
+fastest the writer reached (`docs/scale.md`). The tests are in
+`tests/test_runs_of_rows_apply_as_one_statement.py`.
+
+Parallel apply partitioned by key (step 2 below) is not built. Measured
+here, the tail keeps up with the fastest writer this machine can run, so
+there is no rate available to show that it is needed.
+
+*Large transactions streamed to the subscription (2026-09-25):* measured
+on PostgreSQL 16, with the source's `logical_decoding_work_mem` at 64kB
+and 20,000 rows written in one transaction. The subscription migkit made
+spilled 3,460,000 bytes to the source's disk and sent them at commit.
+With `streaming = parallel`, nothing spilled, the same bytes were
+streamed, and all the rows arrived.
+
+The subscription now carries the option, based on the server versions
+read at planning time:
+* `parallel` from 16 on the target
+* `on` from 14 on the target
+* nothing where either side is older than 14, or where either side
+  cannot be asked
+
+A source older than 14 cannot send a transaction before it commits.
+The test is `tests/test_large_transactions_stream_to_the_subscription.py`.
+
+*More than one applier on the MySQL-family replica (2026-09-25):*
+measured with 100,000 one-row transactions queued on the replica before
+its applier started.
+
+| Target | Setting | One applier | Four appliers |
+| --- | --- | --- | --- |
+| MySQL 8.4 | `replica_parallel_workers` | 28.8s, 55.3s, 51.0s | 14.2s, 16.4s, 27.4s |
+| MariaDB 11.8 | `slave_parallel_threads` | 7.6s to 9.1s | 4.7s to 5.2s |
+
+The same rows arrived in every run. On MariaDB, "one applier" means
+`slave_parallel_threads` 0, which is the default.
+
+The plan now sets four appliers on a target that has only one. It leaves
+the target alone in three cases:
+* a MySQL target that does not keep the source's commit order
+  (`replica_preserve_commit_order`)
+* a MariaDB target with a replica running, where the setting cannot be
+  changed
+* a target that cannot be asked
+
+The note names the configuration line that keeps the setting after a
+restart. A managed target is told to set the parameter instead.
+
+*MariaDB replica on a target with its own log (2026-09-25):* measured on
+11.8. The plan started the replica at `MASTER_USE_GTID = current_pos`. On
+a target that keeps a binary log, that position includes the target's own
+writes, such as the tables made for the copy (`0-52-3`). The replica asked
+the source for that position and stopped with error 1236. It now starts
+at `slave_pos`, which holds only what was replicated. On a target with no
+log, `slave_pos` is the same position as before. The test for both
+changes is `tests/test_the_replica_applies_in_parallel.py`, with a binary
+log on both sides.
 
 The paid tools lead here because they apply changes in parallel while
 keeping each key's order, and collapse many changes to one row before
@@ -1635,8 +1833,11 @@ writing. Build it in two steps:
 
 1. **The planner sets the native parallel-apply knobs where the target
    has them:**
-   * PostgreSQL 16+ `streaming = parallel` on subscriptions
+   * PostgreSQL 16+ `streaming = parallel` on subscriptions (done, above)
    * MySQL `replica_parallel_workers` with `WRITESET` dependency tracking
+     (done, above; 8.4 always tracks by write set and has no setting for
+     it; an 8.0 source's `binlog_transaction_dependency_tracking` is the
+     source's setting, which migkit does not change)
 
    Measure each against item 28's rates.
 2. **Where migkit owns the apply (the stream path), a migkit applier:**

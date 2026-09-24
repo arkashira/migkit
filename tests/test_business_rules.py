@@ -7,6 +7,7 @@ write, and the answers are compared by value: a sum written `1.5000` on one
 server and `1.5` on the other is the same sum, and rows are compared as a
 set because servers group in their own order.
 """
+import pytest
 import sqlite3
 
 from migkit.config import Endpoint, Hop
@@ -95,3 +96,92 @@ def test_postgres_rules_run_read_only(pg_pair, tmp_path):
     assert "read-only" in got["postgres rule sneaky"].detail, got
     assert psql(pg_pair["src"], "select count(*) from sales"
                 ).stdout.strip() == "2"
+
+
+# ---- MongoDB, whose questions are aggregation pipelines ----
+
+MONGO, MONGO_PORT = "migkit-test-rules-mongo", 15771
+
+
+@pytest.fixture(scope="module")
+def mongo():
+    import subprocess
+    import time
+    subprocess.run(["docker", "rm", "-f", "-v", MONGO], capture_output=True)
+    try:
+        subprocess.run(["docker", "run", "-d", "--name", MONGO, "-p",
+                        f"{MONGO_PORT}:27017", "mongo:7"], check=True,
+                       capture_output=True)
+        import pymongo
+        client = pymongo.MongoClient(port=MONGO_PORT,
+                                     serverSelectionTimeoutMS=2000)
+        for _ in range(60):
+            try:
+                client.admin.command("ping")
+                break
+            except Exception:
+                time.sleep(2)
+        yield client
+    finally:
+        subprocess.run(["docker", "rm", "-f", "-v", MONGO],
+                       capture_output=True)
+
+
+def _mongo_eng(tmp_path, rules):
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.mongodb import MongoEngine
+    ep = Endpoint(host="127.0.0.1", port=MONGO_PORT, user="", password="")
+    hop = Hop(name="mr", engine="mongodb", source=ep, target=ep,
+              databases=["shop"], db_map={"shop": "shop2"},
+              options={"rules": rules})
+    hop.report_dir = lambda db=None: tmp_path
+    return MongoEngine(hop)
+
+
+BY_STATUS = {"collection": "orders",
+             "pipeline": [{"$group": {"_id": "$status",
+                                      "n": {"$sum": 1},
+                                      "total": {"$sum": "$amount"}}}]}
+
+
+@pytest.mark.docker
+def test_a_mongo_pipeline_is_a_rule(mongo, tmp_path):
+    from bson.decimal128 import Decimal128
+    from migkit import rules
+    for db, amounts in (("shop", ["1.50", "2.5"]),
+                        ("shop2", ["1.5000", "2.50"])):
+        mongo[db].orders.drop()
+        mongo[db].orders.insert_many(
+            [{"_id": i, "status": "paid", "amount": Decimal128(a)}
+             for i, a in enumerate(amounts)]
+            + [{"_id": 9, "status": "open", "amount": Decimal128("7")}])
+    eng = _mongo_eng(tmp_path, {"by status": BY_STATUS})
+    got = rules.check(eng, "shop")
+    assert [r.status for r in got] == ["ok"], [r.detail for r in got]
+    # the same question tells a real difference from a spelling
+    mongo["shop2"].orders.insert_one({"_id": 10, "status": "paid",
+                                      "amount": Decimal128("1")})
+    got = rules.check(eng, "shop")
+    assert [r.status for r in got] == ["diff"], [r.detail for r in got]
+    assert "paid" in got[0].detail, got[0].detail
+
+
+@pytest.mark.docker
+def test_a_mongo_rule_that_writes_is_refused_before_it_runs(mongo,
+                                                           tmp_path):
+    from migkit import rules
+    mongo["shop"].orders.drop()
+    mongo["shop"].orders.insert_one({"_id": 1, "status": "paid"})
+    writing = {"collection": "orders",
+               "pipeline": [{"$match": {}}, {"$out": "copied"}]}
+    got = rules.check(_mongo_eng(tmp_path, {"sneaky": writing}), "shop")
+    assert [r.status for r in got] == ["error"], [r.detail for r in got]
+    assert "may only read" in got[0].detail, got[0].detail
+    assert "copied" not in mongo["shop"].list_collection_names()
+
+
+def test_sql_given_to_mongo_says_what_a_mongo_rule_is(tmp_path):
+    from migkit.engines.mongodb import MongoEngine
+    with pytest.raises(RuntimeError) as e:
+        MongoEngine.run_rule(None, "src", "shop", "select count(*) from t")
+    assert "aggregation pipeline" in str(e.value), e.value

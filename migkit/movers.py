@@ -2647,6 +2647,10 @@ def stream_codegen(hop, dbs, engine):
             "plugin.name": "pgoutput",
             "slot.name": name.replace("-", "_"),
         })
+        if _pg_snapshot_watermarks(hop, dbs[0] if dbs else "postgres"):
+            # the same, from the source's own snapshot of transactions in
+            # flight rather than from rows written into it
+            source["config"]["read.only"] = "true"
     # what the hop already excludes, kept out of the stream as well. The
     # same resolution the bulk movers and `check` use, so a table nobody
     # wants is not carried by the CDC leg either.
@@ -2829,6 +2833,25 @@ def _gtid_on(hop):
     except Exception:
         return False
     return bool(got) and str(got[0]).upper() == "ON"
+
+
+def _pg_snapshot_watermarks(hop, db):
+    """Whether a PostgreSQL source can give the read-only re-read its
+    watermarks: `pg_current_snapshot()`, from version 13.
+
+    Measured with the connector shipped here (3.0.8) against PostgreSQL 16,
+    no signalling table anywhere: without `read.only` the incremental
+    re-read was refused (`Incremental snapshot is not properly
+    configured`); with it, it read the 50 rows again beside the stream -
+    `will end at position [50]`, then `finished` - the connector RUNNING
+    throughout and nothing written to the source. A row updated before
+    its chunk came out as the new value in the stream and in the re-read
+    (`49 -> -1 -> -1`). The option is not in the connector's advertised
+    configuration, which is why it is measured rather than looked up.
+
+    One attempt: a source that cannot be asked keeps the pause."""
+    from migkit.engines.postgres import PostgresEngine
+    return (PostgresEngine(hop)._server_version("src", db) or 0) >= 130000
 
 
 def stream_reads_again_in_place(out):

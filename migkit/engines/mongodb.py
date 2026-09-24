@@ -1038,6 +1038,52 @@ class MongoEngine(Engine):
                       + (f"; {whose}" if whose else ""), str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
 
+    #: stages that write, which a rule may not hold anywhere in it
+    WRITING_STAGES = ("$out", "$merge")
+
+    def run_rule(self, side, db, question):
+        """The rows one side answers to a business rule: an aggregation
+        pipeline over one collection, `{"collection": ..., "pipeline":
+        [...]}`. Each document is a row, its values in the order the
+        pipeline wrote them, a grouped `_id` spread into its fields - the
+        same rows a SQL `group by` gives on the other side of a pair.
+
+        MongoDB has no transaction that cannot write, so a pipeline holding
+        a stage that writes is refused before it runs: a rule never writes,
+        and the source is not written to."""
+        from bson import json_util
+        try:
+            spec = json_util.loads(question)
+        except ValueError:
+            raise RuntimeError("a MongoDB rule is an aggregation pipeline:"
+                               " {collection: ..., pipeline: [...]}, not SQL")
+        if not isinstance(spec, dict) or "collection" not in spec:
+            raise RuntimeError("a MongoDB rule names its collection:"
+                               " {collection: ..., pipeline: [...]}")
+
+        def writes(node):
+            if isinstance(node, dict):
+                return any(k in self.WRITING_STAGES or writes(v)
+                           for k, v in node.items())
+            if isinstance(node, list):
+                return any(writes(v) for v in node)
+            return False
+        pipeline = spec.get("pipeline") or []
+        if writes(pipeline):
+            raise RuntimeError("the rule's pipeline writes ($out or $merge),"
+                               " and a rule may only read")
+        coll = self._client(side)[self._d(side, db)][str(spec["collection"])]
+        rows = []
+        for doc in coll.aggregate(pipeline, allowDiskUse=True):
+            row = []
+            for k, v in doc.items():
+                if k == "_id" and isinstance(v, dict):
+                    row += list(v.values())
+                else:
+                    row.append(v)
+            rows.append(tuple(row))
+        return rows
+
     def _client_hashes(self, coll, flt=None):
         """Hash documents locally when the server has no hashing operator.
 

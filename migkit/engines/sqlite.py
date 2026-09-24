@@ -397,29 +397,23 @@ class SQLiteEngine(NeutralCopier, Engine):
         conflict = ", ".join(f'"{k}"' for k in sorted(key))
         tail = (f" on conflict ({conflict}) do update set {sets}" if sets
                 else f" on conflict ({conflict}) do nothing")
-        conn = sqlite3.connect(self._path(side))
-        try:
+        with self._writer(side, db) as conn:
             conn.execute(f'insert into "{table}" ({cols})'
                          f" values ({marks}){tail}",
                          [self._bind(row[n]) for n in names])
-            conn.commit()
-        finally:
-            conn.close()
 
     def _apply_delete(self, side, db, table, key):
-        import sqlite3
-
-        from .. import canon
         table = self.local_table(table)
         names = sorted(key)
         where = " and ".join(f'"{n}" = ?' for n in names)
-        conn = sqlite3.connect(self._path(side))
-        try:
+        with self._writer(side, db) as conn:
             conn.execute(f'delete from "{table}" where {where}',
                          [self._bind(key[n]) for n in names])
-            conn.commit()
-        finally:
-            conn.close()
+
+    def _open_writer(self, side, db):
+        import sqlite3
+        self._target_only(side, "apply changes")
+        return sqlite3.connect(self._path(side))
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon

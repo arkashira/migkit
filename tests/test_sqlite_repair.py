@@ -113,14 +113,40 @@ def test_everything_it_overwrites_or_removes_goes_to_undo_first(tmp_path):
     assert all(r["key"] != ["11"] for r in saved), saved
 
 
-def test_a_column_it_cannot_render_is_refused_rather_than_written_as_null(
-        tmp_path):
-    """Measured: `numeric` has no canonical rendering in sqlite, so it is
-    left out of the comparison - and a repair that wrote the row anyway put
-    the column in as NULL and left the table still differing."""
+def test_the_same_type_on_both_sides_is_compared_and_repaired(tmp_path):
+    """`numeric` has no rendering migkit shares across engines. Declared
+    the same on both sides of one engine it is compared by the engine's
+    own text, and repaired: the target comes out as the source."""
     eng, dst, report = _build(
         tmp_path, "create table t (id integer primary key, v text, n numeric)",
         [(i, f"v{i}", i * 1.5) for i in range(1, 21)], THREE)
+    assert eng.check_data("main")[0].status == "diff"
+    for action in eng.repair_plan("main", "rows"):
+        eng.apply("main", action)
+    got = eng.check_data("main")[0]
+    assert got.status == "ok", got.detail
+    con = sqlite3.connect(dst)
+    assert con.execute("select sum(n) from t").fetchone()[0] == 315.0
+    assert con.execute("select n, typeof(n) from t where id = 11"
+                       ).fetchone() == (16.5, "real")
+    con.close()
+
+
+def test_a_column_it_cannot_render_is_refused_rather_than_written_as_null(
+        tmp_path):
+    """Measured: `numeric` has no canonical rendering in sqlite, so where
+    the two sides declare it differently it is left out of the comparison -
+    and a repair that wrote the row anyway put the column in as NULL and
+    left the table still differing."""
+    eng, dst, report = _build(
+        tmp_path, "create table t (id integer primary key, v text, n numeric)",
+        [(i, f"v{i}", i * 1.5) for i in range(1, 21)], THREE)
+    con = sqlite3.connect(dst)
+    con.executescript("create table k as select * from t; drop table t;"
+                      " create table t (id integer primary key, v text,"
+                      " n decimal(10,2)); insert into t select * from k;"
+                      " drop table k;")
+    con.close()
     got = eng.check_data("main")
     assert got[0].status == "diff"
     actions = eng.repair_plan("main", "rows")

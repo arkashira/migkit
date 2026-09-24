@@ -83,15 +83,75 @@ class MySQLEngine(Engine):
     def _my_ident(name):
         return "`" + str(name).replace("`", "``") + "`"
 
+    #: the account migkit's own replica signs in with (`replicate_sql`) -
+    #: what tells it apart from a replica somebody else set up
+    REPL_USER = "migkit_repl"
+
     def stream_writers(self, db):
-        """Adds the target's replica applier, when its SQL thread runs."""
+        """Adds the target's replica applier, when its SQL thread runs. The
+        one migkit set up signs in as its own account and can be paused for
+        a repair; any other cannot."""
         out = super().stream_writers(db)
         for row in self._q_named("dst", "show replica status"):
             sql = self._repl_field(row, self._REPL_FIELDS["sql"])
             host = self._repl_field(row, self._REPL_FIELDS["host"])
+            user = self._repl_field(row, self._REPL_FIELDS["user"])
             if str(sql).lower() == "yes":
-                out.append((f"the replica applying from {host}", False))
+                out.append((f"the replica applying from {host}",
+                            str(user) == self.REPL_USER))
         return out
+
+    def pause_writer(self, db, what, window):
+        """migkit's own replica, paused for a repair.
+
+        First it catches up with the source as it is now, so that nothing
+        the repair is about to write is still on its way: a change still
+        in the relay log, applied after the repair, would put back a value
+        older than the one the repair read. Then its applier stops. The
+        receiver keeps fetching, so what the source writes meanwhile waits
+        in the relay log and is applied on top of the repair when the
+        applier starts again."""
+        if not what.startswith("the replica applying from "):
+            return super().pause_writer(db, what, window)
+        if not dict(self.stream_writers(db)).get(what):
+            raise ValueError(f"{what} is not migkit's")
+        if self._replica_caught_up(db, window) is not True:
+            return False
+        mariadb = self._brands()[1].name == "mariadb"
+        self._q("dst", "stop slave sql_thread" if mariadb
+                else "stop replica sql_thread")
+        return True
+
+    def resume_writer(self, db, what):
+        if not what.startswith("the replica applying from "):
+            return super().resume_writer(db, what)
+        mariadb = self._brands()[1].name == "mariadb"
+        self._q("dst", "start slave sql_thread" if mariadb
+                else "start replica sql_thread")
+
+    def _replica_caught_up(self, db, window):
+        """Wait until the target has applied what the source has written
+        now: by GTID where the source runs it, by its binary log file and
+        position otherwise. True, False on time out, None where there is
+        nothing to wait on."""
+        got = self.fence_wait(db, self.src_lsn(db), timeout=window)
+        if got is not None:
+            return got
+        pos = self._binlog_position("src")
+        if not pos:
+            return None
+        ask = ("select master_pos_wait(%s, %s, 5)"
+               if self._brands()[1].name == "mariadb"
+               else "select source_pos_wait(%s, %s, 5)")
+        began = time.monotonic()
+        while time.monotonic() - began < window:
+            r = self._q("dst", ask, (pos[0], int(pos[1])))
+            if r and r[0][0] is not None and int(r[0][0]) >= 0:
+                return True
+            if r and r[0][0] is None:
+                # the applier is not running, or this is no replica
+                return None
+        return False
 
     def table_facts(self, side, db):
         """InnoDB's own row estimate and whether a primary key exists."""
@@ -334,42 +394,62 @@ class MySQLEngine(Engine):
             cache[ident] = {r[0] for r in rows}
         return cache[ident]
 
+    #: Rows in one applied statement (`Engine._apply_each`).
+    APPLY_ROWS = 1000
+
     def _apply_upsert(self, side, db, table, key, values):
+        self._apply_upserts(side, db, table, [(key, values)])
+
+    def _apply_upserts(self, side, db, table, rows):
         from .. import canon
         table = self.local_table(table)
-        row = dict(key)
-        row.update(values)
-        names = [n for n in sorted(row)
+        key = rows[0][0]
+        full = [{**k, **v} for k, v in rows]
+        names = [n for n in sorted(full[0])
                  if n not in self._unwritable_columns(side, db, table)]
         cols = ", ".join(f"`{n}`" for n in names)
-        marks = ", ".join(["%s"] * len(names))
         sets = ", ".join(f"`{n}` = values(`{n}`)"
                          for n in names if n not in key)
-        tail = f" on duplicate key update {sets}" if sets else ""
-        conn = self._conn(side)
-        try:
+        # a row already there with nothing but its key to write is left
+        # as it is, as `on conflict do nothing` does
+        tail = (f" on duplicate key update {sets}" if sets else
+                " on duplicate key update " + ", ".join(
+                    f"`{k}` = `{k}`" for k in sorted(key)))
+        mark = "(" + ", ".join(["%s"] * len(names)) + ")"
+        with self._writer(side, db) as conn:
             with conn.cursor() as cur:
-                cur.execute(f"insert into `{self._d(side, db)}`.`{table}`"
-                            f" ({cols}) values ({marks}){tail}",
-                            [canon.sql_value(row[n]) for n in names])
-            conn.commit()
-        finally:
-            conn.close()
+                for at in range(0, len(full), self.APPLY_ROWS):
+                    part = full[at:at + self.APPLY_ROWS]
+                    cur.execute(
+                        f"insert into `{self._d(side, db)}`.`{table}`"
+                        f" ({cols}) values "
+                        + ", ".join([mark] * len(part)) + tail,
+                        [canon.sql_value(r[n]) for r in part
+                         for n in names])
 
     def _apply_delete(self, side, db, table, key):
+        self._apply_deletes(side, db, table, [key])
+
+    def _apply_deletes(self, side, db, table, keys):
         from .. import canon
         table = self.local_table(table)
-        names = sorted(key)
-        where = " and ".join(f"`{n}` = %s" for n in names)
-        conn = self._conn(side)
-        try:
+        names = sorted(keys[0])
+        cols = ", ".join(f"`{n}`" for n in names)
+        mark = "(" + ", ".join(["%s"] * len(names)) + ")"
+        with self._writer(side, db) as conn:
             with conn.cursor() as cur:
-                cur.execute(f"delete from `{self._d(side, db)}`.`{table}`"
-                            f" where {where}",
-                            [canon.sql_value(key[n]) for n in names])
-            conn.commit()
-        finally:
-            conn.close()
+                for at in range(0, len(keys), self.APPLY_ROWS):
+                    part = keys[at:at + self.APPLY_ROWS]
+                    cur.execute(
+                        f"delete from `{self._d(side, db)}`.`{table}`"
+                        f" where ({cols}) in ("
+                        + ", ".join([mark] * len(part)) + ")",
+                        [canon.sql_value(k[n]) for k in part
+                         for n in names])
+
+    def _open_writer(self, side, db):
+        self._target_only(side, "apply changes")
+        return self._conn(side)
 
     def binlog_names(self, db, table, values):
         """Binlog row values keyed by column name rather than by position.
@@ -484,7 +564,11 @@ class MySQLEngine(Engine):
             only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
                          NotImplementedEvent],
             filter_non_implemented_events=False)
-        out, skipped = [], set()
+        # each table's key once a batch: asked for every event, on a
+        # connection of its own, it held the reader to about 160 rows a
+        # second - one-row transactions at 472 a second left the tail 38
+        # seconds behind when the writer stopped (`bench/run.py`)
+        out, skipped, keys_of = [], set(), {}
         try:
             for ev in stream:
                 if isinstance(ev, NotImplementedEvent):
@@ -498,7 +582,9 @@ class MySQLEngine(Engine):
                     # the target owns it: the move left it alone, so the
                     # tail does too - and a keyless one does not stop it
                     continue
-                keys = self._pk_cols(self._d(side, db), table)
+                if table not in keys_of:
+                    keys_of[table] = self._pk_cols(self._d(side, db), table)
+                keys = keys_of[table]
                 if not keys:
                     skipped.add(table)
                     continue
@@ -2084,6 +2170,75 @@ class MySQLEngine(Engine):
             " re-check afterwards - a second pass over already-repaired text"
             " breaks it again")
 
+    def _mojibake_repair(self, db):
+        """The row-by-row repair the mojibake check asks for, as PostgreSQL
+        has it: only the values that re-encode to valid UTF-8 are touched,
+        each update matching the old value as well as the key, and the
+        genuinely accented text next to them is left alone.
+
+        It reads the **target**: migkit writes to the source nowhere. The
+        decision of which values to repair is the base's
+        (`_mojibake_updates`); this supplies the rows. A table without a
+        primary key cannot address a row, and a broken key column is not
+        rewritten - both are named rather than attempted."""
+        ddb = self._d("dst", db)
+        place = ",".join(["%s"] * len(self.TEXT_TYPES))
+        cols = {}
+        for t, c in self._q("dst", "select c.table_name, c.column_name"
+                                   " from information_schema.columns c"
+                                   " join information_schema.tables t"
+                                   " on t.table_schema = c.table_schema"
+                                   " and t.table_name = c.table_name"
+                                   " where c.table_schema = %s and"
+                                   " t.table_type in ('BASE TABLE',"
+                                   " 'SYSTEM VERSIONED')"
+                                   " and c.table_name not like 'migkit%%'"
+                                   f" and c.data_type in ({place})"
+                                   " order by 1, 2",
+                            (ddb,) + self.TEXT_TYPES):
+            if not self.hop.excluded(db, str(t)):
+                cols.setdefault(str(t), []).append(str(c))
+        stmts, undo, touched, refused = [], [], set(), []
+        repaired = clean = skipped = left = 0
+        q = self._quote_ident
+        for table, columns in sorted(cols.items()):
+            key = [str(r[0]) for r in self._q("dst", self.PK_SQL,
+                                              (ddb, table))]
+            if not key:
+                refused.append((table, "no primary key, so no row can be"
+                                       " addressed"))
+                continue
+            for c in columns:
+                if c in key:
+                    refused.append((f"{table}.{c}", "the key itself -"
+                                    " rewriting it would move rows other"
+                                    " tables point at"))
+            want = [c for c in columns if c not in key]
+            if not want:
+                continue
+            where = " or ".join(f"length({q(c)}) <> char_length({q(c)})"
+                                for c in want)
+            rows = [list(r) for r in self._q(
+                "dst", f"select {', '.join(q(c) for c in key + want)}"
+                       f" from {q(ddb)}.{q(table)} where {where}"
+                       f" limit {self.MOJIBAKE_REPAIR_CAP + 1}")]
+            s, u, t, rep, cl, sk, lf = self._mojibake_updates(
+                db, table, key, want, rows)
+            stmts += s
+            undo += u
+            touched |= t
+            repaired += rep
+            clean += cl
+            skipped += sk
+            left += lf
+        if not repaired:
+            return None
+        enabled = self._repair_text_enabled()
+        note = self._mojibake_repair_note(repaired, touched, clean, skipped,
+                                          left, refused, enabled)
+        return RepairAction(db, "text", stmts if enabled else [],
+                            undo if enabled else [], note)
+
     def _collation_versions(self, db):
         """MySQL cannot have this problem, and that is a design difference
         worth stating rather than a check worth faking.
@@ -3222,6 +3377,11 @@ class MySQLEngine(Engine):
                     [], f"{t}: delete extra/changed on target (saved to undo"
                         " first), reinsert from source"))
             actions += self._mapped_repairs(db, kind)
+            # after the resync, never before it: a recopy takes its rows from
+            # the source, which is where the broken text lives
+            text = self._mojibake_repair(db)
+            if text:
+                actions.append(text)
         if kind in ("schema", "all"):
             act = self._schema_repair_action(db)
             if act:
@@ -3351,6 +3511,24 @@ class MySQLEngine(Engine):
                 conn.commit()
             finally:
                 conn.close()
+            return
+        if action.kind == "text":
+            # withheld unless MIGKIT_REPAIR_TEXT says otherwise, in which
+            # case the note is the whole action and applying it does nothing.
+            # One transaction: all of the repair or none of it
+            if action.statements:
+                conn = self._conn("dst")
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"use {self._my_ident(self._d('dst', db))}")
+                        for s in action.statements:
+                            cur.execute(s)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
             return
         if action.kind == "events":
             # one statement at a time over one session: an event's body is
@@ -4164,6 +4342,64 @@ class MySQLEngine(Engine):
         return [f"change replication filter {', '.join(parts)}"
                 " for channel '';"], conf
 
+    #: Appliers for migkit's replica where the target has one. Measured,
+    #: 100,000 one-row transactions queued on the replica before its
+    #: applier started, runs after a warm-up:
+    #:
+    #:     MySQL 8.4     replica_parallel_workers 1   28.8s 55.3s 51.0s
+    #:                                            4   14.2s 16.4s 27.4s
+    #:     MariaDB 11.8  slave_parallel_threads   0    7.6s  7.9s  9.1s  7.9s
+    #:                                            4    5.0s  4.7s  5.2s  4.7s
+    #:
+    #: The same rows arrived either way. Both commit in the source's order
+    #: with more than one (MySQL only with `replica_preserve_commit_order`,
+    #: which is asked), so a reader of the target never sees a transaction
+    #: before one the source committed ahead of it. MySQL has 4 by default
+    #: from 8.0.27; MariaDB has none by default.
+    APPLIERS = 4
+
+    def _parallel_apply_sql(self, brand):
+        """(statements, the configuration line that keeps them) giving the
+        replica `APPLIERS` appliers, or ([], None) where it has more than
+        one already or the target cannot be asked - once: this decides
+        an option, and a plan should not wait on retries for it."""
+        import pymysql
+        n = self.APPLIERS
+        try:
+            conn = self._conn("dst", retry=False)
+        except pymysql.err.MySQLError:
+            return [], None
+        try:
+            with conn.cursor() as cur:
+                if brand == "mariadb":
+                    cur.execute("select @@slave_parallel_threads")
+                    if int(cur.fetchone()[0]) > 0:
+                        return [], None
+                    # it cannot be changed while any replica on the target
+                    # is running
+                    cur.execute("show all slaves status")
+                    cols = [d[0] for d in cur.description or ()]
+                    for row in cur.fetchall():
+                        row = dict(zip(cols, row))
+                        if "Yes" in (
+                                self._repl_field(row, self._REPL_FIELDS["io"]),
+                                self._repl_field(row,
+                                                 self._REPL_FIELDS["sql"])):
+                            return [], None
+                    return ([f"set global slave_parallel_threads = {n};"],
+                            f"slave_parallel_threads = {n}")
+                cur.execute("select @@replica_parallel_workers,"
+                            " @@replica_preserve_commit_order")
+                workers, ordered = cur.fetchone()
+        except pymysql.err.MySQLError:
+            return [], None
+        finally:
+            conn.close()
+        if int(workers) > 1 or int(ordered) != 1:
+            return [], None
+        return ([f"set global replica_parallel_workers = {n};"],
+                f"replica_parallel_workers = {n}")
+
     def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
         """The statements that make the target a replica of the source.
 
@@ -4201,28 +4437,35 @@ class MySQLEngine(Engine):
                 " rows the copy already carried - move with --mode"
                 " full+cdc instead")
         src_cmds = [
-            "create user if not exists 'migkit_repl'@'%'"
+            f"create user if not exists '{self.REPL_USER}'@'%'"
             f" identified by '{secret}';",
             # a user an earlier run left keeps its old password otherwise,
             # and the replica below would be given this one
-            f"alter user 'migkit_repl'@'%' identified by '{secret}';",
-            "grant replication slave on *.* to 'migkit_repl'@'%';",
+            f"alter user '{self.REPL_USER}'@'%' identified by '{secret}';",
+            f"grant replication slave on *.* to '{self.REPL_USER}'@'%';",
         ]
         filters, conf = self._replica_filter_sql(brand)
+        parallel, applier = self._parallel_apply_sql(brand)
         keep = ("; these scope the replica to the hop and last only until"
                 " the target restarts - add them to its configuration"
                 + (" (the parameter group)" if "rds.amazonaws.com"
                    in (t.host or "") else "")
                 + ": " + "; ".join(conf))
+        if applier:
+            keep += (f"; {applier} gives the replica {self.APPLIERS}"
+                     " appliers where it had one, and lasts only until the"
+                     " target restarts as well")
         if "rds.amazonaws.com" in (t.host or ""):
             # a managed target takes filters from its parameter group only
-            filters = []
+            filters = parallel = []
             keep = ("; set these in the target's parameter group before"
                     " starting it, or the replica writes every database and"
                     " table of the source: " + "; ".join(conf))
+            if applier:
+                keep += (f"; and {applier}, or it applies with one")
             dst_cmds = [
                 f"call mysql.rds_set_external_source ('{s.host}', {s.port},"
-                f" 'migkit_repl', '{secret}',"
+                f" '{self.REPL_USER}', '{secret}',"
                 + (f" '{pos[0]}', {pos[1]}," if pos else " '', 4,")
                 + " 0);",
                 "call mysql.rds_start_replication;",
@@ -4233,16 +4476,23 @@ class MySQLEngine(Engine):
             # difference in behaviour. Its own form is `CHANGE MASTER TO`
             # with `MASTER_USE_GTID`, which MySQL 8 rejects with the same
             # error, so the two are not interchangeable in either direction.
-            auto = ("MASTER_USE_GTID = current_pos" if gtid_on else
+            # `slave_pos`, not `current_pos`: measured on 11.8, a target
+            # that keeps a log of its own had its own writes (the tables
+            # made for the copy) in `current_pos` as 0-52-3, asked the
+            # source for that, and stopped on error 1236 - "not in the
+            # master's binlog". `slave_pos` holds only what was replicated,
+            # and is the same position on a target that keeps no log.
+            auto = ("MASTER_USE_GTID = slave_pos" if gtid_on else
                     (f"MASTER_LOG_FILE = '{pos[0]}',"
                      f" MASTER_LOG_POS = {pos[1]}"
                      + (", MASTER_USE_GTID = no" if exact else "")
                      if pos else ""))
             dst_cmds = [
                 f"change master to MASTER_HOST = '{s.host}',"
-                f" MASTER_PORT = {s.port}, MASTER_USER = 'migkit_repl',"
+                f" MASTER_PORT = {s.port}, MASTER_USER = '{self.REPL_USER}',"
                 f" MASTER_PASSWORD = '{secret}', {auto};",
                 *filters,
+                *parallel,
                 "start slave;",
             ]
         else:
@@ -4252,17 +4502,18 @@ class MySQLEngine(Engine):
                  f" SOURCE_LOG_POS = {pos[1]}" if pos else "")
             dst_cmds = [
                 f"change replication source to SOURCE_HOST = '{s.host}',"
-                f" SOURCE_PORT = {s.port}, SOURCE_USER = 'migkit_repl',"
+                f" SOURCE_PORT = {s.port}, SOURCE_USER = '{self.REPL_USER}',"
                 f" SOURCE_PASSWORD = '{secret}',"
                 # MySQL 8 only: MariaDB has no such option
                 f" GET_SOURCE_PUBLIC_KEY = 1, {auto};",
                 *filters,
+                *parallel,
                 "start replica;",
             ]
         stop = ["stop slave;", "reset slave all;"] if brand == "mariadb" \
             else ["stop replica;", "reset replica all;"]
         return {"src": src_cmds, "dst": dst_cmds,
-                "drop_src": ["drop user if exists 'migkit_repl'@'%';"],
+                "drop_src": [f"drop user if exists '{self.REPL_USER}'@'%';"],
                 "drop_dst": stop,
                 "status": ("show slave status" if brand == "mariadb"
                            else "show replica status"),
@@ -4279,6 +4530,7 @@ class MySQLEngine(Engine):
         "sql": ("Replica_SQL_Running", "Slave_SQL_Running"),
         "lag": ("Seconds_Behind_Source", "Seconds_Behind_Master"),
         "host": ("Source_Host", "Master_Host"),
+        "user": ("Source_User", "Master_User"),
     }
 
     @staticmethod
@@ -4416,16 +4668,44 @@ class MySQLEngine(Engine):
         return (on, f"gtid {'ON' if on else 'OFF'}")
 
     def setup_target_plan(self, db):
-        s, t = self.hop.source, self.hop.target
-        tdb = self._d("dst", db)
+        """The target's preparation, in the order that measures best, with
+        the parts migkit does itself said as migkit's commands.
+
+        The old plan loaded the whole schema before the data, so every
+        secondary index was maintained row by row through the load
+        (measured on 8: 1.150 s for 200,000 rows with three of them, 0.303
+        + 0.511 s loading bare and building after), and it created the
+        database as `utf8mb4` whatever the source's character set was. The
+        move now creates the tables the target lacks, sets the secondary
+        indexes aside and builds them once after, and keeps the target's
+        triggers off; the database is created in the source's own character
+        set and collation."""
+        hop, tdb = self.hop.name, self._d("dst", db)
+        try:
+            cs = self._q("src", "select default_character_set_name,"
+                                " default_collation_name from"
+                                " information_schema.schemata"
+                                " where schema_name = %s", (db,))
+        except Exception:
+            cs = []
+        create = (f"create database `{tdb}` character set {cs[0][0]}"
+                  f" collate {cs[0][1]};   -- the source's own" if cs else
+                  f"create database `{tdb}` ...;   -- the source's character"
+                  " set could not be read: use the one `show create database"
+                  f" {db}` gives there")
         return [
-            f"mysqldump -h {s.host} -u {s.user} -p --no-data --routines --triggers"
-            f" --events {db} > {db}.schema.sql",
-            f"mysql -h {t.host} -u {t.user} -p -e 'create database `{tdb}`"
-            f" character set utf8mb4'  # match source charset/collation",
-            f"mysql -h {t.host} -u {t.user} -p {tdb} < {db}.schema.sql",
-            "-- set foreign_key_checks=0 on the load session or drop FKs until cutover",
-            "-- then start the migration service full load + binlog replication into existing tables",
+            create,
+            f"-- tables and rows: migkit move {hop} --go - it creates the"
+            " tables the target lacks from the source's definitions, loads"
+            " them with the secondary indexes set aside and built once after"
+            " (1.41x faster, measured), and keeps the target's triggers off"
+            " while it loads",
+            f"-- routines, views, triggers and events: migkit schema {hop}"
+            " --migration writes them as files to review and apply; events"
+            f" are carried disabled (migkit sync {hop} --kind schema) and"
+            " switched on at cutover",
+            f"-- accounts and their grants: migkit users {hop}",
+            f"-- then: migkit check {hop}",
         ]
 
     def migration_pair(self, db):
