@@ -85,8 +85,10 @@ def test_without_a_mapping_the_command_is_exactly_what_it_was(tmp_path):
     # was one that could not run
     trx = movers.tool_flag("mydumper", "--trx-tables",
                            "--trx-consistency-only")
-    assert steps[0].command.endswith(f"--no-schemas {trx}"), \
-        steps[0].command
+    # the machine log the progress lines are read from is not a mapping
+    # flag; it is there for every hop the installed build can give it to
+    command = steps[0].command.removesuffix(" --machine-log-json -v 3")
+    assert command.endswith(f"--no-schemas {trx}"), steps[0].command
 
 
 def test_the_config_is_written_beside_the_dump_not_inside_it(tmp_path):

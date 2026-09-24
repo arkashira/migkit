@@ -42,6 +42,7 @@ def _wait(port, timeout=90):
 def _ready(name):
     for _ in range(40):
         if subprocess.run(["docker", "exec", name, "mysql", "-uroot", "-ptest",
+                           "-h127.0.0.1", "--protocol=tcp",
                            "-e", "select 1"],
                           capture_output=True).returncode == 0:
             time.sleep(1)

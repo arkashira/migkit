@@ -77,7 +77,8 @@ def _pg_in_transaction(port):
 def _mysql(container, sql):
     return subprocess.run(
         ["docker", "exec", container, "mysql", "-uroot", "-ptest", "-N", "-B",
-         "-e", sql], capture_output=True, text=True)
+         "-h127.0.0.1", "--protocol=tcp", "-e", sql],
+        capture_output=True, text=True)
 
 
 def _mysql_takeable(container, table="t"):

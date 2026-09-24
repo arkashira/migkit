@@ -150,7 +150,8 @@ def test_mysql_reads_its_whole_column_catalogue_in_one_query():
         end = time.time() + 180
         while time.time() < end:
             ok = subprocess.run(["docker", "exec", name, "mysql", "-uroot",
-                                 "-ptest", "-e", "select 1"],
+                                 "-ptest", "-h127.0.0.1",
+                                 "--protocol=tcp", "-e", "select 1"],
                                 capture_output=True).returncode == 0
             with socket.socket() as s:
                 s.settimeout(2)

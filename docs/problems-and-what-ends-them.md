@@ -1088,6 +1088,16 @@ predicate, so a filtered table went through them whole and the move said
 So does the change tail, which cannot judge a change against a SQL
 predicate yet (`test_full_cdc_misses_nothing.py`).
 
+The bulk path's own question had a hole of its own. Before listing any
+tables it asked which filter keys apply to this database, and it counted
+a two-part key only when the first part was the database's name. On
+PostgreSQL, `public.orders` is a schema and a table, so that key applied
+to no database. The dump neither refused it nor routed the table to the
+copier, and every row was copied. The check matches keys by suffix, so it
+then compared a filtered source against a full target. A two-part key now
+names a database only on engines whose tables have no schema
+(`test_a_schema_qualified_filter_is_not_lost.py`).
+
 ### C12. The exclude list that only some engines read
 
 **What happens.** `exclude` is how a hop protects a table the target owns:
@@ -1150,6 +1160,23 @@ When the count failed, it reported zero rows, which looks like an empty
 target, and an empty target is the last thing a load being watched should
 be mistaken for. It now counts the mapped names, and a count that fails is
 reported as an error.
+
+### C13a. The documents older than their validator
+
+**What happens.** MongoDB does not check existing documents when a
+validator is added to a collection, so a source can hold documents that
+its own validator would now refuse. The MongoDB load creates each
+collection with its validator first and inserts afterwards. Measured on
+MongoDB 7 with the 100.16 tools: one of two documents was refused, the
+load reported `1 document, 1 failure`, and it exited 0. migkit printed
+`copied`.
+
+**migkit: Ends it** (`test_the_mongo_load_says_what_it_did.py`). The load
+now keeps what the source holds and bypasses the validator for the copy.
+Judging those documents is `check`'s job, not the copy's. Any document the
+load still counts as failed, for whatever reason, stops the move, naming
+the collection and how many documents did not load. Each collection is
+reported as it lands.
 
 ### C14. The password left on disk by a dry run
 
@@ -2152,6 +2179,13 @@ How the tail uses it:
     rebuilt was *accepted* by the new set, which resumed from it without
     complaint. So an oplog that was restored rather than wrapped is not
     caught either.
+
+**MySQL to MySQL had the hole in another shape.** Its `full+cdc` printed a
+native replica plan whose position was taken before the copy. Started by
+hand from that position, the replica stopped on the first row the copy had
+already carried (1062, measured on 8.4), and nothing written afterwards
+arrived. The hop now runs the same tail as a pair of MySQL with itself
+(`test_mysql_full_cdc.py`).
 
 **The tail also ignored the hop's rules.** Three more holes, each one
 followed the move in one place and not in the other:

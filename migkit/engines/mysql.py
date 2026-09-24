@@ -42,6 +42,23 @@ class MySQLEngine(Engine):
     def neutral_tables(self, side, db):
         return self._tables(side, db)
 
+    def table_facts(self, side, db):
+        """InnoDB's own row estimate and whether a primary key exists."""
+        out = {}
+        for name, rows, key in self._q(
+                side, "select t.table_name, t.table_rows,"
+                      " exists(select 1 from information_schema"
+                      ".table_constraints c where c.table_schema ="
+                      " t.table_schema and c.table_name = t.table_name"
+                      " and c.constraint_type = 'PRIMARY KEY')"
+                      " from information_schema.tables t"
+                      " where t.table_schema = %s"
+                      " and t.table_type = 'BASE TABLE'",
+                (self._d(side, db),)):
+            out[name] = {"rows": None if rows is None else int(rows),
+                         "key": bool(key)}
+        return out
+
     def column_catalog(self, side, db):
         """{table: [(column, type), ...]} in one query - what a move reads
         before and after itself to notice a DDL on the source."""

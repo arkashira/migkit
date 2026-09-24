@@ -84,6 +84,21 @@ This is the ground migkit stands on.
 
 **0. Choose per table, from measured facts, and combine.**
 
+*Started (2026-09-24):* `migkit/planner.py` makes one decision per table,
+each with its reason. The first rules are the ones correctness forces:
+* a table the hop excludes is left alone
+* a table whose row filter the bulk path cannot apply goes table by table
+
+These decisions used to be made in three places and were never said per
+table. The facts come from the source's catalogue in one query per
+database (`table_facts`: a row estimate, `null` rather than 0 for a table
+never analysed, and whether there is a key; PostgreSQL and MySQL). The
+dry run of `move` now reads the plan out, every table off the usual path
+first (`tests/test_the_plan_by_table.py`). The second reading is the
+planner's first verification rule (0a). Rules that choose on speed are
+still to come. They wait for the benchmark (28) to give them measurements
+to choose from.
+
 * **Today:** one function, `movers.pick()`, chooses the mover per *engine*.
   It takes the first tool found installed (pgcopydb, pg_dump, mydumper,
   pgloader, mongodump) and falls back to the builtin copier. It never looks
@@ -261,9 +276,22 @@ it is read and loaded (`public.orders: loaded (3 tables)`), taken from
 what the programs print as they go. `test_a_real_run_names_no_program.py`
 runs `move` for real down every PostgreSQL path, dry run and `--go`, and
 reads everything it printed; `--help` of every command is scanned too
-(it said "anything reladiff speaks"). Still open: the same per-table
-progress for the MySQL and MongoDB paths, measured against their output
-first.
+(it said "anything reladiff speaks"). The MySQL and MongoDB paths now
+report per table too, each read from what the programs print, as measured
+on the installed builds:
+* **MySQL:** both programs log one JSON object per event. The reader takes
+  the dump's `dump_table_progress` and the load's `restore_data_progress`
+  by field, never by the wording of a message. A failure is the program's
+  own error messages, not the raw tail of a machine log. The load's closing
+  error count is checked even when it exits 0
+  (`test_the_mysql_bulk_path_speaks.py`).
+* **MongoDB:** the load's "finished restoring" line gives what landed and
+  what failed for each collection. Measured: a document that failed was
+  counted there, and the program still exited 0
+  (`test_the_mongo_load_says_what_it_did.py`).
+
+Still open: one vocabulary for rows, bytes, rate and ETA across every
+path. Today the lines are per table.
 * **Today:** `_sh` logs every command line it runs (`$ pg_dump ...`,
   `$ mydumper ...`), and some paths log a program's own message
   (`pg_restore ignored version-mismatch SET statements`).
@@ -381,10 +409,30 @@ passes a collecting result handler, so nothing is printed and nothing is
 written to a database, and keeps connections in a directory made for the
 run, owner-only, removed at the end.
 
+*Wired into `check` (2026-09-24), by the planner's first rule:* a
+cross-engine hop gets a second reading whenever the reader is installed
+and speaks both engines. Every value is converted on the way, and
+migkit's own reading was the only one looking. No flag and no option is
+involved. `planned_checks()` is how an engine adds a check from what it
+can see (`tests/test_second_reading_in_check.py`).
+
+*Measured, MySQL 8 against PostgreSQL 16, the same values on both sides*
+(bigint past 2^53, `decimal(12,4)`, empty string, `datetime`, `date`,
+`tinyint(1)`/`boolean`, `double`):
+* count, sum, min and max of every column: all equal, 3.8 s
+* field-by-field comparison by key: all equal, 2.0 s
+* **row hash: one false difference.** The row holding the double `-1e-07`
+  hashed differently, because the two servers spell it differently before
+  hashing. Hashed column by column, only the `double` column disagreed.
+
+So the second reading runs the aggregates and never the row hash across
+engines. A second opinion that reports differences which are not there is
+worse than none.
+
 Still to measure:
-* its speed against migkit's own checksum on the same pair
-* which of its type mappings disagree with `canon`, where it would call
-  equal what migkit calls different
+* its speed against migkit's own checksum at size
+* where else its type handling disagrees with `canon`: other engines and
+  other types (`json`, `time`, `bit`, spatial)
 
 The planner (item 0) uses it where it sees something migkit's own reader
 does not, not everywhere.
@@ -418,10 +466,21 @@ The planner picks per table:
 * blocking where it does not, saying that streaming will pause and for how
   long, from the table's size and the measured rate
 
-Measure on this pipeline first:
-* that `read.only=true` on the connector version shipped here runs without
-  a signalling table
+*Measured (2026-09-24), MySQL 8 with `gtid_mode=ON`, the connector
+image shipped here, the Kafka signal channel, no signalling table
+anywhere:* with `read.only=true` on the source connector, an
+`execute-snapshot` signal of type `INCREMENTAL` ran. The connector logged
+`Requested 'INCREMENTAL' snapshot of data collections '[app.t]'`, then
+`will end at position [50]`, then `incremental snapshotting of table
+'app.t' finished`. That is the same request the standard incremental
+snapshot refused on this pipeline for want of a table in the source. So the
+read-only variant needs no write to the source.
+
+Still to measure, at a size the sandbox holds (the first try at 3,000 rows
+with one-row chunks took the machine down with it):
+* the number of rows it re-emits
 * that a key updated during a chunk ends up with the streamed value
+* PostgreSQL's read-only variant
 
 ## P0: correctness at cutover
 
@@ -504,30 +563,26 @@ across it as stale, and recognising online schema-change temp tables.
 **5b. MySQL to MySQL full+cdc: the copy and the replica start from
 different points.**
 
-Found by reading the code, while fixing the cross-engine version (problems
-file E7). Not yet measured.
-* **Today:**
-  * `move --mode full+cdc` prints the replication plan with the binlog
-    position taken before the copy, and then copies.
-  * The copy is not a snapshot at that position. Each table is read as it
-    is when its turn comes.
-  * Replaying from the position onto rows the copy already has should stop
-    the replica on its first duplicate key (1062) or missing row (1032).
-  * With GTID on, the plan uses `SOURCE_AUTO_POSITION = 1`. The target has
-    none of the source's GTIDs after a logical copy, so the replica asks
-    for the source's whole history. It either replays it or fails with
-    1236 where the binlogs are purged.
-  * `--mode cdc` run on its own after a copy takes a new position, after
-    the copy, which leaves the E7 hole.
-* **To measure first:** all three cases, on two MySQL 8.4 containers and on
-  MariaDB.
-* **Deeper:** start the replica where the copy's data actually is:
-  * with a bulk dump: the position and GTID set the dump records at its
-    consistent snapshot. For GTID, this means `gtid_purged` on the target
-    before the replica starts.
-  * with the table copier: the position taken before the copy, with the
-    replica's exec mode set to idempotent for the catch-up, then back to
-    strict. Or the same change-point tail the cross-engine path uses.
+*Done (2026-09-24) for the tail; native replication still open.*
+* **Measured, before:** `move --mode full+cdc --go` copied and printed a
+  replica plan, with the binlog position taken before the copy. Nothing
+  started the replica. When it was started by hand on 8.4 from that
+  position, it stopped on the first row the copy had already carried:
+  `Replica_SQL_Running: No`, `Last_SQL_Errno: 1062`. A row written after
+  that never arrived. The copy is not a snapshot at any position, so no
+  position taken beside it is right for a strict replica.
+* **Now:** the same hop runs the change tail that the cross-engine hops
+  use, as a pair of MySQL with itself. It starts from a position taken
+  before the copy and applies by key, so the stretch the copy and the log
+  share converges instead of stopping. Any engine with its own change log
+  and an applier gets this. `tests/test_mysql_full_cdc.py` (fails on the
+  old code).
+* **Still open:** native replication (faster, and runs without migkit).
+  It needs a copy that *is* a snapshot at a position:
+  * the dump's own recorded position and GTID set
+  * `gtid_purged` on the target where GTID is on
+  * `--mode cdc` on its own still takes a new position, after whatever
+    loaded the target
 
 ## P1: before the move - one assessment that answers every managed service's list
 

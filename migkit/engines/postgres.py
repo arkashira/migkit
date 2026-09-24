@@ -73,6 +73,8 @@ class PostgresEngine(Engine):
     ENGINE_FAMILY = "postgres"
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = True
+    # pg_settings, read inside the database, carries `alter database set`
+    SETTINGS_PER_DATABASE = True
 
     USER_TABLES = ("select n.nspname||'.'||c.relname from pg_class c"
                    " join pg_namespace n on n.oid = c.relnamespace"
@@ -127,6 +129,29 @@ class PostgresEngine(Engine):
                          " where schemaname not in"
                          " ('pg_catalog','information_schema') order by 1")
         return [l for l in out.splitlines() if l]
+
+    def table_facts(self, side, db):
+        """Rows as the planner's statistics estimate them - `null`, not 0,
+        for a table never analysed (PostgreSQL 14+ keeps -1 there) - and
+        whether a primary key exists."""
+        out = {}
+        got = self._psql(side, self._d(side, db),
+                         "select n.nspname||'.'||c.relname||chr(31)"
+                         "||coalesce(case when c.reltuples < 0 then null"
+                         " else c.reltuples::bigint end::text, '')"
+                         # as a number: a boolean turned into text is
+                         # `true`, not the `t` psql prints for a column
+                         "||chr(31)||exists(select 1 from pg_index i"
+                         " where i.indrelid = c.oid and i.indisprimary)::int"
+                         " from pg_class c join pg_namespace n"
+                         " on n.oid = c.relnamespace"
+                         " where c.relkind in ('r', 'p') and n.nspname"
+                         " not in ('pg_catalog', 'information_schema')")
+        for line in got.splitlines():
+            name, rows, key = (line.split("\x1f") + ["", ""])[:3]
+            out[name] = {"rows": int(rows) if rows.isdigit() else None,
+                         "key": key == "1"}
+        return out
 
     def neutral_tables(self, side, db):
         # without the hop's exclude list, as every other engine's list is:

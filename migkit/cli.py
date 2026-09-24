@@ -454,7 +454,9 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     if exclude:
         hop.exclude = list(hop.exclude) + [p.strip() for p in exclude.split(",") if p.strip()]
     eng = get_engine(hop)
-    allowed = list(eng.checks) + ["deep", "params"]
+    from .engines.base import Engine
+    planned = list(eng.planned_checks())
+    allowed = list(eng.checks) + ["deep", "params"] + planned
     # smart by default: with no --only, run the full battery including the
     # deep checks (fk orphans, sequence collisions, drift, boundary). --only
     # narrows for a fast targeted pass; --deep stays as a no-op alias.
@@ -464,7 +466,7 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
         # server settings too: a timezone, collation or eviction policy
         # that differs changes what the same data means, and it was only
         # compared when asked for by name
-        checks = list(eng.checks) + ["deep", "params"]
+        checks = list(eng.checks) + ["deep", "params"] + planned
     if do_deep and "deep" not in checks:
         checks.append("deep")
     dbs = [db] if db else eng.databases()
@@ -502,6 +504,15 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
             if prev.get((c, d)) == "ok":
                 out.append({"check": c, "scope": d, "status": "ok",
                             "detail": "resume: skipped, was ok"})
+                continue
+            if (c == "params" and d != dbs[0]
+                    and not eng.SETTINGS_PER_DATABASE
+                    and type(eng).check_params is not Engine.check_params):
+                # the server's settings, not this database's: compared once,
+                # rather than the same finding repeated for every database
+                out.append({"check": c, "scope": d, "status": "skip",
+                            "detail": "server settings are the same for every"
+                                      f" database; compared under {dbs[0]}"})
                 continue
             fn = getattr(eng, f"check_{c}")
             try:
@@ -878,6 +889,33 @@ def movers_pick_and_run(hop, eng, db, go):
             _changelog(hop, {"op": f"move-{via}", "db": d})
 
 
+def _table_plan(hop, eng, d, via):
+    """Where each table goes and why, before anything is copied.
+
+    Read from the source's catalogue. A catalogue that cannot be read
+    costs the operator this view and nothing else: the copy asks the same
+    questions again, and stops on its own if they cannot be answered.
+    """
+    from . import planner
+    from .engines import ALIASES
+    engine = ALIASES.get(hop.engine, hop.engine)
+    try:
+        lister = getattr(eng, "_all_tables", None)
+        tables = lister("src", d) if lister else eng.neutral_tables("src", d)
+        facts = eng.table_facts("src", d)
+    except Exception as e:
+        from .movers import DRIVEN
+        from .wording import without_programs
+        why = (str(e).strip().splitlines()[-1][:100] if str(e).strip()
+               else type(e).__name__)
+        return ["  (the plan by table could not be read: "
+                f"{without_programs(why, DRIVEN)})"]
+    decisions = planner.plan(hop, d, via, tables,
+                             "public" if engine == "postgres" else None,
+                             facts)
+    return ["  by table:"] + planner.lines(decisions)
+
+
 def _copy_routed(hop, eng, d, via, chunk, log):
     """Carry the tables the bulk path left to the table copier.
 
@@ -1053,6 +1091,16 @@ def _tail(hop, eng, db, go):
     eng.tail_apply(db, go, path, lambda m: console.print(m))
 
 
+def _tail_pair(eng):
+    """The change tail for an engine that reads its own change log and can
+    apply one, run as a pair of itself - or None where it cannot."""
+    from .engines.base import Engine
+    if (type(eng).neutral_changes is Engine.neutral_changes
+            or type(eng)._apply_upsert is Engine._apply_upsert):
+        return None
+    return eng._as_pair()
+
+
 def _tail_before_copy(hop, eng, db):
     """Where the tail starts, fixed before the copy it follows.
 
@@ -1182,6 +1230,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     console.print(f"[bold]{d}[/bold] bulk copy:")
                     from . import drift
                     before = drift.shape(eng, "src", d) if go else None
+                    for line in _table_plan(hop, eng, d, v):
+                        console.print(line)
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     for s0 in steps:
@@ -1254,18 +1304,18 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     if engine == "postgres" and has_repl:
         # a subscription with copy_data=true is the native full+cdc
         return _replicate(hop, eng, db, True, do_drop, go)
-    if engine == "mysql" and has_repl:
-        console.print("mysql full+cdc: binlog coordinates below are captured"
-                      " BEFORE the load, execute the replicate SQL after"
-                      " the copy finishes\n")
-        _replicate(hop, eng, db, True, False, False)
-        return _move_full(hop, eng, db, table, chunk, go)
-    if has_tail and hasattr(eng, "move_table"):
+    # MySQL used to print a replica plan here, from a position taken before
+    # the copy. The copy is not a snapshot at that position, and a replica
+    # started from it stopped on the first row the copy had already carried
+    # (1062, measured on 8.4) and applied nothing after. The tail applies
+    # by key, so replaying that stretch converges instead.
+    tailer = eng if has_tail else _tail_pair(eng)
+    if tailer is not None and hasattr(eng, "move_table"):
         if go:
-            _tail_before_copy(hop, eng, db)
+            _tail_before_copy(hop, tailer, db)
         _move_full(hop, eng, db, table, chunk, go)
         if go:
-            return _tail(hop, eng, db, go)
+            return _tail(hop, tailer, db, go)
         # not "then run --mode cdc": a tail started after the copy has
         # skipped what changed during it
         console.print("with --go the copy is followed by the change tail,"

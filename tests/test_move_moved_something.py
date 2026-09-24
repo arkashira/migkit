@@ -209,8 +209,14 @@ def test_an_excluded_table_does_not_hide_a_real_failure(pg_pair, tmp_path,
     got = CliRunner().invoke(cli.main, ["move", "moved", "--mode", "full",
                                         "--go"])
     assert got.exit_code != 0, got.output
-    assert "public.moved" in got.output, got.output
-    assert "public.audit_log" not in got.output, got.output
+    # the failure names what stayed empty; the plan above it names the
+    # excluded table too, as left alone, which is the other half of the
+    # same truth
+    said = " ".join(got.output.split())
+    empty = said.split("still empty on the target:", 1)[1].split(". ")[0]
+    assert "public.moved" in empty, said
+    assert "public.audit_log" not in empty, said
+    assert "public.audit_log: left alone" in said, said
 
 
 def test_the_refusal_does_not_name_the_program_that_ran(pg_pair, tmp_path,

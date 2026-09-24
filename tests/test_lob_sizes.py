@@ -163,6 +163,7 @@ def mysql_one():
         time.sleep(1)
     for _ in range(60):
         if subprocess.run(["docker", "exec", MY, "mysql", "-uroot", "-ptest",
+                           "-h127.0.0.1", "--protocol=tcp",
                            "-e", "select 1"],
                           capture_output=True).returncode == 0:
             break

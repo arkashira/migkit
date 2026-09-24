@@ -7,6 +7,8 @@ from .base import Engine, NeutralCopier, RepairAction, Result
 
 class SQLiteEngine(NeutralCopier, Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    # every setting it compares is the file's own
+    SETTINGS_PER_DATABASE = True
 
     def _path(self, side):
         ep = self.hop.source if side == "src" else self.hop.target

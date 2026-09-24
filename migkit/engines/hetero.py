@@ -773,6 +773,56 @@ class HeteroEngine(Engine):
                        f" {self.src_name}/{self.dst_name},"
                        f" {len(rows)} tables")]
 
+    def planned_checks(self):
+        """A second reading, where it can be had.
+
+        A cross-engine pair is where a second opinion earns its cost: every
+        value is converted on the way, and migkit's own reading is the only
+        one looking. So it runs whenever the independent reader is installed
+        and speaks both engines, and never for pairs it cannot read.
+        """
+        from .. import second_reader
+        if (second_reader.interpreter()
+                and self.src_name in second_reader.READER_TYPES
+                and self.dst_name in second_reader.READER_TYPES):
+            return ("second",)
+        return ()
+
+    def check_second(self, db):
+        """Every paired table read a second way: counts, and the sum,
+        minimum and maximum of every column, through another library and
+        other SQL.
+
+        Aggregates, not the reader's row hash. Measured on a MySQL and a
+        PostgreSQL table holding the same values: the aggregates and a
+        field-by-field comparison agreed on all of them, and the row hash
+        called a row with the double `-1e-07` different - the two servers
+        spell it differently before hashing. A second reading that reports
+        differences which are not there is worse than none.
+        """
+        from .. import second_reader
+        pairs, _, _, _ = self.match_tables(
+            self.src_engine.neutral_tables("src", db),
+            self.dst_engine.neutral_tables("dst", db), self._rename)
+        if not pairs:
+            return [Result("second reading", db, "skip",
+                           "no table is on both sides to read twice")]
+        dst_db = self.hop.target_db(db)
+
+        def named(ident, database):
+            # the reader wants schema.table; MySQL's schema is its database
+            return ident if "." in str(ident) else f"{database}.{ident}"
+        tables = [f"{named(s_, db)}={named(d_, dst_db)}" for s_, d_ in pairs]
+        answer = second_reader.run({
+            "source": second_reader.connection(self.src_name,
+                                               self.hop.source, db),
+            "target": second_reader.connection(self.dst_name,
+                                               self.hop.target, dst_db),
+            "kind": "column", "tables": tables,
+            "args": ["--count", "*", "--sum", "*", "--min", "*",
+                     "--max", "*"]})
+        return second_reader.findings(answer, db)
+
     def check_counts(self, db):
         if not self._can_compare_neutrally():
             got = self._no_rendering("counts")

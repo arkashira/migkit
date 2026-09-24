@@ -108,7 +108,8 @@ MY1_PORT, MY2_PORT = 13395, 13396
 def _mysql(container, sql):
     return subprocess.run(
         ["docker", "exec", container, "mysql", "-uroot", "-ptest", "-N", "-B",
-         "-e", sql], capture_output=True, text=True)
+         "-h127.0.0.1", "--protocol=tcp", "-e", sql],
+        capture_output=True, text=True)
 
 
 @pytest.fixture(scope="module")

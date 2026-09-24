@@ -63,7 +63,8 @@ def pair():
     for n in (SRC, DST):
         for _ in range(90):
             r = subprocess.run(["docker", "exec", n, "mysql", "-uroot",
-                                "-ptest", "-e", "select 1"],
+                                "-ptest", "-h127.0.0.1",
+                                "--protocol=tcp", "-e", "select 1"],
                                capture_output=True)
             if r.returncode == 0:
                 break

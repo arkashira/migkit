@@ -243,7 +243,8 @@ def lone_mysql():
         time.sleep(2)
     for _ in range(90):
         if subprocess.run(["docker", "exec", NAME, "mysql", "-uroot",
-                           "-ptest", "-e", "select 1"],
+                           "-ptest", "-h127.0.0.1",
+                           "--protocol=tcp", "-e", "select 1"],
                           capture_output=True).returncode == 0:
             break
         time.sleep(2)

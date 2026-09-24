@@ -106,6 +106,10 @@ class RepairAction:
 class Engine:
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = False
+    #: whether `check_params` reads anything a database can set for itself.
+    #: Where it reads only the server's, one comparison answers for every
+    #: database the hop moves.
+    SETTINGS_PER_DATABASE = False
 
     def __init__(self, hop):
         self.hop = hop
@@ -1345,6 +1349,17 @@ class Engine:
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
 
+    def table_facts(self, side, db):
+        """{table: {"rows": estimate or None, "key": bool}} from the
+        catalogue, in one query - what the planner decides from. Empty where
+        an engine has no cheap way to say."""
+        return {}
+
+    def planned_checks(self):
+        """Checks added to this hop's battery from what can be seen about
+        it, on top of `checks` - none unless an engine knows better."""
+        return ()
+
     #: what an engine puts in a settings mapping it could not read
     UNREADABLE = "_error"
 
@@ -2538,6 +2553,23 @@ class Engine:
         """
         raise self._no_canon("read a change log")
 
+    def _as_pair(self):
+        """This hop seen as a pair of the same engine, so the machinery
+        written for any pair - the copier, the change tail - serves a
+        same-engine hop too, instead of a second copy of it per engine."""
+        import dataclasses
+
+        from .hetero import HeteroEngine
+        name = self.CANON_ENGINE
+        hop = dataclasses.replace(
+            self.hop, engine="hetero",
+            options={**self.hop.options, "source_engine": name,
+                     "target_engine": name})
+        # the report directory is a method the tests and callers may have
+        # replaced on this hop; the pair keeps writing where this one does
+        hop.report_dir = self.hop.report_dir
+        return HeteroEngine(hop)
+
     def change_point(self, side, db):
         """A token for *now* in this engine's change log, in the shape
         `neutral_changes` takes back, read without consuming anything.
@@ -2635,20 +2667,6 @@ class NeutralCopier:
     engine and hands the table to that one. A fix to the copier is then a
     fix for every engine it serves.
     """
-
-    def _as_pair(self):
-        import dataclasses
-
-        from .hetero import HeteroEngine
-        name = self.CANON_ENGINE
-        hop = dataclasses.replace(
-            self.hop, engine="hetero",
-            options={**self.hop.options, "source_engine": name,
-                     "target_engine": name})
-        # the report directory is a method the tests and callers may have
-        # replaced on this hop; the pair keeps writing where this one does
-        hop.report_dir = self.hop.report_dir
-        return HeteroEngine(hop)
 
     def list_move_tables(self, db):
         return self._as_pair().list_move_tables(db)

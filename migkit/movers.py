@@ -11,6 +11,7 @@ know what it runs underneath. Third-party components used there are named
 only in the generated compose file. See NOTICE for attribution.
 """
 import functools
+import json
 import re
 import subprocess
 from urllib.parse import quote
@@ -84,11 +85,36 @@ FILTERING_COPIERS = ("postgres", "mysql")
 
 
 def _filtered_here(hop, db):
-    """The hop's row-filter keys that apply to database `db`."""
+    """The hop's row-filter keys that may apply to database `db`.
+
+    Left out only when a key names another database outright. A two-part
+    key is `database.table` on MySQL and `schema.table` on PostgreSQL, and
+    `row_filter` matches both by suffix. This used to keep a two-part key
+    only when its first part was `db`, so `public.orders` applied to no
+    database at all. The bulk path then neither refused the filter nor
+    routed the table to the copier, and dumped every row of a table the
+    hop filters. A key is now dropped only when its first part is one of
+    the hop's other databases. Callers that hold the table list
+    (`routed_to_copier`) still match each table exactly.
+    """
+    from .engines import ALIASES
     rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
-    return sorted(k for k in rules
-                  if len([p for p in str(k).split(".") if p]) < 2
-                  or str(k).split(".")[0] == db)
+    # where tables have no schema, the first of two parts is a database
+    engine = ALIASES.get(hop.engine, hop.engine)
+    if engine == "hetero":
+        engine = (hop.options or {}).get("source_engine", "")
+    two_is_database = engine in ("mysql", "mongodb", "sqlite")
+    known = set(getattr(hop, "databases", None) or []) | set(
+        getattr(hop, "db_map", None) or {})
+    out = []
+    for key in rules:
+        parts = [p for p in str(key).split(".") if p]
+        if len(parts) < 2 or parts[0] == db:
+            out.append(key)
+        elif (len(parts) == 2 and not two_is_database
+              and parts[0] not in known):
+            out.append(key)
+    return sorted(out)
 
 
 def routed_to_copier(hop, db, via, tables, qualifier="public"):
@@ -101,15 +127,9 @@ def routed_to_copier(hop, db, via, tables, qualifier="public"):
     plan and the move, so none of them can disagree about which tables took
     which path. Nothing is routed for a path that applies the filter itself.
     """
-    if via in ROW_FILTER_MOVERS or not _filtered_here(hop, db):
-        return []
-    out = []
-    for ident in sorted(tables):
-        parts = [p for p in str(ident).split(".") if p]
-        if hop.row_filter(db, *parts):
-            out.append(".".join(parts) if len(parts) > 1
-                       else f"{qualifier}.{parts[0]}")
-    return out
+    from . import planner
+    return [d.table for d in planner.plan(hop, db, via, tables, qualifier)
+            if d.path == planner.COPIER]
 
 
 def refuse_unpushable_filters(hop, db, via, engine=None):
@@ -204,7 +224,10 @@ def _sh(cmd, env=None, log=None, progress=None):
         p.wait()
         out = err = "".join(tail)
     if p.returncode:
-        said = (err or out)[-500:]
+        # a reader that parsed the program's log knows its error messages;
+        # the raw tail of a machine log is not something to show anyone
+        explain = getattr(progress, "failure", None)
+        said = ((explain() if explain else None) or err or out)[-500:]
         raise RuntimeError(wording.without_programs(said, DRIVEN))
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
@@ -225,6 +248,74 @@ def _tables_done(pattern, verb, total=None):
         of = f" of {total:,}" if total else ""
         return f"{m.group('table')}: {verb} ({len(seen):,}{of} tables)"
     return read
+
+
+class _JsonLog:
+    """A progress reader for a program that logs one JSON object per line.
+
+    Read by field rather than by the wording of a message, which is what a
+    log written for machines is for. `on_event` answers migkit's line for
+    an event, or None. Error messages are kept for the failure text.
+    """
+
+    def __init__(self, on_event):
+        self.on_event = on_event
+        self.errors = []
+
+    def __call__(self, line):
+        line = line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return None
+        # measured: a successful load logs a GLib assertion at ERROR with
+        # fatal true, and carries on; it is not the program's own error
+        if (event.get("level") in ("ERROR", "CRITICAL")
+                and event.get("domain") != "GLib" and event.get("message")):
+            self.errors.append(str(event["message"]))
+        return self.on_event(event)
+
+    def failure(self):
+        return "; ".join(self.errors[-3:]) or None
+
+
+def _my_dump_progress():
+    """The MySQL dump's `dump_table_progress` events, once per table."""
+    seen = []
+
+    def on(event):
+        if event.get("event") != "dump_table_progress":
+            return None
+        name = f"{event.get('db')}.{event.get('table')}"
+        if name in seen:
+            return None
+        seen.append(name)
+        total = str(event.get("tables_total") or "")
+        of = f" of {int(total):,}" if total.isdigit() else ""
+        return f"{name}: reading ({len(seen):,}{of} tables)"
+    return _JsonLog(on)
+
+
+def _my_load_progress(summary):
+    """The MySQL load's `restore_data_progress` events, once per table,
+    and its `restore_completed` counts into `summary`."""
+    seen = []
+
+    def on(event):
+        kind = event.get("event")
+        if kind == "restore_completed":
+            summary.update(event)
+            return None
+        if kind != "restore_data_progress":
+            return None
+        name = f"{event.get('db')}.{event.get('table')}"
+        if name in seen:
+            return None
+        seen.append(name)
+        return f"{name}: loading ({len(seen):,} tables)"
+    return _JsonLog(on)
 
 
 #: what the PostgreSQL dump and load say, with `-v`, as they reach each
@@ -982,6 +1073,11 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
     load = ["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
             "-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
             "--threads", str(workers)]
+    # one JSON object per event, table by table - what the progress lines
+    # are read from. A build without it just gives no per-table lines.
+    for cmd, program in ((dump, "mydumper"), (load, "myloader")):
+        if "--machine-log-json" in _long_options(program):
+            cmd += ["--machine-log-json", "-v", "3"]
     return dump, load
 
 
@@ -1034,13 +1130,20 @@ def mydumper_move(hop, db, workers, go, log):
         omit.write_text("".join(f"{n}\n" for n in skip))
     if log:
         log(dump)
-    _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log)
+    _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
+        progress=_my_dump_progress())
     from .engines.mysql import MySQLEngine
     _my_truncate_target(hop, db, log)
+    summary = {}
     with _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
         if log:
             log(load)
-        _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log)
+        _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
+            progress=_my_load_progress(summary))
+    errors = str(summary.get("errors") or "0")
+    if errors.isdigit() and int(errors):
+        # the load's own count, which an exit code of 0 does not rule out
+        raise RuntimeError(f"the load counted {int(errors):,} errors")
     if skip:
         _my_orphans_left(hop, db, log)
     shutil.rmtree(outdir, ignore_errors=True)
@@ -1118,8 +1221,11 @@ def mongodump_move(hop, db, workers, go, log):
     tdb = hop.target_db(db)
     dump = ["mongodump", f"--uri={_mongo_uri(s)}", f"--db={db}", "--archive",
             "--quiet", *[f"--excludeCollection={n}" for n in skip]]
+    # the collection is made with its validator before its documents go
+    # in, and a document written before that validator existed - which the
+    # source still holds - was refused, while the program exited 0
     restore = ["mongorestore", f"--uri={_mongo_uri(t)}", "--archive",
-               "--drop", f"--nsInclude={db}.*",
+               "--drop", "--bypassDocumentValidation", f"--nsInclude={db}.*",
                *[f"--nsExclude={db}.{n}" for n in skip],
                *([f"--nsFrom={db}.*", f"--nsTo={tdb}.*"] if tdb != db
                  else []),
@@ -1139,18 +1245,45 @@ def mongodump_move(hop, db, workers, go, log):
     dump = subprocess.Popen(dump, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=tool_env())
     restore = subprocess.Popen(restore, stdin=dump.stdout,
-                               stdout=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, env=tool_env())
     dump.stdout.close()
-    _, err_r = restore.communicate()
+    # what the load says as it finishes each collection, in migkit's words,
+    # and how many documents it could not load - which it reports and then
+    # exits 0 over
+    loaded = _tables_done(MONGO_RESTORED, "loaded")
+    tail, failed = [], []
+    for raw in restore.stderr:
+        line = raw.decode(errors="replace")
+        said = loaded(line)
+        if said and log:
+            log(said)
+        m = re.search(MONGO_RESTORED, line)
+        if m and int(m.group("failed")):
+            failed.append(f"{m.group('table')} {m.group('failed')} of"
+                          f" {int(m.group('docs')) + int(m.group('failed'))}")
+        tail.append(line)
+        del tail[:-40]
+    restore.wait()
     _, err_d = dump.communicate()
     if dump.returncode or restore.returncode:
         from .wording import without_programs
-        raise RuntimeError(without_programs((err_d + err_r).decode()[-500:],
-                                            DRIVEN))
+        raise RuntimeError(without_programs(
+            (err_d.decode(errors="replace") + "".join(tail))[-500:], DRIVEN))
+    if failed:
+        raise RuntimeError(
+            "documents that did not load: " + ", ".join(failed[:6])
+            + (" ..." if len(failed) > 6 else ""))
     if log:
         log(f"{db}: copied")
     return steps
+
+
+#: what the MongoDB load says as it finishes each collection
+#: (measured on 100.16: "finished restoring `app.orders` (1 document,
+#: 1 failure)" - the first count is what landed, the namespace in backticks)
+MONGO_RESTORED = (r"finished restoring `?(?P<table>[^`\s]+)`? \((?P<docs>\d+)"
+                  r" documents?, (?P<failed>\d+) failures?\)")
 
 
 
