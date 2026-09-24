@@ -115,3 +115,25 @@ def test_an_empty_source_table_empties_the_target_one(mysql_src, pg_pair):
                                 lambda m: None)
     assert psql(dst, "select count(*) from orders",
                 "shop_new").stdout.strip() == "0"
+
+
+def test_watch_counts_the_mapped_target_and_says_when_it_cannot(
+        mysql_src, pg_pair):
+    """`watch` counted the target under the source's database name, and a
+    count that failed was reported as zero rows - an empty target, which
+    is the one thing a load being watched must not be mistaken for."""
+    _my("drop database if exists shop; create database shop;"
+        " create table shop.orders (id int primary key, v varchar(20));"
+        " insert into shop.orders values (1,'a'),(2,'b'),(3,'c');")
+    dst = pg_pair["dst"]
+    psql(dst, "drop database if exists shop")
+    psql(dst, "drop database if exists shop_new")
+    assert psql(dst, "create database shop_new").returncode == 0
+    assert psql(dst, "create table orders (id int primary key,"
+                     " v varchar(20)); insert into orders values (1,'a'),"
+                     " (2,'b')", "shop_new").returncode == 0
+    got = _engine(pg_pair).watch_sample("shop")
+    assert got.get("src_rows") == 3 and got.get("dst_rows") == 2, got
+    psql(dst, "drop database shop_new")
+    got = _engine(pg_pair).watch_sample("shop")
+    assert "error" in got and "dst_rows" not in got, got

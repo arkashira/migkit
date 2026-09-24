@@ -922,9 +922,15 @@ def _stop_if_the_schema_moved(hop, eng, d, before):
 
 
 def _move_full(hop, eng, db, table, chunk, go):
+    from . import movers
+    from .engines import ALIASES
     capabilities.require(hop.engine, "table-copy")
     dbs = [db] if db else eng.databases()
     for d in dbs:
+        # the bulk path asked this and the table copier did not, so a
+        # filter the copier cannot apply moved every row under "complete"
+        movers.refuse_unpushable_filters(hop, d, "builtin",
+                                         ALIASES.get(hop.engine, hop.engine))
         ck = _Checkpoint(hop.report_dir(d) / "move.json")
         if table:
             tables = [tuple(table.split(".", 1)) if "." in table
@@ -965,9 +971,13 @@ def _move_full(hop, eng, db, table, chunk, go):
 
 
 def _replicate(hop, eng, db, copy_data, do_drop, go):
+    import secrets
     dbs = [db] if db else eng.databases()
     for d in dbs:
-        sql = eng.replicate_sql(d, copy_data=copy_data)
+        # a plan that is only shown keeps the placeholder for the person
+        # who will run it; one migkit runs gets a password nobody has seen
+        secret = secrets.token_urlsafe(24) if go and not do_drop else None
+        sql = eng.replicate_sql(d, copy_data=copy_data, secret=secret)
         console.print(f"[bold]{d}[/bold]")
         if do_drop:
             plan = [("dst", x) for x in sql["drop_dst"]] + \
@@ -979,6 +989,7 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
             console.print(f"  note: {sql['note']}")
         for side, stmt in plan:
             shown = without_secret(stmt, hop.source.password)
+            shown = without_secret(shown, secret)
             console.print(f"  {side}: {shown}")
             if go:
                 eng.apply_replication_stmt(side, d, stmt)

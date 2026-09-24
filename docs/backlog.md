@@ -143,7 +143,7 @@ declared not applicable with the reason):
 
 | capability | pg | mysql | mongo | redis | kafka | mssql | sqlite | generic | hetero |
 |---|---|---|---|---|---|---|---|---|---|
-| comparing the schema | yes | yes | yes | - | yes | yes | yes | yes | yes |
+| comparing the schema | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | comparing row counts | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | - |
@@ -172,7 +172,9 @@ neutrally), and MongoDB notices a move that moved nothing. Then: MySQL
 fences and confirms; Redis carries users (by password hash) and compares
 its settings; Kafka and SQLite compare their settings; the cross-engine
 bulk path notices an empty move; and a table-by-table move refreshes
-statistics on every engine, SQLite included. The table above is
+statistics on every engine, SQLite included. Redis compares its schema: the
+modules loaded on each side, and which kinds of value a sample of keys
+holds. The table above is
 regenerated from `capabilities.matrix()`.
 
 **The deeper version:**
@@ -294,6 +296,16 @@ first.
   apply no filter at all still refuses, without naming a program.
 * `test_the_check_reads_the_row_filter.py`: 12 tests, 8 of which fail on
   the old code. Full suite: 1391 passed.
+* **Still open:** the table-by-table path and the change tail now refuse a
+  filter they cannot apply, instead of carrying every row. The next step
+  is to apply the filter:
+  * in the cross-engine copier, by reading through the source's filtered
+    select
+  * in the tail, by writing each change and then removing the row from
+    the target if the predicate, evaluated there, no longer selects it
+
+  Evaluating on the target assumes the predicate is valid in the target's
+  dialect. The check already assumes this when it filters both sides.
 
 `Hop.row_filter()` has no caller anywhere in `migkit/`. Its docstring says
 the predicate is "pushed into the mover's own flag and into the checksum's
@@ -488,6 +500,34 @@ across it as stale, and recognising online schema-change temp tables.
   * recognise online schema-change temp tables (`_gho/_ghc/_del`,
     `_new/_old`) and the final `RENAME`, instead of reporting them as
     strangers
+
+**5b. MySQL to MySQL full+cdc: the copy and the replica start from
+different points.**
+
+Found by reading the code, while fixing the cross-engine version (problems
+file E7). Not yet measured.
+* **Today:**
+  * `move --mode full+cdc` prints the replication plan with the binlog
+    position taken before the copy, and then copies.
+  * The copy is not a snapshot at that position. Each table is read as it
+    is when its turn comes.
+  * Replaying from the position onto rows the copy already has should stop
+    the replica on its first duplicate key (1062) or missing row (1032).
+  * With GTID on, the plan uses `SOURCE_AUTO_POSITION = 1`. The target has
+    none of the source's GTIDs after a logical copy, so the replica asks
+    for the source's whole history. It either replays it or fails with
+    1236 where the binlogs are purged.
+  * `--mode cdc` run on its own after a copy takes a new position, after
+    the copy, which leaves the E7 hole.
+* **To measure first:** all three cases, on two MySQL 8.4 containers and on
+  MariaDB.
+* **Deeper:** start the replica where the copy's data actually is:
+  * with a bulk dump: the position and GTID set the dump records at its
+    consistent snapshot. For GTID, this means `gtid_purged` on the target
+    before the replica starts.
+  * with the table copier: the position taken before the copy, with the
+    replica's exec mode set to idempotent for the catch-up, then back to
+    strict. Or the same change-point tail the cross-engine path uses.
 
 ## P1: before the move - one assessment that answers every managed service's list
 
@@ -839,6 +879,11 @@ Done so far (problems file E7, `test_full_cdc_misses_nothing.py`):
 * a tail stopped on a quiet source and started again
 * a count-only tail followed by one that applies
 * a collection dropped under a running tail
+* the replication slot dropped and the binlog purged under a saved
+  position (`test_a_lost_position_stops_the_tail.py`). Still open: the
+  MongoDB resume point expiring. It needs about a gigabyte of oplog to
+  measure, and a token from a rebuilt replica set was accepted without a
+  word.
 
 Every case ends one of two ways: the run resumes from the last committed
 point, or it stops and says in migkit's words what happened and what to

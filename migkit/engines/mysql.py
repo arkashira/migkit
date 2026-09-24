@@ -276,6 +276,7 @@ class MySQLEngine(Engine):
         is no way to address the row on the target, and applying an UPDATE by
         matching every column would hit every duplicate of it.
         """
+        import pymysql
         from pymysqlreplication import BinLogStreamReader
         from pymysqlreplication.row_event import (DeleteRowsEvent,
                                                   UpdateRowsEvent,
@@ -316,6 +317,10 @@ class MySQLEngine(Engine):
         try:
             for ev in stream:
                 table = ev.table
+                if self.hop.excluded(db, table):
+                    # the target owns it: the move left it alone, so the
+                    # tail does too - and a keyless one does not stop it
+                    continue
                 keys = self._pk_cols(self._d(side, db), table)
                 if not keys:
                     skipped.add(table)
@@ -345,6 +350,20 @@ class MySQLEngine(Engine):
                          "log_pos": stream.log_pos}
                 if len(out) >= limit:
                     break
+        except pymysql.err.OperationalError as e:
+            # measured on 8.4 after `purge binary logs`: 1236, "Could not
+            # find first log file name in binary log index file"
+            if not (e.args and e.args[0] == 1236):
+                raise
+            raise SystemExit(
+                f"the source no longer has the binlog this tail had read up"
+                f" to ({token.get('log_file')}, position"
+                f" {token.get('log_pos')}): {e.args[-1]}."
+                " The changes after it went with it, so starting again from"
+                " now would skip them without a trace. Move again with"
+                " --mode full+cdc, and keep the binlog longer than the tail"
+                " may be stopped for (binlog_expire_logs_seconds, or"
+                " `binlog retention hours` on RDS)")
         finally:
             stream.close()
         if skipped:
@@ -3115,7 +3134,16 @@ class MySQLEngine(Engine):
             sconn.close()
             dconn.close()
 
-    def replicate_sql(self, db, copy_data=True):
+    def replicate_sql(self, db, copy_data=True, secret=None):
+        """The statements that make the target a replica of the source.
+
+        `secret` is the replication user's password. A plan printed for a
+        person to run carries `CHANGE_ME` for them to replace; a plan migkit
+        runs itself is given a fresh random one. It used to run the
+        placeholder: `--go` made a user reachable from any host whose
+        password is printed in this file.
+        """
+        secret = secret or "CHANGE_ME"
         s, t = self.hop.source, self.hop.target
         try:
             pos = self._binlog_position("src")
@@ -3126,13 +3154,16 @@ class MySQLEngine(Engine):
         gtid_on, gtid_note = self._gtid_state(brand)
         src_cmds = [
             "create user if not exists 'migkit_repl'@'%'"
-            " identified by 'CHANGE_ME';",
+            f" identified by '{secret}';",
+            # a user an earlier run left keeps its old password otherwise,
+            # and the replica below would be given this one
+            f"alter user 'migkit_repl'@'%' identified by '{secret}';",
             "grant replication slave on *.* to 'migkit_repl'@'%';",
         ]
         if "rds.amazonaws.com" in (t.host or ""):
             dst_cmds = [
                 f"call mysql.rds_set_external_source ('{s.host}', {s.port},"
-                " 'migkit_repl', 'CHANGE_ME',"
+                f" 'migkit_repl', '{secret}',"
                 + (f" '{pos[0]}', {pos[1]}," if pos else " '', 4,")
                 + " 0);",
                 "call mysql.rds_start_replication;",
@@ -3149,7 +3180,7 @@ class MySQLEngine(Engine):
             dst_cmds = [
                 f"change master to MASTER_HOST = '{s.host}',"
                 f" MASTER_PORT = {s.port}, MASTER_USER = 'migkit_repl',"
-                f" MASTER_PASSWORD = 'CHANGE_ME', {auto};",
+                f" MASTER_PASSWORD = '{secret}', {auto};",
                 "start slave;",
             ]
         else:
@@ -3158,7 +3189,7 @@ class MySQLEngine(Engine):
             dst_cmds = [
                 f"change replication source to SOURCE_HOST = '{s.host}',"
                 f" SOURCE_PORT = {s.port}, SOURCE_USER = 'migkit_repl',"
-                f" SOURCE_PASSWORD = 'CHANGE_ME',"
+                f" SOURCE_PASSWORD = '{secret}',"
                 # MySQL 8 only: MariaDB has no such option
                 f" GET_SOURCE_PUBLIC_KEY = 1, {auto};",
                 "start replica;",

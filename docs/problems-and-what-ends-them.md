@@ -1081,6 +1081,13 @@ tables out and hand them to the table copier, so the rest of the database
 still goes the fast way. A path that can apply no filter refuses before
 anything is copied.
 
+That last sentence was true of the bulk paths only. The table-by-table
+path never asked. The cross-engine copiers and SQLite's copier take no
+predicate, so a filtered table went through them whole and the move said
+"complete". The table copier now asks the same question before it starts.
+So does the change tail, which cannot judge a change against a SQL
+predicate yet (`test_full_cdc_misses_nothing.py`).
+
 ### C12. The exclude list that only some engines read
 
 **What happens.** `exclude` is how a hop protects a table the target owns:
@@ -1104,6 +1111,21 @@ through the same `hop.excluded()` rule; the MongoDB bulk path leaves an
 excluded collection out of both the dump and the restore. SQL Server still
 ignores the list and cannot be tested on this machine.
 
+"PostgreSQL reads it" turned out to be true only of its own paths. Two
+more holes, both measured:
+
+* **PostgreSQL's table list for the cross-engine paths** did not drop
+  excluded tables. A PostgreSQL-to-MySQL move copied an excluded table into
+  the target that owned it. It stopped only because the target's copy was
+  already there. Every engine now keeps two lists. `_all_tables` includes
+  the excluded tables and is used to work out what to leave out.
+  `neutral_tables` drops them and is used for everything else.
+* **The MySQL streaming pipeline** had the opposite fault. It worked out the
+  connector's exclude list from `neutral_tables`, which had already
+  dropped the excluded tables. So the exclude list came out empty, and the
+  connector streamed the protected tables into the target
+  (`test_stream_leaves_excluded_tables_out.py`).
+
 ### C13. The copier that left the target's strays behind
 
 **What happens.** The keyed table copiers replace one key range per chunk,
@@ -1123,6 +1145,11 @@ connected to the target database by the *source's* name. A hop mapping
 or filled the wrong database where one of that name did exist. It now
 connects through the hop's database map, and removes what lies outside the
 source's range the same way (`test_hetero_copier_target.py`).
+`watch` on the same pair counted the target under the tables' source names.
+When the count failed, it reported zero rows, which looks like an empty
+target, and an empty target is the last thing a load being watched should
+be mistaken for. It now counts the mapped names, and a count that fails is
+reported as an error.
 
 ### C14. The password left on disk by a dry run
 
@@ -2108,6 +2135,38 @@ How the tail uses it:
   run that applies changes saves one.
 * A position file that cannot be read stops the tail. It is not treated as
   "start from now".
+* A position the source no longer holds stops the tail with a sentence
+  saying what was lost (`test_a_lost_position_stops_the_tail.py`). Measured
+  before the fix, both cases were loud but said nothing useful:
+  * A dropped PostgreSQL slot: the tail made a new slot, then failed on
+    `cannot advance replication slot to 0/1519AF8, minimum is 0/1519C58`.
+    The new slot stayed behind, holding WAL. Now no slot is made, and the
+    message says the changes after the saved position went with the old
+    slot.
+  * A purged MySQL binlog: a traceback ending in `(1236, 'Could not find
+    first log file name in binary log index file')`. Now the message names
+    the file and position, says what was lost, and says which retention
+    setting to lengthen.
+  * MongoDB, not measured. Wrapping a real oplog needs about a gigabyte
+    of writes. A resume token taken from a replica set that was then
+    rebuilt was *accepted* by the new set, which resumed from it without
+    complaint. So an oplog that was restored rather than wrapped is not
+    caught either.
+
+**The tail also ignored the hop's rules.** Three more holes, each one
+followed the move in one place and not in the other:
+
+* **Exclude.** The tail carried changes to tables the move had left alone,
+  writing into tables the target owns. A keyless excluded table stopped
+  it outright. Every change reader now skips what the hop excludes, the
+  same way its table list does.
+* **Renames.** A table the hop renames was copied under its new name and
+  then kept up to date under its old one. The tail now pairs tables the way
+  the move does. The MySQL-to-PostgreSQL copier had also written every
+  table under its source name, and now uses the mapped name too.
+* **Row filters.** Every change was applied, including changes to rows
+  the filter leaves out. The tail refuses a filtered table before the copy
+  starts, until it can apply the filter.
 
 Test: `test_full_cdc_misses_nothing.py`.
 
@@ -2300,6 +2359,17 @@ config in the first place - got back
 `****c****r****e****a****t****e****` instead of the statement it was about
 to run. Fixed, with the guard in one shared helper:
 `test_masking_an_empty_password.py`.
+
+**The MySQL replication login ran with the placeholder.** The MySQL plan
+creates `migkit_repl` on the source, with host `'%'`, so any host may sign
+in as it. Printed for a person to run, the plan carries `CHANGE_ME` for
+them to replace. Under `move --mode cdc --go`, migkit ran that plan as it
+stood. The result was a replication login on the source whose password is
+printed in this repository. A run now gets a fresh random password. The
+same password is used to make the user, to reset a user an earlier run
+left behind, and to sign the replica in. It is masked in what migkit
+prints, and a printed-only plan still shows the placeholder
+(`test_replication_user_password.py`).
 
 **Missing:** masking of *data*. If an operator needs a drilldown that is
 safe to paste into a ticket, migkit does not yet offer one.

@@ -371,9 +371,13 @@ class MongoEngine(Engine):
                 if event is None:
                     break
                 op = event.get("operationType")
+                table = (event.get("ns") or {}).get("coll")
+                # a collection the hop leaves alone, dropped or written,
+                # is the target's business and not the tail's
+                if table and self.hop.excluded(db, table):
+                    continue
                 if op not in self.STREAM_OPS:
                     raise self._not_a_row_change(op, event)
-                table = event.get("ns", {}).get("coll")
                 key = dict(event.get("documentKey") or {})
                 if self.STREAM_OPS[op] == "delete":
                     out.append(canon.change("delete", table, key))
@@ -1455,10 +1459,12 @@ class MongoEngine(Engine):
                     + ("" if go else " (count-only, add --go to apply)"))
                 for ev in stream:
                     op = ev["operationType"]
+                    coll = (ev.get("ns") or {}).get("coll")
+                    if coll and self.hop.excluded(db, coll):
+                        continue
                     if op not in self.STREAM_OPS:
                         raise self._not_a_row_change(op, ev)
                     n += 1
-                    coll = ev["ns"]["coll"]
                     key = ev.get("documentKey", {})
                     if not go:
                         continue

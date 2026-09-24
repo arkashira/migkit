@@ -116,12 +116,25 @@ class PostgresEngine(Engine):
 
     CANON_ENGINE = "postgres"
 
-    def neutral_tables(self, side, db):
+    def _all_tables(self, side, db):
+        """Every table on a side as `schema.table`, the excluded ones too.
+
+        The bulk paths need those by name, to tell the dump what to leave
+        out; everything else wants `neutral_tables`.
+        """
         out = self._psql(side, self._d(side, db),
                          "select schemaname||'.'||tablename from pg_tables"
                          " where schemaname not in"
                          " ('pg_catalog','information_schema') order by 1")
         return [l for l in out.splitlines() if l]
+
+    def neutral_tables(self, side, db):
+        # without the hop's exclude list, as every other engine's list is:
+        # measured, a PostgreSQL-to-MySQL move copied an excluded table
+        # into the target that owned it, and stopped only because the
+        # target's copy was already there
+        return [t for t in self._all_tables(side, db)
+                if not self.hop.excluded(db, *t.split(".", 1))]
 
     def column_catalog(self, side, db):
         """{schema.table: [(column, type), ...]} in one query - what a move
@@ -406,9 +419,14 @@ class PostgresEngine(Engine):
         base = re.sub(r"[^a-z0-9_]", "_", str(self.hop.name).lower())
         return f"migkit_{base}"[:63]
 
-    def _slot_ready(self, side, db):
+    def _slot_ready(self, side, db, resuming_from=None):
         """Make sure the slot exists and is one migkit can read. Returns its
         name.
+
+        `resuming_from` is a position a tail saved. A slot that has to be
+        made while one is held means the old slot is gone - dropped, or the
+        server rebuilt - and every change after that position went with it.
+        Making a new one there would carry on from now, so this stops.
 
         Created rather than assumed: a slot that does not exist yet has no
         changes in it, and a tail that silently started from "now" would skip
@@ -421,6 +439,13 @@ class PostgresEngine(Engine):
         got = self._psql(side, target,
                          "select plugin from pg_replication_slots"
                          f" where slot_name = '{name}'").strip()
+        if not got and resuming_from:
+            raise SystemExit(
+                f"the slot {name} is gone from the source, and the tail had"
+                f" read up to {resuming_from} from it. The changes after that"
+                " were kept by the slot and nowhere else, so starting again"
+                " from now would skip them without a trace. Move again with"
+                " --mode full+cdc, which makes the slot before it copies")
         if not got:
             level = self._psql(side, target, "show wal_level").strip()
             if level != "logical":
@@ -474,7 +499,7 @@ class PostgresEngine(Engine):
         advanced by evidence of success rather than by the act of looking.
         """
         from .. import pgslot
-        name = self._slot_ready(side, db)
+        name = self._slot_ready(side, db, resuming_from=token)
         target = self._d(side, db)
         if token:
             # the caller applied everything up to this LSN, so the server may
@@ -495,6 +520,8 @@ class PostgresEngine(Engine):
             if parsed is None:
                 continue
             table = parsed["table"]
+            if self.hop.excluded(db, *str(table).split(".")):
+                continue
             if table not in keys:
                 keys[table] = self.neutral_key(side, db, table)
                 if not keys[table]:
@@ -5335,7 +5362,9 @@ class PostgresEngine(Engine):
     def _repl_name(self):
         return "migkit_" + self.hop.name.replace("-", "_")
 
-    def replicate_sql(self, db, copy_data=True):
+    def replicate_sql(self, db, copy_data=True, secret=None):
+        # the subscription signs in as the hop's own source user, so there
+        # is no replication user for `secret` to be the password of
         s = self.hop.source
         name = self._repl_name()
         conn = (f"host={s.host} port={s.port} dbname={db}"

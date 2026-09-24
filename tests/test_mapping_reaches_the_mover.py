@@ -255,7 +255,7 @@ def test_pg_dump_gets_the_same_excluded_tables(tmp_path, monkeypatch):
         def __init__(self, hop):
             pass
 
-        def neutral_tables(self, side, db):
+        def _all_tables(self, side, db):
             return ["public.orders", "public.audit_log"]
 
     import migkit.engines.postgres as pg
@@ -285,7 +285,7 @@ def test_a_source_that_cannot_be_listed_says_so_instead_of_filtering(
         def __init__(self, hop):
             pass
 
-        def neutral_tables(self, side, db):
+        def _all_tables(self, side, db):
             raise RuntimeError("connection refused")
 
     import migkit.engines.postgres as pg

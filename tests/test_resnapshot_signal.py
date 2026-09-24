@@ -124,7 +124,9 @@ def test_the_hops_exclude_list_reaches_the_connector(tmp_path, monkeypatch):
         def __init__(self, hop):
             pass
 
-        def neutral_tables(self, side, db):
+        # every table, the excluded one included: the list the exclude
+        # list is worked out from
+        def _all_tables(self, side, db):
             return ["public.orders", "public.audit_log"]
 
     import migkit.engines.postgres as pg
@@ -193,7 +195,7 @@ def test_a_source_that_cannot_be_listed_leaves_the_stream_unfiltered(
         def __init__(self, hop):
             pass
 
-        def neutral_tables(self, side, db):
+        def _all_tables(self, side, db):
             raise RuntimeError("connection refused")
 
     import migkit.engines.postgres as pg

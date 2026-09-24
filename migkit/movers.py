@@ -532,7 +532,7 @@ def pgdump_move(hop, db, workers, go, log):
     if getattr(hop, "exclude", None) or _filtered_here(hop, db):
         try:
             from .engines.postgres import PostgresEngine
-            tables = PostgresEngine(hop).neutral_tables("src", db)
+            tables = PostgresEngine(hop)._all_tables("src", db)
             skip = excluded_tables(hop, db, tables)
             routed = [n for n in routed_to_copier(hop, db, "pgdump", tables)
                       if n not in skip]
@@ -1285,7 +1285,7 @@ def pgcopydb_move(hop, db, workers, go, log):
     if getattr(hop, "exclude", None) or _filtered_here(hop, db):
         try:
             from .engines.postgres import PostgresEngine
-            tables = PostgresEngine(hop).neutral_tables("src", db)
+            tables = PostgresEngine(hop)._all_tables("src", db)
             routed = routed_to_copier(hop, db, "pgcopydb", tables)
             text = pgcopydb_filters(hop, db, tables, also=routed)
         except Exception as e:
@@ -1649,10 +1649,10 @@ def stream_codegen(hop, dbs, engine):
             from .engines.postgres import PostgresEngine
             one = dbs[0] if dbs else "postgres"
             if src_is_mysql:
-                tables = MySQLEngine(hop).neutral_tables("src", one)
+                tables = MySQLEngine(hop)._all_tables("src", one)
                 skip = debezium_exclude(hop, one, tables, one)
             else:
-                tables = PostgresEngine(hop).neutral_tables("src", one)
+                tables = PostgresEngine(hop)._all_tables("src", one)
                 skip = debezium_exclude(hop, one, tables, "public")
         except Exception:
             # a source that cannot be listed leaves the stream unfiltered

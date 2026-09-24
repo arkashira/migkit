@@ -925,7 +925,7 @@ class HeteroEngine(Engine):
         try:
             # the target's own probe below reads an error as "no rows", so
             # whether it can be reached at all is asked first
-            self.pg._psql("dst", self.pg._d("dst", db), "select 1")
+            self.pg._psql("dst", db, "select 1")
             with_rows = [t for t in self.my._tables("src", db)
                          if self.my._q("src", f"select 1 from `{db}`.`{t}`"
                                               " limit 1")]
@@ -975,6 +975,9 @@ class HeteroEngine(Engine):
                 log(f"{self.dst_name}: {made}")
             return self._neutral_move(db, sch, tbl, chunk, ck, log)
         t = tbl or sch
+        # the name the hop gives it on the target; this copier wrote every
+        # table under its source name, whatever the mapping said
+        dst_t = self._leaf(self._rename(t))
         key = f"{db}.{t}"
         st = ck.setdefault(key, {})
         if st.get("done"):
@@ -1003,13 +1006,13 @@ class HeteroEngine(Engine):
                             else v for v in row])
             tgt = self.hop.target
             env = tool_env({"PGPASSWORD": tgt.password})
-            pre = f'delete from "{t}" where {pred_pg};' if pred_pg \
-                else f'truncate "{t}";'
+            pre = f'delete from "{dst_t}" where {pred_pg};' if pred_pg \
+                else f'truncate "{dst_t}";'
             p = subprocess.run(
                 ["psql", "-h", tgt.host, "-p", str(tgt.port),
                  "-U", tgt.user, "-d", self.pg._d("dst", db), "-X", "-q",
                  "-v", "ON_ERROR_STOP=1", "-1", "-c", pre,
-                 "-c", f"\\copy \"{t}\" ({collist_pg}) from stdin"
+                 "-c", f"\\copy \"{dst_t}\" ({collist_pg}) from stdin"
                        " (format csv, null '')"],
                 input=buf.getvalue(), capture_output=True, text=True, env=env)
             if p.returncode:
@@ -1045,10 +1048,22 @@ class HeteroEngine(Engine):
         st["done"] = True
         ck.save()
 
-    def _can_tail(self):
+    def _can_tail(self, db=None):
         """Refuse, naming the pair, when changes cannot be carried - before
         a copy that a tail was meant to follow, not after it."""
         from .base import Engine
+        if db is not None:
+            filtered = [t for t in self.src_engine.neutral_tables("src", db)
+                        if self.hop.row_filter(db, *str(t).split("."))]
+            if filtered:
+                # the filter is SQL the source evaluates; a change record
+                # carries values, and every change used to be applied
+                # whether or not its row was one the filter selects
+                raise SystemExit(
+                    f"{', '.join(filtered[:6])} move under a row filter, and"
+                    " the change tail cannot apply one yet - it would carry"
+                    " changes to rows the filter leaves out. Move these"
+                    " tables without CDC, or exclude them from this hop")
         if type(self.src_engine).neutral_changes is Engine.neutral_changes:
             raise SystemExit(
                 f"{self.src_name} has no change log migkit can read, so"
@@ -1062,6 +1077,46 @@ class HeteroEngine(Engine):
                 f"{self.dst_name} cannot apply changes yet - it has no"
                 " statement for writing one row by its key")
 
+    @staticmethod
+    def _saved_token(token_path):
+        """The position a tail saved, None when there is none."""
+        import json as _json
+        if not token_path.exists():
+            return None
+        try:
+            return _json.loads(token_path.read_text())["token"]
+        except (ValueError, KeyError, TypeError):
+            # starting from now instead would skip everything between the
+            # point this file held and now, and say nothing
+            raise SystemExit(
+                f"the saved position in {token_path} cannot be read, and a"
+                " tail started from anywhere else either skips changes or"
+                " cannot say it did not. Remove the file and move again with"
+                " --mode full+cdc")
+
+    def _tail_targets(self, db):
+        """{source table's leaf: the target table its changes go to}.
+
+        The same pairing the move makes, through the hop's mapping. The tail
+        used to write each change to the source's own table name, so a
+        table the hop renames was copied under its new name and then kept
+        up to date under its old one.
+        """
+        there = ([] if self.dst_engine.target_missing(db)
+                 else self.dst_engine.neutral_tables("dst", db))
+        pairs, src_only, _, _ = self.match_tables(
+            self.src_engine.neutral_tables("src", db), there, self._rename)
+        out = {self._leaf(s_): d for s_, d in pairs}
+        for s_ in src_only:
+            out[self._leaf(s_)] = self._leaf(self._rename(s_))
+        return out
+
+    def _tail_target(self, targets, table):
+        # a table made on the source after the tail began goes by its
+        # mapped name, as the move would have sent it
+        return (targets.get(self._leaf(table))
+                or self._leaf(self._rename(table)))
+
     def tail_start(self, db, token_path):
         """Fix where the tail will begin, before the copy it follows.
 
@@ -1070,7 +1125,7 @@ class HeteroEngine(Engine):
         starting later skips them.
         """
         import json as _json
-        self._can_tail()
+        self._can_tail(db)
         if token_path.exists():
             return False
         point = self.src_engine.change_point("src", db)
@@ -1095,32 +1150,30 @@ class HeteroEngine(Engine):
         import json as _json
         import time as _time
         self._can_tail()
-        if go:
+        # read before anything connects: a file that cannot be read is the
+        # answer whatever the servers would have said
+        token = self._saved_token(token_path)
+        if go and not token_path.exists():
             # saved before the first change is read: a tail stopped before
             # anything arrived would otherwise restart from a later "now"
             # and skip whatever came in between
             self.tail_start(db, token_path)
-        token = None
-        if token_path.exists():
-            try:
-                token = _json.loads(token_path.read_text())["token"]
-            except (ValueError, KeyError, TypeError):
-                # starting from now instead would skip everything between
-                # the point this file held and now, and say nothing
-                raise SystemExit(
-                    f"the saved position in {token_path} cannot be read, and"
-                    " a tail started from anywhere else either skips changes"
-                    " or cannot say it did not. Remove the file and move"
-                    " again with --mode full+cdc")
+            token = self._saved_token(token_path)
+        else:
+            self._can_tail(db)
         log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)")
             + (f", resuming from {str(token)[:40]}" if token else ""))
         seen = 0
+        targets = self._tail_targets(db)
         try:
             while True:
                 changes, token = self.src_engine.neutral_changes(
                     "src", db, token, limit=1000)
                 if changes:
+                    changes = [dict(c, table=self._tail_target(targets,
+                                                               c["table"]))
+                               for c in changes]
                     changes, flattened = self._flatten_changes(changes)
                     if flattened:
                         log(f"{flattened} values were not there on the"
@@ -1154,15 +1207,22 @@ class HeteroEngine(Engine):
         """
         import time
         if self.my and self.pg:
+            tables = self.my._tables("src", db)
             a = sum(self.my._q("src",
                                f"select count(*) from `{db}`.`{t}`")[0][0]
-                    for t in self.my._tables("src", db))
+                    for t in tables)
             try:
-                b = sum(int(self.pg._psql("dst", db,
-                                          f'select count(*) from "{t}"'))
-                        for t in self.my._tables("src", db))
-            except RuntimeError:
-                b = 0
+                # the target's own names for its tables; and a count that
+                # could not be taken is not a count of zero, which is what
+                # this used to report
+                b = sum(int(self.pg._psql(
+                            "dst", db, f'select count(*) from'
+                                       f' "{self._leaf(self._rename(t))}"'))
+                        for t in tables)
+            except (RuntimeError, ValueError) as e:
+                return {"db": db, "ts": time.time(), "src_rows": a,
+                        "error": str(e).splitlines()[-1][:120] if str(e)
+                        else type(e).__name__}
             return {"db": db, "ts": time.time(), "src_rows": a,
                     "dst_rows": b}
         try:

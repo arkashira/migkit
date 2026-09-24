@@ -115,7 +115,7 @@ def _fresh(src):
            " pg_replication_slots")
 
 
-def _conf(tmp_path, monkeypatch, src):
+def _conf(tmp_path, monkeypatch, src, extra=""):
     import migkit.config as cfg
     ends = {"mysql": f"{{host: 127.0.0.1, port: {MY_PORT}, user: root,"
                      " password: test}",
@@ -127,7 +127,8 @@ def _conf(tmp_path, monkeypatch, src):
         "hops:\n  fc:\n    engine: hetero\n"
         f"    source: {ends[src]}\n    target: {ends[dst]}\n"
         "    databases: [cx]\n"
-        f"    options: {{source_engine: {src}, target_engine: {dst}}}\n")
+        f"    options: {{source_engine: {src}, target_engine: {dst}}}\n"
+        + extra)
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
 
@@ -287,6 +288,66 @@ def test_a_tail_stopped_before_anything_arrived_resumes_where_it_began(
     assert pg("select v from a where id = 300") == "between runs"
 
 
+@pytest.mark.parametrize("src", ["mysql", "postgres"])
+@pytest.mark.usefixtures("servers")
+@docker
+def test_the_tail_leaves_an_excluded_table_alone(src, tmp_path,
+                                                 monkeypatch):
+    """The move left `b` and `c` alone and the tail carried their changes
+    anyway - into a table the target owns - and a keyless excluded table
+    stopped it outright."""
+    _fresh(src)
+    run, dst = (my, pg) if src == "mysql" else (pg, my)
+    run("create table c (v varchar(20))")
+    dst("insert into b values (999, 'mine')")
+    _conf(tmp_path, monkeypatch, src, "    exclude: [b, c]\n")
+
+    def during(table):
+        _write_on(src)(table)
+        run("update b set v = 'from the source' where id = 1")
+        run("insert into c values ('keyless')")
+    got, said = _move(monkeypatch, "full+cdc", during)
+    assert got.exit_code == 0, said
+    assert "no primary key" not in said, said
+    assert _rows(dst, "a") == _rows(run, "a")
+    assert _rows(dst, "b") == "999:mine", _rows(dst, "b")
+
+
+@pytest.mark.parametrize("src", ["mysql", "postgres"])
+@pytest.mark.usefixtures("servers")
+@docker
+def test_the_tail_writes_where_the_move_wrote(src, tmp_path, monkeypatch):
+    """A table the hop renames was copied under its new name and then kept
+    up to date under its old one."""
+    _fresh(src)
+    run, dst = (my, pg) if src == "mysql" else (pg, my)
+    dst("alter table a rename to a_new")
+    _conf(tmp_path, monkeypatch, src, "    mapping: {tables: {a: a_new}}\n")
+    got, said = _move(monkeypatch, "full+cdc", _write_on(src))
+    assert got.exit_code == 0, said
+    assert _rows(dst, "a_new") == _rows(run, "a")
+    assert dst("select v from a_new where id = 1") == "changed"
+
+
+@pytest.mark.parametrize("mode", ["full", "full+cdc"])
+@pytest.mark.usefixtures("servers")
+@docker
+def test_a_row_filter_nothing_can_apply_stops_before_the_copy(
+        mode, tmp_path, monkeypatch):
+    """Neither cross-engine copier takes a predicate, and the tail cannot
+    judge a change against one: every row moved, under "complete"."""
+    _fresh("mysql")
+    _conf(tmp_path, monkeypatch, "mysql",
+          "    mapping: {where: {a: 'id > 5'}}\n")
+    monkeypatch.setenv("MIGKIT_MOVER", "builtin")
+    copied = []
+    got, said = _move(monkeypatch, mode, copied.append)
+    assert got.exit_code != 0, said
+    assert "row filter" in said, said
+    assert copied == []
+    assert pg("select count(*) from a") == "0"
+
+
 def test_an_unreadable_position_is_not_read_as_none(tmp_path):
     """Read as nothing, a tail would start from now and skip everything
     since the file was written."""
@@ -399,13 +460,14 @@ def test_a_mongo_position_taken_before_the_writes_reads_them(mongo):
     assert ("insert", 1) not in seen
 
 
-def _mongo_pair(mongo):
+def _mongo_pair(mongo, exclude=()):
     """The same server, a second database as the target."""
     from migkit.engines.mongodb import MongoEngine
     hop = mongo.hop
     from migkit.config import Hop
     return MongoEngine(Hop(name="fcmg2", engine="mongodb", source=hop.source,
-                           target=hop.target, db_map={"cx": "cy"}))
+                           target=hop.target, db_map={"cx": "cy"},
+                           exclude=list(exclude)))
 
 
 def _run_tail(eng, path, go, during=None, seconds=4):
@@ -484,3 +546,29 @@ def test_every_engine_with_a_change_log_can_say_where_it_is_now():
             with_log.append(name)
             assert cls.change_point is not Engine.change_point, name
     assert set(with_log) >= {"mysql", "postgres", "mongodb"}, with_log
+
+
+@docker
+def test_a_mongo_tail_leaves_an_excluded_collection_alone(mongo, tmp_path):
+    """Written or dropped, a collection the hop excludes is the target's
+    business: neither carried nor a reason to stop."""
+    eng = _mongo_pair(mongo, exclude=["cache"])
+    path = tmp_path / "tail-token.json"
+    lines = _run_tail(eng, path, True, lambda: mongosh(
+        "db.cache.insertOne({_id: 1}); db.cache.drop();"
+        " db.q.insertOne({_id: 900})"))
+    said = " ".join(lines)
+    assert "SystemExit" not in said, said
+    assert mongosh("db.cache.countDocuments()", "cy").stdout.strip() == "0"
+    got = mongosh("(db.q.findOne({_id: 900}) || {})._id", "cy").stdout
+    assert got.strip() == "900", got
+
+
+@docker
+def test_the_cross_engine_mongo_reader_leaves_it_alone_too(mongo):
+    eng = _mongo_pair(mongo, exclude=["cache"])
+    point = eng.change_point("src", "cx")
+    assert mongosh("db.cache.insertOne({_id: 2}); db.cache.drop();"
+                   " db.q.insertOne({_id: 901})").returncode == 0
+    got, _ = eng.neutral_changes("src", "cx", point)
+    assert [(c["table"], c["key"]["_id"]) for c in got] == [("q", 901)], got
