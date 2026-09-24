@@ -445,6 +445,20 @@ class PostgresEngine(Engine):
                 " let migkit make it, or point this hop at another name")
         return name
 
+    def change_point(self, side, db):
+        """The slot, made now if it is not there, and the position it holds
+        from.
+
+        The position is the slot's own rather than the server's current
+        one: a slot that already existed keeps changes from before now, and
+        replaying those converges where skipping them would not.
+        """
+        name = self._slot_ready(side, db)
+        return self._psql(side, self._d(side, db),
+                          "select confirmed_flush_lsn::text from"
+                          " pg_replication_slots"
+                          f" where slot_name = '{name}'").strip()
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of a logical slot, as neutral records.
 

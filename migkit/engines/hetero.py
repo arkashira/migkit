@@ -1007,7 +1007,7 @@ class HeteroEngine(Engine):
                 else f'truncate "{t}";'
             p = subprocess.run(
                 ["psql", "-h", tgt.host, "-p", str(tgt.port),
-                 "-U", tgt.user, "-d", db, "-X", "-q",
+                 "-U", tgt.user, "-d", self.pg._d("dst", db), "-X", "-q",
                  "-v", "ON_ERROR_STOP=1", "-1", "-c", pre,
                  "-c", f"\\copy \"{t}\" ({collist_pg}) from stdin"
                        " (format csv, null '')"],
@@ -1023,8 +1023,10 @@ class HeteroEngine(Engine):
             ck.save()
             return
         mm = self.my._q("src", f"select coalesce(min(`{intpk}`), 0),"
-                        f" coalesce(max(`{intpk}`), 0) from `{db}`.`{t}`")[0]
-        lo, hi = int(mm[0]), int(mm[1])
+                        f" coalesce(max(`{intpk}`), 0),"
+                        f" min(`{intpk}`) is not null"
+                        f" from `{db}`.`{t}`")[0]
+        lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
         last = st.get("last", lo - 1)
         while last < hi:
             nxt = min(last + chunk, hi)
@@ -1037,8 +1039,44 @@ class HeteroEngine(Engine):
             st["last"] = last
             ck.save()
             log(f"{key}: up to {intpk}={last:,} of {hi:,}")
+        # each chunk replaces its own key range, so a target row outside the
+        # source's whole range was in none of them
+        push([], f'not ("{intpk}" between {lo} and {hi})' if has else "true")
         st["done"] = True
         ck.save()
+
+    def _can_tail(self):
+        """Refuse, naming the pair, when changes cannot be carried - before
+        a copy that a tail was meant to follow, not after it."""
+        from .base import Engine
+        if type(self.src_engine).neutral_changes is Engine.neutral_changes:
+            raise SystemExit(
+                f"{self.src_name} has no change log migkit can read, so"
+                " there is nothing to tail. Re-run `migkit move` for a fresh"
+                " full load instead, and verify it with `migkit check`")
+        # `neutral_apply` lives on the base class on purpose - the loop is
+        # the same everywhere and only the two statements differ - so asking
+        # whether *that* was overridden answers the wrong question
+        if type(self.dst_engine)._apply_upsert is Engine._apply_upsert:
+            raise SystemExit(
+                f"{self.dst_name} cannot apply changes yet - it has no"
+                " statement for writing one row by its key")
+
+    def tail_start(self, db, token_path):
+        """Fix where the tail will begin, before the copy it follows.
+
+        A position already saved is kept: it is older than now, and starting
+        earlier only replays changes the appliers are idempotent for, where
+        starting later skips them.
+        """
+        import json as _json
+        self._can_tail()
+        if token_path.exists():
+            return False
+        point = self.src_engine.change_point("src", db)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(_json.dumps({"token": point}))
+        return True
 
     def tail_apply(self, db, go, token_path, log):
         """Carry changes from one engine's log into the other, until stopped.
@@ -1056,26 +1094,24 @@ class HeteroEngine(Engine):
         """
         import json as _json
         import time as _time
-        from .base import Engine
-        if type(self.src_engine).neutral_changes is Engine.neutral_changes:
-            raise SystemExit(
-                f"{self.src_name} has no change log migkit can read, so"
-                " there is nothing to tail. Re-run `migkit move` for a fresh"
-                " full load instead, and verify it with `migkit check`")
-        # `neutral_apply` lives on the base class on purpose - the loop is
-        # the same everywhere and only the two statements differ - so asking
-        # whether *that* was overridden answers the wrong question
-        if type(self.dst_engine)._apply_upsert is Engine._apply_upsert:
-            raise SystemExit(
-                f"{self.dst_name} cannot apply changes yet - it has no"
-                " statement for writing one row by its key")
-
+        self._can_tail()
+        if go:
+            # saved before the first change is read: a tail stopped before
+            # anything arrived would otherwise restart from a later "now"
+            # and skip whatever came in between
+            self.tail_start(db, token_path)
         token = None
         if token_path.exists():
             try:
-                token = _json.loads(token_path.read_text()).get("token")
-            except Exception:
-                token = None
+                token = _json.loads(token_path.read_text())["token"]
+            except (ValueError, KeyError, TypeError):
+                # starting from now instead would skip everything between
+                # the point this file held and now, and say nothing
+                raise SystemExit(
+                    f"the saved position in {token_path} cannot be read, and"
+                    " a tail started from anywhere else either skips changes"
+                    " or cannot say it did not. Remove the file and move"
+                    " again with --mode full+cdc")
         log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)")
             + (f", resuming from {str(token)[:40]}" if token else ""))

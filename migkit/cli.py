@@ -461,7 +461,10 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     if only:
         checks = [c for c in only.split(",") if c in allowed]
     else:
-        checks = list(eng.checks) + ["deep"]
+        # server settings too: a timezone, collation or eviction policy
+        # that differs changes what the same data means, and it was only
+        # compared when asked for by name
+        checks = list(eng.checks) + ["deep", "params"]
     if do_deep and "deep" not in checks:
         checks.append("deep")
     dbs = [db] if db else eng.databases()
@@ -1019,11 +1022,46 @@ def _follow(hop, eng, db, do_drop, go):
                       f" verify: migkit check {hop.name}")
 
 
-def _tail(hop, eng, db, go):
+def _tail_token(hop, db):
     if not db:
         raise SystemExit("cdc tail needs --db")
-    eng.tail_apply(db, go, hop.report_dir(db) / "tail-token.json",
-                   lambda m: console.print(m))
+    return hop.report_dir(db) / "tail-token.json"
+
+
+def _tail(hop, eng, db, go):
+    path = _tail_token(hop, db)
+    if not path.exists() and _Checkpoint(hop.report_dir(db) / "move.json"):
+        # a copy with no position is the hole full+cdc closes; on its own,
+        # cdc can only say it is there
+        console.print(
+            f"[yellow]{db} was copied by an earlier run that saved no change"
+            " position. This tail starts from now, so what the source changed"
+            " between that copy and now is carried by nothing - `migkit"
+            " check` will show it, or move again with --mode full+cdc, which"
+            " takes the position first[/yellow]")
+    eng.tail_apply(db, go, path, lambda m: console.print(m))
+
+
+def _tail_before_copy(hop, eng, db):
+    """Where the tail starts, fixed before the copy it follows.
+
+    Taken after the copy, it skips everything the source changed while the
+    rows were being read: the tail begins at the end of the log, the copy
+    read the table before those changes, and nothing downstream can tell
+    such a row from one that never changed.
+
+    A copy an earlier run finished with no position saved has the same hole
+    from the other side - what changed on its tables since is in no log this
+    tail will read - so those tables are copied again rather than trusted.
+    """
+    path = _tail_token(hop, db)
+    ck = _Checkpoint(hop.report_dir(db) / "move.json")
+    if ck and not path.exists():
+        console.print(f"  {db}: an earlier copy saved no change position, so"
+                      " what changed on its tables since cannot be carried -"
+                      " copying them again")
+        ck.path.unlink()
+    eng.tail_start(db, path)
 
 
 def _tail_ready(eng):
@@ -1212,11 +1250,15 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         _replicate(hop, eng, db, True, False, False)
         return _move_full(hop, eng, db, table, chunk, go)
     if has_tail and hasattr(eng, "move_table"):
+        if go:
+            _tail_before_copy(hop, eng, db)
         _move_full(hop, eng, db, table, chunk, go)
         if go:
             return _tail(hop, eng, db, go)
-        console.print("then: migkit move --mode cdc --db <db> --go"
-                      " to stream changes")
+        # not "then run --mode cdc": a tail started after the copy has
+        # skipped what changed during it
+        console.print("with --go the copy is followed by the change tail,"
+                      " from a position taken before the copy starts")
         return
     capabilities.require(hop.engine, "stream")
     capabilities.require(hop.engine, "table-copy")

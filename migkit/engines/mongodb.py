@@ -289,6 +289,43 @@ class MongoEngine(Engine):
     STREAM_OPS = {"insert": "insert", "replace": "insert",
                   "update": "update", "delete": "delete"}
 
+    @staticmethod
+    def _not_a_row_change(op, event):
+        return SystemExit(
+            f"the change stream reported {op!r} on"
+            f" {(event.get('ns') or {}).get('coll', '?')}, which is"
+            " not a row change - migkit carries inserts,"
+            " updates, replaces and deletes, and will not pretend"
+            " a dropped or renamed collection is one of them.\n"
+            "    Re-run the full load for that collection, then"
+            " start the tail again from a token taken after it")
+
+    def change_point(self, side, db):
+        """A resume token for now, read without taking any event off the
+        stream: the server answers an empty first batch with the position it
+        reached, which is exactly the point a tail started from here would
+        begin at."""
+        try:
+            stream = self._client(side)[self._d(side, db)].watch([])
+        except Exception as e:
+            if "only supported on replica sets" in str(e):
+                raise SystemExit(
+                    "this server is a standalone, and a change stream needs"
+                    " a replica set - the oplog a stream reads does not"
+                    " exist otherwise")
+            raise
+        try:
+            token = (stream.resume_token or {}).get("_data")
+        finally:
+            stream.close()
+        if not token:
+            # None would be read as "start from now" later, after the copy
+            raise SystemExit(
+                "the server opened a change stream without saying where it"
+                " stands, so there is no position to start the tail from"
+                " before the copy")
+        return token
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of a change stream, as neutral records.
 
@@ -335,14 +372,7 @@ class MongoEngine(Engine):
                     break
                 op = event.get("operationType")
                 if op not in self.STREAM_OPS:
-                    raise SystemExit(
-                        f"the change stream reported {op!r} on"
-                        f" {event.get('ns', {}).get('coll', '?')}, which is"
-                        " not a row change - migkit carries inserts,"
-                        " updates, replaces and deletes, and will not pretend"
-                        " a dropped or renamed collection is one of them.\n"
-                        "    Re-run the full load for that collection, then"
-                        " start the tail again from a token taken after it")
+                    raise self._not_a_row_change(op, event)
                 table = event.get("ns", {}).get("coll")
                 key = dict(event.get("documentKey") or {})
                 if self.STREAM_OPS[op] == "delete":
@@ -1390,38 +1420,63 @@ class MongoEngine(Engine):
         ]
 
     def tail_apply(self, db, go, token_path, log):
-        import json as _json
+        """Same-engine change tail, carrying each document as BSON.
 
+        Only an applying run moves the saved position: a count-only run that
+        saved one sent the next `--go` past events nobody applied. The
+        position is saved before the first event is read, so a tail stopped
+        before anything arrived resumes there rather than at a later "now".
+        """
         from bson.json_util import dumps, loads
         src = self._client("src")[db]
         dst = self._client("dst")[self._d("dst", db)]
         resume = None
         if token_path.exists():
-            resume = loads(token_path.read_text())
-            log(f"resuming from saved token")
+            try:
+                resume = loads(token_path.read_text())
+            except ValueError:
+                raise SystemExit(
+                    f"the saved position in {token_path} cannot be read, and"
+                    " a tail started from anywhere else either skips changes"
+                    " or cannot say it did not. Remove the file and move"
+                    " again")
+            log("resuming from saved token")
+        elif go:
+            resume = {"_data": self.change_point("src", db)}
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_text(dumps(resume))
         kwargs = {"full_document": "updateLookup"}
         if resume:
             kwargs["resume_after"] = resume
-        n = 0
-        with src.watch(**kwargs) as stream:
-            log("tailing change stream, ctrl-c to stop"
-                + ("" if go else " (count-only, add --go to apply)"))
-            for ev in stream:
-                n += 1
-                op = ev["operationType"]
-                coll = ev["ns"]["coll"]
-                key = ev.get("documentKey", {})
-                if go:
+        n, applied = 0, None
+        try:
+            with src.watch(**kwargs) as stream:
+                log("tailing change stream, ctrl-c to stop"
+                    + ("" if go else " (count-only, add --go to apply)"))
+                for ev in stream:
+                    op = ev["operationType"]
+                    if op not in self.STREAM_OPS:
+                        raise self._not_a_row_change(op, ev)
+                    n += 1
+                    coll = ev["ns"]["coll"]
+                    key = ev.get("documentKey", {})
+                    if not go:
+                        continue
                     if op in ("insert", "update", "replace"):
                         doc = ev.get("fullDocument")
                         if doc is not None:
                             dst[coll].replace_one(key, doc, upsert=True)
-                    elif op == "delete":
+                    else:
                         dst[coll].delete_one(key)
-                if n % 100 == 0 or op == "invalidate":
-                    token_path.write_text(dumps(ev["_id"]))
-                    log(f"{n} events, token saved ({op} {coll})")
-        token_path.write_text(dumps(stream.resume_token))
+                    applied = ev["_id"]
+                    if n % 100 == 0:
+                        token_path.write_text(dumps(applied))
+                        log(f"{n} events, token saved ({op} {coll})")
+        except KeyboardInterrupt:
+            log(f"stopped after {n} changes; rerun to resume")
+        finally:
+            if applied is not None:
+                token_path.write_text(dumps(applied))
 
     def watch_sample(self, db):
         a = self._client("src")[db].command("dbStats")

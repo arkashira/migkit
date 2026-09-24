@@ -303,15 +303,7 @@ class MySQLEngine(Engine):
                     f" FULL: {why}.\n"
                     f"    set global {name} = 'FULL';   -- self-managed\n"
                     f"    {name}=FULL                   -- parameter group")
-        token = dict(token or {})
-        if not token:
-            pos = (self._q(side, "show binary log status")
-                   or self._q(side, "show master status"))
-            if not pos:
-                raise SystemExit(
-                    "the binlog is off on this server, so there is no change"
-                    " log to read - turn on log_bin, or move without CDC")
-            token = {"log_file": pos[0][0], "log_pos": int(pos[0][1])}
+        token = dict(token or {}) or self.change_point(side, db)
         stream = BinLogStreamReader(
             connection_settings={"host": ep.host, "port": ep.port,
                                  "user": ep.user, "passwd": ep.password},
@@ -362,6 +354,37 @@ class MySQLEngine(Engine):
                 " applying it by matching every column would hit every"
                 " duplicate. Add a key, or exclude the table")
         return out, token
+
+    def _binlog_position(self, side):
+        """(file, position) the binlog is at now, or None when it is off.
+
+        MySQL 8.4 renamed the statement and removed the old spelling; 8.0,
+        Aurora and MariaDB only have the old one. Asking with `or` meant the
+        new spelling's syntax error on an 8.0 server stopped the tail before
+        the old one was ever tried, so only that error moves on to the next.
+        """
+        import pymysql
+        for q in ("show binary log status", "show master status"):
+            try:
+                got = self._q(side, q)
+            except pymysql.err.ProgrammingError as e:
+                if e.args and e.args[0] == 1064:
+                    continue
+                raise
+            if got:
+                return got[0][0], int(got[0][1])
+            return None
+        return None
+
+    def change_point(self, side, db):
+        """Where the binlog is now, as the token `neutral_changes` resumes
+        from."""
+        pos = self._binlog_position(side)
+        if not pos:
+            raise SystemExit(
+                "the binlog is off on this server, so there is no change"
+                " log to read - turn on log_bin, or move without CDC")
+        return {"log_file": pos[0], "log_pos": pos[1]}
 
     def neutral_digest(self, side, db, table, columns):
         from .. import canon
@@ -1183,22 +1206,17 @@ class MySQLEngine(Engine):
                            "pip install mysql-replication for delta verify")]
         state = self.hop.report_dir(db) / "delta-pos.json"
         if not state.exists():
-            pos = None
-            for q in ("show binary log status",   # mysql 8.4+
-                      "show master status"):      # mysql 8.0 / aurora / txsql
-                try:
-                    pos = self._q("src", q)
-                except Exception:
-                    pos = None
-                if pos:
-                    break
+            try:
+                pos = self._binlog_position("src")
+            except Exception:
+                pos = None
             if not pos:
                 return [Result("delta", db, "error",
                                "cannot read binlog position on source")]
-            state.write_text(json.dumps({"log_file": pos[0][0],
-                                         "log_pos": int(pos[0][1])}))
+            state.write_text(json.dumps({"log_file": pos[0],
+                                         "log_pos": pos[1]}))
             return [Result("delta", db, "ok",
-                           f"baseline {pos[0][0]}:{pos[0][1]} recorded,"
+                           f"baseline {pos[0]}:{pos[1]} recorded,"
                            " changes are tracked from this point on")]
         from .. import rowtext
         ck = json.loads(state.read_text())
@@ -3099,15 +3117,11 @@ class MySQLEngine(Engine):
 
     def replicate_sql(self, db, copy_data=True):
         s, t = self.hop.source, self.hop.target
-        pos = None
-        for _q_ in ("show binary log status", "show master status"):
-            try:
-                pos = self._q("src", _q_)
-            except Exception:
-                pos = None
-            if pos:
-                break
-        coords = f"file {pos[0][0]} pos {pos[0][1]}" if pos else "unknown"
+        try:
+            pos = self._binlog_position("src")
+        except Exception:
+            pos = None
+        coords = f"file {pos[0]} pos {pos[1]}" if pos else "unknown"
         brand = self._brands()[0].name
         gtid_on, gtid_note = self._gtid_state(brand)
         src_cmds = [
@@ -3119,7 +3133,7 @@ class MySQLEngine(Engine):
             dst_cmds = [
                 f"call mysql.rds_set_external_source ('{s.host}', {s.port},"
                 " 'migkit_repl', 'CHANGE_ME',"
-                + (f" '{pos[0][0]}', {pos[0][1]}," if pos else " '', 4,")
+                + (f" '{pos[0]}', {pos[1]}," if pos else " '', 4,")
                 + " 0);",
                 "call mysql.rds_start_replication;",
             ]
@@ -3130,8 +3144,8 @@ class MySQLEngine(Engine):
             # with `MASTER_USE_GTID`, which MySQL 8 rejects with the same
             # error, so the two are not interchangeable in either direction.
             auto = ("MASTER_USE_GTID = current_pos" if gtid_on else
-                    (f"MASTER_LOG_FILE = '{pos[0][0]}',"
-                     f" MASTER_LOG_POS = {pos[0][1]}" if pos else ""))
+                    (f"MASTER_LOG_FILE = '{pos[0]}',"
+                     f" MASTER_LOG_POS = {pos[1]}" if pos else ""))
             dst_cmds = [
                 f"change master to MASTER_HOST = '{s.host}',"
                 f" MASTER_PORT = {s.port}, MASTER_USER = 'migkit_repl',"
@@ -3139,8 +3153,8 @@ class MySQLEngine(Engine):
                 "start slave;",
             ]
         else:
-            auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else                 (f"SOURCE_LOG_FILE = '{pos[0][0]}',"
-                 f" SOURCE_LOG_POS = {pos[0][1]}" if pos else "")
+            auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else                 (f"SOURCE_LOG_FILE = '{pos[0]}',"
+                 f" SOURCE_LOG_POS = {pos[1]}" if pos else "")
             dst_cmds = [
                 f"change replication source to SOURCE_HOST = '{s.host}',"
                 f" SOURCE_PORT = {s.port}, SOURCE_USER = 'migkit_repl',"

@@ -834,6 +834,12 @@ engine 0e declares a move or stream for:
 * the replication slot dropped, the binlog purged, the change-stream
   resume point expired
 
+Done so far (problems file E7, `test_full_cdc_misses_nothing.py`):
+* writes on the source while a `full+cdc` copy runs
+* a tail stopped on a quiet source and started again
+* a count-only tail followed by one that applies
+* a collection dropped under a running tail
+
 Every case ends one of two ways: the run resumes from the last committed
 point, or it stops and says in migkit's words what happened and what to
 do. Either way, `check` afterwards proves the target. An outcome that is

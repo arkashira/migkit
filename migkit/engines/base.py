@@ -2538,6 +2538,18 @@ class Engine:
         """
         raise self._no_canon("read a change log")
 
+    def change_point(self, side, db):
+        """A token for *now* in this engine's change log, in the shape
+        `neutral_changes` takes back, read without consuming anything.
+
+        A copy followed by a tail needs it taken **before** the copy: a tail
+        that starts from wherever the log is once the copy finishes has
+        skipped every change made while the rows were being read, and
+        nothing downstream can tell those rows from ones that never
+        changed.
+        """
+        raise self._no_canon("read a change log")
+
     def neutral_apply(self, side, db, changes):
         """Apply change records. Returns how many were applied.
 

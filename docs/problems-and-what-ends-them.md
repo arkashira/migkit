@@ -1117,6 +1117,13 @@ Once every chunk is done, the PostgreSQL and MySQL copiers remove the
 target rows outside the source's range, within the hop's row filter only,
 and say how many.
 
+The MySQL-to-PostgreSQL copier had the same hole, and a second one: it
+connected to the target database by the *source's* name. A hop mapping
+`shop` to `shop_new` therefore failed on a database that did not exist,
+or filled the wrong database where one of that name did exist. It now
+connects through the hop's database map, and removes what lies outside the
+source's range the same way (`test_hetero_copier_target.py`).
+
 ### C14. The password left on disk by a dry run
 
 **What happens.** The one-pass MySQL-to-PostgreSQL path writes a load file
@@ -1640,6 +1647,19 @@ value out. A comparison that cannot run is now an error line of its own.
 The same broker settings, read the same way, are compared as Kafka's
 server settings.
 
+**The sweep that followed.** `test_every_check_runs.py` now runs every
+check of every engine against a target that answers nothing. None of them
+may say ok about that target. A fact about the source alone, such as its
+keys or its types, is not a claim about the target and is allowed. The
+sweep found one more case. SQLite's AUTOINCREMENT comparison read every
+failure to open `sqlite_sequence` as "no counters", so it reported a
+target file that did not exist as `0 counters, values match`. Its repair
+had a matching hole. A target table that has never been written to has no
+row in `sqlite_sequence`, so the planned UPDATE changed nothing and
+reported success. That target would then hand out ids the source had
+already used and deleted. Both are fixed, and the counters of excluded
+tables are left alone (`test_sqlite_counters.py`).
+
 ### D12b. The key that is not a key
 
 **What happens.** A row comparison that matches by key is only as good as
@@ -2034,6 +2054,62 @@ error whenever either thread is not `Yes`. Three states measured live and
 pinned: unreachable source, dead applier, and a healthy replica whose rows
 actually arrived - the last so the check cannot pass by always saying no.
 Test: `test_replication_says_whether_it_is_running.py`.
+
+---
+
+### E7. The tail that started after the copy
+
+**What happens.** A full load followed by change capture needs the change
+log's position taken *before* the first row is read. A tail started after
+the copy begins past every change the source took while the copy ran. The
+copy read those rows before they changed, and nothing downstream can tell
+them from rows that never changed. The same hole opens between two runs of
+a tail when the position is saved only after something has been applied.
+
+**Measured, before the fix.** `move --mode full+cdc` on a cross-engine hop
+ran the copy and then started the tail from wherever the log was at that
+moment. With an update, a delete and an insert made on the source after
+each table's copy, none of them reached the target, in either direction
+(MySQL to PostgreSQL, PostgreSQL to MySQL). The run said nothing. Three
+more holes of the same kind:
+
+* A tail stopped on a quiet source saved no position. The next run started
+  from a later "now", so what was written between the two runs was carried
+  by neither.
+* MongoDB's own tail saved its position every hundred events even in a
+  count-only run. The next `--go` then began after events nobody had
+  applied.
+* The same MongoDB tail passed over a dropped collection without a word.
+
+**migkit: Ends it.** Every engine with a change log answers
+`change_point(side, db)`, a position for *now*, read without consuming
+anything:
+
+* MySQL: the binlog file and position, read in one place for the tail,
+  the delta baseline and the replication plan. The query tries the newer
+  statement first and falls back to the older one only on a syntax error.
+  The tail's copy of it joined the two with `or`, so on MySQL 8.0, which
+  predates the newer spelling (added in 8.2), it would have stopped on the
+  syntax error without trying the old statement. Not measured on 8.0, since
+  no 8.0 image is on this machine. MariaDB 11 accepts both (measured).
+* PostgreSQL: the slot, made before the copy. The position is the slot's
+  own confirmed position, not the server's current one.
+* MongoDB: a resume token, taken from an empty first batch.
+
+How the tail uses it:
+
+* `full+cdc` saves the position before the copy starts.
+* A position that is already saved is kept, because starting earlier only
+  replays changes and the appliers are idempotent.
+* If an earlier run finished a copy without saving a position, that copy is
+  run again rather than trusted.
+* `--mode cdc` on its own, after such a copy, says what it cannot carry.
+* A tail saves its position before reading the first change, and only a
+  run that applies changes saves one.
+* A position file that cannot be read stops the tail. It is not treated as
+  "start from now".
+
+Test: `test_full_cdc_misses_nothing.py`.
 
 ---
 

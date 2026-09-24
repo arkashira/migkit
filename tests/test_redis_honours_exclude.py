@@ -143,3 +143,21 @@ def test_server_settings_are_compared_and_secrets_left_out(pair, tmp_path):
         assert "requirepass" not in dumped and "masterauth" not in dumped
     finally:
         t.config_set("maxmemory-policy", "noeviction")
+
+
+def test_a_kind_of_value_the_copy_left_behind_is_named(pair, tmp_path):
+    """A stream on the source and none on the target is the shape of a copy
+    that dropped what it did not handle; the key counts can still match."""
+    s, t = pair
+    for c in (s, t):
+        c.flushdb()
+    s.set("a", "1")
+    s.xadd("events", {"k": "v"})
+    t.set("a", "1")
+    t.set("events", "flattened")
+    eng = _engine()
+    eng.hop.report_dir = lambda db=None, _p=tmp_path: _p
+    got = {r.scope: r for r in eng.check_schema("0")}
+    kinds = got["db0 kinds"]
+    assert kinds.status == "diff" and "stream" in kinds.detail, kinds.detail
+    assert got["db0 modules"].status == "ok", got["db0 modules"].detail

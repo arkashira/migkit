@@ -4,7 +4,7 @@ from .base import Engine, RepairAction, Result
 
 
 class RedisEngine(Engine):
-    checks = ("counts", "data")
+    checks = ("schema", "counts", "data")
     ENGINE_FAMILY = "redis"
 
     def _client(self, side, db=0, decode=True):
@@ -180,6 +180,82 @@ class RedisEngine(Engine):
         # the server's own count includes the excluded keys, so the kept
         # ones are counted by walking them
         return sum(len(b) for b in self._scan_batches(client, 0, True, db))
+
+    def check_schema(self, db):
+        """What a keyspace has in place of a schema: the modules loaded,
+        and the kinds of value it holds.
+
+        A module brings its own value types - a JSON document, a search
+        index, a time series - and a target without the module cannot hold
+        them at all. And a kind of value present on the source and absent
+        on the target (streams, say) is the shape of a copy that dropped
+        what it did not understand. Kinds are read from a sample of keys,
+        the hop's `sample` option, the whole keyspace when `deep` is set.
+        """
+        res = []
+
+        def modules(side):
+            got = self._client(side, 0).module_list() or []
+            return {str(m.get("name", m.get(b"name", ""))):
+                    str(m.get("ver", m.get(b"ver", ""))) for m in got}
+
+        try:
+            ms, md = modules("src"), modules("dst")
+        except Exception as e:
+            return [Result("schema", f"db{db}", "error",
+                           f"the modules could not be read: "
+                           f"{str(e).splitlines()[-1][:80]} - the kinds of"
+                           " value each side can hold were not compared")]
+        lacking = sorted(m for m in ms if m not in md)
+        older = sorted(f"{m} {ms[m]} -> {md[m]}" for m in ms
+                       if m in md and md[m] < ms[m])
+        if lacking or older:
+            res.append(Result(
+                "schema", f"db{db} modules", "diff",
+                "; ".join(([f"not on the target: {', '.join(lacking)}"]
+                           if lacking else [])
+                          + ([f"older on the target: {', '.join(older)}"]
+                             if older else [])), "",
+                "load the same modules on the target before copying: a"
+                " value of a module's type cannot land without it"))
+        else:
+            res.append(Result("schema", f"db{db} modules", "ok",
+                              f"{len(ms)} modules, the same on both sides"))
+
+        sample = int(self.hop.options.get("sample", 5000))
+        deep = bool(self.hop.options.get("deep", False))
+
+        def kinds(side):
+            client = self._client(side, db)
+            seen = {}
+            for keys in self._scan_batches(client, sample, deep, db):
+                pipe = client.pipeline(transaction=False)
+                for k in keys:
+                    pipe.type(k)
+                for t in pipe.execute():
+                    seen[t] = seen.get(t, 0) + 1
+            return seen
+
+        try:
+            ks, kd = kinds("src"), kinds("dst")
+        except Exception as e:
+            res.append(Result("schema", f"db{db} kinds", "error",
+                              f"the keyspace could not be sampled:"
+                              f" {str(e).splitlines()[-1][:80]}"))
+            return res
+        gone = sorted(k for k in ks if k not in kd)
+        if gone:
+            res.append(Result(
+                "schema", f"db{db} kinds", "diff",
+                f"kinds of value on the source and none on the target:"
+                f" {', '.join(f'{k} ({ks[k]:,})' for k in gone)}", "",
+                "a copy that left out values it did not handle: move those"
+                " keys again with a path that carries their kind"))
+        else:
+            res.append(Result("schema", f"db{db} kinds", "ok",
+                              "every kind of value on the source is on the"
+                              f" target: {', '.join(sorted(ks)) or 'none'}"))
+        return res
 
     #: settings that change what the data means or whether it survives:
     #: an eviction policy decides which keys vanish under memory pressure,

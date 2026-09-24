@@ -557,13 +557,29 @@ class SQLiteEngine(NeutralCopier, Engine):
                        f"{len(common)} tables, rows {ta:,}=={tb:,}")]
 
     def _seqs(self, side):
+        """{table: last AUTOINCREMENT value}, for the tables the hop keeps.
+
+        SQLite makes `sqlite_sequence` with the first AUTOINCREMENT table,
+        so its absence is an answer: no counters. Any other failure is not.
+        Every failure used to read as `{}`, and a target file that did not
+        exist came back as "0 counters, values match".
+        """
+        import sqlite3
         try:
-            return dict(self._q(side, "select name, seq from sqlite_sequence"))
-        except Exception:
-            return {}
+            rows = self._q(side, "select name, seq from sqlite_sequence")
+        except sqlite3.OperationalError as e:
+            if "no such table: sqlite_sequence" in str(e):
+                return {}
+            raise
+        return {t: v for t, v in rows if not self.hop.excluded("main", t)}
 
     def check_autoinc(self, db):
-        a, b = self._seqs("src"), self._seqs("dst")
+        try:
+            a, b = self._seqs("src"), self._seqs("dst")
+        except Exception as e:
+            return [Result("autoinc", db, "error",
+                           f"{e} - no counter could be read, which is not"
+                           " the same as the counters matching")]
         bad = [f"{t} src={v} dst={b.get(t)}" for t, v in sorted(a.items())
                if b.get(t) != v]
         if bad:
@@ -795,19 +811,27 @@ class SQLiteEngine(NeutralCopier, Engine):
         return clause + (("; " + "; ".join(notes)) if notes else "")
 
     def repair_plan(self, db, kind):
+        def q(name):
+            return str(name).replace("'", "''")
         actions = []
         if kind in ("rows", "all"):
             actions += self._rows_plan(db, "from the source file to the"
                                            " target file")
         if kind in ("sequences", "all"):
             a, b = self._seqs("src"), self._seqs("dst")
-            stmts = [f"update sqlite_sequence set seq = {v}"
-                     f" where name = '{t}';"
-                     f"  -- dst now {b.get(t, 'MISSING')}"
+            # a target table that has never been written to has no row in
+            # sqlite_sequence, and an UPDATE of a row that is not there
+            # changes nothing and reports success
+            stmts = [(f"update sqlite_sequence set seq = {v}"
+                      f" where name = '{q(t)}';  -- dst now {b[t]}")
+                     if t in b else
+                     (f"insert into sqlite_sequence (name, seq)"
+                      f" values ('{q(t)}', {v});  -- dst had none")
                      for t, v in sorted(a.items()) if b.get(t) != v]
             undo = [f"update sqlite_sequence set seq = {b[t]}"
-                    f" where name = '{t}';"
-                    for t in sorted(a) if t in b and b.get(t) != a[t]]
+                    f" where name = '{q(t)}';" if t in b else
+                    f"delete from sqlite_sequence where name = '{q(t)}';"
+                    for t in sorted(a) if b.get(t) != a[t]]
             same = sum(1 for t, v in a.items() if b.get(t) == v)
             if stmts:
                 actions.append(RepairAction(

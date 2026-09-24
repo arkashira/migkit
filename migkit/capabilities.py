@@ -69,7 +69,6 @@ GAPS = {
     },
     "redis": {
         "confirm": (NOT_YET, "1"),
-        "schema": (NOT_YET, "0e"),
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
         "bulk-move": (NOT_YET, "0e"),
         "table-copy": (NOT_YET, "0e"),

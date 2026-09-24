@@ -391,3 +391,53 @@ def test_setup_and_replication_plans_answer(pg_pair, servers, tmp_path):
         if not {"src", "dst", "status"} <= set(plan):
             broken.append(f"{name}.replicate_sql answered {sorted(plan)}")
     assert not broken, broken
+
+
+def _unreachable(name, engine, tmp_path):
+    """The same engine, its target swapped for one nothing answers on."""
+    import dataclasses
+    hop = engine.hop
+    dead = Endpoint(host="127.0.0.1", port=1, user="u", password="p",
+                    options=dict(getattr(hop.target, "options", {}) or {}))
+    if name in ("sqlite",):
+        dead = Endpoint(host=str(tmp_path / "nowhere" / "gone.db"), port=0,
+                        user="", password="")
+    if name == "hetero":
+        dead = Endpoint(host=str(tmp_path / "nowhere" / "gone.db"), port=0,
+                        user="", password="")
+    if name == "generic":
+        dead = Endpoint(host="x", port=0, user="", password="", options={
+            "url": "postgresql://postgres:test@127.0.0.1:1/postgres"})
+    hop2 = dataclasses.replace(hop, target=dead)
+    hop2.report_dir = hop.report_dir
+    return type(engine)(hop2)
+
+
+def test_no_check_passes_a_target_it_cannot_reach(pg_pair, servers, tmp_path):
+    """The worst answer a check can give is `ok` about a target it never
+    read. Kafka's topic-settings comparison did exactly the quieter version
+    of that - left itself out when its reader failed - so every check of
+    every engine is run here against a target that answers nothing, and
+    none of them may say ok."""
+    engines = _engines(pg_pair, tmp_path)
+    passed = []
+    ran = 0
+    for name, engine in sorted(engines.items()):
+        dead = _unreachable(name, engine, tmp_path)
+        db = _db_of(name)
+        for check in ALL_CHECKS:
+            method = getattr(type(dead), f"check_{check}", None)
+            if method is None or method is getattr(Engine, f"check_{check}"):
+                continue
+            ran += 1
+            try:
+                got = getattr(dead, f"check_{check}")(db)
+            except (Exception, SystemExit):
+                continue          # refusing is an answer; passing is not
+            # a fact about the source alone (its keys, its types) is not
+            # a claim about the target, and may well be true
+            passed += [f"{name}.check_{check}: {r.scope} {r.detail[:90]}"
+                       for r in got or [] if r.status == "ok"
+                       and not r.scope.endswith("(source)")]
+    assert ran >= 15, f"only {ran} checks were exercised at all"
+    assert not passed, passed

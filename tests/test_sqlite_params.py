@@ -47,3 +47,25 @@ def test_the_same_settings_pass(tmp_path):
 def test_a_file_that_is_not_there_is_not_a_match(tmp_path):
     got = _engine(tmp_path, 7, 7, dst_exists=False).check_params("main")
     assert got and all(r.status != "ok" for r in got), _said(got)
+
+
+def test_a_plain_check_compares_the_settings_without_being_asked(
+        tmp_path, monkeypatch):
+    """They were compared only under `--only params`, so a check run the
+    ordinary way never looked at them."""
+    from click.testing import CliRunner
+
+    import migkit.config as cfg
+    from migkit import cli
+    _engine(tmp_path, 7, 3)
+    conf = tmp_path / "hops.yaml"
+    conf.write_text(
+        "hops:\n  lite:\n    engine: sqlite\n"
+        f"    source: {{host: {tmp_path / 'a.db'}, user: x, password: x}}\n"
+        f"    target: {{host: {tmp_path / 'b.db'}, user: x, password: x}}\n"
+        "    databases: [main]\n")
+    monkeypatch.setattr(cfg, "CONF", str(conf))
+    monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
+    got = CliRunner().invoke(cli.main, ["check", "lite"])
+    said = " ".join(got.output.split())
+    assert "user_version" in said, said
