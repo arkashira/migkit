@@ -1962,6 +1962,76 @@ Done so far (problems file E7, `test_full_cdc_misses_nothing.py`):
   MongoDB resume point expiring. It needs about a gigabyte of oplog to
   measure, and a token from a rebuilt replica set was accepted without a
   word.
+* **migkit killed mid-load (2026-09-25).** This was measured with real
+  moves, and the programs migkit started outlived it.
+  * *MySQL, 1,500,000 rows.* The load went on without migkit: 375,000
+    rows when migkit died, all of them soon after. A move started again
+    at once emptied the tables under the running load, then stopped on
+    `Duplicate entry '425000'`. It named neither the cause nor the
+    program.
+  * *PostgreSQL, 3,000,000 rows.* The copy program finished the table
+    after migkit was gone. The target was left with every row, no
+    primary key and no index, because the step after the copy never ran.
+
+  The fix has two parts. First, `kill` (SIGTERM) now stops the programs
+  the move started, the way ctrl-c does. Measured: the load stopped with
+  migkit, the dropped index came back, and the next move was `same`.
+
+  Second, `kill -9` and the out-of-memory killer cannot be answered by
+  anything, so the programs a move runs are listed while they run
+  (`running-programs.json`). The next move finds one still running,
+  names the process, and stops before it writes anything. Measured: the
+  second move refused while the orphaned load ran; the move after it
+  ended went through, and the verdict was `same`. A process number
+  reused by another program is not taken for the move's.
+
+  The tests are in `tests/test_a_stopped_move_leaves_nothing_writing.py`.
+
+  Seen on the way, and fixed: the deep checks said `every table has a pk
+  or unique index` and `3 indexes, all valid` beside a schema check
+  saying the target had lost all three. The first reads only the source
+  and now says so. The second now counts each side.
+
+  The second move after the PostgreSQL case put the keys back, and in
+  the right order: it emptied the tables, loaded them, and then added
+  the keys of the tables the killed run had created
+  (`created-tables.json`).
+* **The connection lost under a running tail (2026-09-25).** Measured
+  with the target paused for 30 seconds: the tail stopped on `timeout
+  expired` and did not come back. A tail is meant to run for days, and a
+  brief network drop ended it.
+
+  Now the tail re-reads from its last saved position once the server
+  answers. It waits 2 seconds, then doubles the wait up to a minute, and
+  logs each retry. Three cases were measured:
+  * the target paused for 30 seconds
+  * the target's network cut for 30 seconds (connection refused, retried
+    four times)
+  * the source paused for 30 seconds
+
+  Each time the tail kept running and every row arrived once the server
+  was back. An error that is not about the connection still stops the
+  tail (a table dropped on the target, in
+  `test_alerts_and_notifications.py`). The test is
+  `tests/test_the_tail_rides_out_a_lost_connection.py`.
+* **The target's disk filling (2026-09-25).** Measured by moving about
+  150 MB of PostgreSQL into a target with a 150 MB disk. The move stopped,
+  as it should. But its message was the last 500 characters of the copy
+  program's log, mostly lines like `Sub-process exited with code 12`. The
+  database's own lines were cut off above them: `could not extend file
+  ...: No space left on device`, with its SQLSTATE and its hint.
+
+  The target then stopped altogether, on `PANIC: could not write to file
+  "pg_wal/..."`. The next move's log again ended in the program's own
+  lines, above a refused connection.
+
+  A failed program is now explained in the database's words. The side
+  and the SQLSTATE come first, and the common ones are spelled out: `the
+  target ran out of disk space: the target said: could not extend file
+  ... (SQLSTATE 53100); hint: Check free disk space.; context: COPY big,
+  line 175845`. A server that cannot be reached is named by its address.
+  The tests use the logs as the program wrote them
+  (`tests/test_the_database_words_come_through.py`).
 
 Every case ends one of two ways: the run resumes from the last committed
 point, or it stops and says in migkit's words what happened and what to

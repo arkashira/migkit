@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-from ..util import tool_env
+from ..util import is_transient, tool_env
 from .base import Engine, RepairAction, Result
 
 
@@ -1886,6 +1886,8 @@ class HeteroEngine(Engine):
         # has not read, asked once a minute
         caught_up = _time.time()
         room, room_at, room_said = None, 0.0, False
+        # connection failures in a row, for the wait before the next try
+        lost = 0
         targets = self._tail_targets(db)
         # the source's shape the tail last applied under, saved beside its
         # position, so a DDL made while it was stopped is seen too
@@ -1928,54 +1930,76 @@ class HeteroEngine(Engine):
                             log("could not read how long the source keeps"
                                 f" its log for the tail: {type(e).__name__}")
                             room_said = True
-                asked = _time.time()
-                changes, token = self.src_engine.neutral_changes(
-                    "src", db, token, limit=1000)
-                if len(changes) < 1000:
-                    caught_up = asked
-                # an online schema change's working tables are not on the
-                # target and are not the application's data
-                changes = [c for c in changes
-                           if not drift.transient(c["table"])]
-                if changes and known is not None:
-                    # before the batch is applied: rows on both sides of a
-                    # DDL may be in it, and its position is not saved yet
-                    known = self._shape_gate(db, token_path, saved_token)
-                if changes:
-                    changes = self._in_scope(db, changes)
-                if changes:
-                    changes = [dict(self._mapped_change(db, c),
-                                    table=self._tail_target(targets,
-                                                            c["table"]))
-                               for c in changes]
-                    changes, flattened = self._flatten_changes(changes)
-                    if flattened:
-                        log(f"{flattened} values were not there on the"
-                            f" source and landed as NULL - {self.dst_name}"
-                            " cannot store the difference")
-                    if go:
-                        self.dst_engine.neutral_apply("dst", db, changes)
-                    seen += len(changes)
-                    if go:
-                        token_path.parent.mkdir(parents=True, exist_ok=True)
-                        token_path.write_text(_json.dumps({"token": token}))
-                        saved_token = token
-                    log(f"{seen} changes"
-                        + ("" if go else " seen (nothing applied)"))
+                try:
+                    asked = _time.time()
+                    changes, token = self.src_engine.neutral_changes(
+                        "src", db, token, limit=1000)
+                    if len(changes) < 1000:
+                        caught_up = asked
+                    # an online schema change's working tables are not on the
+                    # target and are not the application's data
+                    changes = [c for c in changes
+                               if not drift.transient(c["table"])]
+                    if changes and known is not None:
+                        # before the batch is applied: rows on both sides of a
+                        # DDL may be in it, and its position is not saved yet
+                        known = self._shape_gate(db, token_path, saved_token)
+                    if changes:
+                        changes = self._in_scope(db, changes)
+                    if changes:
+                        changes = [dict(self._mapped_change(db, c),
+                                        table=self._tail_target(targets,
+                                                                c["table"]))
+                                   for c in changes]
+                        changes, flattened = self._flatten_changes(changes)
+                        if flattened:
+                            log(f"{flattened} values were not there on the"
+                                f" source and landed as NULL - {self.dst_name}"
+                                " cannot store the difference")
+                        if go:
+                            self.dst_engine.neutral_apply("dst", db, changes)
+                        seen += len(changes)
+                        if go:
+                            token_path.parent.mkdir(parents=True, exist_ok=True)
+                            token_path.write_text(_json.dumps({"token": token}))
+                            saved_token = token
+                        log(f"{seen} changes"
+                            + ("" if go else " seen (nothing applied)"))
+                        if go:
+                            tailctl.beat(token_path.parent, caught_up, seen,
+                                         room)
+                    else:
+                        if go and token != saved_token:
+                            # the log moved on with nothing to apply: the new
+                            # position is how far the target is, which is what
+                            # a fence reads
+                            token_path.write_text(_json.dumps({"token": token}))
+                            saved_token = token
+                        if go:
+                            tailctl.beat(token_path.parent, caught_up, seen,
+                                         room)
+                        _time.sleep(1)
+                except Exception as e:  # noqa: BLE001 - classified below
+                    if not is_transient(e):
+                        raise
+                    # a network blip or a server restarting: measured, the
+                    # target paused for 30 seconds ended a running tail on
+                    # `timeout expired` for good. Nothing after the saved
+                    # position was kept, so it is read again from there -
+                    # which the appliers are idempotent for - once the
+                    # server answers
+                    token = saved_token
+                    lost += 1
+                    wait = min(60, 2 ** min(lost, 6))
+                    said = (str(e).strip().splitlines() or [""])[0][:100]
+                    log(f"lost a connection ({said}); trying again in"
+                        f" {wait}s from the last saved position")
                     if go:
                         tailctl.beat(token_path.parent, caught_up, seen,
                                      room)
-                else:
-                    if go and token != saved_token:
-                        # the log moved on with nothing to apply: the new
-                        # position is how far the target is, which is what
-                        # a fence reads
-                        token_path.write_text(_json.dumps({"token": token}))
-                        saved_token = token
-                    if go:
-                        tailctl.beat(token_path.parent, caught_up, seen,
-                                     room)
-                    _time.sleep(1)
+                    _time.sleep(wait)
+                    continue
+                lost = 0
         except KeyboardInterrupt:
             log(f"stopped after {seen} changes; rerun to resume")
         finally:

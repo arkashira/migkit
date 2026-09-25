@@ -2873,7 +2873,7 @@ class PostgresEngine(Engine):
         yet as much as it is a failed rebuild afterwards. On the source it
         reads as an index nobody uses; on the target it is the post-load
         `CREATE INDEX CONCURRENTLY` that died and said so once."""
-        broken, partial, total = [], [], 0
+        broken, partial, total = [], [], {"source": 0, "target": 0}
         for side, name in (("src", db), ("dst", self._d("dst", db))):
             label = "source" if side == "src" else "target"
             try:
@@ -2888,7 +2888,7 @@ class PostgresEngine(Engine):
                     continue
                 table, index, relkind, valid, ready = parts
                 if valid == "1":
-                    total += 1
+                    total[label] += 1
                 elif relkind == "I":
                     partial.append((label, table, index))
                 else:
@@ -3289,7 +3289,8 @@ class PostgresEngine(Engine):
                                   " replica identity full, before migrating"))
         else:
             res.append(Result("deep", f"{db} keys", "ok",
-                              "every table has a pk or unique index"))
+                              "every table on the source has a pk or unique"
+                              " index"))
 
         res.append(self._planner_stats(db))
         cross = self._crosscheck(db)

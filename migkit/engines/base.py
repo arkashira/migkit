@@ -1331,6 +1331,7 @@ class Engine:
           while `EXPLAIN` on the indexed column still chose a seq scan.
           Every write pays for an index no read can use.
 
+        `total` is the valid ones, {"source": n, "target": n}.
         `broken` is [(side, table, index, maintained)]. `partial` is the
         separate case that is **not** a fault: an index on a partitioned
         parent is invalid by design until every partition's index has been
@@ -1362,11 +1363,16 @@ class Engine:
                   " missing partition index if it stays this way", "",
                 "ATTACH the index on every partition, or rebuild the parent"
                 " index so it builds them for you")
-        if not total:
+        if not sum(total.values()):
             return Result("deep", f"{db} indexes", "skip",
                           "no indexes on either side to check")
+        # per side: "3 indexes, all valid" read as a clean bill for a target
+        # a killed load had left with none - measured, the schema check
+        # said the three were missing while this said OK beside it
         return Result("deep", f"{db} indexes", "ok",
-                      f"{total} indexes, all valid and usable by the planner")
+                      f"{total['source']} on the source and"
+                      f" {total['target']} on the target, every one valid"
+                      " and usable by the planner")
 
     def check_params(self, db):
         return [Result("params", db, "skip",

@@ -73,7 +73,12 @@ def mysql_server():
                     "mysql:8"], check=True, capture_output=True)
     assert _wait(MY_PORT)
     for _ in range(90):
-        if my_sql("select 1").returncode == 0:
+        # over TCP: the image's first server answers on its socket only,
+        # then stops for the real one - a `select 1` through the socket
+        # passed in that window and the table made next was never made
+        if subprocess.run(["docker", "exec", MY, "mysql", "-uroot", "-ptest",
+                           "-h127.0.0.1", "--protocol=tcp", "-e",
+                           "select 1"], capture_output=True).returncode == 0:
             break
         time.sleep(2)
     else:
@@ -242,12 +247,14 @@ def test_the_canonical_key_is_the_same_on_two_different_engines(pg_pair,
 def test_mysql_answers_for_exactly_the_keys_it_was_given(mysql_server,
                                                          tmp_path):
     from migkit.engines.mysql import MySQLEngine
-    my_sql("create database if not exists bk")
-    my_sql("drop table if exists t;"
-           " create table t (id bigint primary key, label varchar(64),"
-           " v varchar(64));", db="bk")
-    my_sql(f"insert into t values (1, '{AWKWARD}', 'one'),"
-           " (2, 'plain', null), (3, 'third', 'three');", db="bk")
+    for sql, db in (("create database if not exists bk", None),
+                    ("drop table if exists t;"
+                     " create table t (id bigint primary key,"
+                     " label varchar(64), v varchar(64));", "bk"),
+                    (f"insert into t values (1, '{AWKWARD}', 'one'),"
+                     " (2, 'plain', null), (3, 'third', 'three');", "bk")):
+        got = my_sql(sql, db=db)
+        assert got.returncode == 0, got.stderr
     ep = Endpoint(host="127.0.0.1", port=MY_PORT, user="root",
                   password="test")
     eng = MySQLEngine(Hop(name="b", engine="mysql", source=ep, target=ep,

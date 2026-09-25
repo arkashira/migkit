@@ -216,7 +216,8 @@ def test_a_healthy_pair_counts_what_it_checked(pg_pair, tmp_path):
         assert got.returncode == 0, got.stderr
     res = _invalid(_engine(pg_pair, tmp_path))
     assert res.status == "ok", res.detail
-    assert "4 indexes" in res.detail, res.detail   # pk + clean_v, both sides
+    # pk + clean_v, on each side
+    assert "2 on the source and 2 on the target" in res.detail, res.detail
 
 
 def test_the_full_deep_report_carries_it(pg_pair, tmp_path):
@@ -238,31 +239,39 @@ def test_the_verdict_needs_no_server(tmp_path):
                               password="p"), databases=["x"])
     hop.report_dir = lambda db=None: tmp_path
     eng = PostgresEngine(hop)
+    NINE = {"source": 9, "target": 9}
 
     dead = eng._invalid_index_result(
-        "x", [("target", "public.t", "t_uniq", False)], [], 9, "hint")
+        "x", [("target", "public.t", "t_uniq", False)], [], NINE, "hint")
     assert dead.status == "diff" and "only the name is taken" in dead.detail
 
     costly = eng._invalid_index_result(
-        "x", [("target", "public.t", "t_uniq", True)], [], 9, "hint")
+        "x", [("target", "public.t", "t_uniq", True)], [], NINE, "hint")
     assert costly.status == "diff"
     assert "maintained on every write" in costly.detail
 
     # a fault and a partitioned parent together: the fault is the verdict
     mixed = eng._invalid_index_result(
         "x", [("source", "public.t", "t_uniq", True)],
-        [("target", "public.p", "p_at", )], 9, "hint")
+        [("target", "public.p", "p_at", )], NINE, "hint")
     assert mixed.status == "diff" and "p_at" not in mixed.detail, mixed.detail
 
     waiting = eng._invalid_index_result(
-        "x", [], [("target", "public.p", "p_at")], 9, "hint")
+        "x", [], [("target", "public.p", "p_at")], NINE, "hint")
     assert waiting.status == "warn" and "public.p.p_at" in waiting.detail
 
-    fine = eng._invalid_index_result("x", [], [], 9, "hint")
-    assert fine.status == "ok" and "9 indexes" in fine.detail
+    fine = eng._invalid_index_result("x", [], [], NINE, "hint")
+    assert fine.status == "ok", fine.detail
+    assert "9 on the source and 9 on the target" in fine.detail, fine.detail
+    # a target a killed load left with none: counted by side, so the OK
+    # does not read as a clean bill for it
+    bare = eng._invalid_index_result("x", [], [], {"source": 3,
+                                                   "target": 0}, "hint")
+    assert "3 on the source and 0 on the target" in bare.detail, bare.detail
 
     # nothing to look at is not a clean bill of health
-    none = eng._invalid_index_result("x", [], [], 0, "hint")
+    none = eng._invalid_index_result("x", [], [], {"source": 0,
+                                                   "target": 0}, "hint")
     assert none.status == "skip", none.detail
 
 

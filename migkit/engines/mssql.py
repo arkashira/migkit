@@ -275,7 +275,8 @@ class MSSQLEngine(Engine):
                               " migrating"))
         else:
             res.append(Result("deep", f"{db} keys", "ok",
-                              "every table has a pk or unique index"))
+                              "every table on the source has a pk or unique"
+                              " index"))
         # movers load with constraints/triggers disabled and often forget
         # to re-enable or re-validate: is_disabled and is_not_trusted are
         # the sql server analog of postgres NOT VALID

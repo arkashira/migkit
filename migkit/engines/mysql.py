@@ -2386,7 +2386,8 @@ class MySQLEngine(Engine):
                               " migrating"))
         else:
             res.append(Result("deep", f"{db} keys", "ok",
-                              "every table has a pk or unique index"))
+                              "every table on the source has a pk or unique"
+                              " index"))
 
         res.append(self._fk_orphans(db))
 

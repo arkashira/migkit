@@ -202,3 +202,61 @@ def without_programs(text, names):
         text = re.sub(rf"(?i)(?<![\w/-]){re.escape(name)}(?![\w-])",
                       "the copy", text)
     return text.strip()
+
+
+#: A server's own error line inside a program's log: PostgreSQL's
+#: `ERROR:  <message>` with its `DETAIL`, `HINT` and `CONTEXT`, as the
+#: copy programs pass them on - with the side (`[TARGET 114]`) and the
+#: SQLSTATE (`[53100]`) where the program adds them. A program's own lines
+#: (`ERROR  pgsql.c:3317 ...`, no colon) are not the server's words.
+_SERVER_SAID = re.compile(
+    r"(?:\[(?P<side>SOURCE|TARGET)\b[^\]]*\]\s*)?(?:\[(?P<state>[0-9A-Z]{5})\]"
+    r"\s*)?\b(?P<level>ERROR|FATAL|PANIC|DETAIL|HINT|CONTEXT):\s+(?P<msg>.+)$",
+    re.M)
+
+#: libpq's words for a server it could not reach
+_UNREACHABLE = re.compile(r'connection to server at "(?P<host>[^"]+)",'
+                          r" port (?P<port>\d+) failed: (?P<why>.+)$", re.M)
+
+#: SQLSTATEs whose meaning an operator should not have to look up
+_STATES = {"53100": "ran out of disk space",
+           "53200": "ran out of memory",
+           "53300": "has no connection slots left"}
+
+
+def database_words(text):
+    """What the database itself said, out of a program's log, or ''.
+
+    A failed copy's log ends in the program's own bookkeeping. Measured, a
+    target whose disk filled: the last 500 characters were four lines of
+    `Sub-process exited with code 12` and the like, and the line that said
+    `could not extend file ...: No space left on device`, with its SQLSTATE
+    and the database's own hint, was cut off above them."""
+    found = list(_SERVER_SAID.finditer(text or ""))
+    first = next((m for m in found
+                  if m.group("level") in ("ERROR", "FATAL", "PANIC")), None)
+    if first is None:
+        reach = _UNREACHABLE.search(text or "")
+        if reach:
+            # measured: a target whose disk filled stopped altogether (a
+            # PANIC on the log it could not write), and the next copy's
+            # log ended in its own bookkeeping, not in this line
+            return (f"the database at {reach.group('host')}:"
+                    f"{reach.group('port')} could not be reached:"
+                    f" {reach.group('why').strip()}")
+        if "no space left on device" in (text or "").lower():
+            return ("a disk ran out of space - the database's, or this"
+                    " machine's where the local copy is written")
+        return ""
+    side = {"TARGET": "the target", "SOURCE": "the source"}.get(
+        first.group("side") or "", "the database")
+    state = first.group("state") or ""
+    said = first.group("msg").strip()
+    if state:
+        said += f" (SQLSTATE {state})"
+    extra = [f"{m.group('level').lower()}: {m.group('msg').strip()}"
+             for m in found[found.index(first) + 1:]
+             if m.group("level") in ("DETAIL", "HINT", "CONTEXT")][:3]
+    lead = f"{side} {_STATES[state]}: " if state in _STATES else ""
+    return (lead + f"{side} said: {said}"
+            + ("; " + "; ".join(extra) if extra else ""))

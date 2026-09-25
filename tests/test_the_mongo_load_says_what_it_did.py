@@ -138,6 +138,10 @@ def test_a_load_that_reports_failures_is_not_called_copied(monkeypatch,
         def wait(self):
             return 0
 
+        # finished, as a process that has exited says
+        def poll(self):
+            return self.returncode
+
         def communicate(self):
             return b"", b""
 

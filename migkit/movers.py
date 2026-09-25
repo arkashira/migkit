@@ -13,7 +13,10 @@ only in the generated compose file. See NOTICE for attribution.
 import functools
 import json
 import re
+import socket
 import subprocess
+import threading
+import time
 from urllib.parse import quote
 
 from .util import run, tool_env, which
@@ -225,6 +228,98 @@ _SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
 _DEBUG = None
 
 
+#: the file the programs a bulk path is running are listed in while they
+#: run (`_spawned`); set by `run_via` for the database it moves
+_RUNNING = None
+_RUNNING_LOCK = threading.Lock()
+LOADERS = ("pg_restore", "myloader", "mongorestore")
+COPIERS = ("pgcopydb", "pgloader")
+
+
+def _program_role(program):
+    name = str(program).rsplit("/", 1)[-1]
+    return ("load program" if name in LOADERS
+            else "copy program" if name in COPIERS else "dump program")
+
+
+class _spawned:
+    """Lists a program in the run's file for as long as it runs, and
+    stops it if the run is stopped before it finishes.
+
+    Measured, MySQL: migkit killed while the load ran, and the load went
+    on without it - 375,000 rows when migkit died, 1,500,000 by the time a
+    person could look. A move started again at once emptied the tables
+    under it and stopped on `Duplicate entry`, naming neither. A signal
+    that migkit can handle now stops what it started (`kill` sends one);
+    one it cannot (`kill -9`, the out-of-memory killer) leaves the listing
+    behind, and the next run finds the program still running and waits
+    for a person rather than writing beside it."""
+
+    def __init__(self, proc, program):
+        self.proc, self.program = proc, program
+
+    def __enter__(self):
+        if _RUNNING is not None:
+            with _RUNNING_LOCK:
+                got = _read_running(_RUNNING)
+                got[str(self.proc.pid)] = {
+                    "host": socket.gethostname(),
+                    "program": str(self.program).rsplit("/", 1)[-1],
+                    "since": time.time()}
+                _RUNNING.write_text(json.dumps(got))
+        return self.proc
+
+    def __exit__(self, kind, exc, tb):
+        if kind is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        if _RUNNING is not None:
+            with _RUNNING_LOCK:
+                got = _read_running(_RUNNING)
+                got.pop(str(self.proc.pid), None)
+                if got:
+                    _RUNNING.write_text(json.dumps(got))
+                else:
+                    _RUNNING.unlink(missing_ok=True)
+        return False
+
+
+def _read_running(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _still_running(path):
+    """[(pid, program, since)] a run that is gone listed and that still
+    run. A listing whose process is gone, or is now another program under
+    the same number, is dropped."""
+    from . import tailctl
+    alive, got = [], _read_running(path)
+    for pid, rec in list(got.items()):
+        if rec.get("host") != socket.gethostname():
+            # another machine's process cannot be asked about; it counts
+            alive.append((pid, rec.get("program"), rec.get("since")))
+            continue
+        if tailctl.process_alive(rec.get("host"), pid):
+            p = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                               capture_output=True, text=True)
+            if p.stdout.strip().rsplit("/", 1)[-1] == rec.get("program"):
+                alive.append((pid, rec.get("program"), rec.get("since")))
+                continue
+        got.pop(pid)
+    if got:
+        path.write_text(json.dumps(got))
+    else:
+        path.unlink(missing_ok=True)
+    return alive
+
+
 def _debug(cmd, env=None):
     """Write a command line to the run's debug log, secrets removed."""
     if _DEBUG is not None:
@@ -245,32 +340,40 @@ def _sh(cmd, env=None, log=None, progress=None):
     from . import wording
     _debug(cmd, env)
     if progress is None:
-        p = subprocess.run(cmd, env=tool_env(env), text=True,
-                           capture_output=True)
-        out, err = p.stdout, p.stderr
+        with _spawned(subprocess.Popen(cmd, env=tool_env(env), text=True,
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE),
+                      cmd[0]) as p:
+            out, err = p.communicate()
     else:
         # read what the program says as it says it, and turn the lines that
         # mark progress into migkit's own; the rest is kept only for the
         # error message if it fails
         # one stream, so a program that fills the other pipe cannot stall
         # while this one is being read
-        p = subprocess.Popen(cmd, env=tool_env(env), text=True,
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-        tail = []
-        for line in p.stdout:
-            said = progress(line)
-            if said and log:
-                log(said)
-            tail.append(line)
-            del tail[:-40]
-        p.wait()
+        with _spawned(subprocess.Popen(cmd, env=tool_env(env), text=True,
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT),
+                      cmd[0]) as p:
+            tail = []
+            for line in p.stdout:
+                said = progress(line)
+                if said and log:
+                    log(said)
+                tail.append(line)
+                del tail[:-40]
+            p.wait()
         out = err = "".join(tail)
     if p.returncode:
         # a reader that parsed the program's log knows its error messages;
         # the raw tail of a machine log is not something to show anyone
         explain = getattr(progress, "failure", None)
-        said = ((explain() if explain else None) or err or out)[-500:]
+        # a program whose log a reader parses is explained by the reader,
+        # which also knows which of its lines are tolerated
+        said = ((explain() if explain else None)
+                or (progress is None
+                    and wording.database_words((err or "") + (out or "")))
+                or (err or out)[-500:])
         raise RuntimeError(wording.without_programs(said, DRIVEN))
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
@@ -2064,12 +2167,18 @@ def mongodump_move(hop, db, workers, go, log):
     if log:
         log(copy)
     _debug(copy.argv)
-    dump = subprocess.Popen(dump, stdout=subprocess.PIPE,
+    dump_cmd, restore_cmd = dump, restore
+    dump = subprocess.Popen(dump_cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=tool_env())
-    restore = subprocess.Popen(restore, stdin=dump.stdout,
+    restore = subprocess.Popen(restore_cmd, stdin=dump.stdout,
                                stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, env=tool_env())
     dump.stdout.close()
+    with _spawned(dump, dump_cmd[0]), _spawned(restore, restore_cmd[0]):
+        return _mongo_piped(db, dump, restore, log, steps)
+
+
+def _mongo_piped(db, dump, restore, log, steps):
     # what the load says as it finishes each collection, in migkit's words,
     # and how many documents it could not load - which it reports and then
     # exits 0 over
@@ -3085,6 +3194,20 @@ def run_via(via, hop, db, workers, go, log):
                          " available on this machine - migkit doctor says"
                          " what is missing and migkit doctor --install"
                          " puts it in place")
+    running = hop.report_dir(db) / "running-programs.json"
+    if go:
+        left = _still_running(running)
+        if left:
+            pid, program, since = left[0]
+            raise SystemExit(
+                f"the {_program_role(program)} an earlier move of {db}"
+                f" started is still running (process {pid}, since"
+                f" {time.strftime('%H:%M:%S', time.localtime(since or 0))}):"
+                " the run that started it was stopped without stopping it,"
+                " and it is still writing. A move started beside it would"
+                " empty the tables under it. Wait for it to finish, or stop"
+                f" it (`kill {pid}`), then run the move again. Nothing has"
+                " been written by this run")
     if go:
         refused = options_missing(hop, db, via)
         if refused:
@@ -3098,11 +3221,26 @@ def run_via(via, hop, db, workers, go, log):
                 + "; ".join(", ".join(v) for v in refused.values())
                 + ". Nothing has been written. migkit doctor --install"
                 " puts a build that does in place")
-    global _DEBUG
+    global _DEBUG, _RUNNING
     from .wording import DebugLog
     _DEBUG = (DebugLog(hop.report_dir(db) / "commands.log"),
               (hop.source.password, hop.target.password))
+    _RUNNING = running if go else None
+    # stopped by a service manager or `kill`: taken as ctrl-c, so the
+    # programs this run started are stopped with it (`_spawned`)
+    import signal
+    try:
+        term = signal.signal(signal.SIGTERM, _stop_on_term) if go else None
+    except ValueError:
+        term = None
     try:
         return fns[via](hop, db, workers, go, log)
     finally:
         _DEBUG = None
+        _RUNNING = None
+        if term is not None:
+            signal.signal(signal.SIGTERM, term)
+
+
+def _stop_on_term(signum, frame):
+    raise KeyboardInterrupt
