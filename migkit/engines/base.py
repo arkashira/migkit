@@ -1894,6 +1894,26 @@ class Engine:
     # engine. Empty means there are no client programs to compare.
     CLIENT_TOOLS = ()
 
+    def _bulk_path_rows(self):
+        """assess rows for the programs the move would run: their builds,
+        and whether each takes every option the move passes it."""
+        from .. import movers
+        via = movers.chosen(self.hop.engine)
+        dbs = list(self.hop.databases or self.hop.db_map or [])
+        if via not in movers.PROGRAMS or not dbs:
+            return []
+        try:
+            got = movers.bulk_path_report(self.hop, dbs[0], via)
+        except Exception as e:  # noqa: BLE001 - said, as a row
+            # the rest of assess still has its answers to give
+            return [{"level": "warn", "scope": "bulk path",
+                     "item": "the programs the move runs",
+                     "detail": f"not asked ({type(e).__name__}):"
+                               f" {(str(e).splitlines() or [''])[-1][:90]}"
+                               " - unknown, not clean"}]
+        return [{"level": level, "scope": "bulk path", "item": item,
+                 "detail": detail} for level, item, detail in got]
+
     def _server_versions(self):
         """(source version, target version) as the engine reports them.
 
@@ -3064,6 +3084,14 @@ class Engine:
         changed.
         """
         raise self._no_canon("read a change log")
+
+    def stream_room(self, side, db, token):
+        """How much longer the source keeps what a tail at `token` has not
+        read yet, before that falls out of its log: `{"seconds": n}` or
+        `{"bytes": n}`, with `held_bytes` where the log is held for it. None
+        where the engine keeps no log or cannot say. The tail asks once a
+        minute, for `/metrics`."""
+        return None
 
     def neutral_apply(self, side, db, changes):
         """Apply change records. Returns how many were applied.

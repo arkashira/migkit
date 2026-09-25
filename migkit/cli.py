@@ -632,6 +632,8 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
         load=getattr(eng, "_last_throttle", None), coverage=coverage or None)
+    from . import notify
+    notify.verdict(hop, env, lambda m: console.print(f"[yellow]{m}[/yellow]"))
     from .report import write_report
     report_path = write_report(hop, results)
     bad = [r for r in results if r["status"] not in ("ok", "skip")]

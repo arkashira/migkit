@@ -320,6 +320,34 @@ class MongoEngine(Engine):
 
     CHANGE_POINT_READS_ONLY = True
 
+    def stream_room(self, side, db, token):
+        """Seconds of oplog older than the tail's resume point: the oplog
+        drops its oldest entries as it is written, so this is about how
+        long the point stays in it at the rate it is written now.
+
+        Measured on 7: a resume token's `_data` opens with 0x82 and the
+        cluster time, seconds then increment, both four bytes big-endian -
+        the seconds matched the `clusterTime` the server answered with.
+        None where the token is not one of those or the oplog cannot be
+        read by this user."""
+        from pymongo.errors import PyMongoError
+        try:
+            raw = bytes.fromhex(str(token or ""))
+        except ValueError:
+            return None
+        if len(raw) < 9 or raw[0] != 0x82:
+            return None
+        at = int.from_bytes(raw[1:5], "big")
+        try:
+            oldest = next(iter(
+                self._client(side).local["oplog.rs"].find({}, {"ts": 1})
+                .sort("$natural", 1).limit(1)), None)
+        except PyMongoError:
+            return None
+        if not oldest:
+            return None
+        return {"seconds": max(at - oldest["ts"].time, 0)}
+
     def change_point(self, side, db):
         """A resume token for now, read without taking any event off the
         stream: the server answers an empty first batch with the position it
@@ -1513,6 +1541,7 @@ class MongoEngine(Engine):
         inv = self._handwork()
         items += inv.rows() + inv.summary()
         items += self._mover_leftovers()
+        items += self._bulk_path_rows()
         return items
 
     def _mover_leftovers(self):

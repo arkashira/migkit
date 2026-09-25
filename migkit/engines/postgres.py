@@ -944,6 +944,31 @@ class PostgresEngine(Engine):
                 " let migkit make it, or point this hop at another name")
         return name
 
+    def stream_room(self, side, db, token):
+        """The slot's `safe_wal_size`: what the server can still write
+        before the slot loses WAL it holds, and the tail's position with
+        it. Where nothing caps that (`max_slot_wal_keep_size` -1, the
+        default) the slot keeps everything, and what fills is the source's
+        disk: `held_bytes` says how much it is holding."""
+        got = self._psql(side, self._d(side, db),
+                         "select wal_status || chr(31)"
+                         " || coalesce(safe_wal_size::text, '') || chr(31)"
+                         " || coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(),"
+                         " restart_lsn)::bigint::text, '')"
+                         " from pg_replication_slots where slot_name ="
+                         f" '{self.slot_name()}'")
+        if not got:
+            return None
+        # not stripped: Python counts the separator as white space, and a
+        # lost slot's empty fields went with it
+        status, safe, held = got.split("\x1f")
+        out = {"held_bytes": int(held)} if held else {}
+        if status == "lost":
+            out["bytes"] = 0
+        elif safe:
+            out["bytes"] = max(int(safe), 0)
+        return out or None
+
     def change_point(self, side, db):
         """The slot, made now if it is not there, and the position it holds
         from.
@@ -5043,6 +5068,7 @@ class PostgresEngine(Engine):
         hw = self._handwork(avail)
         items += hw.rows() + hw.summary()
         items += self._mover_leftovers()
+        items += self._bulk_path_rows()
         items += self._client_tool_versions(
             ("pg_dump", "pg_restore", "psql"), dv)
         # the deep checks that are about the move ahead rather than the one

@@ -1877,9 +1877,15 @@ class HeteroEngine(Engine):
         log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)")
             + (f", resuming from {str(token)[:40]}" if token else ""))
-        from .. import drift, tailctl
+        from .. import drift, notify, tailctl
         seen = 0
         saved_token = token
+        # when a read last came back short of its limit - it had reached
+        # the end of the source's log - for `/metrics` to say how far
+        # behind the tail is; and how much longer the source keeps what it
+        # has not read, asked once a minute
+        caught_up = _time.time()
+        room, room_at, room_said = None, 0.0, False
         targets = self._tail_targets(db)
         # the source's shape the tail last applied under, saved beside its
         # position, so a DDL made while it was stopped is seen too
@@ -1903,14 +1909,30 @@ class HeteroEngine(Engine):
         try:
             if running:
                 running.__enter__()
+                if running.was_stopped:
+                    notify.tail_started(self.hop, db, log)
             if window:
                 window.__enter__()
             while True:
                 # between batches, never inside one: everything read so far
                 # is applied and its position saved before it holds still
                 tailctl.hold_if_asked(token_path.parent, log)
+                if go and _time.time() - room_at >= 60:
+                    room_at = _time.time()
+                    try:
+                        room = self.src_engine.stream_room("src", db, token)
+                    except Exception as e:  # noqa: BLE001
+                        # a reading for /metrics does not stop the tail
+                        room = None
+                        if not room_said:
+                            log("could not read how long the source keeps"
+                                f" its log for the tail: {type(e).__name__}")
+                            room_said = True
+                asked = _time.time()
                 changes, token = self.src_engine.neutral_changes(
                     "src", db, token, limit=1000)
+                if len(changes) < 1000:
+                    caught_up = asked
                 # an online schema change's working tables are not on the
                 # target and are not the application's data
                 changes = [c for c in changes
@@ -1940,6 +1962,9 @@ class HeteroEngine(Engine):
                         saved_token = token
                     log(f"{seen} changes"
                         + ("" if go else " seen (nothing applied)"))
+                    if go:
+                        tailctl.beat(token_path.parent, caught_up, seen,
+                                     room)
                 else:
                     if go and token != saved_token:
                         # the log moved on with nothing to apply: the new
@@ -1947,6 +1972,9 @@ class HeteroEngine(Engine):
                         # a fence reads
                         token_path.write_text(_json.dumps({"token": token}))
                         saved_token = token
+                    if go:
+                        tailctl.beat(token_path.parent, caught_up, seen,
+                                     room)
                     _time.sleep(1)
         except KeyboardInterrupt:
             log(f"stopped after {seen} changes; rerun to resume")
@@ -1956,7 +1984,10 @@ class HeteroEngine(Engine):
                     window.__exit__(*sys.exc_info())
             finally:
                 if running:
-                    running.__exit__(None, None, None)
+                    running.__exit__(*sys.exc_info())
+                    why = tailctl.stopped(token_path.parent)
+                    if sys.exc_info()[0] is not None and why:
+                        notify.tail_stopped(self.hop, db, why, log)
                 if term is not None:
                     signal.signal(signal.SIGTERM, term)
 

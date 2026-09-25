@@ -29,3 +29,23 @@ gets the migrated data and nothing else.
 For continuous CDC, run `migkit move <hop> --mode cdc --go` and let migkit
 verify the stream. Where an engine has no native change feed, migkit stands
 up and supervises its own streaming pipeline behind the same command.
+
+## Alerts and notifications
+
+`/metrics` on the dashboard (`migkit report --serve`) carries each hop's last
+verdict and, for a running change tail, how far behind it is, whether it is
+still going round its loop, and whether it stopped on an error.
+`prometheus-alerts.yml` here has rules over those metrics; load it with
+`rule_files:` and change the thresholds to fit.
+
+To be told without Prometheus, give the hop receivers:
+
+    options:
+      notify:
+        - https://hooks.slack.com/services/...    # or Discord, a Teams workflow, any JSON URL
+        - pagerduty:<routing key>                 # one incident per hop, resolved when it clears
+
+or set `MIGKIT_NOTIFY` (addresses separated by commas) for every hop. A check
+sends when its verdict moves between same, different and error, and a tail
+sends when it stops on an error and when it runs again. What is sent names
+each finding's check and table, never the rows' values.

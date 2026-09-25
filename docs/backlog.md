@@ -1885,6 +1885,57 @@ notifications (Slack, Teams, PagerDuty, generic HTTP) for:
 
 This is the part of CloudWatch alarms that migkit can own.
 
+*Done (2026-09-25):*
+* **Tail heartbeat.** A change tail now writes `tail.beat` each time
+  round its loop. It records when the tail last read to the end of the
+  source's log and how many changes it has applied.
+* **Stop record.** A tail that stops on anything other than a person's
+  ctrl-c or a service stop writes `tail.stopped`, saying what stopped it.
+* **Tail metrics.** `/metrics` reads those files and exports:
+  * `migkit_tail_behind_seconds`
+  * `migkit_tail_heartbeat_age_seconds`
+  * `migkit_tail_running`, which is 0 when the process is gone without
+    stopping
+  * `migkit_tail_paused`
+  * `migkit_tail_changes_applied`
+  * `migkit_tail_stopped`
+* **Alert rules.** `deploy/prometheus-alerts.yml` ships rules over these
+  metrics and the check metrics. A test holds every metric a rule names
+  against what the exporter emits.
+* **Notifications.** The hop option `notify`, or `MIGKIT_NOTIFY`, sends
+  a message when:
+  * the verdict moves between `same`, `different` and `error`
+  * a tail stops on an error
+  * a stopped tail runs again
+
+  Slack, Discord, Teams workflows, PagerDuty (one incident per hop and
+  one per tail, resolved when it clears) and any JSON receiver each get
+  the shape they take. What is sent carries each finding's check, scope
+  and status, never its detail, and a webhook's address is never
+  printed.
+
+The tests are in `tests/test_alerts_and_notifications.py`. The receivers
+are local; nothing is sent to the real services.
+
+*Retention.* Each engine is now asked how much longer the source keeps
+what the tail has not read (`stream_room`). The tail asks once a minute
+and `/metrics` exports the answer:
+* **PostgreSQL:** the slot's `safe_wal_size` (0 once the slot has lost
+  its WAL), and the bytes it holds when nothing caps them. Measured:
+  32MB capped, 45,143,112 bytes of room, then `lost` after a load and a
+  checkpoint.
+* **MySQL:** seconds until the tail's binlog file may be purged. That
+  is counted from when the file stopped being written, which is the
+  time on the format event opening the next file. It is 0 once the file
+  is gone, and nothing when auto-purge is off.
+* **MongoDB:** seconds of oplog older than the resume point. The resume
+  token opens with 0x82 and the cluster time.
+
+There are alert rules for each (`MigkitRetentionShort`,
+`MigkitRetentionBytesShort`). A managed MySQL's retention is its own
+setting and is not read yet, so no number is given for it rather than a
+wrong one. The tests are in `tests/test_how_long_the_source_keeps_the_log.py`.
+
 **44. Failure caused on purpose.**
 
 This is for day one, not instead of real use: real migrations keep
@@ -1953,6 +2004,30 @@ older server rejects. So:
   says when the installed one is outside it (`_client_tool_versions`
   exists; extend it to every wrapped program)
 * a release that changes behaviour is caught in CI, not by an operator
+
+*Checked where the move runs (2026-09-25):* the same check now runs on
+the machine doing the move, against the build installed there, not only
+in CI. Neither of the following names the program.
+
+`assess` gives one row for each program the chosen bulk path runs. The
+row has three parts:
+* the installed build's version
+* whether that build is the one migkit was measured with (`MEASURED`:
+  18.6, 1.0.5, 100.16.1)
+* whether the build takes every option the move's own command lines
+  pass it
+
+A move with a build that lacks an option stops before anything is
+written, and names the options. Tested with a stand-in older build on
+the path, whose help lacked one option the move passes. `assess` failed
+that row, and the move stopped without running the program.
+
+Building this found a cache keyed on the program's name. A program
+upgraded under a long-running process (`sync --serve`) was still read
+as the old build. It is now keyed on the file and its modification time.
+
+The tests are in `tests/test_the_installed_build_takes_the_options.py`.
+The CI matrix of versions is still to do.
 
 ### P2: reach the paid tools have and migkit does not
 

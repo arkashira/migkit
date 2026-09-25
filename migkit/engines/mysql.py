@@ -690,6 +690,68 @@ class MySQLEngine(Engine):
         except (KeyError, TypeError, ValueError):
             return None
 
+    def stream_room(self, side, db, token):
+        """Seconds until the binlog file the tail is reading may be purged.
+
+        A file is purged once it has not been written for
+        `binlog_expire_logs_seconds`, and it stops being written when the
+        next one starts. Measured on 8.4: each file opens with a format
+        event carrying the time it started, and the time on the one after
+        the tail's is the time the tail's file was last written. The
+        purge runs when a file rotates, so the time given is the soonest.
+
+        None where nothing purges (`binlog_expire_logs_auto_purge` off, or
+        no expiry) and on a managed server, whose retention is its own
+        setting and not this variable."""
+        import pymysql
+        ep = self.hop.source if side == "src" else self.hop.target
+        if "rds.amazonaws.com" in (ep.host or "") or not token:
+            return None
+        try:
+            expire = int(self._q(side, "select"
+                                 " @@binlog_expire_logs_seconds")[0][0])
+        except pymysql.err.MySQLError:
+            # MariaDB before 10.6
+            expire = int(float(self._q(side, "select @@expire_logs_days"
+                                       )[0][0]) * 86400)
+        try:
+            if not int(self._q(side, "select"
+                               " @@binlog_expire_logs_auto_purge")[0][0]):
+                return None
+        except pymysql.err.MySQLError:
+            pass
+        if expire <= 0:
+            return None
+        files = [r[0] for r in self._q(side, "show binary logs")]
+        at = token.get("log_file")
+        if at not in files:
+            return {"seconds": 0}
+        if at == files[-1]:
+            return {"seconds": expire}
+        closed = self._binlog_started(side, files[files.index(at) + 1])
+        if closed is None:
+            return None
+        return {"seconds": max(int(closed + expire - time.time()), 0)}
+
+    def _binlog_started(self, side, name):
+        """The time on the format event a binlog file opens with."""
+        from pymysqlreplication import BinLogStreamReader
+        from pymysqlreplication.event import FormatDescriptionEvent
+        ep = self.hop.source if side == "src" else self.hop.target
+        stream = BinLogStreamReader(
+            connection_settings={"host": ep.host, "port": ep.port,
+                                 "user": ep.user, "passwd": ep.password},
+            server_id=int(self.hop.options.get("server_id", 4379)),
+            blocking=False, resume_stream=True, log_file=name, log_pos=4,
+            only_events=[FormatDescriptionEvent])
+        try:
+            for ev in stream:
+                if ev.timestamp and stream.log_file == name:
+                    return ev.timestamp
+        finally:
+            stream.close()
+        return None
+
     def change_point(self, side, db):
         """Where the binlog is now, as the token `neutral_changes` resumes
         from."""
@@ -3905,6 +3967,7 @@ class MySQLEngine(Engine):
         inv = self._handwork()
         items += inv.rows() + inv.summary()
         items += self._mover_leftovers()
+        items += self._bulk_path_rows()
         items += self._client_tool_versions(("mysqldump", "mysql"), dv)
         items += self._packet_items()
         items += self._collations_unknown()

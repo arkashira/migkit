@@ -248,7 +248,69 @@ def prometheus(hops):
         if summary.exists():
             lines.append(f'migkit_last_check_age_seconds{{{lbl}}}'
                          f' {int(time.time() - summary.stat().st_mtime)}')
-    return "\n".join(lines) + "\n"
+        lines += _tail_metrics(REPORTS / name, lbl)
+    return "\n".join(TAIL_HELP + lines) + "\n"
+
+
+TAIL_HELP = [
+    "# HELP migkit_tail_running A change tail is marked running here"
+    " (0: its process is gone and it did not stop)",
+    "# TYPE migkit_tail_running gauge",
+    "# HELP migkit_tail_paused The tail is holding still for a repair",
+    "# TYPE migkit_tail_paused gauge",
+    "# HELP migkit_tail_heartbeat_age_seconds Since the tail last went"
+    " round its loop",
+    "# TYPE migkit_tail_heartbeat_age_seconds gauge",
+    "# HELP migkit_tail_behind_seconds Since the tail last read to the end"
+    " of the source's log",
+    "# TYPE migkit_tail_behind_seconds gauge",
+    "# HELP migkit_tail_changes_applied Changes this tail has applied since"
+    " it started",
+    "# TYPE migkit_tail_changes_applied gauge",
+    "# HELP migkit_tail_stopped The tail stopped on an error and has not"
+    " been started again",
+    "# TYPE migkit_tail_stopped gauge",
+    "# HELP migkit_tail_retention_margin_seconds How much longer the source"
+    " keeps what the tail has not read (MySQL, MongoDB)",
+    "# TYPE migkit_tail_retention_margin_seconds gauge",
+    "# HELP migkit_tail_retention_margin_bytes What the source can still"
+    " write before the tail's slot loses WAL (PostgreSQL)",
+    "# TYPE migkit_tail_retention_margin_bytes gauge",
+    "# HELP migkit_tail_source_held_bytes Log the source holds for the tail",
+    "# TYPE migkit_tail_source_held_bytes gauge",
+]
+
+ROOM = {"seconds": "migkit_tail_retention_margin_seconds",
+        "bytes": "migkit_tail_retention_margin_bytes",
+        "held_bytes": "migkit_tail_source_held_bytes"}
+
+
+def _tail_metrics(where, lbl):
+    from . import tailctl
+    out = []
+    if not where.is_dir():
+        return out
+    for d in sorted(p for p in where.iterdir() if p.is_dir()):
+        st = tailctl.state(d)
+        if st is None:
+            continue
+        tl = f'{lbl},db="{d.name}"'
+        if st["marked"]:
+            out.append(f"migkit_tail_running{{{tl}}} {int(st['running'])}")
+            out.append(f"migkit_tail_paused{{{tl}}} {int(st['paused'])}")
+        if st["beat_age"] is not None:
+            out.append(f"migkit_tail_heartbeat_age_seconds{{{tl}}}"
+                       f" {int(st['beat_age'])}")
+            out.append(f"migkit_tail_behind_seconds{{{tl}}}"
+                       f" {int(st['behind'])}")
+            out.append(f"migkit_tail_changes_applied{{{tl}}}"
+                       f" {int(st['changes'] or 0)}")
+            for key, value in (st["room"] or {}).items():
+                if key in ROOM and value is not None:
+                    out.append(f"{ROOM[key]}{{{tl}}} {int(value)}")
+        if st["stopped"]:
+            out.append(f"migkit_tail_stopped{{{tl}}} 1")
+    return out
 
 
 def _activity(hops):

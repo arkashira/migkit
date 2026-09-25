@@ -1557,7 +1557,6 @@ def mydumper_defaults(hop, db):
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
-@functools.lru_cache(maxsize=None)
 def _long_options(program):
     """The long options this installed build of `program` really has.
 
@@ -1567,7 +1566,20 @@ def _long_options(program):
     --overwrite-tables`. Measured, the column holds 136 options for mydumper
     and 99 for myloader, and that one is in neither.
     """
-    p = subprocess.run([program, "--help"], env=tool_env(None), text=True,
+    import os
+    # asked once per build: the build on the path, and the file as it is
+    # now - a program upgraded under a long-running process is a new build
+    path = which(program) or program
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        stamp = None
+    return _options_of(path, stamp)
+
+
+@functools.lru_cache(maxsize=None)
+def _options_of(path, stamp):
+    p = subprocess.run([path, "--help"], env=tool_env(None), text=True,
                        capture_output=True)
     # the option column: the flag, then the column gap, the end of the
     # line, or its `=VALUE`. Measured, the MongoDB tools spell theirs in
@@ -2946,19 +2958,121 @@ def stream_status(name, port=8083):
     return f"{name}: connector={conn} tasks={','.join(tasks) or 'none'}"
 
 
+def _movers():
+    return {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
+            "mydumper": mydumper_move, "pgloader": pgloader_move,
+            "mongodump": mongodump_move}
+
+
+#: the programs each bulk path runs, in the order it runs them
+PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
+            "pgcopydb": ("docker",),
+            "mydumper": ("mydumper", "myloader"),
+            "pgloader": ("pgloader",),
+            "mongodump": ("mongodump", "mongorestore")}
+#: how a report names them: never by the program's own name
+ROLES = ("dump program", "load program")
+#: the builds each program was measured with here (backlog 46)
+MEASURED = {"pg_dump": "18.6", "pg_restore": "18.6",
+            "mydumper": "1.0.5", "myloader": "1.0.5",
+            "mongodump": "100.16.1", "mongorestore": "100.16.1"}
+
+
+def program_version(program):
+    """The installed build's version, as its `--version` prints it."""
+    p = subprocess.run([program, "--version"], env=tool_env(None),
+                       text=True, capture_output=True)
+    m = re.search(r"(\d+\.\d+(?:\.\d+)?)", (p.stdout or "") + (p.stderr or ""))
+    return m.group(1) if m else None
+
+
+def options_missing(hop, db, via):
+    """{program: [option]} for every long option the bulk path's own
+    command lines pass a program whose installed build does not have it.
+
+    The command lines are the dry run's, so they are the ones the move
+    would run. Each has changed underneath migkit already - a flag
+    renamed, another removed - and the program stopped at option parsing,
+    after migkit had started. `tests/test_wrapped_flags_exist.py` holds
+    them against the builds installed where the tests run; this holds
+    them against the build installed where the move runs."""
+    out = {}
+    wrapped = [p for p in PROGRAMS.get(via, ()) if p in MEASURED]
+    if not wrapped or not all(which(p) for p in wrapped):
+        return out
+    for step in _movers()[via](hop, db, 1, False, None) or ():
+        argv = getattr(step, "argv", None) or []
+        # a piped step carries two programs
+        parts, cur = [], []
+        for a in argv:
+            if a == "|":
+                parts.append(cur)
+                cur = []
+            else:
+                cur.append(a)
+        parts.append(cur)
+        for part in parts:
+            if not part:
+                continue
+            program = str(part[0]).rsplit("/", 1)[-1]
+            if program not in wrapped:
+                continue
+            flags = {str(a).split("=", 1)[0] for a in part
+                     if str(a).startswith("--")}
+            gone = sorted(flags - _long_options(program))
+            if gone:
+                out.setdefault(program, [])
+                out[program] += [f for f in gone if f not in out[program]]
+    return out
+
+
+def _role(via, program):
+    return ROLES[min(PROGRAMS[via].index(program), len(ROLES) - 1)]
+
+
+def bulk_path_report(hop, db, via):
+    """[(level, item, detail)] for the programs `via` runs: the build
+    installed, whether it is one migkit was measured with, and whether it
+    takes every option migkit passes it. No program is named."""
+    rows = []
+    try:
+        missing, refused = options_missing(hop, db, via), ""
+    except SystemExit as e:
+        # a flag the move chooses between spellings of, and this build has
+        # none of them (`tool_flag`)
+        missing, refused = {}, str(e)
+    for program in PROGRAMS.get(via, ()):
+        if program not in MEASURED or not which(program):
+            continue
+        role = _role(via, program)
+        have = program_version(program) or "unknown"
+        measured = MEASURED[program]
+        seen = ("the build migkit was measured with" if have == measured
+                else f"not the build migkit was measured with ({measured})")
+        if refused:
+            rows.append(("fail", f"the {role}, {have}",
+                         f"{seen}; {refused}"))
+        elif missing.get(program):
+            rows.append(("fail", f"the {role}, {have}",
+                         f"{seen}; it does not take"
+                         f" {', '.join(missing[program])}, which the move"
+                         " passes it, so it would stop at option parsing"
+                         " - migkit doctor --install puts a build that"
+                         " does in place"))
+        else:
+            rows.append(("pass", f"the {role}, {have}",
+                         f"{seen}; it takes every option the move passes"
+                         " it"))
+    return rows
+
+
 def run_via(via, hop, db, workers, go, log):
-    fns = {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
-           "mydumper": mydumper_move, "pgloader": pgloader_move,
-           "mongodump": mongodump_move}
+    fns = _movers()
     if via not in fns:
         # a mover nobody has taught this function about must stop here rather
         # than fall through to whatever happens to be first
         raise SystemExit(f"no bulk path named {via!r}")
-    tools = {"pgdump": ("pg_dump", "pg_restore"),
-             "pgcopydb": ("docker",),
-             "mydumper": ("mydumper", "myloader"),
-             "pgloader": ("pgloader",),
-             "mongodump": ("mongodump", "mongorestore")}[via]
+    tools = PROGRAMS[via]
     missing = [t for t in tools if not which(t)]
     if missing:
         # the names went out through the variables here, where the static
@@ -2971,6 +3085,19 @@ def run_via(via, hop, db, workers, go, log):
                          " available on this machine - migkit doctor says"
                          " what is missing and migkit doctor --install"
                          " puts it in place")
+    if go:
+        refused = options_missing(hop, db, via)
+        if refused:
+            # before anything is written: the program would stop at option
+            # parsing with the move already begun
+            raise SystemExit(
+                "the installed "
+                + " and ".join(f"{_role(via, p)} ({program_version(p)})"
+                               for p in refused)
+                + " does not take options the move passes it: "
+                + "; ".join(", ".join(v) for v in refused.values())
+                + ". Nothing has been written. migkit doctor --install"
+                " puts a build that does in place")
     global _DEBUG
     from .wording import DebugLog
     _DEBUG = (DebugLog(hop.report_dir(db) / "commands.log"),

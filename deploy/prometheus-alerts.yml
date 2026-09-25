@@ -1,0 +1,86 @@
+# Alert rules for the metrics migkit serves at /metrics
+# (`migkit report --serve`) and prints with `migkit report --metrics`.
+# Load with `rule_files:` in prometheus.yml. The thresholds are starting
+# points; change them to fit the migration.
+groups:
+  - name: migkit
+    rules:
+      - alert: MigkitHopDifferent
+        expr: migkit_hop_status == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.hop }}: the last check found a difference"
+
+      - alert: MigkitHopError
+        expr: migkit_hop_status == 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.hop }}: the last check could not finish"
+
+      - alert: MigkitCheckStale
+        expr: migkit_last_check_age_seconds > 86400
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.hop }}: not checked for a day"
+
+      - alert: MigkitTailBehind
+        expr: migkit_tail_behind_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}: the change tail has not
+            reached the end of the source's log for
+            {{ $value | humanizeDuration }}
+
+      - alert: MigkitTailStalled
+        expr: >-
+          migkit_tail_running == 1 and migkit_tail_paused == 0
+          and migkit_tail_heartbeat_age_seconds > 120
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}: the change tail has not
+            gone round its loop for {{ $value | humanizeDuration }}
+
+      - alert: MigkitTailGone
+        expr: migkit_tail_running == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}: the change tail's process
+            is gone without stopping
+
+      - alert: MigkitTailStopped
+        expr: migkit_tail_stopped == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}: the change tail stopped on
+            an error
+
+      - alert: MigkitRetentionShort
+        expr: migkit_tail_retention_margin_seconds < 3600
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}: the source may drop what
+            the change tail has not read within
+            {{ $value | humanizeDuration }}
+
+      - alert: MigkitRetentionBytesShort
+        expr: migkit_tail_retention_margin_bytes < 1073741824
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}: the tail's slot loses WAL
+            after {{ $value | humanize1024 }}B more is written
