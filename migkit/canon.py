@@ -820,6 +820,28 @@ def change(op, table, key, values=None):
             "values": dict(values or {})}
 
 
+#: classes whose values reach a writer as numbers or times, never as a
+#: mapping or a buffer, so `sql_value` has nothing to do for them
+PLAIN = frozenset({"integer", "decimal", "float", "boolean", "date",
+                   "timestamp", "time"})
+
+
+def sql_rows(classes, rows):
+    """`rows` with `sql_value` applied where a column can need it: a
+    million rows of eight columns called it eight million times, and half
+    of those were numbers and times it passes through untouched."""
+    need = [i for i, c in enumerate(classes) if c not in PLAIN]
+    if not need:
+        return rows
+    out = []
+    for r in rows:
+        r = list(r)
+        for i in need:
+            r[i] = sql_value(r[i])
+        out.append(r)
+    return out
+
+
 def sql_value(value):
     """One value on its way into a SQL driver.
 
@@ -877,6 +899,20 @@ def from_text(cls, text):
             return bytes.fromhex(raw[2:])
         return raw.encode()
     return text
+
+
+def fold_rows(classes, rows, total=0):
+    """(rows folded, running digest) over rows of values, rendered by
+    their classes and folded one row at a time as `digest_step` folds -
+    the one fold every engine that digests in this process uses, and the
+    number the SQL engines' own digests are held to."""
+    from . import rowtext
+    n = 0
+    for row in rows:
+        total = digest_step(total, rowtext.encode(
+            [render_value(c, v) for c, v in zip(classes, row)]))
+        n += 1
+    return n, total
 
 
 def digest_step(total, text):

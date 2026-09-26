@@ -85,8 +85,8 @@ def source(pg_pair):
 
 def _pair(src, dst, src_ep, dst_ep, tmp_path, **extra):
     from migkit.engines.hetero import HeteroEngine
+    extra.setdefault("options", {"source_engine": src, "target_engine": dst})
     hop = Hop(name="cs", engine="hetero",
-              options={"source_engine": src, "target_engine": dst},
               source=src_ep, target=dst_ep, databases=["cssrc"], **extra)
     hop.report_dir = lambda db=None: tmp_path
     return HeteroEngine(hop)
@@ -167,10 +167,23 @@ def test_microseconds_the_target_cannot_hold_are_a_difference(
          db="cssrc")
     pg = Endpoint(host="127.0.0.1", port=port, user="postgres",
                   password="test")
-    eng = _pair("postgres", "cassandra", pg, _cs(
-        replication="{'class': 'SimpleStrategy', 'replication_factor': 1}"),
-        tmp_path)
-    _move(eng, tmp_path, "fine.json")
+    replication = "{'class': 'SimpleStrategy', 'replication_factor': 1}"
+    eng = _pair("postgres", "cassandra", pg, _cs(replication=replication),
+                tmp_path)
+    # read back as it is written: the move stops at the batch, naming the
+    # column the target cannot hold as it was given
+    with pytest.raises(SystemExit) as e:
+        _move(eng, tmp_path, "fine.json")
+    assert str(e.value).startswith("cssrc.fine: written twice, 0 rows of a"
+                                   " batch are not on the target and 1 read"
+                                   " back different from the source - the"
+                                   " first by key 1, in at."), e.value
+    # and with the hop's read-back turned off, `check` finds it after
+    eng = _pair("postgres", "cassandra", pg, _cs(replication=replication),
+                tmp_path, options={"source_engine": "postgres",
+                                   "target_engine": "cassandra",
+                                   "verify_batches": False})
+    _move(eng, tmp_path, "fine-unchecked.json")
     got = _data(eng)
     assert got["cssrc.fine"].status == "diff", got["cssrc.fine"].__dict__
     psql(port, "drop table fine", db="cssrc")

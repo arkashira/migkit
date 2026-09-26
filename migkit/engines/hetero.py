@@ -1,12 +1,9 @@
-import csv
-import io
 import re
 import signal
-import subprocess
 import sys
 import time
 
-from ..util import is_transient, tool_env
+from ..util import is_transient
 from .base import Engine, RepairAction, Result
 
 
@@ -836,6 +833,122 @@ class HeteroEngine(Engine):
                 self.dst_engine.CANON_ENGINE, dst_types[name])))
         return src_cols, dst_cols, notes
 
+    @staticmethod
+    def _rows_differ(sc, dc, a, b):
+        """(missing, extra, changed) between rows read by key from each
+        side - {key: row} in `sc` and `dc` order - compared in the one
+        rendering both sides render to."""
+        from .. import canon
+
+        def text(cols, row):
+            return tuple(canon.render_value(c, v)
+                         for (_, c), v in zip(cols, row))
+        missing = [k for k in a if k not in b]
+        extra = [k for k in b if k not in a]
+        changed = [k for k in a if k in b
+                   and text(sc, a[k]) != text(dc, b[k])]
+        return missing, extra, changed
+
+    #: keys asked of the target at once when a batch is read back
+    READ_BACK = 5000
+
+    def _read_back_plan(self, db, src_t, dst_t, src_cols, key):
+        """What a written batch is read back and compared by: (source
+        columns, target columns, where each lies in a row as read, the
+        key in the target's names) - or None where the two sides have no
+        rendering in common for the key and a column besides it."""
+        if key is None or not self._can_compare_neutrally():
+            return None
+        sc, dc, _ = self._comparable_columns(db, self.src_engine, src_t,
+                                             self.dst_engine, dst_t)
+        names = [n for n, _ in sc]
+        read = [n for n, _ in src_cols]
+        if (not sc or not set(key) <= set(names)
+                or not set(names) <= set(read)):
+            return None
+        to_dst = dict(zip(names, [n for n, _ in dc]))
+        src_where, dst_where = self._row_scope(db, src_t)
+        return (sc, dc, [read.index(n) for n in names],
+                [to_dst[k] for k in key], dst_where, src_t, src_where)
+
+    def _batch_digest(self, db, dst_t, plan, key, rows):
+        """(the batch's digest, the target's over the batch's key range),
+        where the key is one integer column on both sides: one number back
+        from each server instead of every row. The source's is asked of the
+        source over the same range, beside the target's - folding the batch
+        here took longer than reading it (measured, 7.8 of 32.7 seconds a
+        million rows). A source changed since the batch was read answers a
+        different number, and the batch is then compared row by row with
+        what was read, which is what decides. None where it does not apply
+        - a range of text holds different rows under different collations."""
+        import concurrent.futures as cf
+
+        from .. import canon
+        sc, dc, at, dst_key = plan[:4]
+        dst_where = plan[4] if len(plan) > 4 else None
+        src_t, src_where = (plan[5], plan[6]) if len(plan) > 6 else (None,
+                                                                      None)
+        if (len(key) != 1 or dict(sc).get(key[0]) != "integer"
+                or dict(dc).get(dst_key[0]) != "integer"
+                or not self.dst_engine.SQL_DIALECT):
+            return None
+        where = [n for n, _ in sc].index(key[0])
+        ks = [r[at[where]] for r in rows if r[at[where]] is not None]
+        if not ks:
+            return None
+        lo, hi = int(min(ks)), int(max(ks))
+
+        def rng(eng, name, extra):
+            q = eng._quote_ident(name)
+            r = f"{q} >= {lo} and {q} <= {hi}"
+            return f"({extra}) and {r}" if extra else r
+
+        def theirs():
+            got = self.dst_engine.neutral_digest(
+                "dst", db, dst_t, dc, where=rng(self.dst_engine, dst_key[0],
+                                                dst_where))
+            return int(got[0]), str(got[1])
+
+        def ours():
+            if src_t and self.src_engine.SQL_DIALECT:
+                got = self.src_engine.neutral_digest(
+                    "src", db, src_t, sc, where=rng(self.src_engine, key[0],
+                                                    src_where))
+                return int(got[0]), str(got[1])
+            n, total = canon.fold_rows([c for _, c in sc],
+                                       ([r[i] for i in at] for r in rows))
+            return n, str(total)
+        with cf.ThreadPoolExecutor(2) as pool:
+            a, b = pool.submit(ours), pool.submit(theirs)
+            return a.result(), b.result()
+
+    def _verify_batch(self, db, dst_t, plan, key, rows):
+        """Keys of `rows` - as read from the source - whose row on the
+        target is not there or does not render the same: (missing,
+        changed, the columns the first changed row differs in)."""
+        from .. import canon
+        sc, dc, at, dst_key = plan[:4]
+        mine = [[r[i] for i in at] for r in rows]
+        names = [n for n, _ in sc]
+        where = [names.index(k) for k in key]
+        missing, changed, cols = [], [], []
+        for i in range(0, len(mine), self.READ_BACK):
+            part = mine[i:i + self.READ_BACK]
+            a = self._by_key_map(sc, key, part)
+            b = self.dst_engine.neutral_rows_by_key(
+                "dst", db, dst_t, dc, dst_key,
+                [tuple(r[j] for j in where) for r in part])
+            gone, _, differ = self._rows_differ(sc, dc, a, b)
+            missing += gone
+            changed += differ
+            if differ and not cols:
+                k = differ[0]
+                cols = [n for (n, c), x, (_, d), y in
+                        zip(sc, a[k], dc, b[k])
+                        if canon.render_value(c, x)
+                        != canon.render_value(d, y)]
+        return missing, changed, cols
+
     def _neutral_move(self, db, sch, tbl, chunk, ck, log):
         """Read from one engine, write to the other, for any pair.
 
@@ -844,6 +957,7 @@ class HeteroEngine(Engine):
         the log says so - restarting that one starts it over, which is the
         honest consequence of there being nothing to resume from.
         """
+        from .. import canon
         src_t = f"{sch}.{tbl}" if sch else tbl
         leaf = self._leaf(src_t)
         pairs, _, _, _ = self.match_tables(
@@ -866,8 +980,8 @@ class HeteroEngine(Engine):
             log(f"{leaf}: {n}")
         key = self.move_key(db, "", leaf)
         st = ck.setdefault(key, {})
-        if st.get("done"):
-            log(f"{key}: done earlier, skip")
+        if st.get("done") and self._still_the_same(db, key, src_t, dst_t,
+                                                    st, log):
             return
         after = tuple(st["last"]) if st.get("last") is not None else None
         src_where, dst_where = self._row_scope(db, src_t)
@@ -903,44 +1017,94 @@ class HeteroEngine(Engine):
         if not self.src_engine.RESUMES_BY_KEY:
             resumable = []
         if not resumable or not set(resumable) <= names:
-            # nothing to resume from: one pass, a batch at a time
-            batches = self.src_engine.neutral_batches(
-                "src", db, src_t, src_cols, chunk, **read_scope)
-            while True:
-                with gate.unit():
-                    rows = next(batches, None)
-                if rows is None:
+            # nothing to resume from: one pass, a batch at a time, folded
+            # as it passes and held to the whole target table after
+            whole = (self._read_back_plan(db, src_t, dst_t, src_cols, [])
+                     if (self.hop.options or {}).get("verify_batches", True)
+                     else None)
+            for attempt in (1, 2):
+                batches = self.src_engine.neutral_batches(
+                    "src", db, src_t, src_cols, chunk, **read_scope)
+                folded, total, moved = 0, 0, 0
+                while True:
+                    with gate.unit():
+                        rows = next(batches, None)
+                    if rows is None:
+                        break
+                    rows, flattened = self._flatten_absent(rows)
+                    absent += flattened
+                    self.dst_engine.neutral_write("dst", db, dst_t,
+                                                  dst_cols, rows)
+                    moved += len(rows)
+                    if whole:
+                        k, total = canon.fold_rows(
+                            [c for _, c in whole[0]],
+                            ([r[i] for i in whole[2]] for r in rows), total)
+                        folded += k
+                if not whole:
                     break
-                rows, flattened = self._flatten_absent(rows)
-                absent += flattened
-                self.dst_engine.neutral_write("dst", db, dst_t, dst_cols,
-                                              rows)
-                moved += len(rows)
+                there = self.dst_engine.neutral_digest(
+                    "dst", db, dst_t, whole[1],
+                    **({"where": dst_where} if dst_where else {}))
+                if (int(there[0]), str(there[1])) == (folded, str(total)):
+                    break
+                if attempt == 2:
+                    raise SystemExit(
+                        f"{key}: copied twice in one pass each (it has no"
+                        f" key), and the target holds {int(there[0]):,}"
+                        f" rows where {folded:,} were copied, or the same"
+                        " number holding different values. The target"
+                        " changes what it is given, or another writer is"
+                        " writing this table")
+                log(f"{key}: the target does not hold what was copied;"
+                    " emptying it and copying it again")
+                self.dst_engine.neutral_empty(
+                    "dst", db, dst_t, **({"where": dst_where} if dst_where
+                                         else {}))
             st["moved"] = moved
             log(f"{key}: {moved:,} rows in one pass (no key to resume"
                 " from, so a restart starts over)")
-        while resumable and set(resumable) <= names:
+        plan = (self._read_back_plan(db, src_t, dst_t, src_cols, resumable)
+                if resumable and set(resumable) <= names
+                and (self.hop.options or {}).get("verify_batches", True)
+                else None)
+        def read(point):
             with gate.unit():
-                rows, last = self.src_engine.neutral_read(
-                    "src", db, src_t, src_cols, after, chunk, **read_scope)
-            if not rows:
-                break
-            rows, flattened = self._flatten_absent(rows)
-            absent += flattened
-            self.dst_engine.neutral_write("dst", db, dst_t, dst_cols, rows)
-            moved += len(rows)
-            st["moved"] = moved
-            if last is None:
-                log(f"{key}: {moved:,} rows in one pass (no key to resume"
-                    " from, so a restart starts over)")
-                break
-            after = last
-            st["last"] = list(last)
-            ck.save()
-            # the rate over this run's own rows, not rows an earlier run
-            # carried before a restart
-            log(progress(key, moved, rows_there, started, time.monotonic(),
-                         since=from_rows))
+                return self.src_engine.neutral_read(
+                    "src", db, src_t, src_cols, point, chunk, **read_scope)
+        # the next batch is read while this one is written and read back:
+        # the two servers work at once, and the checkpoint still moves only
+        # past batches written and checked
+        import concurrent.futures as cf
+        ahead = cf.ThreadPoolExecutor(1)
+        try:
+            pending = (ahead.submit(read, after)
+                       if resumable and set(resumable) <= names else None)
+            while pending is not None:
+                rows, last = pending.result()
+                if not rows:
+                    break
+                pending = ahead.submit(read, last) if last is not None \
+                    else None
+                rows, flattened = self._flatten_absent(rows)
+                absent += flattened
+                self._write_checked(db, key, dst_t, dst_cols, plan,
+                                    resumable, rows, log)
+                moved += len(rows)
+                st["moved"] = moved
+                if last is None:
+                    log(f"{key}: {moved:,} rows in one pass (no key to"
+                        " resume from, so a restart starts over)")
+                    break
+                after = last
+                st["last"] = list(last)
+                ck.save()
+                # the rate over this run's own rows, not rows an earlier
+                # run carried before a restart
+                log(progress(key, moved, rows_there, started,
+                             time.monotonic(), since=from_rows))
+        finally:
+            ahead.shutdown(wait=True, cancel_futures=True)
         if absent:
             log(f"{key}: {absent:,} values were not there on the source and"
                 f" landed as NULL - {self.dst_name} has no way to store"
@@ -948,6 +1112,74 @@ class HeteroEngine(Engine):
                 " null\", so the distinction ends at this hop")
         st["done"] = True
         ck.save()
+
+    def _write_checked(self, db, key, dst_t, dst_cols, plan, resumable,
+                       rows, log):
+        """A batch written, then read back from the target by its keys and
+        compared with what was read from the source - so a move that
+        finishes has been checked row for row as it went, not only by a
+        `check` run afterwards. A batch that reads back different is
+        written once more; if it still does, the copy stops there and
+        names it. The checkpoint has not moved past the batch before, so a
+        run started again begins with it."""
+        self.dst_engine.neutral_write("dst", db, dst_t, dst_cols, rows)
+        if plan is None:
+            return
+        quick = self._batch_digest(db, dst_t, plan, resumable, rows)
+        if quick is not None and quick[0] == quick[1]:
+            return
+        missing, changed, cols = self._verify_batch(db, dst_t, plan,
+                                                    resumable, rows)
+        if not (missing or changed):
+            if quick is not None and quick[1][0] > quick[0][0]:
+                log(f"{key}: {quick[1][0] - quick[0][0]:,} rows in this"
+                    " batch's key range are only on the target - written"
+                    " there by something else while the copy ran")
+            return
+        log(f"{key}: {len(missing) + len(changed):,} rows of a batch read"
+            " back from the target different from what was written;"
+            " writing it again")
+        self.dst_engine.neutral_write("dst", db, dst_t, dst_cols, rows)
+        missing, changed, cols = self._verify_batch(db, dst_t, plan,
+                                                    resumable, rows)
+        if not (missing or changed):
+            return
+        first = (changed or missing)[0]
+        raise SystemExit(
+            f"{key}: written twice, {len(missing):,} rows of a batch are"
+            f" not on the target and {len(changed):,} read back different"
+            f" from the source - the first by key {', '.join(first)}"
+            + (f", in {', '.join(cols[:6])}" if cols else "")
+            + f". The target changes what {self.dst_name} is given, or"
+            " cannot hold it as it is. The copy stopped here; the batches"
+            " before it were read back equal")
+
+    def _still_the_same(self, db, key, src_t, dst_t, st, log):
+        """A table an earlier run finished, digested on both sides before
+        it is skipped: the source may have changed since, and "done
+        earlier, skip" left the target behind it without a word. The same,
+        it stays done; different, it is copied again."""
+        sc, dc, _ = self._comparable_columns(db, self.src_engine, src_t,
+                                             self.dst_engine, dst_t)
+        if not sc:
+            log(f"{key}: done earlier; no column of it can be compared on"
+                " both sides, so it is skipped unchecked")
+            return True
+        src_where, dst_where = self._row_scope(db, src_t)
+        a = self.src_engine.neutral_digest(
+            "src", db, src_t, sc, **({"where": src_where} if src_where
+                                     else {}))
+        b = self.dst_engine.neutral_digest(
+            "dst", db, dst_t, dc, **({"where": dst_where} if dst_where
+                                     else {}))
+        if (int(a[0]), str(a[1])) == (int(b[0]), str(b[1])):
+            log(f"{key}: done earlier, and both sides still hold the same"
+                " rows - skipped")
+            return True
+        st.clear()
+        log(f"{key}: done earlier, and the two sides no longer hold the"
+            " same rows - copying it again")
+        return False
 
     #: what one read of the table copier holds, at most: rows, and bytes
     #: as the source's catalogue counts them
@@ -1496,7 +1728,6 @@ class HeteroEngine(Engine):
         over."""
         import json
 
-        from .. import canon
         from .base import Result
         src = self.src_engine
         if not getattr(src, "CHANGE_POINT_READS_ONLY", False):
@@ -1544,14 +1775,7 @@ class HeteroEngine(Engine):
             a = src.neutral_rows_by_key("src", db, src_t, sc, key, raw)
             b = self.dst_engine.neutral_rows_by_key("dst", db, dst_t, dc,
                                                     key, raw)
-
-            def text(cols, row):
-                return tuple(canon.render_value(c, v)
-                             for (_, c), v in zip(cols, row))
-            missing = [k for k in a if k not in b]
-            extra = [k for k in b if k not in a]
-            changed = [k for k in a if k in b and text(sc, a[k]) !=
-                       text(dc, b[k])]
+            missing, extra, changed = self._rows_differ(sc, dc, a, b)
             if missing or extra or changed:
                 clean = False
                 self._write_drill(db, self._leaf(table),
@@ -2157,106 +2381,22 @@ class HeteroEngine(Engine):
         return [("", t) for t in self.my._tables("src", db)]
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
-        # the copier written for MySQL to PostgreSQL copies each table under
-        # its source's column names; a table the hop's mapping reshapes
-        # goes the way that reads the mapping
-        if not (self.my and self.pg) or self.hop.column_rules(db, sch, tbl):
-            if not self._can_move_neutrally():
-                self._mysql_to_postgres_only("moving a table")
-            # before anything is read from the target: some targets are not
-            # there until something makes them, and listing what a target
-            # already holds is the first thing this does
-            made = self.dst_engine.prepare_target(db)
-            if made:
-                log(f"{self.dst_name}: {made}")
-            return self._neutral_move(db, sch, tbl, chunk, ck, log)
-        t = tbl or sch
-        # the name the hop gives it on the target; this copier wrote every
-        # table under its source name, whatever the mapping said
-        dst_t = self._leaf(self._rename(t))
-        key = self.move_key(db, sch, tbl)
-        st = ck.setdefault(key, {})
-        if st.get("done"):
-            log(f"{key}: done earlier, skip")
-            return
-        cols = self.my._cols(db, t)
-        collist_my = ", ".join(f"`{c}`" for c in cols)
-        collist_pg = ", ".join(f'"{c}"' for c in cols)
-        # the hop's row filter on both ends: only the rows it selects are
-        # read, and only the rows it selects are replaced
-        src_where, dst_where = self._row_scope(db, t)
-        my_and = f" and ({src_where.replace('%', '%%')})" if src_where \
-            else ""
-        pg_and = f" and ({dst_where})" if dst_where else ""
-        pks = self.my._pk_cols(db, t)
-        intpk = None
-        if len(pks) == 1:
-            r = self.my._q("src",
-                           "select data_type from information_schema.columns"
-                           " where table_schema=%s and table_name=%s"
-                           " and column_name=%s", (db, t, pks[0]))
-            if r and r[0][0] in ("tinyint", "smallint", "mediumint",
-                                 "int", "bigint"):
-                intpk = pks[0]
+        """One table through the copier every pair shares.
 
-        def push(rows, pred_pg):
-            buf = io.StringIO()
-            w = csv.writer(buf)
-            for row in rows:
-                w.writerow(["" if v is None else
-                            v.hex() if isinstance(v, (bytes, bytearray))
-                            else v for v in row])
-            tgt = self.hop.target
-            env = tool_env({"PGPASSWORD": tgt.password,
-                            **self.pg.replica_env(db)})
-            pre = (f'delete from "{dst_t}" where ({pred_pg}){pg_and};'
-                   if pred_pg else
-                   f'delete from "{dst_t}" where {dst_where};' if dst_where
-                   else f'truncate "{dst_t}";')
-            p = subprocess.run(
-                ["psql", "-h", tgt.host, "-p", str(tgt.port),
-                 "-U", tgt.user, "-d", self.pg._d("dst", db), "-X", "-q",
-                 "-v", "ON_ERROR_STOP=1", "-1", "-c", pre,
-                 "-c", f"\\copy \"{dst_t}\" ({collist_pg}) from stdin"
-                       " (format csv, null '')"],
-                input=buf.getvalue(), capture_output=True, text=True, env=env)
-            if p.returncode:
-                raise RuntimeError(p.stderr[-300:])
-
-        if not intpk:
-            # it read the whole table into one list: measured, 220 MB at
-            # 200,000 rows and 1.33 GB at 1,600,000, a table keyed by text.
-            # The copier written for any pair pages by any key, and reads a
-            # table with none a batch at a time
-            if not self._can_move_neutrally():
-                self._mysql_to_postgres_only("moving a table")
-            made = self.dst_engine.prepare_target(db)
-            if made:
-                log(f"{self.dst_name}: {made}")
-            return self._neutral_move(db, sch, tbl, chunk, ck, log)
-        mm = self.my._q("src", f"select coalesce(min(`{intpk}`), 0),"
-                        f" coalesce(max(`{intpk}`), 0),"
-                        f" min(`{intpk}`) is not null"
-                        f" from `{db}`.`{t}`"
-                        + (f" where {src_where}" if src_where else ""))[0]
-        lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
-        last = st.get("last", lo - 1)
-        while last < hi:
-            nxt = min(last + chunk, hi)
-            rows = self.my._q("src",
-                              f"select {collist_my} from `{db}`.`{t}`"
-                              f" where `{intpk}` > %s and `{intpk}` <= %s"
-                              + my_and, (last, nxt))
-            push(rows, f'"{intpk}" > {last} and "{intpk}" <= {nxt}')
-            last = nxt
-            st["last"] = last
-            ck.save()
-            log(f"{key}: up to {intpk}={last:,} of {hi:,}")
-        # each chunk replaces its own key range, so a target row outside the
-        # source's whole range was in none of them
-        push([], f'not ("{intpk}" between {lo} and {hi})' if has else "true")
-        st["done"] = True
-        ck.save()
+        MySQL to PostgreSQL had a copier of its own, which wrote a CSV
+        itself: bytes went in as their hex digits read as text, and every
+        empty string as NULL - measured, 200,000 of 200,000 rows differed
+        after a move that reported success. The shared copier writes through
+        each engine's own writer, which takes every value by its type."""
+        if not self._can_move_neutrally():
+            self._mysql_to_postgres_only("moving a table")
+        # before anything is read from the target: some targets are not
+        # there until something makes them, and listing what a target
+        # already holds is the first thing this does
+        made = self.dst_engine.prepare_target(db)
+        if made:
+            log(f"{self.dst_name}: {made}")
+        return self._neutral_move(db, sch, tbl, chunk, ck, log)
 
     def _can_tail(self, db=None):
         """Refuse, naming the pair, when changes cannot be carried - before

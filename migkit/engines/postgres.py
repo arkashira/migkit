@@ -726,30 +726,55 @@ class PostgresEngine(Engine):
         return self._by_key_map(columns, key, rows)
 
     def neutral_write(self, side, db, table, columns, rows):
+        """Rows in through COPY, and over what the table already holds by
+        its key: into a temporary table first, then one statement that
+        inserts or replaces. A batch written again replaces itself.
+
+        COPY takes each value by its Python type - bytes as `bytea`, an
+        empty string as one, `None` as NULL - where a CSV the copier wrote
+        itself had turned bytes into their hex digits as text and every
+        empty string into NULL (measured, MySQL to PostgreSQL: 200,000 of
+        200,000 rows differed)."""
         if not rows:
             return 0
-        from psycopg2.extras import execute_values
+        import psycopg
 
         from .. import canon
+        self._target_only(side, "write rows")
         sch, tbl = self._split(table)
+        quoted = f'"{sch}"."{tbl}"'
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
-        if key and all(k in names for k in key):
-            sets = ", ".join(f'"{n}" = excluded."{n}"'
-                             for n in names if n not in key)
-            conflict = ", ".join(f'"{k}"' for k in key)
-            tail = (f" on conflict ({conflict}) do update set {sets}"
-                    if sets else f" on conflict ({conflict}) do nothing")
-        else:
-            tail = ""
-        with self._conn(side, self._d(side, db)) as conn:
+        keyed = bool(key) and all(k in names for k in key)
+        ep = self.hop.source if side == "src" else self.hop.target
+        name = self._d(side, db)
+        extra = ({"options": "-c session_replication_role=replica"}
+                 if side == "dst" and name in self.__dict__.get(
+                     "_as_replica", ()) else {})
+        with psycopg.connect(host=ep.host, port=ep.port, user=ep.user,
+                             password=ep.password, dbname=name,
+                             connect_timeout=15, **extra) as conn:
             with conn.cursor() as cur:
-                execute_values(cur, f'insert into "{sch}"."{tbl}" ({cols})'
-                                    f" values %s{tail}",
-                               [[canon.sql_value(v) for v in r]
-                                for r in rows])
-            conn.commit()
+                into = quoted
+                if keyed:
+                    # the carried columns only: a column the batch does
+                    # not carry keeps its own default on the table
+                    cur.execute("create temporary table migkit_batch on"
+                                f" commit drop as select {cols} from"
+                                f" {quoted} with no data")
+                    into = "migkit_batch"
+                with cur.copy(f"copy {into} ({cols}) from stdin") as copy:
+                    for r in canon.sql_rows([c for _, c in columns], rows):
+                        copy.write_row(r)
+                if keyed:
+                    sets = ", ".join(f'"{n}" = excluded."{n}"'
+                                     for n in names if n not in key)
+                    conflict = ", ".join(f'"{k}"' for k in key)
+                    cur.execute(
+                        f"insert into {quoted} ({cols}) select {cols} from"
+                        f" migkit_batch on conflict ({conflict}) do "
+                        + (f"update set {sets}" if sets else "nothing"))
         return len(rows)
 
     def neutral_empty(self, side, db, table, where=None):
@@ -2787,12 +2812,12 @@ class PostgresEngine(Engine):
                     out = self._psql(
                         side, name,
                         self.NO_INDEX_PATHS
-                        + f"select row_to_json(s) from (select {cols},"
-                          f" count(*) as migkit_n from"
-                          f' "{sch.replace(chr(34), chr(34) * 2)}".'
-                          f'"{tbl.replace(chr(34), chr(34) * 2)}"'
-                          f" group by {cols} having count(*) > 1"
-                          f" limit {self.DUPLICATE_CAP}) s")
+                        + self._as_json_rows(
+                            f"select {cols}, count(*) as migkit_n from"
+                            f' "{sch.replace(chr(34), chr(34) * 2)}".'
+                            f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                            f" group by {cols} having count(*) > 1"
+                            f" limit {self.DUPLICATE_CAP}"))
                     groups = [l for l in out.splitlines() if l.strip()]
                     if groups:
                         found.append((label, table, index, cols, len(groups),
@@ -2809,6 +2834,15 @@ class PostgresEngine(Engine):
 
     #: Every text column on a real table, which is where text that was
     #: already broken before the move is hiding.
+    @staticmethod
+    def _as_json_rows(select):
+        """`select` with each row as one JSON object, one per line. The row
+        goes by a name no column has: `row_to_json(s)` over a table with a
+        column `s` was read as that column, and the check stopped on `No
+        function matches` (measured)."""
+        return (f"select row_to_json(migkit_row) from ({select})"
+                " migkit_row")
+
     TEXT_COLUMNS = (
         "select c.table_schema||'.'||c.table_name||chr(9)||c.column_name"
         " from information_schema.columns c"
@@ -2845,11 +2879,11 @@ class PostgresEngine(Engine):
                 where = " or ".join(f"octet_length({q}) <> char_length({q})"
                                     for q in quoted)
                 out = self._psql(
-                    "src", db,
-                    f'select row_to_json(s) from (select {", ".join(quoted)}'
-                    f' from "{sch.replace(chr(34), chr(34) * 2)}".'
-                    f'"{tbl.replace(chr(34), chr(34) * 2)}"'
-                    f' where {where} limit {self.MOJIBAKE_SAMPLE}) s')
+                    "src", db, self._as_json_rows(
+                        f'select {", ".join(quoted)}'
+                        f' from "{sch.replace(chr(34), chr(34) * 2)}".'
+                        f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                        f' where {where} limit {self.MOJIBAKE_SAMPLE}'))
                 rows = [[json.loads(line).get(c) for c in columns]
                         for line in out.splitlines() if line.strip()]
                 found, seen = self._mojibake_tally(table, columns, rows)
@@ -4920,11 +4954,11 @@ class PostgresEngine(Engine):
                 f"octet_length({q}) <> char_length({q})"
                 for q in quoted[len(key):])
             out = self._psql(
-                "dst", db,
-                f'select row_to_json(s) from (select {", ".join(quoted)}'
-                f' from "{sch.replace(chr(34), chr(34) * 2)}".'
-                f'"{tbl.replace(chr(34), chr(34) * 2)}"'
-                f' where {where} limit {self.MOJIBAKE_REPAIR_CAP + 1}) s')
+                "dst", db, self._as_json_rows(
+                    f'select {", ".join(quoted)}'
+                    f' from "{sch.replace(chr(34), chr(34) * 2)}".'
+                    f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                    f' where {where} limit {self.MOJIBAKE_REPAIR_CAP + 1}'))
             rows = []
             for line in out.splitlines():
                 if not line.strip():
@@ -6696,13 +6730,90 @@ class PostgresEngine(Engine):
              "-d", self._d("dst", db),
              "-X", "-q", "-v", "ON_ERROR_STOP=1", "-1", *cmds,
              "-c", f"\\copy {qt}{collist} from stdin"],
-            stdin=out.stdout, stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env_t)
-        out.stdout.close()
-        _, err_i = inp.communicate()
-        _, err_o = out.communicate()
+        # passed on through here, and tallied on the way: what the target
+        # is read back against once it has committed (`_copy_checked`)
+        from ..tally import Tally
+        tally = Tally()
+        try:
+            while True:
+                chunk = out.stdout.read(1 << 16)
+                if not chunk:
+                    break
+                tally.feed(chunk)
+                inp.stdin.write(chunk)
+        except BrokenPipeError:
+            pass
+        finally:
+            try:
+                inp.stdin.close()
+            except BrokenPipeError:
+                pass
+        err_i = inp.stderr.read()
+        inp.stdout.read()
+        inp.wait()
+        err_o = out.stderr.read()
+        out.wait()
         if out.returncode or inp.returncode:
             raise RuntimeError((err_o + err_i).decode()[-300:])
+        return tally.end()
+
+    def _copy_out_tally(self, side, db, select_sql):
+        """The rows `select_sql` answers on `side`, tallied as COPY writes
+        them - the read-back half of `_copy_checked`."""
+        from ..tally import Tally
+        ep = self.hop.source if side == "src" else self.hop.target
+        env = tool_env({"PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
+        got = subprocess.Popen(
+            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
+             "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",
+             "-c", f"\\copy ({select_sql}) to stdout"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        tally = Tally()
+        while True:
+            chunk = got.stdout.read(1 << 16)
+            if not chunk:
+                break
+            tally.feed(chunk)
+        _, err = got.communicate()
+        if got.returncode:
+            raise RuntimeError(err.decode()[-300:])
+        return tally.end()
+
+    def _copy_checked(self, db, qt, cols, where, pre_sql, what, log):
+        """One range copied through the pipe, then read back from the
+        target and held to what passed: a copy that says it moved a range
+        has moved exactly those rows. Where the two differ, the range is
+        asked of both servers in the rendering every engine shares - two
+        releases can write a value's text differently and hold the same
+        value - and copied once more if that differs too. A range that
+        still differs stops the copy, named. A source written to while it
+        is copied is not a difference: what passed is the reference, not
+        what the source holds by the time the target is read."""
+        select = self._copy_select(qt, cols, where)
+        sent = self._copy_pipe(db, select, qt, pre_sql, columns=cols)
+        if not (self.hop.options or {}).get("verify_batches", True):
+            return sent
+        for attempt in (1, 2):
+            there = self._copy_out_tally("dst", db, select)
+            if there == sent:
+                return sent
+            same = self._range_same(db, qt.replace('"', ''), where)
+            if same:
+                return sent
+            if attempt == 2:
+                break
+            log(f"{what}: read back from the target different from what"
+                " was copied; copying it again")
+            sent = self._copy_pipe(db, select, qt, pre_sql, columns=cols)
+        raise SystemExit(
+            f"{what}: copied twice, and the target reads back {there.n:,}"
+            f" rows where {sent.n:,} were copied, or the same number"
+            " holding different values. The target changes what it is"
+            " given, or another writer is writing these rows. The copy"
+            " stopped here; the ranges before it read back equal")
+
 
     def move_key(self, db, sch, tbl):
         return f"{sch or 'public'}.{tbl}"
@@ -6712,22 +6823,24 @@ class PostgresEngine(Engine):
         key = self.move_key(db, sch, tbl)
         qt = f'"{sch}"."{tbl}"'
         st = ck.setdefault(key, {})
-        if st.get("done"):
-            log(f"{key}: done earlier, skip")
-            return
-        pk = self._int_pk(db, sch, tbl)
         # The hop's row filter, applied on both ends: only the rows it
         # selects are read, and only the rows it selects are replaced. A
         # target row outside the filter is not this copy's to delete - the
         # check reports it separately (`_outside_filter`).
         rf = (self.hop.row_filter(db, sch, tbl)
               if hasattr(self.hop, "row_filter") else None)
+        if st.get("done") and self.recheck_done(db, key, st, log, rf):
+            ck.save()
+            return
+        ck.save()
+        pk = self._int_pk(db, sch, tbl)
+        st["key"] = pk
         if not pk:
             log(f"{key}: no single int pk, single-shot copy")
             cols = self._copy_cols(db, sch, tbl)
-            self._copy_pipe(db, self._copy_select(qt, cols, rf or ""), qt,
-                            f"delete from {qt} where {rf}" if rf
-                            else f"truncate {qt}", columns=cols)
+            self._copy_checked(db, qt, cols, rf or "",
+                               f"delete from {qt} where {rf}" if rf
+                               else f"truncate {qt}", key, log)
             st["done"] = True
             return
         mm = self._psql("src", db,
@@ -6737,19 +6850,33 @@ class PostgresEngine(Engine):
                         + (f" where {rf}" if rf else ""))
         lo, hi, has = mm.split("|")
         lo, hi = int(lo), int(hi)
-        last = st.get("last", lo - 1)
-        while last < hi:
-            nxt = min(last + chunk, hi)
-            pred = f'"{pk}" > {last} and "{pk}" <= {nxt}'
+        from .. import ranges
+        slots = ranges.active
+
+        def edges():
+            rows = ((self.table_facts("src", db).get(key) or {}).get("rows")
+                    or hi - lo + 1)
+            every = ranges.step(rows, chunk, slots.workers)
+            if rows <= every:
+                return []
+            return [r[0] for r in self.run_rule("src", db, ranges.bounds_sql(
+                self._quote_ident, qt, pk, every, rf))]
+        todo = ranges.plan(st, lo, hi, edges, ck.save) if has == "1" else []
+        cols = self._copy_cols(db, sch, tbl)
+
+        def one(rng):
+            after, upto = rng
+            pred = f'"{pk}" > {after} and "{pk}" <= {upto}'
             if rf:
                 pred = f"({pred}) and ({rf})"
-            cols = self._copy_cols(db, sch, tbl)
-            self._copy_pipe(db, self._copy_select(qt, cols, pred), qt,
-                            f"delete from {qt} where {pred}", columns=cols)
-            last = nxt
-            st["last"] = last
-            ck.save()
-            log(f"{key}: up to {pk}={last:,} of {hi:,}")
+            self._copy_checked(db, qt, cols, pred,
+                               f"delete from {qt} where {pred}",
+                               f"{key} {pk} {after + 1:,} to {upto:,}", log)
+            ranges.finished(st, after, ck.save)
+            log(f"{key}: {pk} {after + 1:,} to {upto:,} copied"
+                f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
+                " ranges)")
+        slots.each(todo, one)
         # Each chunk replaces its own key range, so a target row whose key
         # lies outside the source's whole range was never in any chunk and
         # stayed - a target carrying an earlier attempt kept its strays.

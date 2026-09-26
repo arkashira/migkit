@@ -111,9 +111,11 @@ class MongoEngine(Engine):
         name = tbl or sch
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
-        if st.get("done"):
-            log(f"{key}: done earlier, skip")
+        if st.get("done") and self.recheck_done(db, name, st, log,
+                                                label=key):
+            ck.save()
             return
+        ck.save()
         src = self._client("src")[db][name]
         target = self._client("dst")[self._d("dst", db)]
         dst = target[name]
@@ -621,7 +623,7 @@ class MongoEngine(Engine):
         if where:
             raise SystemExit("a row filter is SQL, and MongoDB takes none;"
                              " narrow this collection another way")
-        from .. import canon, rowtext
+        from .. import canon
         coll = self._client(side)[self._d(side, db)][table]
         fields = [name for name, _ in columns]
         classes = dict(columns)
@@ -642,11 +644,10 @@ class MongoEngine(Engine):
                 .limit(self.DIGEST_CHUNK)), label="mongo read")
             if not docs:
                 break
-            for doc in docs:
-                total = canon.digest_step(total, rowtext.encode(
-                    [canon.render_value(classes[name], doc.get(name))
-                     for name in fields]))
-                n += 1
+            k, total = canon.fold_rows(
+                [classes[name] for name in fields],
+                ([doc.get(name) for name in fields] for doc in docs), total)
+            n += k
             after, started = docs[-1]["_id"], True
         return (n, str(total))
 

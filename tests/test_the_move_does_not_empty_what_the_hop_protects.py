@@ -225,7 +225,7 @@ def test_both_bulk_paths_use_the_one_wording():
            "movers.py").read_text()
     assert "truncate all user tables" not in src, "a second wording is back"
     assert _callers_of("_truncate_step") == {"pgdump_move", "pgcopydb_move",
-                                             "mydumper_move"}
+                                             "mydumper_move", "pgloader_move"}
 
 
 def test_the_exclusion_is_resolved_through_the_shared_reader():
@@ -244,9 +244,11 @@ def test_the_exclusion_is_resolved_through_the_shared_reader():
 
 def test_both_bulk_paths_still_empty_the_target():
     """The truncate is what keeps a data-only load from doubling every row.
-    Dropping the call would make every test above pass."""
+    Dropping the call would make every test above pass. The one-pass
+    MySQL load empties it too: run again, it appended every row."""
     assert _callers_of("_pg_truncate_target") == {"pgdump_move",
-                                                  "pgcopydb_move"}
+                                                  "pgcopydb_move",
+                                                  "pgloader_move"}
 
 
 def test_the_refusal_names_no_tool(pg_pair):

@@ -1730,8 +1730,35 @@ Measured with two clusters:
 * **B1** type mappings that change values
 * **B4** default collation changes (the collapse is asked; mixed collations inside stored code are not)
 * ~~**B6** values the target refuses~~ done (2026-09-25): zero dates named before a move between engines
-* **C1** speed
-* **C3** resume after a crash
+* **C1** speed (2026-09-26: tables side by side, integer keys split into
+  equal-row ranges, the shared copier pipelined and writing PostgreSQL
+  through COPY; still to come: a process per range for the pairs bound by
+  Python's work per row)
+* **C3** resume after a crash (2026-09-26: each range checked and
+  checkpointed on its own, a finished table asked again before it is
+  skipped; still to come: a table with no key resumes from the start)
+
+*The move, faster and checked as it goes (2026-09-26).* The user asked
+for a move that is faster, smarter, deeper, as correct as it can be and
+safe to run again. What was measured and done, on a sandbox of 300,000
+and 1,000,000 rows across four pairs:
+* **Found on the way:** the MySQL to PostgreSQL copier wrote a CSV
+  itself - bytes landed as their hex digits read as text and every empty
+  string as NULL, 200,000 of 200,000 rows different after a move that
+  reported success. That copier is gone; the pair goes through the copier
+  every pair shares, whose PostgreSQL writer is COPY, and it is faster
+  (5.8 s to 4.3 s before read-back). And the PostgreSQL deep checks that
+  sample rows as JSON stopped on a table with a column named `s`.
+* **Read back as it is written:** see C3 in the problems file. Turned off
+  with the hop option `verify_batches: false`.
+* **Idempotent:** the one-pass MySQL to PostgreSQL load empties the
+  target first as the other bulk paths do (run again, it appended);
+  Kafka goes on from the positions it saved; a keyspace is copied again.
+* **Not done, with the reason:** resuming the streaming PostgreSQL bulk
+  path from where it stopped - the snapshot it copies from ends with the
+  process, and a resumed copy from a new one would be inconsistent across
+  tables; it is run again whole, and its result is compared with the
+  source. `LOAD DATA LOCAL` for MySQL - see C1.
 * **C4** load on the source
 * **D11** documents outside the table
 * **E4** change streams vs oplog

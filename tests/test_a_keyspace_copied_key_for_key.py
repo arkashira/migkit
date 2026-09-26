@@ -138,6 +138,15 @@ def test_stopped_and_resumed_every_kept_key_arrives(pair, tmp_path):
     got = [r for r in eng.check_data("0") if r.check == "data"]
     assert [r.status for r in got] == ["diff"], [r.__dict__ for r in got]
     t.set(b"\xff\xfe raw", b"\x00\x01")
+    # run again after the source changed: not skipped on the earlier word
+    s.set("k:1", "changed")
+    said = []
+    eng.move_table("0", "", "0", 50, _Checkpoint(tmp_path / "move.json"),
+                   said.append)
+    assert said[0] == ("db0: done earlier; a keyspace cannot be asked"
+                       " whether it still matches, so it is copied again"), \
+        said
+    assert t.get("k:1") == b"changed"
 
 
 def test_the_restore_point_says_what_the_target_held(pair, tmp_path):

@@ -43,6 +43,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...>
 
+* <...> reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
+
+* the bulk copy finished and <...> of <...>'s tables do not hold what the source does: <...> ... | <...>. Nothing has been marked as moved. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
+
 * <...>: the source's schema changed while it was being moved - <...> ... | <...>. The rows moved before and after it may not line up. Bring the target's schema level with the source's, then move again and run migkit check.
 
 * reverse: <...> - the one there is, is at_cutover
@@ -66,8 +70,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * moving and then following a <...> source is not set up on this machine; migkit doctor says what is missing
 
 * no way to follow a <...> source is set up on this machine; migkit doctor says what is missing
-
-* the bulk copy reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
 
 * which hop? reports exist for: <...>
 
@@ -207,6 +209,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is no longer on both sides, so the rows the last check listed cannot be placed
 
+* <...>: copied twice in one pass each (it has no key), and the target holds <...> rows where <...> were copied, or the same number holding different values. The target changes what it is given, or another writer is writing this table
+
+* <...>: written twice, <...> rows of a batch are not on the target and <...> read back different from the source - the first by key <...>, in <...> | <...>. The target changes what <...> is given, or cannot hold it as it is. The copy stopped here; the batches before it were read back equal
+
 * <...> is not on the target and migkit cannot build it: no neutral class for <...>. Create the table yourself and run this again - guessing a column type is how a migration arrives complete and wrong
 
 * <...> moves under a row filter, which is SQL, and <...> takes none. Drop the filter, or exclude the table from this hop
@@ -297,6 +303,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: newer_wins names <...>, and it is not on both sides, so which row is newer cannot be told. Nothing was repaired on this table.
 
+* <...>: copied twice, and the target reads back <...> rows where <...> were copied, or the same number holding different values. The target changes what it is given, or another writer is writing these rows. The copy stopped here; the ranges before it read back equal
+
 ## `migkit/engines/opensearch.py`
 
 * <...> moves under a row filter, which is SQL, and OpenSearch takes none
@@ -340,6 +348,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the <...>: <...>. The connection was refused before it ran anything.
 
 * <...>: newer_wins names <...>, and it is not on both sides, so which row is newer cannot be told. Nothing was repaired on this table.
+
+* <...>: copied twice, and the target reads back <...> rows where <...> were copied, or the same number holding different values. The target changes what it is given, or another writer is writing these rows. The copy stopped here; the ranges before it read back equal
 
 * MIGKIT_SUBSCRIBE_TIMEOUT=<...> is not a whole number of seconds greater than zero
 

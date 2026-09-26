@@ -1399,6 +1399,10 @@ class Engine:
         where it does or the engine cannot say before reading."""
         return None
 
+    #: whether tables can be written side by side on this engine: a file
+    #: that takes one writer at a time (SQLite) cannot
+    WRITES_IN_PARALLEL = True
+
     def native_replica_unsafe(self):
         """Why the server's own replication would carry this hop wrongly,
         in words, or None."""
@@ -2816,6 +2820,58 @@ class Engine:
         cls = {n: c for n, c in columns}
         at = {n: i for i, (n, _) in enumerate(columns)}
         return tuple(canon.render_value(cls[k], row[at[k]]) for k in key)
+
+    def recheck_done(self, db, table, st, log, where=None, label=None):
+        """A table an earlier run finished, asked again before it is
+        skipped: the source may have changed since, and "done earlier,
+        skip" left a target behind it without a word. Both sides are
+        digested; the same, it stays done. Different, the ranges the copy
+        was made in are asked one by one and only those that differ are
+        copied again - or, with no ranges to ask, the table is copied again
+        whole. Returns whether it stays done."""
+        label = label or table
+        same = self._range_same(db, table, where)
+        if same is None:
+            log(f"{label}: done earlier; no column of it can be compared,"
+                " so it is skipped unchecked")
+            return True
+        if same:
+            log(f"{label}: done earlier, and both sides still hold the same"
+                " rows - skipped")
+            return True
+        ranges = st.get("ranges")
+        if ranges and st.get("key"):
+            q = self._quote_ident(st["key"])
+            bad = []
+            for after, upto in ranges:
+                rng = f"{q} > {int(after)} and {q} <= {int(upto)}"
+                if not self._range_same(db, table, f"({where}) and {rng}"
+                                        if where else rng):
+                    bad.append(after)
+            st["ranges_done"] = [a for a in st.get("ranges_done", [])
+                                 if a not in bad]
+            st.pop("done", None)
+            log(f"{label}: done earlier, and {len(bad)} of {len(ranges)}"
+                " ranges no longer match the source - copying those again")
+            return False
+        for k in list(st):
+            del st[k]
+        log(f"{label}: done earlier, and the two sides no longer hold the"
+            " same rows - copying it again")
+        return False
+
+    def _range_same(self, db, table, where=None):
+        """Whether the rows `where` selects digest the same on the source
+        and the target of a same-engine hop, over every column both
+        render; None where none can be. What a copier asks when a range it
+        wrote reads back different from what it sent: two releases can
+        write a value's text differently and hold the same value."""
+        sc, dc, _ = self._comparable_columns(db, self, table, self, table)
+        if not sc:
+            return None
+        return (self.neutral_digest("src", db, table, sc, where=where or None)
+                == self.neutral_digest("dst", db, table, dc,
+                                       where=where or None))
 
     def _by_key_map(self, columns, key, rows):
         return {self._key_of(columns, key, row): row for row in rows}

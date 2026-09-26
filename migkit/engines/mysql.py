@@ -1,6 +1,7 @@
 import difflib
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -4604,9 +4605,13 @@ class MySQLEngine(Engine):
         key = self.move_key(db, sch, tbl)
         ddb = self._d("dst", db)
         st = ck.setdefault(key, {})
-        if st.get("done"):
-            log(f"{key}: done earlier, skip")
+        rf = (self.hop.row_filter(db, t)
+              if hasattr(self.hop, "row_filter") else None)
+        if st.get("done") and self.recheck_done(db, t, st, log, rf,
+                                                label=key):
+            ck.save()
             return
+        ck.save()
         cols = self._cols(db, t)
         collist = ", ".join(f"`{c}`" for c in cols)
         ph = ", ".join(["%s"] * len(cols))
@@ -4619,79 +4624,174 @@ class MySQLEngine(Engine):
             if r and r[0][0] in ("tinyint", "smallint", "mediumint",
                                  "int", "bigint"):
                 intpk = pks[0]
+        st["key"] = intpk
+        # The hop's row filter on both ends, as the PostgreSQL copier does
+        # it: read only what it selects, replace only what it selects. `%`
+        # doubled where the statement also carries parameters, or a
+        # `like 'a%'` filter would be read as a placeholder.
+        rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
         sconn, dconn = self._conn("src"), self._conn("dst")
         try:
-            with dconn.cursor() as dcur, sconn.cursor() as scur:
-                dcur.execute("set foreign_key_checks = 0")
-                # The hop's row filter on both ends, as the PostgreSQL
-                # copier does it: read only what it selects, replace only
-                # what it selects. `%` doubled where the statement also
-                # carries parameters, or a `like 'a%'` filter would be read
-                # as a placeholder.
-                rf = (self.hop.row_filter(db, t)
-                      if hasattr(self.hop, "row_filter") else None)
-                rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
-                if not intpk:
-                    log(f"{key}: no single int pk, single-shot copy")
-                    dcur.execute(f"delete from `{ddb}`.`{t}` where ({rf})"
-                                 if rf else f"truncate `{ddb}`.`{t}`")
-                    scur.execute(f"select {collist} from `{db}`.`{t}`"
-                                 + (f" where ({rf})" if rf else ""))
-                    while True:
-                        rows = scur.fetchmany(5000)
-                        if not rows:
-                            break
-                        dcur.executemany(
-                            f"insert into `{ddb}`.`{t}` ({collist})"
-                            f" values ({ph})", rows)
-                    dconn.commit()
-                    st["done"] = True
-                    ck.save()
-                    return
-                mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
-                             f" coalesce(max(`{intpk}`), 0),"
-                             f" min(`{intpk}`) is not null"
-                             f" from `{db}`.`{t}`"
-                             + (f" where ({rf})" if rf else ""))[0]
-                lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
-                last = st.get("last", lo - 1)
-                while last < hi:
-                    nxt = min(last + chunk, hi)
-                    dcur.execute(f"delete from `{ddb}`.`{t}`"
-                                 f" where `{intpk}` > %s and `{intpk}` <= %s"
-                                 + rfp, (last, nxt))
-                    scur.execute(f"select {collist} from `{db}`.`{t}`"
-                                 f" where `{intpk}` > %s and `{intpk}` <= %s"
-                                 + rfp, (last, nxt))
-                    while True:
-                        rows = scur.fetchmany(5000)
-                        if not rows:
-                            break
-                        dcur.executemany(
-                            f"insert into `{ddb}`.`{t}` ({collist})"
-                            f" values ({ph})", rows)
-                    dconn.commit()
-                    last = nxt
-                    st["last"] = last
-                    ck.save()
-                    log(f"{key}: up to {intpk}={last:,} of {hi:,}")
-                # each chunk replaces its own key range, so a target row
-                # outside the source's whole range was in none of them
-                outside = (f"not (`{intpk}` between {lo} and {hi})" if has
-                           else "true")
-                if rf:
-                    outside = f"({outside}) and ({rf})"
-                gone = dcur.execute(f"delete from `{ddb}`.`{t}`"
-                                    f" where {outside}")
-                dconn.commit()
-                if gone:
-                    log(f"{key}: removed {gone:,} target rows the source"
-                        " does not have")
+            if not intpk:
+                log(f"{key}: no single int pk, single-shot copy")
+                self._range_checked(
+                    sconn, dconn, db, t, collist, ph,
+                    f" where ({rf})" if rf else "", (),
+                    (f"delete from `{ddb}`.`{t}` where ({rf})" if rf
+                     else f"truncate `{ddb}`.`{t}`"), rf, key, log)
                 st["done"] = True
                 ck.save()
+                return
+            mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
+                         f" coalesce(max(`{intpk}`), 0),"
+                         f" min(`{intpk}`) is not null"
+                         f" from `{db}`.`{t}`"
+                         + (f" where ({rf})" if rf else ""))[0]
+            lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
+            from .. import ranges
+            slots = ranges.active
+
+            def edges():
+                rows = ((self.table_facts("src", db).get(t) or {})
+                        .get("rows") or hi - lo + 1)
+                every = ranges.step(rows, chunk, slots.workers)
+                if rows <= every:
+                    return []
+                return [r[0] for r in self.run_rule(
+                    "src", db, ranges.bounds_sql(
+                        self._quote_ident, f"`{db}`.`{t}`", intpk, every,
+                        rf))]
+            todo = ranges.plan(st, lo, hi, edges, ck.save) if has else []
+            # a connection each: a range copied beside another holds its
+            # own transaction on the target
+            local = threading.local()
+
+            def one(rng):
+                after, upto = rng
+                if not hasattr(local, "conns"):
+                    local.conns = (self._conn("src"), self._conn("dst"))
+                    opened.append(local.conns)
+                rng_sql = (f"`{intpk}` > {int(after)} and `{intpk}` <="
+                           f" {int(upto)}")
+                self._range_checked(
+                    local.conns[0], local.conns[1], db, t, collist, ph,
+                    f" where `{intpk}` > %s and `{intpk}` <= %s" + rfp,
+                    (after, upto),
+                    f"delete from `{ddb}`.`{t}` where {rng_sql}"
+                    + (f" and ({rf})" if rf else ""),
+                    f"({rng_sql}) and ({rf})" if rf else rng_sql,
+                    f"{key} {intpk} {after + 1:,} to {upto:,}", log)
+                ranges.finished(st, after, ck.save)
+                log(f"{key}: {intpk} {after + 1:,} to {upto:,} copied"
+                    f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
+                    " ranges)")
+            opened = []
+            try:
+                slots.each(todo, one)
+            finally:
+                for a, b in opened:
+                    a.close()
+                    b.close()
+            # each chunk replaces its own key range, so a target row
+            # outside the source's whole range was in none of them
+            outside = (f"not (`{intpk}` between {lo} and {hi})" if has
+                       else "true")
+            if rf:
+                outside = f"({outside}) and ({rf})"
+            with dconn.cursor() as dcur:
+                gone = dcur.execute(f"delete from `{ddb}`.`{t}`"
+                                    f" where {outside}")
+            dconn.commit()
+            if gone:
+                log(f"{key}: removed {gone:,} target rows the source"
+                    " does not have")
+            st["done"] = True
+            ck.save()
         finally:
             sconn.close()
             dconn.close()
+
+    def _range_checked(self, sconn, dconn, db, t, collist, ph, where, args,
+                       clear, literal, what, log):
+        """The rows `where` selects on the source copied over what `clear`
+        removes on the target, in one transaction there, then read back
+        from the target and held to what passed. Read as a stream: a
+        buffered read held the whole range in memory before a row was
+        written. Where the two differ the range is asked in the rendering
+        both sides share - a changed column type reads back as other
+        values holding the same data - and copied once more if that
+        differs too; a range that still differs stops the copy, named."""
+        import pymysql
+
+        from ..tally import Tally
+        ddb = self._d("dst", db)
+        insert = f"insert into `{ddb}`.`{t}` ({collist}) values ({ph})"
+
+        def once():
+            sent = Tally()
+            with dconn.cursor() as dcur, \
+                    sconn.cursor(pymysql.cursors.SSCursor) as scur:
+                dcur.execute("set foreign_key_checks = 0")
+                # ranges written side by side each delete their own span
+                # first; under repeatable read that locks the gaps beside
+                # it too, and two neighbours deadlocked (measured, 1213)
+                dcur.execute("set session transaction isolation level read"
+                             " committed")
+                dcur.execute(clear)
+                scur.execute(f"select {collist} from `{db}`.`{t}`" + where,
+                             args or None)
+                while True:
+                    rows = scur.fetchmany(5000)
+                    if not rows:
+                        break
+                    for r in rows:
+                        sent.row(r)
+                    dcur.executemany(insert, rows)
+            dconn.commit()
+            return sent
+
+        def copy():
+            # a deadlock or a lock wait the server gave up on rolls the
+            # range back whole; it is copied again from the start
+            for tries in range(6):
+                try:
+                    return once()
+                except pymysql.err.OperationalError as e:
+                    if e.args[0] not in (1205, 1213) or tries == 5:
+                        raise
+                    dconn.rollback()
+                    time.sleep(0.2 * (tries + 1))
+
+        def there():
+            got = Tally()
+            with dconn.cursor(pymysql.cursors.SSCursor) as cur:
+                cur.execute(f"select {collist} from `{ddb}`.`{t}`" + where,
+                            args or None)
+                while True:
+                    rows = cur.fetchmany(5000)
+                    if not rows:
+                        break
+                    for r in rows:
+                        got.row(r)
+            return got
+        sent = copy()
+        if not (self.hop.options or {}).get("verify_batches", True):
+            return sent
+        for round_ in (1, 2):
+            back = there()
+            if back == sent or self._range_same(db, t, literal):
+                return sent
+            if round_ == 2:
+                break
+            log(f"{what}: read back from the target different from what"
+                " was copied; copying it again")
+            sent = copy()
+        raise SystemExit(
+            f"{what}: copied twice, and the target reads back {back.n:,}"
+            f" rows where {sent.n:,} were copied, or the same number"
+            " holding different values. The target changes what it is"
+            " given, or another writer is writing these rows. The copy"
+            " stopped here; the ranges before it read back equal")
 
     #: a replica follows a whole server, so one serves every database of
     #: the hop (`_replica_filters` scopes it)

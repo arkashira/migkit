@@ -684,9 +684,32 @@ to 5.4 s - and every mover's result is now checked by
 cannot be reported as a completed move. Test:
 `test_move_moved_something.py`.
 
-**Missing:** the pairs with no native mover, and a comparison against a
-managed service on the same hardware. Until that exists migkit makes no
-claim about being faster than anything beyond the two movers measured.
+The table copier, the path for everything a native mover does not carry
+(2026-09-26), measured on a million rows and a 2-CPU sandbox:
+* tables are copied side by side, as many as the hop's `workers`, largest
+  first, under a gate that narrows when either server reports load; a
+  target that takes one writer (SQLite) is written one table at a time
+* a table with one integer key is split into ranges of equal rows - not
+  equal spans of the key, which on sparse keys left most ranges empty -
+  and the ranges share the move's workers. MySQL ranges written side by
+  side deadlocked (1213) under repeatable read; they are written under
+  read committed, and a range the server rolls back is copied again
+* the copier every pair shares reads the next batch while it writes and
+  checks the current one (13.6 s to 10.8 s for a million rows MySQL to
+  PostgreSQL), writes into PostgreSQL through COPY, and converts only the
+  columns that can need it
+* measured and not kept: setting secondary indexes aside for the table
+  copier (PostgreSQL 7.1 s to 6.8 s, MySQL 13.7 s to 15.6 s - worse), and
+  loading MySQL through `LOAD DATA LOCAL` (36% faster writes, but the
+  client setting it needs lets the server ask for any file on the
+  machine). Rebuilding the indexes the bulk paths set aside now runs side
+  by side.
+
+**Missing:** the pairs with no native mover are bound by Python's work
+per row - threads gave them nothing measurable; a process per range is
+the next step - and a comparison against a managed service on the same
+hardware. Until that exists migkit makes no claim about being faster than
+anything beyond what is measured here.
 
 ### C2. LOBs
 
@@ -749,8 +772,27 @@ exists (`test_resume_chunked_pg.py`, `test_resume_chunked_mysql.py`), and a
 second verify of an unchanged table deliberately reads no rows and says so
 rather than pretending to have re-read them.
 
-**Missing:** resume that survives the machine, and a statement-level record
-of what a repair had applied when it stopped.
+The move itself (2026-09-26): every range a table copier writes is read
+back from the target once it is committed and held to what passed - the
+bytes the PostgreSQL pipe carried, the rows the MySQL copier sent, the
+batch the shared copier wrote (one range digest from each server where the
+key is an integer, row by row otherwise, the whole table for one with no
+key). A range that reads back different is copied once more and then stops
+the copy, named; so a move that finishes has been checked as it went, and
+a source written to meanwhile is not called different. Ranges are
+checkpointed each on its own, so a run started again copies only those not
+done, and the checkpoint is written whole. A table an earlier run finished
+is digested on both sides before it is skipped, and only the ranges that no
+longer match are copied again. A bulk program's result is compared with
+the source before the move is called complete. Tests:
+`test_the_table_copy_checks_and_resumes_by_range.py`,
+`test_the_mysql_table_copy_checks_by_range.py`,
+`test_a_move_runs_tables_side_by_side_and_says_what_it_did.py`.
+
+**Missing:** a table with no key still starts over when a run is
+interrupted - nothing on the target says which of its rows a range put
+there - and a statement-level record of what a repair had applied when it
+stopped.
 
 ### C4. The verification kills the source
 

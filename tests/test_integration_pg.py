@@ -99,8 +99,8 @@ def test_resumable_move_survives_crash(pg_pair, tmp_path):
     r = _migkit(conf, "move", "t", "--table", "big", "--go", "--chunk", "10000")
     assert "move complete" in r.stdout
     # resume must NOT redo chunk 1 (10,000 already checkpointed)
-    assert "id=10,000" not in r.stdout
-    assert "id=20,000" in r.stdout
+    assert "id 1 to 10,000" not in r.stdout
+    assert "id 10,001 to 20,000 copied" in r.stdout
 
     r = _migkit(conf, "check", "t", "--only", "counts")
     assert r.returncode == 0

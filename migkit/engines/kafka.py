@@ -200,9 +200,10 @@ class KafkaEngine(Engine):
         off the target's own end, and not sent twice."""
         topic = tbl or sch
         st = ck.setdefault(self.move_key(db, sch, tbl), {})
-        if st.get("done"):
-            log(f"{topic}: done earlier, skip")
-            return
+        if st.pop("done", None):
+            # a topic grows: what arrived since the copy goes on from the
+            # positions it saved, rather than being skipped
+            log(f"{topic}: done earlier; copying what arrived since")
         self._copy_topic(topic, st, chunk, ck.save, log)
         st["done"] = True
         ck.save()

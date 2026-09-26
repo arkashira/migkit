@@ -153,3 +153,35 @@ def test_a_topic_arrives_whole_after_a_crash_between_batch_and_checkpoint(
         admin.close()
     text = str(got)
     assert "86400000" in text, text
+
+
+def test_a_topic_copied_before_gets_what_arrived_since(brokers, tmp_path):
+    """Run again, a finished topic is not skipped: it goes on from the
+    positions the copy saved, and sends nothing twice."""
+    from kafka import KafkaProducer
+    from kafka.admin import KafkaAdminClient, NewTopic
+
+    from migkit.cli import _Checkpoint
+    admin = KafkaAdminClient(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+    admin.create_topics([NewTopic("grows", num_partitions=1,
+                                  replication_factor=1)])
+    admin.close()
+    time.sleep(2)
+
+    def send(start, n):
+        producer = KafkaProducer(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+        for i in range(start, start + n):
+            producer.send("grows", key=b"k", value=f"m{i}".encode())
+        producer.flush()
+        producer.close()
+    send(0, 10)
+    eng = _engine(tmp_path)
+    eng.move_table("cluster", "", "grows", 40,
+                   _Checkpoint(tmp_path / "move.json"), [].append)
+    send(10, 5)
+    said = []
+    eng.move_table("cluster", "", "grows", 40,
+                   _Checkpoint(tmp_path / "move.json"), said.append)
+    assert "grows: done earlier; copying what arrived since" in said, said
+    got = [v for _, v, _, _ in _all(DST_PORT, "grows")[0]]
+    assert got == [f"m{i}".encode() for i in range(15)], got

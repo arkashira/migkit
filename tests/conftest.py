@@ -78,14 +78,20 @@ do $$ declare r record; begin
   loop execute 'drop sequence if exists public.'||quote_ident(r.sequencename)||' cascade'; end loop;
   for r in select extname from pg_extension where extname <> 'plpgsql'
   loop execute 'drop extension if exists '||quote_ident(r.extname)||' cascade'; end loop;
+  for r in select p.oid::regprocedure as f from pg_proc p
+           join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = 'public' and p.prokind in ('f', 'p')
+  loop execute 'drop routine if exists '||r.f||' cascade'; end loop;
 end $$;
 """
 
 
 @pytest.fixture(autouse=True)
 def clean_pg(request):
-    """Drop all user tables/sequences on both DBs before each pg test, so
-    the shared session containers never leak state between tests."""
+    """Drop all user tables, sequences and routines on both DBs before
+    each pg test, so the shared session containers never leak state
+    between tests: a trigger function one test left behind read as an
+    extra object in another's schema check."""
     if "pg_pair" not in request.fixturenames:
         yield
         return

@@ -718,6 +718,33 @@ def _outside_exclusion(hop, db, rows, log=None, qualifier="public"):
     return kept
 
 
+def _rebuild(names, build, workers, log):
+    """(rebuilt, failed): every index `build` makes, as many at once as
+    the move has workers - each on a session of its own, so the server
+    builds them side by side, where one after another left all but one
+    of the target's cores idle for the length of the rebuild."""
+    import concurrent.futures as cf
+    rebuilt, failed = [], []
+
+    def one(name):
+        try:
+            build(name)
+            return name, None
+        except Exception as e:  # noqa: BLE001 - said, and the rest go on
+            return name, e
+    with cf.ThreadPoolExecutor(max(1, min(int(workers or 1),
+                                          len(names) or 1))) as pool:
+        for name, err in pool.map(one, list(names)):
+            if err is None:
+                rebuilt.append(name)
+                continue
+            failed.append(name)
+            if log:
+                log(f"REBUILD FAILED for {name}:"
+                    f" {str(err).splitlines()[-1][:100]}")
+    return rebuilt, failed
+
+
 class _IndexWindow:
     """Drop the target's secondary indexes for a load and put them back.
 
@@ -793,16 +820,10 @@ class _IndexWindow:
 
     def __exit__(self, *exc):
         from . import indexes as _ix
-        rebuilt, failed = [], []
-        for name in self.dropped:
-            try:
-                _pg_psql(self.hop, self.db, self.ddl[name])
-                rebuilt.append(name)
-            except Exception as e:
-                failed.append(name)
-                if self.log:
-                    self.log(f"REBUILD FAILED for {name}:"
-                             f" {str(e).splitlines()[-1][:100]}")
+        rebuilt, failed = _rebuild(
+            self.dropped, lambda name: _pg_psql(self.hop, self.db,
+                                                self.ddl[name]),
+            self.workers, self.log)
         if self.log:
             self.log(_ix.summary(self.dropped, rebuilt, failed))
         if not failed:
@@ -1526,15 +1547,9 @@ class _MyIndexWindow:
 
     def __exit__(self, *exc):
         from . import indexes as _ix
-        rebuilt, failed = [], []
-        for key in self.dropped:
-            try:
-                self.eng._q("dst", self.ddl[key])
-                rebuilt.append(key)
-            except Exception as e:
-                failed.append(key)
-                if self.log:
-                    self.log(f"REBUILD FAILED for {key}: {str(e)[:100]}")
+        rebuilt, failed = _rebuild(
+            self.dropped, lambda key: self.eng._q("dst", self.ddl[key]),
+            self.workers, self.log)
         if self.log:
             self.log(_ix.summary(self.dropped, rebuilt, failed))
         if not failed:
@@ -2158,9 +2173,13 @@ ALTER SCHEMA '{db}' RENAME TO 'public';
 """
     copy = Step(phase("stream-copy", workers=workers),
                 ["pgloader", loadfile])
-    steps = [copy]
+    steps = [_truncate_step(hop, db), copy]
     if not go:
         return steps + ["# dry-run, add --go to execute"]
+    # a data-only load appends: run again, it doubled every row or stopped
+    # on the first key already there. Emptied first, as the other bulk
+    # paths into PostgreSQL empty it, so a second run replaces the first
+    _pg_truncate_target(hop, db, log)
     loadfile.write_text(body)
     loadfile.chmod(0o600)
     try:

@@ -6,6 +6,8 @@ from .base import Engine, NeutralCopier, RepairAction, Result
 
 
 class SQLiteEngine(NeutralCopier, Engine):
+    #: one writer at a time: a second waits on the file's lock and fails
+    WRITES_IN_PARALLEL = False
     checks = ("schema", "counts", "autoinc", "data")
     # every setting it compares is the file's own
     SETTINGS_PER_DATABASE = True

@@ -163,15 +163,13 @@ class DbapiRows(NeutralCopier):
     def neutral_digest(self, side, db, table, columns, where=None):
         """Folded here, over rows the driver hands back as values, with the
         renderer and the arithmetic every engine's digest is held to."""
-        from .. import canon, rowtext
+        from .. import canon
         classes = [c for _, c in columns]
         total, n = 0, 0
         for batch in self.neutral_batches(side, db, table, columns,
                                           size=5000, where=where):
-            for row in batch:
-                total = canon.digest_step(total, rowtext.encode(
-                    [canon.render_value(c, v) for c, v in zip(classes, row)]))
-                n += 1
+            k, total = canon.fold_rows(classes, batch, total)
+            n += k
         return (n, str(total))
 
     def neutral_write(self, side, db, table, columns, rows):

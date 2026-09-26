@@ -136,11 +136,27 @@ def test_stopped_on_a_number_and_resumed_it_loses_no_string(pair, tmp_path):
     assert not [x for x in said if "mongo" in x.lower()], said
 
 
-def test_a_finished_collection_is_not_copied_again(pair, tmp_path):
+def test_a_finished_collection_is_asked_again_before_it_is_skipped(
+        pair, tmp_path):
+    """Skipped only while both sides still hold the same documents: an
+    earlier run's word was taken whatever the source had done since."""
     from migkit.cli import _Checkpoint
     s, t = pair
-    ck = _Checkpoint(tmp_path / "move.json")
-    ck["app.things"] = {"done": True}
+    s.app.again.drop()
+    t.app.again.drop()
+    s.app.again.insert_many([{"_id": i, "v": i} for i in range(5)])
+    eng = _engine(tmp_path)
+    eng.move_table("app", "", "again", 3,
+                   _Checkpoint(tmp_path / "move.json"), [].append)
     said = []
-    _engine(tmp_path).move_table("app", "", "things", 3, ck, said.append)
-    assert said == ["app.things: done earlier, skip"], said
+    eng.move_table("app", "", "again", 3,
+                   _Checkpoint(tmp_path / "move.json"), said.append)
+    assert said == ["app.again: done earlier, and both sides still hold the"
+                    " same rows - skipped"], said
+    s.app.again.update_one({"_id": 2}, {"$set": {"v": 20}})
+    said = []
+    eng.move_table("app", "", "again", 3,
+                   _Checkpoint(tmp_path / "move.json"), said.append)
+    assert said[0] == ("app.again: done earlier, and the two sides no longer"
+                       " hold the same rows - copying it again"), said
+    assert t.app.again.find_one({"_id": 2})["v"] == 20

@@ -55,8 +55,10 @@ class _Checkpoint(dict):
 
     def __init__(self, path, remote=None):
         super().__init__()
+        import threading
         self.path = path
         self.remote = remote
+        self._lock = threading.RLock()
         # the entries this process's copiers write into: theirs, whatever
         # another machine saved since
         self._mine = set()
@@ -77,9 +79,25 @@ class _Checkpoint(dict):
         super().__setitem__(key, value)
 
     def save(self):
-        if self.remote is not None:
-            self._merge_into_remote()
-        self.path.write_text(json.dumps(self, indent=1))
+        """Written whole or not at all - to a file beside it, then put in
+        its place: a crash while writing left half a checkpoint, which the
+        next run could not read. Tables copied side by side save through
+        one lock, and a table's entry that grows while it is written out is
+        written again."""
+        with self._lock:
+            if self.remote is not None:
+                self._merge_into_remote()
+            for _ in range(20):
+                try:
+                    text = json.dumps(self, indent=1)
+                    break
+                except RuntimeError:
+                    # an entry changed size under the encoder: another
+                    # table's copier saving its progress
+                    continue
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp.write_text(text)
+            tmp.replace(self.path)
 
     def discard(self):
         self.path.unlink(missing_ok=True)
@@ -1268,6 +1286,153 @@ def _copy_table(eng, d, sch, t, chunk, ck, log):
     pair.finish_created(d, log)
 
 
+def _side_health(eng, side, d):
+    """What a side says about its load, for the gate; None where it will
+    not say."""
+    import inspect
+    fn = getattr(eng, "_health", None)
+    if fn is None:
+        return None
+    try:
+        takes_db = len(inspect.signature(fn).parameters) > 1
+        return fn(side, d) if takes_db else fn(side)
+    except Exception:  # noqa: BLE001 - a probe never stops the move
+        return None
+
+
+def _largest_first(eng, d, tables):
+    """The tables in the order that finishes soonest side by side: the
+    largest started first, so one is not left running alone at the end."""
+    try:
+        facts = eng.table_facts("src", d)
+    except Exception:  # noqa: BLE001 - the order they came in
+        return list(tables)
+
+    def size(item):
+        sch, t = item
+        f = facts.get(f"{sch}.{t}" if sch else t) or facts.get(t) or {}
+        return -int(f.get("bytes") or f.get("rows") or 0)
+    return sorted(tables, key=size)
+
+
+def _copy_tables(hop, eng, d, tables, chunk, ck):
+    """The tables copied side by side, as many at once as the hop's
+    `workers` - and only as many as both servers take: the gate asks each
+    side how it is doing before a table starts, and narrows when either
+    is under load. A target that takes one writer at a time (a file) is
+    written one table after another. A table that fails lets the others
+    in flight finish, starts no more, and is said."""
+    from . import ranges
+    target = getattr(eng, "dst_engine", eng)
+    workers = max(1, int(getattr(hop, "workers", 1) or 1))
+    if not getattr(target, "WRITES_IN_PARALLEL", True):
+        workers = 1
+    before = ranges.active
+    # the ranges every table in flight copies share the move's workers
+    ranges.active = ranges.Slots(workers)
+    try:
+        _copy_tables_in(hop, eng, d, tables, chunk, ck, min(workers,
+                                                            len(tables)))
+    finally:
+        ranges.active = before
+
+
+def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
+    import concurrent.futures as cf
+
+    from .throttle import Throttle
+
+    def log(m):
+        console.print(f"  {m}")
+    if workers < 2:
+        for sch, t in tables:
+            _copy_table(eng, d, sch, t, chunk, ck, log)
+            _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
+        return
+
+    def health():
+        seen = None
+        for side in ("src", "dst"):
+            h = _side_health(eng, side, d)
+            if h is not None and h.stressed():
+                return h
+            seen = seen or h
+        return seen
+    gate = Throttle(workers, probe=health)
+
+    def one(sch, t):
+        gate.gate()
+        try:
+            _copy_table(eng, d, sch, t, chunk, ck, log)
+            _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
+        finally:
+            gate.done()
+    failed = None
+    pool = cf.ThreadPoolExecutor(workers)
+    try:
+        futs = [pool.submit(one, sch, t)
+                for sch, t in _largest_first(eng, d, tables)]
+        for f in cf.as_completed(futs):
+            if f.cancelled():
+                continue
+            if f.exception() is not None and failed is None:
+                failed = f.exception()
+                for g in futs:
+                    g.cancel()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    said = gate.line()
+    if said:
+        log(said)
+    if failed is not None:
+        raise failed
+
+
+def _refuse_if_nothing_arrived(hop, eng, d, what, log):
+    """Every copy path ends here: a copy can exit cleanly and leave the
+    target empty, and saying "complete" over that is the one thing a
+    migration tool must never do."""
+    empty = eng.moved_nothing(d)
+    if empty:
+        # the copy was told to skip what the hop excludes, so a table it
+        # skipped is not one it failed to fill - counting it made a correct
+        # move report itself failed and go unrecorded
+        empty = [t for t in empty if not hop.excluded(d, *t.split("."))]
+    if empty:
+        raise SystemExit(
+            f"{what} reported success and {d} is still empty on the"
+            " target: " + ", ".join(empty[:6])
+            + (" ..." if len(empty) > 6 else "")
+            + ". Nothing has been marked as moved - look at the copy's"
+              " output above, and at the target server's log")
+    if empty is None:
+        log("(this engine cannot confirm the rows landed; `migkit check` is"
+            " what proves it)")
+
+
+def _held_to_the_source(hop, eng, d, log):
+    """A bulk copy's whole result compared with the source before it is
+    called complete: a program that loads a database can say it did and
+    leave rows out or change them, and the table copier checks every range
+    as it writes where a program copying on its own cannot be asked to.
+    Skipped where the hop says `verify_batches: false`."""
+    if not (hop.options or {}).get("verify_batches", True):
+        return
+    log("comparing what arrived with the source")
+    bad = [r for r in eng.check_data(d)
+           if r.check == "data" and r.status in ("diff", "error")]
+    if not bad:
+        return
+    raise SystemExit(
+        f"the bulk copy finished and {len(bad)} of {d}'s tables do not hold"
+        " what the source does: "
+        + "; ".join(f"{r.scope}: {r.detail[:120]}" for r in bad[:4])
+        + (" ..." if len(bad) > 4 else "")
+        + ". Nothing has been marked as moved. A source written to while it"
+          " was copied differs by what changed - move with --mode full+cdc"
+          " for that; otherwise `migkit sync` puts the rows right")
+
+
 def _stop_if_the_schema_moved(hop, eng, d, before):
     """Every move path ends here: a DDL on the source during the move means
     the rows on either side of it belong to two different tables, and
@@ -1343,11 +1508,7 @@ def _move_full(hop, eng, db, table, chunk, go):
             else:
                 with eng.load_window(d, lambda m: console.print(f"  {m}"),
                                      {t for _, t in tables}):
-                    for sch, t in tables:
-                        _copy_table(eng, d, sch, t, chunk, ck,
-                                    lambda m: console.print(f"  {m}"))
-                        _changelog(hop, {"op": "move", "db": d,
-                                         "table": f"{sch}.{t}"})
+                    _copy_tables(hop, eng, d, tables, chunk, ck)
             if not table:
                 eng.finish_created(d, lambda m: console.print(f"  {m}"))
         finally:
@@ -1360,6 +1521,8 @@ def _move_full(hop, eng, db, table, chunk, go):
             planner.record_rate(hop, "builtin", rows, time.time() - began)
         _stop_if_the_schema_moved(hop, eng, d, before)
         if not table:
+            _refuse_if_nothing_arrived(hop, eng, d, "the table copy",
+                                       lambda m: console.print(f"  {m}"))
             _record_copy(hop, d, point)
         # the table copier leaves the statistics behind it exactly as a
         # bulk load does; only the bulk path used to put them right
@@ -1945,29 +2108,11 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                         _copy_routed(hop, eng, d, v, chunk,
                                      lambda m: chat(f"  {m}"))
                         _stop_if_the_schema_moved(hop, eng, d, before)
-                        # an external mover can exit 0 and leave the target
-                        # empty; saying "complete" over that is the one
-                        # thing a migration tool must never do
-                        empty = eng.moved_nothing(d)
-                        if empty:
-                            # the copy was told to skip what the hop
-                            # excludes, so a table it skipped is not one it
-                            # failed to fill - counting it made a correct
-                            # move report itself failed and go unrecorded
-                            empty = [t for t in empty
-                                     if not hop.excluded(d, *t.split("."))]
-                        if empty:
-                            raise SystemExit(
-                                f"the bulk copy reported success and {d} is"
-                                f" still empty on the target: "
-                                + ", ".join(empty[:6])
-                                + (" ..." if len(empty) > 6 else "")
-                                + ". Nothing has been marked as moved - look"
-                                  " at the copy's output above, and at the"
-                                  " target server's log")
-                        if empty is None:
-                            chat("  (this engine cannot confirm the rows"
-                                 " landed; `migkit check` is what proves it)")
+                        _refuse_if_nothing_arrived(hop, eng, d,
+                                                   "the bulk copy",
+                                                   lambda m: chat(f"  {m}"))
+                        _held_to_the_source(hop, eng, d,
+                                            lambda m: chat(f"  {m}"))
                         _changelog(hop, {"op": f"move-{v}", "db": d})
                         _record_copy(hop, d, point)
                         # the load left the statistics behind it; the engine

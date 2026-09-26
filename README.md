@@ -189,8 +189,13 @@ hops:
     target: { host: 10.0.0.10,       port: 5432, user: app, password: "secret" }
     databases: [appdb, orders]  # source db names, empty = discover from source
     db_map: { appdb: app_prod } # optional src->dst rename; unmapped = same name
-    workers: 4
+    workers: 4                  # tables and key ranges copied side by side
 ```
+
+A move reads every range it writes back from the target and holds it to
+what it copied, and compares a bulk program's result with the source before
+it calls the move complete. `options: { verify_batches: false }` turns that
+off for a hop where the time matters more.
 
 ## Commands
 

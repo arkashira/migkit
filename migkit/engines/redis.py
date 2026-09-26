@@ -218,8 +218,13 @@ class RedisEngine(Engine):
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
         if st.get("done"):
-            log(f"{key}: done earlier, skip")
-            return
+            # a keyspace has no digest a server answers for it, and the
+            # source may have changed since: copied again rather than
+            # skipped on the word of an earlier run
+            st.clear()
+            ck.save()
+            log(f"{key}: done earlier; a keyspace cannot be asked whether"
+                " it still matches, so it is copied again")
         src = self._client("src", db, decode=False)
         dst = self._client("dst", db, decode=False)
         if "cursor" not in st:

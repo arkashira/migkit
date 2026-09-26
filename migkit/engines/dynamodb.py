@@ -279,15 +279,13 @@ class DynamoDBEngine(NeutralCopier, Engine):
         return self._by_key_map(columns, key, found)
 
     def neutral_digest(self, side, db, table, columns, where=None):
-        from .. import canon, rowtext
+        from .. import canon
         classes = [c for _, c in columns]
         total, n = 0, 0
         for batch in self.neutral_batches(side, db, table, columns, 5000,
                                           where):
-            for row in batch:
-                total = canon.digest_step(total, rowtext.encode(
-                    [canon.render_value(c, v) for c, v in zip(classes, row)]))
-                n += 1
+            k, total = canon.fold_rows(classes, batch, total)
+            n += k
         return (n, str(total))
 
     def table_facts(self, side, db):
