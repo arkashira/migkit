@@ -107,6 +107,15 @@ def _rates_path(hop):
     return hop.report_dir() / "throughput.json"
 
 
+def _kind(hop):
+    """What makes one hop's runs a guide to another's: the engines on
+    each side."""
+    opts = hop.options or {}
+    if hop.engine == "hetero":
+        return f"{opts.get('source_engine')}->{opts.get('target_engine')}"
+    return hop.engine
+
+
 def record_rate(hop, path, rows, seconds):
     """Remember one finished copy: `rows` in `seconds` by `path`."""
     import json
@@ -120,36 +129,82 @@ def record_rate(hop, path, rows, seconds):
         got = {}
     runs = got.setdefault(path, [])
     runs.append({"rows": int(rows), "seconds": round(seconds, 3),
-                 "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 "kind": _kind(hop)})
     del runs[:-10]
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(got, indent=1))
 
 
-def measured_rate(hop, path):
-    """Rows per second the latest copy on `path` achieved, or None."""
+def _runs(path_file, path):
     import json
     try:
-        runs = json.loads(_rates_path(hop).read_text()).get(path) or []
+        return json.loads(path_file.read_text()).get(path) or []
     except (OSError, ValueError):
-        return None
+        return []
+
+
+def measured_rate(hop, path):
+    """Rows per second the latest copy on `path` achieved, or None."""
+    runs = _runs(_rates_path(hop), path)
     last = runs[-1] if runs else None
     return last["rows"] / last["seconds"] if last else None
 
 
+def _elsewhere(hop, path):
+    """([run], [hop name]) from the other hops of the same kind on the same
+    path: a rehearsal's runs, for the migration it rehearses."""
+    from . import config
+    kind, runs, names = _kind(hop), [], []
+    try:
+        dirs = sorted(p for p in config.REPORTS.iterdir() if p.is_dir())
+    except OSError:
+        return [], []
+    for d in dirs:
+        if d.name == hop.name:
+            continue
+        got = [r for r in _runs(d / "throughput.json", path)
+               if r.get("kind") == kind]
+        if got:
+            runs += got
+            names.append(d.name)
+    return runs, names
+
+
+def _took(secs):
+    return (f"{secs / 3600:,.1f}h" if secs >= 3600 else
+            f"{secs / 60:,.0f}min" if secs >= 60 else f"{secs:,.0f}s")
+
+
 def estimate(hop, path, rows):
-    """The plan's line about time, in words."""
+    """The plan's line about time, in words.
+
+    A range from every run kept on the path, and which runs those were -
+    one run is one number and is called that. A hop that has run nothing
+    yet is given the runs of other hops of the same engines on the same
+    path - a rehearsal's, typically - and told whose they are. Nothing
+    measured, nothing estimated."""
     if not rows:
         return "no row count to estimate from"
-    rate = measured_rate(hop, path)
-    if not rate:
+    runs, whose = _runs(_rates_path(hop), path), None
+    if not runs:
+        runs, others = _elsewhere(hop, path)
+        whose = ", ".join(others[:3]) + (" ..." if len(others) > 3 else "")
+    if not runs:
         return (f"about {rows:,} rows; no copy on this path measured yet,"
                 " so no time is estimated")
-    secs = rows / rate
-    took = (f"{secs / 3600:,.1f}h" if secs >= 3600 else
-            f"{secs / 60:,.0f}min" if secs >= 60 else f"{secs:,.0f}s")
-    return (f"about {rows:,} rows, about {took} at the {rate:,.0f} rows/s"
-            " measured on this path last time")
+    rates = sorted(r["rows"] / r["seconds"] for r in runs)
+    when = sorted(r.get("at", "")[:10] for r in runs)
+    where = f"this path by {whose}" if whose else "this path"
+    if len(runs) == 1:
+        return (f"about {rows:,} rows, about {_took(rows / rates[0])} at the"
+                f" {rates[0]:,.0f} rows/s measured on {where}"
+                + (" last time" if not whose else "")
+                + f" ({when[0]}) - one run, so one number and not a range")
+    return (f"about {rows:,} rows, between {_took(rows / rates[-1])} and"
+            f" {_took(rows / rates[0])} going by the {len(runs)} runs on"
+            f" {where} ({rates[0]:,.0f} to {rates[-1]:,.0f} rows/s,"
+            f" {when[0]} to {when[-1]})")
 
 
 # --- how much it carries, and the room it needs -----------------------------
@@ -167,7 +222,8 @@ def _size(n):
     return human_bytes(n)
 
 
-def size_line(decisions, facts, engine, price_per_gb=None):
+def size_line(decisions, facts, engine, price_per_gb=None, free=None,
+              kept=None):
     """The plan's line about size, from the source's catalogue: what the
     move carries and what the target needs for it. None where the
     catalogue gives no sizes.
@@ -175,7 +231,12 @@ def size_line(decisions, facts, engine, price_per_gb=None):
     `price_per_gb` is what the hop says a gigabyte costs to carry across
     its network path (hop option `transfer_price_per_gb`). migkit cannot
     read a price from anywhere, so without one no cost is said. What
-    crosses is the tables' rows; the indexes are built on the target."""
+    crosses is the tables' rows; the indexes are built on the target.
+
+    `kept` is the target's own answer to how much of the log a load
+    writes it holds at once: a callable from the bytes of log written to
+    (bytes held, why), or None where the target cannot say. What it holds
+    needs room beside the tables."""
     carried = {d.table for d in decisions if d.path != LEFT}
     data = index = 0
     known = False
@@ -195,9 +256,24 @@ def size_line(decisions, facts, engine, price_per_gb=None):
             f" tables, {_size(index)} of indexes built on the target); the"
             " target needs that much room")
     log = LOG_PER_BYTE.get(engine)
+    grows = held = 0
     if log:
         what, per, base = log
         grows = (data + index if base == "tables and indexes" else data) * per
+        answer = kept(int(grows)) if kept else None
+        if answer:
+            held, why = answer
+            line += (f", plus the {_size(int(held))} of {what} it holds at"
+                     f" once while it loads ({why})")
+    if free is not None:
+        # measured on PostgreSQL: a target whose disk filled mid-load did
+        # not just refuse the rows - it stopped altogether, on the log it
+        # could not write
+        line += (f" and has {_size(free)} free"
+                 + (" - NOT ENOUGH: a load that fills a disk can stop the"
+                    " target altogether, not only the move"
+                    if free < data + index + held else ""))
+    if log:
         line += (f", and {what} grows by about {_size(int(grows))} while"
                  " it loads")
     if price_per_gb is not None:

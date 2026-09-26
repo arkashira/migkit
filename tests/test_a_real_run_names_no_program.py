@@ -80,4 +80,6 @@ def test_the_dump_path_says_how_far_it_has_got(pg_pair, tmp_path,
     for t in ("a", "b", "c"):
         assert f"public.{t}: read (" in said, said
         assert f"public.{t}: loaded (" in said, said
-    assert "of 3 tables)" in said or "(3 tables)" in said, said
+    # counted against the source's own catalogue: tables and their bytes
+    # (backlog 0c), where the program's lines alone gave neither total
+    assert "3 of 3 tables, " in said and " (100%)" in said, said

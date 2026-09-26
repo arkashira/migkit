@@ -188,13 +188,17 @@ def test_the_cross_engine_path_refuses_seventeen_of_them(cmp_pair, tmp_path,
     assert len(src) + len(notes) == 37, (len(src), len(notes))
     # the honest part: every refusal is named, none is dropped quietly
     assert len(notes) == len({n.split(":")[0] for n in notes}), notes
-    for column in ("iv", "h", "tsv"):
+    for column in ("iv",):
         assert any(n.startswith(f"{column}:") for n in notes), (column, notes)
         hit = [n for n in notes if n.startswith(f"{column}:")][0]
         assert "no canonical rendering" in hit, hit
     # an enum is compared as the text of its label now
-    # (`test_enums_and_domains_across_engines.py`), which moved the number
-    assert "e" in {n for n, _ in src}, src
+    # (`test_enums_and_domains_across_engines.py`), and a key/value set as
+    # a JSON object and a text search vector as its text
+    # (`test_hstore_and_tsvector_across_engines.py`), which moved the number
+    compared = {n: cls for n, cls in src}
+    assert compared.get("e") and compared.get("tsv") == "text", src
+    assert compared.get("h") == "json", src
 
 
 def test_a_refused_column_is_not_quietly_dropped(cmp_pair, tmp_path,

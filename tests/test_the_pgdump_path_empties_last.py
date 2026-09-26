@@ -147,7 +147,7 @@ def test_both_bulk_paths_stop_the_same_way():
     # path, which now reads the collection list for the exclude list, stops
     # at the same point
     assert callers == {"pgdump_move", "mydumper_move", "pgcopydb_move",
-                       "mongodump_move"}, callers
+                       "mongodump_move", "mongosync_move"}, callers
 
 
 def test_the_refusal_names_no_tool():

@@ -381,12 +381,17 @@ def test_installing_says_how_many_not_which(monkeypatch):
                         lambda argv, **k: ran.append(argv) or
                         type("P", (), {"returncode": 1, "stderr": "x"})())
     monkeypatch.setattr(tools, "second_reader_present", lambda: False)
-    built = []
+    built, fetched = [], []
     monkeypatch.setattr(tools, "install_second_reader",
                         lambda log: built.append(log) or True)
+    # a vendor's build is fetched over the network: asked for, not done
+    monkeypatch.setattr(tools, "install_vendor",
+                        lambda program, log: fetched.append(program) or True)
     said = []
     tools.install_missing(said.append)
     assert built, "the second reading is part of installing everything"
+    assert fetched == list(tools.VENDOR), fetched
+    assert "fetching vendor component 1 ..." in said, said
     assert ran and len([s for s in said if "installing component" in s]) \
         == len(ran), said
     low = " ".join(said).lower()

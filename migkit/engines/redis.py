@@ -15,9 +15,13 @@ class RedisEngine(Engine):
             import redis
         except ImportError:
             raise SystemExit("pip install 'migkit[redis]' for redis support")
+        # a key or a value need not be text: decoded so that every byte
+        # comes back as it was sent, where strict decoding stopped the
+        # check on the first key that was not UTF-8
         return redis.Redis(host=ep.host, port=ep.port,
                            password=ep.password or None, db=int(db),
-                           socket_timeout=15, decode_responses=decode)
+                           socket_timeout=15, decode_responses=decode,
+                           encoding_errors="surrogateescape")
 
     def databases(self):
         if self.hop.databases:
@@ -180,6 +184,134 @@ class RedisEngine(Engine):
         # the server's own count includes the excluded keys, so the kept
         # ones are counted by walking them
         return sum(len(b) for b in self._scan_batches(client, 0, True, db))
+
+    def list_move_tables(self, db):
+        """A keyspace is the unit: it has no tables inside it."""
+        return [("", str(db))]
+
+    def move_key(self, db, sch, tbl):
+        return f"db{db}"
+
+    #: keys per read of the keyspace copier
+    COPY_BATCH = 1000
+
+    def _raw_kept(self, db, keys):
+        """`_kept` over keys as the server holds them, which need not be
+        text: matched through a decoding that cannot fail, returned as
+        they were."""
+        if not self.hop.exclude:
+            return keys
+        text = {k.decode("utf-8", "surrogateescape"): k for k in keys}
+        return [text[k] for k in self._kept(db, list(text))]
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        """The keyspace, key for key as stored - each value in the
+        server's own serialised form with what is left of its time to
+        live - through the same read-write the repair uses.
+
+        Resumed from the scan's cursor in the checkpoint. A key written
+        while the scan runs may or may not be carried, as the server
+        documents for any scan: `check`, and the tail where there is one,
+        are what settle it. A fresh start first removes what the target
+        holds that the hop does not leave out: it is not this copy's."""
+        from ..wording import progress
+        key = self.move_key(db, sch, tbl)
+        st = ck.setdefault(key, {})
+        if st.get("done"):
+            log(f"{key}: done earlier, skip")
+            return
+        src = self._client("src", db, decode=False)
+        dst = self._client("dst", db, decode=False)
+        if "cursor" not in st:
+            gone, cursor = 0, 0
+            while True:
+                cursor, keys = dst.scan(cursor, count=self.COPY_BATCH)
+                keys = self._raw_kept(db, keys)
+                if keys:
+                    gone += dst.unlink(*keys)
+                if cursor == 0:
+                    break
+            st.update(cursor=0, moved=0)
+            ck.save()
+            if gone:
+                log(f"{key}: emptied {gone:,} keys the target held before"
+                    " the copy")
+        cursor = int(st["cursor"])
+        moved = from_keys = int(st.get("moved", 0))
+        # the server's count includes what the hop leaves out; walking the
+        # keyspace once more for a total would double the reading
+        total = None if self.hop.exclude else src.dbsize()
+        began = time.monotonic()
+        batch = max(1, min(int(chunk), self.COPY_BATCH))
+        while True:
+            cursor, keys = src.scan(cursor, count=batch)
+            keys = self._raw_kept(db, keys)
+            if keys:
+                read = src.pipeline(transaction=False)
+                for k in keys:
+                    read.dump(k)
+                    read.pttl(k)
+                got = read.execute()
+                write = dst.pipeline(transaction=False)
+                for k, payload, ttl in zip(keys, got[0::2], got[1::2]):
+                    if payload is None or ttl == -2:
+                        continue    # gone since the scan found it
+                    write.restore(k, ttl if ttl and ttl > 0 else 0, payload,
+                                  replace=True)
+                    moved += 1
+                try:
+                    write.execute()
+                except Exception as e:
+                    raise SystemExit(
+                        f"{key}: the target refused a key it was handed:"
+                        f" {str(e)[:90]}. A payload version error means it"
+                        " runs an older Redis than the source, whose values"
+                        " do not load into an older version") from None
+            st.update(cursor=cursor, moved=moved)
+            ck.save()
+            if keys:
+                log(progress(key, moved, total, began, time.monotonic(),
+                             unit="keys", since=from_keys))
+            if cursor == 0:
+                break
+        st["done"] = True
+        ck.save()
+
+    def moved_nothing(self, db):
+        """The keyspace holds keys on the source and none on the target,
+        counting only what the hop does not leave out."""
+        try:
+            def any_kept(side):
+                client = self._client(side, db, decode=False)
+                cursor = 0
+                while True:
+                    cursor, keys = client.scan(cursor, count=self.COPY_BATCH)
+                    if self._raw_kept(db, keys):
+                        return True
+                    if cursor == 0:
+                        return False
+            return [f"db{db}"] if any_kept("src") and not any_kept("dst") \
+                else []
+        except Exception:  # noqa: BLE001 - None: cannot be asked
+            return None
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target held before a repair: how many keys of each
+        kind, and the modules loaded. The keys a repair replaces are kept
+        whole beside it, in the repair's own undo file."""
+        client = self._client("dst", db, decode=False)
+        kinds, cursor = {}, 0
+        while True:
+            cursor, keys = client.scan(cursor, count=self.COPY_BATCH)
+            read = client.pipeline(transaction=False)
+            for k in self._raw_kept(db, keys):
+                read.type(k)
+            for t in read.execute():
+                t = t.decode()
+                kinds[t] = kinds.get(t, 0) + 1
+            if cursor == 0:
+                break
+        (state_dir / "dst-shape.txt").write_text(repr(sorted(kinds.items())))
 
     def check_schema(self, db):
         """What a keyspace has in place of a schema: the modules loaded,
@@ -366,7 +498,6 @@ class RedisEngine(Engine):
         sample = int(self.hop.options.get("sample", 5000))
         deep = bool(self.hop.options.get("deep", False))
         checked = 0
-        bad = 0
         # A SCAN plus a pipeline of reads is the heaviest thing a verifier
         # does to a single-threaded server, and nothing else was slowing it
         # down: this loop ran at whatever speed the network allowed, against
@@ -383,7 +514,6 @@ class RedisEngine(Engine):
             checked += len(keys)
             if stream and checked % 20000 < 1000:
                 stream(f"db{db}: {checked} keys compared")
-        bad = len(missing) + len(changed)
         extra = []
         seen_dst = 0
         for keys in self._scan_batches(t, sample, deep, db):
@@ -396,6 +526,22 @@ class RedisEngine(Engine):
             seen_dst += len(keys)
         self._write_drilldown(db, missing=missing, changed=changed,
                               extra=extra)
+        proof = ""
+        suspects = missing + changed + extra
+        if suspects and len(suspects) <= self.DRILL_CAP:
+            # confirm before calling it different: where the target is a
+            # replica of this source, a change it has not applied yet is
+            # still arriving, not wrong
+            import json
+            got = self.fenced_recheck(db, f"db{db}",
+                                      {json.dumps(k) for k in suspects})
+            if got is not None:
+                missing, extra, changed = ([json.loads(k) for k in ks]
+                                           for ks in got[:3])
+                proof = "; ".join(got[3])
+                if stream:
+                    stream(f"db{db}: fence {proof}")
+        bad = len(missing) + len(changed)
         mode = "full scan" if deep else f"sample {checked}"
         res = []
         if bad:
@@ -406,7 +552,9 @@ class RedisEngine(Engine):
                 parts.append(f"{len(changed)} with a different value")
             res.append(Result("data", f"db{db}", "diff",
                               f"{bad}/{checked} keys differ ({mode}):"
-                              f" {', '.join(parts)}", "",
+                              f" {', '.join(parts)}"
+                              + (f"; still so once the replica had caught"
+                                 f" up ({proof})" if proof else ""), "",
                               f"migkit sync {self.hop.name} --db {db}"
                               " --kind rows --apply"))
         if extra:
@@ -415,7 +563,9 @@ class RedisEngine(Engine):
             res.append(Result(
                 "data", f"db{db} extra keys", "diff",
                 f"{len(extra)} of {seen_dst} keys on the target are not on"
-                f" the source: {shown}{more}", "",
+                f" the source: {shown}{more}"
+                + (f"; still so once the replica had caught up ({proof})"
+                   if proof else ""), "",
                 "a target still holding keys from an earlier attempt:"
                 f" migkit sync {self.hop.name} --db {db} --kind rows --apply"
                 " removes them, with the old values written to the undo file"
@@ -423,7 +573,9 @@ class RedisEngine(Engine):
         return res or [Result(
             "data", f"db{db}", "ok",
             f"{checked} keys value-equal, {seen_dst} target keys all present"
-            f" on the source ({mode}, pipelined)")]
+            f" on the source ({mode}, pipelined)"
+            + (f"; the difference was still arriving ({proof})"
+               if proof else ""))]
 
     def _write_drilldown(self, db, **kinds):
         """The keys behind the counts, through the shared writer.
@@ -616,3 +768,291 @@ class RedisEngine(Engine):
         return {"db": f"db{db}", "ts": time.time(),
                 "src_rows": self._client("src", db).dbsize(),
                 "dst_rows": self._client("dst", db).dbsize()}
+
+    # --- the server's own replication (REPLICAOF) ---------------------------
+
+    #: one replica per server: it carries every database the server holds
+    REPLICATES_THE_SERVER = True
+    #: a replica begins with a copy of the source's whole dataset, so
+    #: following and copying-then-following are the same thing
+    REPLICA_COPIES = True
+    #: the account the replica signs in to the source as
+    REPL_USER = "migkit_repl"
+    #: seconds the status waits for the replica's link to come up
+    REPLICA_SETTLE = 10
+
+    def _keyspace(self, side):
+        """The databases holding keys on a side, by number."""
+        return {k[2:] for k in self._client(side).info("keyspace")}
+
+    def native_replica_unsafe(self):
+        """Why REPLICAOF would carry this hop wrongly, or None.
+
+        A replica's first sync empties the target, every database of it,
+        before it loads the source's snapshot - measured on 7.4: a key the
+        target had of its own and a key in a database the source did not
+        use were both gone once the link came up. And it carries every
+        database and every key the source has, with no filter to leave any
+        out."""
+        if self.hop.exclude:
+            return ("the hop excludes keys, and a Redis replica carries"
+                    " every key of the source: its first sync empties the"
+                    " target, the excluded keys with it")
+        for side in ("src", "dst"):
+            if self._client(side).info("cluster").get("cluster_enabled"):
+                return (f"the {'source' if side == 'src' else 'target'} is"
+                        " a Redis Cluster, which takes no REPLICAOF: its"
+                        " shards replicate within the cluster")
+        covered = set(self.databases())
+        carried = sorted(self._keyspace("src") - covered, key=int)
+        if carried:
+            return (f"the source has keys in db{', db'.join(carried)}, which"
+                    " the hop does not name, and a replica carries every"
+                    " database of the source")
+        erased = sorted(self._keyspace("dst") - covered, key=int)
+        if erased:
+            return (f"the target has keys in db{', db'.join(erased)}, which"
+                    " the hop does not name, and a replica's first sync"
+                    " empties every database of the target")
+        return self._older_target()
+
+    def _older_target(self):
+        """Why the target cannot load the source's snapshot, or None.
+
+        A replica loads the source's snapshot, and a server does not read
+        the format of a newer one - measured, a 7.4 source and a 6.2 target:
+        `Can't handle RDB format version 12`, the link down for good, and
+        the target already emptied. The same software is compared by its
+        own version; different software by the Redis version each says it
+        is compatible with, which is what decides the format it reads."""
+        s, d = self._brands()
+        if s.name and s.name == d.name and s.version and d.version:
+            have, need = d.version, s.version
+        else:
+            def claim(side):
+                try:
+                    return self._client(side).info("server").get(
+                        "redis_version")
+                except Exception:
+                    return None
+            have, need = claim("dst"), claim("src")
+        if not (have and need):
+            return None
+
+        def parts(v):
+            import re
+            return tuple(int(x) for x in re.findall(r"\d+", str(v))[:2])
+        if parts(have) < parts(need):
+            return (f"the target runs {have} and the source {need}: a"
+                    " replica loads the source's snapshot, which an older"
+                    " server does not read, and its first sync has emptied"
+                    " the target by then")
+        return None
+
+    def _acl(self, side):
+        """Whether the side keeps accounts of its own (Redis 6 and later)."""
+        try:
+            self._client(side).execute_command("ACL", "WHOAMI")
+            return True
+        except Exception:
+            return False
+
+    def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
+        """The commands that make the target a replica of the source.
+
+        Where the source asks for a password, the replica signs in as an
+        account of its own that may do nothing but replicate, with a
+        password drawn for the run - the source's own password is never
+        given to the target. `secret` is None for a plan only shown, which
+        carries CHANGE_ME for the person who runs it."""
+        import shlex
+        secret = secret or "CHANGE_ME"
+        s = self.hop.source
+        src_cmds, dst_cmds, drop_src = [], [], []
+        notes = []
+        if s.password:
+            if self._acl("src"):
+                src_cmds = [f"ACL SETUSER {self.REPL_USER} reset on"
+                            f" >{secret} +psync +replconf +ping"]
+                dst_cmds = [f"CONFIG SET masteruser {self.REPL_USER}",
+                            f"CONFIG SET masterauth {secret}"]
+                drop_src = [f"ACL DELUSER {self.REPL_USER}"]
+            else:
+                dst_cmds = ["CONFIG SET masterauth"
+                            f" {shlex.quote(s.password)}"]
+                notes.append("the source keeps no accounts, so the target"
+                             " is given the source's own password")
+        dst_cmds.append(f"REPLICAOF {s.host} {s.port}")
+        held = {d: self._client("dst", d).dbsize()
+                for d in sorted(self._keyspace("dst"), key=int)}
+        if any(held.values()):
+            notes.append("the first sync replaces what the target holds - "
+                         + ", ".join(f"{n:,} key{'s' * (n != 1)} in db{d}"
+                                     for d, n in held.items() if n)
+                         + " - with the source's")
+        if not copy_data or copied:
+            notes.append("a replica always begins with a copy of the"
+                         " source's whole dataset, whatever was copied"
+                         " before")
+        notes.append("the target is read-only while it replicates;"
+                     " REPLICAOF NO ONE at cutover makes it writable and"
+                     " keeps every key")
+        return {"src": src_cmds, "dst": dst_cmds,
+                "drop_dst": ["REPLICAOF NO ONE", "CONFIG SET masteruser ''",
+                             "CONFIG SET masterauth ''"],
+                "drop_src": drop_src,
+                "status": "INFO replication",
+                "note": "; ".join(notes)}
+
+    def apply_replication_stmt(self, side, db, stmt):
+        """One command of the plan, as the server's own words.
+
+        REPLICAOF answers OK whether or not the target can reach the
+        source; `replication_status` is what says whether it did."""
+        import shlex
+
+        import redis
+        from ..util import without_secret
+        args = shlex.split(stmt)
+        try:
+            return self._client(side).execute_command(*args)
+        except redis.RedisError as e:
+            # a password is the value after `>` or after masterauth
+            hidden = [w[1:] for w in args if w.startswith(">")]
+            if [a.lower() for a in args[:3]] == ["config", "set",
+                                                 "masterauth"]:
+                hidden += args[3:]
+            said = str(e)
+            for word in hidden + [self.hop.source.password]:
+                said = without_secret(said, word)
+            where = "source" if side == "src" else "target"
+            hint = (" - a managed service keeps replication to itself"
+                    if "unknown command" in said.lower() else "")
+            raise SystemExit(f"the {where} refused {' '.join(args[:2])}:"
+                             f" {said[:160]}{hint}. What ran before it"
+                             " stays as it is.")
+
+    def _replica(self):
+        return self._client("dst").info("replication")
+
+    def replication_status(self, db, sql):
+        """Whether the target is replicating, read from the target after
+        the link has had a moment to come up.
+
+        REPLICAOF says OK and connects behind it. A refused sign-in shows
+        on the target only as a link that stays down - the reason goes to
+        its log, which migkit cannot read - so the source's own record of
+        refused sign-ins (ACL LOG) is asked what happened."""
+        end = time.time() + self.REPLICA_SETTLE
+        while True:
+            r = self._replica()
+            if (r.get("role") != "slave"
+                    or r.get("master_link_status") == "up"
+                    or r.get("master_sync_in_progress")
+                    or time.time() > end):
+                break
+            time.sleep(0.5)
+        if r.get("role") != "slave":
+            return ("the target is not a replica: the commands ran but"
+                    " nothing is replicating, NOT replicating")
+        where = f"source {r.get('master_host')}:{r.get('master_port')}"
+        if r.get("master_sync_in_progress"):
+            total = int(r.get("master_sync_total_bytes") or -1)
+            got = int(r.get("master_sync_read_bytes") or 0)
+            return (f"{where}, copying the source's dataset ({got:,}"
+                    + (f" of {total:,}" if total > 0 else "")
+                    + " bytes so far)")
+        if r.get("master_link_status") == "up":
+            at = int(self._client("src").info("replication")
+                     .get("master_repl_offset") or 0)
+            behind = max(0, at - int(r.get("master_repl_offset") or 0))
+            return f"{where}, link up, {behind:,} bytes behind"
+        return f"{where}, link down, NOT replicating: {self._why_down()}"
+
+    def _why_down(self):
+        """What the source says about the replica's sign-in."""
+        try:
+            log = self._client("src").execute_command("ACL", "LOG", "20")
+        except Exception:
+            log = []
+        for entry in log or []:
+            e = entry if isinstance(entry, dict) else dict(
+                zip(entry[::2], entry[1::2]))
+            if (e.get("reason") == "auth"
+                    and e.get("username") == self.REPL_USER
+                    and float(e.get("age-seconds") or 1e9)
+                    < self.REPLICA_SETTLE + 30):
+                return "the source refused the replica's sign-in"
+        s = self.hop.source
+        return (f"the target has not reached the source at {s.host}:"
+                f"{s.port} - an address the target cannot route to, or a"
+                " source it cannot sign in to")
+
+    def src_lsn(self, db):
+        """Where the source's replication stream is now: its replication
+        id and offset."""
+        r = self._client("src").info("replication")
+        return f"{r.get('master_replid')}:{int(r.get('master_repl_offset') or 0)}"
+
+    def fence_wait(self, db, at, timeout=300):
+        """Wait until the target's replica has applied the source's stream
+        up to `at`. None where the target is not a replica of this source,
+        so the caller does not wait on something that cannot arrive."""
+        if not at:
+            return None
+        replid, _, offset = str(at).rpartition(":")
+        end = time.time() + timeout
+        while time.time() < end:
+            r = self._replica()
+            if r.get("role") != "slave":
+                return None
+            if r.get("master_link_status") == "up":
+                if replid not in (r.get("master_replid"),
+                                  r.get("master_replid2")):
+                    return None
+                if int(r.get("master_repl_offset") or 0) >= int(offset):
+                    return True
+            time.sleep(0.2)
+        return False
+
+    def stream_writers(self, db):
+        """The target's replica, when it is one: it cannot be paused for a
+        repair, and a replica takes no writes but its own."""
+        out = super().stream_writers(db)
+        r = self._replica()
+        if r.get("role") == "slave":
+            out.append((f"the replica of {r.get('master_host')}:"
+                        f"{r.get('master_port')}", False))
+        return out
+
+    # --- the confirm pass (base `fenced_recheck`) ---------------------------
+
+    def _compare_pks(self, db, table, keys):
+        """(missing, extra, changed) among these keys, as the drilldown
+        writes them - read again from both sides, now."""
+        import json
+        names = [json.loads(k) for k in keys]
+        s, t = self._client("src", db), self._client("dst", db)
+        ps, pt = s.pipeline(transaction=False), t.pipeline(transaction=False)
+        for k in names:
+            ps.type(k)
+            pt.type(k)
+        missing, extra, both = [], [], []
+        for k, a, b in zip(names, ps.execute(), pt.execute()):
+            if a == "none" and b == "none":
+                continue
+            if b == "none":
+                missing.append(k)
+            elif a == "none":
+                extra.append(k)
+            else:
+                both.append(k)
+        gone, changed = self._batch_compare(s, t, both) if both else ([], [])
+
+        def enc(ks):
+            return [json.dumps(k) for k in ks]
+        return enc(missing + gone), enc(extra), enc(changed)
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        self._write_drill(db, table, missing=missing, extra=extra,
+                          changed=changed)

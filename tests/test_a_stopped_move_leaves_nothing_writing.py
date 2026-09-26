@@ -65,6 +65,9 @@ CHILD = textwrap.dedent("""
                               movers._sh(["sleep", "300"])}
     movers.options_missing = lambda h, d, v: {}
     movers.which = lambda p: "/bin/" + p
+    # the sizes the progress lines are read against: there is no source
+    # here to ask, and asking an address nothing listens on is retried
+    movers._source_sizes = lambda h, d: {}
     print("started", flush=True)
     movers.run_via("mydumper", hop, "app", 1, True, None)
 """)

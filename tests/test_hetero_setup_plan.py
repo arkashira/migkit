@@ -65,14 +65,23 @@ def test_a_pair_that_cannot_tail_says_what_to_do_instead():
 
 
 def test_a_pair_with_no_row_shaped_path_says_so_rather_than_listing_steps():
-    for pair in (("mysql", "redis"), ("postgres", "kafka")):
-        plan = _plan(*pair)
-        text = _joined(plan)
-        assert "no table-shaped path" in text, text
-        assert "migkit move" not in text, text
-        assert "convert-schema" not in text, text
-        assert "migkit assess demo" in text, text
-        assert len(plan) <= 3, plan
+    plan = _plan("mysql", "redis")
+    text = _joined(plan)
+    assert "no table-shaped path" in text, text
+    assert "migkit move" not in text, text
+    assert "convert-schema" not in text, text
+    assert "migkit assess demo" in text, text
+    assert len(plan) <= 3, plan
+
+
+def test_a_stream_target_is_given_the_change_stream_and_nothing_else():
+    """Kafka as a pair's target takes the source's changes as messages: no
+    table to compare or copy, and the stream is the step."""
+    text = _joined(_plan("postgres", "kafka"))
+    assert "holds a stream of changes, not a copy of the tables" in text
+    assert "migkit move demo --mode cdc --go" in text, text
+    assert "migkit move demo --db shop --go" not in text, text
+    assert "convert-schema" not in text, text
 
 
 def test_the_mysql_to_postgres_plan_still_reads_as_it_did():

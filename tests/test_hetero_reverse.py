@@ -192,11 +192,12 @@ def test_a_table_on_only_one_side_is_a_difference(engine):
 
 
 def test_a_type_with_no_rendering_is_named_and_the_rest_still_compare(engine):
-    """A PostgreSQL `tsvector` has no MySQL counterpart and no canonical
+    """A PostgreSQL `point` has no MySQL counterpart and no canonical
     rendering. The table is still compared on everything else, and the column
     that was left out is in the line - which is the difference between a
-    partial answer and a wrong one."""
-    assert pg_sql("alter table shape add column doc tsvector").returncode == 0
+    partial answer and a wrong one. (This used `tsvector`, which renders as
+    its text now.)"""
+    assert pg_sql("alter table shape add column doc point").returncode == 0
     assert my_sql("alter table shape add column doc text", "cx").returncode \
         == 0
     try:

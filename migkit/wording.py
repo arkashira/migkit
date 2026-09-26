@@ -35,6 +35,8 @@ PHASES = {
     "empty": "emptying the target's tables",
     "load": "loading the local copy into the target",
     "stream-copy": "copying tables straight from source to target",
+    "sync": "copying online while the source keeps changing, then"
+            " committing",
     "copy-table": "copying table by table",
     "indexes-off": "dropping secondary indexes for the load",
     "indexes-on": "rebuilding the secondary indexes",
@@ -94,11 +96,14 @@ def human_bytes(n):
         n /= 1024
 
 
-def progress(table, done, total=None, started=None, now=None, unit="rows"):
+def progress(table, done, total=None, started=None, now=None, unit="rows",
+             since=0):
     """One progress line: how far, how fast, how long left.
 
     The rate and the time left are only said when they can be computed -
-    a guess presented as a number is worse than no number.
+    a guess presented as a number is worse than no number. `since` is how
+    far an earlier run had got before this one started: the rate is this
+    run's own, not a restart's inheritance.
     """
     now = time.monotonic() if now is None else now
     line = f"{table}: {_n(done)}"
@@ -107,12 +112,62 @@ def progress(table, done, total=None, started=None, now=None, unit="rows"):
         line += f" of {_n(total)} {unit} ({pct:.0f}%)"
     else:
         line += f" {unit}"
-    if started is not None and now > started and done:
-        rate = done / (now - started)
+    if started is not None and now > started and done > since:
+        rate = (done - since) / (now - started)
         line += f", {_n(int(rate))} {unit}/s"
         if total and total > done and rate > 0:
             line += f", about {_duration((total - done) / rate)} left"
     return line
+
+
+class Tally:
+    """Tables finished, bytes carried, the rate and the time left: one
+    vocabulary for every path's progress (backlog 0c).
+
+    `sizes` is {table: bytes} from the source's catalogue. A table is
+    found in it by its full name or by its last part, since each program
+    names tables its own way. The rate and the time left are said only
+    once there is something to divide - a guess shown as a number is worse
+    than none."""
+
+    def __init__(self, sizes=None, total=None, clock=None):
+        self.sizes = dict(sizes or {})
+        self.total = total or (len(self.sizes) or None)
+        self.clock = clock or time.monotonic
+        self.began = self.clock()
+        self.seen, self.carried = [], 0
+        self.leaf = {}
+        for name, size in self.sizes.items():
+            self.leaf.setdefault(str(name).rsplit(".", 1)[-1], size)
+
+    def _size(self, name):
+        if name in self.sizes:
+            return self.sizes[name]
+        return self.leaf.get(str(name).rsplit(".", 1)[-1], 0)
+
+    def reached(self, name):
+        """The progress so far, once `name` is finished; None if it was
+        already counted."""
+        if name in self.seen:
+            return None
+        self.seen.append(name)
+        self.carried += int(self._size(name) or 0)
+        parts = [f"{len(self.seen):,}"
+                 + (f" of {self.total:,}" if self.total else "")
+                 + " tables"]
+        whole = sum(int(v or 0) for v in self.sizes.values())
+        if whole:
+            parts.append(f"{human_bytes(self.carried)} of"
+                         f" {human_bytes(whole)}"
+                         f" ({min(100.0, 100.0 * self.carried / whole):.0f}%)")
+            elapsed = self.clock() - self.began
+            if self.carried and elapsed > 0:
+                rate = self.carried / elapsed
+                parts.append(f"{human_bytes(rate)}/s")
+                if whole > self.carried:
+                    parts.append(f"about {_duration((whole - self.carried) / rate)}"
+                                 " left")
+        return ", ".join(parts)
 
 
 def _duration(seconds):
@@ -224,6 +279,25 @@ _STATES = {"53100": "ran out of disk space",
            "53300": "has no connection slots left"}
 
 
+#: a pooler refusing a setting given as the connection opens (PgBouncer)
+_POOLER_REFUSED = re.compile(
+    r"unsupported startup parameter(?: in options)?: (?P<name>[\w.]+)")
+
+
+def pooler_refused(text):
+    """Plain words for a connection pooler that refused a setting migkit
+    gives a connection as it opens, or ''. Measured through PgBouncer
+    1.25: `FATAL: unsupported startup parameter in options:
+    statement_timeout`, which reads as the database refusing it."""
+    got = _POOLER_REFUSED.search(text or "")
+    if not got:
+        return ""
+    return (f"a connection pooler stands between migkit and the database,"
+            f" and refused the setting {got.group('name')} migkit gives a"
+            " connection as it opens: give the hop the database's own"
+            " address - the pooler's is for the application")
+
+
 def database_words(text):
     """What the database itself said, out of a program's log, or ''.
 
@@ -232,6 +306,9 @@ def database_words(text):
     `Sub-process exited with code 12` and the like, and the line that said
     `could not extend file ...: No space left on device`, with its SQLSTATE
     and the database's own hint, was cut off above them."""
+    pooled = pooler_refused(text)
+    if pooled:
+        return pooled
     found = list(_SERVER_SAID.finditer(text or ""))
     first = next((m for m in found
                   if m.group("level") in ("ERROR", "FATAL", "PANIC")), None)

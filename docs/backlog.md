@@ -156,24 +156,24 @@ gaps below.
 The matrix as `capabilities.matrix()` computes it (`-` = not yet, `n/a` =
 declared not applicable with the reason):
 
-| capability | pg | mysql | mongo | redis | kafka | mssql | sqlite | generic | hetero |
-|---|---|---|---|---|---|---|---|---|---|
-| comparing the schema | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| comparing row counts | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| carrying sequences and auto-increment values | yes | yes | n/a | n/a | n/a | yes | yes | - | yes |
-| comparing server settings | yes | yes | yes | yes | yes | yes | yes | - | - |
-| moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes |
-| copying table by table, resumably | yes | yes | - | - | - | - | yes | - | yes |
-| keeping the target following the source | yes | yes | yes | - | - | - | n/a | - | yes |
-| proving the target has caught up before cutover | yes | yes | yes | - | - | - | n/a | - | yes |
-| telling a difference still arriving from one that is wrong | yes | yes | yes | - | - | - | n/a | - | yes |
-| verifying only what changed | yes | yes | yes | - | yes | yes | n/a | - | - |
-| carrying users and their grants | yes | yes | yes | yes | - | - | n/a | - | - |
-| noticing a move that moved nothing | yes | yes | yes | - | - | - | - | - | yes |
-| refreshing the target's statistics after a load | yes | yes | n/a | n/a | n/a | - | yes | - | yes |
-| snapshotting the target so a cutover can be rolled back | yes | yes | yes | - | - | - | - | - | - |
+| capability | pg | mysql | mongo | mssql | redis | kafka | sqlite | parquet | clickhouse | dynamodb | oracle | db2 | ase | opensearch | cassandra | redshift | snowflake | bigquery | kinesis | pubsub | hetero | generic |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| comparing the schema | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | yes |
+| comparing row counts | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | yes |
+| comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | yes |
+| the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | - | yes | yes | - | - | - | n/a | n/a | yes | yes |
+| carrying sequences and auto-increment values | yes | yes | n/a | yes | n/a | n/a | yes | n/a | n/a | n/a | - | - | - | n/a | n/a | - | - | - | n/a | n/a | yes | - |
+| comparing server settings | yes | yes | yes | yes | yes | yes | yes | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| copying table by table, resumably | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | - |
+| keeping the target following the source | yes | yes | yes | yes | yes | yes | n/a | - | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| proving the target has caught up before cutover | yes | yes | yes | yes | yes | yes | n/a | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| telling a difference still arriving from one that is wrong | yes | yes | yes | - | yes | - | n/a | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| verifying only what changed | yes | yes | yes | yes | - | yes | n/a | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| carrying users and their grants | yes | yes | yes | - | yes | - | n/a | n/a | - | n/a | - | - | - | - | - | - | - | - | n/a | n/a | - | - |
+| noticing a move that moved nothing | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | - |
+| refreshing the target's statistics after a load | yes | yes | n/a | yes | n/a | n/a | yes | n/a | n/a | n/a | yes | - | - | n/a | n/a | - | - | - | n/a | n/a | yes | - |
+| snapshotting the target so a cutover can be rolled back | yes | yes | yes | yes | yes | - | yes | - | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
 
 The first hand-made version of this table said MongoDB's change stream was
 "tail only". It is wired into `move --mode cdc`; the probe read it right.
@@ -191,6 +191,111 @@ statistics on every engine, SQLite included. Redis compares its schema: the
 modules loaded on each side, and which kinds of value a sample of keys
 holds. The table above is
 regenerated from `capabilities.matrix()`.
+
+Closed 2026-09-25:
+* MongoDB copies collection by collection, document for document as
+  stored, resumed by `_id` through a comparison that orders across types.
+  A plain `$gt` would have lost every string `_id` after a batch ending
+  on a number.
+* Redis copies a keyspace key for key, in the server's own serialised
+  form with each key's remaining time to live, resumed from the scan's
+  cursor.
+* SQL Server copies table by table through the shared copier, and
+  refreshes the target's statistics.
+* The empty-move guard asks through each side's own reads, so it covers
+  every pair and every engine on the shared copier.
+* A pair compares the two settings two engines share: what the zone names
+  mean, and what the text can hold.
+* Restore points: a pair keeps the target engine's own; SQLite keeps the
+  whole target file through its online backup; Redis keeps the target's
+  key kinds, beside the repair's own undo of every key it replaces.
+* Redis replies are decoded so that every byte comes back as sent. Strict
+  decoding stopped `check` on the first key that was not UTF-8.
+* Kafka copies a topic message for message: each partition's messages go
+  into the same partition on the target, with their keys, values, headers
+  and times. The times are what a group's position is translated by
+  afterwards. The topic is made with the source's partition count and the
+  configs that decide what it means, and only committed messages are
+  read. The copy was stopped after a batch reached the target and before
+  its checkpoint was saved. On resume, that batch was counted off the
+  target's own end and not sent twice: 300 messages arrived as 300, in
+  order, identical
+  (`tests/test_a_topic_copied_message_for_message.py`).
+* A pair verifies only what changed (`delta`), from a source whose log
+  reads without moving (`tests/test_a_pair_verifies_only_what_changed.py`).
+* Redis follows, fences and confirms through its own replication
+  (REPLICAOF). The replica signs in to the source as an account that may
+  only replicate (`+psync +replconf +ping`), with a password drawn for
+  the run; the source's own password never reaches the target. Measured
+  on 7.4 first:
+  * a replica's first sync empties every database of the target before
+    it loads the source's snapshot, and it carries every database and
+    key the source has, with no filter. So a hop that excludes keys, or
+    whose databases leave out keys on either side, is refused, naming
+    the databases. A Redis Cluster is refused too.
+  * a 6.2 target of a 7.4 source cannot read the snapshot (`Can't handle
+    RDB format version 12`): the link stays down, and the target had
+    been emptied already. An older target is refused before anything is
+    set up.
+  * REPLICAOF answers OK when the replica cannot sign in, and says why
+    only in the target's log. The status line waits for the link and,
+    when it stays down, reads the source's record of refused sign-ins
+    (ACL LOG): "the source refused the replica's sign-in".
+  * the fence waits on the replica's offset against the source's, under
+    the source's replication id. The check's confirm pass uses it: with
+    the link held down while the source changed, the check said the
+    difference was still arriving, and a key only the target had was
+    still named once the replica caught up.
+  * `move --mode full+cdc` on a Redis hop is the replica, as a
+    subscription with its copy is PostgreSQL's. A repair beside a
+    replica is refused, since a replica takes no writes but its own.
+  (`tests/test_a_redis_target_that_replicates_the_source.py`)
+* SQL Server keeps a restore point: each identity's current value, which
+  a rollback reseeds with `dbcc checkident`, and the definitions of its
+  views, functions, procedures and triggers. Found on the way: reading
+  rows through the driver had given the engine a second `_q`, which hid
+  the one that runs statements through the client, and every native
+  check of a SQL Server hop stopped on a `TypeError` before asking the
+  server anything. The target was also asked under the source's database
+  name, whatever `db_map` said. Both fixed
+  (`tests/test_sql_server_native_checks_run.py`).
+* SQL Server follows and fences through Change Tracking - the key and
+  last operation of each row changed since a version, read as the row is
+  now. Measured against Azure SQL Edge (SQL Server's engine, in the build
+  that runs on arm64): an insert, an update of it and a delete came back
+  as the inserted row with its new value and a delete, and the tail kept
+  a mapped database level with the fence passing. A table the database
+  does not track, or changes its retention has cleaned up, stop the tail
+  by name (`tests/test_sql_server_follows_through_change_tracking.py`).
+  Every engine read through a DB-API driver - SQL Server, Oracle, Db2,
+  SAP ASE, the warehouses - now applies a change stream: a row updated
+  by its key, and inserted where none was, so a change carrying only
+  some columns keeps the others.
+* The native SQL Server checks, run against a server for the first time,
+  had three faults, all fixed (`tests/test_sql_server_checks_against_a_server.py`):
+  * the client refused the server's own certificate (`x509: negative
+    serial number`, since Go 1.23), so no check ran at all
+  * a statement that failed exited 0, with its message read as rows -
+    and both sides of a comparison can print the same message
+  * a constraint the server named was compared by that name: the same
+    primary key was `PK__o__3213E83F720CC3A2` in one database and
+    `PK__o__3213E83FA19E373F` in the other, one missing and one extra. It
+    is named by its kind, table and columns now
+* Kafka follows and fences: the tail is the topic copier, round after
+  round, going on from the positions the copy saved, so nothing is sent
+  twice; the fence waits on each partition's saved position against the
+  source's end. A transaction leaves a marker at a partition's end that
+  no reader of committed messages is given, and without taking the
+  consumer's own position there the fence waited for an offset that never
+  arrived (measured: 82 against 80 messages). A topic copied to nothing
+  is named after a move
+  (`tests/test_a_kafka_target_that_follows_the_source.py`).
+
+Tests:
+* `tests/test_a_collection_copied_document_for_document.py`
+* `tests/test_a_keyspace_copied_key_for_key.py`
+* `tests/test_a_move_that_moved_nothing_on_any_engine.py`
+* `tests/test_the_settings_two_engines_share.py`
 
 **The deeper version:**
 * **A declared matrix, not a hidden one.** Every engine states, for every
@@ -290,8 +395,18 @@ on the installed builds:
   counted there, and the program still exited 0
   (`test_the_mongo_load_says_what_it_did.py`).
 
-Still open: one vocabulary for rows, bytes, rate and ETA across every
-path. Today the lines are per table.
+*One vocabulary (2026-09-25):* every bulk path's progress line now counts
+against the source's own catalogue, the tables it carries and their
+bytes, with the rate and the time left:
+
+    public.orders: read (3 of 12 tables, 1.2 GB of 4.8 GB (25%), 40.0 MB/s, about 1m30s left)
+
+This covers the PostgreSQL dump and restore, the MySQL dump and load,
+and the MongoDB load. The table copier says rows the same way, with its
+rate taken over the current run's own rows, not rows an earlier run
+carried before a restart. Where the catalogue gives no sizes, the line
+counts tables and guesses nothing
+(`tests/test_one_progress_vocabulary.py`).
 * **Today:** `_sh` logs every command line it runs (`$ pg_dump ...`,
   `$ mydumper ...`), and some paths log a program's own message
   (`pg_restore ignored version-mismatch SET statements`).
@@ -524,6 +639,13 @@ Still open: a key changed *inside* a chunk's window. At this size the
 chunks finish too fast to land a write in one, and the first try at 3,000
 one-row chunks took the sandbox down with it.
 
+*Blocked (2026-09-25), with the reason:* landing a write inside a chunk
+needs a table large enough that one chunk takes seconds, beside the full
+Kafka Connect stack, and on this machine (a 4 GiB VM shared with other
+work) that stack is the one it may not run. The measurement waits for a
+machine with room for it; the code path it would exercise is the one
+measured above.
+
 ## P0: correctness at cutover
 
 **1. Confirm before calling it different.**
@@ -566,8 +688,18 @@ change read and not yet applied reads `ok ... still arriving`, and reads
 `tests/test_cross_engine_confirms_from_mongo.py`).
 
 Still open:
-* SQL Server
-* a fence for replication migkit does not drive itself
+* SQL Server, which has no change stream in migkit yet (0e).
+
+*Replication migkit does not drive (2026-09-25):* the fence already covers
+it wherever the replication shows a position:
+* PostgreSQL waits for every active slot on the database, whoever owns it.
+  That includes a native subscription, a connector, or a managed service's
+  task.
+* MySQL waits on a target that is a native replica, through the server's
+  own `WAIT_FOR_EXECUTED_GTID_SET` (or `MASTER_GTID_WAIT` on MariaDB).
+* A consumer that shows no position on either server falls back to the
+  hop's settle time, and the verdict says it settled on time rather than
+  on a fence.
 
 * **Today:** the PostgreSQL LSN fence re-compares only after the consumers
   have flushed past a captured position, and `watch` names hot tables.
@@ -616,10 +748,14 @@ Two things found while bounding it, both measured:
 
 (`tests/test_the_snapshot_is_held_for_a_bounded_time.py`)
 
-Still open: restarting a table's pass from its last chunk under a fresh
-snapshot instead of ending it. A consistent pass cannot do that without
-giving up the single instant it exists for; the table-by-table pass
-already reads each table on its own.
+*Closed by reasoning (2026-09-25):* restarting a table's pass from its
+last chunk under a fresh snapshot is not a consistent pass any more. Its
+chunks would come from different instants, which is the table-by-table
+pass that already exists. That pass reads each table on its own, is
+resumable, and is confirmed against the stream's position where there is
+one (item 1). The consistent pass keeps its one instant, bounded by
+`snapshot_limit`. When the bound is reached it ends with an error rather
+than a verdict built from two instants.
 * **Today:** `check --consistent` opens one repeatable-read transaction per
   side for the whole pass. On a large table that holds back vacuum
   (PostgreSQL) or purge (InnoDB history list) for as long as the pass takes.
@@ -833,8 +969,27 @@ did a DROP of the excluded table.
 
 (`tests/test_the_native_replica_stays_in_the_hop.py`)
 
-Still open: which kinds of DDL a native replica applies, beyond the scope
-above. It applies every DDL inside the hop's databases, as a replica does.
+*Which schema changes a native replica applies (measured 2026-09-25, 8.4,
+under the plan's own filters):*
+* **Same database name on both sides:** every table, view, routine,
+  trigger and index statement in the hop's database arrived, including
+  one naming its table with the database while another database was in
+  use. A table in another database did not arrive, and neither did an
+  account.
+* **A renamed database:** the replica's rewrite applies to the database
+  in use, not to one a statement names. `alter table cx.t add column d`
+  and `create table cx.t3`, run with another database in use or none,
+  never reached the renamed target. The replica kept running. The next
+  row arrived as `7 1 2`, without the value of the column that never
+  arrived, and nothing reported an error.
+
+So a hop that renames a database is not given a native replica. `move`
+says why and points at migkit's own change tail, which stops on a
+schema change rather than carrying half of it. This is the same rule a
+hop that maps columns already had
+(`tests/test_which_schema_changes_a_native_replica_carries.py`).
+DTS-style allow-lists of DDL kinds are left to the tail, since a native
+replica filters by database and table, never by the kind of statement.
 
 * **Today:** a DDL on the source mid-move is invisible until the next
   schema check.
@@ -883,8 +1038,13 @@ different points.**
     replay what the first applied.
 
   `tests/test_cdc_after_a_separate_copy.py` and
-  `tests/test_full_cdc_misses_nothing.py`. Still open: a native replica
-  for a copy that was not a snapshot at a position (the table copier's).
+  `tests/test_full_cdc_misses_nothing.py`.
+* *Closed by reasoning (2026-09-25):* a native replica after a copy that
+  was not a snapshot at one position (the table copier's) cannot be
+  right. A strict replica stops on the first row the copy already
+  carried (measured above: 1062), and no position makes it right. The
+  tail replays by key from before the copy and converges, and that is
+  what `--mode cdc` gives such a copy.
 
 ## P1: before the move - one assessment that answers every managed service's list
 
@@ -915,9 +1075,18 @@ different points.**
   * `assess` fails either setting with the statement to run.
   * An application session that turns compression on for itself, which
     `assess` cannot see, stops the tail too.
-  * `tests/test_a_compressed_binlog_stops_the_tail.py`.
-  * Still open: reading compressed transactions instead of stopping on
-    them.
+  * *Read, not stopped on (2026-09-25):* MySQL's compressed transaction
+    is now opened by migkit itself (`binlog_payload.py`). The header's
+    fields are read up to the end mark, the payload is decompressed with
+    zstd, and each event inside is handed to the reader's own parser as
+    if it had arrived on its own, with table maps updating its table
+    map. Measured on 8.4: an insert, an update and a delete in a session
+    that turned compression on, and an insert with the server's own
+    setting on, all reached the tail in order with their values, and the
+    delta verified the rows. `assess` passes the setting. MariaDB's
+    compressed row events are another format, and still stop the tail
+    and fail `assess`
+    (`tests/test_a_compressed_binlog_is_read_or_stops_the_tail.py`).
 * **The largest row against the target's `max_allowed_packet` (MySQL):**
   measured on 8.4. An 8 MiB value loaded into a target with a 4 MiB packet
   stopped the copy with `Lost connection` and nothing else. An 8 MiB value
@@ -958,8 +1127,31 @@ names the slots that spilled. The value it gives is the next power of two
 at least the average spilled transaction, and never less than twice the
 current setting (`tests/test_decoding_that_spills_is_named.py`).
 
+*Target storage with the log included (2026-09-25):* the plan's room now
+counts the log the target holds at once while it loads, from the target's
+own answer. Measured on PostgreSQL 16 with `max_wal_size = 64MB`, loading
+a 355 MiB table in one statement:
+* it wrote 411 MiB of WAL, and `pg_wal` peaked at 80 MiB, since
+  checkpoints recycle the rest
+* with one inactive slot on the target, `pg_wal` peaked at 416 MiB: all
+  of it
+
+So a PostgreSQL target is counted at 1.25 × `max_wal_size` plus
+`wal_keep_size`, or at all of the WAL once it has a slot. A MySQL target
+that keeps a binlog holds all of it until `binlog_expire_logs_seconds`
+(30 days by default). The "NOT ENOUGH" warning compares against the
+tables, the indexes and that log together
+(`tests/test_the_room_includes_the_log_the_target_keeps.py`).
+
 Still open: `wal_sender_timeout`, only with a measured reason for a
-value, and target storage with WAL included.
+value.
+
+*Left open on purpose (2026-09-25):* no measurement here has shown a
+value that is wrong for a migration. The default (60 s) ends a sender
+whose receiver has said nothing for that long, and migkit's own tail
+reads through SQL rather than a sender, so it is not one of those
+receivers. A recommendation waits for a failure that shows what the
+value should be, rather than a number copied from a guide.
 
 *Found on the way, and done (2026-09-24):* a MySQL `move --mode full` onto
 a target without the tables stopped at the load on `ERROR 1146 ... doesn't
@@ -1128,6 +1320,14 @@ the tables' rows across costs at it. It prices only the rows, because the
 indexes are built on the target. Without the option, the plan names no
 cost. Still open: the target's free space, which neither engine reports
 over SQL.
+
+*Free space (2026-09-25):* the plan now says what the target has free,
+where the server reports it. MongoDB does (`dbStats`), and the plan says
+`NOT ENOUGH` when the move needs more; measured against `df`, the two
+agreed within a few MB. PostgreSQL and MySQL do not report free space,
+and the plan does not guess it. A MongoDB move's plan had no size line
+at all before; the collections' own statistics now give it one
+(`tests/test_the_plan_says_the_targets_free_space.py`).
 
 Bytes per table are already known. Add the transfer cost for the network
 path the hop uses, the target storage, and the time from the measured
@@ -1359,6 +1559,40 @@ refusal says so when there is none.
 * DVT as the cross-check.
 * Plan 20, PL/SQL conversion with behavioural proof, stays last.
 
+*Written, not yet run against a server (2026-09-25).* Oracle is a side
+of a pair through `python-oracledb` in thin mode, with no Instant Client.
+It sits on the base every engine read through a DB-API driver shares
+(`engines/dbapi.py`, the one SQL Server now uses too). That base covers:
+* reads resumed by key, with the row comparison spelled out
+* writes that delete by key and insert in one transaction
+* digests folded in-process through the shared renderer
+* created tables, and read-only rules
+
+What is Oracle's own:
+* **Names.** A name in capitals is said in small letters, and one in
+  small letters is written in capitals, so `orders` meets `ORDERS`.
+* **Values.** A `CHAR` is compared without its padding. A `NUMBER(p, s)`
+  is read back at its declared scale, since Oracle keeps no trailing
+  zeros (`12.50` is `12.5`), and numbers are fetched as decimals, never
+  as floats. A `DATE` is a timestamp, because it holds a time of day. A
+  time with a zone is left out rather than rendered without its zone.
+* **Carried code.** A PL/SQL function whose body is one `RETURN` is
+  carried across the pair through the translator. Anything longer is
+  named.
+* **Deep check.** Objects a load left invalid on the target, and
+  constraints left disabled or not validated.
+
+Held without a server (`tests/test_oracle_as_one_side_of_a_pair.py`):
+the values the driver hands back digest as PostgreSQL digests the same
+rows in the server, including a padded `CHAR`, a `DATE` with a time and
+a `NUMBER(10,2)` that kept no trailing zero. The name folding, the
+driver's `:1` parameters and the PL/SQL carrying are covered too.
+
+Oracle Free could not be run here. Measured, it filled the container
+VM's disk and took 2.5 GB of its 3.8 GB of memory, and was stopped and
+removed. Ora2Pg and DVT are still to wrap, and the change stream
+(LogMiner) is still to come.
+
 **12. MongoDB to MongoDB with `mongosync` underneath.**
 
 A mover for the only pair where the vendor ships one. MongoDB's
@@ -1366,10 +1600,99 @@ migration-verifier is a cross-check candidate. Measure where it writes its
 metadata before trusting it: it must be neither the source nor the target
 of the migration.
 
+*Done (2026-09-25):* measured with mongosync 1.21 between two MongoDB 7.0
+replica sets. The build is `mongosync-macos-arm-arm64-1.21.0.zip`, signed
+by MongoDB.
+
+
+*Found on the way (2026-09-25):* the sync program sends telemetry to its
+vendor unless told not to, and it wrote its metrics into whatever
+directory it was started from. Measured: a `metrics/` directory appeared
+in the directory the test ran in. It now runs with telemetry off, its
+logs and metrics in the hop's reports, and the reports directory as its
+working directory. The test starts it from an empty directory, and that
+directory stays empty.
+**What it needs, and what it writes.** Started plainly, it refused: it
+wanted a user on the source so that it could turn on write blocking
+there. Started with `preExistingDestinationData` and the hop's database
+as its only namespace, it:
+* asked for no user on the source
+* wrote nothing to the source: no database or collection appeared there
+* kept its own bookkeeping in `__mdb_internal_mongosync` on the target
+* carried 3,000 documents, and an insert and an update made while it ran
+* kept NumberLong and Decimal128 as they were
+* committed
+
+**How migkit runs it.** It is the MongoDB bulk path once installed,
+because it copies online and is consistent as of its commit, which a
+dump of a live source is not. migkit:
+* drops the target's collections in scope first, because it refuses a
+  collection that exists, even an empty one
+* gives it both addresses in a private configuration file
+* lists it while it runs, so a killed move leaves nothing unaccounted for
+* stops it after the commit
+
+It gives way to the dump where the hop or the servers cannot take it:
+* a database mapped to another name
+* a side that is not a replica set
+* a server older than 6.0
+* a server that cannot be asked
+
+`doctor --install` fetches the build from the vendor for macOS and the
+Linux systems the vendor publishes for, and checks its `--version`.
+
+The option reader missed the program's own help shape (`--config value`,
+one space), and found 5 of its 15 options. It now reads that shape, and
+every other program's count stayed the same.
+
+The tests are in `tests/test_mongodb_moves_online_through_the_sync.py`.
+
+*Found on the way:* the MongoDB dump and load were handed `--uri` with
+the password in it. So were the MySQL and generic comparison runs
+(addresses), and the PostgreSQL cross-check (URIs). The guard missed all
+of these, because it looked at the call and not at the variable the
+command line was built in. It now follows variables and helper
+functions. The passwords now go in:
+* a private `--config` file, for the MongoDB programs
+* the comparison run's own file, for the comparisons
+* a password file, for the cross-check
+
+(`tests/test_no_program_is_handed_a_password.py`,
+`tests/test_the_mongodb_path_keeps_its_password_off_the_command_line.py`)
+
 **13. Kafka offsets across a cutover (E2).**
 
 Compare against MirrorMaker 2's checkpoint translation rather than raw
 offsets, which differ by design.
+
+*Done (2026-09-25): offsets translated by the message they point at.* A
+committed offset is the next message a group reads. Where the two logs
+do not line up, the same number is a different message. Such a partition
+used to be named and left alone. Now the message itself is found on the
+target:
+* first by the time it was written (`offsets_for_times`)
+* then by its key and value, scanning at most 1,000 messages forward
+
+The group is compared with, and repaired to, the offset where that
+message is. A group at the end of the source's log goes after the
+source's last message. Where the message is one of several the same, the
+first is taken, so a consumer reads one message again rather than
+skipping one. Where the message is not on the target at all, the
+partition is still named and left alone.
+
+MirrorMaker 2 translates through its own offset-sync records and only at
+the intervals it writes them. This asks the two logs themselves, so it
+works for any copy that kept the messages' times: MirrorMaker, a
+connector, or migkit's own.
+
+Measured with two clusters:
+* the target's partition began with seven messages the source never had,
+  then the source's twenty
+* a group at 12 on the source was found at 19 on the target, set there,
+  and read `message 12` first
+* a group whose next message only the source had was refused
+
+(`tests/test_kafka_offsets.py`)
 
 ## P2: the plan items still open
 
@@ -1377,11 +1700,26 @@ offsets, which differ by design.
 * **10:** documents the table only points at
 * **12:** LOBs, correctness then speed
 * **13:** a cutover runbook migkit drives - freeze, delta, verify,
-  sequences, flip. Items 1-5 above are its parts.
+  sequences, flip. Items 1-5 above are its parts. *Written (2026-09-25):*
+  `docs/cutover.md`, the order of the commands that exist, each with the
+  check that has to pass before the next and what to do when it does not.
+  Driving it as one command waits on the rule against new CLI modes.
 * **14:** a migkit-owned mover, only with the benchmark of item 1
-* **18:** continuous verification that costs what changed (delta exists for
-  PostgreSQL, MySQL and MongoDB; generalise the cursor contract)
-* **19:** bisection diffing across engines on the canonical rendering
+* ~~**18:** continuous verification that costs what changed~~ done for
+  pairs (2026-09-25): a pair whose source log reads without moving
+  (MySQL, MongoDB) verifies only the rows the log names, asking both
+  sides for those keys and comparing them in the one rendering. The
+  position moves only on a clean pass. A source read through the tail's
+  slot says so (`tests/test_a_pair_verifies_only_what_changed.py`)
+* ~~**19:** bisection diffing across engines on the canonical rendering~~
+  done (2026-09-25): a table past the walk's 20,000-row cap, keyed by one
+  integer, is digested in halves of its key range on both engines, and
+  only the halves that disagree are followed down to ranges small enough
+  to walk. A text range would depend on each engine's collation, so it is
+  left to the walk. Measured, MySQL against PostgreSQL at 60,000 rows: a
+  changed, a missing and an extra row past the walk's reach were all
+  named, where the walk alone had stopped at 20,000 and said there might
+  be more (`tests/test_a_large_table_is_bisected_across_engines.py`)
 * **20:** PL/SQL with behavioural proof
 
 ## P2: *Partly* in the problems file, still to close
@@ -1398,7 +1736,7 @@ offsets, which differ by design.
 * **D11** documents outside the table
 * **E4** change streams vs oplog
 * **F1** dual writes
-* **F4** poolers (*Not yet*)
+* ~~**F4** poolers~~ done (2026-09-25): named in `assess`, and a refused connection setting said as the pooler's
 * ~~**G2** masking what the drilldown shows~~ done (2026-09-25): hop option `mask`
 
 ## P3: carried over from the work loop
@@ -1480,8 +1818,19 @@ check then says, of the rows only the target has:
 * that it cannot tell, where no move of migkit's marked the target and it
   keeps no timestamps
 
-(`tests/test_who_wrote_the_rows_only_the_target_has.py`). Still open:
-MySQL, from the binlog where it still covers the window.
+(`tests/test_who_wrote_the_rows_only_the_target_has.py`).
+
+*MySQL (2026-09-25):* a move records where the target's binlog was as it
+began. For the rows only the target has, the data check reads the
+target's own binlog from that point:
+* a row written since is there, with the server that wrote it: this
+  server's own sessions, or another server arriving through a replica
+* a row that is not there was held before the move began, so the target
+  was not emptied of it
+* where the log from that point is gone, it says it cannot tell
+
+Measured: one row left from before and two written after, each named as
+such. The test is `tests/test_who_wrote_the_rows_only_the_mysql_target_has.py`.
 
 **16. The side scripts in `tools/` become migkit, or go.**
 
@@ -1596,9 +1945,24 @@ table are compared this way, and a table the pair builds keeps those types
 as the source wrote them
 (`tests/test_same_engine_types_with_no_shared_rendering.py`).
 
-Still open: across engines, `interval`, `hstore` and `tsvector` have no
-counterpart on the other engines migkit pairs PostgreSQL with. They stay
-out of the comparison, and the footnote says so.
+*Across engines (2026-09-25):* `hstore` and `tsvector` are carried and
+compared now:
+* **`tsvector` and `tsquery` are compared as text.** A text search vector
+  prints its lexemes sorted and once each, so its text is the value
+  itself.
+* **`hstore` is compared as JSON.** A key/value set is a JSON object of
+  strings: the extension casts it to jsonb, and MySQL keeps it as JSON.
+  It is read as a mapping now; it came back as its text (`"a"=>"1"`),
+  which is not JSON at all on the other side.
+
+Measured PostgreSQL to MySQL: a table carrying both was built (hstore as
+JSON, tsvector as text), moved and checked equal. A changed key/value set
+and a changed text search vector each read as a difference
+(`tests/test_hstore_and_tsvector_across_engines.py`).
+
+`interval` still has no counterpart. MySQL has no type that holds months
+and seconds apart, and the driver turns a month into thirty days on the
+way. It stays out of the comparison, and the footnote says so.
 
 **20. The PostgreSQL-only helpers, ported where the idea exists elsewhere.**
 
@@ -1650,8 +2014,60 @@ change, TRUNCATE included, and a marker that does not is a false negative.
 **23. The time zone the data actually uses.** Compare it with the time zone
 each server declares.
 
+*Done (2026-09-25):* a new deep check, `time zone in use`, on PostgreSQL
+and MySQL (`migkit/zones.py`).
+
+The problem: a column with no zone of its own holds whatever wall-clock
+time the application wrote. An application writing Bangkok time into a
+server set to UTC is harmless until the move. Then a target column that
+has a zone, or a target server in another zone, shifts every value by
+seven hours. A count and a checksum over the same text do not see it.
+
+The evidence used is the one kind that does not guess. A column whose
+latest value is in the future of the server's UTC clock is written in a
+zone at least that far ahead, and the check names the column and the
+zone. A latest value in the past proves nothing, and is not read as a
+zone. Only columns an index leads are read, so each costs one probe and
+never a scan.
+
+Measured with values seven hours ahead on a UTC server: both engines
+said "at least UTC+6:30", and a column with no index was not read
+(`tests/test_the_time_zone_the_data_is_written_in.py`).
+
 **24. G1: a target that is correct and slow.** Close what
 `problems-and-what-ends-them.md` G1 leaves open.
+
+*Done (2026-09-25), decided from what the others do.* DMS and DTS do not
+look at this at all. The tools that do, Oracle's SQL Performance Analyzer
+and Microsoft's Database Experimentation Assistant, take the source's
+real statements, run them on both sides, and compare plans and times.
+migkit now does the same for reads (`migkit/workload.py`, in the deep
+checks):
+* **Which statements.** The source's busiest reads by total time, from
+  its own statement statistics: `pg_stat_statements` on PostgreSQL, the
+  `performance_schema` digests on MySQL. migkit's own statements are left
+  out: on PostgreSQL by user, on MySQL by what its checks contain.
+* **Plans.** Each read is planned on both sides. PostgreSQL uses a
+  generic plan where parameters remain. A table the target reads whole
+  and the source does not is a finding, whatever the timing says.
+
+  Measured on MySQL: `max(k)` over an indexed column is answered before
+  execution, and its plan names no table. That counts too.
+* **Times.** A read that can run as it is, is run on both sides:
+  read-only, under a time limit, once to warm each side, then alternated.
+  It is slower only when its median is more than twice the source's and
+  more than 20 ms beyond it.
+* **Where it stands.** A finding is `warn` and never `diff`, because the
+  data is the same. It does not stop `check` unless the hop says
+  `performance: gate`.
+* **What it shows.** Only the normalised statement, never a sample's
+  literal values.
+
+With an index dropped on the target, both engines named it: "reads t
+whole on the target where the source uses index t_k". With the index in
+place, both said the target answers as well. The tests are in
+`tests/test_the_target_answers_the_sources_reads.py` and
+`tests/test_the_target_answers_the_sources_reads_mysql.py`.
 
 **25. Long reads over unstable links.** Sustained MongoDB cursors stalled
 over a tunnel; single-command reads did not. Read in bounded chunks that
@@ -1683,9 +2099,26 @@ wrapped:
 
 The question is mechanism, not features.
 
+*Read (2026-09-25):* `docs/research-other-tools.md` covers HVR, Qlik
+Replicate, Striim, Airbyte, Bytebase and Trino, from each vendor's own
+documentation, and says what migkit took from each:
+* Qlik's batch optimized apply is the model backlog 29 followed
+* Striim's interval validation, and Bytebase's schema snapshot at each
+  change, are ideas to take next
+
+HVR, Qlik, Striim and Bytebase are learned from and not wrapped. They
+are commercial or bring a platform of their own. Trino is a candidate
+second reader, to measure first. sqlpipe and schemachange are not read
+yet.
+
 **27. SQL Server depth.** Closed as untestable on this arm64 machine. Either
 find an x86 runner, or list it plainly in section H of
 `problems-and-what-ends-them.md` as a limit.
+
+*2026-09-25:* SQL Server is now a side of a pair (item 39): tables,
+keys, reads, writes, digests, views and functions. It sits on the
+driver base it shares with Oracle and Db2. Every line of it is held
+without a server. It still waits for an x86 runner to be run for real.
 
 ---
 
@@ -1730,6 +2163,12 @@ It writes the numbers with the hardware and versions to
 `reports/bench/`, and `docs/scale.md` has the first run. Still open: the
 10k and 50k tx/s rates, which this laptop VM cannot produce, and the
 recipe for the managed services.
+
+*Blocked (2026-09-25), with the reason:* 10k and 50k transactions a
+second need a source and a target on hardware that can sustain them, and
+this machine's 2-CPU VM tops out far below. `migkit bench --cdc-rate`
+takes the rate as it is; the run waits for that hardware, and its
+numbers go into `docs/scale.md` with the machine they came from.
 
 **29. Change apply that keeps up at very high write rates.**
 
@@ -1866,6 +2305,60 @@ HA, resume on another machine, a scheduler, a UI and roles:
   this inside existing verbs and hop options, and say so where it is not
   possible.
 
+*First step (2026-09-25): the write lock is a lease.* It was a file
+holding a process number. Only a process on the same machine could ask
+whether that number still ran, and a holder that died left the file
+saying it did. Now:
+* the holder renews a lease while it runs, every third of its term
+  (`MIGKIT_LEASE_SECONDS`, 60 by default)
+* a lease not renewed for its whole term is taken over, with a line
+  naming the holder that let it lapse
+* a holder on the same machine whose process is gone is taken over at
+  once
+* a holder that was taken over stops renewing, and does not remove the
+  new holder's lease when it finishes
+* reads and writes of the lease are made under an exclusive lock, so two
+  processes deciding at once cannot both win
+
+The tests are in `tests/test_a_hops_write_lease.py`.
+
+*Second step (2026-09-25): the run's state in the bucket.* With the s3
+state backend (`options.state.backend: s3`), a run keeps its state under
+`<prefix><hop>/run/`, beside the restore points:
+* **The lease.** It is written only over the version that was read, using
+  the bucket's own conditional write (`If-Match`, or `If-None-Match: *`
+  for the first). A write that loses reads again and decides again.
+  Measured against an S3-compatible server in a container: of eight
+  processes asking at once, one held the lease. A holder that stopped
+  renewing was taken over after its term, and could not remove the new
+  holder's lease when it came back.
+* **Checkpoints.** A move's checkpoint is saved there after every chunk,
+  and read from there by a machine that has none of its own. A second
+  machine's dry run of a move the first had finished said it was already
+  done.
+* **The change position.** The tail's position, and the column shape it
+  applies under, are pushed as they change, every two seconds at most. A
+  position a few seconds old is safe to resume from, because the tail
+  applies by key and converges on what it replays.
+* **The copy record.** A later `--mode cdc` starts from it, on whichever
+  machine runs it.
+
+Run state is sealed like a restore point where `MIGKIT_STATE_KEY` is set,
+since a checkpoint names the last key copied. The key is derived once per
+process, not once per chunk. The lease is not sealed, because it holds
+no data.
+
+*Found on the way:* the dry run of a move looked its checkpoint up as
+`schema.table`. Every copier but PostgreSQL's writes `database.table`,
+and Redis writes `db<n>`. So on every other engine a finished or
+half-done copy read as `todo`. Each engine now names the entry in one
+place (`move_key`), and the copier and the plan both use it. A copy
+resumed by a text key is said as `resume after [...]`, where formatting
+it as a number would have stopped the plan.
+
+The tests are in `tests/test_another_machine_takes_the_run_over.py` and
+`tests/test_the_plan_reads_the_checkpoint_the_copier_writes.py`.
+
 **31. Scale-out across machines.**
 
 A coordinator hands out tables and chunks from a queue in the shared
@@ -1873,6 +2366,37 @@ store (item 30), and workers lease them. This is DMS Serverless and a
 Striim cluster done the open way. The throttle already scales work
 *down* when the source strains; add scaling *up* when the source has
 headroom.
+
+*Done for tables (2026-09-25):* a hop with `share_tables: true` and the s3
+state backend can run the same `move --mode full --go` on several
+machines at once. There is no coordinator: the bucket is the queue.
+* The machine that arrives first sets up under the hop's lease: it
+  creates what the target lacks and records the change position from
+  before any copying. Every later machine uses that position.
+* Then each table is taken by whichever machine gets its lease, a lease
+  per table in the bucket. It is copied under its own load window, and
+  the machine moves on.
+* The checkpoint is merged into the bucket with conditional writes, so
+  machines saving at once keep each other's tables.
+* A table whose lease is held is asked for again. So a table whose
+  machine died is taken over once its lease lapses, from that machine's
+  last saved chunk.
+* When every table is done, one machine completes the move: indexes,
+  statistics, the copy record. The others say that another machine is
+  completing it.
+
+Measured with two processes, each with its own report directory, against
+an S3-compatible server in a container:
+* six tables were each copied once, split between the two machines, and
+  every row arrived
+* one machine killed partway through a 20,000-row table was taken over:
+  the next machine carried on from the saved chunk, emptied nothing, and
+  finished with every row once
+
+The tests are in `tests/test_another_machine_takes_the_run_over.py`.
+Still open: chunks of one table across machines, and scaling up within a
+machine when the source has headroom. Meanwhile, adding machines is the
+way to scale up.
 
 **32. Alerts, not only metrics.**
 
@@ -1958,10 +2482,28 @@ Done so far (problems file E7, `test_full_cdc_misses_nothing.py`):
 * a count-only tail followed by one that applies
 * a collection dropped under a running tail
 * the replication slot dropped and the binlog purged under a saved
-  position (`test_a_lost_position_stops_the_tail.py`). Still open: the
-  MongoDB resume point expiring. It needs about a gigabyte of oplog to
-  measure, and a token from a rebuilt replica set was accepted without a
-  word.
+  position (`test_a_lost_position_stops_the_tail.py`)
+* **A position from another source, and MongoDB's resume point expiring
+  (2026-09-25).** A saved position belongs to one server's log. After a
+  failover to a server with a log of its own, or with the source rebuilt
+  under the same address, a MySQL file and offset point into a different
+  binlog. A MongoDB token from a rebuilt set had been accepted without a
+  word. Now:
+  * the source's identity is saved beside the position when it is first
+    saved: MySQL's server id, PostgreSQL's system identifier (which a
+    physical replica shares with its primary), and MongoDB's replica set
+    name and id
+  * every resume compares it. A different source stops the tail before
+    it applies anything, and says which source the position belonged to
+  * MongoDB is also asked, before the stream opens, whether its oplog
+    still reaches back to the position, and whether the position is later
+    than the set's own clock, which means it was taken on another set
+
+  Measured by rebuilding each source under the same address: MySQL,
+  PostgreSQL, and MongoDB with the same set name. A token moved behind
+  the oplog's start was named as gone, and one moved past the set's clock
+  as another set's. The tail stopped before opening the stream
+  (`tests/test_a_position_from_another_source_stops_the_tail.py`).
 * **migkit killed mid-load (2026-09-25).** This was measured with real
   moves, and the programs migkit started outlived it.
   * *MySQL, 1,500,000 rows.* The load went on without migkit: 375,000
@@ -2052,6 +2594,40 @@ Item 28 measures speed. What is left here:
 * memory staying flat as tables grow (every read streamed, never a whole
   table in memory)
 
+*Memory, measured (2026-09-25):* migkit's own peak memory (`/usr/bin/time
+-l`) on moves and checks of the same table at 200,000 and 1,600,000 rows.
+
+| path | 200,000 rows | 1,600,000 rows |
+|---|---|---|
+| PostgreSQL to PostgreSQL, move (table copier) | 36 MB | 35 MB |
+| PostgreSQL to PostgreSQL, check | 327 MB | 338 MB |
+| MySQL to PostgreSQL, table keyed by text, before | 220 MB | **1,334 MB** |
+| the same, now | 99 MB | 99 MB |
+| MySQL to PostgreSQL, table with no key, now | 89 MB | 88 MB |
+| MySQL to PostgreSQL, check | 46 MB | 44 MB |
+
+The cross-engine copier held the table in three ways:
+* a table without a single integer key went down a path that read it
+  into one list
+* a table with no key was read by `neutral_read` in one piece
+* a keyed read took `--chunk` rows at a time (500,000), whatever the rows
+  weighed
+
+Now a keyless table is read through a cursor the server keeps
+(`neutral_batches`: PostgreSQL, MySQL, SQLite). Each read is capped at
+50,000 rows, and at 64 MB going by the table's own bytes per row. Each
+read is still a resumable step. The copy took 22.8 seconds against 23.0
+before. The tests are in `tests/test_a_copy_holds_a_read_not_a_table.py`.
+
+*The terabyte recipe (2026-09-25):* `docs/scale.md` now carries the
+recipe for the run on rented machines: the size in rows (about 3.6
+billion `bench_rows` to a terabyte), the machines and volumes, the steps,
+what to write down (including the cost, from each machine's hours and
+price), and what counts as a pass. The pass is a `same` verdict with
+peak memory flat from ten million rows. The run itself waits on the
+owner renting the machines, since this laptop's container VM has a
+20 GiB disk.
+
 **46. Wrapped programs stay wrapped when they change.**
 
 *Started (2026-09-24):* `tests/test_wrapped_flags_exist.py` reads the
@@ -2097,7 +2673,16 @@ upgraded under a long-running process (`sync --serve`) was still read
 as the old build. It is now keyed on the file and its modification time.
 
 The tests are in `tests/test_the_installed_build_takes_the_options.py`.
-The CI matrix of versions is still to do.
+
+*The matrix (2026-09-25):* `.github/workflows/wrapped-programs.yml` runs
+both checks against each program's versions, weekly and on any change to
+the bulk paths:
+* PostgreSQL client 14 to 18, from the project's own repository
+* the MySQL dump and load 0.21.4, 1.0.5 and 1.0.8
+* the MongoDB tools 100.9.4, 100.12.0 and 100.16.1
+
+Each download address was checked to exist. The workflow runs on GitHub
+and has not run yet.
 
 ### P2: reach the paid tools have and migkit does not
 
@@ -2109,6 +2694,90 @@ The CI matrix of versions is still to do.
 
 Measure a wrap candidate before writing a loader, the rule as always.
 
+*ClickHouse, done (2026-09-25):* an engine of its own, on either side of a
+pair (`source_engine`/`target_engine: clickhouse`). It reads through the
+HTTP driver and compares through the in-process renderer.
+* **Created tables.** A table migkit creates is a MergeTree ordered by
+  the source's key, with the columns outside the key nullable.
+* **No doubled rows on a restart.** A MergeTree keeps a second row with
+  the same key, so a batch written again after a restart deletes its keys
+  first. Measured: 1,600 rows written again left 3,001 rows, 3,001 of
+  them distinct, where the plain insert would have left 4,601.
+* **Strings and bytes.** `String` columns are read as bytes, and decoded
+  only where the column is text. Beside a column the other side declares
+  bytes, a `String` is compared as bytes. Rendered as text, it had
+  stopped the comparison on the first value that was not UTF-8.
+* **Time zones.** A time with no zone is handed to the server as a
+  wall-clock reading in the server's own zone. Measured from a machine at
+  UTC+7: the driver had stored `2024-02-29 00:05` as `2024-02-28 17:05`,
+  and every row read as different. Checked again against a server set to
+  Tokyo, where the value round-tripped unchanged.
+* **Deep check.** Mutations still being applied (the deletes of a
+  restart) are named, since rows read before they finish are not settled.
+
+A table ClickHouse made itself also moves into PostgreSQL: unsigned keys,
+low-cardinality strings, a nullable decimal, millisecond times
+(`tests/test_clickhouse_as_a_side_of_a_pair.py`).
+
+*Kinesis, done (2026-09-25):* a pair with `target_engine: kinesis`
+delivers its changes into Kinesis Data Streams. The messages are Kafka's,
+built by the one module both use now (`streamout.py`), under the same
+hop options.
+* **Missing streams.** One the target does not have stops the delivery,
+  unless the hop says `create_streams: true`, since a stream costs money
+  for as long as it exists.
+* **Order.** A key's records go to one shard. Kinesis can keep some
+  records of a batch and refuse others, which would put a key's later
+  change ahead of a refused earlier one. So a batch holds each key once,
+  and a refused record goes again before its key's next change. Measured
+  against a local stand-in: with key `b`'s record refused and the others
+  kept, both keys' changes arrived in order and none twice. Resending
+  from the first refused record, the obvious way, had doubled key `a`'s
+  last two changes.
+
+(`tests/test_changes_delivered_to_kinesis.py`)
+
+*Pub/Sub, done (2026-09-25):* `target_engine: pubsub`, the same messages
+from the same module. The target's `project` option names the project;
+`host`/`port` an emulator. Each message carries its row's key as its
+ordering key, and the publisher keeps order by it.
+* **A topic nobody reads.** Measured on the emulator: a message published
+  to a topic with no subscription is accepted - the publish returns its
+  id - and a subscription made afterwards receives nothing. So a topic
+  without a subscription stops the delivery before anything is sent, as
+  a missing topic does. migkit makes neither: what reads them is not
+  migkit's to decide.
+* **A failed publish.** The client holds the key's later messages back;
+  the delivery stops, frees the key, and the tail goes on from its last
+  saved position when started again.
+(`tests/test_changes_delivered_to_pubsub.py`)
+
+*Event Hubs, done (2026-09-25) through its Kafka endpoint:* a Kafka hop
+whose endpoint says `security_protocol: SASL_SSL`, `sasl_mechanism:
+PLAIN`, the user `$ConnectionString` and the connection string as the
+password. Every client migkit makes for a side is given the side's
+sign-in (`tests/test_a_kafka_cluster_that_asks_for_a_password.py`,
+against a broker that requires SCRAM; Event Hubs itself needs an Azure
+account). A wrong password is said as a refused sign-in, where the
+client alone said only that it could not reach the cluster. Amazon MSK's
+IAM sign-in is not one of the mechanisms yet.
+
+*Redshift, Snowflake and BigQuery, support written (2026-09-25),
+untested:* each is a side of a pair (`target_engine: redshift` and so
+on), reading its tables, columns and keys from its own
+`information_schema` (Snowflake's keys from `show primary keys`), rows
+through its DB-API driver, compared through the in-process renderer. A
+table migkit creates keeps `not null` and the key, and nothing else of
+the source's column rules; BigQuery's key is `not enforced`. Rows go in
+as every DB-API engine writes them, except into BigQuery, which is given
+a load job after the batch's keys are deleted - one insert statement per
+row is a job each there. What is pinned without an account: the tables
+each would create, how a page is read, how Snowflake's catalogue is read
+back, and the rows BigQuery's load job is given
+(`tests/test_warehouses_as_a_side_of_a_pair.py`). Still to come: loading
+from staged Parquet through each warehouse's own bulk command, and a run
+against real accounts.
+
 **34. More engines to move, not only to verify.**
 * **Sources DMS takes that migkit cannot:** Db2, SAP ASE, SQL Server at
   full depth.
@@ -2118,6 +2787,118 @@ Measure a wrap candidate before writing a loader, the rule as always.
 Order by what a real migration asks for. Every one arrives with its
 verification, or it does not arrive.
 
+*Parquet, done (2026-09-25):* files on a disk or under an S3 prefix, on
+either side of a pair (`target_engine: parquet`, with the endpoint's
+`path`, or `url: s3://bucket/prefix` plus `endpoint_url` for
+S3-compatible storage).
+* **Layout.** A database is a directory, and a table is its part files
+  plus `_table.json`, which says what the columns are and which of them
+  key the table. Files keep neither.
+* **Types.** Values are Arrow types: `decimal128(p, s)`,
+  `timestamp[us]`, `date32`. A decimal whose source declared no
+  precision is kept as its text, since no fixed scale reproduces what an
+  unconstrained numeric holds.
+* **Restarts.** A keyed table names each part by the keys it holds, so a
+  batch written again after a restart replaces itself.
+* **As a source.** A Parquet table is read in one pass, a batch at a
+  time, since files keep no order to resume by.
+* **Deep check.** Every part file must open and hold the rows its footer
+  says. A part cut off halfway is named.
+
+Measured on a disk and in an S3-compatible bucket: a removed part is a
+difference, and a truncated one is a deep finding. The files moved back
+into PostgreSQL with every row
+(`tests/test_parquet_files_as_a_side_of_a_pair.py`).
+
+*Db2, written, not yet run against a server (2026-09-25):* on the same
+driver base as Oracle and SQL Server, through `ibm_db`. A hop's database
+is a schema; the endpoint's `database` option is the database to connect
+to.
+* It shares Oracle's name folding and its padding and scale handling.
+* A character column with no code page (`FOR BIT DATA`) is bytes.
+* The deep check names tables a load left in check-pending.
+
+Held without a server, because IBM's image runs on x86 only
+(`tests/test_db2_as_one_side_of_a_pair.py`).
+
+*SAP ASE, support written (2026-09-25), untested:* a side of a pair
+(`ase`, with `sybase` and `sap-ase` as other names for it), reached
+through FreeTDS's ODBC driver at protocol 5.0 - the TDS driver that
+installs with pip stops at SQL Server's 7.x (measured, `unrecognized tds
+version: 5.0`). Tables, columns and the primary key come from ASE's own
+catalogue; rows are compared through the in-process renderer. SAP's image
+runs on x86 only, so what is pinned is how the connection is asked for,
+how names, parameters and pages are written, how its types are classed,
+and the table it would create (`tests/test_sap_ase_as_one_side_of_a_pair.py`).
+Where ODBC cannot load (measured: the module installs, then misses
+`libodbc.2.dylib`), it says what to install.
+
+*Cassandra and ScyllaDB, done (2026-09-25):* on either side of a pair
+(`cassandra`, with `scylladb` as another name for it). A database is a
+keyspace.
+* **Keyspaces.** A keyspace is created only with the replication the
+  target endpoint names (`replication`), since how many copies it keeps
+  is the operator's decision. The deep check warns while a keyspace
+  keeps fewer than three copies.
+* **Keys.** A table migkit creates takes all of the source's key columns
+  together as its partition key. No clustering order is invented. A
+  table with no key is refused.
+* **Writes.** An insert replaces a row with the same key: 901 rows after
+  a replay, not 1,802. A null is left unset rather than written, so no
+  tombstone is made.
+* **Reads.** Rows come back in token order, so a table is read in one
+  pass, a page at a time, and looked up by key concurrently.
+* **Timestamps.** A `timestamp` holds milliseconds. A source value with
+  microseconds arrives without them, and the check reports a
+  difference, because the target does hold less.
+
+(`tests/test_cassandra_as_a_side_of_a_pair.py`)
+
+*OpenSearch and Elasticsearch, done (2026-09-25):* on either side of a
+pair (`opensearch`, with `elasticsearch` as another name for it). A
+database is a prefix on index names, and a table is an index.
+* **Ids.** A document's id is the canonical text of the row's key. A
+  batch written again replaced itself: 1,201 documents after a replay,
+  not 2,401.
+* **Values.** What each column was is kept in the mapping's own `_meta`.
+  A decimal goes into `_source` as its text, and it came back as
+  `1234.5000` and `1234567890123456.7890`: a JSON number would have lost
+  the scale of the first and the digits of the second.
+* **Reads.** An index is read in one pass through a scroll, and looked up
+  by key through `_mget`. The target is refreshed before migkit reads
+  it; the source never is.
+* **Indexes migkit did not make** are read by their mapping, each field
+  by the class it holds, and keyed by `_id`. An object field stays
+  unmapped.
+* **Deep check.** A red index is named, since a check reading it is not
+  reading everything.
+
+(`tests/test_opensearch_as_a_side_of_a_pair.py`)
+
+*DynamoDB, done (2026-09-25):* on either side of a pair
+(`target_engine: dynamodb`, with `endpoint_url` and `region`; a database
+is a prefix on table names, `<db>.` by default).
+* **Types it does not keep.** DynamoDB keeps a number without the scale
+  it was written with: `1.50` came back from the service as `1.5`. It has
+  no time type either. So a table migkit creates carries each column's
+  class in its tags, and values are read back as that class: a decimal
+  at its scale, a time as a time. Where an endpoint takes no tags
+  (DynamoDB Local), the description is kept on this machine by endpoint,
+  where any hop reading that endpoint finds it.
+* **Keys.** A composite key becomes the partition and sort keys. A table
+  keyed by three columns, or by none, has no DynamoDB table to go to, and
+  is refused by name.
+* **Writes and reads.** Items are written by key, so a batch written
+  again lands on itself. A table is read in one pass, since items come
+  back in no order. Rows are looked up by key through batch reads.
+* **Deep check.** Tables that are not active are named, and so is a
+  target table without point-in-time recovery, which leaves a cutover
+  nothing to go back to.
+
+Measured against DynamoDB Local: PostgreSQL in and back out with every
+value as it was. A changed item was a difference, and a replayed batch
+left 701 items, not 1,402 (`tests/test_dynamodb_as_a_side_of_a_pair.py`).
+
 **35. Change-stream delivery in the formats consumers expect.**
 
 DTS offers five. migkit should offer:
@@ -2125,6 +2906,25 @@ DTS offers five. migkit should offer:
   registry (Redpanda ships one)
 * topic and partition rules by table, key or column
 * skipping oversize messages, with a count of what was skipped
+
+*Done for Kafka (2026-09-25):* a hop with `engine: hetero` and
+`target_engine: kafka` carries the change tail into topics.
+* **Formats:** `format` is `json`, `debezium` (the envelope: before,
+  after, source, op) or `canal` (data, type, pkNames).
+* **Routing:** `topic` is a template, `{db}.{table}` by default.
+  `partition_by` names a column. By default the partition comes from the
+  row's key, so each key's changes stay in order.
+* **Every change is sent, in the source's order.** Changes are not
+  collapsed to the row's last state the way table writes are.
+* **Oversize messages:** a message larger than `max_message_bytes` is
+  skipped, and counted by topic in `stream-skipped.json`.
+
+Found while building it: the tail paired each table with an existing
+topic by its last name. A second stream's changes for `o` went to
+`rule(a.o)`, a topic nobody read. A stream's destination is now named by
+its rule alone. The tests run against Redpanda
+(`tests/test_changes_delivered_to_kafka.py`). Still open: Avro and a
+schema registry.
 
 **36. Sync in both directions, and other topologies.**
 
@@ -2139,12 +2939,42 @@ one-to-many:
 
 SymmetricDS and GoldenGate are the references for the mechanism.
 
+*Done for PostgreSQL's own replication (2026-09-25):* these streams write
+to the source, so they are off unless the hop's options say so.
+`topology: two_way` runs a stream each way. Each subscription is created
+with `origin = none`, so it takes only what the other side's own sessions
+wrote, and nothing goes round.
+
+Measured with an insert on each side: both rows arrived on both sides,
+each side held two rows, and `apply_error_count` stayed 0 on both (an
+echo would have been a second insert of the same key). Tearing down with
+`--drop` removes both streams. Two-way is refused before PostgreSQL 16 on
+either side, because that is where a subscription can first tell the
+two apart.
+
+A conflict stops the stream that meets it, and the stream's status says
+so. Resolving conflicts by policy needs migkit's own tail and is still
+open, as are MySQL two-way and more than two nodes
+(`tests/test_streams_back_and_both_ways.py`).
+
 **37. Rollback that loses nothing: live reverse replication.**
 
 At cutover, start a stream from the new target back to the old source,
 positioned at the same fence. If the cutover is abandoned, the old side
 has every write made since. Verify both directions while it runs. This is
 the GoldenGate and Striim failback, with migkit's checks on it.
+
+*Done for PostgreSQL's own replication (2026-09-25):* `reverse:
+at_cutover` makes tearing the stream down (`move --mode cdc --drop --go`)
+also start a stream back, from the new primary to the old source, from
+that moment. The application's roles are given back the target only once
+that stream runs.
+
+Measured: a row written on the new primary after cutover reached the old
+source, and a row written on the old source no longer went forward.
+Without the option, nothing is created on the source. MySQL takes the
+same path (a replica on the old source) and is still to be measured
+(`tests/test_streams_back_and_both_ways.py`).
 
 **38. Accounts and clouds without long-lived passwords.**
 * **Passwordless sign-in to managed databases:** assume-role and workload
@@ -2153,6 +2983,30 @@ the GoldenGate and Striim failback, with migkit's checks on it.
   Vault next to the existing Vault
 * **Cross-account access:** the cross-account role pattern DTS uses,
   done with each cloud's own mechanism
+
+*Done, checked offline (2026-09-25):*
+* **Sign in without a password.** `auth: aws_iam` on an endpoint signs
+  in to RDS and Aurora with a token the cloud signs. A token opens
+  connections for 15 minutes, so migkit signs a new one once the old one
+  is 10 minutes old, and a long run does not start failing halfway.
+  `aws_role_arn` signs as a role in another account, assumed for each
+  token.
+* **Secrets from each cloud's store**, read at load time:
+  * `aws-sm:<id>[#field]`: AWS Secrets Manager, taking the region from
+    the ARN, and a field from a JSON secret such as the ones RDS keeps
+  * `gcp-sm:projects/<p>/secrets/<s>`: Google Secret Manager
+  * `azure-kv:https://<vault>.vault.azure.net/secrets/<name>`: Azure Key
+    Vault
+
+  Each of these is beside Vault, `env:` and `file:`.
+
+The tests reach no cloud. The token is signed on this machine from
+stand-in credentials, and it names the host, the user, the action and
+the role's key. The secret store and the role answer through the SDK's
+own stub (`tests/test_cloud_sign_in_and_secrets.py`).
+
+Still to do against the real services: a sign-in to RDS with a token,
+Cloud SQL IAM, and managed identities.
 
 **39. Converting schema and code between engines, wider.**
 
@@ -2164,12 +3018,66 @@ Use sqlglot where SQL is enough. Every converted object stays behind
 migkit's behavioural proof (plan 20): same inputs, same outputs, on both
 sides.
 
+*Done (2026-09-25):* `schema --convert` now carries views and functions
+whose body is one expression, between MySQL, PostgreSQL and SQL Server,
+in any direction:
+* Views are created after the views they read.
+* A qualifier naming the source's own database, or a schema holding
+  something the move carries, is dropped. Any other qualifier stays, and
+  fails on the target rather than pointing at a table of the same name.
+* A body of statements, a procedure, or a type with no counterpart is
+  written as a comment naming it and saying why. `--apply` leaves any
+  object the target already has alone, and lists any it could not
+  create.
+
+The proof is in the hetero deep check, `converted code`:
+* A view is compared by the digest of its rows.
+* A function is compared by its answers, in one read-only query per
+  side, to every combination of its arguments' test values: null, the
+  edges, a value that rounds, case, a trailing space, a character wider
+  than a byte, and dates.
+* A converted object the target lacks is a warning, not a pass.
+
+Measured on MySQL to PostgreSQL:
+* The translator turns MySQL's `length` (bytes) into PostgreSQL's
+  `length` (characters). Only the wide-character input tells them apart,
+  and the proof names the function.
+* PostgreSQL ignores a function's declared decimal scale, for both its
+  arguments and its result, where MySQL rounds. The conversion now states
+  the scale as a cast in the body, and the proof caught the version
+  without it.
+
+SQL Server as a pair's side:
+* Tables, keys, reads, writes, digests, views and functions, read through
+  its driver.
+* Rendered in-process by the renderer every in-process engine shares.
+  The digest of the values the driver returns was measured equal to
+  PostgreSQL's in-server digest of the same rows.
+* The T-SQL paths are written, but have not yet been run against a
+  server, because none runs on this machine's architecture.
+
+Tests: `tests/test_views_and_functions_carried_across_engines.py` and
+`tests/test_sql_server_as_one_side_of_a_pair.py`.
+
 **40. Estimates that rest on measurement.**
 
 SCT estimates effort. migkit refused to guess, because it had nothing to
 calibrate against. Item 7's per-phase timings from real rehearsals are
 that calibration. Estimate time and effort as ranges, and state the runs
 each range came from. Without enough runs, say so instead of guessing.
+
+*Done for time (2026-09-25):* the plan estimated from the latest run on
+the path alone, however the others had gone. It now gives a range from
+every run kept (the last ten), for example "between 5min and 20min going
+by the 3 runs on this path (5,000 to 20,000 rows/s, first date to last
+date)". A single run is called "one number, not a range".
+
+A hop that has not run yet is given the runs of other hops with the same
+engines on the same path, and told whose they were. Typically these are
+a rehearsal's runs, for the migration it rehearses. Runs on other engines
+are never used. With nothing measured, the plan still estimates nothing.
+The tests are in `tests/test_time_from_measured_rates.py`. Effort
+estimates for conversion wait on item 39.
 
 **41. Trust, the open-source way.**
 
@@ -2180,12 +3088,54 @@ A vendor sells certifications. What an open tool can offer instead:
 * reports encrypted at rest
 * redaction of values in what is shown and stored (with G2)
 
+*Done (2026-09-25):*
+* **Threat model.** `docs/threat-model.md` covers what migkit is given,
+  what it writes and where, its secrets, the data in reports, and the
+  processes it runs. Each claim names the test that holds it.
+* **A finding while writing it: the local copy.** A dump-and-load move
+  keeps the source's whole data in files under the report directory.
+  That copy was removed only after a load that succeeded. A load that
+  failed or was stopped left it readable by anyone who could read the
+  directory. Now the copy is readable by this user only (0700) before
+  anything is written into it, and it is removed when the move ends,
+  whichever way it ends (`tests/test_the_local_copy_is_private_and_goes.py`).
+* **Redaction.** Redaction was done with G2 (`mask`). Notifications and
+  the diagnostics bundle carry no values.
+* **Audit log.** `changelog.jsonl` records each operation.
+
+*Then (2026-09-25):*
+* **Releases** carry a CycloneDX SBOM of the wheel as installed, and build
+  provenance signed through GitHub's Sigstore attestation. The SBOM
+  command was run here: 51 components. The attestation steps run on the
+  next tagged release.
+* **Restore points** are encrypted with `MIGKIT_STATE_KEY` before they
+  leave the working directory, for the mirror and the bucket. A restore
+  point holds whole rows. Measured: without the passphrase, or with
+  another one, a point is refused rather than read (`tests/test_state.py`).
+
+Still open: the report directory's own files at rest (drilldowns). Mask
+the values with `mask`, and use the disk's encryption for the rest.
+
 **42. Support, without an SLA.**
 
 A troubleshooting guide keyed by every error migkit can raise, each with
 its fix. A diagnostics bundle collected by `doctor` with secrets and
 values redacted, so a problem can be reported without handing anything
 over (an environment variable, not a new flag).
+
+*Done (2026-09-25):*
+* **`docs/troubleshooting.md`** is generated from the code. It lists
+  every refusal written where it is raised, 129 of them, grouped by the
+  part of migkit that raises it. Each message already says what to do.
+  A test fails when the guide falls behind the code, and it names no
+  program.
+* **`MIGKIT_DIAGNOSE=<file>.zip migkit doctor`** writes a bundle to
+  report a problem with. It holds versions, what each engine can do
+  here, the configuration, and each hop's last verdict and change log.
+  Passwords, tokens, keys, notification addresses and credentials inside
+  an address are taken out before anything is written, and so is every
+  finding's detail, which is where keys and values are
+  (`tests/test_a_problem_can_be_reported_without_handing_anything_over.py`).
 
 ### Soon
 
@@ -2200,6 +3150,49 @@ Google, local models. For:
 What it produces is treated as a proposal: it goes through the same
 verification and behavioural proof as anything else, and is never applied
 on trust. Off unless a provider is configured.
+
+*First use (2026-09-25):* `MIGKIT_AI` picks the provider:
+* `openai`: any OpenAI-compatible endpoint, including local models, at
+  `MIGKIT_AI_URL`
+* `anthropic`
+* `google`
+
+The key is `MIGKIT_AI_KEY` and the model `MIGKIT_AI_MODEL`. migkit chooses
+no model for an OpenAI-style endpoint.
+
+After a `check` that found something, the provider's plain-language
+account of the findings is printed under the verdict. It is marked as a
+proposal, and changes nothing.
+
+What is sent is each finding's check, scope, status and category. The
+detail, where keys and values are, is sent only with
+`MIGKIT_AI_SHARE=detail`, and never for a hop that masks values. A
+provider that cannot be reached is said, and the check's result stands.
+The tests use a local stand-in for each API's own shape
+(`tests/test_help_from_a_model_any_provider.py`).
+
+*Conversions (2026-09-25):* a view or function the translator cannot
+carry can get a proposal from the provider, when `MIGKIT_AI_SHARE`
+includes `code`:
+* **What is sent.** The object's own definition, from the source (`show
+  create` on MySQL, `pg_get_functiondef` and `pg_get_viewdef` on
+  PostgreSQL). No row is sent.
+* **What comes back.** One `create` statement, taken from a fenced block
+  or from the answer. It goes into the converted file marked as a
+  proposal, and only `--apply` puts it on the target.
+* **The proof.** The proof now covers every view and function of the
+  source: the translator's, a model's, or a person's. Each is asked the
+  same inputs on both sides. One the target does not have is named. A
+  procedure answers nothing to compare, and is counted as such.
+
+Measured with a local stand-in provider: of two proposals, the one that
+doubled where the source doubled and added one was named as answering
+differently. Once rewritten by hand, both passed. Without `code` in
+`MIGKIT_AI_SHARE`, nothing was sent
+(`tests/test_a_model_proposes_what_the_translator_cannot_carry.py`).
+
+Still to use it for: drafting fixes, which go through the same proof as
+anything else.
 
 ### Not pursued
 

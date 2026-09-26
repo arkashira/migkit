@@ -204,7 +204,8 @@ def test_offsets_are_not_copied_between_logs_that_do_not_line_up(clusters,
                                                                  tmp_path):
     """The refusal. Ten more messages on one side and the same number means
     a different message, so copying it moves a consumer past records it
-    never read."""
+    never read. Where the message the group reads next is not on the
+    target at all, there is nowhere to put the group either."""
     from kafka import KafkaProducer
     _commit(SRC_PORT, "billing", {0: 30, 1: 20})
     eng = _engine(tmp_path)
@@ -217,7 +218,13 @@ def test_offsets_are_not_copied_between_logs_that_do_not_line_up(clusters,
         producer.send("orders", value=b"only on the target", partition=0)
     producer.flush()
     producer.close()
-    _commit(SRC_PORT, "billing", {0: 45})
+    producer = KafkaProducer(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+    for _ in range(3):
+        producer.send("orders", value=b"only on the source", partition=0)
+    producer.flush()
+    producer.close()
+    # the next message this group reads is one the target never got
+    _commit(SRC_PORT, "billing", {0: 51})
     before = _committed(DST_PORT, "billing")
 
     got = _by_scope(eng.check_deep("cluster"))
@@ -225,6 +232,8 @@ def test_offsets_are_not_copied_between_logs_that_do_not_line_up(clusters,
     assert unsure.status == "warn", unsure.detail
     assert "orders[0]" in unsure.detail, unsure.detail
     assert "do not start and end together" in unsure.detail
+    assert "the message it reads next is not on the target" in \
+        unsure.detail, unsure.detail
     assert "MirrorMaker2" in unsure.fix_hint or \
         "reset-offsets" in unsure.fix_hint
     # the pass on the rest says what it did not look at
@@ -255,3 +264,62 @@ def test_an_unreachable_cluster_is_an_error_not_an_empty_list(tmp_path):
     got = KafkaEngine(hop).check_deep("cluster")
     assert got[0].status == "error", [(r.status, r.detail) for r in got]
     assert "not the same as there being none" in got[0].detail
+
+
+def test_a_group_is_put_at_the_same_message_where_the_logs_do_not_line_up(
+        clusters, tmp_path):
+    """The target's partition began with seven messages the source never
+    had, then the source's twenty, written at the same times as on the
+    source, as a mirror keeps them. The same message is seven further on,
+    and the group is put there - not at the source's number, which on the
+    target is seven messages short, and not refused."""
+    from kafka import KafkaProducer
+    from kafka.admin import KafkaAdminClient, NewTopic
+    for port in (SRC_PORT, DST_PORT):
+        admin = KafkaAdminClient(bootstrap_servers=f"127.0.0.1:{port}")
+        admin.create_topics([NewTopic("shifted", num_partitions=1,
+                                      replication_factor=1)])
+        admin.close()
+    time.sleep(2)
+    dst = KafkaProducer(bootstrap_servers=f"127.0.0.1:{DST_PORT}")
+    for i in range(7):
+        dst.send("shifted", key=b"old", value=f"before {i}".encode(),
+                 timestamp_ms=1_700_000_000_000 + i)
+    dst.flush()
+    src = KafkaProducer(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+    for producer in (src, dst):
+        for i in range(20):
+            producer.send("shifted", key=f"s{i}".encode(),
+                          value=f"message {i}".encode(),
+                          timestamp_ms=1_700_000_100_000 + i * 1000)
+        producer.flush()
+        producer.close()
+    from kafka import KafkaConsumer, TopicPartition
+    from kafka.structs import OffsetAndMetadata
+    for port, offset in ((SRC_PORT, 12), (DST_PORT, 12)):
+        c = KafkaConsumer(bootstrap_servers=f"127.0.0.1:{port}",
+                          group_id="shipping", enable_auto_commit=False)
+        tp = TopicPartition("shifted", 0)
+        c.assign([tp])
+        c.commit({tp: OffsetAndMetadata(offset, "", -1)})
+        c.close()
+    eng = _engine(tmp_path)
+    got = _by_scope(eng.check_deep("cluster"))
+    # the same number on the target is a different message: a difference
+    assert "shipping shifted[0] src=12 dst=12 (the same message is at 19" \
+        in got["group-offsets"].detail, got["group-offsets"].detail
+    for action in eng.repair_plan("cluster", "sequences"):
+        eng.apply("cluster", action)
+    c = KafkaConsumer(bootstrap_servers=f"127.0.0.1:{DST_PORT}",
+                      group_id="shipping", enable_auto_commit=False)
+    tp = TopicPartition("shifted", 0)
+    assert c.committed(tp) == 19
+    c.assign([tp])
+    c.seek(tp, 19)
+    first = next(m for batch in [c.poll(timeout_ms=5000)]
+                 for msgs in batch.values() for m in msgs)
+    assert (first.key, first.value) == (b"s12", b"message 12")
+    c.close()
+    after = _by_scope(eng.check_deep("cluster"))
+    assert "shipping shifted" not in after["group-offsets"].detail, \
+        after["group-offsets"].detail

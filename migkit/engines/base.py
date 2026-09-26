@@ -1378,6 +1378,106 @@ class Engine:
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
 
+    def move_key(self, db, sch, tbl):
+        """What a table's entry in the copy's checkpoint is called: the one
+        name the copier writes under and the plan reads back."""
+        return f"{db}.{tbl or sch}"
+
+    def log_kept(self, db, grows):
+        """(bytes, why): how much of `grows` bytes of log written by a load
+        this target holds at once, or None where it cannot say."""
+        return None
+
+    def stream_identity(self, side, db):
+        """What the side's change log belongs to - a server, a replica
+        set - for a saved position to be held to, or None where the engine
+        cannot say."""
+        return None
+
+    def position_lost(self, side, db, token):
+        """Why the side's log no longer holds `token`, in words, or None
+        where it does or the engine cannot say before reading."""
+        return None
+
+    def native_replica_unsafe(self):
+        """Why the server's own replication would carry this hop wrongly,
+        in words, or None."""
+        return None
+
+    def pooler(self, side):
+        """{"name", "mode", "version"} for a connection pooler the side is
+        reached through, or None where none is known of. `mode` is how it
+        shares server sessions - session, transaction or statement - or
+        None where it would not say.
+
+        An Amazon RDS Proxy is known by its address, whatever the engine
+        behind it; an engine that can ask the pooler itself says more."""
+        import re
+        ep = self.hop.source if side == "src" else self.hop.target
+        if re.search(r"\.proxy-[a-z0-9]+\.[a-z0-9-]+\.rds\.amazonaws\.com$",
+                     ep.host or "", re.I):
+            return {"name": "RDS Proxy", "mode": None, "version": None,
+                    "note": "sharing server sessions between transactions,"
+                            " and keeping one to a client that changes its"
+                            " session",
+                    "means": "every connection migkit opens there changes"
+                             " its session, and holds a server session the"
+                             " application could have had for as long as"
+                             " it runs"}
+        return None
+
+    def _pooler_items(self):
+        """`assess` rows for a side reached through a connection pooler.
+
+        Pooling by transaction hands a client's next statement to whichever
+        server session is free, so what a session holds - a setting, a
+        temporary table, a session lock - does not stay with migkit's
+        connection, and a setting asked for at connection start is refused
+        outright (measured through PgBouncer 1.25:
+        `unsupported startup parameter in options: statement_timeout`). A
+        change stream through it was measured to work: a subscription
+        through PgBouncer 1.25 copied and followed."""
+        items = []
+        for side, word in (("src", "source"), ("dst", "target")):
+            try:
+                got = self.pooler(side)
+            except Exception:
+                got = None
+            if not got:
+                continue
+            name = " ".join(x for x in (got["name"], got.get("version"))
+                            if x)
+            mode = got.get("mode")
+            if mode == "session":
+                items.append({
+                    "level": "pass", "scope": "instance",
+                    "item": f"the {word} is reached through a connection"
+                            " pooler",
+                    "detail": f"{name}, pooling by session: each connection"
+                              " keeps its own server session, as migkit's"
+                              " work needs; every connection migkit holds"
+                              " is one fewer for the application"})
+                continue
+            how = (f"pooling by {mode}" if mode else got.get("note")
+                   or "in a pooling mode it tells its administrators only")
+            means = got.get("means") or (
+                "a session setting, a temporary table or a session lock does"
+                " not stay with migkit's connection, and a setting asked for"
+                " at connection start is refused")
+            items.append({
+                "level": "warn", "scope": "instance",
+                "item": f"the {word} is reached through a connection pooler",
+                "detail": f"{name}, {how}: {means}. Give the hop the"
+                          " database's own address for the move and the"
+                          " repair; the pooler's is for the application"})
+        return items
+
+    def text_encodings(self, side, db):
+        """{encoding as the engine names it: columns or objects in it},
+        for what the side's text is stored in; None where the engine
+        cannot say."""
+        return None
+
     def stream_writers(self, db):
         """[(what, pausable)] writing into this target database besides a
         repair: migkit's own change tail (which can be paused), and
@@ -1480,6 +1580,13 @@ class Engine:
         catalogue, in one query - what the planner decides from. Empty where
         an engine has no cheap way to say."""
         return {}
+
+    def free_bytes(self, side, db):
+        """What the side's disk has free, as the server reports it, or None
+        where it reports nothing - which is PostgreSQL's and MySQL's
+        answer: neither will say, and a guess here would be worse than the
+        plan saying nobody knows."""
+        return None
 
     def why_it_stopped(self, message):
         """What on the servers explains a copy that stopped with
@@ -1904,7 +2011,13 @@ class Engine:
         """assess rows for the programs the move would run: their builds,
         and whether each takes every option the move passes it."""
         from .. import movers
-        via = movers.chosen(self.hop.engine)
+        # the path the move would take for this hop, not the first one
+        # installed: the online sync gives way where the hop cannot use it
+        try:
+            via, _ = movers.fitted(self.hop, self.hop.engine,
+                                   movers.chosen(self.hop.engine))
+        except SystemExit:
+            via = movers.chosen(self.hop.engine)
         dbs = list(self.hop.databases or self.hop.db_map or [])
         if via not in movers.PROGRAMS or not dbs:
             return []
@@ -2013,6 +2126,7 @@ class Engine:
         if self.CLIENT_TOOLS:
             items += self._client_tool_versions(self.CLIENT_TOOLS, dv)
         items += self._assess_extra()
+        items += self._pooler_items()
         items += self._preflight_items()
         items += self._scope_items()
         return items
@@ -2421,13 +2535,31 @@ class Engine:
             if not scls or not dcls:
                 out["unreadable"].append((name, swhy or dwhy))
                 continue
+            if {scls, dcls} == {"text", "bytes"}:
+                # a type that holds bytes as readily as text reads as
+                # bytes beside a column that is bytes: rendered as text it
+                # is a difference in every row, or no rendering at all
+                eng, typ = ((src_engine, src_types[name]) if scls == "text"
+                            else (dst_engine, dst_types[name]))
+                base = str(typ).split("(")[0].strip().lower()
+                if base in eng.TEXT_HOLDS_BYTES:
+                    scls = dcls = "bytes"
             out["pairs"].append((name, scls, dcls))
         out["src_types"], out["dst_types"] = src_types, dst_types
         return out
 
     def _drill_rows(self, db, name, src_engine, src_t, src_cols,
                     dst_engine, dst_t, dst_cols, wheres=(None, None)):
-        """Which rows differ, written to the estate's files, as a clause.
+        found = self._localise(db, name, src_engine, src_t, src_cols,
+                               dst_engine, dst_t, dst_cols, wheres)
+        if isinstance(found, str):
+            return found
+        return self._drill_clause(db, name, *found)
+
+    def _localise(self, db, name, src_engine, src_t, src_cols, dst_engine,
+                  dst_t, dst_cols, wheres=(None, None)):
+        """(missing, changed, extra, capped) - which rows differ - or the
+        clause saying why they cannot be told.
 
         A digest says a table is wrong; this says which rows, which is what
         a repair needs and what an operator reads first. Both sides are
@@ -2441,7 +2573,6 @@ class Engine:
         be lined up says why instead of writing an empty list, which `sync`
         would read as nothing to do.
         """
-        import json
         names = [n for n, _ in src_cols]
         try:
             key = list(src_engine.neutral_key("src", db, src_t))
@@ -2507,6 +2638,12 @@ class Engine:
         except Exception as e:
             return f"; rows not localised: {str(e).splitlines()[-1][:90]}"
 
+        return missing, changed, extra, capped
+
+    def _drill_clause(self, db, name, missing, changed, extra, capped,
+                      how=""):
+        """The rows found, written to the estate's files, as a clause."""
+        import json
         self._write_drill(
             db, name,
             missing=[json.dumps(list(k)) for k in missing],
@@ -2534,7 +2671,7 @@ class Engine:
         if capped:
             clause += (f"; stopped after {self.DRILL_CAP:,} rows on the "
                        + " and ".join(capped) + ", so there may be more")
-        return clause
+        return clause + how
 
     @staticmethod
     def _key_text(key, hop=None, table=None):
@@ -2855,6 +2992,54 @@ class Engine:
                 how.append(f"{t}: settled after {settle}s (no fence visible)")
         return still, healed, how
 
+    def neutral_batches(self, side, db, table, columns, size=1000,
+                        where=None):
+        """The whole table in one pass, `size` rows at a time: for a table
+        with no key to resume from, which `neutral_read` answers in one
+        piece.
+
+        Measured, MySQL to PostgreSQL, a table keyed by text: the copy held
+        220 MB at 200,000 rows and 1.33 GB at 1,600,000 - every row of the
+        table in memory at once, on the way to running out of it. An engine
+        that can read through a cursor the server keeps overrides this;
+        here the one piece is handed on as one batch."""
+        rows, _ = self.neutral_read(side, db, table, columns, None, size,
+                                    **({"where": where} if where else {}))
+        if rows:
+            yield rows
+
+    def neutral_views(self, side, db):
+        """[(name, the view's SQL)] - what a view is defined as, for another
+        engine to be given (backlog 39). [] where the engine has none."""
+        return []
+
+    def neutral_functions(self, side, db):
+        """[(name, [(parameter, declared type)], returned type, the body's
+        one expression)] for every function and procedure the engine's
+        users wrote. The expression is None where the body is statements
+        rather than one expression: SQL alone does not carry those, and
+        they are listed so that the conversion names them."""
+        return []
+
+    def code_definition(self, side, db, kind, name):
+        """The source's own text for a view, function or procedure, for a
+        proposal to be made from; None where the engine cannot give it."""
+        return None
+
+    def neutral_function_sql(self, name, params, returns, body):
+        """The statement creating a one-expression function here, from
+        `[(parameter, this engine's type)]`, this engine's return type
+        and an expression already in this engine's SQL."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot create functions")
+
+    def neutral_create_code(self, side, db, statement):
+        """Run one converted `create` statement on the target. A plain
+        create, never `or replace`: an object already there is the
+        operator's, and the statement fails rather than replace it."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot create converted objects")
+
     def neutral_empty(self, side, db, table, where=None):
         """Remove every row of `table` on the target, keeping the table.
         Returns how many went.
@@ -2875,6 +3060,17 @@ class Engine:
 
     #: what the SQL translator calls this engine's dialect, where it has one
     SQL_DIALECT = None
+
+    #: why an engine that renders in this process does, as a report says it
+    FOLDED_BECAUSE = "has no hashing operator of its own"
+
+    #: whether a table can be read a key range at a time; one that cannot
+    #: is copied in one pass, a batch at a time
+    RESUMES_BY_KEY = True
+
+    #: text types this engine stores as bytes, compared as bytes beside a
+    #: column the other side declares bytes
+    TEXT_HOLDS_BYTES = ()
 
     def neutral_column_rules(self, side, db, table):
         """{column: {"null": takes NULL, "default": its default as this
@@ -2919,14 +3115,19 @@ class Engine:
         out = ""
         if rule.get("identity"):
             out += {"postgres": " generated by default as identity",
-                    "mysql": " auto_increment"}.get(style, "")
+                    "mysql": " auto_increment",
+                    "mssql": " identity(1,1)",
+                    "oracle": " generated by default as identity",
+                    "db2": " generated by default as identity"
+                    }.get(style, "")
         if rule.get("null") is False:
             out += " not null"
         if rule.get("default") is not None and not rule.get("identity"):
             d = rule["default"]
             # MySQL takes any expression, and any default on a TEXT or
             # BLOB column, only in parentheses
-            out += f" default ({d})" if style in ("mysql", "sqlite") \
+            out += f" default ({d})" if style in ("mysql", "sqlite",
+                                                    "mssql") \
                 else f" default {d}"
         return out
 
@@ -3318,3 +3519,6 @@ class NeutralCopier:
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
         return self._as_pair().move_table(db, sch, tbl, chunk, ck, log)
+
+    def moved_nothing(self, db):
+        return self._as_pair().moved_nothing(db)

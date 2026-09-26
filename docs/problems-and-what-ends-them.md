@@ -2280,9 +2280,13 @@ saved first. Tests: `test_diff_kind_pg.py`, `test_revert_live_pg.py`.
 exactly-once; a consumer can resume before or after where it should.
 Negative translated offsets were a real data-loss bug.
 
-**migkit: Partly.** Consumer group offsets are compared between clusters and
-can be repaired through `alter_group_offsets`. Tests:
-`test_kafka_offsets.py`, `test_kafka_unreadable.py`.
+**migkit: Ends it.** Consumer group offsets are compared between clusters
+and repaired through `alter_group_offsets`. Where the two logs do not line
+up, a group's offset is translated by the message it points at: found on
+the target by its time, then by its key and value. It is never carried
+over as a bare number. A group whose next message the target does not
+have is named and left alone. Tests: `test_kafka_offsets.py`,
+`test_kafka_unreadable.py`.
 
 ### E3. Redis TTLs and cross-version payloads
 
@@ -2390,16 +2394,19 @@ The change reader skipped all three without a word; its position did not
 move and it returned nothing. A tail on such a source calls itself caught
 up for as long as it runs, while every change goes missing.
 
-**migkit: Ends the silent part** -
-`test_a_compressed_binlog_stops_the_tail.py`.
-* The tail stops on the first compressed event and names the setting. Its
-  position stays where it was.
-* `assess` fails either setting with the statement to run.
-* A session that turns compression on for itself, which no server
-  setting shows, stops the tail too.
-* The test also pins the reader's own behaviour. If a later version learns
-  to open these events, that test fails, and the stop can give way to
-  reading them.
+**migkit: Ends it for MySQL, ends the silent part for MariaDB** -
+`test_a_compressed_binlog_is_read_or_stops_the_tail.py`.
+* MySQL's compressed transaction is opened by migkit itself: the payload is
+  decompressed, and its events are parsed as if they had arrived on their
+  own. The tail and the delta read them like any other: measured on 8.4,
+  an insert, an update and a delete written compressed all arrived, in
+  order and with their values, and `assess` passes the setting.
+* MariaDB's compressed row events are another format. The tail stops on
+  the first one and names the setting, with its position where it was,
+  and `assess` fails `log_bin_compress` with the statement to run.
+* The test also pins the reader's own behaviour: on its own it still
+  returns nothing for a compressed transaction, which is why migkit opens
+  them itself.
 
 ### E6b. The replica that followed the whole server
 
@@ -2601,14 +2608,27 @@ statements fail intermittently for the same reason unless
 routed through it at all, and a single `SET` outside a transaction pins a
 client to one backend for the rest of its session.
 
-**migkit: Not yet.** migkit connects with whatever the hop names, and a hop
-pointed at a pooler would get CDC, advisory locks and session settings that
-behave differently from the direct connection the checks assume - with no
-warning. The detection is cheap: a PgBouncer connection answers
-`SHOW LISTEN_ADDR` on its admin console, and more usefully the server
-version string and `pg_backend_pid()` behaviour differ from a direct
-connection across two statements. A hop that must not go through a pooler -
-the CDC one especially - should say so before it fails oddly.
+**migkit: Done (2026-09-25).** `assess` names a pooler on either side, how
+it pools, and what that means for migkit's work. Measured against
+PgBouncer 1.25 in transaction pooling, in front of PostgreSQL 16:
+* a setting given as a connection opens is refused - `FATAL: unsupported
+  startup parameter in options: statement_timeout` - which is how the
+  row repair opens its connection. It read as the database refusing
+  something; it is now said as the pooler, with the way out: give the hop
+  the database's own address. `TimeZone` and `DateStyle`, which PgBouncer
+  tracks, went through.
+* a subscription made through it copied its table and followed the next
+  insert. Replication connections pass through PgBouncer since 1.23, so
+  the claim above that they cannot be routed through it at all is out of
+  date, and a change stream through a pooler is not refused.
+
+PgBouncer is known by its console (the database `pgbouncer`), which lets
+its administrators in and tells them the pool mode. Anyone else is
+refused there as a wrong password is, while PostgreSQL would have signed
+them in first and said the database does not exist - so a user the hop's
+own database lets in, refused for a database no server has, is behind a
+pooler. An Amazon RDS Proxy is known by its address, for any engine
+(`tests/test_a_pooler_between_migkit_and_the_database.py`).
 
 ---
 
@@ -2688,9 +2708,13 @@ An engine that cannot ask passes nothing and keeps the old behaviour, since
 naming: `test_deep_float_pg.py::test_identical_floats_pass` had been red
 since the check landed, and went green without being edited.
 
-**Still open, as a question rather than a defect:** whether a
-target-performance finding should be able to spell itself `diff` at all,
-when every other `diff` in this tool means the two sides do not match.
+**Answered (2026-09-25): a performance finding is `warn`, never `diff`.**
+Every other `diff` in this tool means the two sides do not match, and a
+slow target holds the same data. The deep checks now also replay the
+source's own busiest reads on both sides and compare plans and times,
+the way Oracle's SQL Performance Analyzer and Microsoft's Database
+Experimentation Assistant do (backlog 24). A hop that wants a slow
+target to stop the cutover says `performance: gate`.
 
 On MySQL the check reports `skip` with the measurement behind it rather than
 a verdict: `innodb_table_stats.n_rows` read 19 for a table holding 50,000

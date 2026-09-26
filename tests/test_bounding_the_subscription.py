@@ -159,7 +159,7 @@ def test_every_engine_that_starts_replication_can_run_it():
     from migkit.engines.base import Engine
     offered = [n for n in NAMES
                if _class_for(n) and hasattr(_class_for(n), "replicate_sql")]
-    assert set(offered) == {"postgres", "mysql"}, offered
+    assert set(offered) == {"postgres", "mysql", "redis"}, offered
     for n in offered:
         cls = _class_for(n)
         assert cls.apply_replication_stmt is not Engine.apply_replication_stmt
@@ -173,8 +173,11 @@ def test_the_shared_path_asks_the_engine():
     import pathlib
     src = (pathlib.Path(__file__).resolve().parents[1] / "migkit" /
            "cli.py").read_text()
+    # the statements are applied in `_replicate_one`, which `_replicate`
+    # runs once each way where the hop asks for a stream back
     fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.FunctionDef) and n.name == "_replicate")
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_replicate_one")
     body = "\n".join(ast.dump(s) for s in fn.body)
     assert "apply_replication_stmt" in body
     assert "_psql" not in body, "the postgres-only method is back"

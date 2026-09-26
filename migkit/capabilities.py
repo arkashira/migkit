@@ -43,6 +43,11 @@ NOT_YET = "not yet"
 _FILE_DB = ("a SQLite database is a file with no change log that can be"
             " read without writing to it, so it moves offline")
 _NO_PLANNER = "the engine keeps no optimiser statistics to refresh"
+_STREAM_ONLY = ("{} is where a pair delivers its changes (engine:"
+                " hetero, target_engine: {}), not a hop's engine: it"
+                " holds a stream of changes, not a copy to compare")
+_FILES = ("Parquet files are data at rest, with no server, settings or"
+          " change log of their own")
 
 #: every gap, by engine: (NOT_APPLICABLE, why) or (NOT_YET, backlog item)
 GAPS = {
@@ -51,42 +56,25 @@ GAPS = {
     "mongodb": {
         "sequences": (NOT_APPLICABLE,
                       "collections have no sequences or auto-increment"),
-        "table-copy": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "mssql": {
         "confirm": (NOT_YET, "1"),
         "bulk-move": (NOT_YET, "0e"),
-        "table-copy": (NOT_YET, "0e"),
-        "stream": (NOT_YET, "0e"),
-        "fence": (NOT_YET, "0e"),
         "users": (NOT_YET, "0e"),
-        "guard": (NOT_YET, "0e"),
-        "statistics": (NOT_YET, "0e"),
-        "snapshot": (NOT_YET, "0e"),
     },
     "redis": {
-        "confirm": (NOT_YET, "1"),
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
         "bulk-move": (NOT_YET, "0e"),
-        "table-copy": (NOT_YET, "0e"),
-        "stream": (NOT_YET, "0e"),
-        "fence": (NOT_YET, "0e"),
         "delta": (NOT_YET, "0e"),
-        "guard": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "0e"),
     },
     "kafka": {
         "confirm": (NOT_YET, "1"),
         "sequences": (NOT_APPLICABLE,
                       "offsets are assigned by the broker, not carried"),
         "bulk-move": (NOT_YET, "0e"),
-        "table-copy": (NOT_YET, "0e"),
-        "stream": (NOT_YET, "0e"),
-        "fence": (NOT_YET, "0e"),
         "users": (NOT_YET, "0e"),
-        "guard": (NOT_YET, "0e"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
         "snapshot": (NOT_YET, "0e"),
     },
@@ -97,14 +85,132 @@ GAPS = {
         "fence": (NOT_APPLICABLE, _FILE_DB),
         "delta": (NOT_APPLICABLE, _FILE_DB),
         "users": (NOT_APPLICABLE, "a SQLite database has no users"),
-        "guard": (NOT_YET, "0e"),
-        "snapshot": (NOT_YET, "0e"),
     },
+    "parquet": {
+        "sequences": (NOT_APPLICABLE, _FILES),
+        "params": (NOT_APPLICABLE, _FILES),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_YET, "34"),
+        "fence": (NOT_APPLICABLE, _FILES),
+        "confirm": (NOT_APPLICABLE, _FILES),
+        "delta": (NOT_APPLICABLE, _FILES),
+        "users": (NOT_APPLICABLE, "who may read the files is the storage's"
+                                  " own access control, not the table's"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "clickhouse": {
+        "sequences": (NOT_APPLICABLE, "ClickHouse has no sequences or"
+                                      " auto-increment to carry"),
+        "params": (NOT_YET, "33"),
+        "bulk-move": (NOT_YET, "33"),
+        "stream": (NOT_YET, "33"),
+        "fence": (NOT_YET, "33"),
+        "confirm": (NOT_YET, "33"),
+        "delta": (NOT_YET, "33"),
+        "users": (NOT_YET, "33"),
+        "statistics": (NOT_APPLICABLE, "a MergeTree reads by its sorting"
+                                       " key and keeps no optimiser"
+                                       " statistics to refresh"),
+        "snapshot": (NOT_YET, "33"),
+    },
+    "dynamodb": {
+        "sequences": (NOT_APPLICABLE, "DynamoDB has no sequences or"
+                                      " auto-increment to carry"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_YET, "34"),
+        "fence": (NOT_YET, "34"),
+        "confirm": (NOT_YET, "34"),
+        "delta": (NOT_YET, "34"),
+        "users": (NOT_APPLICABLE, "who may read a table is IAM's, not the"
+                                  " table's"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "oracle": {
+        "sequences": (NOT_YET, "11"),
+        "params": (NOT_YET, "11"),
+        "bulk-move": (NOT_YET, "11"),
+        "stream": (NOT_YET, "11"),
+        "fence": (NOT_YET, "11"),
+        "confirm": (NOT_YET, "11"),
+        "delta": (NOT_YET, "11"),
+        "users": (NOT_YET, "11"),
+        "snapshot": (NOT_YET, "11"),
+    },
+    "db2": {
+        "sequences": (NOT_YET, "34"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_YET, "34"),
+        "fence": (NOT_YET, "34"),
+        "confirm": (NOT_YET, "34"),
+        "delta": (NOT_YET, "34"),
+        "users": (NOT_YET, "34"),
+        "statistics": (NOT_YET, "34"),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "ase": {
+        "deep": (NOT_YET, "34"),
+        "sequences": (NOT_YET, "34"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_YET, "34"),
+        "fence": (NOT_YET, "34"),
+        "confirm": (NOT_YET, "34"),
+        "delta": (NOT_YET, "34"),
+        "users": (NOT_YET, "34"),
+        "statistics": (NOT_YET, "34"),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "opensearch": {
+        "sequences": (NOT_APPLICABLE, "an index has no sequences or"
+                                      " auto-increment to carry"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_YET, "34"),
+        "fence": (NOT_YET, "34"),
+        "confirm": (NOT_YET, "34"),
+        "delta": (NOT_YET, "34"),
+        "users": (NOT_YET, "34"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "cassandra": {
+        "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
+                                      " auto-increment to carry"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_YET, "34"),
+        "fence": (NOT_YET, "34"),
+        "confirm": (NOT_YET, "34"),
+        "delta": (NOT_YET, "34"),
+        "users": (NOT_YET, "34"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "34"),
+    },
+    **{name: {
+        "deep": (NOT_YET, "33"),
+        "sequences": (NOT_YET, "33"),
+        "params": (NOT_YET, "33"),
+        "bulk-move": (NOT_YET, "33"),
+        "stream": (NOT_YET, "33"),
+        "fence": (NOT_YET, "33"),
+        "confirm": (NOT_YET, "33"),
+        "delta": (NOT_YET, "33"),
+        "users": (NOT_YET, "33"),
+        "statistics": (NOT_YET, "33"),
+        "snapshot": (NOT_YET, "33"),
+    } for name in ("redshift", "snowflake", "bigquery")},
+    "kinesis": {cap: (NOT_APPLICABLE, _STREAM_ONLY.format("Kinesis",
+                                                          "kinesis"))
+                for cap in CAPABILITIES},
+    "pubsub": {cap: (NOT_APPLICABLE, _STREAM_ONLY.format("Pub/Sub",
+                                                         "pubsub"))
+               for cap in CAPABILITIES},
     "hetero": {
-        "params": (NOT_YET, "0e"),
-        "delta": (NOT_YET, "0e"),
         "users": (NOT_YET, "0e"),
-        "snapshot": (NOT_YET, "0e"),
     },
     "generic": {
         "confirm": (NOT_YET, "33"),
@@ -183,7 +289,8 @@ def _has(method):
 
 def _stream(name):
     from . import movers
-    return movers.stream_supported(name) or name in engines_with("tail_apply")
+    return (movers.stream_supported(name) or name in engines_with("tail_apply")
+            or name in engines_with("replicate_sql"))
 
 
 PROBES = {

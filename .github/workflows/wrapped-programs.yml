@@ -1,0 +1,78 @@
+name: wrapped programs
+
+# Every flag the bulk paths pass a wrapped program, held against each
+# version of it in the matrix (backlog 46). A version that renamed or
+# dropped a flag fails here rather than at an operator's option parsing.
+# The same check runs on the machine doing a move, against the build
+# installed there (`tests/test_the_installed_build_takes_the_options.py`).
+on:
+  schedule:
+    - cron: "17 4 * * 1"   # weekly: a new release lands without a push
+  workflow_dispatch:
+  pull_request:
+    paths: ["migkit/movers.py", "tests/test_wrapped_flags_exist.py",
+            "tests/test_the_installed_build_takes_the_options.py",
+            ".github/workflows/wrapped-programs.yml"]
+
+jobs:
+  postgresql-client:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["14", "15", "16", "17", "18"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the client at this version, from the PostgreSQL project's own repository
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt jammy-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-${{ matrix.version }}
+          echo "/usr/lib/postgresql/${{ matrix.version }}/bin" >> "$GITHUB_PATH"
+      - run: pip install -e . pytest
+      - run: pg_dump --version
+      - run: pytest -q tests/test_wrapped_flags_exist.py tests/test_the_installed_build_takes_the_options.py -k "pgdump or postgres"
+
+  mysql-dump-and-load:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["0.21.4-1", "1.0.5-1", "1.0.8-1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the programs at this version, from their own releases
+        run: |
+          curl -fsSLo /tmp/md.deb "https://github.com/mydumper/mydumper/releases/download/v${{ matrix.version }}/mydumper_${{ matrix.version }}.jammy_amd64.deb"
+          sudo apt-get update
+          sudo apt-get install -y /tmp/md.deb
+      - run: pip install -e ".[mysql]" pytest
+      - run: mydumper --version
+      - run: pytest -q tests/test_wrapped_flags_exist.py tests/test_the_installed_build_takes_the_options.py -k "mydumper or mysql"
+
+  mongodb-tools:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["100.9.4", "100.12.0", "100.16.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the tools at this version, from their vendor
+        run: |
+          curl -fsSLo /tmp/mt.deb "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-${{ matrix.version }}.deb"
+          sudo apt-get install -y /tmp/mt.deb
+      - run: pip install -e ".[mongo]" pytest
+      - run: mongodump --version
+      - run: pytest -q tests/test_wrapped_flags_exist.py tests/test_the_installed_build_takes_the_options.py -k "mongodump or mongodb or mongorestore"

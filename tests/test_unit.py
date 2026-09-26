@@ -75,10 +75,10 @@ def test_hetero_rejects_an_engine_migkit_does_not_have():
                    target=Endpoint(host="t", user="u", password="p"),
                    options={"source_engine": src, "target_engine": dst})
     try:
-        get_engine(hop("oracle", "mysql"))
+        get_engine(hop("informix", "mysql"))
         assert False, "should reject an engine with no driver"
     except SystemExit as e:
-        assert "oracle" in str(e)
+        assert "informix" in str(e)
     eng = get_engine(hop("postgres", "mysql"))
     assert eng.src_engine.CANON_ENGINE == "postgres"
 
@@ -127,7 +127,7 @@ def test_the_ddl_mapping_refuses_a_class_it_has_no_type_for():
     with pytest.raises(ValueError):
         canon.ddl_type("postgres", "geography")
     with pytest.raises(ValueError):
-        canon.ddl_type("oracle", "integer")
+        canon.ddl_type("informix", "integer")
 
 
 def test_secret_env_and_file_resolution(tmp_path, monkeypatch):

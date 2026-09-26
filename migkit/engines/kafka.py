@@ -7,19 +7,447 @@ from .base import Engine, RepairAction, Result
 class KafkaEngine(Engine):
     checks = ("schema", "counts", "data")
 
-    def _consumer(self, side):
+    # --- the destination of a change stream (backlog 35) -----------------
+    # A hop `engine: hetero` with `target_engine: kafka` carries the source's
+    # changes into topics, in the shapes and under the hop options
+    # `streamout` describes.
+    #: topics are made by the first message, and a message carries the
+    #: fields it has - a column added on the source is simply in the next
+    CREATES_ON_WRITE = True
+    EXPRESSES_ABSENT = True
+
+    #: how a cluster is signed in to, as the endpoint's options say it
+    SECURITY = ("PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL")
+    MECHANISMS = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512")
+
+    def _connection(self, side):
+        """What every client of a side is given: where the cluster is, and
+        how to sign in. Endpoint options:
+          hosts: [h1:9092, h2:9092]      (else host and port)
+          security_protocol: SASL_SSL    (PLAINTEXT, SSL, SASL_PLAINTEXT)
+          sasl_mechanism: SCRAM-SHA-512  (PLAIN, SCRAM-SHA-256)
+          ssl_cafile: /path/ca.pem
+        with the endpoint's user and password as the SASL account. That is
+        how Amazon MSK with SCRAM, Confluent Cloud and Azure Event Hubs'
+        Kafka endpoint (user `$ConnectionString`, the connection string as
+        the password) are reached."""
         ep = self.hop.source if side == "src" else self.hop.target
+        hosts = ep.options.get("hosts") or [f"{ep.host}:{ep.port}"]
+        out = {"bootstrap_servers": list(hosts)}
+        protocol = str(ep.options.get("security_protocol", "") or "").upper()
+        if not protocol:
+            return out
+        if protocol not in self.SECURITY:
+            raise SystemExit(f"security_protocol: {protocol} is not one of"
+                             f" {', '.join(self.SECURITY)}")
+        out["security_protocol"] = protocol
+        if protocol.startswith("SASL"):
+            mech = str(ep.options.get("sasl_mechanism", "PLAIN")).upper()
+            if mech not in self.MECHANISMS:
+                raise SystemExit(f"sasl_mechanism: {mech} is not one of"
+                                 f" {', '.join(self.MECHANISMS)}")
+            out.update(sasl_mechanism=mech, sasl_plain_username=ep.user,
+                       sasl_plain_password=ep.password)
+        if ep.options.get("ssl_cafile"):
+            out["ssl_cafile"] = ep.options["ssl_cafile"]
+        return out
+
+    def _signed_in(self, side, make):
+        """`make()`, with a refused sign-in said as one. The client retries
+        a refused SASL handshake until it gives up, and then says only that
+        it could not reach the cluster - measured, `Unable to bootstrap`
+        after half a minute, the broker's `Invalid credentials` left in its
+        log - which reads as a network fault."""
+        import logging
+        seen = []
+
+        class Catch(logging.Handler):
+            def emit(self, record):
+                text = record.getMessage()
+                if "SaslAuthenticationFailed" in text:
+                    seen.append(text.rsplit(":", 1)[-1].strip())
+        log = logging.getLogger("kafka")
+        handler = Catch(level=logging.WARNING)
+        log.addHandler(handler)
+        try:
+            return make()
+        except Exception:
+            if seen:
+                raise SystemExit(
+                    f"the {'source' if side == 'src' else 'target'} cluster"
+                    f" refused the sign-in: {seen[-1]}. Check the endpoint's"
+                    " user and password, and its sasl_mechanism") from None
+            raise
+        finally:
+            log.removeHandler(handler)
+
+    def _producer(self, **extra):
+        try:
+            from kafka import KafkaProducer
+        except ImportError:
+            raise SystemExit("pip install 'migkit[kafka]' for kafka support")
+        return self._signed_in("dst", lambda: KafkaProducer(
+            **self._connection("dst"), acks="all", request_timeout_ms=15000,
+            max_request_size=16 * 2 ** 20, **extra))
+
+    def _stream_options(self):
+        from .. import streamout
+        return streamout.options(self.hop)
+
+    @staticmethod
+    def _message(fmt, db, change, now_ms):
+        from .. import streamout
+        return streamout.message(fmt, db, change, now_ms)
+
+    def neutral_apply(self, side, db, changes):
+        """Every change as a message, in the order the source made them.
+
+        Not collapsed as a table's rows are: a row's state is what a table
+        keeps, and every change is what a stream's consumers read. The
+        source's order is kept for each key, because a key's messages go
+        to one partition."""
+        from .. import streamout
+        self._target_only(side, "write a change stream")
+        sent, skipped = streamout.encoded(self.hop, db, changes,
+                                          int(time.time() * 1000))
+        producer = self._producer()
+        try:
+            for topic, key, value in sent:
+                producer.send(topic, value=value, key=key.encode())
+            producer.flush()
+        finally:
+            producer.close()
+        self._count_skipped(db, skipped)
+        return len(changes)
+
+    def _count_skipped(self, db, skipped):
+        from .. import streamout
+        streamout.count_skipped(self.hop, db, skipped)
+
+    def _apply_upsert(self, side, db, table, key, values):
+        self.neutral_apply(side, db, [{"op": "update", "table": table,
+                                       "key": key, "values": values}])
+
+    def _apply_delete(self, side, db, table, key):
+        self.neutral_apply(side, db, [{"op": "delete", "table": table,
+                                       "key": key}])
+
+    def target_missing(self, db):
+        """A stream's destination is named by the topic rule, not by what
+        is there. Read off the topics that exist, a table was paired by
+        its last name with a topic an earlier stream had made (`a.o` for
+        `o`), and its changes went to `rule(a.o)` - measured, a second
+        stream's four changes landed in a topic nobody read."""
+        return True
+
+    def _consumer(self, side, **extra):
         try:
             from kafka import KafkaConsumer
         except ImportError:
             raise SystemExit("pip install 'migkit[kafka]' for kafka support")
-        return KafkaConsumer(bootstrap_servers=f"{ep.host}:{ep.port}",
-                             request_timeout_ms=15000,
-                             consumer_timeout_ms=10000,
-                             enable_auto_commit=False)
+        return self._signed_in(side, lambda: KafkaConsumer(
+            **self._connection(side), request_timeout_ms=15000,
+            consumer_timeout_ms=10000, enable_auto_commit=False, **extra))
 
     def databases(self):
         return ["cluster"]
+
+    # --- copying topics, message for message (backlog 0e) ---------------
+
+    def list_move_tables(self, db):
+        consumer = self._consumer("src")
+        try:
+            return [("", t) for t in self._topics(consumer)]
+        finally:
+            consumer.close()
+
+    def move_key(self, db, sch, tbl):
+        return f"topic.{tbl or sch}"
+
+    def _made_like_the_source(self, topic, partitions):
+        """The target's topic, made with the source's partition count and
+        the configs that decide what a topic means, where it is missing."""
+        from kafka.admin import NewTopic
+        dst = self._consumer("dst")
+        try:
+            if topic in dst.topics():
+                return None
+            brokers = len(dst._client.cluster.brokers()) or 1
+        finally:
+            dst.close()
+        configs = self._topic_configs("src", [topic]).get(topic, {})
+        keep = {k: v for k, v in configs.items()
+                if k in self.CRITICAL_CONFIGS and v is not None}
+        rf = int((self.hop.options or {}).get("replication_factor",
+                                                min(3, brokers)))
+        admin = self._admin("dst")
+        try:
+            admin.create_topics([NewTopic(topic, num_partitions=partitions,
+                                          replication_factor=rf,
+                                          topic_configs=keep)])
+        finally:
+            admin.close()
+        return f"{topic}: made on the target with {partitions} partitions"
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        """One topic, each partition's messages into the same partition on
+        the target, with their keys, values, headers and times: the times
+        are what a group's position is translated by afterwards
+        (`_translate`). Only committed messages are read.
+
+        Resumed per partition from the checkpoint. A batch the target got
+        and the checkpoint did not - a crash between the two - is counted
+        off the target's own end, and not sent twice."""
+        topic = tbl or sch
+        st = ck.setdefault(self.move_key(db, sch, tbl), {})
+        if st.get("done"):
+            log(f"{topic}: done earlier, skip")
+            return
+        self._copy_topic(topic, st, chunk, ck.save, log)
+        st["done"] = True
+        ck.save()
+
+    def _copy_topic(self, topic, st, chunk, save, log):
+        """What `topic` holds past the positions in `st`, copied, and the
+        positions moved on: the copy's whole work, and each round of the
+        tail's. Returns how many messages went."""
+        from kafka import TopicPartition
+
+        from ..wording import progress
+
+        # set when the consumer is made: its fetcher reads it only then
+        src = self._consumer("src", isolation_level="read_committed")
+        dst = self._consumer("dst")
+        producer = self._producer(max_in_flight_requests_per_connection=1)
+        sent = 0
+        try:
+            parts = self._partitions(src, topic)
+            made = self._made_like_the_source(topic, len(parts))
+            if made:
+                log(made)
+            if len(self._partitions(dst, topic)) < len(parts):
+                raise SystemExit(
+                    f"{topic} has fewer partitions on the target than on the"
+                    " source: a key's messages would land in another"
+                    " partition, out of the order its consumers read them")
+            began = time.monotonic()
+            for p in parts:
+                src_tp, dst_tp = TopicPartition(topic, p), \
+                    TopicPartition(topic, p)
+                pst = st.setdefault("parts", {}).setdefault(str(p), {})
+                end = src.end_offsets([src_tp])[src_tp]
+                there = dst.end_offsets([dst_tp])[dst_tp]
+                if "base" not in pst:
+                    pst.update(base=there, copied=0,
+                               next=src.beginning_offsets([src_tp])[src_tp])
+                    if there:
+                        log(f"{topic}[{p}]: the target held {there:,}"
+                            " messages before the copy; offsets will differ,"
+                            " and group positions are translated by message")
+                if pst["next"] >= end:
+                    continue
+                # what reached the target after the last checkpoint
+                ahead = there - pst["base"] - pst["copied"]
+                src.assign([src_tp])
+                src.seek(src_tp, pst["next"])
+                total = end - pst["next"]
+                done = 0
+                while pst["next"] < end:
+                    batch = [m for msgs in src.poll(
+                                 timeout_ms=5000,
+                                 max_records=max(1, min(int(chunk), 5000))
+                             ).values() for m in msgs if m.offset < end]
+                    if not batch:
+                        # past what a reader of committed messages is given
+                        # - a transaction's marker, an aborted write - the
+                        # consumer's own position says so; its end is not
+                        # reached by any message
+                        pst["next"] = max(pst["next"],
+                                          min(src.position(src_tp), end))
+                        save()
+                        break
+                    for m in batch:
+                        if ahead > 0:
+                            ahead -= 1
+                        else:
+                            producer.send(topic, value=m.value, key=m.key,
+                                          headers=list(m.headers or []),
+                                          partition=p,
+                                          timestamp_ms=m.timestamp)
+                            sent += 1
+                        pst["copied"] += 1
+                        done += 1
+                    producer.flush()
+                    pst["next"] = batch[-1].offset + 1
+                    save()
+                    log(progress(f"{topic}[{p}]", done, total, began,
+                                 time.monotonic(), unit="messages"))
+        finally:
+            producer.close()
+            src.close()
+            dst.close()
+        return sent
+
+    def moved_nothing(self, db):
+        """Topics holding messages on the source and none on the target:
+        what reached a partition is its end past its start."""
+        from kafka import TopicPartition
+        try:
+            src, dst = self._consumer("src"), self._consumer("dst")
+        except Exception:  # noqa: BLE001 - None: cannot be asked
+            return None
+        try:
+            def held(consumer, topic):
+                tps = [TopicPartition(topic, p)
+                       for p in self._partitions(consumer, topic)]
+                if not tps:
+                    return False
+                ends = consumer.end_offsets(tps)
+                begins = consumer.beginning_offsets(tps)
+                return any(ends[tp] > begins[tp] for tp in tps)
+            return [topic for _, topic in self.list_move_tables(db)
+                    if held(src, topic) and not held(dst, topic)]
+        except Exception:  # noqa: BLE001 - None: cannot be asked
+            return None
+        finally:
+            src.close()
+            dst.close()
+
+    # --- keeping the target following: the copier, round after round -----
+
+    def _tail_state(self, db, token_path):
+        """The positions the tail goes on from: its own, or - the first
+        time - where the copy of the topics ended, so a tail after a copy
+        sends nothing twice."""
+        import json
+        if token_path.exists():
+            try:
+                return json.loads(token_path.read_text())["token"]
+            except (ValueError, KeyError, TypeError):
+                raise SystemExit(
+                    f"the saved positions in {token_path} cannot be read,"
+                    " and a tail started from anywhere else sends messages"
+                    " twice or skips them. Remove the file to copy every"
+                    " topic from its start again")
+        copied = self.hop.report_dir(db) / "move.json"
+        try:
+            state = json.loads(copied.read_text())
+        except (OSError, ValueError):
+            return {}
+        for st in state.values():
+            if isinstance(st, dict):
+                st.pop("done", None)
+        return state
+
+    #: a topic is a log that keeps its order: the tail goes on from the
+    #: positions the copy saved, and nothing changes behind them
+    TAIL_GOES_ON_FROM_THE_COPY = True
+
+    def tail_start(self, db, token_path):
+        """Nothing to fix before a copy (`TAIL_GOES_ON_FROM_THE_COPY`)."""
+        return False
+
+    def tail_apply(self, db, go, token_path, log):
+        """Each round, every topic copied on from where the last round
+        ended, until stopped. The positions are saved after each batch
+        reached the target, as the copy saves them."""
+        import json
+
+        from .. import tailctl
+        state = self._tail_state(db, token_path)
+
+        def save():
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = token_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"token": state}))
+            tmp.replace(token_path)
+        log("following the source's topics, ctrl-c to stop"
+            + ("" if go else " (count-only, add --go to copy)"))
+        if not go:
+            behind = self._behind(db, state)
+            log(f"{sum(behind.values()):,} messages not on the target yet"
+                + "".join(f"; {t} {n:,}" for t, n in sorted(behind.items())
+                          if n))
+            return
+        seen = 0
+        with tailctl.Running(token_path.parent):
+            while True:
+                tailctl.hold_if_asked(token_path.parent, log)
+                went = 0
+                for _, topic in self.list_move_tables(db):
+                    st = state.setdefault(self.move_key(db, "", topic), {})
+                    went += self._copy_topic(topic, st, 5000, save,
+                                             lambda m: None)
+                save()
+                if went:
+                    seen += went
+                    log(f"{seen} messages")
+                tailctl.beat(token_path.parent, time.time(), seen)
+                if not went:
+                    time.sleep(1)
+
+    def _behind(self, db, state):
+        """{topic: messages on the source past the saved positions}."""
+        from kafka import TopicPartition
+        src = self._consumer("src")
+        try:
+            out = {}
+            for _, topic in self.list_move_tables(db):
+                parts = (state.get(self.move_key(db, "", topic)) or {}).get(
+                    "parts", {})
+                tps = [TopicPartition(topic, p)
+                       for p in self._partitions(src, topic)]
+                ends = src.end_offsets(tps) if tps else {}
+                begins = src.beginning_offsets(tps) if tps else {}
+                out[topic] = sum(
+                    max(0, ends[tp] - (parts.get(str(tp.partition), {})
+                                       .get("next", begins[tp])))
+                    for tp in tps)
+            return out
+        finally:
+            src.close()
+
+    def src_lsn(self, db):
+        """Each source partition's end now, where a tail is running to
+        reach it; None where none is."""
+        from kafka import TopicPartition
+
+        from .. import tailctl
+        if not tailctl.alive(self.hop.report_dir(db)):
+            return None
+        src = self._consumer("src")
+        try:
+            out = {}
+            for _, topic in self.list_move_tables(db):
+                tps = [TopicPartition(topic, p)
+                       for p in self._partitions(src, topic)]
+                for tp, end in (src.end_offsets(tps) if tps else {}).items():
+                    out.setdefault(topic, {})[str(tp.partition)] = end
+            return out
+        finally:
+            src.close()
+
+    def fence_wait(self, db, at, timeout=300):
+        """Wait until the tail's saved position has reached `at` in every
+        partition. True when it has, False on timeout, None where there is
+        nothing to wait on."""
+        import json
+        if not at:
+            return None
+        path = self.hop.report_dir(db) / "tail-token.json"
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            try:
+                state = json.loads(path.read_text())["token"]
+            except (OSError, ValueError, KeyError, TypeError):
+                return None
+            if all(int((state.get(self.move_key(db, "", topic)) or {})
+                       .get("parts", {}).get(p, {}).get("next", -1)) >= want
+                   for topic, parts in at.items()
+                   for p, want in parts.items()):
+                return True
+            time.sleep(1)
+        return False
 
     def _topics(self, consumer):
         """Every topic migkit verifies: internal ones and the ones the hop
@@ -32,10 +460,9 @@ class KafkaEngine(Engine):
         return sorted(consumer.partitions_for_topic(topic) or [])
 
     def _admin(self, side):
-        ep = self.hop.source if side == "src" else self.hop.target
         from kafka.admin import KafkaAdminClient
-        return KafkaAdminClient(bootstrap_servers=f"{ep.host}:{ep.port}",
-                                request_timeout_ms=15000)
+        return self._signed_in(side, lambda: KafkaAdminClient(
+            **self._connection(side), request_timeout_ms=15000))
 
     # semantics-critical topic configs: a cleanup.policy or retention
     # mismatch silently changes what the topic MEANS on the target
@@ -306,6 +733,75 @@ class KafkaEngine(Engine):
              else apart).append(tp)
         return same, apart
 
+    #: target messages read, from the first at the committed message's
+    #: time, looking for that message, at most
+    TRANSLATE_SCAN = 1000
+
+    @staticmethod
+    def _message_at(consumer, tp, offset):
+        """(time, key, value) of the message at `offset`, or None."""
+        consumer.assign([tp])
+        consumer.seek(tp, offset)
+        end = time.time() + 15
+        while time.time() < end:
+            for msgs in consumer.poll(timeout_ms=2000).values():
+                for m in msgs:
+                    if m.offset >= offset:
+                        return (m.timestamp, m.key, m.value)
+        return None
+
+    def _find(self, consumer, tp, message):
+        """The target's offset of `message`: from the first offset at its
+        time, the first message with its key and value. None where it is
+        not there within `TRANSLATE_SCAN` messages."""
+        at, key, value = message
+        start = consumer.offsets_for_times({tp: at}).get(tp)
+        if start is None:
+            return None
+        consumer.assign([tp])
+        consumer.seek(tp, start.offset)
+        seen = 0
+        while seen < self.TRANSLATE_SCAN:
+            batch = consumer.poll(timeout_ms=3000)
+            if not batch:
+                return None
+            for msgs in batch.values():
+                for m in msgs:
+                    seen += 1
+                    if m.key == key and m.value == value:
+                        return m.offset
+        return None
+
+    def _translate(self, sc, dc, tp, offset):
+        """(the target's offset, "") for a group's committed source offset,
+        or (None, why).
+
+        A committed offset is the next message the group reads. On a target
+        whose log does not line up with the source's, the same number is a
+        different message; so the message itself is found on the target, by
+        the time it was written and then its key and value, and the group is
+        put at it. Where that message is one of several the same, the first
+        is taken: the consumer reads one again rather than skipping one.
+        A group at the end of the source's log is put after the source's
+        last message on the target."""
+        beg = sc.beginning_offsets([tp])[tp]
+        end = sc.end_offsets([tp])[tp]
+        if offset < beg:
+            return None, "its position is older than the source's log"
+        if offset >= end:
+            if end <= beg:
+                return None, "the partition is empty on the source"
+            last = self._message_at(sc, tp, end - 1)
+            found = self._find(dc, tp, last) if last else None
+            return ((found + 1, "") if found is not None else
+                    (None, "the source's last message is not on the target"))
+        message = self._message_at(sc, tp, offset)
+        if message is None:
+            return None, "the message it reads next could not be read"
+        found = self._find(dc, tp, message)
+        return ((found, "") if found is not None else
+                (None, "the message it reads next is not on the target"))
+
     def check_deep(self, db):
         """Consumer-group parity: the classic kafka-migration failure is
         moving the data but not the committed offsets - every consumer
@@ -339,7 +835,8 @@ class KafkaEngine(Engine):
                               f"{len(gs)} consumer groups present on"
                               " target"))
         behind, unsure, changed = [], [], []
-        checked = 0
+        checked = translated = 0
+        sc = dc = None
         for group in sorted(gs | gd):
             try:
                 offs_s = self._group_offsets("src", group)
@@ -355,7 +852,25 @@ class KafkaEngine(Engine):
             checked += 1
             same, apart = self._comparable(list(offs_s))
             for tp in apart:
-                unsure.append(f"{group} {tp.topic}[{tp.partition}]")
+                if sc is None:
+                    sc, dc = self._consumer("src"), self._consumer("dst")
+                try:
+                    there, why = self._translate(sc, dc, tp, offs_s[tp])
+                except Exception as e:  # noqa: BLE001 - said, not guessed
+                    there, why = None, f"{type(e).__name__}: {str(e)[:60]}"
+                if there is None:
+                    unsure.append(f"{group} {tp.topic}[{tp.partition}]"
+                                  f" ({why})")
+                    continue
+                translated += 1
+                if offs_d.get(tp) != there:
+                    behind.append(f"{group} {tp.topic}[{tp.partition}]"
+                                  f" src={offs_s[tp]} dst={offs_d.get(tp)}"
+                                  f" (the same message is at {there} on the"
+                                  " target)")
+                    changed.append(json.dumps(
+                        {"group": group, "topic": tp.topic,
+                         "partition": tp.partition, "offset": there}))
             for tp in same:
                 if offs_d.get(tp) != offs_s[tp]:
                     behind.append(f"{group} {tp.topic}[{tp.partition}]"
@@ -363,6 +878,9 @@ class KafkaEngine(Engine):
                     changed.append(json.dumps(
                         {"group": group, "topic": tp.topic,
                          "partition": tp.partition, "offset": offs_s[tp]}))
+        for consumer in (sc, dc):
+            if consumer is not None:
+                consumer.close()
         self._write_drill(db, "groups", missing=missing, changed=changed)
         # a pass has to say what it did not look at, or a group with one
         # untranslatable partition reads as a group that was checked
@@ -372,7 +890,9 @@ class KafkaEngine(Engine):
             "deep", "group-offsets", "diff" if behind else "ok",
             "; ".join(behind[:6]) + aside if behind
             else f"{checked} groups, every comparable committed offset"
-                 f" matches{aside}", "",
+                 f" matches"
+                 + (f" ({translated} found by the message they point at)"
+                    if translated else "") + aside, "",
             f"migkit sync {self.hop.name} --db {db} --kind sequences --apply"
             if behind else ""))
         if unsure:
@@ -380,8 +900,9 @@ class KafkaEngine(Engine):
                 "deep", "group-offsets not comparable", "warn",
                 f"{len(unsure)} partitions where an offset does not mean the"
                 f" same thing on both sides: {', '.join(unsure[:6])} - the"
-                " two logs do not start and end together, so migkit will not"
-                " copy a number between them", "",
+                " two logs do not start and end together, and the message"
+                " the group reads next was not found on the target, so"
+                " migkit will not copy a number between them", "",
                 "translate each group's position by message time rather than"
                 " by number, or reset the target's groups deliberately with"
                 " kafka-consumer-groups --reset-offsets"))
@@ -407,9 +928,9 @@ class KafkaEngine(Engine):
             [f"commit {len(rows)} offsets on the target for"
              f" {len(groups)} groups: {', '.join(groups[:6])}"
              + (" ..." if len(groups) > 6 else "")],
-            [], "only partitions whose logs begin and end together on the two"
-                " sides are listed; the target's current offsets go to the"
-                " undo file first")]
+            [], "where the two logs do not line up, each offset is the one"
+                " of the same message on the target; the target's current"
+                " offsets go to the undo file first")]
 
     def apply(self, db, action):
         """Set the target's committed offsets to the source's.

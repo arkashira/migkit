@@ -23,6 +23,8 @@ PROGRAMS = {
     "mysqldump": ("mysql-client", "default-mysql-client"),
     "mongodump": ("mongodb-database-tools", ""),
     "mongorestore": ("mongodb-database-tools", ""),
+    # not in any package manager: fetched from its vendor (`install_vendor`)
+    "mongosync": ("", ""),
     "mydumper": ("mydumper", "mydumper"),
     "myloader": ("mydumper", "mydumper"),
     "pgloader": ("pgloader", "pgloader"),
@@ -74,7 +76,7 @@ CAPABILITIES = [
      [], []),
     ("MongoDB: bulk move",
      "collection load between MongoDB deployments",
-     ["mongodump", "mongorestore"], []),
+     ["mongodump", "mongorestore"], ["mongosync"]),
     ("SQL Server: verify",
      "compare rows and objects",
      [], ["sqlcmd"]),
@@ -138,6 +140,8 @@ def by_hand(programs):
     for c in programs:
         if c == SECOND_READER:
             continue    # `doctor --install` builds it wherever Python runs
+        if c in VENDOR and vendor_file(c):
+            continue    # fetched from its vendor (`install_vendor`)
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
             out.append(c)
@@ -173,9 +177,95 @@ def install_missing(log=print):
         if p.returncode != 0:
             log(f"  component {n} did not install; run migkit doctor again"
                 " to see which capability is still short")
+    for n, cmd in enumerate([c for c in dict.fromkeys(wanted)
+                             if c in VENDOR and not which(c)], 1):
+        log(f"fetching vendor component {n} ...")
+        if not install_vendor(cmd, log):
+            log(f"  vendor component {n} did not install; run migkit"
+                " doctor again to see which capability is still short")
     if not _present(SECOND_READER):
         install_second_reader(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
+
+
+#: programs no package manager carries, fetched from their vendor at the
+#: build measured here: {program: version}
+VENDOR = {"mongosync": "1.21.0"}
+VENDOR_URL = "https://fastdl.mongodb.org/tools/mongosync/"
+
+
+def vendor_file(program):
+    """The vendor's file of `program` for this machine, or None where it
+    publishes none - then it is one to install by hand."""
+    if program != "mongosync":
+        return None
+    version = VENDOR[program]
+    system, machine = platform.system(), platform.machine().lower()
+    if system == "Darwin":
+        arch = "arm-arm64" if machine in ("arm64", "aarch64") else "x86_64"
+        return f"mongosync-macos-{arch}-{version}.zip"
+    if system != "Linux" or machine not in ("x86_64", "amd64"):
+        return None
+    release = {}
+    try:
+        for line in open("/etc/os-release"):
+            k, _, v = line.strip().partition("=")
+            release[k] = v.strip('"')
+    except OSError:
+        return None
+    ident, ver = release.get("ID", ""), release.get("VERSION_ID", "")
+    # the builds the vendor publishes, measured by asking for each
+    name = {("ubuntu", "20.04"): "ubuntu2004", ("ubuntu", "22.04"): "ubuntu2204",
+            ("ubuntu", "24.04"): "ubuntu2404", ("amzn", "2023"): "amazon2023"
+            }.get((ident, ver))
+    if name is None and ident in ("rhel", "rocky", "almalinux") \
+            and ver.startswith("9"):
+        name = "rhel90"
+    return f"mongosync-{name}-x86_64-{version}.tgz" if name else None
+
+
+def install_vendor(program, log=print, into=None):
+    """Fetch `program` from its vendor and put it beside migkit's own
+    programs. True once `--version` of the installed copy says the build
+    asked for."""
+    import os
+    import sysconfig
+    import tarfile
+    import tempfile
+    import urllib.request
+    import zipfile
+    name = vendor_file(program)
+    if not name:
+        log("  its vendor publishes no build for this machine; install it"
+            " by hand")
+        return False
+    into = into or sysconfig.get_path("scripts")
+    with tempfile.TemporaryDirectory() as work:
+        archive = os.path.join(work, name)
+        try:
+            urllib.request.urlretrieve(VENDOR_URL + name, archive)
+        except OSError as e:
+            log(f"  could not fetch it ({type(e).__name__})")
+            return False
+        opener = (zipfile.ZipFile(archive) if name.endswith(".zip")
+                  else tarfile.open(archive))
+        with opener as box:
+            if isinstance(box, tarfile.TarFile):
+                box.extractall(work, filter="data")
+            else:
+                box.extractall(work)
+        found = [os.path.join(root, program)
+                 for root, _, files in os.walk(work)
+                 if program in files and root.endswith("bin")]
+        if not found:
+            log("  the fetched archive holds no program by that name")
+            return False
+        target = os.path.join(into, program)
+        shutil.copyfile(found[0], target)
+        os.chmod(target, 0o755)
+    got = subprocess.run([target, "--version"], capture_output=True,
+                         text=True)
+    return VENDOR[program] in (got.stdout + got.stderr)
 
 
 def install_second_reader(log=print):

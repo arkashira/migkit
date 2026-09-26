@@ -168,3 +168,39 @@ class Timer:
         if not done or not total:
             return "?"
         return human_secs(self.elapsed() / done * (total - done))
+
+
+class PrivateFile:
+    """A file readable by this user only, for as long as a program needs
+    it, then gone: where a secret goes instead of a command line, which
+    every process listing on the machine can read."""
+
+    def __init__(self, text, suffix=""):
+        self.text, self.suffix, self.path = text, suffix, None
+
+    def __enter__(self):
+        import os
+        import tempfile
+        fd, self.path = tempfile.mkstemp(prefix="migkit-", suffix=self.suffix)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(self.text)
+        return self.path
+
+    def __exit__(self, *exc):
+        import os
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+        return False
+
+
+def diff_run_config(url1, table1, url2, table2):
+    """The comparison program's run, as its own configuration file reads it
+    (`--conf`), so neither address - passwords and all - is on its command
+    line."""
+    import json
+    return ("[run.default]\n"
+            f"1 = {{database = {json.dumps(url1)}, table = {json.dumps(table1)}}}\n"
+            f"2 = {{database = {json.dumps(url2)}, table = {json.dumps(table2)}}}\n")

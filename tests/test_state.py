@@ -32,7 +32,6 @@ def test_local_backend_roundtrip(tmp_path, monkeypatch):
     import migkit.config as cfg
     import migkit.state as state
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
-    monkeypatch.setattr(state, "REPORTS", tmp_path / "reports")
     store = state.get_store(_hop({"backend": "local",
                                   "mirror": str(tmp_path / "mirror")}))
     assert store.kind == "local"
@@ -59,7 +58,6 @@ def test_s3_backend_roundtrip(tmp_path, monkeypatch):
     import migkit.config as cfg
     import migkit.state as state
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
-    monkeypatch.setattr(state, "REPORTS", tmp_path / "reports")
     os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
     os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
     os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
@@ -89,3 +87,40 @@ def test_unknown_backend_errors():
     import migkit.state as state
     with pytest.raises(SystemExit):
         state.get_store(_hop({"backend": "gcs"}))
+
+
+def test_a_restore_point_leaves_the_working_directory_encrypted(
+        tmp_path, monkeypatch):
+    """It holds whole rows - the undo of a repair - and its mirror and its
+    bucket may have more readers than this machine (backlog 41). With
+    `MIGKIT_STATE_KEY` it is encrypted before it leaves; without the
+    passphrase, or with another one, it is not read back."""
+    import shutil
+
+    import migkit.config as cfg
+    import migkit.state as state
+    monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
+    monkeypatch.setenv("MIGKIT_STATE_KEY", "CHANGE_ME-a passphrase")
+    store = state.get_store(_hop({"backend": "local",
+                                  "mirror": str(tmp_path / "mirror")}))
+    ts = _make_points(store)[0]
+    sealed = next((tmp_path / "mirror").glob(f"shopdb-{ts}.tar.gz"))
+    raw = sealed.read_bytes()
+    assert raw.startswith(state.SEALED)
+    # gzip would have left the row's text findable in the clear
+    import gzip
+    import io
+    with pytest.raises(Exception):
+        gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
+    # the working copy gone, it comes back from the sealed mirror
+    shutil.rmtree(tmp_path / "reports" / "proofhop" / "shopdb" / "state" / ts)
+    d = store.fetch("shopdb", ts)
+    assert '"pk":["0"]' in (d / "rows-orders.jsonl").read_text()
+    shutil.rmtree(d)
+    monkeypatch.setenv("MIGKIT_STATE_KEY", "CHANGE_ME-another")
+    with pytest.raises(SystemExit, match="not the passphrase"):
+        store.fetch("shopdb", ts)
+    shutil.rmtree(d, ignore_errors=True)
+    monkeypatch.delenv("MIGKIT_STATE_KEY")
+    with pytest.raises(SystemExit, match="set MIGKIT_STATE_KEY"):
+        store.fetch("shopdb", ts)

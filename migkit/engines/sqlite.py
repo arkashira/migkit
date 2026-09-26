@@ -221,8 +221,9 @@ class SQLiteEngine(NeutralCopier, Engine):
         return [r[1] for r in
                 self._q(side, f'pragma table_info("{table}")') if r[5]]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
-                     where=None):
+    def _read_query(self, side, db, table, columns, after, limit, where):
+        """(sql, key, names) for `neutral_read` and `neutral_batches`: one
+        statement shape for both."""
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
@@ -235,10 +236,33 @@ class SQLiteEngine(NeutralCopier, Engine):
             resume = f"({keys}) > ({places})"
         where = self._where(where, resume)
         order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
-        cap = f" limit {int(limit)}" if key else ""
-        rows = [list(r) for r in
-                self._q(side, f'select {cols} from "{table}"'
-                              f"{where}{order}{cap}")]
+        cap = f" limit {int(limit)}" if key and limit else ""
+        return (f'select {cols} from "{table}"{where}{order}{cap}', key,
+                names)
+
+    def neutral_batches(self, side, db, table, columns, size=1000,
+                        where=None):
+        """The whole table in one pass, `size` rows at a time, for a table
+        with no key to resume from - read through a cursor the server keeps,
+        so no more than a batch is ever held here."""
+        sql, _, _ = self._read_query(side, db, table, columns, None, None,
+                                     where)
+        conn = self._reader(side)
+        try:
+            cur = conn.execute(sql)
+            while True:
+                rows = cur.fetchmany(size)
+                if not rows:
+                    break
+                yield [list(r) for r in rows]
+        finally:
+            conn.close()
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
+        sql, key, names = self._read_query(side, db, table, columns, after,
+                                           limit, where)
+        rows = [list(r) for r in self._q(side, sql)]
         if not rows or not key:
             return (rows, None)
         idx = [names.index(k) for k in key if k in names]
@@ -302,6 +326,22 @@ class SQLiteEngine(NeutralCopier, Engine):
         return gone
 
     SQL_DIALECT = "sqlite"
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The whole target file, copied through SQLite's own online
+        backup, which reads a consistent file while it is in use."""
+        import sqlite3
+        src = sqlite3.connect(self._path("dst"))
+        out = sqlite3.connect(state_dir / "dst.sqlite")
+        try:
+            src.backup(out)
+        finally:
+            out.close()
+            src.close()
+
+    def text_encodings(self, side, db):
+        got = self._q(side, "pragma encoding")
+        return {str(got[0][0]): 1} if got else None
 
     def neutral_column_rules(self, side, db, table):
         rows = self._q(side, f'pragma table_info("{table}")')

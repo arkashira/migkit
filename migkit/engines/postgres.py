@@ -75,6 +75,8 @@ class PostgresEngine(Engine):
     counts_from_data = True
     # pg_settings, read inside the database, carries `alter database set`
     SETTINGS_PER_DATABASE = True
+    #: a subscription with copy_data=true copies the tables, then follows
+    REPLICA_COPIES = True
 
     USER_TABLES = ("select n.nspname||'.'||c.relname from pg_class c"
                    " join pg_namespace n on n.oid = c.relnamespace"
@@ -375,9 +377,98 @@ class PostgresEngine(Engine):
         extra = {}
         if side == "dst" and db in self.__dict__.get("_as_replica", ()):
             extra["options"] = "-c session_replication_role=replica"
-        return psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+        conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
                                 password=ep.password, dbname=db,
                                 connect_timeout=15, **extra)
+        self._read_hstore(conn, side, db)
+        return conn
+
+    #: a database name no server has, for asking a pooler who it is
+    NO_SUCH_DATABASE = "migkit_no_such_database"
+
+    def pooler(self, side):
+        """PgBouncer, known by its own console, and by its own words.
+
+        Its console is the database `pgbouncer`: an administrator of it is
+        let in and told how the hop's database is pooled. Anyone else is
+        refused there, as a wrong password is - so a database no server has
+        is asked for next, which PgBouncer refuses as `no such database`
+        and PostgreSQL as `database ... does not exist`; a user PgBouncer
+        signs in through the server is refused there as a wrong password,
+        where PostgreSQL would have signed them in first. Measured on
+        PgBouncer 1.25 and PostgreSQL 16. A pooler that passes every
+        database name on to the server is not told apart from it, and is
+        not claimed to be."""
+        got = super().pooler(side)
+        if got:
+            return got
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+
+        def ask(dbname):
+            try:
+                conn = psycopg2.connect(host=ep.host, port=ep.port,
+                                        user=ep.user, password=ep.password,
+                                        dbname=dbname, connect_timeout=5)
+            except psycopg2.OperationalError as e:
+                return None, str(e)
+            return conn, ""
+        conn, said = ask("pgbouncer")
+        if conn is None:
+            if "does not exist" in said:
+                return None
+            _, said = ask(self.NO_SUCH_DATABASE)
+            if "no such database" in said:
+                return {"name": "PgBouncer", "mode": None, "version": None}
+            if "authentication failed" not in said:
+                return None
+            # PostgreSQL signs a user in before it looks for the database;
+            # PgBouncer signs a user outside its own list in per database,
+            # and cannot for one it does not serve (measured: `SASL
+            # authentication failed` there, for a user the hop's database
+            # let in)
+            own, _ = ask(self._d(side, (self.databases() or ["postgres"])[0]))
+            if own is None:
+                return None
+            own.close()
+            return {"name": "a connection pooler", "mode": None,
+                    "version": None}
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("show version")
+            version = str(cur.fetchone()[0]).replace("PgBouncer", "").strip()
+            cur.execute("show databases")
+            names = [c[0] for c in cur.description]
+            wanted = {self._d(side, d) for d in self.databases()}
+            modes = {r[names.index("pool_mode")] for r in cur.fetchall()
+                     if r[names.index("name")] in wanted}
+            modes.discard(None)
+            modes.discard("")
+            if not modes:
+                cur.execute("show config")
+                modes = {r[1] for r in cur.fetchall() if r[0] == "pool_mode"}
+        finally:
+            conn.close()
+        return {"name": "PgBouncer", "version": version or None,
+                "mode": "/".join(sorted(modes)) or None}
+
+    def _read_hstore(self, conn, side, db):
+        """A key/value set read as the mapping it is, where the database
+        has the extension - it came back as its text (`"a"=>"1"`), and
+        written into another engine's JSON column that is not JSON at all.
+        Asked once per database."""
+        known = self.__dict__.setdefault("_hstore", {})
+        ident = (side, db)
+        if known.get(ident) is False:
+            return
+        from psycopg2.extras import register_hstore
+        try:
+            register_hstore(conn)
+            known[ident] = True
+        except Exception:  # noqa: BLE001 - no extension here is the answer
+            conn.rollback()
+            known[ident] = False
 
     def load_window(self, db, log=None, tables=None):
         """The target's connections as a replica while rows are written
@@ -566,8 +657,9 @@ class PostgresEngine(Engine):
             return {"PGOPTIONS": "-c session_replication_role=replica"}
         return {}
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
-                     where=None):
+    def _read_query(self, side, db, table, columns, after, limit, where):
+        """(sql, args, key, names) for `neutral_read` and
+        `neutral_batches`: one statement shape for both."""
         sch, tbl = self._split(table)
         names = [n for n, _ in columns]
         cols = ", ".join(f'"{n}"' for n in names)
@@ -581,11 +673,34 @@ class PostgresEngine(Engine):
         # the driver formats every statement it is given parameters for
         where = self._where(where, resume, True, percent=True)
         order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
-        cap = f" limit {int(limit)}" if key else ""
+        cap = f" limit {int(limit)}" if key and limit else ""
+        return (f'select {cols} from "{sch}"."{tbl}"{where}{order}{cap}',
+                args, key, names)
+
+    def neutral_batches(self, side, db, table, columns, size=1000,
+                        where=None):
+        """The whole table in one pass, `size` rows at a time, for a table
+        with no key to resume from - read through a cursor the server keeps,
+        so no more than a batch is ever held here."""
+        sql, args, _, _ = self._read_query(side, db, table, columns, None,
+                                           None, where)
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor(name="migkit_batches") as cur:
+                cur.itersize = size
+                cur.execute(sql, args)
+                while True:
+                    rows = cur.fetchmany(size)
+                    if not rows:
+                        break
+                    yield [list(r) for r in rows]
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
+        sql, args, key, names = self._read_query(side, db, table, columns,
+                                                 after, limit, where)
         with self._conn(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'select {cols} from "{sch}"."{tbl}"'
-                            f"{where}{order}{cap}", args)
+                cur.execute(sql, args)
                 rows = [list(r) for r in cur.fetchall()]
         if not rows or not key:
             return (rows, None)
@@ -3115,14 +3230,21 @@ class PostgresEngine(Engine):
         import tempfile
         from urllib.parse import quote
         s_, t_ = self.hop.source, self.hop.target
-        src = (f"postgresql://{s_.user}:{quote(s_.password or '', safe='')}"
-               f"@{s_.host}:{s_.port}/{db}")
-        dst = (f"postgresql://{t_.user}:{quote(t_.password or '', safe='')}"
-               f"@{t_.host}:{t_.port}/{self._d('dst', db)}")
+        # the passwords in a password file, not in the addresses: those
+        # were the program's arguments
+        src = f"postgresql://{quote(s_.user, safe='')}@{s_.host}:{s_.port}/{db}"
+        dst = (f"postgresql://{quote(t_.user, safe='')}@{t_.host}:{t_.port}"
+               f"/{self._d('dst', db)}")
         work = tempfile.mkdtemp(prefix="migkit-schemacheck-")
         try:
+            from pathlib import Path
+
+            from ..movers import _pgpass
+            passfile = Path(work) / ".pgpass"
+            _pgpass(passfile, self.hop, db, self._d("dst", db))
             p = run(["pgcopydb", "compare", "schema", "--dir", work,
-                     "--source", src, "--target", dst], check=False)
+                     "--source", src, "--target", dst],
+                    env={"PGPASSFILE": str(passfile)}, check=False)
         except Exception as e:
             return Result("deep", f"{db} schema cross-check", "error",
                           "the schemas could not be read a second time:"
@@ -3151,14 +3273,21 @@ class PostgresEngine(Engine):
         import tempfile
         from urllib.parse import quote
         s_, t_ = self.hop.source, self.hop.target
-        src = (f"postgresql://{s_.user}:{quote(s_.password or '', safe='')}"
-               f"@{s_.host}:{s_.port}/{db}")
-        dst = (f"postgresql://{t_.user}:{quote(t_.password or '', safe='')}"
-               f"@{t_.host}:{t_.port}/{self._d('dst', db)}")
+        # the passwords in a password file, not in the addresses: those
+        # were the program's arguments
+        src = f"postgresql://{quote(s_.user, safe='')}@{s_.host}:{s_.port}/{db}"
+        dst = (f"postgresql://{quote(t_.user, safe='')}@{t_.host}:{t_.port}"
+               f"/{self._d('dst', db)}")
         work = tempfile.mkdtemp(prefix="migkit-crosscheck-")
         try:
+            from pathlib import Path
+
+            from ..movers import _pgpass
+            passfile = Path(work) / ".pgpass"
+            _pgpass(passfile, self.hop, db, self._d("dst", db))
             p = run(["pgcopydb", "compare", "data", "--dir", work,
-                     "--source", src, "--target", dst], check=False)
+                     "--source", src, "--target", dst],
+                    env={"PGPASSFILE": str(passfile)}, check=False)
         except Exception as e:
             return Result("deep", f"{db} cross-check", "error",
                           "the pair could not be read a second time:"
@@ -3261,6 +3390,244 @@ class PostgresEngine(Engine):
             " `migkit move --go`, which now analyzes what it loads)",
             reachable)
 
+
+    # --- the source's own reads, planned and timed on both sides (G1) ----
+
+    def workload_reads(self, db, n):
+        """[(label, statement, runnable)] - the source's busiest reads by
+        total time, from `pg_stat_statements` - or why there are none.
+        The hop's own user's statements are left out: they are migkit's
+        checks, not the application's reads."""
+        if self._psql("src", db, "select count(*) from pg_extension where"
+                                 " extname = 'pg_stat_statements'") != "1":
+            return ("the source keeps no statement statistics here"
+                    " (pg_stat_statements is not installed in this"
+                    " database)")
+        rows = self._psql("src", db, f"""
+            select replace(replace(query, chr(10), ' '), chr(31), ' ')
+              from pg_stat_statements
+             where dbid = (select oid from pg_database
+                            where datname = current_database())
+               and userid <> (select oid from pg_roles
+                               where rolname = current_user)
+               and query ~* '^\\s*(select|with)\\M'
+               and query !~* '(pg_catalog|information_schema|pg_stat)'
+             order by total_exec_time desc limit {int(n)}""")
+        import re
+        out = []
+        for q in (l for l in rows.splitlines() if l.strip()):
+            label = " ".join(q.split())[:70]
+            out.append((label, q, not re.search(r"\$\d", q)))
+        return out
+
+    def _plan_json(self, side, db, sql, analyze=False):
+        import json as _json
+        conn = self._conn(side, self._d(side, db))
+        try:
+            conn.set_session(readonly=True)
+            with conn.cursor() as cur:
+                cur.execute("set statement_timeout = 5000")
+                import re
+                params = bool(re.search(r"\$\d", sql))
+                opts = ("analyze, timing off, format json" if analyze else
+                        "generic_plan, format json" if params
+                        else "format json")
+                cur.execute(f"explain ({opts}) {sql}")
+                got = cur.fetchone()[0]
+            return got if isinstance(got, list) else _json.loads(got)
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def workload_plan(self, side, db, sql):
+        """{table: "index <name>" or None where the plan reads it whole}.
+        A statement with parameters left in it is planned generically,
+        which is PostgreSQL 16 and later."""
+        out = {}
+
+        def walk(node):
+            rel = node.get("Relation Name")
+            if rel:
+                kind = node.get("Node Type", "")
+                out[rel] = (f"index {node.get('Index Name')}"
+                            if "Index" in kind and node.get("Index Name")
+                            else None if kind == "Seq Scan"
+                            else out.get(rel))
+            for child in node.get("Plans") or []:
+                walk(child)
+        walk(self._plan_json(side, db, sql)[0]["Plan"])
+        return out
+
+    def workload_time(self, side, db, sql):
+        """The statement's execution time in ms, run read-only; no rows
+        come back."""
+        return float(self._plan_json(side, db, sql, analyze=True)[0]
+                     ["Execution Time"])
+
+    def stream_identity(self, side, db):
+        """The cluster's system identifier, which a physical replica shares
+        with its primary and a rebuilt server does not. None where this
+        user may not read it."""
+        try:
+            got = self._psql(side, db, "select system_identifier from"
+                                       " pg_control_system()")
+        except Exception:  # noqa: BLE001 - not every user may ask
+            return None
+        return {"cluster": got.strip()} if got.strip() else None
+
+    #: WAL the target held at its peak during a load, per byte of
+    #: `max_wal_size`: measured on 16 at 64MB, loading a 355 MiB table
+    #: that wrote 411 MiB of WAL, `pg_wal` peaked at 80 MiB
+    WAL_PEAK = 1.25
+
+    def log_kept(self, db, grows):
+        """Checkpoints recycle WAL past `max_wal_size`, unless a slot on
+        the target still needs it. Measured with one inactive slot on the
+        same load: `pg_wal` peaked at 416 MiB, all of it."""
+        row = self._psql("dst", db, """
+            select (select count(*) from pg_replication_slots)
+                   || ',' || pg_size_bytes(current_setting('max_wal_size'))
+                   || ',' || pg_size_bytes(current_setting('wal_keep_size'))
+            """).split(",")
+        slots, most, keep = (int(x) for x in row)
+        if slots:
+            return (grows, f"all of it: {slots} replication slot(s) on the"
+                           " target keep WAL until they have read it")
+        bound = int(most * self.WAL_PEAK) + keep
+        return (min(grows, bound), "checkpoints recycle it past"
+                                   " max_wal_size and wal_keep_size")
+
+    def text_encodings(self, side, db):
+        # one encoding for the whole database: every text value is in it
+        got = self._psql(side, self._d(side, db),
+                         "select pg_encoding_to_char(encoding) from"
+                         " pg_database where datname = current_database()")
+        return {got.strip(): 1} if got.strip() else None
+
+    def neutral_create_code(self, side, db, statement):
+        if side != "dst":
+            raise RuntimeError("migkit does not write to the source")
+        conn = self._conn(side, self._d(side, db))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(statement)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def neutral_views(self, side, db):
+        rows = self._psql(side, db, "select schemaname||'.'||viewname"
+                                    "||chr(31)||replace(definition,"
+                                    " chr(10), ' ') from pg_views where"
+                                    " schemaname not in ('pg_catalog',"
+                                    " 'information_schema') order by 1")
+        out = []
+        for line in rows.splitlines():
+            n, _, d = line.partition("\x1f")
+            if n and not self.hop.excluded(db, *n.split(".")):
+                out.append((n, d))
+        return out
+
+    def neutral_functions(self, side, db):
+        """Functions and procedures written in the database - not the ones
+        an extension brought, which the target gets from the extension.
+        A `language sql` function whose body is one `select` of one
+        expression and nothing else is carried; the rest are named."""
+        import sqlglot
+        from sqlglot import exp
+        out = []
+        for line in self._psql(side, db, """
+                select p.proname::text || chr(31) || p.prokind::text || chr(31)
+                       || l.lanname::text || chr(31)
+                       || pg_get_function_identity_arguments(p.oid)
+                       || chr(31) || format_type(p.prorettype, null)
+                       || chr(31) || replace(coalesce(p.prosrc, ''),
+                                             chr(10), ' ')
+                  from pg_proc p
+                  join pg_namespace n on n.oid = p.pronamespace
+                  join pg_language l on l.oid = p.prolang
+                 where n.nspname not in ('pg_catalog', 'information_schema')
+                   and n.nspname not like 'pg_toast%'
+                   and p.prokind in ('f', 'p')
+                   and not exists (select 1 from pg_depend d
+                                    where d.classid = 'pg_proc'::regclass
+                                      and d.objid = p.oid
+                                      and d.deptype = 'e')
+                 order by 1""").splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 6:
+                continue
+            fn, kind, lang, args, returns, src = parts
+            params = []
+            for a in filter(None, (x.strip() for x in args.split(","))):
+                pname, _, ptype = a.partition(" ")
+                params.append((pname, ptype) if ptype else ("", pname))
+            one = None
+            if kind == "f" and lang == "sql" and all(p for p, _ in params):
+                try:
+                    tree = sqlglot.parse_one(src.strip().rstrip(";"),
+                                             read="postgres")
+                    if isinstance(tree, exp.Select) and \
+                            len(tree.expressions) == 1 and \
+                            not tree.args.get("from") and \
+                            not tree.args.get("where"):
+                        one = tree.expressions[0].unalias().sql("postgres")
+                except Exception:  # noqa: BLE001 - not one expression
+                    one = None
+            out.append((fn, params, returns, one))
+        return out
+
+    def code_definition(self, side, db, kind, name):
+        schema, _, leaf = str(name).rpartition(".")
+        if kind == "view":
+            got = self._psql(side, db, "select pg_get_viewdef(to_regclass("
+                                       f"'{self._quote_ident(schema or 'public')}"
+                                       f".{self._quote_ident(leaf)}'))")
+            return (f"create view {leaf} as {got}" if got else None)
+        got = self._psql(side, db, "select string_agg(pg_get_functiondef("
+                                   "p.oid), chr(10)) from pg_proc p where"
+                                   f" p.proname = '{leaf}'")
+        return got or None
+
+    def neutral_function_sql(self, name, params, returns, body):
+        args = ", ".join(f'{self._quote_ident(p)} {t}' for p, t in params)
+        return (f"create function {self._quote_ident(name)}({args}) returns"
+                f" {returns} language sql as $$ select {body} $$")
+
+    def zone_evidence(self, side, db):
+        """(the server's UTC offset in minutes, its UTC clock, [(table.column,
+        latest value)]) for the `timestamp without time zone` columns an
+        index leads - read by the index, so each is one probe (`zones`)."""
+        conn = self._conn(side, self._d(side, db))
+        try:
+            conn.set_session(readonly=True)
+            with conn.cursor() as cur:
+                cur.execute("select (extract(timezone from now()) / 60)::int,"
+                            " now() at time zone 'utc'")
+                offset, now = cur.fetchone()
+                cur.execute("""
+                    select n.nspname, t.relname, a.attname
+                      from pg_index x
+                      join pg_class t on t.oid = x.indrelid
+                      join pg_namespace n on n.oid = t.relnamespace
+                      join pg_attribute a on a.attrelid = t.oid
+                                         and a.attnum = x.indkey[0]
+                     where a.atttypid = 'timestamp'::regtype
+                       and n.nspname not in ('pg_catalog',
+                                             'information_schema')
+                     group by 1, 2, 3 limit 30""")
+                cols = cur.fetchall()
+                heads = []
+                for sch, t, c in cols:
+                    if self.hop.excluded(db, sch, t):
+                        continue
+                    cur.execute(f'select max("{c}") from "{sch}"."{t}"')
+                    heads.append((f"{sch}.{t}.{c}", cur.fetchone()[0]))
+            return int(offset), now, heads
+        finally:
+            conn.rollback()
+            conn.close()
+
     def check_deep(self, db):
         res = []
         rpt = self.hop.report_dir(db)
@@ -3293,6 +3660,9 @@ class PostgresEngine(Engine):
                               " index"))
 
         res.append(self._planner_stats(db))
+        from .. import workload, zones
+        res.append(workload.compare(self, db))
+        res.append(zones.infer(self, db))
         cross = self._crosscheck(db)
         if cross is not None:
             res.append(cross)
@@ -4713,6 +5083,12 @@ class PostgresEngine(Engine):
              "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
             input=script, capture_output=True, text=True, env=env)
         if p.returncode:
+            from ..wording import pooler_refused
+            pooled = pooler_refused(p.stderr)
+            if pooled:
+                where = "source" if side == "src" else "target"
+                raise SystemExit(f"the {where}: {pooled}. The connection was"
+                                 " refused before it ran anything.")
             raise RuntimeError((p.stdout + p.stderr)[-400:])
         return p.stdout
 
@@ -4909,6 +5285,7 @@ class PostgresEngine(Engine):
         dv = dst_b.version or self._psql("dst", "postgres",
                                          "show server_version")
         items.append(self._version_row(sv, dv))
+        items += self._pooler_items()
 
         # read replica (pg_is_in_recovery=t) rejects writes incl SELECT FOR
         # UPDATE (25006): fatal as a target, ok-for-checks as a source
@@ -6327,9 +6704,12 @@ class PostgresEngine(Engine):
         if out.returncode or inp.returncode:
             raise RuntimeError((err_o + err_i).decode()[-300:])
 
+    def move_key(self, db, sch, tbl):
+        return f"{sch or 'public'}.{tbl}"
+
     def move_table(self, db, sch, tbl, chunk, ck, log):
         sch = sch or "public"
-        key = f"{sch}.{tbl}"
+        key = self.move_key(db, sch, tbl)
         qt = f'"{sch}"."{tbl}"'
         st = ck.setdefault(key, {})
         if st.get("done"):
@@ -6397,6 +6777,9 @@ class PostgresEngine(Engine):
         conn = (f"host={s.host} port={s.port} dbname={db}"
                 f" user={s.user} password={s.password}")
         streaming = self._subscription_streaming(db)
+        # a stream the other way exists or will: this one must not send
+        # back what that one applied, or a change goes round for ever
+        origin = getattr(self, "loop_safe", False)
         note = {}
         if copied:
             # its slot is made now, and the log before now is not in it
@@ -6416,12 +6799,28 @@ class PostgresEngine(Engine):
                     f" publication {name} with (copy_data ="
                     f" {'true' if copy_data else 'false'}"
                     + (f", streaming = {streaming}" if streaming else "")
+                    + (", origin = none" if origin else "")
                     + ");"],
             "drop_src": [f"drop publication if exists {name};"],
             "drop_dst": [f"drop subscription if exists {name};"],
             "status": "select subname, received_lsn, latest_end_lsn,"
                       " latest_end_time from pg_stat_subscription",
         }
+
+    def loops_prevented(self, db):
+        """Why streams both ways would send changes round for ever here,
+        or "" where they cannot. A subscription told `origin = none` takes
+        only what the other side's own sessions wrote - PostgreSQL 16 on
+        both sides."""
+        src = self._server_version("src", db)
+        dst = self._server_version("dst", self._d("dst", db))
+        if not src or not dst:
+            return "a side's version could not be read"
+        if src < 160000 or dst < 160000:
+            return ("a subscription tells its own changes from the other"
+                    " side's only from PostgreSQL 16, and a change would go"
+                    " round for ever")
+        return ""
 
     def _subscription_streaming(self, db):
         """How the subscription takes a transaction too large for the

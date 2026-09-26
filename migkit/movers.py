@@ -22,7 +22,7 @@ from urllib.parse import quote
 from .util import run, tool_env, which
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper",
-        "pgloader", "mongodump")
+        "pgloader", "mongodump", "mongosync")
 
 
 def pick(engine, table=""):
@@ -42,6 +42,11 @@ def pick(engine, table=""):
         return "mydumper"
     if engine == "hetero" and which("pgloader"):
         return "pgloader"
+    if engine == "mongodb" and which("mongosync"):
+        # online, and consistent as of its commit - a dump of a source
+        # still taking writes is neither; `fitted` falls back where the
+        # hop or the servers cannot take it
+        return "mongosync"
     if engine == "mongodb" and which("mongodump") and which("mongorestore"):
         return "mongodump"
     return "builtin"
@@ -81,6 +86,12 @@ def fitted(hop, engine, via):
     an exclude list it loads the tables the target owns. The table copier
     carries all of those, so the decision is made here, from the hop.
     """
+    if via == "mongosync":
+        why = _mongosync_unfit(hop)
+        if not why:
+            return via, None
+        return ("mongodump" if which("mongodump") and which("mongorestore")
+                else "builtin"), why
     if via != "pgloader":
         return via, None
     from .engines import ALIASES
@@ -207,7 +218,8 @@ def supported(engine, via):
             "pgcopydb": engine == "postgres",
             "mydumper": engine == "mysql",
             "pgloader": engine == "hetero",
-            "mongodump": engine == "mongodb"}.get(via, True)
+            "mongodump": engine == "mongodb",
+            "mongosync": engine == "mongodb"}.get(via, True)
 
 
 def stream_supported(engine):
@@ -221,7 +233,7 @@ def stream_supported(engine):
 #: the command lines go to the run's debug log, and what a failing one said
 #: is passed on with its name taken out.
 DRIVEN = ("pg_dump", "pg_restore", "pgcopydb", "psql", "mydumper",
-          "myloader", "pgloader", "mongodump", "mongorestore")
+          "myloader", "pgloader", "mongodump", "mongorestore", "mongosync")
 #: environment variables whose values are secrets, for the debug log
 _SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
 #: (DebugLog, secrets) for the run in progress, set by `run_via`
@@ -233,7 +245,7 @@ _DEBUG = None
 _RUNNING = None
 _RUNNING_LOCK = threading.Lock()
 LOADERS = ("pg_restore", "myloader", "mongorestore")
-COPIERS = ("pgcopydb", "pgloader")
+COPIERS = ("pgcopydb", "pgloader", "mongosync")
 
 
 def _program_role(program):
@@ -378,21 +390,42 @@ def _sh(cmd, env=None, log=None, progress=None):
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
+#: {table: bytes} of the database the running bulk path carries, from the
+#: source's catalogue; set by `run_via` so every progress reader counts
+#: against it
+_SIZES = None
+
+
+def _source_sizes(hop, db):
+    """{table: bytes} the move carries, the hop's exclusions left out; {}
+    where the catalogue says nothing."""
+    from .engines import get_engine
+    try:
+        facts = get_engine(hop).table_facts("src", db)
+    except Exception:  # noqa: BLE001 - progress without sizes, then
+        return {}
+    return {name: int(f.get("bytes") or 0) for name, f in facts.items()
+            if isinstance(f, dict) and f.get("bytes")
+            and not hop.excluded(db, *str(name).split("."))}
+
+
 def _tables_done(pattern, verb, total=None):
     """A progress reader for a program that names each table as it
     reaches it: `pattern` has a `table` group. Answers migkit's line for a
-    matching line - `public.orders: read (3 of 12 tables)` - and None for
-    everything else."""
-    seen = []
+    matching line - `public.orders: read (3 of 12 tables, 1.2 GB of 4.8 GB
+    (25%), 40.0 MB/s, about 1m30s left)` - and None for everything else."""
+    from .wording import Tally
+    tally = Tally(_SIZES, total)
     rx = re.compile(pattern)
 
     def read(line):
         m = rx.search(line)
         if not m:
             return None
-        seen.append(m.group("table"))
-        of = f" of {total:,}" if total else ""
-        return f"{m.group('table')}: {verb} ({len(seen):,}{of} tables)"
+        so_far = tally.reached(m.group("table"))
+        if so_far is None:
+            return None
+        return f"{m.group('table')}: {verb} ({so_far})"
     return read
 
 
@@ -429,25 +462,26 @@ class _JsonLog:
 
 def _my_dump_progress():
     """The MySQL dump's `dump_table_progress` events, once per table."""
-    seen = []
+    from .wording import Tally
+    tally = Tally(_SIZES)
 
     def on(event):
         if event.get("event") != "dump_table_progress":
             return None
         name = f"{event.get('db')}.{event.get('table')}"
-        if name in seen:
-            return None
-        seen.append(name)
         total = str(event.get("tables_total") or "")
-        of = f" of {int(total):,}" if total.isdigit() else ""
-        return f"{name}: reading ({len(seen):,}{of} tables)"
+        if total.isdigit():
+            tally.total = int(total)
+        so_far = tally.reached(name)
+        return f"{name}: reading ({so_far})" if so_far else None
     return _JsonLog(on)
 
 
 def _my_load_progress(summary):
     """The MySQL load's `restore_data_progress` events, once per table,
     and its `restore_completed` counts into `summary`."""
-    seen = []
+    from .wording import Tally
+    tally = Tally(_SIZES)
 
     def on(event):
         kind = event.get("event")
@@ -457,10 +491,8 @@ def _my_load_progress(summary):
         if kind != "restore_data_progress":
             return None
         name = f"{event.get('db')}.{event.get('table')}"
-        if name in seen:
-            return None
-        seen.append(name)
-        return f"{name}: loading ({len(seen):,} tables)"
+        so_far = tally.reached(name)
+        return f"{name}: loading ({so_far})" if so_far else None
     return _JsonLog(on)
 
 
@@ -844,19 +876,46 @@ def pgdump_move(hop, db, workers, go, log):
         load.argv.remove("--disable-triggers")
     if quiet == "session":
         env_t["PGOPTIONS"] = "-c session_replication_role=replica"
-    import shutil
-    shutil.rmtree(outdir, ignore_errors=True)
-    if log:
-        log(dump)
-    _sh(dump.argv, {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"},
-        log, progress=_tables_done(PG_DUMP_TABLE, "read"))
-    _pg_create_missing(hop, db, log)
-    _pg_truncate_target(hop, db, log)
-    with _IndexWindow(hop, db, workers, log):
-        _pgdump_restore(load, env_t, log)
+    with _LocalCopy(outdir):
+        if log:
+            log(dump)
+        _sh(dump.argv, {"PGPASSWORD": s.password,
+                        "PGCONNECT_TIMEOUT": "15"},
+            log, progress=_tables_done(PG_DUMP_TABLE, "read"))
+        _pg_create_missing(hop, db, log)
+        _pg_truncate_target(hop, db, log)
+        with _IndexWindow(hop, db, workers, log):
+            _pgdump_restore(load, env_t, log)
     _pg_finish_created(hop, db, log)
-    shutil.rmtree(outdir, ignore_errors=True)
     return steps
+
+
+class _LocalCopy:
+    """The local copy of the source a dump-and-load path makes: private
+    while it exists, and gone when the path ends, whichever way it ends.
+
+    It is the source's data, all of it, in files. It was removed only
+    after a load that succeeded: a load that failed or was stopped left
+    it in the report directory, readable by anyone who could read that,
+    until the next run happened to start by removing it. Now it is made
+    readable by this user only before anything is written into it, and
+    removed on the way out."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        import os
+        import shutil
+        shutil.rmtree(self.path, ignore_errors=True)
+        self.path.mkdir(parents=True)
+        os.chmod(self.path, 0o700)
+        return self.path
+
+    def __exit__(self, *exc):
+        import shutil
+        shutil.rmtree(self.path, ignore_errors=True)
+        return False
 
 
 class _RestoreLog:
@@ -1687,9 +1746,13 @@ def _options_of(path, stamp):
     # the option column: the flag, then the column gap, the end of the
     # line, or its `=VALUE`. Measured, the MongoDB tools spell theirs in
     # camelCase with `=<value>` (`--bypassDocumentValidation`), and the old
-    # lower-case, gap-only pattern found 6 of mongodump's 37 flags
+    # lower-case, gap-only pattern found 6 of mongodump's 37 flags. The
+    # online sync names its value after one space (`--config value`), and
+    # 5 of its 15 were found until that shape was read too; every other
+    # program's count stayed the same
     return frozenset(re.findall(
-        r"(?m)^\s+(?:-\w,\s+)?(--[a-zA-Z0-9][a-zA-Z0-9-]*)(?=\s{2,}|$|=|\[=)",
+        r"(?m)^\s+(?:-\w,\s+)?(--[a-zA-Z0-9][a-zA-Z0-9-]*)"
+        r"(?=\s{2,}|$|=|\[=|\s[A-Za-z_<][\w<>.-]*\s{2,})",
         (p.stdout or "") + (p.stderr or "")))
 
 
@@ -2019,34 +2082,33 @@ def mydumper_move(hop, db, workers, go, log):
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
         raise _unresolved_exclusion(db, unresolved)
-    import shutil
-    shutil.rmtree(outdir, ignore_errors=True)
     cnf.write_text(settings)
     cnf.chmod(0o600)
     if skip or routed:
         omit.write_text("".join(f"{n}\n" for n in skip + routed))
-    if log:
-        log(dump)
-    _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
-        progress=_my_dump_progress())
-    from .engines.mysql import MySQLEngine
-    _my_create_missing(hop, db, log)
-    _my_truncate_target(hop, db, log)
-    summary = {}
-    with _MyTriggerWindow(hop, db, log), \
-            _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
+    with _LocalCopy(outdir):
         if log:
-            log(load)
-        _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
-            progress=_my_load_progress(summary))
-    errors = str(summary.get("errors") or "0")
-    if errors.isdigit() and int(errors):
-        # the load's own count, which an exit code of 0 does not rule out
-        raise RuntimeError(f"the load counted {int(errors):,} errors")
-    if skip:
-        _my_orphans_left(hop, db, log)
-    _my_dump_position(hop, db, outdir)
-    shutil.rmtree(outdir, ignore_errors=True)
+            log(dump)
+        _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
+            progress=_my_dump_progress())
+        from .engines.mysql import MySQLEngine
+        _my_create_missing(hop, db, log)
+        _my_truncate_target(hop, db, log)
+        summary = {}
+        with _MyTriggerWindow(hop, db, log), \
+                _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
+            if log:
+                log(load)
+            _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
+                progress=_my_load_progress(summary))
+        errors = str(summary.get("errors") or "0")
+        if errors.isdigit() and int(errors):
+            # the load's own count, which an exit code of 0 does not rule
+            # out
+            raise RuntimeError(f"the load counted {int(errors):,} errors")
+        if skip:
+            _my_orphans_left(hop, db, log)
+        _my_dump_position(hop, db, outdir)
     return steps
 
 
@@ -2110,8 +2172,16 @@ ALTER SCHEMA '{db}' RENAME TO 'public';
     return steps
 
 
-def _mongo_uri(ep):
-    auth = (f"{quote(ep.user, safe='')}:{quote(ep.password, safe='')}@"
+def _mongo_uri(ep, secret=False):
+    """The address a MongoDB program is given. Without its password unless
+    `secret` says so: a command line is readable by every process listing
+    on the machine, and the dump and load programs took theirs whole - the
+    guard against it looked at the call and not at the variable the
+    command line was built in. The password goes in a private file
+    (`_MongoSecrets`)."""
+    auth = ((f"{quote(ep.user, safe='')}:{quote(ep.password, safe='')}@"
+             if secret or not ep.password
+             else f"{quote(ep.user, safe='')}@")
             if ep.user else "")
     hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
     uri = f"mongodb://{auth}{hosts}/"
@@ -2167,15 +2237,233 @@ def mongodump_move(hop, db, workers, go, log):
     if log:
         log(copy)
     _debug(copy.argv)
-    dump_cmd, restore_cmd = dump, restore
-    dump = subprocess.Popen(dump_cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=tool_env())
-    restore = subprocess.Popen(restore_cmd, stdin=dump.stdout,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE, env=tool_env())
-    dump.stdout.close()
-    with _spawned(dump, dump_cmd[0]), _spawned(restore, restore_cmd[0]):
-        return _mongo_piped(db, dump, restore, log, steps)
+    with _MongoSecrets(hop.report_dir(db), s, t) as files:
+        dump_cmd = dump + files["src"]
+        restore_cmd = restore + files["dst"]
+        dump = subprocess.Popen(dump_cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=tool_env())
+        restore = subprocess.Popen(restore_cmd, stdin=dump.stdout,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, env=tool_env())
+        dump.stdout.close()
+        with _spawned(dump, dump_cmd[0]), _spawned(restore, restore_cmd[0]):
+            return _mongo_piped(db, dump, restore, log, steps)
+
+
+class _MongoSecrets:
+    """Each side's password in a file of its own, readable by this user
+    only, for as long as the programs run: `{side: ["--config=<file>"]}`,
+    empty for a side with no password. Measured with the Database Tools
+    100.16: `--config` holding `password:` beside a `--uri` without one
+    signed in, and a wrong one there exited 1."""
+
+    def __init__(self, where, src, dst):
+        import tempfile
+        self.where, self.eps = where, {"src": src, "dst": dst}
+        self.dir = None
+        self._tmp = tempfile
+
+    def __enter__(self):
+        import os
+
+        import yaml
+        self.where.mkdir(parents=True, exist_ok=True)
+        self.dir = self._tmp.mkdtemp(prefix="mongo-auth-", dir=self.where)
+        os.chmod(self.dir, 0o700)
+        out = {}
+        for side, ep in self.eps.items():
+            if not ep.password:
+                out[side] = []
+                continue
+            path = f"{self.dir}/{side}.yaml"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(yaml.safe_dump({"password": ep.password}))
+            out[side] = [f"--config={path}"]
+        return out
+
+    def __exit__(self, *exc):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+        return False
+
+
+def _mongosync_unfit(hop):
+    """Why the online sync cannot carry this hop, or None.
+
+    It keeps each database's name, needs both sides to be a replica set
+    or sharded cluster of MongoDB 6.0 or later, and reads no row filter.
+    Asked of the servers, once; one that cannot be asked is a reason."""
+    if any(hop.target_db(d) != d for d in (hop.databases or [])) or any(
+            k != v for k, v in (hop.db_map or {}).items()):
+        return "the online sync keeps each database's name, and the hop maps one"
+    from .engines.mongodb import MongoEngine
+    eng = MongoEngine(hop)
+    for side, label in (("src", "source"), ("dst", "target")):
+        try:
+            admin = eng._client(side).admin
+            hello = admin.command("hello")
+            version = admin.command("buildInfo").get("versionArray") or [0]
+        except Exception as e:  # noqa: BLE001 - said, as the reason
+            return f"the {label} could not be asked ({type(e).__name__})"
+        if not (hello.get("setName") or hello.get("msg") == "isdbgrid"):
+            return f"the {label} is not a replica set or sharded cluster"
+        if int(version[0]) < 6:
+            return f"the {label} is older than MongoDB 6.0"
+    return None
+
+
+def _free_port():
+    import socket as _socket
+    with _socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _sync_api(port, method, path, body=None, timeout=15):
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/v1/{path}", method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def mongosync_move(hop, db, workers, go, log):
+    """MongoDB to MongoDB through the cluster-to-cluster sync: an online
+    copy that keeps applying the source's changes while it runs, committed
+    when it has caught up, and consistent as of that commit.
+
+    Measured with 1.21 between two 7.0 replica sets. Started with
+    `preExistingDestinationData` and the hop's database as its only
+    namespace, it wrote nothing to the source: no database or collection
+    appeared there, and it asked for no user on the source (without that
+    option it refused to start until it could turn on write blocking
+    there). It keeps its own bookkeeping in `__mdb_internal_mongosync` on
+    the target. 3,000 documents arrived, and so did an insert and an update
+    made while it ran; NumberLong and Decimal128 stayed as they were.
+
+    Both addresses, passwords and all, go in its configuration file, which
+    is readable by this user only and removed when it ends."""
+    from .wording import Step, phase
+    skip, unresolved = [], ""
+    if getattr(hop, "exclude", None):
+        try:
+            from .engines.mongodb import MongoEngine
+            names = MongoEngine(hop)._client("src")[db].list_collection_names()
+            skip = sorted(n for n in names if hop.excluded(db, n))
+        except Exception as e:  # noqa: BLE001 - said, and refused below
+            unresolved = (str(e).strip().splitlines()[0][:100] if str(e)
+                          else type(e).__name__)
+    port = _free_port()
+    start = {"source": "cluster0", "destination": "cluster1",
+             "preExistingDestinationData": True,
+             "includeNamespaces": [{"database": db}]}
+    if skip:
+        start["excludeNamespaces"] = [{"database": db, "collections": skip}]
+    sync = Step(phase("sync", left_out=len(skip)),
+                ["mongosync", "--config", "<private file>", "--port", port])
+    steps = [sync]
+    if unresolved:
+        steps.append(_unresolved_note(unresolved))
+    if not go:
+        return steps + ["# dry-run, add --go to execute"]
+    if unresolved:
+        raise _unresolved_exclusion(db, unresolved)
+    import yaml
+
+    from .engines.mongodb import MongoEngine
+    from .util import PrivateFile
+    eng = MongoEngine(hop)
+    # what the target holds of these collections is not this copy's, and
+    # the sync refuses to start over one that exists even empty (measured:
+    # "namespace conflict(s) with existing data") - dropped, on the target
+    # only, as the other bulk path drops them; it builds their indexes
+    target = eng._client("dst")[db]
+    there = set(target.list_collection_names())
+    for name in eng._client("src")[db].list_collection_names():
+        if name not in skip and name in there:
+            target.drop_collection(name)
+    # its logs and metrics in the hop's reports, and nothing sent to its
+    # vendor: telemetry is on unless it is turned off, and measured, its
+    # metrics went into whatever directory it was started from
+    here = hop.report_dir(db)
+    conf = yaml.safe_dump({
+        "cluster0": _mongo_uri(hop.source, secret=True),
+        "cluster1": _mongo_uri(hop.target, secret=True),
+        "port": port, "logPath": str(here / "sync-logs"),
+        "metricsLogPath": str(here / "sync-metrics"),
+        "disableTelemetry": True})
+    if log:
+        log(sync)
+    with PrivateFile(conf, ".yaml") as path:
+        argv = ["mongosync", "--config", path]
+        _debug(argv)
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, env=tool_env(),
+                                cwd=here)
+        with _spawned(proc, "mongosync"):
+            _mongosync_run(port, proc, start, db, log)
+            # committed: it has nothing more to do, and does not stop
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    return steps
+
+
+def _mongosync_run(port, proc, start, db, log):
+    import time as _t
+    end = _t.time() + 60
+    while True:
+        try:
+            _sync_api(port, "GET", "progress", timeout=5)
+            break
+        except OSError:
+            if proc.poll() is None and _t.time() > end:
+                proc.terminate()
+                proc.wait()
+            if proc.poll() is not None:
+                raise RuntimeError("the online sync did not start: "
+                                   + (proc.stderr.read() or b"").decode(
+                                       errors="replace")[-300:])
+            _t.sleep(0.5)
+    got = _sync_api(port, "POST", "start", start)
+    if not got.get("success"):
+        raise RuntimeError(f"the online sync refused to start:"
+                           f" {got.get('errorDescription') or got}")
+    said, last = None, _t.time()
+    while True:
+        p = _sync_api(port, "GET", "progress").get("progress") or {}
+        if proc.poll() is not None:
+            raise RuntimeError("the online sync stopped before it"
+                               " could commit")
+        copy = p.get("collectionCopy") or {}
+        done, total = (copy.get("estimatedCopiedBytes"),
+                       copy.get("estimatedTotalBytes"))
+        if log and total and _t.time() - last > 10:
+            from .wording import human_bytes
+            now = f"{db}: {human_bytes(done or 0)} of {human_bytes(total)}"
+            if now != said:
+                log(now)
+                said, last = now, _t.time()
+        if p.get("canCommit") and (p.get("lagTimeSeconds") or 0) <= 1:
+            break
+        _t.sleep(1)
+    got = _sync_api(port, "POST", "commit", {})
+    if not got.get("success"):
+        raise RuntimeError(f"the online sync would not commit:"
+                           f" {got.get('errorDescription') or got}")
+    while (_sync_api(port, "GET", "progress").get("progress") or {}
+           ).get("state") != "COMMITTED":
+        if proc.poll() is not None:
+            raise RuntimeError("the online sync stopped while committing")
+        _t.sleep(1)
+    if log:
+        log(f"{db}: copied, and committed with nothing left to apply")
 
 
 def _mongo_piped(db, dump, restore, log, steps):
@@ -3070,7 +3358,7 @@ def stream_status(name, port=8083):
 def _movers():
     return {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
             "mydumper": mydumper_move, "pgloader": pgloader_move,
-            "mongodump": mongodump_move}
+            "mongodump": mongodump_move, "mongosync": mongosync_move}
 
 
 #: the programs each bulk path runs, in the order it runs them
@@ -3078,13 +3366,15 @@ PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
             "pgcopydb": ("docker",),
             "mydumper": ("mydumper", "myloader"),
             "pgloader": ("pgloader",),
-            "mongodump": ("mongodump", "mongorestore")}
+            "mongodump": ("mongodump", "mongorestore"),
+            "mongosync": ("mongosync",)}
 #: how a report names them: never by the program's own name
 ROLES = ("dump program", "load program")
 #: the builds each program was measured with here (backlog 46)
 MEASURED = {"pg_dump": "18.6", "pg_restore": "18.6",
             "mydumper": "1.0.5", "myloader": "1.0.5",
-            "mongodump": "100.16.1", "mongorestore": "100.16.1"}
+            "mongodump": "100.16.1", "mongorestore": "100.16.1",
+            "mongosync": "1.21.0"}
 
 
 def program_version(program):
@@ -3221,11 +3511,12 @@ def run_via(via, hop, db, workers, go, log):
                 + "; ".join(", ".join(v) for v in refused.values())
                 + ". Nothing has been written. migkit doctor --install"
                 " puts a build that does in place")
-    global _DEBUG, _RUNNING
+    global _DEBUG, _RUNNING, _SIZES
     from .wording import DebugLog
     _DEBUG = (DebugLog(hop.report_dir(db) / "commands.log"),
               (hop.source.password, hop.target.password))
     _RUNNING = running if go else None
+    _SIZES = _source_sizes(hop, db) if go else None
     # stopped by a service manager or `kill`: taken as ctrl-c, so the
     # programs this run started are stopped with it (`_spawned`)
     import signal
@@ -3238,6 +3529,7 @@ def run_via(via, hop, db, workers, go, log):
     finally:
         _DEBUG = None
         _RUNNING = None
+        _SIZES = None
         if term is not None:
             signal.signal(signal.SIGTERM, term)
 

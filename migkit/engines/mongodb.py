@@ -82,6 +82,81 @@ class MongoEngine(Engine):
         return self._client(side)[self._d(side, db)][table].delete_many(
             {}).deleted_count
 
+    def text_encodings(self, side, db):
+        # BSON strings are UTF-8 by the format's own definition
+        return {"UTF-8": 1}
+
+    def list_move_tables(self, db):
+        return [("", c) for c in self.neutral_tables("src", db)]
+
+    #: documents per read of the collection copier
+    COPY_BATCH = 5000
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        """One collection, document for document as stored: every BSON type,
+        nested documents and arrays included, which the classes the other
+        engines share cannot carry.
+
+        Resumed by `_id` from the checkpoint. The resume compares through
+        `$expr`, which orders across types the way the sort does - a plain
+        `$gt` matches only values of the same type, and a collection whose
+        `_id`s are numbers and strings would have lost every string after
+        the last number. Each batch replaces the documents with the same
+        `_id`, so a restart converges. A collection this copy made gets the
+        source's indexes once its documents are in."""
+        from bson import json_util
+        from pymongo import ReplaceOne
+
+        from ..wording import progress
+        name = tbl or sch
+        key = self.move_key(db, sch, tbl)
+        st = ck.setdefault(key, {})
+        if st.get("done"):
+            log(f"{key}: done earlier, skip")
+            return
+        src = self._client("src")[db][name]
+        target = self._client("dst")[self._d("dst", db)]
+        dst = target[name]
+        after = json_util.loads(st["last"]) if "last" in st else None
+        started_here = after is None
+        if started_here:
+            st["made"] = name not in target.list_collection_names()
+            # what the target already holds is not this copy's
+            gone = dst.delete_many({}).deleted_count
+            st["moved"] = 0
+            if gone:
+                log(f"{key}: emptied {gone:,} documents the target held"
+                    " before the copy")
+        moved = from_docs = int(st.get("moved", 0))
+        total = (self.table_facts("src", db).get(name) or {}).get("rows")
+        batch = max(1, min(int(chunk), self.COPY_BATCH))
+        began = time.monotonic()
+        while True:
+            flt = {} if after is None else \
+                {"$expr": {"$gt": ["$_id", {"$literal": after}]}}
+            docs = list(src.find(flt).sort("_id", 1).limit(batch))
+            if not docs:
+                break
+            dst.bulk_write([ReplaceOne({"_id": d["_id"]}, d, upsert=True)
+                            for d in docs], ordered=False)
+            moved += len(docs)
+            after = docs[-1]["_id"]
+            st["moved"] = moved
+            st["last"] = json_util.dumps(after)
+            ck.save()
+            log(progress(key, moved, total, began, time.monotonic(),
+                         unit="documents", since=from_docs))
+        if st.get("made"):
+            for index_name, spec in src.index_information().items():
+                if index_name == "_id_":
+                    continue
+                keys = spec.pop("key")
+                spec.pop("v", None)
+                spec.pop("ns", None)
+                dst.create_index(keys, name=index_name, **spec)
+        st["done"] = True
+        ck.save()
+
     def moved_nothing(self, db):
         """Collections the source has documents in and the target has none.
 
@@ -149,6 +224,35 @@ class MongoEngine(Engine):
 
     EXPRESSES_ABSENT = True
     CREATES_ON_WRITE = True
+
+    def table_facts(self, side, db):
+        """{collection: {"rows", "key", "bytes", "index_bytes"}} from each
+        collection's own statistics - `size` is the documents as they are,
+        before the storage engine compresses them, which is what a copy
+        carries."""
+        out = {}
+        dbh = self._client(side)[self._d(side, db)]
+        for name in self.neutral_tables(side, db):
+            try:
+                st = dbh.command("collStats", name)
+            except Exception:  # noqa: BLE001 - a view, or not allowed
+                continue
+            out[name] = {"rows": int(st.get("count") or 0), "key": True,
+                         "bytes": int(st.get("size") or 0),
+                         "index_bytes": int(st.get("totalIndexSize") or 0)}
+        return out
+
+    def free_bytes(self, side, db):
+        """The free space of the disk the database is on: `dbStats`
+        reports the filesystem's size and use."""
+        try:
+            st = self._client(side)[self._d(side, db)].command("dbStats")
+        except Exception:  # noqa: BLE001 - not allowed is no answer
+            return None
+        total, used = st.get("fsTotalSize"), st.get("fsUsedSize")
+        if total is None or used is None:
+            return None
+        return max(int(total) - int(used), 0)
 
     def neutral_key(self, side, db, table):
         """`_id`, which MongoDB guarantees on every document."""
@@ -348,6 +452,54 @@ class MongoEngine(Engine):
             return None
         return {"seconds": max(at - oldest["ts"].time, 0)}
 
+    def stream_identity(self, side, db):
+        """The replica set: its name, and its id where this user may read
+        the configuration. A token from another set was measured to be
+        accepted without a word."""
+        from pymongo.errors import PyMongoError
+        admin = self._client(side).admin
+        try:
+            name = admin.command("hello").get("setName")
+        except PyMongoError:
+            return None
+        if not name:
+            return None
+        out = {"replica set": name}
+        try:
+            got = admin.command("replSetGetConfig")["config"]
+            out["id"] = str(got.get("settings", {}).get("replicaSetId", ""))
+        except PyMongoError:
+            pass
+        return out
+
+    def position_lost(self, side, db, token):
+        """The oplog no longer reaching back to the token, or the token
+        standing later than the set's own clock - taken on another set.
+        Asked before the stream opens: a stream opened on a lost point is
+        refused only by some servers, and not by all versions."""
+        from pymongo.errors import PyMongoError
+        data = token.get("_data") if isinstance(token, dict) else token
+        at = self._token_time(data) if data else None
+        if at is None:
+            return None
+        client = self._client(side)
+        try:
+            oldest = next(iter(client.local["oplog.rs"].find({}, {"ts": 1})
+                               .sort("$natural", 1).limit(1)), None)
+            now = client.admin.command("hello").get("operationTime")
+        except PyMongoError:
+            return None
+        if oldest and at.time < oldest["ts"].time:
+            return (f"the source's oplog now starts at {oldest['ts'].as_datetime():%Y-%m-%d %H:%M:%S} UTC and"
+                    f" the saved position is from {at.as_datetime():%Y-%m-%d %H:%M:%S} UTC: the changes"
+                    " between them are gone from the source")
+        if now is not None and at.time > now.time + 60:
+            return (f"the saved position ({at.as_datetime():%Y-%m-%d %H:%M:%S} UTC) is later than"
+                    " the source's own clock"
+                    f" ({now.as_datetime():%Y-%m-%d %H:%M:%S} UTC): it was taken on another replica"
+                    " set")
+        return None
+
     def change_point(self, side, db):
         """A resume token for now, read without taking any event off the
         stream: the server answers an empty first batch with the position it
@@ -491,16 +643,9 @@ class MongoEngine(Engine):
             if not docs:
                 break
             for doc in docs:
-                parts = []
-                for name in fields:
-                    value = doc.get(name)
-                    text = (None if value is None
-                            else canon.render_value(classes[name], value))
-                    if text is None:
-                        parts.append(f"{rowtext.NULL_LEN}:")
-                    else:
-                        parts.append(f"{len(text)}:{text}")
-                total = canon.digest_step(total, rowtext.SEP.join(parts))
+                total = canon.digest_step(total, rowtext.encode(
+                    [canon.render_value(classes[name], doc.get(name))
+                     for name in fields]))
                 n += 1
             after, started = docs[-1]["_id"], True
         return (n, str(total))
@@ -1711,6 +1856,8 @@ class MongoEngine(Engine):
         before anything arrived resumes there rather than at a later "now".
         """
         from bson.json_util import dumps, loads
+
+        from .. import tailctl
         src = self._client("src")[db]
         dst = self._client("dst")[self._d("dst", db)]
         resume = None
@@ -1723,11 +1870,13 @@ class MongoEngine(Engine):
                     " a tail started from anywhere else either skips changes"
                     " or cannot say it did not. Remove the file and move"
                     " again")
+            tailctl.same_source(self, db, token_path, resume)
             log("resuming from saved token")
         elif go:
             resume = {"_data": self.change_point("src", db)}
             token_path.parent.mkdir(parents=True, exist_ok=True)
             token_path.write_text(dumps(resume))
+            tailctl.same_source(self, db, token_path, None)
         kwargs = {"full_document": "updateLookup"}
         if resume:
             kwargs["resume_after"] = resume

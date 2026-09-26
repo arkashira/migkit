@@ -181,12 +181,12 @@ def test_a_type_with_no_neutral_class_stops_the_build(engine):
     The refusal names the column and the type so the operator can create the
     table themselves."""
     assert pg_sql("create table odd (id bigint primary key,"
-                  " v tsvector)").returncode == 0
+                  " v point)").returncode == 0
     try:
         with pytest.raises(SystemExit) as e:
             engine.move_table("cx", "public", "odd", 10, _Checkpoint(),
                               lambda m: None)
-        assert "no neutral class for v (tsvector)" in str(e.value)
+        assert "no neutral class for v (point)" in str(e.value)
         assert my_sql("select count(*) from information_schema.tables"
                       " where table_schema='cx' and table_name='odd'"
                       ).stdout.strip() == "0"

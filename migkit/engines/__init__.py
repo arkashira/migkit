@@ -1,7 +1,9 @@
 ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "aurora-postgres": "postgres", "alloydb": "postgres",
            "documentdb": "mongodb", "cosmosdb-mongo": "mongodb",
-           "azure-sql": "mssql", "tdsql": "mysql"}
+           "azure-sql": "mssql", "tdsql": "mysql",
+           "elasticsearch": "opensearch", "scylladb": "cassandra",
+           "sybase": "ase", "sap-ase": "ase"}
 
 
 def _class_for(name):
@@ -30,6 +32,45 @@ def _class_for(name):
     if name == "sqlite":
         from .sqlite import SQLiteEngine
         return SQLiteEngine
+    if name == "parquet":
+        from .parquet import ParquetEngine
+        return ParquetEngine
+    if name == "clickhouse":
+        from .clickhouse import ClickHouseEngine
+        return ClickHouseEngine
+    if name == "dynamodb":
+        from .dynamodb import DynamoDBEngine
+        return DynamoDBEngine
+    if name == "oracle":
+        from .oracle import OracleEngine
+        return OracleEngine
+    if name == "db2":
+        from .db2 import Db2Engine
+        return Db2Engine
+    if name == "opensearch":
+        from .opensearch import OpenSearchEngine
+        return OpenSearchEngine
+    if name == "cassandra":
+        from .cassandra import CassandraEngine
+        return CassandraEngine
+    if name == "kinesis":
+        from .kinesis import KinesisEngine
+        return KinesisEngine
+    if name == "pubsub":
+        from .pubsub import PubSubEngine
+        return PubSubEngine
+    if name == "ase":
+        from .ase import AseEngine
+        return AseEngine
+    if name == "redshift":
+        from .warehouse import RedshiftEngine
+        return RedshiftEngine
+    if name == "snowflake":
+        from .warehouse import SnowflakeEngine
+        return SnowflakeEngine
+    if name == "bigquery":
+        from .warehouse import BigQueryEngine
+        return BigQueryEngine
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
@@ -38,7 +79,9 @@ def _class_for(name):
 
 #: every canonical engine name, in the order a report lists them
 NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
-         "hetero", "generic")
+         "parquet", "clickhouse", "dynamodb", "oracle", "db2", "ase",
+         "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
+         "kinesis", "pubsub", "hetero", "generic")
 
 
 def engines_with(method):

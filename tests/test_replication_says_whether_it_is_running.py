@@ -157,7 +157,7 @@ def test_every_engine_that_starts_replication_can_report_on_it():
     from migkit.engines.base import Engine
     offered = [n for n in NAMES
                if _class_for(n) and hasattr(_class_for(n), "replicate_sql")]
-    assert set(offered) == {"postgres", "mysql"}, offered
+    assert set(offered) == {"postgres", "mysql", "redis"}, offered
     for n in offered:
         cls = _class_for(n)
         assert cls.replication_status is not Engine.replication_status, n

@@ -1,13 +1,18 @@
-"""A binlog written compressed stops the change tail instead of being
-skipped.
+"""A binlog written compressed is read, or stops the change tail - it is
+never skipped.
 
 Measured before, MySQL 8.4 with `binlog_transaction_compression = ON` and
 MariaDB 11 with `log_bin_compress = ON`: an insert, an update and a
 delete went into the binlog compressed, and the reader returned no change
 and did not move its position. The tail would have called itself caught up
-for as long as it ran. The reader cannot open a compressed transaction, so
-the tail now stops on one, says which setting writes it and what to do,
-and `assess` fails the setting before anything starts.
+for as long as it ran.
+
+MySQL's compressed transaction is now opened by migkit itself
+(`binlog_payload`): its events are decompressed and parsed as if they had
+arrived on their own, and the tail and the delta read them like any other.
+MariaDB's compressed row events are another format; they still stop the
+tail, say which setting writes them and what to do, and `assess` fails
+the setting before anything starts.
 """
 import socket
 import subprocess
@@ -104,8 +109,8 @@ def _changes(eng, token):
 
 
 def test_the_reader_really_skips_a_compressed_transaction(mysql):
-    """What the stop rests on. If the reader learns to open them, this
-    fails, and the stop can give way to reading them."""
+    """Why migkit opens them itself: the reader, on its own, returns
+    nothing for them."""
     from pymysqlreplication import BinLogStreamReader
     from pymysqlreplication.row_event import (DeleteRowsEvent,
                                               UpdateRowsEvent,
@@ -128,39 +133,39 @@ def test_the_reader_really_skips_a_compressed_transaction(mysql):
         stream.close()
 
 
-def test_a_compressed_transaction_stops_the_tail_where_it_is(mysql):
+def test_a_compressed_transaction_is_read_by_the_tail(mysql):
     eng = _eng(MY_PORT)
     token = eng.change_point("src", "appdb")
     _sql(MY, "mysql", "insert into appdb.t values (10, 'plain')")
     # an application session turning it on for itself, the server's
-    # own setting still off: what assess cannot see
+    # own setting still off, and then the server's
     _sql(MY, "mysql", "set session binlog_transaction_compression = ON;"
-                      " insert into appdb.t values (11, 'packed')")
-    with pytest.raises(SystemExit) as e:
-        _changes(eng, token)
-    said = str(e.value)
-    assert "binlog_transaction_compression" in said, said
-    assert f"position {token['log_pos']}" in said, said
-    assert "move again with --mode full+cdc" in said, said
-    # what is written uncompressed is read as before
-    token = eng.change_point("src", "appdb")
-    _sql(MY, "mysql", "insert into appdb.t values (12, 'plain')")
-    assert _changes(eng, token) == [("insert", 12)]
+                      " insert into appdb.t values (11, 'packed');"
+                      " update appdb.t set v = 'moved' where id = 10;"
+                      " delete from appdb.t where id = 11")
+    _sql(MY, "mysql", "set global binlog_transaction_compression = ON")
+    try:
+        _sql(MY, "mysql", "insert into appdb.t values (12, 'packed too')")
+    finally:
+        _sql(MY, "mysql", "set global binlog_transaction_compression = OFF")
+    _sql(MY, "mysql", "insert into appdb.t values (13, 'plain')")
+    got, _ = eng.neutral_changes("src", "appdb", token)
+    assert [(c["op"], c["key"]["id"]) for c in got] == [
+        ("insert", 10), ("insert", 11), ("update", 10), ("delete", 11),
+        ("insert", 12), ("insert", 13)], got
+    assert got[2]["values"]["v"] == "moved", got[2]
 
 
-def test_assess_fails_the_setting_on_mysql(mysql):
+def test_assess_passes_the_setting_on_mysql(mysql):
     eng = _eng(MY_PORT)
-    item = "binlog_transaction_compression=OFF on source"
-    got = [i for i in eng.assess() if i["item"].startswith(item)]
-    assert [i["level"] for i in got] == ["pass"], got
+    item = "compressed transactions in the binlog readable"
     _sql(MY, "mysql", "set global binlog_transaction_compression = ON")
     try:
         got = [i for i in eng.assess() if i["item"].startswith(item)]
     finally:
         _sql(MY, "mysql", "set global binlog_transaction_compression = OFF")
-    assert [i["level"] for i in got] == ["fail"], got
-    assert "set global binlog_transaction_compression = OFF" in \
-        got[0]["detail"], got
+    assert [(i["level"], i["detail"]) for i in got] == [
+        ("pass", "ON - the tail opens them")], got
 
 
 def test_mariadb_compressed_rows_stop_the_tail_and_fail_assess(mariadb):
@@ -178,20 +183,19 @@ def test_mariadb_compressed_rows_stop_the_tail_and_fail_assess(mariadb):
     assert "set global log_bin_compress = OFF" in got[0]["detail"], got
 
 
-def test_a_compressed_transaction_stops_the_delta_where_it_is(mysql,
-                                                              tmp_path):
+def test_a_compressed_transaction_is_verified_by_the_delta(mysql,
+                                                           tmp_path):
     """The delta loop read the same binlog with the same reader, and said
     `0 changes since last verified position` over a compressed insert -
-    then moved its position past it."""
+    then moved its position past it. It now reads the row and verifies
+    it."""
     eng = _eng(MY_PORT)
     eng.hop.report_dir = lambda db=None: tmp_path
     eng.delta_verify("appdb")
-    state = tmp_path / "delta-pos.json"
-    before = state.read_text()
     _sql(MY, "mysql", "set session binlog_transaction_compression = ON;"
                       " insert into appdb.t values (21, 'packed')")
-    got = eng.delta_verify("appdb")
-    assert [r.status for r in got] == ["error"], [r.__dict__ for r in got]
-    assert "binlog_transaction_compression" in got[0].detail, got[0].detail
-    assert "was verified" in got[0].detail, got[0].detail
-    assert state.read_text() == before
+    got = {r.scope: r for r in eng.delta_verify("appdb")}
+    assert got["appdb.t"].status == "ok", [r.__dict__ for r in
+                                           got.values()]
+    assert got["appdb.t"].detail.startswith("1 touched rows"), \
+        got["appdb.t"].detail

@@ -14,6 +14,7 @@ Files in the database's report directory, nothing else:
 * `tail.paused`  written by the tail once it is holding still
 * `tail.beat`    written by the tail every time round its loop
 * `tail.stopped` what stopped it, when that was not a person
+* `tail-source.json` which source the saved position belongs to
 """
 import json
 import os
@@ -22,6 +23,7 @@ import time
 
 PID, PAUSE, PAUSED = "tail.pid", "tail.pause", "tail.paused"
 BEAT, STOPPED = "tail.beat", "tail.stopped"
+SOURCE = "tail-source.json"
 
 
 class Running:
@@ -167,3 +169,45 @@ def pause(where, timeout):
 
 def resume(where):
     (where / PAUSE).unlink(missing_ok=True)
+
+
+def same_source(eng, db, token_path, token):
+    """Stop before resuming from a position that is not the source's any
+    more (backlog 44).
+
+    A position belongs to one server's log. After a failover to a replica,
+    or with the source rebuilt under the same address, a MySQL file and
+    offset point into a different binlog, and a MongoDB resume token taken
+    on another replica set was measured to be accepted without a word -
+    either way the tail goes on, having skipped what it cannot know it
+    skipped. So the source's identity is saved beside the position when
+    the position is first saved, and compared on every resume. Where the
+    engine can say its log no longer holds the position, that stops the
+    tail too, before the stream is opened rather than after it has read."""
+    path = token_path.parent / SOURCE
+    said = eng.stream_identity("src", db)
+    if said is not None:
+        try:
+            saved = json.loads(path.read_text())
+        except (OSError, ValueError):
+            saved = None
+        if saved is None or not token:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(said))
+        elif saved != said:
+            raise SystemExit(
+                f"{db}: the saved change position belongs to another source"
+                f" ({_who(saved)}); the source is now {_who(said)}. A failover"
+                " or a rebuilt server gives the same address a log of its"
+                " own, and resuming in it skips what the old one held."
+                " Nothing was applied. Move again with --mode full+cdc, or"
+                f" remove {token_path.name} and {SOURCE} once the target is"
+                " known to be level with the new source.")
+    lost = eng.position_lost("src", db, token) if token else None
+    if lost:
+        raise SystemExit(f"{db}: {lost}. Nothing was applied. Move again"
+                         " with --mode full+cdc.")
+
+
+def _who(identity):
+    return ", ".join(f"{k} {v}" for k, v in sorted(identity.items()))

@@ -32,9 +32,9 @@ def test_mysql_tinyint_is_an_integer_not_a_boolean():
 def test_an_unmapped_type_is_refused_rather_than_treated_as_text():
     """Falling back to the engine's own text would compare two renderings
     nobody checked agree, and report correct data as different."""
-    cls, why = c.comparable("postgres", "tsvector")
+    cls, why = c.comparable("postgres", "point")
     assert cls is None
-    assert "no canonical rendering" in why and "tsvector" in why
+    assert "no canonical rendering" in why and "point" in why
     assert c.type_class("mysql", "geometry") is None
 
 

@@ -150,6 +150,13 @@ TYPES = {
         "bpchar": "text", "char": "text", "text": "text", "name": "text",
         "uuid": "text", "inet": "text", "cidr": "text", "macaddr": "text",
         "xml": "text",
+        # a text search vector prints its lexemes sorted and once each, and
+        # a query its normalised form, so their text is the value itself
+        "tsvector": "text", "tsquery": "text",
+        # a key/value set is a JSON object of strings: the extension casts
+        # it to jsonb, which the `json` rendering then normalises the way
+        # the other side's JSON is
+        "hstore": "json",
         "bytea": "bytes",
         "date": "date",
         "timestamp without time zone": "timestamp", "timestamp": "timestamp",
@@ -207,6 +214,163 @@ TYPES = {
     # the scale it was given - `1.50` comes back `1.50` - so once it is taken
     # through `to_decimal()` the same fixed-point text comes out as
     # PostgreSQL's `::text` and MySQL's `cast(... as char)` produce.
+    # SQL Server, read through its driver and rendered in this process.
+    # Its `timestamp` is a row version, not a time, and `datetimeoffset`
+    # carries an offset the renderer would drop: both stay unmapped, as
+    # do `sql_variant`, `hierarchyid` and the spatial types.
+    "mssql": {
+        "tinyint": "integer", "smallint": "integer", "int": "integer",
+        "bigint": "integer",
+        "decimal": "decimal", "numeric": "decimal", "money": "decimal",
+        "smallmoney": "decimal",
+        "float": "float", "real": "float",
+        "bit": "boolean",
+        "char": "text", "varchar": "text", "nchar": "text",
+        "nvarchar": "text", "text": "text", "ntext": "text",
+        "uniqueidentifier": "text", "xml": "text", "sysname": "text",
+        "binary": "bytes", "varbinary": "bytes", "image": "bytes",
+        "date": "date",
+        "datetime": "timestamp", "datetime2": "timestamp",
+        "smalldatetime": "timestamp",
+        "time": "time",
+    },
+    # Parquet, by the Arrow type names a table's `_table.json` gives:
+    # `decimal_text` is a decimal kept as its text, where the source
+    # declared no precision for it to be kept in
+    "parquet": {
+        "int64": "integer", "double": "float", "bool": "boolean",
+        "string": "text", "binary": "bytes", "date32": "date",
+        "timestamp": "timestamp", "time64": "time",
+        "decimal128": "decimal", "decimal256": "decimal",
+        "decimal_text": "decimal",
+    },
+    # ClickHouse, by the type a value is once `Nullable(...)` and
+    # `LowCardinality(...)` are taken off it. It has no time-of-day type,
+    # and a `String` is bytes: a text column read from it is decoded, a
+    # column declared bytes on the other side is compared as bytes.
+    "clickhouse": {
+        "int8": "integer", "int16": "integer", "int32": "integer",
+        "int64": "integer", "int128": "integer", "int256": "integer",
+        "uint8": "integer", "uint16": "integer", "uint32": "integer",
+        "uint64": "integer", "uint128": "integer", "uint256": "integer",
+        "float32": "float", "float64": "float",
+        "decimal": "decimal", "decimal32": "decimal", "decimal64": "decimal",
+        "decimal128": "decimal", "decimal256": "decimal",
+        "bool": "boolean",
+        "string": "text", "fixedstring": "text", "uuid": "text",
+        "enum8": "text", "enum16": "text", "ipv4": "text", "ipv6": "text",
+        "date": "date", "date32": "date",
+        "datetime": "timestamp", "datetime64": "timestamp",
+    },
+    # DynamoDB: a table migkit made carries each column's class in its
+    # tags, by these names; one it did not make is described by the kinds
+    # of attribute its items hold. A number there is a decimal, without
+    # the scale it was written with.
+    "dynamodb": {
+        "integer": "integer", "decimal": "decimal", "float": "float",
+        "boolean": "boolean", "text": "text", "bytes": "bytes",
+        "date": "date", "timestamp": "timestamp", "time": "time",
+        "s": "text", "n": "decimal", "b": "bytes", "bool": "boolean",
+    },
+    # Oracle: a DATE holds a time of day too. A time with a zone is left
+    # out, as a text of its own would drop the zone. `NUMBER` with no
+    # scale holds integers and decimals alike, and renders the same text
+    # either way.
+    "oracle": {
+        "number": "decimal", "integer": "decimal", "float": "float",
+        "binary_float": "float", "binary_double": "float",
+        "varchar2": "text", "nvarchar2": "text", "char": "text",
+        "nchar": "text", "clob": "text", "nclob": "text", "long": "text",
+        "raw": "bytes", "blob": "bytes", "long raw": "bytes",
+        "date": "timestamp", "timestamp": "timestamp",
+    },
+    # Db2 (LUW), by `syscat.columns` type names. A character column with
+    # no code page holds bytes (`FOR BIT DATA`), and is declared VARBINARY
+    # by the reading of the catalogue.
+    "db2": {
+        "smallint": "integer", "integer": "integer", "bigint": "integer",
+        "decimal": "decimal", "numeric": "decimal", "decfloat": "decimal",
+        "real": "float", "double": "float", "float": "float",
+        "boolean": "boolean",
+        "character": "text", "char": "text", "varchar": "text",
+        "graphic": "text", "vargraphic": "text", "clob": "text",
+        "dbclob": "text",
+        "blob": "bytes", "binary": "bytes", "varbinary": "bytes",
+        "date": "date", "timestamp": "timestamp", "time": "time",
+    },
+    # SAP ASE, by `systypes` names
+    "ase": {
+        "tinyint": "integer", "smallint": "integer", "int": "integer",
+        "integer": "integer", "bigint": "integer",
+        "unsigned smallint": "integer", "unsigned int": "integer",
+        "unsigned bigint": "integer",
+        "numeric": "decimal", "decimal": "decimal", "money": "decimal",
+        "smallmoney": "decimal",
+        "float": "float", "real": "float", "double precision": "float",
+        "bit": "boolean",
+        "char": "text", "varchar": "text", "nchar": "text",
+        "nvarchar": "text", "unichar": "text", "univarchar": "text",
+        "text": "text", "unitext": "text", "sysname": "text",
+        "longsysname": "text",
+        "binary": "bytes", "varbinary": "bytes", "image": "bytes",
+        "date": "date", "time": "time", "bigtime": "time",
+        "datetime": "timestamp", "smalldatetime": "timestamp",
+        "bigdatetime": "timestamp",
+    },
+    # Amazon Redshift, by `information_schema.columns` type names
+    "redshift": {
+        "smallint": "integer", "integer": "integer", "bigint": "integer",
+        "numeric": "decimal", "decimal": "decimal",
+        "real": "float", "double precision": "float",
+        "boolean": "boolean",
+        "character": "text", "character varying": "text", "char": "text",
+        "varchar": "text", "bpchar": "text", "text": "text",
+        "binary varying": "bytes", "varbyte": "bytes",
+        "date": "date",
+        "timestamp without time zone": "timestamp",
+        "timestamp with time zone": "timestamp",
+        "time without time zone": "time", "time with time zone": "time",
+        "super": "json",
+    },
+    # Snowflake. `NUMBER` at scale 0 is read as INTEGER; `VARIANT` holds
+    # JSON's values
+    "snowflake": {
+        "integer": "integer", "number": "decimal", "decimal": "decimal",
+        "numeric": "decimal", "float": "float", "double": "float",
+        "real": "float", "boolean": "boolean",
+        "text": "text", "varchar": "text", "char": "text", "string": "text",
+        "binary": "bytes", "varbinary": "bytes",
+        "date": "date", "timestamp_ntz": "timestamp",
+        "timestamp_ltz": "timestamp", "timestamp_tz": "timestamp",
+        "time": "time", "variant": "json", "object": "json",
+    },
+    # Google BigQuery. DATETIME has no zone and TIMESTAMP is an instant,
+    # as PostgreSQL's two timestamps are
+    "bigquery": {
+        "int64": "integer", "numeric": "decimal", "bignumeric": "decimal",
+        "float64": "float", "bool": "boolean", "string": "text",
+        "bytes": "bytes", "date": "date", "datetime": "timestamp",
+        "timestamp": "timestamp", "time": "time", "json": "json",
+    },
+    # OpenSearch: an index migkit made keeps each column's class in its
+    # mapping's `_meta`; one it did not make is read by the class each kind
+    # of field holds. Either way the names are the classes themselves.
+    "opensearch": {
+        "integer": "integer", "decimal": "decimal", "float": "float",
+        "boolean": "boolean", "text": "text", "bytes": "bytes",
+        "date": "date", "timestamp": "timestamp", "time": "time",
+    },
+    # Cassandra and ScyllaDB. Collections and user types stay unmapped. A
+    # `timestamp` holds milliseconds.
+    "cassandra": {
+        "tinyint": "integer", "smallint": "integer", "int": "integer",
+        "bigint": "integer", "varint": "integer", "counter": "integer",
+        "decimal": "decimal", "float": "float", "double": "float",
+        "boolean": "boolean", "text": "text", "varchar": "text",
+        "ascii": "text", "uuid": "text", "timeuuid": "text", "inet": "text",
+        "blob": "bytes", "date": "date", "timestamp": "timestamp",
+        "time": "time",
+    },
     "mongodb": {
         "int": "integer", "long": "integer",
         "double": "float",
@@ -452,6 +616,117 @@ DDL = {
         "timestamp": ("datetime(6)", "datetime({0})"),
         "time": ("time(6)", "time({0})"),
         "json": ("json", "json"),
+    },
+    "mssql": {
+        OWN: ("nvarchar(max)", "{0}"),
+        "integer": ("bigint", "bigint"),
+        "decimal": ("decimal(38,10)", "decimal({0},{1})"),
+        "float": ("float", "float"),
+        "boolean": ("bit", "bit"),
+        # a key column cannot be `max`; a length the source gave is kept
+        "text": ("nvarchar(max)", "nvarchar({0})"),
+        "bytes": ("varbinary(max)", "varbinary({0})"),
+        "date": ("date", "date"),
+        "timestamp": ("datetime2(6)", "datetime2({0})"),
+        "time": ("time(6)", "time({0})"),
+        "json": ("nvarchar(max)", "nvarchar(max)"),
+    },
+    "clickhouse": {
+        OWN: ("String", "String"),
+        "integer": ("Int64", "Int64"),
+        "decimal": ("Decimal(38, 10)", "Decimal({0}, {1})"),
+        "float": ("Float64", "Float64"),
+        "boolean": ("Bool", "Bool"),
+        "text": ("String", "String"),
+        "bytes": ("String", "String"),
+        "date": ("Date32", "Date32"),
+        "timestamp": ("DateTime64(6)", "DateTime64({0})"),
+    },
+    "oracle": {
+        OWN: ("CLOB", "CLOB"),
+        "integer": ("NUMBER(19)", "NUMBER(19)"),
+        "decimal": ("NUMBER", "NUMBER({0},{1})"),
+        "float": ("BINARY_DOUBLE", "BINARY_DOUBLE"),
+        "boolean": ("NUMBER(1)", "NUMBER(1)"),
+        "text": ("VARCHAR2(4000 CHAR)", "VARCHAR2({0} CHAR)"),
+        "bytes": ("BLOB", "BLOB"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
+    },
+    "db2": {
+        OWN: ("CLOB", "CLOB"),
+        "integer": ("BIGINT", "BIGINT"),
+        "decimal": ("DECIMAL(31,10)", "DECIMAL({0},{1})"),
+        "float": ("DOUBLE", "DOUBLE"),
+        "boolean": ("BOOLEAN", "BOOLEAN"),
+        "text": ("VARCHAR(4000)", "VARCHAR({0})"),
+        "bytes": ("BLOB", "VARBINARY({0})"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
+        "time": ("TIME", "TIME"),
+    },
+    "ase": {
+        OWN: ("text", "text"),
+        "integer": ("bigint", "bigint"),
+        "decimal": ("numeric(38,10)", "numeric({0},{1})"),
+        "float": ("double precision", "double precision"),
+        "boolean": ("bit", "bit"),
+        "text": ("text", "varchar({0})"),
+        "bytes": ("image", "varbinary({0})"),
+        "date": ("date", "date"),
+        "timestamp": ("bigdatetime", "bigdatetime"),
+        "time": ("bigtime", "bigtime"),
+    },
+    "redshift": {
+        OWN: ("varchar(65535)", "varchar(65535)"),
+        "integer": ("bigint", "bigint"),
+        "decimal": ("numeric(38,10)", "numeric({0},{1})"),
+        "float": ("double precision", "double precision"),
+        "boolean": ("boolean", "boolean"),
+        "text": ("varchar(65535)", "varchar({0})"),
+        "bytes": ("varbyte(1024000)", "varbyte({0})"),
+        "date": ("date", "date"),
+        "timestamp": ("timestamp", "timestamp"),
+        "time": ("time", "time"),
+        "json": ("super", "super"),
+    },
+    "snowflake": {
+        OWN: ("VARCHAR", "VARCHAR"),
+        "integer": ("NUMBER(38,0)", "NUMBER(38,0)"),
+        "decimal": ("NUMBER(38,10)", "NUMBER({0},{1})"),
+        "float": ("FLOAT", "FLOAT"),
+        "boolean": ("BOOLEAN", "BOOLEAN"),
+        "text": ("VARCHAR", "VARCHAR({0})"),
+        "bytes": ("BINARY", "BINARY({0})"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("TIMESTAMP_NTZ(9)", "TIMESTAMP_NTZ({0})"),
+        "time": ("TIME(9)", "TIME({0})"),
+        "json": ("VARIANT", "VARIANT"),
+    },
+    "bigquery": {
+        OWN: ("STRING", "STRING"),
+        "integer": ("INT64", "INT64"),
+        "decimal": ("BIGNUMERIC", "BIGNUMERIC({0},{1})"),
+        "float": ("FLOAT64", "FLOAT64"),
+        "boolean": ("BOOL", "BOOL"),
+        "text": ("STRING", "STRING({0})"),
+        "bytes": ("BYTES", "BYTES({0})"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("DATETIME", "DATETIME"),
+        "time": ("TIME", "TIME"),
+        "json": ("JSON", "JSON"),
+    },
+    "cassandra": {
+        OWN: ("text", "text"),
+        "integer": ("bigint", "bigint"),
+        "decimal": ("decimal", "decimal"),
+        "float": ("double", "double"),
+        "boolean": ("boolean", "boolean"),
+        "text": ("text", "text"),
+        "bytes": ("blob", "blob"),
+        "date": ("date", "date"),
+        "timestamp": ("timestamp", "timestamp"),
+        "time": ("time", "time"),
     },
     "sqlite": {
         OWN: ("text", "{0}"),
@@ -817,7 +1092,9 @@ def comparable(engine, declared):
 # SQL expression. Not a lesser arrangement - SQLite is in both lists, because
 # it runs here anyway - but for MongoDB it means the documents cross the
 # network to be folded, which `check` reports rather than leaves implied.
-IN_PROCESS = {"mongodb", "sqlite"}
+IN_PROCESS = {"mongodb", "sqlite", "mssql", "parquet", "clickhouse",
+              "dynamodb", "oracle", "db2", "opensearch", "cassandra",
+              "redshift", "snowflake", "bigquery", "ase"}
 
 
 def renders(engine):

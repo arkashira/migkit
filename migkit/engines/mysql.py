@@ -197,8 +197,9 @@ class MySQLEngine(Engine):
         return [r[0] for r in self._q(side, self.PK_SQL,
                                       (self._d(side, db), table))]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
-                     where=None):
+    def _read_query(self, side, db, table, columns, after, limit, where):
+        """(sql, args, key, names) for `neutral_read` and
+        `neutral_batches`: one statement shape for both."""
         names = [n for n, _ in columns]
         cols = ", ".join(f"`{n}`" for n in names)
         key = self.neutral_key(side, db, table)
@@ -210,10 +211,35 @@ class MySQLEngine(Engine):
             args = list(after)
         where = self._where(where, resume, bool(args), percent=True)
         order = (" order by " + ", ".join(f"`{k}`" for k in key)) if key else ""
-        cap = f" limit {int(limit)}" if key else ""
-        rows = [list(r) for r in self._q(
-            side, f"select {cols} from `{self._d(side, db)}`.`{table}`"
-                  f"{where}{order}{cap}", args or None)]
+        cap = f" limit {int(limit)}" if key and limit else ""
+        return (f"select {cols} from `{self._d(side, db)}`.`{table}`"
+                f"{where}{order}{cap}", args or None, key, names)
+
+    def neutral_batches(self, side, db, table, columns, size=1000,
+                        where=None):
+        """The whole table in one pass, `size` rows at a time, for a table
+        with no key to resume from - read through a cursor the server keeps,
+        so no more than a batch is ever held here."""
+        import pymysql
+        sql, args, _, _ = self._read_query(side, db, table, columns, None,
+                                           None, where)
+        conn = self._conn(side)
+        try:
+            with conn.cursor(pymysql.cursors.SSCursor) as cur:
+                cur.execute(sql, args)
+                while True:
+                    rows = cur.fetchmany(size)
+                    if not rows:
+                        break
+                    yield [list(r) for r in rows]
+        finally:
+            conn.close()
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
+        sql, args, key, names = self._read_query(side, db, table, columns,
+                                                 after, limit, where)
+        rows = [list(r) for r in self._q(side, sql, args)]
         if not rows or not key:
             return (rows, None)
         idx = [names.index(k) for k in key if k in names]
@@ -482,10 +508,22 @@ class MySQLEngine(Engine):
         return out
 
     #: binlog events that carry rows the reader cannot open, and the
-    #: setting that writes them: MySQL's compressed transaction, and
-    #: MariaDB's compressed row events (both kinds of each)
+    #: setting that writes them: MariaDB's compressed row events. MySQL's
+    #: compressed transaction is read (`binlog_payload`); it is listed for
+    #: the reader that cannot, should one be given no way to
     COMPRESSED_ROWS = {0x28: "binlog_transaction_compression",
                        **{t: "log_bin_compress" for t in range(166, 172)}}
+
+    @staticmethod
+    def _row_events(stream):
+        """The stream's events, with each compressed transaction's opened
+        in its place (`binlog_payload`)."""
+        from ..binlog_payload import TransactionPayloadEvent
+        for ev in stream:
+            if isinstance(ev, TransactionPayloadEvent):
+                yield from (e for e in ev.events if hasattr(e, "rows"))
+            else:
+                yield ev
 
     @classmethod
     def _compressed_stop(cls, token, event_type):
@@ -552,6 +590,7 @@ class MySQLEngine(Engine):
                     f" FULL: {why}.\n"
                     f"    set global {name} = 'FULL';   -- self-managed\n"
                     f"    {name}=FULL                   -- parameter group")
+        from ..binlog_payload import register
         token = dict(token or {}) or self.change_point(side, db)
         start = dict(token)
         stream = BinLogStreamReader(
@@ -562,7 +601,7 @@ class MySQLEngine(Engine):
             log_file=token.get("log_file"), log_pos=token.get("log_pos"),
             only_schemas=[self._d(side, db)],
             only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
-                         NotImplementedEvent],
+                         NotImplementedEvent, register()],
             filter_non_implemented_events=False)
         # each table's key once a batch: asked for every event, on a
         # connection of its own, it held the reader to about 160 rows a
@@ -570,7 +609,7 @@ class MySQLEngine(Engine):
         # seconds behind when the writer stopped (`bench/run.py`)
         out, skipped, keys_of = [], set(), {}
         try:
-            for ev in stream:
+            for ev in self._row_events(stream):
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:
                         # nothing of this batch is handed back, so the
@@ -1410,8 +1449,13 @@ class MySQLEngine(Engine):
                 f"@{ep.host}:{ep.port}/{self._d(side, db)}")
 
     def _reladiff_table(self, db, t, pks):
-        cmd = ["reladiff", self._reladiff_url("src", db), t,
-               self._reladiff_url("dst", db), t, "--stats",
+        from ..util import PrivateFile, diff_run_config
+        # both addresses in a private file: they carry the passwords, and
+        # were the program's arguments
+        conf = PrivateFile(diff_run_config(
+            self._reladiff_url("src", db), t, self._reladiff_url("dst", db),
+            t), ".toml")
+        cmd = ["reladiff", "--conf", None, "--stats",
                "-j", str(self.hop.workers), "-c", "%"]
         for k in pks:
             cmd += ["-k", k]
@@ -1420,7 +1464,9 @@ class MySQLEngine(Engine):
         if pred:
             cmd += ["--where", pred]
         try:
-            p = run(cmd, check=False, timeout=3600)
+            with conf as path:
+                cmd[2] = path
+                p = run(cmd, check=False, timeout=3600)
         except Exception:
             return None, "", 0, 0
         text = p.stdout + p.stderr
@@ -1534,6 +1580,88 @@ class MySQLEngine(Engine):
             r.detail += " kind=" + ",".join(sorted(kinds))
         return r, ra, rb
 
+    def target_mark(self, db):
+        """Where the target's binlog is as the move begins: a row written
+        after this is in the log from here on, and one only the target has
+        that is not there was there before the move."""
+        pos = self._binlog_position("dst")
+        return ({"log_file": pos[0], "log_pos": int(pos[1])} if pos
+                else {})
+
+    #: how far into the target's log `who_wrote` reads, at most
+    WHO_WROTE_EVENTS = 200_000
+
+    def who_wrote(self, db, table, keys, began):
+        """Of the rows only the target has, which the target's own binlog
+        shows written since the move began - by this server's sessions or
+        by a replica's - and which it does not, which the target held
+        before. Where the log from that point is gone, it says it cannot
+        tell rather than guess."""
+        from .. import rowtext
+        mark = began or {}
+        if not keys or not mark.get("log_file"):
+            return ""
+        files = [r[0] for r in self._q("dst", "show binary logs")]
+        if mark["log_file"] not in files:
+            return ("who wrote them cannot be told: the target's binlog"
+                    " from the move's start is gone")
+        from pymysqlreplication import BinLogStreamReader
+        from pymysqlreplication.row_event import (UpdateRowsEvent,
+                                                  WriteRowsEvent)
+        wanted = set(keys)
+        # the target's own key: `_pk_cols` asks the source
+        pks = [r[0] for r in self._q("dst", self.PK_SQL,
+                                     (self._d("dst", db), table))]
+        ep = self.hop.target
+        stream = BinLogStreamReader(
+            connection_settings={"host": ep.host, "port": ep.port,
+                                 "user": ep.user, "passwd": ep.password},
+            server_id=int(self.hop.options.get("server_id", 4379)) + 1,
+            blocking=False, resume_stream=True,
+            log_file=mark["log_file"], log_pos=int(mark["log_pos"]),
+            only_schemas=[self._d("dst", db)], only_tables=[table],
+            only_events=[WriteRowsEvent, UpdateRowsEvent])
+        me = int(self._q("dst", "select @@server_id")[0][0])
+        found, by_me, others, first, last, seen = set(), 0, set(), None, \
+            None, 0
+        try:
+            for ev in stream:
+                seen += 1
+                if seen > self.WHO_WROTE_EVENTS:
+                    break
+                for row in ev.rows:
+                    vals = row.get("after_values") or row.get("values") or {}
+                    key = rowtext.encode([vals.get(k) for k in pks])
+                    if key in wanted and key not in found:
+                        found.add(key)
+                        if ev.packet.server_id == me:
+                            by_me += 1
+                        else:
+                            others.add(ev.packet.server_id)
+                        first = first or ev.timestamp
+                        last = ev.timestamp
+        finally:
+            stream.close()
+        import time as _t
+        said = []
+        before = len(wanted) - len(found)
+        if before and seen <= self.WHO_WROTE_EVENTS:
+            said.append(f"{before} not written since the move of"
+                        f" {mark.get('at', '')} began - the target held them"
+                        " before it and was not emptied of them")
+        if found:
+            said.append(
+                f"{len(found)} written since it began"
+                + (f", {by_me} by the target's own sessions" if by_me else "")
+                + (f", {len(found) - by_me} arriving from server"
+                   f" {', '.join(map(str, sorted(others)))}" if others else "")
+                + f", between {_t.strftime('%H:%M:%S', _t.localtime(first))}"
+                  f" and {_t.strftime('%H:%M:%S', _t.localtime(last))}")
+        if seen > self.WHO_WROTE_EVENTS:
+            said.append(f"read the first {self.WHO_WROTE_EVENTS:,} changes"
+                        " since, and stopped there")
+        return "; ".join(said)
+
     def _drilldown(self, db, t, pks, expr, ranges):
         scope = f"{db}.{t}"
         from .. import rowtext
@@ -1567,6 +1695,13 @@ class MySQLEngine(Engine):
         fp = self._column_fingerprint(db, t)
         if fp:
             detail += f"; drift localized to columns: {', '.join(fp[:6])}"
+        if extra:
+            try:
+                whose = self.who_wrote(db, t, extra, self._move_began(db))
+            except Exception:  # noqa: BLE001 - an extra, not the finding
+                whose = ""
+            if whose:
+                detail += f"; of the rows only the target has: {whose}"
         return Result("data", scope, "diff", detail, str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows"
                       " --apply"), len(src), len(dst)
@@ -1676,6 +1811,7 @@ class MySQLEngine(Engine):
                            f"baseline {pos[0]}:{pos[1]} recorded,"
                            " changes are tracked from this point on")]
         from .. import rowtext
+        from ..binlog_payload import register
         ck = json.loads(state.read_text())
         s = self.hop.source
         stream = BinLogStreamReader(
@@ -1686,13 +1822,13 @@ class MySQLEngine(Engine):
             log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
             only_schemas=[db],
             only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
-                         NotImplementedEvent],
+                         NotImplementedEvent, register()],
             filter_non_implemented_events=False)
         touched = {}
         nopk = set()
         n = 0
         try:
-            for ev in stream:
+            for ev in self._row_events(stream):
                 if isinstance(ev, NotImplementedEvent):
                     # the rows of a compressed transaction are not read,
                     # and the delta said "0 changes" over them: the
@@ -2353,8 +2489,220 @@ class MySQLEngine(Engine):
                       " same query - and a corrupt index is exposed only as"
                       " error 1712, with no catalog column to read")
 
+
+    # --- the source's own reads, planned and timed on both sides (G1) ----
+
+    #: statements of migkit's own checks, left out of the application's
+    MIGKIT_MARKS = ("information_schema", "performance_schema", "bit_xor(",
+                    "md5(", "`mysql`.",
+                    # a client reading its settings, not the application
+                    "select @@")
+
+    def workload_reads(self, db, n):
+        """[(label, statement, runnable)] - the source's busiest reads by
+        total time, from `performance_schema`'s digests. The label is the
+        digest's normalised text, never the sample's literal values."""
+        rows = self._q("src", "select DIGEST_TEXT, QUERY_SAMPLE_TEXT from"
+                              " performance_schema"
+                              ".events_statements_summary_by_digest"
+                              " where SCHEMA_NAME = %s and DIGEST_TEXT"
+                              " like 'SELECT %%'"
+                              " order by SUM_TIMER_WAIT desc limit %s",
+                       (self._d("src", db), int(n) * 3))
+        out = []
+        for digest, sample in rows:
+            text = f"{digest} {sample}".lower()
+            if any(m in text for m in self.MIGKIT_MARKS):
+                continue
+            sample = sample or ""
+            # a sample cut at the server's text limit is not a statement
+            whole = bool(sample) and not sample.rstrip().endswith("...") \
+                and "?" not in sample
+            out.append((" ".join(str(digest).split())[:70], sample, whole))
+            if len(out) >= n:
+                break
+        return out
+
+    def _read_only(self, side, db):
+        conn = self._conn(side)
+        cur = conn.cursor()
+        cur.execute(f"use {self._my_ident(self._d(side, db))}")
+        cur.execute("set session max_execution_time = 5000")
+        cur.execute("start transaction read only")
+        return conn, cur
+
+    def workload_plan(self, side, db, sql):
+        """{table: "index <name>" or None where the plan reads it whole}."""
+        import json as _json
+        conn, cur = self._read_only(side, db)
+        try:
+            cur.execute(f"explain format=json {sql}")
+            plan = _json.loads(cur.fetchone()[0])
+        finally:
+            conn.rollback()
+            conn.close()
+        out = {}
+
+        def walk(node):
+            if isinstance(node, dict):
+                t = node.get("table")
+                if isinstance(t, dict) and t.get("table_name"):
+                    out[t["table_name"]] = (
+                        None if t.get("access_type") == "ALL"
+                        else f"index {t.get('key')}" if t.get("key")
+                        else out.get(t["table_name"]))
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(plan)
+        return out
+
+    def workload_time(self, side, db, sql):
+        """The statement's time in ms, from `EXPLAIN ANALYZE`, run
+        read-only; no rows come back."""
+        import re
+        conn, cur = self._read_only(side, db)
+        try:
+            cur.execute(f"explain analyze {sql}")
+            text = cur.fetchone()[0]
+        finally:
+            conn.rollback()
+            conn.close()
+        m = re.search(r"actual time=[\d.]+\.\.([\d.]+)", text)
+        if m:
+            return float(m.group(1))
+        # answered before execution (`max` over an index): nothing ran
+        return 0.0 if "before execution" in text else None
+
+    def stream_identity(self, side, db):
+        """The server's own id: a binlog file and offset mean something in
+        one server's log only."""
+        got = self._q(side, "select @@server_uuid")
+        return {"server": str(got[0][0])} if got else None
+
+    def log_kept(self, db, grows):
+        """A binlog is kept whole until it expires, however long the load
+        took to write it."""
+        on, expire = self._q("dst", "select @@log_bin,"
+                                    " @@binlog_expire_logs_seconds")[0]
+        if not int(on):
+            return (0, "none: the target keeps no binlog")
+        days = int(expire) / 86400
+        return (grows, "all of it, for"
+                       f" {days:g} days (binlog_expire_logs_seconds)"
+                if expire else "all of it, until someone purges it")
+
+    def text_encodings(self, side, db):
+        """Per column: a database's default says nothing about a column
+        declared in another character set, which is where a 3-byte UTF-8
+        column sits inside a utf8mb4 database."""
+        got = {str(c): int(n) for c, n in self._q(
+            side, "select character_set_name, count(*) from"
+                  " information_schema.columns where table_schema = %s and"
+                  " character_set_name is not null group by 1",
+            (self._d(side, db),))}
+        if got:
+            return got
+        rows = self._q(side, "select default_character_set_name from"
+                             " information_schema.schemata where"
+                             " schema_name = %s", (self._d(side, db),))
+        return {str(rows[0][0]): 0} if rows else None
+
+    def neutral_create_code(self, side, db, statement):
+        if side != "dst":
+            raise RuntimeError("migkit does not write to the source")
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"use {self._my_ident(self._d(side, db))}")
+                cur.execute(statement)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def neutral_views(self, side, db):
+        return [(n, d) for n, d in self._q(
+            side, "select table_name, view_definition from"
+                  " information_schema.views where table_schema = %s"
+                  " order by 1", (self._d(side, db),))
+            if not self.hop.excluded(db, n)]
+
+    def neutral_functions(self, side, db):
+        name = self._d(side, db)
+        out = []
+        for fn, kind, body, returns in self._q(
+                side, "select routine_name, routine_type,"
+                      " routine_definition, dtd_identifier from"
+                      " information_schema.routines where routine_schema"
+                      " = %s order by 1", (name,)):
+            text = " ".join(str(body or "").split())
+            one = kind == "FUNCTION" and text.lower().startswith("return ")
+            params = [(p, t) for p, t in self._q(
+                side, "select parameter_name, dtd_identifier from"
+                      " information_schema.parameters where specific_schema"
+                      " = %s and specific_name = %s and ordinal_position > 0"
+                      " order by ordinal_position", (name, fn))]
+            out.append((fn, params, returns, text[7:] if one else None))
+        return out
+
+    def code_definition(self, side, db, kind, name):
+        what = {"view": "view", "function": "function",
+                "procedure": "procedure"}.get(kind)
+        if not what:
+            return None
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"use {self._my_ident(self._d(side, db))}")
+                cur.execute(f"show create {what} {self._my_ident(name)}")
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        # the statement is the column after the name (and, for a view, is
+        # the second of four)
+        return next((c for c in row[1:] if isinstance(c, str)
+                     and c.lower().lstrip().startswith("create")), None)
+
+    def neutral_function_sql(self, name, params, returns, body):
+        # a server writing a binary log refuses a function that declares
+        # nothing about what it reads; this one reads, at most
+        return (f"create function {self._quote_ident(name)}"
+                f"({', '.join(f'{self._quote_ident(p)} {t}' for p, t in params)})"
+                f" returns {returns} reads sql data return {body}")
+
+    def zone_evidence(self, side, db):
+        """(the server's UTC offset in minutes, its UTC clock, [(table.column,
+        latest value)]) for the `datetime` columns an index leads - read
+        by the index, so each is one probe (`zones`)."""
+        name = self._d(side, db)
+        offset, now = self._q(side, "select timestampdiff(minute,"
+                                    " utc_timestamp(), now()),"
+                                    " utc_timestamp(6)")[0]
+        cols = self._q(side, "select s.table_name, s.column_name from"
+                             " information_schema.statistics s join"
+                             " information_schema.columns c on"
+                             " c.table_schema = s.table_schema and"
+                             " c.table_name = s.table_name and"
+                             " c.column_name = s.column_name"
+                             " where s.table_schema = %s and"
+                             " s.seq_in_index = 1 and c.data_type ="
+                             " 'datetime' group by s.table_name,"
+                             " s.column_name limit 30", (name,))
+        heads = []
+        for t, c in cols:
+            if self.hop.excluded(db, t):
+                continue
+            latest = self._q(side, f"select max(`{c}`) from"
+                                   f" {self._my_ident(name)}.`{t}`")[0][0]
+            heads.append((f"{t}.{c}", latest))
+        return int(offset), now, heads
+
     def check_deep(self, db):
-        res = [self._planner_stats(db),
+        from .. import workload, zones
+        res = [self._planner_stats(db), workload.compare(self, db),
+               zones.infer(self, db),
                self._lob_check(db),
                self._invalid_indexes(db),
                self._collation_versions(db),
@@ -3854,6 +4202,7 @@ class MySQLEngine(Engine):
         sv = self._q("src", "select version()")[0][0]
         dv = self._q("dst", "select version()")[0][0]
         items.append(self._version_row(sv, dv, parts=2))
+        items += self._pooler_items()
         # each with the value to set, not only the verdict
         for name, want, lvl, fix in (
                 ("log_bin", "ON", "fail",
@@ -3881,20 +4230,20 @@ class MySQLEngine(Engine):
             f"{ret} - set global binlog_expire_logs_seconds = 604800, or"
             " on RDS call mysql.rds_set_configuration('binlog retention"
             " hours', 168)")
-        for name in ("binlog_transaction_compression", "log_bin_compress"):
-            zc = str(var("src", name)).upper()
-            # "?" is a server without it: the first is MySQL's (8.0.20 and
-            # later), the second MariaDB's
-            if zc in ("?", ""):
-                continue
+        # MySQL's compressed transactions the tail opens (binlog_payload);
+        # MariaDB's compressed row events it cannot
+        zc = str(var("src", "binlog_transaction_compression")).upper()
+        if zc not in ("?", ""):
+            add("pass", "instance", "compressed transactions in the binlog"
+                " readable by the change tail",
+                zc + (" - the tail opens them" if zc == "ON" else ""))
+        zc = str(var("src", "log_bin_compress")).upper()
+        if zc not in ("?", ""):
             add("pass" if zc == "OFF" else "fail", "instance",
-                f"{name}=OFF on source (the change tail cannot read"
-                " compressed rows)",
+                "log_bin_compress=OFF on source (the change tail cannot"
+                " read MariaDB's compressed rows)",
                 zc if zc == "OFF" else
-                f"{zc} - set global {name} = OFF"
-                + ("; a session can still turn it on for itself, and the"
-                   " tail stops if one does"
-                   if name == "binlog_transaction_compression" else ""))
+                f"{zc} - set global log_bin_compress = OFF")
         sid = var("src", "server_id")
         add("pass" if str(sid) not in ("0", "") else "fail", "instance",
             "server_id set on source (a binlog reader needs it)",
@@ -4252,7 +4601,7 @@ class MySQLEngine(Engine):
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
         t = tbl if tbl else sch
-        key = f"{db}.{t}"
+        key = self.move_key(db, sch, tbl)
         ddb = self._d("dst", db)
         st = ck.setdefault(key, {})
         if st.get("done"):
@@ -4347,6 +4696,25 @@ class MySQLEngine(Engine):
     #: a replica follows a whole server, so one serves every database of
     #: the hop (`_replica_filters` scopes it)
     REPLICATES_THE_SERVER = True
+
+    def native_replica_unsafe(self):
+        """A database the hop renames. The replica's rewrite applies to the
+        database in use, not to one a statement names. Measured on 8.4
+        under the plan's own filters: `alter table cx.t add column ...`
+        and `create table cx.t3 ...`, run with another database in use or
+        none, never reached the renamed target. The replica kept running,
+        and the next row's values for the added columns were dropped,
+        without an error. With the same name on both sides every table,
+        view, routine, trigger and index statement arrived."""
+        renamed = self._replica_filters()[0]
+        if not renamed:
+            return None
+        return (f"the hop renames {', '.join(f'{a} to {b}' for a, b in renamed)},"
+                " and the server's own replica renames only the database in"
+                " use: a schema change naming its table with the database"
+                " (`alter table db.t ...`) does not arrive, and the rows"
+                " after it lose the columns it added, with the replica still"
+                " running")
 
     def _replica_filters(self):
         """What a native replica of this hop may write on the target, as

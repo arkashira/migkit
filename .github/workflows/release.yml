@@ -52,6 +52,10 @@ jobs:
   build:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # to sign the provenance
+      attestations: write   # to store it beside the release
     outputs:
       version: ${{ steps.tag.outputs.version }}
     steps:
@@ -91,9 +95,25 @@ jobs:
           echo "wheel installs and runs"
       - name: release notes from the commits
         run: python tools/gen_changelog.py "${{ steps.tag.outputs.tag }}" > RELEASE_NOTES.md
+      - name: software bill of materials (CycloneDX), of the wheel as installed
+        run: |
+          python -m pip install cyclonedx-bom
+          cyclonedx-py environment /tmp/v/bin/python --of JSON \
+            -o "dist/migkit-${{ steps.tag.outputs.version }}.cdx.json"
       - name: checksums
         run: |
           cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: build provenance, signed through GitHub's Sigstore
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: the bill of materials, attested against the wheel
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: dist/*.whl
+          sbom-path: dist/migkit-${{ steps.tag.outputs.version }}.cdx.json
       - uses: actions/upload-artifact@v4
         with:
           name: release-dist

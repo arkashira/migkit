@@ -210,6 +210,63 @@ confirmed to fail without the fix (it reported 100 for a 400-row table).
 - The 20 GiB VM disk is the practical ceiling for this harness: ten million
   rows on both sides plus WAL used about 12 GB.
 
+## A terabyte, on machines anyone can rent (the recipe)
+
+Backlog 45 asks for migkit's own move at terabyte size, with the time
+and the cost stated, re-runnable by anyone. This laptop's container VM
+has a 20 GiB disk, so the run has to happen on rented machines. This is
+the recipe, written so the numbers it produces sit beside the ones
+above.
+
+**Size.** `bench_rows` is about 278 bytes a row on disk (the table
+above). One terabyte is therefore about 3.6 billion rows.
+
+**Machines.** Two database hosts and one host for migkit, in one region
+and one availability zone, so the network is not what gets measured:
+* source and target: the same instance class, each with a 2 TB gp3 volume
+  at 16,000 IOPS and 1,000 MB/s. Engine settings: `shared_buffers` a
+  quarter of memory and `max_wal_size = 64GB` on PostgreSQL, or
+  `innodb_buffer_pool_size` half of memory on MySQL.
+* migkit: a general-purpose instance with 8 vCPUs; peak memory was 30 MB
+  for the move and 333 MB for the check at ten million rows.
+
+Managed databases (RDS, Aurora) work as well, and the recipe is the same
+apart from the host names. Their classes and storage go in the result,
+beside the rest.
+
+**Steps.**
+
+```
+python bench/seed.py --dsn postgresql://USER:CHANGE_ME@SOURCE/postgres \
+  --rows 3600000000 --quiet
+
+/usr/bin/time -v migkit move bench --mode full --go
+/usr/bin/time -v migkit check bench
+```
+
+The check's findings are in `reports/bench/summary.json`, and the times
+the move measured in `reports/bench/throughput.json`.
+
+`bench-hops.yaml` names the two hosts as in `Reproducing` below, with the
+credentials given as `env:` references rather than written in the file.
+
+**What to write down**, next to the tables above:
+* the instance classes, volumes and region
+* the engine versions and every setting changed from its default
+* the wall clock and the peak memory of the move and the check
+* the verdict, and every finding in it
+* the cost: the hours each machine ran times its hourly price, plus the
+  volumes for the same hours, plus any transfer between zones (none, if
+  all three are in one zone). At the prices of the day, name them and
+  their date.
+
+**What counts as a pass.** The check is `same`. Peak memory stays flat
+from ten million rows to 3.6 billion: that is the claim the table above
+makes at ten million, and this run is what tests it. A run that finishes
+with anything other than `same`, or whose memory grows with the table, is
+the result to publish, with the reason. It is not a run to repeat until
+it looks better.
+
 ## Reproducing
 
 ```

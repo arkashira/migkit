@@ -250,10 +250,17 @@ def test_the_rows_are_a_second_call_because_stats_does_not_carry_them(
     _seed(pg_pair, *PLAIN,
           target_changes="update t set v='CHANGED' where id=5;")
     eng = _engine(pg_pair, tmp_path)
+    from migkit.util import diff_run_config
+    conf = tmp_path / "run.toml"
+    conf.write_text(diff_run_config(eng._url("src"), "t", eng._url("dst"),
+                                    "t"))
+
     def argv(**kw):
         # the bare name is not on PATH: reladiff lives beside the
-        # interpreter, which is where migkit's own `run` looks for it
+        # interpreter, which is where migkit's own `run` looks for it; the
+        # addresses go in the run's file, as `_reladiff` gives them
         cmd = eng._reladiff_cmd("t", ["-c", "%", "--json"], jobs=1, **kw)
+        cmd[2] = str(conf)
         return [RELADIFF] + cmd[1:]
 
     both = subprocess.run(argv(), capture_output=True, text=True)

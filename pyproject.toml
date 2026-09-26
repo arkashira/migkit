@@ -28,6 +28,15 @@ dependencies = [
     # engine drivers - one per supported engine, all required
     "psycopg2-binary>=2.9",
     "pymysql>=1.1",
+    "pymssql>=2.3",
+    "clickhouse-connect>=0.8",
+    "oracledb>=2",
+    "ibm_db>=3.2",
+    "pyodbc>=5.1",
+    "cassandra-driver>=3.29",
+    "snowflake-connector-python>=3.6",
+    "google-cloud-bigquery>=3.11",
+    "zstandard>=0.22",
     "mysql-replication>=1.0",
     "pymongo>=4.6",
     "redis>=5.0",
@@ -36,6 +45,7 @@ dependencies = [
     "reladiff",
     "datacompy",
     "pandas",
+    "pyarrow",
     "sqlglot",
     # PostgreSQL structural diff. psycopg3 is pulled with the binary wrapper
     # on purpose: `results` asks only for psycopg[pool], which installs
@@ -44,6 +54,7 @@ dependencies = [
     "psycopg[binary,pool]",
     # cloud metadata for managed-service hops
     "boto3",
+    "google-cloud-pubsub>=2.20",
 ]
 
 [project.urls]

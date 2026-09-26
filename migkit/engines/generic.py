@@ -60,7 +60,9 @@ class GenericEngine(Engine):
         # preference" and go back to the full count, which is the one moment
         # it matters most
         want = self.hop.workers if jobs is None else jobs
-        cmd = ["reladiff", self._url("src"), table, self._url("dst"), table,
+        # the addresses go in the run's configuration file (`_reladiff`),
+        # not here: an address can carry its password
+        cmd = ["reladiff", "--conf", None,
                *(["--stats"] if stats else []), "-j", str(max(1, int(want)))]
         for k in self._key():
             cmd += ["-k", k]
@@ -73,8 +75,13 @@ class GenericEngine(Engine):
                 " installed on this machine: migkit doctor --install"
                 " puts it in place, and migkit doctor says what is"
                 " missing")
-        return run(self._reladiff_cmd(table, extra, jobs, stats), check=False,
-                   timeout=3600)
+        from ..util import PrivateFile, diff_run_config
+        cmd = self._reladiff_cmd(table, extra, jobs, stats)
+        with PrivateFile(diff_run_config(self._url("src"), table,
+                                         self._url("dst"), table),
+                         ".toml") as path:
+            cmd[2] = path
+            return run(cmd, check=False, timeout=3600)
 
     def _gate(self):
         """One table at a time is not the unit here - reladiff runs a whole

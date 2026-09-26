@@ -66,7 +66,7 @@ def test_missing_config_file_errors(tmp_path):
 
 
 def test_unsupported_engine_rejected():
-    hop = Hop(name="x", engine="cassandra",
+    hop = Hop(name="x", engine="couchbase",
               source=Endpoint(host="h"), target=Endpoint(host="h"))
     from migkit.engines import get_engine
     with pytest.raises(SystemExit):

@@ -3,7 +3,7 @@
 > Verify, repair, and move databases across engines - without trusting the mover.
 
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
-[![engines](https://img.shields.io/badge/engines-postgres,%20mysql,%20mongodb,%20mssql,%20sqlite,%20redis,%20kafka-2a78d6)](#supported-engines)
+[![engines](https://img.shields.io/badge/engines-postgres,%20mysql,%20mongodb,%20mssql,%20sqlite,%20redis,%20kafka,%20parquet,%20clickhouse,%20dynamodb,%20opensearch,%20cassandra-2a78d6)](#supported-engines)
 [![cross-engine](https://img.shields.io/badge/cross--engine-mysql_to_postgres-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-0ca30c)](LICENSE)
@@ -183,7 +183,7 @@ project can keep its hops beside its code. The file looks like this:
 ```yaml
 hops:
   my-hop:
-    engine: postgres            # postgres | mysql | mssql | mongodb | sqlite | redis | kafka
+    engine: postgres            # postgres | mysql | mssql | mongodb | sqlite | redis | kafka | hetero
     service: native             # playbook: aws-dms | tencent-dts | gcp-dms | native
     source: { host: src.example.com, port: 5432, user: app, password: "secret" }
     target: { host: 10.0.0.10,       port: 5432, user: app, password: "secret" }
@@ -259,7 +259,9 @@ engine produced it.
 | Tier | Engines |
 |---|---|
 | Native | postgres, mysql, mssql, mongodb, sqlite, redis, kafka |
-| Alias | mariadb, percona, tdsql, aurora-mysql/postgres, alloydb, documentdb, cosmosdb-mongo, azure-sql |
+| Either side of a pair (move and verify) | parquet (disk or S3), clickhouse, dynamodb, opensearch, cassandra; oracle, db2 and ase (SAP ASE, also `sybase`) written, not yet run against a server; redshift, snowflake and bigquery written, not yet run against an account |
+| Change streams delivered into | kafka (Azure Event Hubs through its Kafka endpoint), kinesis, pubsub (json, debezium or canal messages) |
+| Alias | mariadb, percona, tdsql, aurora-mysql/postgres, alloydb, documentdb, cosmosdb-mongo, azure-sql, elasticsearch, scylladb |
 | Row comparison | snowflake, bigquery, redshift, clickhouse, oracle, trino, duckdb, vertica, databricks |
 | Schema comparison (JDBC) | db2, h2, firebird, informix, sybase - drop the driver jar |
 
@@ -279,7 +281,8 @@ migkit check  my2pg                      # cross-dialect row verify
 ```
 
 The `hetero` engine is an orchestrator that reuses the per-side native engines,
-so new pairs (pg->mysql, mssql->pg) follow the same shape.
+so every pair follows the same shape: `source_engine` and `target_engine` in
+the hop's options name any two of the engines above.
 
 ## How it compares
 

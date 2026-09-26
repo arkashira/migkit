@@ -62,11 +62,13 @@ def test_removing_a_capability_is_noticed(monkeypatch):
 
 
 def test_closing_a_gap_is_noticed(monkeypatch):
-    """Give Redis a table copier and its declared gap goes stale."""
-    from migkit.engines.redis import RedisEngine
-    monkeypatch.setattr(RedisEngine, "move_table",
+    """Give the generic engine a table copier and its declared gap goes
+    stale. (Redis, then Kafka, were this example until each was given
+    one.)"""
+    from migkit.engines.generic import GenericEngine
+    monkeypatch.setattr(GenericEngine, "move_table",
                         lambda self, *a: None, raising=False)
-    assert ("redis", "table-copy") in caps.stale()
+    assert ("generic", "table-copy") in caps.stale()
 
 
 def test_the_base_class_placeholder_is_not_a_capability(monkeypatch):
@@ -105,11 +107,11 @@ def test_a_capability_the_engine_has_is_not_refused():
 
 
 def test_not_yet_says_what_to_do_meanwhile():
-    said = _refused("redis", "stream")
-    assert said.startswith("Keeping the target following the source is not"
-                           " available for redis hops yet"), said
+    said = _refused("mssql", "users")
+    assert said.startswith("Carrying users and their grants is not"
+                           " available for mssql hops yet"), said
     assert "backlog item 0e" in said, said
-    assert caps.INSTEAD["stream"] in said, said
+    assert caps.INSTEAD["users"] in said, said
 
 
 def test_not_applicable_says_why():
@@ -119,10 +121,11 @@ def test_not_applicable_says_why():
 
 
 def test_the_name_the_operator_used_is_the_one_said_back():
-    """`documentdb` is MongoDB underneath; the operator wrote documentdb.
-    (This used MySQL's fence, then MongoDB's; both have one now.)"""
-    said = _refused("documentdb", "table-copy")
-    assert "for documentdb hops" in said, said
+    """`azure-sql` is SQL Server underneath; the operator wrote azure-sql.
+    (This used MySQL's fence, then MongoDB's, then MongoDB's collection
+    copy, then SQL Server's stream; all four have one now.)"""
+    said = _refused("azure-sql", "users")
+    assert "for azure-sql hops" in said, said
 
 
 def test_an_unknown_engine_is_refused_not_guessed():
@@ -162,7 +165,6 @@ def sqlite_hop(tmp_path, monkeypatch):
     (["move", "{hop}", "--mode", "cdc", "--go"], "stream"),
     (["move", "{hop}", "--mode", "full+cdc", "--go"], "stream"),
     (["watch", "{hop}", "--verify", "--delta", "--count", "1"], "delta"),
-    (["sync", "{hop}", "--go"], "snapshot"),
     (["users", "{hop}", "test"], "users"),
 ])
 def test_every_command_refuses_in_the_same_words(sqlite_hop, argv, cap):
@@ -182,6 +184,27 @@ def test_every_command_refuses_in_the_same_words(sqlite_hop, argv, cap):
     assert not [t for t in TOOLS if t in low], said
 
 
+def test_a_sqlite_sync_keeps_the_target_file_first(sqlite_hop, tmp_path):
+    """`sync --go` refused on SQLite for want of a restore point; it now
+    keeps the whole target file before it repairs anything."""
+    import sqlite3
+
+    from click.testing import CliRunner
+    from migkit import cli
+    con = sqlite3.connect(tmp_path / "b.db")
+    con.execute("insert into t values (41)")
+    con.commit()
+    con.close()
+    got = CliRunner().invoke(cli.main, ["sync", sqlite_hop, "--go"])
+    said = " ".join((got.output + str(got.exception or "")).split())
+    assert got.exit_code == 0, said
+    kept = list((tmp_path / "reports").rglob("dst.sqlite"))
+    assert len(kept) == 1, kept
+    con = sqlite3.connect(kept[0])
+    assert con.execute("select id from t").fetchall() == [(41,)]
+    con.close()
+
+
 def test_a_method_that_only_refuses_is_not_a_capability(monkeypatch):
     """Redis had a `delta_verify` whose whole body returned an error, and
     the matrix counted it as verifying deltas."""
@@ -199,17 +222,18 @@ def test_a_method_that_only_refuses_is_not_a_capability(monkeypatch):
 
 def test_a_move_on_an_engine_with_no_copier_refuses_in_the_same_words(
         tmp_path, monkeypatch):
-    """Redis still has no copier. SQLite, which this used to run on, now
-    copies table by table through the shared copier."""
+    """The generic engine still has no copier. SQLite, Redis and Kafka,
+    which this used to run on, now copy table by table, keyspace by
+    keyspace and topic by topic."""
     from click.testing import CliRunner
 
     import migkit.config as cfg
     from migkit import cli
     conf = tmp_path / "hops.yaml"
     conf.write_text(
-        "hops:\n  r:\n    engine: redis\n"
-        "    source: {host: 10.0.0.1, port: 6379, user: x, password: x}\n"
-        "    target: {host: 10.0.0.2, port: 6379, user: x, password: x}\n"
+        "hops:\n  r:\n    engine: generic\n"
+        "    source: {host: 10.0.0.1, port: 5000, user: x, password: x}\n"
+        "    target: {host: 10.0.0.2, port: 5000, user: x, password: x}\n"
         "    databases: ['0']\n")
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
@@ -217,5 +241,5 @@ def test_a_move_on_an_engine_with_no_copier_refuses_in_the_same_words(
                                         "--go"])
     said = " ".join((got.output + str(got.exception or "")).split())
     assert got.exit_code != 0, said
-    assert "Copying table by table, resumably is not available for redis" \
-        " hops yet" in said, said
+    assert "Copying table by table, resumably is not available for" \
+        " generic hops yet" in said, said

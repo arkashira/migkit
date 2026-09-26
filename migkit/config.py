@@ -71,6 +71,52 @@ class Endpoint:
                     or self.options.get("path") or self.options.get("url"))
 
 
+class IamEndpoint(Endpoint):
+    """An endpoint that signs in with a token the cloud signs instead of a
+    password (backlog 38): `auth: aws_iam` in its options, for RDS and
+    Aurora. A token is good for 15 minutes to open connections; it is
+    made again when it is 10 minutes old, so a run longer than a token
+    does not start failing to connect halfway. The configured password,
+    if any, is not used. The region comes from `aws_region`, or from the
+    AWS configuration of this machine. `aws_role_arn` signs as a role in
+    another account, assumed for each token - the cross-account pattern
+    the managed services use."""
+
+    _made = 0.0
+    _token = ""
+
+    @property
+    def password(self):
+        import time
+        if not self._token or time.time() - self._made > 600:
+            self._token = _aws_client(
+                "rds", self.options.get("aws_region"),
+                self.options.get("aws_role_arn")).generate_db_auth_token(
+                    DBHostname=self.host, Port=int(self.port),
+                    DBUsername=self.user)
+            self._made = time.time()
+        return self._token
+
+    @password.setter
+    def password(self, value):
+        pass
+
+
+def _aws_client(service, region=None, role=None):
+    try:
+        import boto3
+    except ImportError:
+        raise SystemExit("pip install boto3 for AWS sign-in and secrets")
+    where = {"region_name": region} if region else {}
+    if not role:
+        return boto3.client(service, **where)
+    creds = boto3.client("sts", **where).assume_role(
+        RoleArn=role, RoleSessionName="migkit")["Credentials"]
+    return boto3.client(service, aws_access_key_id=creds["AccessKeyId"],
+                        aws_secret_access_key=creds["SecretAccessKey"],
+                        aws_session_token=creds["SessionToken"], **where)
+
+
 @dataclass
 class Hop:
     name: str
@@ -86,6 +132,21 @@ class Hop:
     options: dict = field(default_factory=dict)
     db_map: dict = field(default_factory=dict)
     mapping: dict = field(default_factory=dict)
+
+    def reversed(self):
+        """The same hop run the other way: the target as the source, the
+        database names mapped back. Its name is its own, so its
+        replication objects and reports are not the forward hop's. Used
+        only where the hop asks for a stream back (`reverse`,
+        `topology`)."""
+        import dataclasses
+        return dataclasses.replace(
+            self, name=f"{self.name}-reverse", source=self.target,
+            target=self.source,
+            databases=[self.target_db(d) for d in (self.databases or [])],
+            db_map={v: k for k, v in (self.db_map or {}).items()},
+            options={k: v for k, v in (self.options or {}).items()
+                     if k not in ("reverse", "topology", "protect_target")})
 
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
@@ -212,6 +273,12 @@ def _secret(val):
       file:/path           -> file contents (trimmed; Docker/K8s secrets)
       vault:secret/db#key  -> Vault KV via VAULT_ADDR/VAULT_TOKEN (or the
                               vault CLI), read at load time
+      aws-sm:<id>[#key]    -> AWS Secrets Manager; `key` picks a field of a
+                              JSON secret (RDS's own secrets are JSON)
+      gcp-sm:projects/<p>/secrets/<s>[/versions/<v>]
+                           -> Google Secret Manager (latest by default)
+      azure-kv:https://<vault>.vault.azure.net/secrets/<name>
+                           -> Azure Key Vault
     A plain string is returned unchanged."""
     if not isinstance(val, str):
         return val
@@ -228,7 +295,61 @@ def _secret(val):
         return p.read_text().strip()
     if val.startswith("vault:"):
         return _vault_read(val[6:])
+    if val.startswith("aws-sm:"):
+        return _aws_secret(val[7:])
+    if val.startswith("gcp-sm:"):
+        return _gcp_secret(val[7:])
+    if val.startswith("azure-kv:"):
+        return _azure_secret(val[9:])
     return val
+
+
+def _aws_secret(ref):
+    import json as _json
+    sid, _, key = ref.partition("#")
+    # an ARN names its region; a bare name uses this machine's
+    region = sid.split(":")[3] if sid.startswith("arn:") else None
+    try:
+        got = _aws_client("secretsmanager", region).get_secret_value(
+            SecretId=sid)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 - said, with the secret's name
+        raise SystemExit(f"could not read AWS secret '{sid}':"
+                         f" {type(e).__name__}")
+    text = got.get("SecretString")
+    if text is None:
+        raise SystemExit(f"AWS secret '{sid}' holds no text")
+    if not key:
+        return text
+    try:
+        return str(_json.loads(text)[key])
+    except (ValueError, KeyError, TypeError):
+        raise SystemExit(f"AWS secret '{sid}' has no field '{key}'")
+
+
+def _gcp_secret(ref):
+    try:
+        from google.cloud import secretmanager
+    except ImportError:
+        raise SystemExit("pip install google-cloud-secret-manager for"
+                         " gcp-sm: secrets")
+    name = ref if "/versions/" in ref else ref + "/versions/latest"
+    got = secretmanager.SecretManagerServiceClient().access_secret_version(
+        name=name)
+    return got.payload.data.decode()
+
+
+def _azure_secret(ref):
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.keyvault.secrets import SecretClient
+    except ImportError:
+        raise SystemExit("pip install azure-identity azure-keyvault-secrets"
+                         " for azure-kv: secrets")
+    vault, _, name = ref.partition("/secrets/")
+    return SecretClient(vault_url=vault, credential=DefaultAzureCredential()
+                        ).get_secret(name.split("/")[0]).value
 
 
 def _vault_read(ref):
@@ -255,11 +376,16 @@ def _endpoint(engine, raw):
     nested = extra.pop("options", None)
     if isinstance(nested, dict):
         extra.update(nested)
-    return Endpoint(
+    auth = str(extra.get("auth", "") or "").lower()
+    if auth not in ("", "password", "aws_iam"):
+        raise SystemExit(f"auth: {auth} - password (the default) or"
+                         " aws_iam")
+    return (IamEndpoint if auth == "aws_iam" else Endpoint)(
         host=_secret(raw.get("host", "")),
         port=int(raw.get("port") or DEFAULT_PORTS.get(engine, 0)),
         user=_secret(raw.get("user", "")),
-        password=str(_secret(raw.get("password", ""))),
+        password=("" if auth == "aws_iam"
+                  else str(_secret(raw.get("password", "")))),
         options=extra,
     )
 
