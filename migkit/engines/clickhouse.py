@@ -355,9 +355,6 @@ class ClickHouseEngine(NeutralCopier, Engine):
     def check_counts(self, db):
         return self._as_pair().check_counts(db)
 
-    def check_data(self, db, table=None, stream=None):
-        return self._as_pair().check_data(db, table, stream)
-
     def check_deep(self, db):
         """Parts a merge or an insert left broken, and mutations - the
         deletes a restart runs - that have not finished: the rows a check
@@ -390,3 +387,225 @@ class ClickHouseEngine(NeutralCopier, Engine):
                                   f"no change still being applied on the"
                                   f" {who}"))
         return out
+
+    # ---- server-side fingerprints ---------------------------------------
+
+    @staticmethod
+    def _key_args(key):
+        """A partition key as `partitionId`'s arguments: a tuple's members
+        one by one - measured, `partitionId(k, toYYYYMM(at))` gives the
+        table's own partition id and `partitionId((k, ...))` another."""
+        text = str(key or "").strip()
+        if not (text.startswith("(") and text.endswith(")")):
+            return text
+        depth, commas = 0, False
+        for i, ch in enumerate(text):
+            depth += ch == "("
+            depth -= ch == ")"
+            if depth == 0 and i < len(text) - 1:
+                return text
+            commas = commas or (ch == "," and depth == 1)
+        return text[1:-1] if commas else text
+
+    def _partitioned_by(self, side, db, table):
+        got = self._rows(side, db, "select partition_key from system.tables"
+                                   " where database = {d:String} and name ="
+                                   " {t:String}",
+                         {"d": self._d(side, db), "t": table})
+        return str(got[0][0] or "").strip() if got else ""
+
+    def _fingerprints(self, db, table, only=None):
+        """({partition: (rows, digest)} of the source, the same of the
+        target), each computed by its own server - no row leaves either.
+
+        A partition is the source's: the target's rows are grouped by the
+        source's partition key through `partitionId`, whatever the target
+        is partitioned by. A row is hashed as the text of the tuple of its
+        columns, in the source's order, where a string is quoted and NULL
+        is not - a NULL and the string 'NULL' do not hash alike - and the
+        hashes are summed, so a row there twice counts twice. Types that
+        render differently (a target made nullable, another time zone)
+        differ here and are settled by the row comparison."""
+        columns = self.neutral_columns("src", db, table)
+        key = self._partitioned_by("src", db, table)
+        row = ("sum(cityHash64(toString(tuple("
+               + ", ".join(self._q(n) for n, _ in columns) + "))))")
+        out = []
+        for side in ("src", "dst"):
+            if not key:
+                pid = "'all'"
+            elif side == "src" or self._partitioned_by(side, db,
+                                                        table) == key:
+                pid = "_partition_id"
+            else:
+                pid = f"partitionId({self._key_args(key)})"
+            where = ""
+            params = {}
+            if only is not None:
+                where = f" where {pid} in {{p:Array(String)}}"
+                params["p"] = sorted(only)
+            got = self._rows(side, db,
+                             f"select {pid} as p, count(), {row} from"
+                             f" {self._qualified(side, db, table)}{where}"
+                             f" group by p", params)
+            out.append({str(p): (int(n), str(h)) for p, n, h in got})
+        return out[0], out[1]
+
+    def check_data(self, db, table=None, stream=None):
+        """Every table's partitions compared by fingerprints each server
+        computes; only a table where they differ - or cannot be computed on
+        a side - is compared row by row through the pair."""
+        tables = [table] if table else self.neutral_tables("src", db)
+        same, rest = [], []
+        for t in tables:
+            try:
+                s, d = self._fingerprints(db, t)
+            except Exception:  # noqa: BLE001 - the rows will say
+                rest.append(t)
+                continue
+            if s == d:
+                same.append(Result("data", f"{db}.{t}", "ok",
+                                   f"{sum(n for n, _ in s.values()):,} rows"
+                                   f" in {len(s)} partitions, each one's"
+                                   " fingerprint equal on both servers"))
+                if stream:
+                    stream(f"{t}: ok")
+            else:
+                rest.append(t)
+        out = list(same)
+        if rest:
+            pair = self._as_pair()
+            for t in rest:
+                out += pair.check_data(db, t, stream)
+        return out
+
+    # ---- settings, access, snapshot, delta ----------------------------------
+
+    #: settings that change what a value is read or written as, or whether
+    #: a write lands: a server in another time zone renders every DateTime
+    #: differently, and deduplication drops a batch inserted twice
+    CRITICAL_PARAMS = ("server.timezone", "session_timezone",
+                       "date_time_input_format", "join_use_nulls",
+                       "insert_deduplicate", "input_format_null_as_default",
+                       "max_partitions_per_insert_block",
+                       "data_type_default_nullable", "union_default_mode",
+                       "mutations_sync", "insert_quorum")
+
+    def check_params(self, db):
+        """The session's settings as the account reads them and the
+        server's own, both sides, through the report every engine's go
+        through."""
+        def pull(side):
+            try:
+                got = {str(n): str(v) for n, v in self._rows(
+                    side, None, "select name, value from system.settings")}
+                got.update({f"server.{n}": str(v) for n, v in self._rows(
+                    side, None, "select name, value from"
+                                " system.server_settings")})
+                got["server.timezone"] = str(self._rows(
+                    side, None, "select timezone()")[0][0])
+                return {n: v for n, v in got.items()
+                        if not any(w in n.lower() for w in
+                                   ("password", "secret", "key_"))}
+            except Exception as e:  # noqa: BLE001 - said by the report
+                return {self.UNREADABLE: str(e).splitlines()[0][:80]}
+        return self._param_result(
+            db, pull("src"), pull("dst"), self.CRITICAL_PARAMS,
+            "set the target's server time zone and these settings as the"
+            " source has them before cutover")
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Every target table frozen as it stands - the server links its
+        parts under a name, which costs no copy until they change - with
+        its definition and rows beside the names of the frozen parts. A
+        server that will not freeze (a managed one) has its tables'
+        definitions and rows recorded, and says why."""
+        import json
+        import re
+        name = "migkit-" + re.sub(r"[^A-Za-z0-9_-]", "-", state_dir.name)
+        out = {"freeze": name, "tables": {}}
+        client = self._client("dst", db)
+        try:
+            for t in self.neutral_tables("dst", db):
+                q = self._qualified("dst", db, t)
+                entry = {
+                    "create": client.command(f"show create table {q}"),
+                    "rows": int(client.command(f"select count() from {q}"))}
+                try:
+                    got = client.query(
+                        f"alter table {q} freeze with name '{name}'",
+                        settings={"alter_partition_verbose_result": 1})
+                    entry["frozen"] = sorted({str(r[2]) for r in
+                                              got.result_rows})
+                except Exception as e:  # noqa: BLE001 - recorded
+                    entry["not_frozen"] = str(e).splitlines()[0][:160]
+                out["tables"][t] = entry
+        finally:
+            client.close()
+        (state_dir / "dst-tables.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True, default=str))
+
+    def _parts(self, side, db):
+        """{table: {partition: signature}} of the active parts: a partition
+        written, merged or mutated since has another signature."""
+        out = {}
+        for t, p, n, h in self._rows(
+                side, db, "select table, partition_id, sum(rows),"
+                          " sum(cityHash64(name)) from system.parts where"
+                          " database = {d:String} and active group by"
+                          " table, partition_id",
+                {"d": self._d(side, db)}):
+            out.setdefault(str(t), {})[str(p)] = f"{n}|{h}"
+        return out
+
+    def delta_verify(self, db, limit=20000, log=None):
+        """Only the partitions written, merged or mutated on either side
+        since the last clean run, compared by the fingerprints each server
+        computes. The first run has no baseline and compares them all. A
+        partition gone from the source must be gone from the target too.
+        The baseline moves only when every changed partition matched."""
+        import json
+        state = self.hop.report_dir(db) / "delta-parts.json"
+        prev = json.loads(state.read_text()) if state.exists() else None
+        now = {"src": self._parts("src", db), "dst": self._parts("dst", db)}
+        # the target's parts are its own partitions; changes there are
+        # found by table, then compared by the source's partitions
+        res, clean, compared = [], True, 0
+        for t in self.neutral_tables("src", db):
+            src_now = now["src"].get(t, {})
+            if prev is None:
+                only = None
+            else:
+                was = prev["src"].get(t, {})
+                only = {p for p in set(src_now) | set(was)
+                        if src_now.get(p) != was.get(p)}
+                if now["dst"].get(t, {}) != prev["dst"].get(t, {}):
+                    only = None
+                if only is not None and not only:
+                    continue
+            try:
+                s, d = self._fingerprints(db, t, only)
+            except Exception as e:  # noqa: BLE001 - not a match
+                clean = False
+                res.append(Result("delta", f"{db}.{t}", "error",
+                                  "the fingerprints could not be computed:"
+                                  f" {str(e).splitlines()[0][:100]}"))
+                continue
+            bad = sorted(p for p in set(s) | set(d) if s.get(p) != d.get(p))
+            compared += len(set(s) | set(d))
+            clean = clean and not bad
+            what = "every partition" if only is None else \
+                f"{len(only)} changed partition(s)"
+            res.append(Result(
+                "delta", f"{db}.{t}", "diff" if bad else "ok",
+                f"{what}: " + (f"{len(bad)} differ ({', '.join(bad[:6])})"
+                               if bad else "equal on both servers")))
+            if log:
+                log(f"{t}: {'DIFF' if bad else 'ok'}")
+        if clean:
+            state.write_text(json.dumps(now))
+        res.insert(0, Result(
+            "delta", db, "ok" if clean else "diff",
+            f"{compared} partition(s) compared, baseline"
+            f" {'advanced' if clean else 'NOT advanced'}"))
+        return res

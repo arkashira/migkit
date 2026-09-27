@@ -24,6 +24,56 @@ from decimal import Decimal
 
 from .base import Engine, NeutralCopier, Result
 
+class RawAttr(str):
+    """A DynamoDB value with no neutral class - a map, a list, a set -
+    carried as the canonical JSON of the attribute (map keys and set
+    members sorted, bytes in base64), so both sides render it alike, and
+    written back as the attribute it was. Between two DynamoDB tables it
+    crosses unchanged; any other engine is given the text."""
+
+    @classmethod
+    def of(cls, attr):
+        return cls(json.dumps(_canonical(attr), sort_keys=True,
+                              separators=(",", ":")))
+
+    def attr(self):
+        return _restored(json.loads(self))
+
+
+def _canonical(attr):
+    import base64
+    kind, raw = next(iter(attr.items()))
+    if kind == "M":
+        return {"M": {k: _canonical(v) for k, v in raw.items()}}
+    if kind == "L":
+        return {"L": [_canonical(v) for v in raw]}
+    if kind in ("B", "BS"):
+        enc = [base64.b64encode(bytes(b)).decode() for b in
+               (raw if kind == "BS" else [raw])]
+        return {kind: sorted(enc) if kind == "BS" else enc[0]}
+    if kind in ("SS", "NS"):
+        return {kind: sorted(raw, key=(lambda n: Decimal(n))
+                             if kind == "NS" else None)}
+    return {kind: raw}
+
+
+def _restored(attr):
+    import base64
+    kind, raw = next(iter(attr.items()))
+    if kind == "M":
+        return {"M": {k: _restored(v) for k, v in raw.items()}}
+    if kind == "L":
+        return {"L": [_restored(v) for v in raw]}
+    if kind == "B":
+        return {"B": base64.b64decode(raw)}
+    if kind == "BS":
+        return {"BS": [base64.b64decode(b) for b in raw]}
+    return {kind: raw}
+
+
+#: attribute kinds with no neutral class, carried whole (`RawAttr`)
+RAW_KINDS = ("M", "L", "SS", "NS", "BS")
+
 #: tag keys holding what migkit knows about a table it created
 TAG_COLUMNS, TAG_KEY = "migkit:columns", "migkit:key"
 #: a tag's value holds at most this many characters
@@ -157,7 +207,16 @@ class DynamoDBEngine(NeutralCopier, Engine):
         from .. import canon
         if value is None:
             return None
+        if isinstance(value, RawAttr):
+            return value.attr()
         cls = canon.type_class("dynamodb", declared)
+        if cls is None:
+            # a column of a table migkit did not make, holding more than
+            # one kind: each value as the kind it is
+            cls = ("boolean" if isinstance(value, bool) else
+                   "decimal" if isinstance(value, (int, float, Decimal))
+                   else "bytes" if isinstance(value, (bytes, bytearray))
+                   else "text")
         if cls in ("integer", "decimal"):
             return {"N": str(Decimal(value) if not isinstance(value, Decimal)
                              else value)}
@@ -178,6 +237,8 @@ class DynamoDBEngine(NeutralCopier, Engine):
         if attr is None or "NULL" in attr:
             return None
         kind, raw = next(iter(attr.items()))
+        if kind in RAW_KINDS:
+            return RawAttr.of(attr)
         cls = canon.type_class("dynamodb", declared)
         if kind == "N":
             number = Decimal(raw)
@@ -301,7 +362,11 @@ class DynamoDBEngine(NeutralCopier, Engine):
     # ---- writing --------------------------------------------------------
 
     def _declared_of(self, col):
+        from .. import canon
         name, cls, numbers = col[0], col[1], tuple(col[2] or ())
+        if cls == canon.OWN and numbers:
+            # DynamoDB to DynamoDB: the source's own kinds, as they are
+            return str(numbers[0])
         if cls not in ("integer", "decimal", "float", "boolean", "text",
                        "bytes", "date", "timestamp", "time"):
             raise SystemExit(f"a {cls} column ({name}) has no DynamoDB"
@@ -468,3 +533,460 @@ class DynamoDBEngine(NeutralCopier, Engine):
                     "turn point-in-time recovery on for those tables"
                     " before the cutover"))
         return out
+
+    # ---- the change log: DynamoDB Streams ----------------------------------
+    # A table's stream is its change log: each write in order per key, kept
+    # 24 hours, read without being consumed - so the same reading serves a
+    # tail, a fence and a verify of only what changed. A table whose stream
+    # is off is said, never turned on: that is a change to the source.
+
+    CHANGE_POINT_READS_ONLY = True
+
+    def _streams(self, side):
+        import boto3
+        ep = self.hop.source if side == "src" else self.hop.target
+        kw = {"region_name": ep.options.get("region") or "us-east-1"}
+        end = ep.options.get("endpoint_url") or (
+            ep.host if str(ep.host).startswith("http") else None)
+        if end:
+            kw["endpoint_url"] = end
+        if ep.user:
+            kw.update(aws_access_key_id=ep.user,
+                      aws_secret_access_key=ep.password)
+        return boto3.client("dynamodbstreams", **kw)
+
+    def _stream_of(self, side, db, table):
+        """(stream ARN, view type) of a table, or refused where it has
+        no stream on."""
+        got = self._client(side).describe_table(
+            TableName=self._name(side, db, table))["Table"]
+        spec = got.get("StreamSpecification") or {}
+        if not spec.get("StreamEnabled") or not got.get("LatestStreamArn"):
+            raise SystemExit(
+                f"{self._name(side, db, table)} has no stream on, and its"
+                " stream is the change log migkit reads: turn it on for the"
+                " table (NEW_IMAGE or NEW_AND_OLD_IMAGES) - migkit does not"
+                " change the source")
+        return got["LatestStreamArn"], spec.get("StreamViewType")
+
+    def _shards(self, side, arn):
+        """Every shard the stream holds, each after its parent: a key's
+        writes move to a child when a shard splits, and are in order only
+        read parent first."""
+        client, start, shards = self._streams(side), None, []
+        while True:
+            got = client.describe_stream(
+                StreamArn=arn, **({"ExclusiveStartShardId": start}
+                                  if start else {}))["StreamDescription"]
+            shards += got.get("Shards", [])
+            start = got.get("LastEvaluatedShardId")
+            if not start:
+                break
+        ids = {s["ShardId"] for s in shards}
+        placed, out = set(), []
+        while len(out) < len(shards):
+            before = len(out)
+            for s in shards:
+                parent = s.get("ParentShardId")
+                if s["ShardId"] not in placed and (
+                        not parent or parent not in ids or parent in placed):
+                    out.append(s)
+                    placed.add(s["ShardId"])
+            if len(out) == before:
+                raise SystemExit(f"the shards of {arn} name each other as"
+                                 " parents; the stream cannot be read in"
+                                 " order")
+        return out
+
+    def _records(self, side, arn, shard, after, most=None):
+        """(records, fully read) of one shard after sequence `after` (from
+        the oldest it keeps with None): records until it is caught up, or
+        `most` of them. A position the stream no longer holds is refused."""
+        client = self._streams(side)
+        try:
+            it = client.get_shard_iterator(
+                StreamArn=arn, ShardId=shard,
+                **({"ShardIteratorType": "AFTER_SEQUENCE_NUMBER",
+                    "SequenceNumber": after} if after else
+                   {"ShardIteratorType": "TRIM_HORIZON"}))["ShardIterator"]
+        except client.exceptions.TrimmedDataAccessException:
+            raise SystemExit(
+                f"the stream no longer holds the records after {after} of"
+                f" {shard}: its 24 hours passed, and what was written then"
+                " is carried by nothing. Move again with --mode full+cdc")
+        out = []
+        while it:
+            got = client.get_records(ShardIterator=it, Limit=1000)
+            out += got.get("Records", [])
+            it = got.get("NextShardIterator")
+            if most and len(out) >= most:
+                return out[:most], False
+            if not got.get("Records"):
+                # nothing more now; an open shard stays open
+                return out, it is None
+        return out, True
+
+    def change_point(self, side, db):
+        """Now, in each table's stream: every shard read to its end, its
+        last record's sequence kept - so a tail started here reads only
+        what is written from here. Reading consumes nothing."""
+        out = {}
+        for t in self.neutral_tables(side, db):
+            arn, _ = self._stream_of(side, db, t)
+            shards, done = {}, []
+            for s in self._shards(side, arn):
+                recs, closed = self._records(side, arn, s["ShardId"], None)
+                shards[s["ShardId"]] = (recs[-1]["dynamodb"]["SequenceNumber"]
+                                        if recs else None)
+                if closed:
+                    done.append(s["ShardId"])
+            out[t] = {"arn": arn, "shards": shards, "done": done}
+        return {"streams": out}
+
+    def log_position(self, side, db):
+        return self.change_point(side, db)
+
+    @staticmethod
+    def position_reached(have, want):
+        """Whether a tail at `have` has read every record `want` holds:
+        each shard read as far, or finished."""
+        if not have or not want:
+            return None
+        for t, w in (want.get("streams") or {}).items():
+            h = (have.get("streams") or {}).get(t)
+            if h is None or h.get("arn") != w.get("arn"):
+                return False
+            for shard, seq in (w.get("shards") or {}).items():
+                if seq is None or shard in (h.get("done") or []):
+                    continue
+                got = (h.get("shards") or {}).get(shard)
+                if got is None or int(got) < int(seq):
+                    return False
+        return True
+
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """Each write after `token`, per table in its stream's order - a
+        shard read only once its parent is finished - as the item is now:
+        the image the stream carries, or the item itself read where the
+        stream keeps keys only. A table whose stream was turned off and on
+        since has lost the records between, and is refused."""
+        from .. import canon
+        if token is None:
+            return [], self.change_point(side, db)
+        state = json.loads(json.dumps(token.get("streams") or {}))
+        found = []
+        for t in self.neutral_tables(side, db):
+            arn, view = self._stream_of(side, db, t)
+            st = state.setdefault(t, {"arn": arn, "shards": {}, "done": []})
+            if st.get("arn") != arn:
+                raise SystemExit(
+                    f"{self._name(side, db, t)} has a new stream since the"
+                    " saved position: the stream was turned off and on, and"
+                    " the records between are gone. Move again with --mode"
+                    " full+cdc")
+            declared = self._declared(side, db, t)
+            key = self._key_schema(side, db, t)
+            done = set(st.get("done") or [])
+            shards = self._shards(side, arn)
+            held = {s["ShardId"] for s in shards}
+            for s in shards:
+                sid = s["ShardId"]
+                if sid in done:
+                    continue
+                parent = s.get("ParentShardId")
+                if parent and parent in held and parent not in done:
+                    continue    # its parent is not finished yet
+                room = limit - len(found)
+                if room <= 0:
+                    break
+                recs, closed = self._records(side, arn, sid,
+                                             st["shards"].get(sid), room)
+                for r in recs:
+                    found.append(self._change_of(side, db, t, r, view,
+                                                 declared, key, canon))
+                    st["shards"][sid] = r["dynamodb"]["SequenceNumber"]
+                if closed and len(recs) < room:
+                    done.add(sid)
+                    st["shards"].setdefault(sid, None)
+            st["done"] = sorted(done)
+        return found, {"streams": state}
+
+    def _change_of(self, side, db, table, record, view, declared, key,
+                   canon):
+        body = record["dynamodb"]
+        ident = {k: self._from_attr(declared.get(k, ""),
+                                    body["Keys"].get(k)) for k in key}
+        if record["eventName"] == "REMOVE":
+            return canon.change("delete", table, ident)
+        image = body.get("NewImage")
+        if image is None:
+            # the stream keeps keys (or the old image) only: the item as
+            # it is now, which a later record will bring up to date again
+            image = self._client(side).get_item(
+                TableName=self._name(side, db, table), Key=body["Keys"],
+                ConsistentRead=True).get("Item")
+            if image is None:
+                return canon.change("delete", table, ident)
+        values = {n: self._from_attr(declared.get(n, ""), a)
+                  for n, a in image.items()}
+        return canon.change("insert" if record["eventName"] == "INSERT"
+                            else "update", table, ident, values)
+
+    def _apply_upserts(self, side, db, table, rows):
+        declared = self._declared(side, db, table)
+        items = []
+        for _, values in rows:
+            item = {}
+            for n, v in values.items():
+                attr = self._to_attr(declared.get(n, "text"), v)
+                if attr is not None:
+                    item[n] = attr
+            items.append({"PutRequest": {"Item": item}})
+        self._batch_write(self._client(side), self._name(side, db, table),
+                          items)
+
+    def _apply_upsert(self, side, db, table, key, values):
+        self._apply_upserts(side, db, table, [(key, values)])
+
+    def _apply_deletes(self, side, db, table, keys):
+        declared = self._declared(side, db, table)
+        self._batch_write(
+            self._client(side), self._name(side, db, table),
+            [{"DeleteRequest": {"Key": {
+                n: self._to_attr(declared.get(n, "text"), v)
+                for n, v in k.items()}}} for k in keys])
+
+    def _apply_delete(self, side, db, table, key):
+        self._apply_deletes(side, db, table, [key])
+
+    # the same-engine hop keeps its target following through the pair's
+    # tail, which reads the stream above and applies by key
+
+    def tail_start(self, db, token_path):
+        return self._as_pair().tail_start(db, token_path)
+
+    def tail_seed(self, db, token_path, point):
+        return self._as_pair().tail_seed(db, token_path, point)
+
+    def tail_apply(self, db, go, token_path, log):
+        return self._as_pair().tail_apply(db, go, token_path, log)
+
+    def src_lsn(self, db):
+        return self._as_pair().src_lsn(db)
+
+    def fence_wait(self, db, lsn, timeout=300):
+        return self._as_pair().fence_wait(db, lsn, timeout)
+
+    def _compare_pks(self, db, table, keys):
+        return self._as_pair()._compare_pks(db, table, keys)
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        return self._as_pair()._write_pk_files(db, table, missing, extra,
+                                                changed)
+
+    def delta_verify(self, db, limit=20000, log=None):
+        return self._as_pair().delta_verify(db, limit, log)
+
+    # ---- settings, snapshot ------------------------------------------------
+
+    #: what changes whether an item stays, or can be found: another time-to-
+    #: live attribute expires other items, a missing index fails the
+    #: queries that use it, another key is another table
+    CRITICAL_PARAMS = ("ttl", "key", "indexes")
+
+    def _settings(self, side, db):
+        """{`table.setting`: value} of every table: key, billing, stream,
+        encryption, class, deletion protection, indexes, time to live and
+        point-in-time recovery. A setting the endpoint does not answer
+        (DynamoDB Local has no backups) is said as not answered."""
+        client, out = self._client(side), {}
+        for t in self.neutral_tables(side, db):
+            name = self._name(side, db, t)
+            d = client.describe_table(TableName=name)["Table"]
+            out[f"{t}.key"] = ",".join(
+                f"{k['AttributeName']}:{k['KeyType']}"
+                for k in d.get("KeySchema", []))
+            out[f"{t}.billing"] = str((d.get("BillingModeSummary") or {})
+                                      .get("BillingMode", "PROVISIONED"))
+            spec = d.get("StreamSpecification") or {}
+            out[f"{t}.stream"] = (str(spec.get("StreamViewType"))
+                                  if spec.get("StreamEnabled") else "off")
+            out[f"{t}.encryption"] = str((d.get("SSEDescription") or {})
+                                         .get("SSEType", "owned"))
+            out[f"{t}.class"] = str((d.get("TableClassSummary") or {})
+                                    .get("TableClass", "STANDARD"))
+            out[f"{t}.deletion_protection"] = str(
+                d.get("DeletionProtectionEnabled", False))
+            out[f"{t}.indexes"] = ";".join(sorted(
+                f"{i['IndexName']}({','.join(k['AttributeName'] for k in i['KeySchema'])}"
+                f"/{i.get('Projection', {}).get('ProjectionType')})"
+                for i in (d.get("GlobalSecondaryIndexes") or [])
+                + (d.get("LocalSecondaryIndexes") or [])))
+            for setting, ask in (
+                    ("ttl", lambda: client.describe_time_to_live(
+                        TableName=name)["TimeToLiveDescription"]),
+                    ("pitr", lambda: client.describe_continuous_backups(
+                        TableName=name)["ContinuousBackupsDescription"])):
+                try:
+                    got = ask()
+                except Exception as e:  # noqa: BLE001 - said as such
+                    out[f"{t}.{setting}"] = ("not answered: "
+                                             + str(e).split(":")[-1][:60])
+                    continue
+                if setting == "ttl":
+                    out[f"{t}.ttl"] = (f"{got.get('AttributeName')}"
+                                       if got.get("TimeToLiveStatus") in
+                                       ("ENABLED", "ENABLING") else "off")
+                else:
+                    out[f"{t}.pitr"] = str(
+                        (got.get("PointInTimeRecoveryDescription") or {})
+                        .get("PointInTimeRecoveryStatus", "DISABLED"))
+        return out
+
+    def check_params(self, db):
+        """Each table's own settings, both sides, through the report every
+        engine's settings go through: a table has them, not a server."""
+        def pull(side):
+            try:
+                return self._settings(side, db)
+            except Exception as e:  # noqa: BLE001 - said by the report
+                return {self.UNREADABLE: str(e).splitlines()[0][:80]}
+        src, dst = pull("src"), pull("dst")
+        crit = sorted({n for n in set(src) | set(dst)
+                       if n.rsplit(".", 1)[-1] in self.CRITICAL_PARAMS})
+        return self._param_result(
+            db, src, dst, crit,
+            "give the target's tables the source's time to live and"
+            " indexes before cutover")
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """A backup of every target table, taken by the service
+        (`CreateBackup`), its ARN kept; where the endpoint takes none
+        (DynamoDB Local), the table's settings and item count are kept and
+        the reason said."""
+        client, out = self._client("dst"), {}
+        for t in self.neutral_tables("dst", db):
+            name = self._name("dst", db, t)
+            entry = {"items": sum(1 for _ in self._scan(
+                "dst", db, t, self._key_schema("dst", db, t)))}
+            try:
+                got = client.create_backup(
+                    TableName=name, BackupName=f"migkit-{state_dir.name}"
+                    [:255])
+                entry["backup"] = got["BackupDetails"]["BackupArn"]
+            except Exception as e:  # noqa: BLE001 - recorded
+                entry["no_backup"] = str(e).split(":")[-1].strip()[:160]
+            out[t] = entry
+        out["settings"] = self._settings("dst", db)
+        (state_dir / "dst-tables.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True, default=str))
+
+    # ---- items copied as the service holds them ----------------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table's items copied as the service holds them - no value
+        converted, so a map, a list or a set arrives as it was - by a
+        parallel scan, one segment per worker (as many as the move worked
+        out it may run), each writing its items back 25 at a time. A table
+        the target lacks is made with the source's key, billing and
+        secondary indexes; one it has is emptied first."""
+        steps = [f"{t}: items copied as they are, by a parallel scan"
+                 for t in tables]
+        if not go:
+            return steps
+        from concurrent.futures import ThreadPoolExecutor
+        segments = max(1, int(getattr(self.hop, "workers_most", 0)
+                              or self.hop.workers or 1))
+        for t in list(shape_only) + list(tables):
+            if t not in self.neutral_tables("dst", db):
+                self._made_like(db, t)
+        for t in tables:
+            self.neutral_empty("dst", db, t)
+            src, dst = self._name("src", db, t), self._name("dst", db, t)
+
+            def segment(i, src=src, dst=dst):
+                reader, writer = self._client("src"), self._client("dst")
+                start, moved = None, 0
+                while True:
+                    got = reader.scan(TableName=src, Segment=i,
+                                      TotalSegments=segments,
+                                      **({"ExclusiveStartKey": start}
+                                         if start else {}))
+                    items = got.get("Items", [])
+                    self._batch_write(writer, dst, [
+                        {"PutRequest": {"Item": item}} for item in items])
+                    moved += len(items)
+                    start = got.get("LastEvaluatedKey")
+                    if not start:
+                        return moved
+            with ThreadPoolExecutor(max_workers=segments) as pool:
+                moved = sum(pool.map(segment, range(segments)))
+            self._describe_like(db, t)
+            if log:
+                log(f"{t}: {moved:,} items copied in {segments} segments")
+        return steps
+
+    def _made_like(self, db, table):
+        """The target table made with the source's key, billing and
+        secondary indexes."""
+        client = self._client("src")
+        d = client.describe_table(TableName=self._name("src", db, table))[
+            "Table"]
+        billing = (d.get("BillingModeSummary") or {}).get(
+            "BillingMode", "PROVISIONED")
+        kw = {"TableName": self._name("dst", db, table),
+              "KeySchema": d["KeySchema"],
+              "AttributeDefinitions": d["AttributeDefinitions"],
+              "BillingMode": billing}
+        if billing == "PROVISIONED":
+            p = d.get("ProvisionedThroughput") or {}
+            kw["ProvisionedThroughput"] = {
+                "ReadCapacityUnits": int(p.get("ReadCapacityUnits") or 5),
+                "WriteCapacityUnits": int(p.get("WriteCapacityUnits") or 5)}
+        for kind in ("GlobalSecondaryIndexes", "LocalSecondaryIndexes"):
+            if d.get(kind):
+                kw[kind] = [{k: i[k] for k in ("IndexName", "KeySchema",
+                                               "Projection")}
+                            | ({"ProvisionedThroughput": {
+                                "ReadCapacityUnits": int(
+                                    i["ProvisionedThroughput"]
+                                    ["ReadCapacityUnits"] or 5),
+                                "WriteCapacityUnits": int(
+                                    i["ProvisionedThroughput"]
+                                    ["WriteCapacityUnits"] or 5)}}
+                               if billing == "PROVISIONED"
+                               and kind == "GlobalSecondaryIndexes"
+                               else {})
+                            for i in d[kind]]
+        dst = self._client("dst")
+        dst.create_table(**kw)
+        dst.get_waiter("table_exists").wait(TableName=kw["TableName"])
+
+    def _describe_like(self, db, table):
+        """The source's description of a table migkit made, where it keeps
+        one, given to the copy - so it reads its values back the same."""
+        described = self._described("src", db, table)
+        if described is None or self._described("dst", db, table):
+            return
+        src, client = self._client("src"), self._client("dst")
+        arn = client.describe_table(TableName=self._name(
+            "dst", db, table))["Table"]["TableArn"]
+        try:
+            tags = [t for t in src.list_tags_of_resource(
+                ResourceArn=src.describe_table(TableName=self._name(
+                    "src", db, table))["Table"]["TableArn"]).get("Tags", [])
+                if t["Key"].startswith("migkit:")]
+            if tags:
+                client.tag_resource(ResourceArn=arn, Tags=tags)
+                return
+        except Exception as e:  # noqa: BLE001 - an endpoint without tags
+            if "not currently supported" not in str(e):
+                raise
+        path = self._kept_here("dst")
+        try:
+            kept = json.loads(path.read_text())
+        except (OSError, ValueError):
+            kept = {}
+        kept[arn] = {"columns": [list(c) for c in described[0]],
+                     "key": list(described[1])}
+        path.write_text(json.dumps(kept))

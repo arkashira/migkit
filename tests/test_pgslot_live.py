@@ -166,6 +166,7 @@ def test_a_delete_under_full_identity_still_yields_a_key(slot):
         names = [n for n, _, _, _ in parsed[0]["old"]]
         assert "b" not in names, names          # it was NULL, so it is gone
         rec = pgslot.change(parsed[0], ["id"])
+        assert rec.pop("before")["id"] == 20, rec
         assert rec == {"op": "delete", "table": "public.t",
                        "key": {"id": 20}, "values": {}}
     finally:

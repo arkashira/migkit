@@ -201,6 +201,7 @@ def test_a_format_it_does_not_know_is_refused():
     hop = Hop(name="x", engine="kafka",
               source=Endpoint(host="h", port=1, user="", password=""),
               target=Endpoint(host="h", port=1, user="", password=""),
-              options={"format": "avro"})
-    with pytest.raises(SystemExit, match="avro is not one of"):
+              options={"format": "protobuf"})
+    with pytest.raises(SystemExit, match="protobuf is not one of json,"
+                                         " debezium, canal, avro"):
         KafkaEngine(hop)._stream_options()

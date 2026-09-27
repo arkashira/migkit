@@ -1,5 +1,6 @@
 import difflib
 import json
+import queue
 import re
 import threading
 import time
@@ -44,14 +45,19 @@ class MySQLEngine(Engine):
             # does not speak MySQL - measured, a PostgreSQL port - held the
             # connect for the whole hour of it; the handshake gets the
             # connect's 15 seconds and the queries after it the hour
-            c = pymysql.connect(host=ep.host, port=ep.port, user=ep.user,
-                                password=ep.password, charset="utf8mb4",
-                                connect_timeout=15,
-                                read_timeout=15, write_timeout=rt,
-                                init_command=(
-                                    "set session sql_mode ="
-                                    f" '{self.WRITE_SQL_MODE}'"
-                                    if side == "dst" else None))
+            # the target's connection offers the server a bulk load, and
+            # answers it only with the rows migkit is sending (`_loading`)
+            opener = (_loading() or pymysql.connect) if side == "dst" \
+                else pymysql.connect
+            c = opener(host=ep.host, port=ep.port, user=ep.user,
+                       password=ep.password, charset="utf8mb4",
+                       connect_timeout=15, **ep.mysql_tls(),
+                       read_timeout=15, write_timeout=rt,
+                       local_infile=opener is not pymysql.connect,
+                       init_command=(
+                           "set session sql_mode ="
+                           f" '{self.WRITE_SQL_MODE}'"
+                           if side == "dst" else None))
             c._read_timeout = rt
             _keepalive(getattr(c, "_sock", None))
             return c
@@ -62,9 +68,25 @@ class MySQLEngine(Engine):
 
     CANON_ENGINE = "mysql"
     OWN_PATHS_READ_COLUMN_MAPPING = False
+    #: a binlog position only says where to read from: the tail may read
+    #: the next batch before the one before it is applied
+    READS_AHEAD = True
 
     def neutral_tables(self, side, db):
         return self._tables(side, db)
+
+    def leg_encryption(self, side, db):
+        """The server's own word on this connection (its session's
+        `Ssl_version` and `Ssl_cipher`, empty where it is not
+        encrypted)."""
+        got = {str(k): str(v or "") for k, v in self.run_rule(
+            side, db, "show session status where variable_name in"
+                      " ('Ssl_version', 'Ssl_cipher')")}
+        if not got:
+            return None
+        cipher = got.get("Ssl_cipher", "")
+        return {"encrypted": bool(cipher),
+                "how": f"{got.get('Ssl_version', '')} {cipher}".strip()}
 
     def run_rule(self, side, db, sql):
         conn = self._conn(side)
@@ -273,13 +295,25 @@ class MySQLEngine(Engine):
         # any column the incoming row does not carry
         tail = f" on duplicate key update {sets}" if sets else ""
         place = "(" + ", ".join(["%s"] * len(names)) + ")"
+        insert = (f"insert into `{self._d(side, db)}`.`{table}` ({cols})"
+                  f" values {place}{tail}")
+        rows = [tuple(canon.sql_value(v) for v in r) for r in rows]
         conn = self._conn(side)
         try:
             with conn.cursor() as cur:
-                cur.executemany(
-                    f"insert into `{self._d(side, db)}`.`{table}` ({cols})"
-                    f" values {place}{tail}",
-                    [tuple(canon.sql_value(v) for v in r) for r in rows])
+                if key and self._uniques(side, db, table) > 1:
+                    self._write_by_key(cur, self._d(side, db), table, names,
+                                       sorted(key), rows)
+                    conn.commit()
+                    return len(rows)
+                try:
+                    self._put_rows(cur, self._d(side, db), table, names,
+                                   rows, insert)
+                except _LoadRefused:
+                    # a row already there, or a value the column would not
+                    # take as it was: the insert says which, or replaces it
+                    conn.rollback()
+                    cur.executemany(insert, rows)
             conn.commit()
         finally:
             conn.close()
@@ -424,6 +458,44 @@ class MySQLEngine(Engine):
     #: Rows in one applied statement (`Engine._apply_each`).
     APPLY_ROWS = 1000
 
+    def _fk_edges(self, side, db):
+        return [(str(a), str(b)) for a, b in self._q(
+            side, "select table_name, referenced_table_name from"
+                  " information_schema.key_column_usage where table_schema"
+                  " = %s and referenced_table_name is not null",
+            (self._d(side, db),))]
+
+    def _keys_off(self, side, db):
+        """Whether the applier writes without checking foreign keys: where
+        every parent a table in scope points at is in scope too, what a row
+        refers to arrives by the same tail, so the check only holds lanes
+        together and stops a row the source let in (R2.5; the managed
+        services ask for them off). The deep check's orphan scan is what
+        finds a row whose parent never came. Asked once a minute."""
+        import time
+        known = self.__dict__.setdefault("_keys_off_of", {})
+        hit = known.get((side, db))
+        if hit is None or time.monotonic() - hit[0] > 60:
+            edges = self._fk_edges(side, db)
+            ok = all(not self.hop.excluded(db, p) for c, p in edges
+                     if not self.hop.excluded(db, c))
+            hit = known[(side, db)] = (time.monotonic(), ok)
+        return hit[1]
+
+    def _ordered_tables(self, side, db):
+        def read():
+            target = self._d(side, db)
+            # with keys off, a parent and its child need not share a lane
+            edges = ([] if self._keys_off(side, db)
+                     else self._fk_edges(side, db))
+            singles = [str(r[0]) for r in self._q(
+                side, "select table_name from information_schema.statistics"
+                      " where table_schema = %s and non_unique = 0 group by"
+                      " table_name having count(distinct index_name) > 1",
+                (target,))]
+            return self._table_groups(edges, singles)
+        return self._ordered_cached(side, db, read)
+
     def _apply_upsert(self, side, db, table, key, values):
         self._apply_upserts(side, db, table, [(key, values)])
 
@@ -445,6 +517,12 @@ class MySQLEngine(Engine):
         mark = "(" + ", ".join(["%s"] * len(names)) + ")"
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
+                if self._uniques(side, db, table) > 1:
+                    self._write_by_key(
+                        cur, self._d(side, db), table, names, sorted(key),
+                        [tuple(canon.sql_value(r[n]) for n in names)
+                         for r in full])
+                    return
                 for at in range(0, len(full), self.APPLY_ROWS):
                     part = full[at:at + self.APPLY_ROWS]
                     cur.execute(
@@ -453,6 +531,58 @@ class MySQLEngine(Engine):
                         + ", ".join([mark] * len(part)) + tail,
                         [canon.sql_value(r[n]) for r in part
                          for n in names])
+
+    def _uniques(self, side, db, table):
+        """How many unique indexes the table has, its key included - asked
+        once a table."""
+        known = self.__dict__.setdefault("_unique_counts", {})
+        at = (side, self._d(side, db), table)
+        if at not in known:
+            got = self._q(side, "select count(distinct index_name) from"
+                                " information_schema.statistics where"
+                                " table_schema = %s and table_name = %s"
+                                " and non_unique = 0", at[1:])
+            known[at] = int(got[0][0]) if got else 0
+        return known[at]
+
+    def _write_by_key(self, cur, db, table, names, key, rows):
+        """Rows onto a table with more than one unique index, by its key:
+        the rows already there updated, then the others inserted.
+
+        `on duplicate key update` fires on whichever unique index the row
+        collides with, and on a second one it updates that index's row -
+        another row than the one the key names, without a word (MySQL's
+        manual; bug 79937, closed as the intended behaviour). Measured: the
+        target held (1, 'a'), a batch wrote (2, 'a') and then (1, 'b') - the
+        row whose e-mail moved to a new one - and the upsert gave row 1 the
+        new row's values and never made row 2. Updating first and inserting
+        after puts a value that moved from one row to a new one where it
+        belongs; a value two rows really both claim is refused, loudly."""
+        qt = f"`{db}`.`{table}`"
+        at = [names.index(k) for k in key]
+        kcols = ", ".join(f"`{k}`" for k in key)
+        one = "(" + ", ".join(["%s"] * len(key)) + ")"
+        there = set()
+        for i in range(0, len(rows), self.APPLY_ROWS):
+            part = rows[i:i + self.APPLY_ROWS]
+            cur.execute(f"select {kcols} from {qt} where ({kcols}) in ("
+                        + ", ".join([one] * len(part)) + ")",
+                        [r[j] for r in part for j in at])
+            there |= {tuple(str(v) for v in r) for r in cur.fetchall()}
+        old = [r for r in rows if tuple(str(r[j]) for j in at) in there]
+        new = [r for r in rows if tuple(str(r[j]) for j in at) not in there]
+        rest = [i for i, n in enumerate(names) if n not in key]
+        if old and rest:
+            cur.executemany(
+                f"update {qt} set "
+                + ", ".join(f"`{names[i]}` = %s" for i in rest)
+                + " where " + " and ".join(f"`{k}` = %s" for k in key),
+                [tuple(r[i] for i in rest) + tuple(r[j] for j in at)
+                 for r in old])
+        if new:
+            cur.executemany(
+                f"insert into {qt} ({', '.join(f'`{n}`' for n in names)})"
+                " values (" + ", ".join(["%s"] * len(names)) + ")", new)
 
     def _apply_delete(self, side, db, table, key):
         self._apply_deletes(side, db, table, [key])
@@ -476,7 +606,11 @@ class MySQLEngine(Engine):
 
     def _open_writer(self, side, db):
         self._target_only(side, "apply changes")
-        return self._conn(side)
+        conn = self._conn(side)
+        if self._keys_off(side, db):
+            with conn.cursor() as cur:
+                cur.execute("set foreign_key_checks = 0")
+        return conn
 
     def binlog_names(self, db, table, values):
         """Binlog row values keyed by column name rather than by position.
@@ -518,11 +652,26 @@ class MySQLEngine(Engine):
     @staticmethod
     def _row_events(stream):
         """The stream's events, with each compressed transaction's opened
-        in its place (`binlog_payload`)."""
+        in its place (`binlog_payload`), and `COMMITTED` wherever a
+        transaction has ended: after its XID, after a compressed one, and
+        after a statement that commits on its own. A position is only ever
+        kept at one of those - see `neutral_changes`."""
+        from pymysqlreplication.event import QueryEvent, XidEvent
+
         from ..binlog_payload import TransactionPayloadEvent
         for ev in stream:
             if isinstance(ev, TransactionPayloadEvent):
                 yield from (e for e in ev.events if hasattr(e, "rows"))
+                yield COMMITTED
+            elif isinstance(ev, XidEvent):
+                yield COMMITTED
+            elif isinstance(ev, QueryEvent):
+                said = ev.query
+                if isinstance(said, bytes):
+                    said = said.decode("utf-8", "replace")
+                if not str(said).strip().upper().startswith(
+                        ("BEGIN", "XA START", "XA END")):
+                    yield COMMITTED
             else:
                 yield ev
 
@@ -549,6 +698,66 @@ class MySQLEngine(Engine):
                " itself" if name == "binlog_transaction_compression" else "")
             + ". What was already written compressed stays unreadable, so"
             " move again with --mode full+cdc once it is off")
+
+    READS_ORIGIN_MARK = True
+
+    def origin_mark(self, side, db):
+        """This thread's row of `migkit_origin` written first in the
+        transaction being applied (`twoway`); the table made once where it
+        is not there."""
+        import threading
+
+        from .. import twoway
+        name = f"{self._my_ident(self._d(side, db))}.`{twoway.TABLE}`"
+        lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
+        with lock:
+            if not self.__dict__.get("_origin_made"):
+                conn = self._conn(side)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"create table if not exists {name}"
+                                    " (origin varchar(191) primary key,"
+                                    " n bigint not null default 0,"
+                                    " seen longtext)")
+                        cur.execute("select count(*) from information_schema"
+                                    ".columns where table_schema = %s and"
+                                    " table_name = %s and column_name ="
+                                    " 'seen'", (self._d(side, db),
+                                                twoway.TABLE))
+                        if not cur.fetchone()[0]:
+                            cur.execute(f"alter table {name} add column"
+                                        " seen longtext")
+                    conn.commit()
+                finally:
+                    conn.close()
+                self._origin_made = True
+        with self._writer(side, db) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"insert into {name} (origin, n, seen) values"
+                            " (%s, 1, %s) on duplicate key update n = n + 1,"
+                            " seen = coalesce(values(seen), seen)",
+                            (twoway.thread_origin(self.hop),
+                             twoway.batch_seen(self)))
+
+    def origin_seen(self, side, db):
+        """What the last batch this hop committed here said it was
+        (`twoway.batch_seen`), None where there is none."""
+        from .. import twoway
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select count(*) from information_schema.tables"
+                            " where table_schema = %s and table_name = %s",
+                            (self._d(side, db), twoway.TABLE))
+                if not cur.fetchone()[0]:
+                    return None
+                cur.execute(f"select seen from {self._my_ident(self._d(side, db))}"
+                            f".`{twoway.TABLE}` where origin = %s",
+                            (twoway.thread_origin(self.hop),))
+                got = cur.fetchone()
+        finally:
+            conn.close()
+        return twoway.seen_of(got[0] if got else None)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of the binlog, as neutral records.
@@ -591,34 +800,92 @@ class MySQLEngine(Engine):
                     f" FULL: {why}.\n"
                     f"    set global {name} = 'FULL';   -- self-managed\n"
                     f"    {name}=FULL                   -- parameter group")
+        from pymysqlreplication.event import QueryEvent, XidEvent
+
         from ..binlog_payload import register
         token = dict(token or {}) or self.change_point(side, db)
         start = dict(token)
-        stream = BinLogStreamReader(
-            connection_settings={"host": ep.host, "port": ep.port,
-                                 "user": ep.user, "passwd": ep.password},
-            server_id=int(self.hop.options.get("server_id", 4379)),
-            blocking=False, resume_stream=True,
-            log_file=token.get("log_file"), log_pos=token.get("log_pos"),
-            only_schemas=[self._d(side, db)],
-            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
-                         NotImplementedEvent, register()],
-            filter_non_implemented_events=False)
-        # each table's key once a batch: asked for every event, on a
-        # connection of its own, it held the reader to about 160 rows a
-        # second - one-row transactions at 472 a second left the tail 38
-        # seconds behind when the writer stopped (`bench/run.py`)
-        out, skipped, keys_of = [], set(), {}
+        # A position is kept only where a transaction ended, with how many
+        # of the next one's rows were handed back already (`skip_rows`), as
+        # Debezium keeps its own. It was kept after whichever rows event the
+        # limit fell on: read from there, the rows of the rest of that
+        # transaction came before the table map that describes them, and
+        # the reader dropped them and moved on to the end of the log.
+        # Measured: one insert of 20,000 rows, 1,281 handed back and the
+        # position at the end - 18,719 rows gone, and nothing said.
+        #
+        # The stream is held open from one call to the next while the
+        # caller comes back with the position it was given: reopened each
+        # time, a catch-up paid for a connection and a TLS handshake per
+        # thousand rows, and a large transaction was read again from its
+        # start for each of them.
+        held = self.__dict__.pop("_binlog_held", None)
+        # a two-way tail's own transactions begin with its mark, and are
+        # left out whole (`twoway`); kept with the position when a read
+        # stops inside one
+        two_way = bool((self.hop.options or {}).get("two_way"))
+        marked = bool(token.get("marked"))
+        if held and (held["token"], held["where"]) == (token, (side, db)):
+            stream, events = held["stream"], held["events"]
+            boundary, in_txn, skip = held["boundary"], held["in_txn"], 0
+            keys_of = held["keys_of"]
+        else:
+            if held:
+                held["stream"].close()
+            stream = BinLogStreamReader(
+                connection_settings={"host": ep.host, "port": ep.port,
+                                     "user": ep.user,
+                                     "passwd": ep.password},
+                server_id=int(self.hop.options.get("server_id", 4379)),
+                blocking=False, resume_stream=True,
+                log_file=token.get("log_file"),
+                log_pos=token.get("log_pos"),
+                only_schemas=[self._d(side, db)],
+                only_events=[WriteRowsEvent, UpdateRowsEvent,
+                             DeleteRowsEvent, NotImplementedEvent,
+                             XidEvent, QueryEvent, register()],
+                filter_non_implemented_events=False)
+            events = self._row_events(stream)
+            boundary = {"log_file": token.get("log_file"),
+                        "log_pos": token.get("log_pos")}
+            in_txn, skip = 0, int(token.get("skip_rows") or 0)
+            # each table's key once a batch: asked for every event, on a
+            # connection of its own, it held the reader to about 160 rows a
+            # second - one-row transactions at 472 a second left the tail
+            # 38 seconds behind when the writer stopped (`bench/run.py`)
+            keys_of = {}
+        out, skipped, keep = [], set(), False
         try:
-            for ev in self._row_events(stream):
+            for ev in events:
+                if ev is COMMITTED:
+                    boundary = {"log_file": stream.log_file,
+                                "log_pos": stream.log_pos}
+                    in_txn, skip, marked = 0, 0, False
+                    token = dict(boundary)
+                    if len(out) >= limit:
+                        keep = True
+                        break
+                    continue
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:
                         # nothing of this batch is handed back, so the
                         # tail stays where it was asked to read from
                         self._compressed_stop(start, ev.event_type)
                     continue
+                # every row of the transaction counts, whatever is done
+                # with it below, so the count read again from the same
+                # position lands on the same row
+                first = in_txn
+                in_txn += len(ev.rows)
                 table = ev.table
-                if self.hop.excluded(db, table):
+                if two_way and table == "migkit_origin":
+                    marked = True
+                token = dict(boundary, skip_rows=in_txn,
+                             **({"marked": True} if marked else {}))
+                rows = ev.rows[skip - first:] if skip > first else ev.rows
+                if marked:
+                    continue
+                if not rows or self.hop.excluded(db, table):
                     # the target owns it: the move left it alone, so the
                     # tail does too - and a keyless one does not stop it
                     continue
@@ -629,7 +896,7 @@ class MySQLEngine(Engine):
                     skipped.add(table)
                     continue
                 named = self._d(side, db)
-                for row in ev.rows:
+                for row in rows:
                     if isinstance(ev, WriteRowsEvent):
                         vals = self.binlog_names(named, table, row["values"])
                         out.append(canon.change(
@@ -644,14 +911,15 @@ class MySQLEngine(Engine):
                         # moved the primary key has to find the old row
                         out.append(canon.change(
                             "update", table,
-                            {k: before[k] for k in keys}, after))
+                            {k: before[k] for k in keys}, after,
+                            before=before))
                     else:
                         vals = self.binlog_names(named, table, row["values"])
                         out.append(canon.change(
-                            "delete", table, {k: vals[k] for k in keys}))
-                token = {"log_file": stream.log_file,
-                         "log_pos": stream.log_pos}
+                            "delete", table, {k: vals[k] for k in keys},
+                            before=vals))
                 if len(out) >= limit:
+                    keep = True
                     break
             else:
                 # read to the end of the log: everything up to here has been
@@ -659,8 +927,10 @@ class MySQLEngine(Engine):
                 # the hop excludes - so the position moves past it too. It
                 # stayed at the last row of this database, and a fence waiting
                 # for the tail to reach the log's end never saw it get there
-                # on a server busy elsewhere.
-                if stream.log_file and stream.log_pos:
+                # on a server busy elsewhere. Only where a transaction ended:
+                # the log's end is one, and a read that stopped inside one
+                # keeps the place it counted to.
+                if stream.log_file and stream.log_pos and not in_txn:
                     token = {"log_file": stream.log_file,
                              "log_pos": stream.log_pos}
         except pymysql.err.OperationalError as e:
@@ -678,7 +948,13 @@ class MySQLEngine(Engine):
                 " may be stopped for (binlog_expire_logs_seconds, or"
                 " `binlog retention hours` on RDS)")
         finally:
-            stream.close()
+            if keep and not skipped:
+                self.__dict__["_binlog_held"] = {
+                    "token": token, "where": (side, db), "stream": stream,
+                    "events": events, "boundary": boundary,
+                    "in_txn": in_txn, "keys_of": keys_of}
+            else:
+                stream.close()
         if skipped:
             raise SystemExit(
                 f"no primary key on {', '.join(sorted(skipped))} - a change"
@@ -1432,13 +1708,21 @@ class MySQLEngine(Engine):
                                   f" `{self._d('dst', db)}`.`{t}`"
                                   f" where ({pred}) is not true")[0][0])
 
+    #: one row's 32-bit hash, summed: a sum of unsigned integers is an
+    #: exact DECIMAL here, and a row there twice counts twice. The fold was
+    #: BIT_XOR, where two equal rows cancel - measured, a table with no key
+    #: holding (1, 'a') twice on the source and (2, 'b') twice on the
+    #: target passed as equal, rows and checksums alike
+    @staticmethod
+    def _summed(expr):
+        return ("coalesce(sum(cast(conv(substring(md5(" + expr + "), 1, 8),"
+                " 16, 10) as unsigned)), 0)")
+
     def _checksum(self, side, db, t, expr, where="", key_expr=None):
-        cols = ["count(*)", "coalesce(bit_xor(crc32(" + expr + ")), 0)",
-                "coalesce(bit_xor(conv(substring(md5(" + expr + "), 1, 8),"
-                " 16, 10)), 0)"]
+        cols = ["count(*)", "coalesce(sum(crc32(" + expr + ")), 0)",
+                self._summed(expr)]
         if key_expr:
-            cols.append("coalesce(bit_xor(conv(substring(md5(" + key_expr
-                        + "), 1, 8), 16, 10)), 0)")
+            cols.append(self._summed(key_expr))
         q = (f"select {', '.join(cols)}"
              f" from {self._scope(side, db, t)} {where}")
         return tuple(self._q(side, q)[0])
@@ -1526,11 +1810,13 @@ class MySQLEngine(Engine):
         ranges = [clause(lo, hi) for lo, hi in pk_ranges]
         cp = (_cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
               if col else _cp.Checkpoint(None))
-        todo = cp.begin(scope, expr, pk_ranges) if col else pk_ranges
+        # "sum": ranges a run that folded by XOR recorded are not mixed in
+        todo = cp.begin(scope, "sum:" + expr, pk_ranges) if col \
+            else pk_ranges
         done_before = cp.resumed(scope) if col else 0
 
         bad_ranges, kinds = [], set()
-        rows_a = rows_b = xor_a = xor_b = 0
+        rows_a = rows_b = sum_a = sum_b = 0
         with ThreadPoolExecutor(max_workers=4) as pool:
             futs = {}
             for lo, hi in todo:
@@ -1557,19 +1843,19 @@ class MySQLEngine(Engine):
                 else:
                     rows_a += ra[0]
                     rows_b += rb[0]
-                    xor_a ^= int(ra[2] or 0)
-                    xor_b ^= int(rb[2] or 0)
+                    sum_a += int(ra[2] or 0)
+                    sum_b += int(rb[2] or 0)
         if not bad_ranges:
             if col:
-                rows_a, xor_s = cp.total(scope, combine="xor")
-                rows_b, xor_a = rows_a, int(xor_s)
-                xor_b = xor_a
+                rows_a, sum_s = cp.total(scope)
+                rows_b, sum_a = rows_a, int(sum_s)
+                sum_b = sum_a
                 cp.clear(scope)
             resumed = (f", resumed {done_before}/{len(pk_ranges)}"
                        if done_before else "")
             return Result("data", scope, "ok",
                           f"rows {rows_a:,}=={rows_b:,}, checksum"
-                          f" {xor_a:x}=={xor_b:x}"
+                          f" {sum_a:x}=={sum_b:x}"
                           f" ({len(pk_ranges)} chunks{resumed})"), \
                 rows_a, rows_b
         if not pks:
@@ -1721,10 +2007,8 @@ class MySQLEngine(Engine):
         # but a NULL and the literal that stood in for it still collided, and
         # the encoding is meant to be the same everywhere
         from .. import rowtext
-        expr = ", ".join(
-            f"coalesce(bit_xor(conv(substring(md5("
-            f"{rowtext.mysql_row([c])}), 1, 8), 16, 10)), 0)"
-            for c in cols)
+        expr = ", ".join(self._summed(rowtext.mysql_row([c]))
+                         for c in cols)
         try:
             a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]
             b = self._q("dst",
@@ -1790,7 +2074,8 @@ class MySQLEngine(Engine):
     def delta_verify(self, db, limit=20000, log=None):
         try:
             from pymysqlreplication import BinLogStreamReader
-            from pymysqlreplication.event import NotImplementedEvent
+            from pymysqlreplication.event import (NotImplementedEvent,
+                                                  QueryEvent, XidEvent)
             from pymysqlreplication.row_event import (DeleteRowsEvent,
                                                       UpdateRowsEvent,
                                                       WriteRowsEvent)
@@ -1823,13 +2108,25 @@ class MySQLEngine(Engine):
             log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
             only_schemas=[db],
             only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
-                         NotImplementedEvent, register()],
+                         NotImplementedEvent, XidEvent, QueryEvent,
+                         register()],
             filter_non_implemented_events=False)
         touched = {}
         nopk = set()
         n = 0
+        end = None
         try:
             for ev in self._row_events(stream):
+                if ev is COMMITTED:
+                    # the next verify starts where a transaction ended:
+                    # started inside one, it could not read the rest of it
+                    # and those rows were never compared (see
+                    # `neutral_changes`)
+                    end = {"log_file": stream.log_file,
+                           "log_pos": stream.log_pos}
+                    if n >= limit:
+                        break
+                    continue
                 if isinstance(ev, NotImplementedEvent):
                     # the rows of a compressed transaction are not read,
                     # and the delta said "0 changes" over them: the
@@ -1866,11 +2163,14 @@ class MySQLEngine(Engine):
                             touched.setdefault(t, set()).add(
                                 rowtext.encode([v[p] for p in pks]))
                     n += 1
-                if n >= limit:
-                    break
-            end = {"log_file": stream.log_file, "log_pos": stream.log_pos}
+            else:
+                if stream.log_file and stream.log_pos:
+                    end = {"log_file": stream.log_file,
+                           "log_pos": stream.log_pos}
         finally:
             stream.close()
+        end = end or {"log_file": ck.get("log_file"),
+                      "log_pos": ck.get("log_pos")}
         if not touched and not nopk:
             state.write_text(json.dumps(end))
             return [Result("delta", db, "ok",
@@ -2149,15 +2449,15 @@ class MySQLEngine(Engine):
         larger than the target's packet is the cause measured, so it is
         looked for."""
         if "lost connection" not in str(message).lower():
-            return ""
+            return super().why_it_stopped(message)
         try:
             items = self._packet_items()
         except Exception:
-            return ""
+            return super().why_it_stopped(message)
         hit = [i for i in items if i["level"] in ("fail", "warn")
                and "max_allowed_packet =" in i["detail"]]
         return (f"The likely cause, in {hit[0]['scope']}: {hit[0]['detail']}."
-                if hit else "")
+                if hit else super().why_it_stopped(message))
 
     def rows_present(self, db, tables):
         ddb = self._d("dst", db)
@@ -2727,12 +3027,31 @@ class MySQLEngine(Engine):
                 " and tc.table_name=t.table_name"
                 " and tc.constraint_type in ('PRIMARY KEY','UNIQUE'))", (db,))]
         if nopk:
+            # a keyless table's change is applied on a replica by reading
+            # the table for the row: MySQL's hash scan keys on the whole
+            # before-image, and a JSON, spatial or large column makes each
+            # of those reads heavy - they are the tables a replica falls
+            # behind on first
+            heavy = sorted({r[0] for r in self._q(
+                "src", "select table_name from information_schema.columns"
+                       " where table_schema = %s and data_type in ('json',"
+                       " 'geometry', 'point', 'linestring', 'polygon',"
+                       " 'multipoint', 'multilinestring', 'multipolygon',"
+                       " 'geometrycollection', 'blob', 'mediumblob',"
+                       " 'longblob', 'text', 'mediumtext', 'longtext')",
+                (db,))} & set(nopk))
             res.append(Result("deep", f"{db} keys", "diff",
                               f"{len(nopk)} tables have no pk/unique (CDC drops"
                               " their updates/deletes, unverifiable by key): "
-                              + ", ".join(nopk[:5]), "",
+                              + ", ".join(nopk[:5])
+                              + (f"; {len(heavy)} of them hold JSON, spatial"
+                                 " or large columns, and a replica applies"
+                                 " each change to them by reading the whole"
+                                 " table: " + ", ".join(heavy[:5])
+                                 if heavy else ""), "",
                               "add a primary key or unique index before"
-                              " migrating"))
+                              " migrating (an invisible one:"
+                              " sql_generate_invisible_primary_key)"))
         else:
             res.append(Result("deep", f"{db} keys", "ok",
                               "every table on the source has a pk or unique"
@@ -4292,6 +4611,9 @@ class MySQLEngine(Engine):
                 add("pass" if cs == cd else "warn", db,
                     "charset and collation match",
                     f"src {cs[0]} / dst {cd[0]}")
+                items.extend(self._code_collations(db, cd[0][1]))
+            items.extend(self._large_values(db))
+        items.extend(self._target_replicas())
 
         try:
             uq = ("select concat(user,'@',host),"
@@ -4325,6 +4647,111 @@ class MySQLEngine(Engine):
         items += self._fork_objects()
         items += self._scope_items()
         return items
+
+    def _code_collations(self, db, target_collation):
+        """Stored code written under another collation than the target
+        database's. A routine, trigger or event keeps the collation it was
+        created under and compares its strings by it; carried to a
+        database whose collation differs, a comparison inside it that
+        matched before can stop matching, and nothing fails. Named so it
+        is looked at before cutover, not found after."""
+        rows = self._q("src", "select concat(routine_type, ' ',"
+                              " routine_name), collation_connection,"
+                              " database_collation from"
+                              " information_schema.routines where"
+                              " routine_schema = %s union all select"
+                              " concat('TRIGGER ', trigger_name),"
+                              " collation_connection, database_collation"
+                              " from information_schema.triggers where"
+                              " trigger_schema = %s union all select"
+                              " concat('EVENT ', event_name),"
+                              " collation_connection, database_collation"
+                              " from information_schema.events where"
+                              " event_schema = %s", (db, db, db))
+        odd = [f"{name} ({base or conn})" for name, conn, base in rows
+               if (base or conn) and (base or conn) != target_collation]
+        if not rows:
+            return []
+        return [{"level": "warn" if odd else "pass", "scope": db,
+                 "item": "stored code written under the target's collation",
+                 "detail": (f"{len(odd)} of {len(rows)} were written under"
+                            f" another collation than the target database's"
+                            f" {target_collation}: {', '.join(odd[:5])} -"
+                            " a string comparison inside them can match"
+                            " differently there" if odd else
+                            f"{len(rows)} routines, triggers and events,"
+                            f" all under {target_collation}")}]
+
+    #: rows of a table read to measure its large values
+    SAMPLE_ROWS = 20000
+
+    def _large_values(self, db):
+        """The large columns of a database sized: for every blob, text and
+        JSON column, its values' length measured on a sample and scaled to
+        the table's rows, and the largest one seen. What a move of them
+        takes is theirs, not the rows' count's."""
+        from ..wording import human_bytes
+        cols = self._q("src", "select c.table_name, c.column_name,"
+                              " coalesce(t.table_rows, 0) from"
+                              " information_schema.columns c join"
+                              " information_schema.tables t on"
+                              " t.table_schema = c.table_schema and"
+                              " t.table_name = c.table_name where"
+                              " c.table_schema = %s and t.table_type ="
+                              " 'BASE TABLE' and c.data_type in ('blob',"
+                              " 'mediumblob', 'longblob', 'text',"
+                              " 'mediumtext', 'longtext', 'json')"
+                              " order by t.table_rows desc", (db,))
+        if not cols:
+            return []
+        total, largest, where = 0, 0, ""
+        for table, col, rows in cols[:50]:
+            q = self._my_ident
+            got = self._q("src", f"select count(*), coalesce(sum(length(v)),"
+                                 f" 0), coalesce(max(length(v)), 0) from"
+                                 f" (select {q(col)} as v from"
+                                 f" {q(db)}.{q(table)} limit"
+                                 f" {self.SAMPLE_ROWS}) s")
+            n, length, most = (int(x) for x in got[0])
+            if n:
+                total += length * max(int(rows), n) // n
+            if most > largest:
+                largest, where = most, f"{table}.{col}"
+        return [{"level": "pass", "scope": db,
+                 "item": "large values sized",
+                 "detail": f"about {human_bytes(total)} in {len(cols)} large"
+                           " columns (measured on up to"
+                           f" {self.SAMPLE_ROWS:,} rows a table)"
+                           + (f"; the largest value seen is"
+                              f" {human_bytes(largest)}, in {where}"
+                              if largest else "")}]
+
+    def _target_replicas(self):
+        """Replicas reading from the target while it is loaded. Every row
+        loaded is written to its binlog and shipped to each of them, and a
+        semi-synchronous one holds every commit until it has it; the
+        managed services advise read replicas off until cutover."""
+        try:
+            n = int(self._q("dst", "select count(*) from"
+                                   " information_schema.processlist where"
+                                   " command like 'Binlog Dump%%'")[0][0])
+        except Exception:  # noqa: BLE001 - not allowed to see them
+            return []
+        semi = ""
+        for name in ("rpl_semi_sync_source_enabled",
+                     "rpl_semi_sync_master_enabled"):
+            try:
+                got = self._q("dst", f"show variables like '{name}'")
+            except Exception:  # noqa: BLE001
+                got = ()
+            if got and str(got[0][1]).upper() == "ON":
+                semi = " (semi-synchronous: every commit waits for one)"
+        return [{"level": "warn" if n else "pass", "scope": "instance",
+                 "item": "no replicas read from the target during the load",
+                 "detail": (f"{n} replicas read from the target{semi} -"
+                            " every row loaded is shipped to each; take"
+                            " them off until cutover, or expect a slower"
+                            " load" if n else "none")}]
 
     #: what only MariaDB keeps, by how its catalogue says so: the table type
     #: of a sequence or a system-versioned table, and the column types MySQL
@@ -4600,7 +5027,58 @@ class MySQLEngine(Engine):
     def list_move_tables(self, db):
         return [("", t) for t in self._tables("src", db)]
 
+    PAYLOAD_SQL = "select repeat(md5(rand()), {n})"
+
+    def capacity(self, side, db):
+        """MySQL 8 lists the CPUs a session may run on in its default
+        resource group (`0-3`); MariaDB and older releases do not say. A
+        replica is one that runs a replication channel."""
+        out = {}
+        status = dict(self._q(side, "show global status where variable_name"
+                                    " in ('Threads_connected',"
+                                    " 'Threads_running')"))
+        limit = int(self._q(side, "select @@max_connections")[0][0])
+        connected = int(status.get("Threads_connected", 0))
+        # one more is kept for an administrator (`connection_admin`)
+        out["free_connections"] = max(0, limit - connected)
+        out["running"] = max(0, int(status.get("Threads_running", 1)) - 1)
+        try:
+            ids = self._q(side, "select vcpu_ids from"
+                                " information_schema.resource_groups where"
+                                " resource_group_name = 'USR_default'")
+            if ids and ids[0][0]:
+                n = 0
+                said = ids[0][0]
+                # the column is binary: bytes, `b'0-1'` as a string
+                if isinstance(said, (bytes, bytearray)):
+                    said = said.decode()
+                for part in str(said).split(","):
+                    lo, _, hi = part.strip().partition("-")
+                    n += (int(hi) - int(lo) + 1) if hi else 1
+                out["cpus"] = n or None
+        except Exception:  # noqa: BLE001 - MariaDB, or before 8.0
+            pass
+        try:
+            out["replica"] = bool(self._q(side, "show replica status"))
+        except Exception:  # noqa: BLE001 - before 8.0.22, and MariaDB
+            try:
+                out["replica"] = bool(self._q(side, "show slave status"))
+            except Exception:  # noqa: BLE001
+                pass
+        return {k: v for k, v in out.items() if v is not None}
+
+    def table_index_window(self, db, table, log):
+        from .. import movers
+        workers = int(getattr(self.hop, "workers", 1) or 1)
+        return movers._MyIndexWindow(self, self.hop, db, workers, log,
+                                     table=table, only_left=table is None)
+
     def move_table(self, db, sch, tbl, chunk, ck, log):
+        import contextlib
+        with contextlib.ExitStack() as later:
+            return self._move_table(db, sch, tbl, chunk, ck, log, later)
+
+    def _move_table(self, db, sch, tbl, chunk, ck, log, later):
         t = tbl if tbl else sch
         key = self.move_key(db, sch, tbl)
         ddb = self._d("dst", db)
@@ -4612,6 +5090,8 @@ class MySQLEngine(Engine):
             ck.save()
             return
         ck.save()
+        self.set_aside_indexes(later, self, db, t, st,
+                               self._rows_of("src", db, t), log)
         cols = self._cols(db, t)
         collist = ", ".join(f"`{c}`" for c in cols)
         ph = ", ".join(["%s"] * len(cols))
@@ -4673,7 +5153,7 @@ class MySQLEngine(Engine):
                     opened.append(local.conns)
                 rng_sql = (f"`{intpk}` > {int(after)} and `{intpk}` <="
                            f" {int(upto)}")
-                self._range_checked(
+                sent = self._range_checked(
                     local.conns[0], local.conns[1], db, t, collist, ph,
                     f" where `{intpk}` > %s and `{intpk}` <= %s" + rfp,
                     (after, upto),
@@ -4685,9 +5165,29 @@ class MySQLEngine(Engine):
                 log(f"{key}: {intpk} {after + 1:,} to {upto:,} copied"
                     f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
                     " ranges)")
+                # the rows it moved, for the move's pace
+                return sent
             opened = []
+            hop = self._picklable_hop() if slots.workers > 1 else None
             try:
-                slots.each(todo, one)
+                if hop is not None and len(todo) > 1:
+                    # a process a range: the copier's work per row is the
+                    # driver's and Python's, and threads share one core for
+                    # it (measured below, `_copy_my_range`)
+                    def done(item, got):
+                        moved, said = got
+                        for m in said:
+                            log(m)
+                        after, upto = item[4], item[5]
+                        ranges.finished(st, after, ck.save)
+                        log(f"{key}: {intpk} {after + 1:,} to {upto:,}"
+                            f" copied ({len(st['ranges_done'])} of"
+                            f" {len(st['ranges'])} ranges)")
+                    slots.each_process(
+                        [(hop, db, t, intpk, a, u, rf, key) for a, u in todo],
+                        _copy_my_range, done)
+                else:
+                    slots.each(todo, one)
             finally:
                 for a, b in opened:
                     a.close()
@@ -4711,6 +5211,118 @@ class MySQLEngine(Engine):
             sconn.close()
             dconn.close()
 
+    #: rows a read of the table copier takes from the source at a time,
+    #: and the bytes it holds at most: rows of large values are read fewer
+    #: at a time (`_batch_for`)
+    COPY_BATCH = 10000
+    COPY_BYTES = 64 * 2 ** 20
+
+    #: fewer rows than this go as one insert: a load's two extra round
+    #: trips cost more than they save on a handful
+    LOAD_FROM = 500
+
+    def _put_rows(self, cur, db, table, names, rows, insert):
+        """Rows onto the target, in the cursor's transaction: as the
+        server's own bulk load (`load data local`) where the server takes
+        one, else as the multi-row insert `insert` names.
+
+        The load is pinned: the connection answers the server's request
+        for a file only with these rows, under a name made for this one
+        statement, and refuses any other name - the client setting that
+        lets a server read any file the client can was why this was not
+        used before. A load also turns what an insert refuses (a value too
+        long, a key already there) into warnings and goes on, so a load
+        that raised any is `_LoadRefused`: the caller rolls it back and
+        writes the rows as inserts, which stop on the row as before."""
+        if len(rows) >= self.LOAD_FROM and self._loads(cur.connection) \
+                and not getattr(_PLAIN, "on", False):
+            try:
+                return _load(cur, db, table, names, rows,
+                             self._load_types(cur, db, table))
+            except _Unfit:
+                pass
+            except _loading_off() as e:
+                if e.args and e.args[0] in _LOAD_OFF:
+                    self._loads_ok = False
+                else:
+                    raise
+        cur.executemany(insert, rows)
+        return len(rows)
+
+    def _load_types(self, cur, db, table):
+        known = self.__dict__.setdefault("_types_loaded", {})
+        if (db, table) not in known:
+            cur.execute("select column_name, data_type from"
+                        " information_schema.columns where table_schema = %s"
+                        " and table_name = %s", (db, table))
+            known[(db, table)] = {n: str(t).lower()
+                                  for n, t in cur.fetchall()}
+        return known[(db, table)]
+
+    def neutral_rewrite(self, side, db, table, columns, rows):
+        """Written again as inserts: a batch that read back different is
+        not given to the bulk load a second time."""
+        _PLAIN.on = True
+        try:
+            return self.neutral_write(side, db, table, columns, rows)
+        finally:
+            _PLAIN.on = False
+
+    def _loads(self, conn):
+        ok = getattr(self, "_loads_ok", None)
+        if ok is None:
+            ok = False
+            if hasattr(conn, "feed"):
+                with conn.cursor() as cur:
+                    cur.execute("select @@global.local_infile")
+                    ok = str(cur.fetchone()[0]).lower() in ("1", "on")
+            self._loads_ok = ok
+        return ok
+
+    def _picklable_hop(self):
+        """The hop as its fields say, for a range copied in a process of
+        its own; None where it cannot be handed over."""
+        import dataclasses
+        import pickle
+        try:
+            hop = dataclasses.replace(self.hop)
+            pickle.dumps(hop)
+            return hop
+        except Exception:  # noqa: BLE001 - threads, then
+            return None
+
+    def copy_range(self, db, t, intpk, after, upto, rf, key, log):
+        """One range of the table copier, on connections of its own: its
+        span on the target replaced by the source's and read back."""
+        cols = self._cols(db, t)
+        collist = ", ".join(f"`{c}`" for c in cols)
+        ph = ", ".join(["%s"] * len(cols))
+        ddb = self._d("dst", db)
+        rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
+        rng_sql = f"`{intpk}` > {int(after)} and `{intpk}` <= {int(upto)}"
+        sconn, dconn = self._conn("src"), self._conn("dst")
+        try:
+            return self._range_checked(
+                sconn, dconn, db, t, collist, ph,
+                f" where `{intpk}` > %s and `{intpk}` <= %s" + rfp,
+                (after, upto),
+                f"delete from `{ddb}`.`{t}` where {rng_sql}"
+                + (f" and ({rf})" if rf else ""),
+                f"({rng_sql}) and ({rf})" if rf else rng_sql,
+                f"{key} {intpk} {after + 1:,} to {upto:,}", log).n
+        finally:
+            sconn.close()
+            dconn.close()
+
+    @staticmethod
+    def _stall_bound(*conns):
+        """Each read on these connections waits at most `stall.seconds()`:
+        a copy streams, and a read that long without a byte is a link that
+        holds and passes nothing (`migkit.stall`)."""
+        from ..stall import seconds
+        for c in conns:
+            c._read_timeout = seconds()
+
     def _range_checked(self, sconn, dconn, db, t, collist, ph, where, args,
                        clear, literal, what, log):
         """The rows `where` selects on the source copied over what `clear`
@@ -4724,11 +5336,37 @@ class MySQLEngine(Engine):
         import pymysql
 
         from ..tally import Tally
+        self._stall_bound(sconn, dconn)
         ddb = self._d("dst", db)
         insert = f"insert into `{ddb}`.`{t}` ({collist}) values ({ph})"
+        names = [n.replace("``", "`")
+                 for n in re.findall(r"`((?:[^`]|``)*)`", collist)]
+        loads = [True]
 
         def once():
             sent = Tally()
+            # the next batch is read while this one is written: each side
+            # waits on its own server, and one waited on the other before.
+            # Measured, a million rows in one range: 28.7s under the
+            # profiler, 11.2s of it waiting on reads and 6.5s on writes
+            batches, stop = queue.Queue(maxsize=2), threading.Event()
+
+            def read(scur):
+                # one row first, to learn how large they are
+                size = 1
+                try:
+                    while not stop.is_set():
+                        rows = scur.fetchmany(size)
+                        if not rows:
+                            break
+                        for r in rows:
+                            sent.row(r)
+                        batches.put(rows)
+                        size = _batch_for(rows, self.COPY_BATCH,
+                                          self.COPY_BYTES)
+                    batches.put(None)
+                except BaseException as e:  # noqa: BLE001 - raised below
+                    batches.put(e)
             with dconn.cursor() as dcur, \
                     sconn.cursor(pymysql.cursors.SSCursor) as scur:
                 dcur.execute("set foreign_key_checks = 0")
@@ -4740,13 +5378,27 @@ class MySQLEngine(Engine):
                 dcur.execute(clear)
                 scur.execute(f"select {collist} from `{db}`.`{t}`" + where,
                              args or None)
-                while True:
-                    rows = scur.fetchmany(5000)
-                    if not rows:
-                        break
-                    for r in rows:
-                        sent.row(r)
-                    dcur.executemany(insert, rows)
+                reader = threading.Thread(target=read, args=(scur,),
+                                          daemon=True)
+                reader.start()
+                try:
+                    while True:
+                        rows = batches.get()
+                        if rows is None:
+                            break
+                        if isinstance(rows, BaseException):
+                            raise rows
+                        if loads[0]:
+                            self._put_rows(dcur, ddb, t, names, rows, insert)
+                        else:
+                            dcur.executemany(insert, rows)
+                finally:
+                    stop.set()
+                    while reader.is_alive():
+                        try:
+                            batches.get(timeout=0.1)
+                        except queue.Empty:
+                            pass
             dconn.commit()
             return sent
 
@@ -4756,6 +5408,13 @@ class MySQLEngine(Engine):
             for tries in range(6):
                 try:
                     return once()
+                except _LoadRefused as e:
+                    # the range goes again as inserts, which stop on the
+                    # row the load had let through with a warning
+                    dconn.rollback()
+                    loads[0] = False
+                    log(f"{what}: the bulk load was not taken as it was"
+                        f" ({e}); copying the range again as inserts")
                 except pymysql.err.OperationalError as e:
                     if e.args[0] not in (1205, 1213) or tries == 5:
                         raise
@@ -4778,13 +5437,29 @@ class MySQLEngine(Engine):
         if not (self.hop.options or {}).get("verify_batches", True):
             return sent
         for round_ in (1, 2):
+            # asked where the rows are first: the source's range and the
+            # target's digested by each server, nothing carried back.
+            # Measured, 300,000 rows: the copy took 15.3s reading every
+            # range back through the driver and 3.9s without it. Different
+            # there - the source may have changed since it was read - the
+            # target is read back and held to what was sent
+            held = self._range_same(db, t, literal, every=names)
+            if held:
+                return sent
             back = there()
-            if back == sent or self._range_same(db, t, literal):
+            if back == sent or (held is None
+                                and self._range_same(db, t, literal)):
                 return sent
             if round_ == 2:
                 break
             log(f"{what}: read back from the target different from what"
-                " was copied; copying it again")
+                " was copied; copying it again"
+                + (" as inserts" if loads[0] and getattr(self, "_loads_ok", False)
+                   else ""))
+            # the second copy is the plainest one there is: whatever the
+            # bulk load stored differently, an insert stores as it always
+            # has
+            loads[0] = False
             sent = copy()
         raise SystemExit(
             f"{what}: copied twice, and the target reads back {back.n:,}"
@@ -4931,6 +5606,68 @@ class MySQLEngine(Engine):
             return [], None
         return ([f"set global replica_parallel_workers = {n};"],
                 f"replica_parallel_workers = {n}")
+
+    def loops_prevented(self, db):
+        """Why replicas both ways would send changes round, or have the two
+        sides make the same key, or "" where neither can happen.
+
+        A MySQL replica drops a change that carries its own server id, so
+        a change made on one side reaches the other, is passed on, and
+        stops where it began - given each side has an id of its own and
+        drops its own (`replicate_same_server_id` off), and with GTIDs on
+        both, so a change is applied once however it arrives. And rows made
+        on both sides at once take the same auto-increment values unless
+        each side hands out its own: an increment of at least two, and a
+        different offset on each."""
+        def read(side, *names):
+            for name in names:
+                try:
+                    got = self._q(side, f"select @@{name}")
+                    return str(got[0][0]) if got else None
+                except Exception:  # noqa: BLE001 - not on this server
+                    continue
+            return None
+        said = {side: {
+            "id": read(side, "server_id"),
+            "passes": read(side, "log_replica_updates", "log_slave_updates"),
+            "same": read(side, "replicate_same_server_id"),
+            "gtid": read(side, "gtid_mode"),
+            "step": read(side, "auto_increment_increment"),
+            "offset": read(side, "auto_increment_offset")}
+            for side in ("src", "dst")}
+        a, b = said["src"], said["dst"]
+        if a["id"] == b["id"]:
+            return (f"both sides have server_id {a['id']}: each would take"
+                    " the other's changes for its own and drop them")
+        for side, name in (("src", "the source"), ("dst", "the target")):
+            if said[side]["same"] == "1":
+                return (f"{name} applies changes carrying its own server id"
+                        " (replicate_same_server_id), so a change would go"
+                        " round for ever")
+            if said[side]["gtid"] not in (None, "ON"):
+                return (f"GTIDs are {said[side]['gtid']} on {name}: without"
+                        " them a change that comes back is applied again"
+                        " - set gtid_mode = ON and enforce_gtid_consistency"
+                        " = ON on both")
+            if said[side]["passes"] in ("0", "OFF"):
+                return (f"{name} does not pass on what it applies"
+                        " (log_replica_updates), so a change made on one"
+                        " side never reaches a third, and one made on it"
+                        " is not known to have been applied")
+        keyed = self._q("src", "select count(*) from"
+                               " information_schema.columns where"
+                               " table_schema = %s and extra like"
+                               " '%%auto_increment%%'", (db,))
+        if keyed and int(keyed[0][0]) and (
+                int(a["step"] or 1) < 2 or int(b["step"] or 1) < 2
+                or a["offset"] == b["offset"]):
+            return ("both sides hand out the same auto-increment values"
+                    f" (increment {a['step']} and {b['step']}, offset"
+                    f" {a['offset']} and {b['offset']}), and a row made on"
+                    " each at once collides - set auto_increment_increment"
+                    " = 2 on both, and auto_increment_offset = 1 on one and"
+                    " 2 on the other")
+        return ""
 
     def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
         """The statements that make the target a replica of the source.
@@ -5272,3 +6009,261 @@ class MySQLEngine(Engine):
         return {"db": db, "ts": time.time(),
                 "src_rows": int(self._q("src", q, (db,))[0][0]),
                 "dst_rows": int(self._q("dst", q, (self._d("dst", db),))[0][0])}
+
+
+def _copy_my_range(item):
+    """What a process of the table copier runs: one range, from a hop
+    handed over whole; what it said comes back with the rows it copied."""
+    hop, db, t, intpk, after, upto, rf, key = item
+    said = []
+    moved = MySQLEngine(hop).copy_range(db, t, intpk, after, upto, rf, key,
+                                        said.append)
+    return moved, said
+
+
+def _batch_for(rows, most, budget):
+    """Rows the next read should take: as many as `budget` bytes hold at
+    the size the last batch's rows were, `most` at the most and one at the
+    least. A fixed count read ten thousand rows whatever they held - of
+    twenty-megabyte values, two hundred gigabytes in one batch, and three
+    batches are in memory at once while one is written."""
+    sample = rows[:64]
+    size = 0
+    for r in sample:
+        for v in r:
+            size += len(v) if isinstance(v, (str, bytes, bytearray)) else 8
+    each = max(1, size // max(1, len(sample)))
+    return max(1, min(int(most), budget // each))
+
+
+class _Committed:
+    """Where a transaction ended, in `MySQLEngine._row_events`."""
+
+    def __repr__(self):
+        return "COMMITTED"
+
+
+COMMITTED = _Committed()
+
+
+#: set while a batch is written again: no bulk load for it
+_PLAIN = threading.local()
+
+#: types that read a number and the same digits as text differently: a
+#: YEAR of 0 is 0000 given as a number and 2000 given as the text "0"
+#: (measured), an ENUM or SET given a number takes the member at that
+#: position, a BIT takes the number's bits
+_NUMBER_IS_NOT_TEXT = {"year", "enum", "set", "bit"}
+
+
+class _Unfit(Exception):
+    """A batch the load's text cannot carry as the insert would: a column
+    holding both bytes and text, or a value with no plain rendering."""
+
+
+class _LoadRefused(Exception):
+    """A load the server finished with warnings or short of the rows."""
+
+
+#: the server's and the client's ways of saying a load is not allowed
+_LOAD_OFF = (1148, 2068, 3948, 3950)
+
+_LOADER = []
+
+
+def _loading_off():
+    import pymysql
+    return (pymysql.err.OperationalError, pymysql.err.InternalError,
+            pymysql.err.ProgrammingError)
+
+
+def _loading():
+    """pymysql's connection with one change: a server's request for a local
+    file is answered from `conn.feed` - `(name, bytes)` set for the one
+    statement that asked - and never from the file system. Any other name
+    is sent nothing and raised. None where pymysql is not shaped as this
+    was written for, and the target is written by inserts."""
+    if _LOADER:
+        return _LOADER[0]
+    try:
+        from pymysql import connections, err
+        from pymysql.constants import CR, ER
+        connections.MySQLResult._read_load_local_packet
+        connections.LoadLocalPacketWrapper
+        connections.Connection._read_query_result
+    except (ImportError, AttributeError):
+        _LOADER.append(None)
+        return None
+
+    class _Result(connections.MySQLResult):
+        def _read_load_local_packet(self, first_packet):
+            conn = self.connection
+            asked = connections.LoadLocalPacketWrapper(first_packet).filename
+            feed, conn.feed = conn.feed, None
+            refused = None
+            try:
+                if not feed or asked != feed[0]:
+                    refused = err.OperationalError(
+                        ER.FILE_NOT_FOUND, "the server asked for a file this"
+                        " connection did not offer; it was sent nothing")
+                else:
+                    step = max(16 * 1024,
+                               min(conn.max_allowed_packet, 1 << 20) - 1024)
+                    data = feed[1]
+                    for at in range(0, len(data), step):
+                        conn.write_packet(data[at:at + step])
+            finally:
+                conn.write_packet(b"")
+                ok = conn._read_packet()
+            if refused:
+                raise refused
+            if not ok.is_ok_packet():
+                raise err.OperationalError(CR.CR_COMMANDS_OUT_OF_SYNC,
+                                           "Commands Out of Sync")
+            self._read_ok_packet(ok)
+
+    class Loading(connections.Connection):
+        feed = None
+
+        def _read_query_result(self, unbuffered=False):
+            self._result = None
+            result = _Result(self)
+            if unbuffered:
+                result.init_unbuffered_query()
+            else:
+                result.read()
+            self._result = result
+            if result.server_status is not None:
+                self.server_status = result.server_status
+            return result.affected_rows
+    _LOADER.append(Loading)
+    return Loading
+
+
+_ESC = str.maketrans({"\\": "\\\\", "\t": "\\t", "\n": "\\n",
+                      "\r": "\\r", "\0": "\\0"})
+
+
+_SPECIAL = re.compile(r"[\\\t\n\r\0]")
+
+
+def _escaped(v):
+    return v.translate(_ESC) if _SPECIAL.search(v) else v
+
+
+def _hexed(v):
+    return bytes(v).hex()
+
+
+def _as_inserted(conn, t):
+    """What pymysql writes into an insert for a value of type `t`, without
+    the quotes: the load and the insert store the same thing because the
+    same function renders both."""
+    enc, mapping = conn.encoders[t], conn.encoders
+
+    def one(v):
+        got = enc(v, mapping)
+        return got[1:-1] if got[:1] == "'" else got
+    return one
+
+
+def _checked(conn):
+    def one(v):
+        try:
+            got = conn.escape(v)
+        except Exception:
+            raise _Unfit
+        if not isinstance(got, str):
+            raise _Unfit
+        if got[:1] == "'" and got[-1:] == "'":
+            got = got[1:-1]
+        if not got or any(c in got for c in "\\\t\n\r'(,"):
+            raise _Unfit
+        return got
+    return one
+
+
+def _load_text(conn, rows, width, types=()):
+    """The rows as the load reads them: tab between fields, a line each,
+    `\\N` for NULL. Bytes go as hex and are turned back by the statement;
+    every other value is written as pymysql writes it into an insert. A
+    column's writer is chosen by the first value of each type it meets, so
+    a row costs a function call a field."""
+    import datetime
+    import decimal
+    plain = (int, float, decimal.Decimal, datetime.datetime, datetime.date,
+             datetime.timedelta, datetime.time)
+    types = list(types) + [None] * (width - len(types))
+    kinds, enc, seen = [None] * width, [None] * width, [None] * width
+
+    def resolve(i, v):
+        t = type(v)
+        hexed = t in (bytes, bytearray, memoryview)
+        kind = "hex" if hexed else "text"
+        if kinds[i] not in (None, kind):
+            raise _Unfit
+        kinds[i] = kind
+        if hexed:
+            e = _hexed
+        elif t is str:
+            e = _escaped
+        elif types[i] in _NUMBER_IS_NOT_TEXT:
+            if types[i] != "year" or t is not int:
+                raise _Unfit
+            e = "{:04d}".format
+        elif t in plain and t in conn.encoders:
+            e = _as_inserted(conn, t)
+        else:
+            e = _checked(conn)
+        enc[i], seen[i] = e, t
+        return e
+    lines = []
+    for r in rows:
+        fields = []
+        for i, v in enumerate(r):
+            if v is None:
+                fields.append("\\N")
+                continue
+            e = enc[i]
+            if e is None or type(v) is not seen[i]:
+                e = resolve(i, v)
+            fields.append(e(v))
+        lines.append("\t".join(fields))
+    lines.append("")
+    try:
+        return kinds, "\n".join(lines).encode("utf-8")
+    except UnicodeEncodeError:
+        raise _Unfit
+
+
+def _load(cur, db, table, names, rows, types=None):
+    import uuid
+
+    def q(n):
+        return "`" + str(n).replace("`", "``") + "`"
+    kinds, data = _load_text(cur.connection, rows, len(names),
+                             [(types or {}).get(n) for n in names])
+    cols, sets = [], []
+    for i, (n, k) in enumerate(zip(names, kinds)):
+        if k == "hex":
+            cols.append(f"@v{i}")
+            sets.append(f"{q(n)} = unhex(@v{i})")
+        else:
+            cols.append(q(n))
+    name = f"rows-{uuid.uuid4().hex}"
+    cur.connection.feed = (name.encode(), data)
+    try:
+        got = cur.execute(
+            f"load data local infile '{name}' into table {q(db)}.{q(table)}"
+            " character set utf8mb4 fields terminated by '\\t' escaped by"
+            " '\\\\' lines terminated by '\\n'"
+            f" ({', '.join(cols)})"
+            + (f" set {', '.join(sets)}" if sets else ""))
+    finally:
+        cur.connection.feed = None
+    cur.execute("show count(*) warnings")
+    warned = int(cur.fetchone()[0])
+    if warned or got != len(rows):
+        raise _LoadRefused(f"{got:,} of {len(rows):,} rows taken,"
+                           f" {warned:,} warnings")
+    return got

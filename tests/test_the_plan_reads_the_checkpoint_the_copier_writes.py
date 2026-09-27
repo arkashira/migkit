@@ -28,6 +28,9 @@ def test_done_and_half_done_are_read_back(tmp_path, monkeypatch):
         "    databases: [main]\n")
     monkeypatch.setattr(cfg, "CONF", str(tmp_path / "hops.yaml"))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
+    # the table copier's plan; a whole SQLite file otherwise moves inside
+    # SQLite itself
+    monkeypatch.setenv("MIGKIT_MOVER", "builtin")
     ck = tmp_path / "reports" / "lite" / "main" / "move.json"
     ck.parent.mkdir(parents=True)
     ck.write_text(json.dumps({"main.t": {"last": ["k-0042"], "moved": 42},

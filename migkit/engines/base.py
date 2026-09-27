@@ -1403,6 +1403,13 @@ class Engine:
     #: that takes one writer at a time (SQLite) cannot
     WRITES_IN_PARALLEL = True
 
+    def position_spans(self, side, db, table, rows_per):
+        """[(start, where)] covering a table by where its rows are stored,
+        about `rows_per` rows each - for a table with no key, which has
+        nothing else to resume from - or None where the engine has no
+        stored position to read by."""
+        return None
+
     def native_replica_unsafe(self):
         """Why the server's own replication would carry this hop wrongly,
         in words, or None."""
@@ -1515,6 +1522,12 @@ class Engine:
         indexes and constraints, where the engine builds them after."""
         return None
 
+    def carry_database_objects(self, db, log=None):
+        """What a database holds outside its tables and a copy of the
+        tables leaves behind (PostgreSQL's large objects), carried after
+        them by a whole-database copy. Nothing, for an engine without."""
+        return None
+
     def _fk_orphans(self, db):
         """The target's rows whose foreign key points at nothing, as a check
         result, or None where the engine has no foreign keys to scan."""
@@ -1592,11 +1605,38 @@ class Engine:
         plan saying nobody knows."""
         return None
 
+    #: what a server says when it will not be written to, in every engine's
+    #: words: PostgreSQL's 25006, MySQL's 1290 and 1792, MongoDB's not
+    #: primary, SQL Server's 3906
+    READ_ONLY_SAID = ("read-only transaction", "--read-only option",
+                      "--super-read-only option", "read only transaction",
+                      "notwritableprimary", "not primary", "not master",
+                      "database is read-only", "is read-only")
+    #: and when it has no room left
+    FULL_SAID = ("no space left on device", "could not extend file",
+                 "the table is full", "disk full", "out of disk space",
+                 "errno: 28")
+
     def why_it_stopped(self, message):
         """What on the servers explains a copy that stopped with
         `message`, as a sentence, or "" where nothing is known. A program
         underneath says what broke; this says why, where the engine can
-        tell."""
+        tell. Two causes read the same on every engine and are said here:
+        a target that went read-only part way - measured, a flip of
+        `default_transaction_read_only` mid-move stopped it on `cannot
+        execute DELETE in a read-only transaction` and nothing more - and a
+        target whose disk filled."""
+        said = str(message).lower()
+        if any(k in said for k in self.READ_ONLY_SAID):
+            return ("the target is read-only: it may have failed over and"
+                    " the hop now reaches a reader, or a setting made it"
+                    " read-only (default_transaction_read_only, read_only)."
+                    " Point the hop at the writer - a cluster's writer"
+                    " endpoint - and move again; what was copied is kept")
+        if any(k in said for k in self.FULL_SAID):
+            return ("the target has run out of disk space. Free space there,"
+                    " or grow its storage, and move again; the ranges"
+                    " already copied are kept")
         return ""
 
     def planned_checks(self):
@@ -2450,6 +2490,17 @@ class Engine:
         return tuple(canon.render_value(cls, value)
                      for (_, cls), value in zip(columns, row))
 
+    def _column_rules(self, db, table):
+        """The hop's `mapping.columns` for a table, read once: {} where it
+        maps nothing there."""
+        known = self.__dict__.setdefault("_column_rules_of", {})
+        at = (db, str(table))
+        if at not in known:
+            rules = self.hop.column_rules(db, *str(table).split(".")) or {}
+            known[at] = rules if (rules.get("keep") or rules.get("drop")
+                                  or rules.get("rename")) else {}
+        return known[at]
+
     def _mapped_types(self, db, table, src_types):
         """The source's columns as the target is meant to have them:
         `mapping.columns` applied - kept or dropped, and renamed.
@@ -2458,7 +2509,12 @@ class Engine:
         One place, so the copy, the comparison and the schema check cannot
         disagree about which source column lands where.
         """
-        rules = self.hop.column_rules(db, *str(table).split("."))
+        rules = self._column_rules(db, table)
+        if not rules:
+            # no mapping for the table: every column as it is - asked once
+            # a change by the tail, and building the same dict again was a
+            # second of 7 for 320,000 changes
+            return dict(src_types), {n: n for n in src_types}
         keep, drop = set(rules.get("keep") or []), set(rules.get("drop") or [])
         rename = rules.get("rename") or {}
         virtual, back = {}, {}
@@ -2860,14 +2916,20 @@ class Engine:
             " same rows - copying it again")
         return False
 
-    def _range_same(self, db, table, where=None):
+    def _range_same(self, db, table, where=None, every=None):
         """Whether the rows `where` selects digest the same on the source
         and the target of a same-engine hop, over every column both
         render; None where none can be. What a copier asks when a range it
         wrote reads back different from what it sent: two releases can
-        write a value's text differently and hold the same value."""
+        write a value's text differently and hold the same value.
+
+        `every` names the columns that must all be among those digested:
+        where one is not, the answer is None - a digest that left a column
+        out cannot say a range was copied whole."""
         sc, dc, _ = self._comparable_columns(db, self, table, self, table)
         if not sc:
+            return None
+        if every is not None and not set(every) <= {n for n, _ in sc}:
             return None
         return (self.neutral_digest("src", db, table, sc, where=where or None)
                 == self.neutral_digest("dst", db, table, dc,
@@ -2921,6 +2983,153 @@ class Engine:
         """
         raise self._no_canon("write rows")
 
+    #: a statement answering about `{n}` x 32 bytes that do not compress,
+    #: for `link_probe`; None where the engine has none
+    PAYLOAD_SQL = None
+    #: sizes the link is tried with, in bytes: either side of the common
+    #: packet sizes (576, 1280, 1500 less headers) and on to a megabyte
+    LINK_SIZES = (512, 1200, 1400, 1460, 2048, 8192, 65536, 1 << 20)
+
+    def link_probe(self, side, db, wait=5.0):
+        """How the link to one side carries data, for `doctor`: its round
+        trip, the largest reply and the largest request that arrived within
+        `wait` seconds, the first size that did not and which way, and a
+        rate.
+
+        A link can open, sign in and answer small questions, and never
+        carry a large reply: a path that drops packets larger than it passes
+        (an MTU black hole - a VPN or tunnel set too high) drops only the
+        full-sized ones, and TCP's keepalives are small. Measured through
+        such a path: connected in 0.04 s, `select 1` answered, and a reply
+        of 6.4 KB never came. A copy there hangs. Each question is asked on
+        a thread and given up on after `wait`."""
+        import random
+        import socket
+        import string
+        import threading
+        import time
+        ep = self.hop.source if side == "src" else self.hop.target
+        out = {}
+
+        def timed(fn):
+            got = {}
+
+            def run():
+                began = time.monotonic()
+                try:
+                    got["value"] = fn()
+                except Exception as e:  # noqa: BLE001 - said below
+                    got["error"] = e
+                got["took"] = time.monotonic() - began
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            t.join(wait)
+            return None if t.is_alive() else got
+        try:
+            with socket.create_connection((ep.host, int(ep.port)),
+                                          timeout=wait):
+                pass
+        except OSError as e:
+            out["tcp"] = str(e)
+            return out
+        first = timed(lambda: self.run_rule(side, db, "select 1"))
+        if first is None:
+            out["stalled"] = ("connecting", None)
+            return out
+        if "error" in first:
+            out["error"] = str(first["error"]).splitlines()[0][:200]
+            return out
+        rtt = [first["took"]]
+        for _ in range(4):
+            got = timed(lambda: self.run_rule(side, db, "select 1"))
+            if got and "took" in got:
+                rtt.append(got["took"])
+        out["rtt_ms"] = round(min(rtt) * 1000, 1)
+        if not self.PAYLOAD_SQL:
+            return out
+        for size in self.LINK_SIZES:
+            sql = self.PAYLOAD_SQL.format(n=size // 32 + 1)
+            got = timed(lambda: self.run_rule(side, db, sql))
+            if got is None:
+                out["stalled"] = ("replies", size)
+                return out
+            if "error" in got:
+                out["error"] = str(got["error"]).splitlines()[0][:200]
+                return out
+            out["replies"] = size
+            if size == self.LINK_SIZES[-1]:
+                out["mb_s"] = round(size / max(got["took"], 1e-6)
+                                    / 2 ** 20, 1)
+        text = "".join(random.choices(string.ascii_letters + string.digits,
+                                      k=self.LINK_SIZES[-1]))
+        for size in self.LINK_SIZES:
+            sql = f"select length('{text[:size]}')"
+            got = timed(lambda: self.run_rule(side, db, sql))
+            if got is None:
+                out["stalled"] = ("requests", size)
+                return out
+            if "error" in got:
+                break
+            out["requests"] = size
+        return out
+
+    def leg_encryption(self, side, db):
+        """{"encrypted": bool, "how": protocol and cipher} of the
+        connection migkit opens to one side, as the database itself says
+        of it - or None where it cannot be asked."""
+        return None
+
+    def capacity(self, side, db):
+        """What this side's server can give a move, for `sizing`: any of
+        `cpus`, `free_connections` (its limit less those reserved and in
+        use), `running` (sessions busy now) and `replica` (it serves reads
+        for a primary). A key it cannot answer is left out - {} says
+        nothing, which the sizing reads as "not readable", never as
+        "idle"."""
+        return {}
+
+    #: rows from which a table copied from its start is written with its
+    #: secondary indexes set aside (`table_index_window`)
+    INDEX_WINDOW_FROM = 100_000
+
+    def table_index_window(self, db, table, log):
+        """A context around copying one table into this target from its
+        start: its secondary indexes set aside and built once after, where
+        this engine has measured that faster. `table` None: only what an
+        earlier copy set aside and did not put back, built on the way out.
+        Nothing, for an engine without one."""
+        import contextlib
+        return contextlib.nullcontext()
+
+    def _rows_of(self, side, db, table):
+        """The catalogue's row estimate for one table, or None where it
+        cannot be read."""
+        try:
+            return (self.table_facts(side, db).get(table) or {}).get("rows")
+        except Exception:  # noqa: BLE001 - an estimate, or none
+            return None
+
+    @staticmethod
+    def set_aside_indexes(later, target, db, table, st, rows, log):
+        """The one place a copier decides whether a table goes into
+        `target` with its indexes set aside: only from its start - a range
+        already copied was written with them in place, and is read back by
+        them - and only where the table is large enough for a bulk build
+        to repay dropping them. `later` is the ExitStack the rebuild runs
+        on the way out of."""
+        if (st.get("ranges_done") or st.get("spans_done")
+                or st.get("last") is not None):
+            return
+        if not rows or int(rows) < target.INDEX_WINDOW_FROM:
+            return
+        later.enter_context(target.table_index_window(db, table, log))
+
+    def neutral_rewrite(self, side, db, table, columns, rows):
+        """A batch that read back different, written again the plainest way
+        the engine has. An engine with a bulk path of its own that could
+        store a value differently from an insert writes with inserts here;
+        every other engine writes as it did the first time."""
+        return self.neutral_write(side, db, table, columns, rows)
     def target_missing(self, db):
         """True when the target is not there yet and the first write makes
         it - a SQLite file, say. A copy starts from an empty list then; a
@@ -3356,6 +3565,12 @@ class Engine:
         minute, for `/metrics`."""
         return None
 
+    #: whether a change position this engine hands back only says where to
+    #: read from next. False where reading from it also says everything
+    #: before it was applied (a PostgreSQL slot moves on then), and the
+    #: tail must not read ahead of what it applied
+    READS_AHEAD = False
+
     def neutral_apply(self, side, db, changes):
         """Apply change records. Returns how many were applied.
 
@@ -3369,10 +3584,165 @@ class Engine:
         the dialect differs. An engine that grew its own copy of the loop
         would be one bug fix away from behaving differently on one target.
         """
+        lanes = self._lanes(side, db, changes)
+        if lanes:
+            try:
+                self._apply_lanes(side, db, lanes)
+                return len(changes)
+            except Exception:  # noqa: BLE001 - the batch again, whole
+                # a lane that failed - a deadlock between two, a value
+                # two lanes' rows both claimed - may leave the others
+                # committed; every change is a row's final state or its
+                # removal, so the whole batch applied again, in one
+                # transaction and in order, puts the target right, and
+                # raises if it cannot
+                self.__dict__["lane_retries"] = \
+                    self.__dict__.get("lane_retries", 0) + 1
         n = 0
         with self._apply_session(side, db):
             n = self._apply_each(side, db, changes)
         return n
+
+    #: changes a batch holds before it is applied in lanes side by side
+    LANES_FROM = 2000
+
+    def _lanes(self, side, db, changes):
+        """The batch as lists of rows that can be applied side by side,
+        each on a connection of its own, or None where it goes as one.
+
+        A row's changes are already one (`_collapsed`); rows of one key go
+        to one lane by the key's hash. A table whose rows depend on each
+        other - joined to another by a foreign key, or holding a unique
+        index besides its key, where one row's value can move to another -
+        goes whole to one lane, in the batch's order, with every table it is
+        joined to (`_ordered_tables`). An engine that cannot say which
+        tables those are applies in one lane.
+
+        What the others do: MySQL's write-set replica and GoldenGate's
+        parallel apply order only the changes whose keys overlap; this is
+        the same rule at the grain of a batch."""
+        from .. import twoway
+        from .base import Engine
+        lanes = int(getattr(self.hop, "workers", 1) or 1)
+        if (lanes < 2 or len(changes) < self.LANES_FROM
+                # a batch whose mark says it was committed has to be one
+                # transaction for the mark to say so
+                or twoway.exact(self.hop)
+                or not getattr(self, "WRITES_IN_PARALLEL", True)
+                or type(self)._open_writer is Engine._open_writer):
+            return None
+        try:
+            ordered = self._ordered_tables(side, db)
+        except Exception:  # noqa: BLE001 - not known: one lane
+            ordered = None
+        if ordered is None:
+            return None
+        out = [[] for _ in range(lanes)]
+        placed = {}
+        for table, row in self._net_rows(side, db, changes):
+            group = ordered.get(self._lane_name(table))
+            if group is not None:
+                at = placed.setdefault(group, len(placed) % lanes)
+            else:
+                at = hash((table, tuple(sorted(
+                    (n, repr(v)) for n, v in row[1].items())))) % lanes
+            out[at].append((table, row))
+        out = [lane for lane in out if lane]
+        return out if len(out) > 1 else None
+
+    def _net_rows(self, side, db, changes):
+        """A batch as the rows to write, in the fewest statements their
+        order allows: [(table, (upsert|delete, key, values))].
+
+        A table no other table depends on and with no unique index besides
+        its key: its changes collapsed to one a key (`_collapsed`), and
+        since those are then independent of each other and of everything
+        else, written as one run of deletes and one of upserts a table (the
+        order DMS's batch apply uses). Measured, 80,000 changes to one
+        table with every tenth row deleted, the target 10 ms away: the
+        batch's order broke it into 4,330 statements, 56 s.
+
+        A table `_ordered_tables` names - joined to others by keys, or with
+        a second unique index - is written change by change in the source's
+        order, first: the source applied them in that order and every
+        statement kept its constraints. Collapsed, a row's last change went
+        where its first had been: an update of a parent, the child's update
+        and delete, the parent's delete became the parent's delete before
+        the child's, refused by the key on every replay. An engine that
+        cannot say which tables those are has every change collapsed, in the
+        order rows were first touched, as before."""
+        try:
+            ordered = self._ordered_tables(side, db)
+        except Exception:  # noqa: BLE001 - not known: as before
+            ordered = None
+        if ordered is None:
+            return self._collapsed(changes)
+        bound, loose = [], []
+        for c in changes:
+            (bound if self._lane_name(c["table"]) in ordered
+             else loose).append(c)
+        out = [row for c in bound for row in self._collapsed([c])]
+        free = {}
+        for table, row in self._collapsed(loose):
+            kind, key, values = row
+            free.setdefault((kind == "delete", table, tuple(sorted(key)),
+                             tuple(sorted({**key, **values}))),
+                            []).append((table, row))
+        return out + [r for shape in sorted(free, key=lambda s: not s[0])
+                      for r in free[shape]]
+
+    def _lane_name(self, table):
+        return str(self.local_table(table)).split(".")[-1]
+
+    def _ordered_tables(self, side, db):
+        """{table: group} for the tables whose rows must be applied in the
+        batch's order - those joined by foreign keys share a group, and a
+        table with a unique index besides its key has one - or None where
+        this engine cannot say. Tables are named by their last part."""
+        return None
+
+    @staticmethod
+    def _table_groups(edges, singles):
+        """{table: group} from foreign-key edges (child, parent) and the
+        tables ordered on their own: each set of tables joined by keys, one
+        group."""
+        root = {}
+
+        def find(t):
+            root.setdefault(t, t)
+            while root[t] != t:
+                root[t] = root[root[t]]
+                t = root[t]
+            return t
+        for a, b in edges:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                root[ra] = rb
+        for t in singles:
+            find(t)
+        return {t: find(t) for t in root}
+
+    def _ordered_cached(self, side, db, read):
+        """`read()` - the ordered tables of `_ordered_tables` - asked again
+        at most once a minute."""
+        import time
+        known = self.__dict__.setdefault("_ordered_of", {})
+        hit = known.get((side, db))
+        if hit is None or time.monotonic() - hit[0] > 60:
+            hit = known[(side, db)] = (time.monotonic(), read())
+        return hit[1]
+
+    def _apply_lanes(self, side, db, lanes):
+        import concurrent.futures as cf
+
+        def one(rows):
+            with self._apply_session(side, db):
+                self._apply_net(side, db, rows)
+        with cf.ThreadPoolExecutor(len(lanes)) as pool:
+            futs = [pool.submit(one, lane) for lane in lanes]
+        failed = next((f.exception() for f in futs if f.exception()), None)
+        if failed is not None:
+            raise failed
 
     def _open_writer(self, side, db):
         """A connection that writes, for engines whose appliers take one;
@@ -3397,8 +3767,15 @@ class Engine:
             if conn is None:
                 yield
                 return
-            self.__dict__["_session"] = conn
+            # the session is the thread's: lanes apply side by side, each
+            # on a connection and a transaction of its own
+            held = self._apply_held()
+            held.conn = conn
             try:
+                if (self.hop.options or {}).get("two_way"):
+                    # first in the transaction, so the tail reading this
+                    # side the other way leaves the whole of it out
+                    self.origin_mark(side, db)
                 yield
                 conn.commit()
             except BaseException:
@@ -3408,9 +3785,23 @@ class Engine:
                     pass
                 raise
             finally:
-                self.__dict__.pop("_session", None)
+                held.conn = None
                 conn.close()
         return session()
+
+    #: whether this engine's change reader leaves out the transactions a
+    #: two-way tail applied (`twoway`)
+    READS_ORIGIN_MARK = False
+
+    def origin_mark(self, side, db):
+        """Write this thread's row of `migkit_origin` in the transaction
+        being applied (`twoway`). Refused where the engine has no way to."""
+        raise SystemExit(f"two_way: {type(self).__name__} cannot mark what"
+                         " migkit applies")
+
+    def _apply_held(self):
+        import threading
+        return self.__dict__.setdefault("_apply_threads", threading.local())
 
     def _writer(self, side, db):
         """The connection one applied statement uses: the batch's, or one
@@ -3419,7 +3810,7 @@ class Engine:
 
         @contextlib.contextmanager
         def one():
-            held = self.__dict__.get("_session")
+            held = getattr(self._apply_held(), "conn", None)
             if held is not None:
                 yield held
                 return
@@ -3440,10 +3831,18 @@ class Engine:
         0.06s. Only runs of rows next to each other are joined, so a parent
         written before its child still is. A key seen again ends the run:
         one statement cannot write the same row twice on every engine."""
+        self._apply_net(side, db, self._net_rows(side, db, changes))
+        return len(changes)
+
+    def _apply_net(self, side, db, rows):
+        """Rows (`_net_rows`) applied in runs, in their order. Named apart
+        from `_apply_rows`, which carries rows between two engines."""
+        from .. import canon
         run, shape, keys = [], None, set()
-        for table, (kind, key, values) in self._collapsed(changes):
+        for table, (kind, key, values) in rows:
             this = (table, kind, tuple(sorted(key)),
-                    tuple(sorted({**key, **values})))
+                    tuple(sorted({**key, **values})),
+                    any(isinstance(v, canon.Added) for v in values.values()))
             ident = tuple(sorted((n, str(v)) for n, v in key.items()))
             if run and (this != shape or ident in keys):
                 self._apply_run(side, db, shape, run)
@@ -3453,14 +3852,55 @@ class Engine:
             run.append((key, values))
         if run:
             self._apply_run(side, db, shape, run)
-        return len(changes)
 
     def _apply_run(self, side, db, shape, rows):
         table, kind = shape[0], shape[1]
         if kind == "delete":
             self._apply_deletes(side, db, table, [k for k, _ in rows])
+        elif len(shape) > 4 and shape[4]:
+            self._apply_added(side, db, table, rows)
         else:
             self._apply_upserts(side, db, table, rows)
+
+    def _apply_added(self, side, db, table, rows):
+        """[(key, values)] where a counter's value is what it adds
+        (`canon.Added`): a row the target has is moved where it stands
+        (`n = n + by`, the rest set), in the batch's transaction, so what
+        the target's own side added meanwhile is kept; a row it has not got
+        is made with what the source ended with."""
+        from .. import canon
+        if not callable(getattr(self, "_qualified", None)):
+            raise SystemExit(f"two_way.delta: {type(self).__name__} cannot"
+                             " add to a value where it stands")
+        local = self.local_table(table)
+        at = self._qualified(side, db, local)
+        q = self._quote_ident
+        with self._writer(side, db) as conn:
+            with conn.cursor() as cur:
+                for key, values in rows:
+                    names = sorted(key)
+                    where = " and ".join(f"{q(k)} = %s" for k in names)
+                    found = [canon.sql_value(key[k]) for k in names]
+                    cur.execute(f"select count(*) from {at} where {where}",
+                                found)
+                    if not cur.fetchone()[0]:
+                        self._apply_upserts(side, db, table, [(key, {
+                            n: (v.to if isinstance(v, canon.Added) else v)
+                            for n, v in values.items()})])
+                        continue
+                    sets, args = [], []
+                    for n, v in sorted(values.items()):
+                        if n in key:
+                            continue
+                        if isinstance(v, canon.Added):
+                            sets.append(f"{q(n)} = {q(n)} + %s")
+                            args.append(canon.sql_value(v.by))
+                        else:
+                            sets.append(f"{q(n)} = %s")
+                            args.append(canon.sql_value(v))
+                    if sets:
+                        cur.execute(f"update {at} set {', '.join(sets)}"
+                                    f" where {where}", args + found)
 
     def _apply_upserts(self, side, db, table, rows):
         """[(key, values)] of one table and one set of columns: one
@@ -3487,6 +3927,7 @@ class Engine:
         one change did not carry is not written as empty; a delete in
         between starts the row again. An update that moved the key leaves
         its old address and arrives at the new one."""
+        from .. import canon
         net, order = {}, []
 
         def touch(table, kind, key, values):
@@ -3499,7 +3940,7 @@ class Engine:
             elif kind == "delete":
                 net[ident] = ["delete", dict(key), {}]
             elif have[0] == "upsert":
-                have[2].update(values)
+                canon.merged_values(have[2], values)
             else:
                 net[ident] = ["upsert", dict(key), dict(values)]
         for c in changes:

@@ -125,7 +125,7 @@ class RedshiftEngine(_Warehouse):
         return psycopg2.connect(host=ep.host, port=ep.port or 5439,
                                 user=ep.user, password=ep.password,
                                 dbname=self._database(side),
-                                connect_timeout=15)
+                                connect_timeout=15, **ep.libpq_tls())
 
 
 class SnowflakeEngine(FoldsToCapitals, _Warehouse):

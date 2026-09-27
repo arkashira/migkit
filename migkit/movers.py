@@ -22,7 +22,15 @@ from urllib.parse import quote
 from .util import run, tool_env, which
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper",
-        "pgloader", "mongodump", "mongosync")
+        "pgloader", "mongodump", "mongosync", "native")
+
+
+def _native(engine):
+    """Whether the engine copies a table by its own means - server to
+    server, or file to file - with no row through this process."""
+    from .engines import _class_for
+    cls = _class_for(engine)
+    return cls is not None and callable(getattr(cls, "native_bulk", None))
 
 
 def pick(engine, table=""):
@@ -49,6 +57,8 @@ def pick(engine, table=""):
         return "mongosync"
     if engine == "mongodb" and which("mongodump") and which("mongorestore"):
         return "mongodump"
+    if _native(engine):
+        return "native"
     return "builtin"
 
 
@@ -123,7 +133,7 @@ ROW_FILTER_MOVERS = ("mydumper",)
 
 #: Bulk paths that can leave a table out, so a table with a row filter can
 #: be carried by the table copier instead.
-ROUTING_MOVERS = ("pgdump", "pgcopydb")
+ROUTING_MOVERS = ("pgdump", "pgcopydb", "native")
 
 #: Engines whose table copier (`move_table`) applies the row filter on
 #: both ends - reading only what it selects, replacing only what it
@@ -219,7 +229,33 @@ def supported(engine, via):
             "mydumper": engine == "mysql",
             "pgloader": engine == "hetero",
             "mongodump": engine == "mongodb",
-            "mongosync": engine == "mongodb"}.get(via, True)
+            "mongosync": engine == "mongodb",
+            "native": _native(engine)}.get(via, True)
+
+
+def qualifier_for(hop):
+    """What a table name with no schema is qualified by in a plan: the
+    schema PostgreSQL puts it in, and nothing elsewhere."""
+    from .engines import ALIASES
+    return ("public" if ALIASES.get(hop.engine, hop.engine) == "postgres"
+            else None)
+
+
+def native_move(hop, db, workers, go, log):
+    """The tables the plan sends the fast way, copied by the engine's own
+    means (`native_bulk`); the rest are left to the table copier, as every
+    routing bulk path leaves them."""
+    from . import planner
+    from .engines import get_engine
+    eng = get_engine(hop)
+    plan = planner.plan(hop, db, "native", eng.neutral_tables("src", db),
+                        qualifier_for(hop), eng.table_facts("src", db))
+    tables = [d.table for d in plan if d.path == planner.BULK]
+    # a table routed for its row filter alone keeps the source's shape: the
+    # engine makes it as it makes the rest, and the copier fills it
+    shaped = [d.table for d in plan if d.path == planner.COPIER
+              and not hop.column_rules(db, *d.table.split("."))]
+    return eng.native_bulk(db, tables, go, log, shape_only=shaped) or []
 
 
 def stream_supported(engine):
@@ -622,7 +658,8 @@ def _pg_truncate_target(hop, db, log=None):
     """
     t = hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
-    env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    env_t = {**t.libpq_env(),
+             "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
 
     def psql(*args):
         return _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
@@ -653,7 +690,31 @@ def _pg_truncate_target(hop, db, log=None):
     _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
          "-d", ddb, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", stmt],
         env_t, log)
+    _pg_clear_carried_objects(hop, db, env_t, log)
     return stmt
+
+
+def _pg_clear_carried_objects(hop, db, env_t, log=None):
+    """The target's large objects that the load carries again, under the
+    same oids, removed first - as the tables it fills are emptied. Left,
+    the load stopped on each of them (measured: `duplicate key value
+    violates unique constraint "pg_largeobject_metadata_oid_index"`, the
+    target already holding what an earlier move had carried). One the
+    source does not have is left as it is."""
+    s, t = hop.source, hop.target
+    ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
+    got = _sh(["psql", "-h", s.host, "-p", str(s.port), "-U", s.user,
+               "-d", db, "-X", "-At", "-c",
+               "select coalesce(string_agg(oid::text, ','), '') from"
+               " pg_largeobject_metadata"],
+              {**s.libpq_env(), "PGPASSWORD": s.password,
+               "PGCONNECT_TIMEOUT": "15"}).stdout.strip()
+    if not got:
+        return
+    _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user, "-d", ddb,
+         "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c",
+         "select count(lo_unlink(oid)) from pg_largeobject_metadata where"
+         f" oid = any('{{{got}}}'::oid[])"], env_t, log)
 
 
 PG_INDEX_SQL = """
@@ -684,7 +745,8 @@ PG_INDEX_NAMES_SQL = """
 def _pg_psql(hop, db, sql, log=None):
     t = hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
-    env = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    env = {**t.libpq_env(),
+           "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
     return _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
                 "-d", ddb, "-X", "-At", "-v", "ON_ERROR_STOP=1",
                 "-c", sql], env, log).stdout
@@ -745,6 +807,15 @@ def _rebuild(names, build, workers, log):
     return rebuilt, failed
 
 
+#: one window at a time takes over what a dead load set aside
+_SET_ASIDE_CLAIM = threading.Lock()
+
+
+def _before_last(sql, anchor, text):
+    at = sql.rindex(anchor)
+    return sql[:at] + text + sql[at:]
+
+
 class _IndexWindow:
     """Drop the target's secondary indexes for a load and put them back.
 
@@ -758,16 +829,24 @@ class _IndexWindow:
     slower way.
     """
 
-    def __init__(self, hop, db, workers, log):
+    def __init__(self, hop, db, workers, log, table=None, only_left=False):
         from .setaside import SetAside
         self.hop, self.db, self.workers, self.log = hop, db, workers, log
+        self.table, self.only_left = table, only_left
         self.dropped, self.ddl = [], {}
         self.record = SetAside(hop, db, "dropped-indexes")
 
     def __enter__(self):
         from . import indexes as _ix
+        sql = PG_INDEX_SQL
+        if self.table:
+            sch, tbl = self.table
+            sql = _before_last(sql, "order by 1",
+                               f"and n.nspname = {_pg_literal(sch)} and"
+                               f" tb.relname = {_pg_literal(tbl)}\n     ")
         try:
-            raw = _pg_psql(self.hop, self.db, PG_INDEX_SQL)
+            raw = ("" if self.only_left
+                   else _pg_psql(self.hop, self.db, sql))
             there = set(_pg_psql(self.hop, self.db, PG_INDEX_NAMES_SQL
                                  ).split())
         except Exception:
@@ -785,17 +864,27 @@ class _IndexWindow:
         rows = [(f"{t.split('.', 1)[0]}.{name}", definition, isc)
                 for t, name, definition, isc in
                 _outside_exclusion(self.hop, self.db, found, self.log)]
+        if self.table:
+            # one table's copy: an index that makes its rows unique stays -
+            # a copier may find rows by it, and a load that let a duplicate
+            # in would find out only at the rebuild
+            rows = [r for r in rows
+                    if not r[1].upper().startswith("CREATE UNIQUE ")]
         drop, ddl = _ix.plan(rows)
         # what a load that died dropped and the target still lacks: built
-        # at the end of this one, with the rest
-        left, stale = self.record.left_behind(there)
-        if not drop and not left:
-            return self
-        if not self.record.save({**left, **ddl}, stale):
-            if self.log:
-                self.log("could not save the index definitions, so none were"
-                         " dropped - the load runs with them in place")
-            return self
+        # at the end of this one, with the rest. Claimed under a lock: two
+        # tables copied side by side each found the dead load's record and
+        # both built its indexes, and the second build failed on the first
+        with _SET_ASIDE_CLAIM:
+            left, stale = self.record.left_behind(there)
+            if not drop and not left:
+                return self
+            if not self.record.save({**left, **ddl}, stale):
+                if self.log:
+                    self.log("could not save the index definitions, so none"
+                             " were dropped - the load runs with them in"
+                             " place")
+                return self
         where = self.record.path
         self.dropped, self.ddl = list(left), dict(left)
         if left and self.log:
@@ -824,7 +913,9 @@ class _IndexWindow:
             self.dropped, lambda name: _pg_psql(self.hop, self.db,
                                                 self.ddl[name]),
             self.workers, self.log)
-        if self.log:
+        # a table's own window, or one that only looked for what a dead
+        # load left, says something only where it did something
+        if self.log and (self.dropped or not (self.table or self.only_left)):
             self.log(_ix.summary(self.dropped, rebuilt, failed))
         if not failed:
             self.record.done()
@@ -888,7 +979,8 @@ def pgdump_move(hop, db, workers, go, log):
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
         raise _unresolved_exclusion(db, unresolved)
-    env_t = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    env_t = {**t.libpq_env(),
+             "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
     from .engines.postgres import PostgresEngine
     quiet = _pg_quiet_triggers(
         hop, db, [n for n in PostgresEngine(hop)._all_tables("src", db)
@@ -900,7 +992,7 @@ def pgdump_move(hop, db, workers, go, log):
     with _LocalCopy(outdir):
         if log:
             log(dump)
-        _sh(dump.argv, {"PGPASSWORD": s.password,
+        _sh(dump.argv, {**s.libpq_env(), "PGPASSWORD": s.password,
                         "PGCONNECT_TIMEOUT": "15"},
             log, progress=_tables_done(PG_DUMP_TABLE, "read"))
         _pg_create_missing(hop, db, log)
@@ -1120,10 +1212,12 @@ def _pg_schema(hop, db, section, tables, whole, log=None):
             "-d", hop.target_db(db), f"--section={section}", "--no-owner",
             "--no-privileges", str(out)]
     try:
-        _sh(dump, {"PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
+        _sh(dump, {**s.libpq_env(),
+                   "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
         # a target with no tables can still have the schemas, types or
         # extensions someone made ready for it; those are left as they are
-        _restore(load, {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"},
+        _restore(load, {**t.libpq_env(),
+                        "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"},
                  log, "the schema", existing_ok=True)
     finally:
         out.unlink(missing_ok=True)
@@ -1236,7 +1330,8 @@ def _pg_quiet_triggers(hop, db, tables):
     t = hop.target
     ask = ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
            "-d", hop.target_db(db), "-X", "-At", "-v", "ON_ERROR_STOP=1"]
-    env = {"PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+    env = {**t.libpq_env(),
+           "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
     if _sh(ask + ["-c", "select rolsuper from pg_roles"
                         " where rolname = current_user"],
            env).stdout.strip() == "t":
@@ -1475,10 +1570,12 @@ class _MyIndexWindow:
     out whether the load worked or raised.
     """
 
-    def __init__(self, engine, hop, db, workers, log):
+    def __init__(self, engine, hop, db, workers, log, table=None,
+                 only_left=False):
         from .setaside import SetAside
         self.eng, self.hop, self.db = engine, hop, db
         self.workers, self.log = workers, log
+        self.table, self.only_left = table, only_left
         self.dropped, self.ddl = [], {}
         self.record = SetAside(hop, db, "dropped-indexes")
 
@@ -1487,7 +1584,8 @@ class _MyIndexWindow:
         ddb = self.hop.target_db(self.db) if hasattr(self.hop, "target_db") \
             else self.db
         try:
-            rows = self.eng._q("dst", MY_INDEX_SQL, (ddb,))
+            rows = ([] if self.only_left
+                    else self.eng._q("dst", MY_INDEX_SQL, (ddb,)))
             there = {f"{t}.{n}" for t, n in self.eng._q(
                 "dst", "select distinct table_name, index_name from"
                        " information_schema.statistics"
@@ -1496,6 +1594,10 @@ class _MyIndexWindow:
             return self
         rows = _outside_exclusion(self.hop, self.db, list(rows), self.log,
                                   qualifier=self.db)
+        if self.table:
+            # one table's copy, and its unique indexes stay (as PostgreSQL's)
+            rows = [r for r in rows
+                    if r[0] == self.table and not int(r[3] or 0)]
         triples = []
         for tbl, name, cols, is_unique, backs_fk in rows:
             key = f"{tbl}.{name}"
@@ -1516,14 +1618,16 @@ class _MyIndexWindow:
         drop, ddl = _ix.plan(triples)
         # what a load that died dropped and the target still lacks: built
         # at the end of this one, with the rest
-        left, stale = self.record.left_behind(there)
-        if not drop and not left:
-            return self
-        if not self.record.save({**left, **ddl}, stale):
-            if self.log:
-                self.log("could not save the index definitions, so none were"
-                         " dropped - the load runs with them in place")
-            return self
+        with _SET_ASIDE_CLAIM:
+            left, stale = self.record.left_behind(there)
+            if not drop and not left:
+                return self
+            if not self.record.save({**left, **ddl}, stale):
+                if self.log:
+                    self.log("could not save the index definitions, so none"
+                             " were dropped - the load runs with them in"
+                             " place")
+                return self
         where = self.record.path
         self.dropped, self.ddl = list(left), dict(left)
         if left and self.log:
@@ -1547,10 +1651,26 @@ class _MyIndexWindow:
 
     def __exit__(self, *exc):
         from . import indexes as _ix
-        rebuilt, failed = _rebuild(
-            self.dropped, lambda key: self.eng._q("dst", self.ddl[key]),
+        # a table's indexes in one statement: InnoDB reads the table once
+        # for all of them, where an ALTER each read it once each and waited
+        # on the one before for the table's lock
+        tables = {}
+        for key in self.dropped:
+            head, _, part = self.ddl[key].partition(" ADD INDEX ")
+            tables.setdefault(head, []).append((key, part))
+        together, apart = _rebuild(
+            list(tables), lambda head: self.eng._q(
+                "dst", head + " " + ", ".join(
+                    f"ADD INDEX {part}" for _, part in tables[head])),
+            self.workers, None)
+        rebuilt = [key for head in together for key, _ in tables[head]]
+        # where the one statement failed, one at a time, to say which
+        more, failed = _rebuild(
+            [key for head in apart for key, _ in tables[head]],
+            lambda key: self.eng._q("dst", self.ddl[key]),
             self.workers, self.log)
-        if self.log:
+        rebuilt += more
+        if self.log and (self.dropped or not (self.table or self.only_left)):
             self.log(_ix.summary(self.dropped, rebuilt, failed))
         if not failed:
             self.record.done()
@@ -2678,18 +2798,26 @@ def pgcopydb_move(hop, db, workers, go, log):
             if routed:
                 filters_note += "\n" + _routed_note(routed)
     uris = {}
+    resume = False
     if how == "local":
-        # its own directory per run. pgcopydb keeps its state - including the
-        # exported snapshot - under /tmp/pgcopydb by default, so a second run
-        # finds the first one's snapshot and dies on it: measured,
-        # `FATAL Failed to use given --snapshot "00000003-00000048-1"`. The
-        # container path never hit this because each container brought its
-        # own filesystem; the binary shares the host's.
-        import tempfile
-        work = tempfile.mkdtemp(prefix="migkit-pgcopydb-")
+        # its own directory for the hop's database, kept under its reports
+        # while a copy is under way. pgcopydb keeps its state - including
+        # the exported snapshot - under /tmp/pgcopydb by default, so a second
+        # run found the first one's snapshot and died on it: measured,
+        # `FATAL Failed to use given --snapshot "00000003-00000048-1"`. Kept
+        # here instead, a copy that was stopped goes on from the tables it
+        # had finished (`--resume`), where it used to start over. The rest
+        # comes from a new snapshot (`--not-consistent`): the snapshot the
+        # first run copied from ended with it, and the rows copied before
+        # and after it can disagree across tables - which is why the move
+        # compares the whole result with the source before it is complete.
+        work, begun = _streaming_work(hop, db)
+        resume = go and begun.exists()
         cmd = ["pgcopydb", "copy", "table-data",
-               "--table-jobs", str(workers), "--dir", work,
+               "--table-jobs", str(workers), "--dir", str(work),
                "--source", src, "--target", dst]
+        if resume:
+            cmd += ["--resume", "--not-consistent"]
         if filters_path:
             cmd += ["--filters", str(filters_path)]
     else:
@@ -2772,16 +2900,39 @@ def pgcopydb_move(hop, db, workers, go, log):
 
     try:
         _pg_create_missing(hop, db, log)
-        _pg_truncate_target(hop, db, log)
+        if resume:
+            # what the stopped copy put in is what it goes on from
+            if log:
+                log("an earlier streaming copy of this database stopped part"
+                    " way; going on from the tables it finished")
+        else:
+            _pg_truncate_target(hop, db, log)
+            if how == "local":
+                import shutil
+                shutil.rmtree(work, ignore_errors=True)
+                work.mkdir(parents=True)
+                begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
         with _IndexWindow(hop, db, workers, log):
             if log:
                 log(copy)
             _sh(copy.argv, env)
     finally:
         passfile.unlink(missing_ok=True)
+    if how == "local":
+        # finished: nothing to go on from next time
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
+        begun.unlink(missing_ok=True)
     _pg_finish_created(hop, db, log)
     _pg_carry_sequences(hop, db, log)
     return steps
+
+
+def _streaming_work(hop, db):
+    """(the streaming copy's working directory, the file saying a copy
+    into it began and has not finished) for the hop's database."""
+    base = hop.report_dir(db)
+    return base / "streaming-work", base / "streaming-work.begun"
 
 
 def _pgpass(path, hop, db, ddb):
@@ -2881,16 +3032,17 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
            f"@{s.host}:{s.port}/{db}")
     dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
            f"@{t.host}:{t.port}/{hop.target_db(db)}")
-    shown = (f"pgcopydb follow --dir {d} --slot-name {slot}"
-             f" --create-slot --origin {origin} --plugin pgoutput"
-             " --not-consistent")
+    argv = ["pgcopydb", "follow", "--dir", str(d), "--slot-name", slot,
+            "--create-slot", "--origin", origin, "--plugin", "pgoutput",
+            "--not-consistent"]
     steps = [
-        shown,
-        f"pgcopydb stream sentinel set apply --dir {d}"
+        f"read the changes through slot {slot} and apply them on the"
+        f" target under origin {origin}",
+        "tell the leg to apply as soon as it is ready"
         "   (without this nothing is ever applied)",
-        f"pgcopydb stream sentinel set endpos --current --dir {d}"
+        "end it at the source's position of that moment"
         "   (the provable stop)",
-        f"state kept in {d} - the source releases WAL as soon as pgcopydb"
+        f"state kept in {d} - the source releases WAL as soon as the leg"
         " has written it there, so that directory is the only copy until"
         " the target has it",
         f"changes from before the slot {slot} existed are not carried;"
@@ -2908,13 +3060,11 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     d.mkdir(parents=True, exist_ok=True)
     env = tool_env({"PGCOPYDB_SOURCE_PGURI": src, "PGCOPYDB_TARGET_PGURI": dst})
     out = d / "follow.log"
+    _debug(argv, env)
     if log:
-        log(shown)
+        log(steps[0])
     with out.open("ab") as fh:
-        proc = _sp.Popen(
-            ["pgcopydb", "follow", "--dir", str(d), "--slot-name", slot,
-             "--create-slot", "--origin", origin, "--plugin", "pgoutput",
-             "--not-consistent"], stdout=fh, stderr=fh, env=env)
+        proc = _sp.Popen(argv, stdout=fh, stderr=fh, env=env)
     try:
         _follow_sentinel(d, env, proc, log)
         limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
@@ -3377,7 +3527,8 @@ def stream_status(name, port=8083):
 def _movers():
     return {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
             "mydumper": mydumper_move, "pgloader": pgloader_move,
-            "mongodump": mongodump_move, "mongosync": mongosync_move}
+            "mongodump": mongodump_move, "mongosync": mongosync_move,
+            "native": native_move}
 
 
 #: the programs each bulk path runs, in the order it runs them
@@ -3386,7 +3537,8 @@ PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
             "mydumper": ("mydumper", "myloader"),
             "pgloader": ("pgloader",),
             "mongodump": ("mongodump", "mongorestore"),
-            "mongosync": ("mongosync",)}
+            "mongosync": ("mongosync",),
+            "native": ()}
 #: how a report names them: never by the program's own name
 ROLES = ("dump program", "load program")
 #: the builds each program was measured with here (backlog 46)

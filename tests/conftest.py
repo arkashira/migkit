@@ -82,6 +82,8 @@ do $$ declare r record; begin
            join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.prokind in ('f', 'p')
   loop execute 'drop routine if exists '||r.f||' cascade'; end loop;
+  -- large objects too: a whole-database move carries them now
+  perform lo_unlink(oid) from pg_largeobject_metadata;
 end $$;
 """
 

@@ -30,6 +30,9 @@ def lite(tmp_path, monkeypatch):
         "    databases: [main]\n")
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
+    # the table copier, whose steps the alteration is timed between; a
+    # whole SQLite file otherwise moves inside SQLite itself
+    monkeypatch.setenv("MIGKIT_MOVER", "builtin")
     return src
 
 

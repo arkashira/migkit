@@ -58,6 +58,12 @@ CONF = _find("MIGKIT_CONF", "hops.yaml", "conf")
 REPORTS = _reports_root()
 
 
+#: tables migkit keeps on a side for itself - a two-way tail's origin
+#: marks (`twoway`) - never copied, compared or repaired as the
+#: application's
+MIGKIT_OWN = ("migkit_origin",)
+
+
 @dataclass
 class Endpoint:
     host: str = ""
@@ -69,6 +75,46 @@ class Endpoint:
     def configured(self):
         return bool(self.host or self.options.get("hosts")
                     or self.options.get("path") or self.options.get("url"))
+
+    #: a PostgreSQL connection's TLS from the endpoint's options, under
+    #: libpq's own names: `sslmode` (verify-full checks the certificate and
+    #: the name on it), `sslrootcert`, `sslcert`, `sslkey`, `sslcrl`. Left
+    #: out, libpq prefers TLS where the server offers it and checks nothing
+    LIBPQ_TLS = ("sslmode", "sslrootcert", "sslcert", "sslkey", "sslcrl")
+
+    def libpq_tls(self):
+        return {k: str(self.options[k]) for k in self.LIBPQ_TLS
+                if self.options.get(k)}
+
+    def libpq_env(self):
+        """The same, as the environment every program on libpq reads."""
+        return {"PG" + k.upper(): v for k, v in self.libpq_tls().items()}
+
+    def mysql_tls(self):
+        """A MySQL connection's TLS from the endpoint's options: `ssl_ca`
+        (the authority that signed the server's certificate, which is then
+        checked, and the name on it unless `ssl_verify_identity: false`),
+        `ssl_cert` and `ssl_key` (a client certificate), or `ssl: true` for
+        TLS with nothing checked. Left out, the client takes TLS where the
+        server offers it and checks nothing (measured on 8.4)."""
+        o = self.options
+        if o.get("ssl_ca"):
+            out = {"ssl_ca": str(o["ssl_ca"]), "ssl_verify_cert": True,
+                   "ssl_verify_identity": bool(o.get("ssl_verify_identity",
+                                                     True))}
+            out.update({k: str(o[k]) for k in ("ssl_cert", "ssl_key")
+                        if o.get(k)})
+            return out
+        if o.get("ssl"):
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            if o.get("ssl_cert"):
+                ctx.load_cert_chain(str(o["ssl_cert"]),
+                                    str(o.get("ssl_key") or "") or None)
+            return {"ssl": ctx}
+        return {}
 
 
 class IamEndpoint(Endpoint):
@@ -132,6 +178,13 @@ class Hop:
     options: dict = field(default_factory=dict)
     db_map: dict = field(default_factory=dict)
     mapping: dict = field(default_factory=dict)
+    #: whether the hop set `workers` itself - then it is a ceiling the
+    #: sizing never passes (`sizing.estimate`); otherwise migkit works the
+    #: number out. A hop read from the configuration without `workers` is
+    #: not set; one made in code with a number is
+    workers_set: bool = True
+    #: the most the pace of a move may reach, set by `sizing.fit`
+    workers_most: int = 0
 
     def reversed(self):
         """The same hop run the other way: the target as the source, the
@@ -151,7 +204,10 @@ class Hop:
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
         d.mkdir(parents=True, exist_ok=True)
-        return d
+        # the files under it that hold values encrypted, where the hop
+        # names who may read them (`evidence`)
+        from . import evidence
+        return evidence.report_path(self, d)
 
     def target_db(self, db):
         """Target database name for a source db. Migrations often land in a
@@ -172,6 +228,9 @@ class Hop:
         being deleted by a reconcile."""
         from fnmatch import fnmatch
         parts = [str(p) for p in parts if p not in (None, "")]
+        if parts and parts[-1] in MIGKIT_OWN:
+            # migkit's own bookkeeping on a side, never the application's
+            return True
         cands = {".".join(parts[i:]) for i in range(len(parts))}
         return any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands)
 
@@ -415,6 +474,7 @@ def load_hops(path=None):
             options=raw.get("options") or {},
             db_map=raw.get("db_map") or {},
             mapping=raw.get("mapping") or {},
+            workers_set="workers" in raw,
         )
     return hops
 

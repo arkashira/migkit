@@ -18,7 +18,9 @@ class KafkaEngine(Engine):
 
     #: how a cluster is signed in to, as the endpoint's options say it
     SECURITY = ("PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL")
-    MECHANISMS = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512")
+    #: AWS_MSK_IAM signs in to Amazon MSK with the machine's AWS
+    #: credentials (the client signs the request itself, over SASL_SSL)
+    MECHANISMS = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512", "AWS_MSK_IAM")
 
     def _connection(self, side):
         """What every client of a side is given: where the cluster is, and
@@ -46,8 +48,14 @@ class KafkaEngine(Engine):
             if mech not in self.MECHANISMS:
                 raise SystemExit(f"sasl_mechanism: {mech} is not one of"
                                  f" {', '.join(self.MECHANISMS)}")
-            out.update(sasl_mechanism=mech, sasl_plain_username=ep.user,
-                       sasl_plain_password=ep.password)
+            if mech == "AWS_MSK_IAM":
+                if protocol != "SASL_SSL":
+                    raise SystemExit("sasl_mechanism: AWS_MSK_IAM signs in"
+                                     " over SASL_SSL only")
+                out.update(sasl_mechanism=mech)
+            else:
+                out.update(sasl_mechanism=mech, sasl_plain_username=ep.user,
+                           sasl_plain_password=ep.password)
         if ep.options.get("ssl_cafile"):
             out["ssl_cafile"] = ep.options["ssl_cafile"]
         return out
@@ -108,6 +116,8 @@ class KafkaEngine(Engine):
         to one partition."""
         from .. import streamout
         self._target_only(side, "write a change stream")
+        if streamout.options(self.hop)[0] == "avro":
+            return self._apply_avro(db, changes)
         sent, skipped = streamout.encoded(self.hop, db, changes,
                                           int(time.time() * 1000))
         producer = self._producer()
@@ -119,6 +129,81 @@ class KafkaEngine(Engine):
             producer.close()
         self._count_skipped(db, skipped)
         return len(changes)
+
+    def _registry(self, side):
+        """The schema registry a side's endpoint names, one a side for the
+        engine's life (its cache of schemas and ids with it)."""
+        from .. import registry
+        held = self.__dict__.setdefault("_registries", {})
+        if side not in held:
+            held[side] = registry.of(self.hop.source if side == "src"
+                                     else self.hop.target)
+        return held[side]
+
+    def _apply_avro(self, db, changes):
+        """The changes as Avro through the target's registry, in Debezium's
+        envelope (`avrostream`), a tombstone after each delete unless the
+        hop says `tombstones: false`."""
+        from .. import avrostream, registry, streamout
+        reg = self._registry("dst")
+        if reg is None:
+            raise SystemExit("format: avro needs the target's"
+                             " `schema_registry` - the URL of the registry"
+                             " its consumers read schemas from")
+        enc = self.__dict__.setdefault("_avro", avrostream.Encoder(reg))
+        _, rule, _, most = streamout.options(self.hop)
+        keep = (self.hop.options or {}).get("tombstones", True)
+        now = int(time.time() * 1000)
+        producer = self._producer()
+        skipped = {}
+        try:
+            for c in changes:
+                topic = rule.format(db=db, table=c["table"])
+                try:
+                    out = enc.encode(topic, db, c, now, tombstones=keep)
+                except registry.Refused as e:
+                    raise SystemExit(
+                        f"{topic}: the schema registry refused the table's"
+                        " new schema - its compatibility rule says the"
+                        f" consumers of the topic could not read it: {e}")
+                for key, value in out:
+                    if value is not None and len(value) > most:
+                        skipped[topic] = skipped.get(topic, 0) + 1
+                        continue
+                    producer.send(topic, value=value, key=key)
+            producer.flush()
+        finally:
+            producer.close()
+        self._count_skipped(db, skipped)
+        return len(changes)
+
+    def _as_compared(self, side, raw):
+        """A message's bytes as two clusters' copies of it compare: where
+        the side has a registry, the schema's id - which each registry
+        numbers its own way - stands as the schema's fingerprint."""
+        from .. import registry
+        reg = self._registry(side) if raw else None
+        frame = registry.frame_of(raw) if reg is not None else None
+        if frame is None:
+            return raw
+        return reg.fingerprint(frame[0]).encode() + frame[1]
+
+    def _translated(self, topic, part, raw):
+        """A message framed by the source's registry, framed again by the
+        target's: its schema registered there under the same subject and
+        its id changed to the one the target gave. The body is untouched.
+        Without it a copy between clusters with registries of their own
+        carries ids the target's consumers look up in the wrong
+        registry."""
+        from .. import registry
+        src, dst = self._registry("src"), self._registry("dst")
+        frame = (registry.frame_of(raw) if src is not None and dst is not None
+                 else None)
+        if frame is None:
+            return raw
+        sid, body = frame
+        return registry.framed(dst.register(f"{topic}-{part}",
+                                            src.schema(sid)), body)
 
     def _count_skipped(self, db, skipped):
         from .. import streamout
@@ -271,10 +356,13 @@ class KafkaEngine(Engine):
                         if ahead > 0:
                             ahead -= 1
                         else:
-                            producer.send(topic, value=m.value, key=m.key,
-                                          headers=list(m.headers or []),
-                                          partition=p,
-                                          timestamp_ms=m.timestamp)
+                            producer.send(
+                                topic,
+                                value=self._translated(topic, "value",
+                                                       m.value),
+                                key=self._translated(topic, "key", m.key),
+                                headers=list(m.headers or []),
+                                partition=p, timestamp_ms=m.timestamp)
                             sent += 1
                         pst["copied"] += 1
                         done += 1
@@ -446,15 +534,25 @@ class KafkaEngine(Engine):
                        .get("parts", {}).get(p, {}).get("next", -1)) >= want
                    for topic, parts in at.items()
                    for p, want in parts.items()):
+                # where the confirm pass compares up to
+                self._fenced_at = at
                 return True
             time.sleep(1)
         return False
+
+    #: topics a cluster keeps for itself: the broker's own (`__`), a schema
+    #: registry's store (`_schemas`), Confluent's and Redpanda's. Copied, a
+    #: registry's store overwrote the target registry's schemas - measured
+    #: between two clusters with registries of their own, and the check then
+    #: compared the two registries' stores as data. A copy carries the
+    #: schemas its messages use by registering them (`_translated`)
+    INTERNAL = ("__", "_schemas", "_confluent", "_redpanda")
 
     def _topics(self, consumer):
         """Every topic migkit verifies: internal ones and the ones the hop
         excludes left out. This engine used to ignore `exclude`."""
         return sorted(t for t in consumer.topics()
-                      if not t.startswith("__")
+                      if not t.startswith(self.INTERNAL)
                       and not self.hop.excluded("cluster", t))
 
     def _partitions(self, consumer, topic):
@@ -464,6 +562,33 @@ class KafkaEngine(Engine):
         from kafka.admin import KafkaAdminClient
         return self._signed_in(side, lambda: KafkaAdminClient(
             **self._connection(side), request_timeout_ms=15000))
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Where the target stood before a repair: each topic's partition
+        ends, every consumer group's committed offsets and the topics'
+        settings. A message cannot be taken back out of a log; what a
+        rollback puts back is where the groups read from, and the ends say
+        which messages came after."""
+        import json
+
+        from kafka import TopicPartition
+        consumer = self._consumer("dst")
+        try:
+            topics = self._topics(consumer)
+            tps = [TopicPartition(t, p) for t in topics
+                   for p in self._partitions(consumer, t)]
+            ends = consumer.end_offsets(tps) if tps else {}
+        finally:
+            consumer.close()
+        groups = {g: {f"{tp.topic}[{tp.partition}]": off for tp, off
+                      in sorted(self._group_offsets("dst", g).items())}
+                  for g in sorted(self._groups("dst"))}
+        (state_dir / "dst-offsets.json").write_text(json.dumps({
+            "ends": {f"{tp.topic}[{tp.partition}]": off
+                     for tp, off in sorted(ends.items())},
+            "groups": groups,
+            "configs": self._topic_configs("dst", topics) if topics else {},
+        }, indent=2, sort_keys=True, default=str))
 
     # semantics-critical topic configs: a cleanup.policy or retention
     # mismatch silently changes what the topic MEANS on the target
@@ -738,9 +863,9 @@ class KafkaEngine(Engine):
     #: time, looking for that message, at most
     TRANSLATE_SCAN = 1000
 
-    @staticmethod
-    def _message_at(consumer, tp, offset):
-        """(time, key, value) of the message at `offset`, or None."""
+    def _message_at(self, consumer, tp, offset, side="src"):
+        """(time, key, value) of the message at `offset`, or None - key and
+        value as they compare across clusters (`_as_compared`)."""
         consumer.assign([tp])
         consumer.seek(tp, offset)
         end = time.time() + 15
@@ -748,10 +873,12 @@ class KafkaEngine(Engine):
             for msgs in consumer.poll(timeout_ms=2000).values():
                 for m in msgs:
                     if m.offset >= offset:
-                        return (m.timestamp, m.key, m.value)
+                        return (m.timestamp,
+                                self._as_compared(side, m.key),
+                                self._as_compared(side, m.value))
         return None
 
-    def _find(self, consumer, tp, message):
+    def _find(self, consumer, tp, message, side="dst"):
         """The target's offset of `message`: from the first offset at its
         time, the first message with its key and value. None where it is
         not there within `TRANSLATE_SCAN` messages."""
@@ -769,7 +896,8 @@ class KafkaEngine(Engine):
             for msgs in batch.values():
                 for m in msgs:
                     seen += 1
-                    if m.key == key and m.value == value:
+                    if (self._as_compared(side, m.key) == key
+                            and self._as_compared(side, m.value) == value):
                         return m.offset
         return None
 
@@ -1038,8 +1166,8 @@ class KafkaEngine(Engine):
             for p in parts:
                 tp = TopicPartition(t, p)
                 with gate.unit():
-                    a, ea = self._tail_hash(sc, tp, sample)
-                    b, eb = self._tail_hash(dc, tp, sample)
+                    a, ea = self._tail_hash(sc, tp, sample, "src")
+                    b, eb = self._tail_hash(dc, tp, sample, "dst")
                 if ea or eb:
                     for side, err in (("source", ea), ("target", eb)):
                         if err:
@@ -1052,6 +1180,8 @@ class KafkaEngine(Engine):
                     stream(f"{t}[{p}]: {'ok' if a == b else 'DIFF'}")
                 if a != b:
                     bad.append(f"{t}[{p}]")
+        healed = self._confirmed(db, bad, stream) if bad else []
+        bad = [b for b in bad if b not in healed]
         res = []
         if unread:
             named = "; ".join(f"{t}[{p}] {why}" if p is not None
@@ -1077,8 +1207,30 @@ class KafkaEngine(Engine):
         elif not res:
             res.append(Result("data", "tail-sample", "ok",
                               f"last {sample} messages hash-equal on"
-                              f" {checked} partitions"))
+                              f" {checked} partitions"
+                              + (f"; {', '.join(healed)} differed while"
+                                 " their changes were still arriving"
+                                 if healed else "")))
         return res
+
+    def _confirmed(self, db, bad, stream=None):
+        """The partitions of `bad` (`topic[p]`) that were only behind: where
+        a tail is running, it is waited on to reach the source's end and
+        each differing partition compared again (the base's confirm pass);
+        with none, what the hop's `settle` allows."""
+        per = {}
+        for b in bad:
+            t, p = b[:-1].rsplit("[", 1)
+            per.setdefault(t, []).append(p)
+        for t, parts in per.items():
+            self._write_pk_files(db, self.DRILL + t, [], [], parts)
+        _, healed, _ = self._resolve_inflight(
+            db, [self.DRILL + t for t in per], stream)
+        out = []
+        for name in healed:
+            t = name[len(self.DRILL):]
+            out += [f"{t}[{p}]" for p in per[t]]
+        return out
 
     def _why_unreadable(self, unread):
         """Turn the client's exception into what the cluster says is wrong.
@@ -1134,7 +1286,7 @@ class KafkaEngine(Engine):
                                 f" replicas {replicas}")
         return out
 
-    def _tail_hash(self, consumer, tp, n):
+    def _tail_hash(self, consumer, tp, n, side=None):
         """(digest, error) for the last n messages of one partition.
 
         The error is handed back rather than folded into the digest. It used
@@ -1157,9 +1309,16 @@ class KafkaEngine(Engine):
             text = str(e)[:80] or repr(e)
             name = type(e).__name__
             return None, text if text.startswith(name) else f"{name}: {text}"
-        start = max(beg, end - n)
+        return self._window_hash(consumer, tp, max(beg, end - n), end,
+                                 side), ""
+
+    def _window_hash(self, consumer, tp, start, end, side=None):
+        """`count|digest` of the messages of one partition from `start` up
+        to, not including, `end` - key and value as they compare across
+        clusters when `side` is given."""
         if start >= end:
-            return "empty", ""
+            return "empty"
+        consumer.assign([tp])
         consumer.seek(tp, start)
         h = hashlib.md5()
         got = 0
@@ -1171,10 +1330,90 @@ class KafkaEngine(Engine):
                 for m in msgs:
                     if m.offset >= end:
                         break
-                    h.update(m.key or b"")
-                    h.update(m.value or b"")
+                    h.update(self._as_compared(side, m.key) or b""
+                             if side else m.key or b"")
+                    h.update(self._as_compared(side, m.value) or b""
+                             if side else m.value or b"")
                     got += 1
-        return f"{got}|{h.hexdigest()}", ""
+        return f"{got}|{h.hexdigest()}"
+
+    # --- the confirm pass (base `fenced_recheck`) ---------------------------
+    #: the drilldown of a topic's differing partitions is named apart from
+    #: the consumer groups' own (`data-groups.*`), which a topic called
+    #: `groups` would otherwise have written over
+    DRILL = "topic-"
+
+    def _compare_pks(self, db, table, keys):
+        """(missing, extra, changed) among these partitions of one topic,
+        read again now: the source's last `sample` messages up to where the
+        fence stood (its end now, without one), against the target's
+        messages ending at the same message - found by its time, key and
+        value, since offsets do not line up across clusters. What the
+        target holds past that message must be what the source wrote after
+        it, in order: a message the source never wrote is found there, not
+        left outside the window. A partition whose last source message is
+        not on the target is missing."""
+        from kafka import TopicPartition
+        topic = table[len(self.DRILL):]
+        sample = int(self.hop.options.get("sample", 200))
+        at = (getattr(self, "_fenced_at", None) or {}).get(topic, {})
+        sc, dc = self._consumer("src"), self._consumer("dst")
+        missing, extra, changed = [], [], []
+        try:
+            for p in sorted(keys, key=int):
+                tp = TopicPartition(topic, int(p))
+                beg = sc.beginning_offsets([tp])[tp]
+                end = int(at.get(str(p), sc.end_offsets([tp])[tp]))
+                if end <= beg:
+                    if dc.end_offsets([tp])[tp] > \
+                            dc.beginning_offsets([tp])[tp]:
+                        extra.append(p)
+                    continue
+                last = self._message_at(sc, tp, end - 1)
+                found = self._find(dc, tp, last) if last else None
+                if found is None:
+                    missing.append(p)
+                    continue
+                dbeg = dc.beginning_offsets([tp])[tp]
+                a = self._window_hash(sc, tp, max(beg, end - sample), end,
+                                      "src")
+                b = self._window_hash(dc, tp, max(dbeg, found + 1 - sample),
+                                      found + 1, "dst")
+                after = self._messages(dc, tp, found + 1, sample, "dst")
+                if a != b or (after and self._messages(
+                        sc, tp, end, len(after), "src") != after):
+                    changed.append(p)
+        finally:
+            sc.close()
+            dc.close()
+        return missing, extra, changed
+
+    def _messages(self, consumer, tp, start, most, side):
+        """Up to `most` messages of one partition from `start` to its end
+        now, as (key, value) as they compare across clusters. Read by
+        message, not by offset: a transaction's marker takes an offset and
+        is never handed to a reader."""
+        end = consumer.end_offsets([tp])[tp]
+        if start >= end or most <= 0:
+            return []
+        consumer.assign([tp])
+        consumer.seek(tp, start)
+        out = []
+        while len(out) < most:
+            batch = consumer.poll(timeout_ms=3000)
+            if not batch:
+                break
+            for msgs in batch.values():
+                out += [(self._as_compared(side, m.key),
+                         self._as_compared(side, m.value))
+                        for m in msgs if m.offset < end]
+            if msgs and msgs[-1].offset >= end - 1:
+                break
+        return out[:most]
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        self._write_drill(db, table, missing=missing, extra=extra,
+                          changed=changed)
 
     def delta_verify(self, db, limit=20000, log=None):
         """Offset-based delta: track each partition's end offset; the new
@@ -1250,8 +1489,8 @@ class KafkaEngine(Engine):
             total += n
             t, p = key.rsplit("/", 1)
             tp = TopicPartition(t, int(p))
-            a, ea = self._tail_hash(sc, tp, min(n, limit))
-            b, eb = self._tail_hash(dc, tp, min(n, limit))
+            a, ea = self._tail_hash(sc, tp, min(n, limit), "src")
+            b, eb = self._tail_hash(dc, tp, min(n, limit), "dst")
             if ea or eb:
                 # the baseline must not move past changes nobody could read:
                 # those messages would never be looked at again, and the next

@@ -698,18 +698,59 @@ The table copier, the path for everything a native mover does not carry
   checks the current one (13.6 s to 10.8 s for a million rows MySQL to
   PostgreSQL), writes into PostgreSQL through COPY, and converts only the
   columns that can need it
-* measured and not kept: setting secondary indexes aside for the table
-  copier (PostgreSQL 7.1 s to 6.8 s, MySQL 13.7 s to 15.6 s - worse), and
-  loading MySQL through `LOAD DATA LOCAL` (36% faster writes, but the
-  client setting it needs lets the server ask for any file on the
-  machine). Rebuilding the indexes the bulk paths set aside now runs side
-  by side.
+* a table copied from its start goes in with its secondary indexes set
+  aside and built once after, in the PostgreSQL copier, the MySQL one and
+  the copier every pair shares (`Engine.table_index_window`, decided in
+  one place, `set_aside_indexes`). A million rows into a table with three
+  secondary indexes: PostgreSQL 7.46 s to 4.42 s in one range and 6.52 s
+  to 3.82 s in four; MySQL 11.62 s to 10.45 s and 8.17 s to 6.57 s. A
+  first measurement had MySQL slower with the window (13.7 s to 15.6 s):
+  its indexes were built back one statement each, each reading the table
+  and waiting on the one before for its lock - they are now built in one
+  statement a table. Unique indexes stay, a range already copied keeps
+  them, and a copy killed with them off leaves a record the next move
+  builds from, whichever tables it copies
+  (`test_a_table_copy_sets_its_indexes_aside.py`)
+* MySQL is written through the server's bulk load where the server takes
+  one (`local_infile`), pinned: the connection answers a request for a
+  file only with the rows of the statement that asked, under a name made
+  for it, and sends nothing for any other name - the client setting the
+  load needs is what lets a server read any file the client can, and was
+  why it had been left out. A load turns what an insert refuses into
+  warnings and goes on, so a load with any warning is rolled back and the
+  rows written as inserts, which stop on the row as before. A YEAR of 0
+  went in as 2000 the first time (the text "0" is the year 2000); the
+  range read back different, and a range that reads back different is now
+  always copied the second time as inserts. The MySQL copier also reads
+  the next batch while it writes one, and holds each range to the source
+  by a digest each server computes rather than reading the range back
+  through the driver (15.3 s under the profiler for 300,000 rows with the
+  read-back, 3.9 s without). A million rows, one range: 15.6 s to 10.9 s;
+  four ranges, now in processes: 7.3 s to 6.8 s, where the 2-CPU server
+  is the limit (`test_the_mysql_copier_loads_in_bulk.py`)
+* found on the way: `check` called a PostgreSQL integer moved into a
+  MySQL YEAR different - equal row by row, different by digest, because
+  the digest wrote the YEAR 0 as `0000` and a BIT as its bytes. MySQL's
+  integers are digested as numbers now, and a BIT read back as bytes is
+  rendered as its number
+* the streaming PostgreSQL bulk copy, stopped part way, goes on from the
+  tables it finished instead of emptying the target and starting over; the
+  part copied after the stop comes from a new snapshot, which is why its
+  result is compared with the source before the move is called complete
+  (`test_the_streaming_copy_goes_on_after_a_stop.py`)
 
-**Missing:** the pairs with no native mover are bound by Python's work
-per row - threads gave them nothing measurable; a process per range is
-the next step - and a comparison against a managed service on the same
-hardware. Until that exists migkit makes no claim about being faster than
-anything beyond what is measured here.
+* a pair's large table with one integer key goes as ranges in processes
+  of their own, since the copier's work per row is Python's and threads
+  gave it nothing measurable: a million rows MySQL to PostgreSQL took
+  10.6 s in one process, 8.1 s in two and 7.0 s in four, with the servers
+  on two CPUs. Each process is started by migkit itself (`python -m
+  migkit.ranges`); the standard library's pools start by importing the
+  program that started them, which ran a calling script again in every
+  process.
+
+**Missing:** a comparison against a managed service on the same hardware.
+Until that exists migkit makes no claim about being faster than anything
+beyond what is measured here.
 
 ### C2. LOBs
 
@@ -789,10 +830,21 @@ the source before the move is called complete. Tests:
 `test_the_mysql_table_copy_checks_by_range.py`,
 `test_a_move_runs_tables_side_by_side_and_says_what_it_did.py`.
 
-**Missing:** a table with no key still starts over when a run is
-interrupted - nothing on the target says which of its rows a range put
-there - and a statement-level record of what a repair had applied when it
-stopped.
+A table with no key (2026-09-27) goes in spans of where the source stores
+its rows (PostgreSQL's page ranges, 14 and later), each written in one
+transaction and checkpointed once it has committed. Nothing on the target
+says which of its rows a span put there, so the target's count is what
+places a stop: equal to what the checkpoint accounts for, the copy goes on;
+one span more, that span committed before its checkpoint and is counted in;
+anything else, the table starts over, said. The whole table is then held
+to the digests of every span. Through the PostgreSQL copier and the copier
+every pair shares (PostgreSQL to MySQL tested). Tests:
+`test_the_table_copy_checks_and_resumes_by_range.py`,
+`test_the_mysql_table_copy_checks_by_range.py`.
+
+**Missing:** a table with no key on a source that has no stored position
+to read by (MySQL, SQL Server) still starts over, and a statement-level
+record of what a repair had applied when it stopped.
 
 ### C4. The verification kills the source
 
@@ -1562,6 +1614,25 @@ of it, so the encoding is injective by construction: distinct tuples cannot
 collide, and NULL is marked by a length that is not a number so no literal
 can impersonate it. Tests: `test_hash_collisions_pg.py`,
 `test_hash_collisions_mysql.py`, `test_keys_with_teeth.py`.
+
+The fold that adds the rows' hashes up can lie too, as found and ended on
+2026-09-27:
+
+* **XOR cancels a row there twice.** MySQL's checksum folded rows with
+  `BIT_XOR`: a table with no key holding `(1,'a')` twice on the source and
+  `(2,'b')` twice on the target passed - same count, both checksums zero -
+  and the column fingerprint missed a column changed to one value on two
+  rows. Every fold now sums (an exact DECIMAL), so a row counts as often as
+  it is there (`test_the_mysql_table_copy_checks_by_range.py`).
+* **A checksum that leaves columns out.** SQL Server's check summed
+  `BINARY_CHECKSUM(*)`, which skips xml, text, ntext and image columns: a
+  table whose xml differed on every row passed. It sums each row's SHA-256
+  of `FOR JSON` now, the drilldown's own hash
+  (`test_sql_server_sums_what_each_row_is.py`).
+* **A rendering that is not the value.** Compared as they printed, a
+  PostgreSQL slot's timestamp (text) and a MySQL row's (a datetime) differed
+  where nothing had changed; values are read as their class first
+  (`test_two_ways_through_migkits_own_tails.py`).
 
 ### D3. Two readings that both failed, compared equal
 

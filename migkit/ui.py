@@ -98,14 +98,27 @@ footer { color: var(--mut); font-size: 11px; text-align: center;
 <div class="card feed" id="feed" style="display:none">
   <h3>recent writes</h3><div id="feedrows"></div>
 </div>
-<footer>auto-refresh 10s &middot; read-only view &middot; 127.0.0.1 only</footer>
+<footer>auto-refresh 10s &middot; a tail can be held and let go on &middot; 127.0.0.1 only</footer>
 </div>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let csrf = '';
+async function act(what, hop, db) {
+  await fetch('/api/' + what, {method: 'POST', headers: {
+    'Content-Type': 'application/json', 'X-Migkit-Csrf': csrf},
+    body: JSON.stringify({hop, db})});
+  load();
+}
 async function load() {
   const r = await fetch('/api/data');
+  if (r.status === 403) {
+    document.getElementById('sum').textContent =
+      'open the address migkit printed when it started';
+    return;
+  }
   const data = await r.json();
+  csrf = data.csrf;
   const worst = {ok: 0, diff: 0, error: 0, na: 0};
   for (const h of data.hops) worst[h.status] = (worst[h.status] || 0) + 1;
   document.getElementById('sum').innerHTML =
@@ -129,6 +142,16 @@ async function load() {
       rows += `<div><span class="dot ${d.status}"></span>` +
         `<span class="db">${esc(d.name)}</span>` +
         (d.note ? `<span class="note">${esc(d.note)}</span>` : '') + '</div>';
+    }
+    for (const t of (h.tails || [])) {
+      if (!t.running) continue;
+      const held = t.paused || t.asked;
+      rows += `<div><span class="db">tail ${esc(t.db)}</span>` +
+        `<span class="note">${t.paused ? 'held' : t.asked ? 'holding' :
+          'running'}</span>` + (h.role === 'operator' ? ` <button
+          onclick="act('${held ? 'resume' : 'hold'}', '${esc(h.name)}',
+          '${esc(t.db)}')">${held ? 'resume' : 'hold'}</button>` : '') +
+        `</div>`;
     }
     el.innerHTML =
       `<h2><span class="dot ${h.status}"></span>${esc(h.name)}` +
@@ -157,6 +180,19 @@ setInterval(load, 10000);
 </script></body></html>"""
 
 
+def _tails(name, hop):
+    """[{db, running, paused}] for every tail the hop's reports know of."""
+    from . import tailctl
+    out = []
+    root = REPORTS / name
+    for marker in sorted(root.glob(f"*/{tailctl.PID}")):
+        where = marker.parent
+        out.append({"db": where.name, "running": tailctl.alive(where),
+                    "paused": (where / tailctl.PAUSED).exists(),
+                    "asked": (where / tailctl.PAUSE).exists()})
+    return out
+
+
 def _hop_data(name, hop):
     out = {"name": name, "engine": hop.engine, "service": hop.service or "",
            "status": "na", "checks": {}, "dbs": [],
@@ -166,6 +202,7 @@ def _hop_data(name, hop):
     rpt = REPORTS / name
     summary = rpt / "summary.json"
     out["has_report"] = (rpt / "report.html").exists()
+    out["tails"] = _tails(name, hop)
     if summary.exists():
         try:
             results = json.loads(summary.read_text())
@@ -330,31 +367,123 @@ def _activity(hops):
     return entries[:12]
 
 
+def role(hop, user):
+    """What `user` may do with a hop in the view: "operator" (hold a tail,
+    let it go on), "viewer", or None (the hop is not shown). The holder of
+    the printed address operates every hop; so does anyone the proxy lets
+    in where the hop names no `access`. Where it does:
+
+        options:
+          access:
+            operator: [ann@example.com]
+            viewer: ["*@example.com"]      # shell patterns
+    """
+    from fnmatch import fnmatch
+    if user is None:
+        return "operator"
+    access = (hop.options or {}).get("access")
+    if not access:
+        return "operator"
+    for name in ("operator", "viewer"):
+        if any(fnmatch(user, str(p)) for p in access.get(name) or []):
+            return name
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
+    """The dashboard, and the few things it may do: hold a tail between
+    batches and let it go on. Bound to 127.0.0.1; a request is served only
+    for this machine's own names (a page elsewhere cannot reach it through
+    a name it controls), data and actions only with the token this start
+    printed - kept in a cookie no script and no other site can read - and
+    an action only with the header only this page sends. Every action is
+    written to the hop's record."""
+
+    #: set by `serve`: the token this start printed, and its port
+    token = ""
+    port = 0
+
     def log_message(self, *a):
         pass
 
-    def _send(self, code, ctype, body):
+    def _send(self, code, ctype, body, headers=()):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in headers:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body if isinstance(body, bytes)
                          else body.encode())
 
+    def _host_ok(self):
+        import os
+        extra = [h.strip() for h in os.environ.get(
+            "MIGKIT_UI_HOSTS", "").split(",") if h.strip()]
+        return self.headers.get("Host", "") in (
+            f"127.0.0.1:{self.port}", f"localhost:{self.port}", *extra)
+
+    def _user(self):
+        """Who is asking, where the view is shared behind a proxy that
+        signs people in and names them in a header of its own
+        (`MIGKIT_UI_USER_HEADER`, e.g. `X-Auth-Request-Email`); None for
+        the holder of the token this start printed."""
+        import os
+        header = os.environ.get("MIGKIT_UI_USER_HEADER", "").strip()
+        got = self.headers.get(header, "").strip() if header else ""
+        return got or None
+
+    def _authed(self):
+        import hmac
+        from http.cookies import SimpleCookie
+        if self._user():
+            # the proxy in front let them in; the view is bound to this
+            # machine, which only it reaches
+            return True
+        jar = SimpleCookie(self.headers.get("Cookie", ""))
+        got = jar.get("migkit_ui")
+        return bool(self.token) and got is not None and hmac.compare_digest(
+            got.value, self.token)
+
+    def _csrf(self):
+        import hashlib
+        import hmac
+        return hmac.new(self.token.encode(), b"csrf",
+                        hashlib.sha256).hexdigest()
+
     def do_GET(self):
-        if self.path == "/" or self.path == "/index.html":
+        from urllib.parse import parse_qs, urlparse
+        if not self._host_ok():
+            return self._send(403, "text/plain", "not this host")
+        url = urlparse(self.path)
+        if url.path in ("/", "/index.html"):
+            given = (parse_qs(url.query).get("t") or [""])[0]
+            if given and given == self.token:
+                return self._send(
+                    303, "text/plain", "", headers=(
+                        ("Set-Cookie", f"migkit_ui={self.token}; HttpOnly;"
+                                       " SameSite=Strict; Path=/"),
+                        ("Location", "/")))
             return self._send(200, "text/html; charset=utf-8", PAGE)
-        if self.path == "/api/data":
-            hops = load_hops()
-            data = {"now": time.strftime("%H:%M:%S"),
-                    "hops": [_hop_data(n, h) for n, h in hops.items()],
-                    "activity": _activity(hops)}
-            return self._send(200, "application/json", json.dumps(data))
-        if self.path == "/metrics":
+        if url.path == "/metrics":
             return self._send(200, "text/plain; version=0.0.4",
                               prometheus(load_hops()))
+        if not self._authed():
+            return self._send(403, "text/plain", "open the address migkit"
+                                                 " printed when it started")
+        if url.path == "/api/data":
+            user = self._user()
+            hops = {n: h for n, h in load_hops().items()
+                    if role(h, user) is not None}
+            data = {"now": time.strftime("%H:%M:%S"), "user": user,
+                    "hops": [dict(_hop_data(n, h), role=role(h, user))
+                             for n, h in hops.items()],
+                    "activity": _activity(hops), "csrf": self._csrf()}
+            return self._send(200, "application/json", json.dumps(data))
         if self.path.startswith("/report/"):
             name = self.path[len("/report/"):].split("/")[0].split("?")[0]
+            hop = load_hops().get(name)
+            if hop is None or role(hop, self._user()) is None:
+                return self._send(404, "text/plain", "not found")
             f = REPORTS / name / "report.html"
             if f.exists() and Path(f).resolve().is_relative_to(
                     REPORTS.resolve()):
@@ -362,11 +491,70 @@ class Handler(BaseHTTPRequestHandler):
                                   f.read_bytes())
         return self._send(404, "text/plain", "not found")
 
+    def do_POST(self):
+        import hmac
+        from urllib.parse import urlparse
+        # the body read before anything is answered: refused unread, the
+        # connection closed under a client still sending it
+        try:
+            size = min(int(self.headers.get("Content-Length", 0)), 4096)
+        except ValueError:
+            size = 0
+        raw = self.rfile.read(size) if size else b""
+        if not self._host_ok():
+            return self._send(403, "text/plain", "not this host")
+        if not self._authed() or not hmac.compare_digest(
+                self.headers.get("X-Migkit-Csrf", ""), self._csrf()):
+            return self._send(403, "text/plain", "not from this page")
+        url = urlparse(self.path)
+        if url.path not in ("/api/hold", "/api/resume"):
+            return self._send(404, "text/plain", "not found")
+        try:
+            asked = json.loads(raw or b"{}")
+            name, db = str(asked["hop"]), str(asked["db"])
+        except (ValueError, KeyError):
+            return self._send(400, "text/plain", "hop and db, as JSON")
+        hops = load_hops()
+        user = self._user()
+        if name not in hops or role(hops[name], user) is None:
+            return self._send(404, "text/plain", "no such hop")
+        if role(hops[name], user) != "operator":
+            return self._send(403, "text/plain", "you view this hop and do"
+                                                 " not operate it")
+        where = REPORTS / name / db
+        if not where.resolve().is_relative_to(REPORTS.resolve()) \
+                or not where.is_dir():
+            return self._send(404, "text/plain", "no such database")
+        from . import audit, tailctl
+        if url.path == "/api/hold":
+            (where / tailctl.PAUSE).write_text(str(time.time()))
+        else:
+            tailctl.resume(where)
+        audit.append(REPORTS / name / "changelog.jsonl",
+                     {"op": "tail-" + url.path.rsplit("/", 1)[1],
+                      "db": db, "through": "dashboard",
+                      "by": user or "the holder of the printed address"})
+        return self._send(200, "application/json", json.dumps({"ok": True}))
+
 
 def serve(port):
+    import threading
+
+    from . import schedule
+    from .config import load_hops
+    import secrets
+    Handler.token, Handler.port = secrets.token_urlsafe(24), port
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"migkit ui: http://127.0.0.1:{port} (ctrl-c to stop)")
+    print(f"migkit ui: http://127.0.0.1:{port}/?t={Handler.token}"
+          " (ctrl-c to stop)")
+    # the hops that run on a schedule of their own are fired from here,
+    # the one process of migkit's that runs anyway (`migkit.schedule`)
+    stop = threading.Event()
+    threading.Thread(target=schedule.loop, args=(load_hops, stop),
+                     daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        stop.set()

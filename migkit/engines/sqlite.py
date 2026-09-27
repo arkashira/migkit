@@ -471,7 +471,9 @@ class SQLiteEngine(NeutralCopier, Engine):
         import os
         return not os.path.exists(self._path("dst") or "")
 
-    def _all_tables(self, side):
+    def _all_tables(self, side, db=None):
+        """Every table, the ones the hop excludes too - as the other
+        engines' `_all_tables(side, db)`: a file holds one database."""
         return [r[0] for r in self._q(side,
                 "select name from sqlite_master where type = 'table'"
                 " and name not like 'sqlite_%' order by name")]
@@ -673,8 +675,13 @@ class SQLiteEngine(NeutralCopier, Engine):
         common = [t for t in src_tables if t in dst_tables]
         ta = tb = 0
         for t in common:
-            a = self._q("src", f'select count(*) from "{t}"')[0][0]
-            b = self._q("dst", f'select count(*) from "{t}"')[0][0]
+            # a table the hop filters is counted through its filter on both
+            # sides, as it is copied and compared: counted whole, a filtered
+            # move read as rows missing on the target
+            pred = self.hop.row_filter(db, t)
+            where = f" where ({pred})" if pred else ""
+            a = self._q("src", f'select count(*) from "{t}"{where}')[0][0]
+            b = self._q("dst", f'select count(*) from "{t}"{where}')[0][0]
             ta += a
             tb += b
             if a != b:
@@ -1001,3 +1008,73 @@ class SQLiteEngine(NeutralCopier, Engine):
                                        f'select count(*) from "{t}"')[0][0]
         return {"db": db, "ts": time.time(),
                 "src_rows": total["src"], "dst_rows": total["dst"]}
+
+    # ---- the whole file's tables, copied inside SQLite ---------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table copied by SQLite itself: the source attached to the
+        target read-only, the rows put in by one `INSERT ... SELECT` in the
+        source's column order, a table the target lacks made by the
+        source's own statement and given its indexes and triggers after
+        its rows. One transaction a table: a stop leaves each table as it
+        was or as the source had it. `shape_only` are tables the table
+        copier fills: made here by the same statement where the target
+        lacks them, so they are not made a second, different way."""
+        steps = [f"{t}: copied by SQLite itself, file to file"
+                 for t in tables]
+        if not go or not (tables or shape_only):
+            return steps
+        import pathlib
+        import sqlite3
+        dst = sqlite3.connect(pathlib.Path(self._path("dst")).resolve()
+                              .as_uri(), uri=True, isolation_level=None)
+        try:
+            dst.execute("attach database ? as source", (
+                pathlib.Path(self._path("src")).resolve().as_uri()
+                + "?mode=ro",))
+            for t in shape_only:
+                there = dst.execute("select 1 from main.sqlite_master where"
+                                    " type = 'table' and name = ?",
+                                    (t,)).fetchone()
+                if not there:
+                    for (sql,) in dst.execute(
+                            "select sql from source.sqlite_master where"
+                            " tbl_name = ? and sql is not null order by"
+                            " type = 'table' desc, type", (t,)).fetchall():
+                        dst.execute(sql)
+            for t in tables:
+                q = '"' + str(t).replace('"', '""') + '"'
+                made = dst.execute("select sql from source.sqlite_master"
+                                   " where type = 'table' and name = ?",
+                                   (t,)).fetchone()
+                there = dst.execute("select 1 from main.sqlite_master where"
+                                    " type = 'table' and name = ?",
+                                    (t,)).fetchone()
+                cols = ", ".join('"' + str(r[1]).replace('"', '""') + '"'
+                                 for r in dst.execute(
+                                     f"pragma source.table_info({q})"))
+                dst.execute("begin immediate")
+                try:
+                    if there:
+                        dst.execute(f"delete from main.{q}")
+                    else:
+                        dst.execute(made[0])
+                    dst.execute(f"insert into main.{q} ({cols}) select"
+                                f" {cols} from source.{q}")
+                    if not there:
+                        for (sql,) in dst.execute(
+                                "select sql from source.sqlite_master where"
+                                " tbl_name = ? and type in ('index',"
+                                " 'trigger') and sql is not null order by"
+                                " type", (t,)).fetchall():
+                            dst.execute(sql)
+                    dst.execute("commit")
+                except BaseException:
+                    dst.execute("rollback")
+                    raise
+                if log:
+                    log(f"{t}: copied")
+            dst.execute("detach database source")
+        finally:
+            dst.close()
+        return steps

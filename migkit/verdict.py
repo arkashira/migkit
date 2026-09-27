@@ -25,8 +25,8 @@ FORMAT_VERSION = 1
 def difference_kind(count_a, key_a, count_b, key_b):
     """Name the shape of a difference from counts and primary-key hashes.
 
-    Engine-independent on purpose. PostgreSQL sums per-row md5 as numeric and
-    MySQL folds it with BIT_XOR, but the *reasoning* is the same in both, and
+    Engine-independent on purpose. PostgreSQL and MySQL each sum per-row
+    md5 prefixes in their own way, but the *reasoning* is the same in both, and
     the last time this kind of logic existed twice the two copies drifted -
     one of them planned key ranges from `min(pk)` and silently skipped every
     row below it.

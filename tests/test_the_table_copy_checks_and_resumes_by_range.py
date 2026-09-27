@@ -169,3 +169,87 @@ def test_a_table_with_a_column_named_like_the_sample_is_still_sampled(
            if r.scope == "postgres mojibake"]
     assert [r.status for r in got] == ["diff"], [r.detail for r in got]
     assert "public.words" in got[0].detail, got[0].detail
+
+
+def _seed_keyless(port, rows=60_000):
+    got = psql(port, f"""
+        create table public.log (at bigint, payload text);
+        insert into public.log select g, 'entry-' || g
+        from generate_series(1, {rows}) g; analyze public.log""")
+    assert got.returncode == 0, got.stderr
+
+
+def _same_log(pg_pair):
+    q = ("select count(*), md5(string_agg(at || payload, ',' order by at,"
+         " payload)) from public.log")
+    return psql(pg_pair["src"], q).stdout == psql(pg_pair["dst"], q).stdout
+
+
+def test_a_table_with_no_key_resumes_by_where_its_rows_are_stored(
+        engine, pg_pair, tmp_path, monkeypatch):
+    """Nothing identifies a row of a table with no key, so it used to be
+    copied in one piece and, stopped, started over. It goes in spans of
+    stored position now, a transaction each, checkpointed as each commits:
+    a stop costs the span it was in."""
+    from migkit import ranges
+    from migkit.cli import _Checkpoint
+    _seed_keyless(pg_pair["src"])
+    psql(pg_pair["dst"], "create table public.log (at bigint, payload text)")
+    real, calls = engine._copy_pipe, []
+
+    def dies_on_the_third(*a, **k):
+        calls.append(1)
+        if len(calls) == 3:
+            raise RuntimeError("the connection went away")
+        return real(*a, **k)
+    monkeypatch.setattr(engine, "_copy_pipe", dies_on_the_third)
+    ck = _Checkpoint(tmp_path / "move.json")
+    with pytest.raises(RuntimeError):
+        engine.move_table("postgres", "public", "log", 500_000, ck, [].append)
+    st = _Checkpoint(tmp_path / "move.json")["public.log"]
+    assert len(st["spans"]) >= 4 and len(st["spans_done"]) == 2, st
+
+    # the next span commits, and the stop comes before its checkpoint: the
+    # target's count says it is there, and it is counted in, not copied twice
+    monkeypatch.setattr(engine, "_copy_pipe", real)
+    real_done = ranges.span_copied
+
+    def lost_after_commit(*a, **k):
+        raise RuntimeError("stopped before the checkpoint")
+    monkeypatch.setattr(ranges, "span_copied", lost_after_commit)
+    with pytest.raises(RuntimeError):
+        engine.move_table("postgres", "public", "log", 500_000,
+                          _Checkpoint(tmp_path / "move.json"), [].append)
+    monkeypatch.setattr(ranges, "span_copied", real_done)
+    again = []
+    monkeypatch.setattr(engine, "_copy_pipe",
+                        lambda *a, **k: again.append(1) or real(*a, **k))
+    engine.move_table("postgres", "public", "log", 500_000,
+                      _Checkpoint(tmp_path / "move.json"), [].append)
+    st = _Checkpoint(tmp_path / "move.json")["public.log"]
+    assert st["done"] and len(again) == len(st["spans"]) - 3, (again, st)
+    assert _same_log(pg_pair)
+
+
+def test_a_count_that_accounts_for_nothing_starts_the_table_over(
+        engine, pg_pair, tmp_path):
+    from migkit.cli import _Checkpoint
+    _seed_keyless(pg_pair["src"])
+    psql(pg_pair["dst"], "create table public.log (at bigint, payload text)")
+    engine.move_table("postgres", "public", "log", 500_000,
+                      _Checkpoint(tmp_path / "move.json"), [].append)
+    saved = _Checkpoint(tmp_path / "move.json")
+    st = saved["public.log"]
+    st["spans_done"] = st["spans_done"][:2]
+    st["span_tally"] = {k: v for k, v in st["span_tally"].items()
+                        if int(k) in st["spans_done"]}
+    del st["done"]
+    saved.save()
+    # a row nobody accounts for, written by something else
+    psql(pg_pair["dst"], "insert into public.log values (-1, 'stray')")
+    said = []
+    engine.move_table("postgres", "public", "log", 500_000,
+                      _Checkpoint(tmp_path / "move.json"), said.append)
+    assert any("does not say which are whose - starting it over" in m
+               for m in said), said
+    assert _same_log(pg_pair)

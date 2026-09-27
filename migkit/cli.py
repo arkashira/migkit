@@ -1,3 +1,4 @@
+import contextlib
 import json
 import socket
 import time
@@ -42,10 +43,10 @@ def _lock(hop):
 def _changelog(hop, entry, eng=None):
     # audit is local-only: migkit never writes bookkeeping into the
     # destination, so the target stays a faithful copy of the source and
-    # schema verification never trips over our own table
-    with (hop.report_dir() / "changelog.jsonl").open("a") as f:
-        f.write(json.dumps({"at": time.strftime("%F %T"), **entry},
-                           default=str) + "\n")
+    # schema verification never trips over our own table. Chained, so an
+    # entry changed afterwards shows (`migkit.audit`)
+    from . import audit
+    audit.append(hop.report_dir() / "changelog.jsonl", entry)
 
 
 class _Checkpoint(dict):
@@ -97,6 +98,8 @@ class _Checkpoint(dict):
                     continue
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
             tmp.write_text(text)
+            from . import failpoint
+            failpoint.hit("checkpoint.written")
             tmp.replace(self.path)
 
     def discard(self):
@@ -366,6 +369,7 @@ def doctor(install):
             console.print("  it cannot install these here; they need"
                           f" installing by hand: {', '.join(manual)}")
     for name, hop in load_hops().items():
+        rtt = {}
         for side, ep in (("src", hop.source), ("dst", hop.target)):
             if not ep.configured():
                 console.print(f"{name} {side}: not configured")
@@ -384,8 +388,19 @@ def doctor(install):
                         role = ""
                 console.print(f"{name} {side}: [green]ok[/green]"
                               f" ({ep.host}, {note}){role}")
+                one = (hop.databases or [dbs[0] if dbs else ""])[0]
+                said, rtt[side] = _link_said(
+                    eng, side, one, "source" if side == "src" else "target")
+                if said:
+                    console.print(f"  {said}")
+                said = _leg_said(eng, side, one, ep)
+                if said:
+                    console.print(f"  {said}")
             except Exception as e:
                 console.print(f"{name} {side}: [red]FAIL[/red] {e}")
+        said = _placement_said(rtt)
+        if said:
+            console.print(f"{name}: {said}")
         # read from what the freeze recorded, so it is said even when the
         # target cannot be reached right now
         from . import freeze
@@ -397,6 +412,96 @@ def doctor(install):
                               f" {', '.join(sorted(held['roles']))};"
                               " tearing the stream down at cutover, or"
                               " rollback --apply, gives them back")
+
+
+#: a round trip past which a side is across a wide network, not beside
+#: the machine migkit runs on
+FAR_MS = 20.0
+
+
+def _placement_said(rtt):
+    """Where this machine is between the two sides, where both round
+    trips were measured: far from both means each row crosses a wide
+    network twice, once in and once out."""
+    a, b = rtt.get("src"), rtt.get("dst")
+    if a is None or b is None or min(a, b) < FAR_MS:
+        return ""
+    return (f"[yellow]placement[/yellow]: this machine is {a} ms from the"
+            f" source and {b} ms from the target, so every row crosses a"
+            " wide network twice. Run migkit next to the target - the side"
+            " written to, whose statements wait on each round trip - so"
+            " only the reads travel")
+
+
+def _leg_said(eng, side, db, ep):
+    """Whether the connection to a side is encrypted, as the database
+    itself says of it, and what carries it: nothing is said of a side on
+    this machine, where no row crosses a network."""
+    local = str(ep.host or "") in ("127.0.0.1", "localhost", "::1") and \
+        not (ep.options or {}).get("tunnel_to")
+    if local:
+        return ""
+    try:
+        got = eng.leg_encryption(side, db)
+    except Exception:  # noqa: BLE001 - a probe never fails doctor
+        return ""
+    if got is None:
+        return ""
+    if got["encrypted"]:
+        return f"encrypted: {got['how']}"
+    through = (ep.options or {}).get("tunnel_to")
+    if through:
+        return (f"not encrypted by the database; carried through the"
+                f" hop's tunnel to {through}, which is what protects it on"
+                " the way")
+    return ("[yellow]not encrypted[/yellow]: every row crosses the network"
+            " as it is. Ask the server for TLS and verify its certificate"
+            " (sslmode verify-full, ssl-mode VERIFY_IDENTITY), or carry the"
+            " connection through a tunnel")
+
+
+def _link_said(eng, side, db, name):
+    """`Engine.link_probe` in a line, and the round trip it measured (ms,
+    or None)."""
+    fn = getattr(eng, "link_probe", None)
+    if fn is None:
+        return "", None
+    try:
+        got = fn(side, db)
+    except Exception:  # noqa: BLE001 - a probe never fails doctor
+        return "", None
+    return _link_line(got, name), got.get("rtt_ms")
+
+
+def _link_line(got, name):
+    stalled = got.get("stalled")
+    if stalled:
+        way, size = stalled
+        if way == "connecting":
+            return (f"[red]link: STALLED[/red] - its port answers, and"
+                    f" signing in to the {name} never finishes: the first"
+                    " full-sized packets of the handshake do not arrive. A"
+                    " path that drops large packets (an MTU black hole - a"
+                    " VPN or tunnel set too high): lower that tunnel's MTU"
+                    " (1280 is safe) or clamp TCP MSS on it")
+        what = ("replies from" if way == "replies" else "requests to")
+        return (f"[red]link: STALLED[/red] - {what} the {name} of"
+                f" {size:,} bytes or more never arrive, smaller ones do. A"
+                " path that drops large packets (an MTU black hole - a VPN"
+                " or tunnel set too high): lower that tunnel's MTU (1280 is"
+                " safe) or clamp TCP MSS on it. A copy over this link"
+                " hangs")
+    if got.get("tcp"):
+        return f"[red]link: its port does not answer[/red] ({got['tcp']})"
+    parts = []
+    if got.get("rtt_ms") is not None:
+        parts.append(f"{got['rtt_ms']} ms round trip")
+    if got.get("replies"):
+        parts.append(f"replies up to {got['replies']:,} bytes and requests"
+                     f" up to {got.get('requests', 0):,} bytes arrive")
+    if got.get("mb_s"):
+        parts.append(f"{got['mb_s']} MB/s")
+    return ("link: " + ", ".join(parts)) if parts else ""
 
 
 @main.command()
@@ -632,6 +737,28 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
         return _drill(hop_name, db, table, limit)
     hop = get_hop(hop_name)
     _require_configured(hop)
+    from . import schedule
+    if not schedule.gate(hop, "check", console.print):
+        return _check(hop, db, table, only, do_deep, consistent, workers,
+                      resume, exclude)
+    # a run its schedule started: what it ended as is the schedule's
+    ok = False
+    try:
+        got = _check(hop, db, table, only, do_deep, consistent, workers,
+                     resume, exclude)
+        ok = True
+        return got
+    except SystemExit as e:
+        # a difference found is a check that did its work
+        ok = e.code in (None, 0, 1)
+        raise
+    finally:
+        schedule.finished(hop, ok)
+
+
+def _check(hop, db, table, only, do_deep, consistent, workers, resume,
+           exclude):
+    hop_name = hop.name
     if exclude:
         hop.exclude = list(hop.exclude) + [p.strip() for p in exclude.split(",") if p.strip()]
     eng = get_engine(hop)
@@ -651,7 +778,13 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
     if do_deep and "deep" not in checks:
         checks.append("deep")
     dbs = [db] if db else eng.databases()
-    workers = workers or hop.workers
+    if workers:
+        # asked for on the command line: a ceiling, as a hop's own is
+        hop.workers, hop.workers_set = int(workers), True
+    if dbs:
+        from . import sizing
+        sizing.fit(hop, eng, dbs[0], lambda m: console.print(f"  {m}"))
+    workers = hop.workers
     summary_path = hop.report_dir() / "summary.json"
     prev = {}
     if resume and summary_path.exists():
@@ -890,6 +1023,10 @@ def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
         console.print(f"repairing {len(dbs)} databases with diffs:"
                       f" {', '.join(dbs)}\n")
     for d in dbs:
+        if do_apply:
+            from . import approvals
+            approvals.require(hop, "repair", d,
+                              lambda m: console.print(f"  {m}"))
         _repair_one(hop, eng, d, kind, do_apply)
 
 
@@ -1254,7 +1391,8 @@ def _copy_routed(hop, eng, d, via, chunk, log):
     from . import movers
     if not hasattr(eng, "move_table"):
         return
-    routed = movers.routed_to_copier(hop, d, via, eng.neutral_tables("src", d))
+    routed = movers.routed_to_copier(hop, d, via, eng.neutral_tables("src", d),
+                                     movers.qualifier_for(hop))
     if not routed:
         return
     path = hop.report_dir(d) / "move-routed.json"
@@ -1322,19 +1460,64 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     is under load. A target that takes one writer at a time (a file) is
     written one table after another. A table that fails lets the others
     in flight finish, starts no more, and is said."""
-    from . import ranges
+    from . import ranges, sizing
+
+    def log(m):
+        console.print(f"  {m}")
     target = getattr(eng, "dst_engine", eng)
-    workers = max(1, int(getattr(hop, "workers", 1) or 1))
+    # how many at once is worked out, not asked for: every factor read at
+    # the start, then kept where the rows go fastest (`sizing`)
+    plan = sizing.fit(hop, eng, d, log, units=_units(eng, d, tables))
+    most = plan.most
     if not getattr(target, "WRITES_IN_PARALLEL", True):
-        workers = 1
+        most = 1
+    pace = sizing.Pace(min(plan.start, most), most,
+                       stress=lambda: _stress(eng, d))
     before = ranges.active
     # the ranges every table in flight copies share the move's workers
-    ranges.active = ranges.Slots(workers)
+    ranges.active = ranges.Slots(most, pace=pace)
     try:
-        _copy_tables_in(hop, eng, d, tables, chunk, ck, min(workers,
-                                                            len(tables)))
+        # indexes a copy that was killed had set aside, built again at the
+        # end of this one - whichever tables it copies
+        window = getattr(target, "table_index_window", None)
+        with (window(d, None, log) if window
+              else contextlib.nullcontext()):
+            _copy_tables_in(hop, eng, d, tables, chunk, ck,
+                            min(most, len(tables)))
     finally:
         ranges.active = before
+        said = pace.line()
+        if said:
+            log(said)
+
+
+def _units(eng, d, tables=None):
+    """How many pieces of work a database's copy can be split into: a
+    range for every `ranges.LEAST` rows of a table, one at least."""
+    from . import ranges
+    try:
+        facts = eng.table_facts("src", d)
+    except Exception:  # noqa: BLE001 - a table each, then
+        return len(tables) if tables else None
+    names = ([f"{sch}.{t}" if sch else t for sch, t in tables]
+             if tables is not None else list(facts))
+    n = 0
+    for name in names:
+        f = facts.get(name) or facts.get(name.split(".")[-1]) or {}
+        n += max(1, int(f.get("rows") or 0) // ranges.LEAST)
+    return n or None
+
+
+def _stress(eng, d):
+    """Why the move should do less at once, or "": either side under
+    strain, as the gate reads it."""
+    from . import sizing
+    for side in ("src", "dst"):
+        h = _side_health(eng, side, d)
+        why = h.stressed() if h is not None else ""
+        if why:
+            return f"{'source' if side == 'src' else 'target'}: {why}"
+    return sizing.strain(eng, d)
 
 
 def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
@@ -1345,8 +1528,10 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
     def log(m):
         console.print(f"  {m}")
     if workers < 2:
+        from . import failpoint
         for sch, t in tables:
             _copy_table(eng, d, sch, t, chunk, ck, log)
+            failpoint.hit("table.done")
             _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
         return
 
@@ -1361,9 +1546,11 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
     gate = Throttle(workers, probe=health)
 
     def one(sch, t):
+        from . import failpoint
         gate.gate()
         try:
             _copy_table(eng, d, sch, t, chunk, ck, log)
+            failpoint.hit("table.done")
             _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
         finally:
             gate.done()
@@ -1511,6 +1698,8 @@ def _move_full(hop, eng, db, table, chunk, go):
                     _copy_tables(hop, eng, d, tables, chunk, ck)
             if not table:
                 eng.finish_created(d, lambda m: console.print(f"  {m}"))
+                eng.carry_database_objects(
+                    d, lambda m: console.print(f"  {m}"))
         finally:
             if lk is not None:
                 lk.unlink()
@@ -1675,6 +1864,16 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
     # from now: what the application writes on the target from here on
     # reaches the old source, and nothing goes round
     _replicate_one(back, rev, tdb, False, do_drop and two_way, go)
+    if two_way and not do_drop:
+        # neither server's own replication reconciles a row both sides
+        # change at once: each applies the other's change over its own, and
+        # the two end holding each other's values (measured on MySQL 8.4
+        # and PostgreSQL 16)
+        console.print("  a row both sides change at once is not reconciled:"
+                      " each takes the other's change over its own, and the"
+                      " two can end holding different values - keep a row's"
+                      " writes on one side at a time, and `migkit check`"
+                      " finds any that differ")
     if go:
         _changelog(hop, {"op": "reverse" if not two_way else "two-way",
                          "db": db, "drop": bool(do_drop and two_way)})
@@ -2010,6 +2209,18 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     Use only over a trusted network (or run migkit on a cloud VM)."""
     try:
         return _move(hop_name, db, table, mode, chunk, do_drop, go)
+    except OSError as e:
+        import errno
+        if e.errno != errno.ENOSPC:
+            raise
+        # this machine's own disk, not a server's: the checkpoint is written
+        # beside itself and put in place whole, so what it said stands
+        raise SystemExit(
+            f"the move stopped: no space left on this machine for"
+            f" {getattr(e, 'filename', None) or 'its report directory'}."
+            " Free space there and move again; the checkpoint is as it was"
+            " before the write that did not fit, and the next run goes on"
+            " from it.")
     except Exception as e:
         # a program underneath failed, or a server refused a row: the
         # message keeps the database's words and loses any program's name,
@@ -2064,6 +2275,11 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     _require_configured(hop)
     eng = get_engine(hop)
     back_at_cutover, _ = _topology(hop)
+    if go and do_drop:
+        # tearing the stream down is the cutover
+        from . import approvals
+        approvals.require(hop, "cutover", db,
+                          lambda m: console.print(f"  {m}"))
     if go and not (do_drop and mode == "cdc" and back_at_cutover):
         # before anything is copied, so no write of the application's lands
         # between the copy and the check; released by tearing the stream
@@ -2094,6 +2310,9 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     point = _position_before_copy(eng, d) if go else None
                     if go:
                         _mark_move(hop, eng, d)
+                    from . import sizing
+                    sizing.fit(hop, eng, d, lambda m: chat(f"  {m}"),
+                               units=_units(eng, d))
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     if go:
@@ -2461,9 +2680,19 @@ def history(hop_name, db, show_ts):
                     console.print(jl.read_text().strip())
     cl = root / "changelog.jsonl"
     if cl.exists():
+        from . import audit
+        n, chained, broken = audit.verify(cl)
         console.print("\nlocal changelog (last 15):")
         for line in cl.read_text().splitlines()[-15:]:
             console.print(f"  {line}")
+        if broken:
+            console.print(f"[red]the record has been changed: {broken}"
+                          "[/red]")
+        else:
+            console.print(f"  {chained} of {n} entries chained, and the"
+                          " chain is whole"
+                          + (f" ({n - chained} from before the chain began)"
+                             if n > chained else ""))
     elif not found:
         console.print("no history yet, nothing has been applied")
 
@@ -2479,7 +2708,10 @@ def rollback(hop_name, db, state_ts, do_apply):
     from .state import get_store
     hop = get_hop(hop_name)
     eng = get_engine(hop)
-    from . import freeze
+    from . import approvals, freeze
+    if do_apply:
+        approvals.require(hop, "rollback", db,
+                          lambda m: console.print(f"  {m}"))
     if freeze.state(hop, db):
         # what migkit took from the application's roles comes back with
         # everything else it changed on the target

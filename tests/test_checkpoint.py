@@ -205,15 +205,18 @@ def test_a_table_with_no_partials_accepts_a_new_size(tmp_path):
     assert Checkpoint(path).chunk_for("public.t", 250_000) == 250_000
 
 
-def test_totals_compose_the_way_the_engine_does(tmp_path):
-    """PostgreSQL sums its per-row hashes; MySQL folds them with BIT_XOR.
-    Both are commutative and associative, which is what makes chunking
-    equivalent to a single pass - but they are not the same operation."""
+def test_totals_add_up_the_ranges(tmp_path):
+    """Every engine sums its per-row hashes, which is what makes chunking
+    equivalent to a single pass. MySQL folded by BIT_XOR, where a row there
+    twice cancels itself: two ranges holding the same checksum would total
+    nothing."""
     cp = Checkpoint(str(tmp_path / "cp.json"))
     cp.record("public.t", None, 10, 5, 0b1100)
     cp.record("public.t", 10, None, 7, 0b1010)
-    assert cp.total("public.t", combine="sum") == (12, str(0b1100 + 0b1010))
-    assert cp.total("public.t", combine="xor") == (12, str(0b1100 ^ 0b1010))
+    assert cp.total("public.t") == (12, str(0b1100 + 0b1010))
+    cp.record("public.u", None, 10, 1, 0b1100)
+    cp.record("public.u", 10, None, 1, 0b1100)
+    assert cp.total("public.u") == (2, str(2 * 0b1100))
 
 
 # ---- boundary-based ranges, for keys that are not integers ----

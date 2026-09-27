@@ -89,9 +89,13 @@ def write(target, conf, reports):
                 lines = []
                 for line in log.read_text().splitlines()[-200:]:
                     try:
-                        lines.append(json.dumps(scrub(json.loads(line))))
+                        entry = scrub(json.loads(line))
                     except ValueError:
                         continue
+                    # who ran it, and where, is not the problem's
+                    for k in ("who", "host", "prev", "hash"):
+                        entry.pop(k, None)
+                    lines.append(json.dumps(entry))
                 z.writestr(f"{hop}/changelog.jsonl", "\n".join(lines) + "\n")
                 names.append(f"{hop}/changelog.jsonl")
     return names

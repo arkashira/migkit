@@ -71,6 +71,9 @@ def _class_for(name):
     if name == "bigquery":
         from .warehouse import BigQueryEngine
         return BigQueryEngine
+    if name == "duckdb":
+        from .duckdb import DuckDBEngine
+        return DuckDBEngine
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
@@ -81,7 +84,7 @@ def _class_for(name):
 NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "parquet", "clickhouse", "dynamodb", "oracle", "db2", "ase",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
-         "kinesis", "pubsub", "hetero", "generic")
+         "kinesis", "pubsub", "duckdb", "hetero", "generic")
 
 
 def engines_with(method):
@@ -116,4 +119,7 @@ def engine_named(name, hop):
 
 
 def get_engine(hop):
+    # a server reached through a tunnel is reached through its open end
+    from ..tunnel import through
+    through(hop)
     return engine_named(hop.engine, hop)

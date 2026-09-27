@@ -116,11 +116,13 @@ def test_the_plan_names_the_two_things_a_bare_wrap_would_miss(tmp_path):
     from migkit import movers
     steps = movers.pgcopydb_follow(_hop(tmp_path), "postgres", go=False)
     joined = "\n".join(steps)
-    assert "sentinel set apply" in joined, joined
+    assert "tell the leg to apply" in joined, joined
     assert "nothing is ever applied" in joined, joined
-    assert "sentinel set endpos --current" in joined, joined
-    assert "--origin migkit_fl_postgres" in joined, joined
-    assert "--slot-name migkit_fl_postgres" in joined, joined
+    assert "end it at the source's position" in joined, joined
+    assert "origin migkit_fl_postgres" in joined, joined
+    assert "slot migkit_fl_postgres" in joined, joined
+    # the plan is the operator's: what runs underneath is not named in it
+    assert "pgcopydb" not in joined.lower() and "sentinel" not in joined
 
 
 def test_the_plan_says_what_it_does_not_carry(tmp_path):

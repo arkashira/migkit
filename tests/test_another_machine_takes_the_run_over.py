@@ -76,6 +76,10 @@ def machine(tmp_path, monkeypatch, bucket):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
 
+    # the table copier, which leases a table at a time; a whole SQLite
+    # file otherwise moves inside SQLite itself
+    monkeypatch.setenv("MIGKIT_MOVER", "builtin")
+
     def switch(name):
         monkeypatch.setattr(cfg, "REPORTS", tmp_path / name / "reports")
     switch("a")

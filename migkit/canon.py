@@ -94,6 +94,44 @@ FLOAT_MAX = "1e45"
 UNCOMPARABLE = "\x1funcomparable"
 
 
+class Added:
+    """A counter's change as what it adds, not what it ends as (a two-way
+    hop's `delta` columns): applied where the target's row stands, so what
+    each side added is kept. `to` is what the source's row ended with,
+    written where the target has no row to add to."""
+
+    __slots__ = ("by", "to")
+
+    def __init__(self, by, to):
+        self.by, self.to = by, to
+
+    def __repr__(self):
+        return f"Added({self.by!r}, to={self.to!r})"
+
+    def __eq__(self, other):
+        return isinstance(other, Added) and (self.by, self.to) == \
+            (other.by, other.to)
+
+    __hash__ = None
+
+
+def merged_values(earlier, later):
+    """A row's values after a later change over an earlier one, in place:
+    later over earlier, except that two additions to one counter are one
+    addition of both, and an addition to a value the batch itself wrote
+    is that value moved."""
+    for name, value in later.items():
+        was = earlier.get(name)
+        if isinstance(value, Added):
+            if isinstance(was, Added):
+                value = Added(was.by + value.by, value.to)
+            elif was is not None and name in earlier \
+                    and not isinstance(was, _Absent):
+                value = was + value.by
+        earlier[name] = value
+    return earlier
+
+
 class _Absent:
     """A field that is not there, as distinct from one holding NULL.
 
@@ -153,6 +191,11 @@ TYPES = {
         # a text search vector prints its lexemes sorted and once each, and
         # a query its normalised form, so their text is the value itself
         "tsvector": "text", "tsquery": "text",
+        # pgvector's types print each element as the shortest decimal that
+        # reads back to the same float - so their text is exactly the value.
+        # Unmapped, a vector column was left out of every comparison: a
+        # wrong vector passed `check` (measured)
+        "vector": "text", "halfvec": "text", "sparsevec": "text",
         # a key/value set is a JSON object of strings: the extension casts
         # it to jsonb, which the `json` rendering then normalises the way
         # the other side's JSON is
@@ -298,6 +341,20 @@ TYPES = {
         "blob": "bytes", "binary": "bytes", "varbinary": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
     },
+    # DuckDB, by `information_schema.columns` type names
+    "duckdb": {
+        "tinyint": "integer", "smallint": "integer", "integer": "integer",
+        "bigint": "integer", "hugeint": "integer", "utinyint": "integer",
+        "usmallint": "integer", "uinteger": "integer", "ubigint": "integer",
+        "decimal": "decimal", "numeric": "decimal",
+        "float": "float", "real": "float", "double": "float",
+        "boolean": "boolean",
+        "varchar": "text", "text": "text", "uuid": "text",
+        "blob": "bytes",
+        "date": "date", "timestamp": "timestamp",
+        "timestamp with time zone": "timestamp", "time": "time",
+        "json": "json",
+    },
     # SAP ASE, by `systypes` names
     "ase": {
         "tinyint": "integer", "smallint": "integer", "int": "integer",
@@ -433,6 +490,13 @@ def _mysql(col, cls):
         return f"date_format({c}, '%Y-%m-%d %H:%i:%s.%f')"
     if cls == "time":
         return f"time_format({c}, '%H:%i:%s.%f')"
+    if cls == "integer":
+        # as a number: `cast(... as char)` of a YEAR of 0 is `0000` and of
+        # a BIT is its bytes, where every other engine writes the number -
+        # measured, a PostgreSQL int of 0 moved into a YEAR compared equal
+        # row by row and different by digest. `+ 0` keeps an unsigned
+        # bigint an integer
+        return f"cast(({c} + 0) as char)"
     return f"cast({c} as char)"
 
 
@@ -516,6 +580,45 @@ def _float_text(d):
                       "f")
 
 
+def json_text(value):
+    """A JSON value as PostgreSQL's `jsonb` writes it, which MySQL's JSON
+    matches: an object's keys by their length and then their bytes, the
+    last of a key given twice, `", "` and `": "` between, a number the
+    decimal it was written as, and text escaped as JSON escapes it. The
+    in-process side of the `json` rendering the two SQL ones give."""
+    import json
+    from decimal import Decimal
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+    if isinstance(value, str):
+        value = json.loads(value, parse_float=Decimal, parse_int=int)
+
+    def one(x):
+        if x is None:
+            return "null"
+        if x is True:
+            return "true"
+        if x is False:
+            return "false"
+        if isinstance(x, int):
+            return str(x)
+        if isinstance(x, float):
+            return one(Decimal(repr(x)))
+        if isinstance(x, Decimal):
+            return format(x, "f")
+        if isinstance(x, str):
+            return json.dumps(x, ensure_ascii=False)
+        if isinstance(x, dict):
+            keys = sorted(x, key=lambda k: (len(str(k).encode()),
+                                            str(k).encode()))
+            return ("{" + ", ".join(f"{json.dumps(str(k), ensure_ascii=False)}"
+                                     f": {one(x[k])}" for k in keys) + "}")
+        if isinstance(x, (list, tuple)):
+            return "[" + ", ".join(one(e) for e in x) + "]"
+        return json.dumps(str(x), ensure_ascii=False)
+    return one(value)
+
+
 def render_value(cls, value):
     """One value as the canonical text, or None when it is NULL.
 
@@ -526,6 +629,9 @@ def render_value(cls, value):
     if value is None:
         return None
     if cls == "integer":
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            # a MySQL BIT, as the driver hands it back
+            return str(int.from_bytes(bytes(value), "big"))
         return str(int(value))
     if cls == "float":
         return _float_text(float(value))
@@ -549,6 +655,8 @@ def render_value(cls, value):
                       "f")
     if cls == "text":
         return value if isinstance(value, str) else str(value)
+    if cls == "json":
+        return json_text(value)
     if cls == "bytes":
         return bytes(value).hex().upper()
     if cls == "boolean":
@@ -560,6 +668,15 @@ def render_value(cls, value):
         # `date_format(..., '%f')` produce. BSON dates carry milliseconds, so
         # the last three digits are zeros - which is the truth about what the
         # field can hold, not a rounding migkit chose.
+        #
+        # An instant with its zone is written as UTC shows it, as the SQL
+        # renderings write one: every PostgreSQL session migkit opens is
+        # pinned to UTC, and MySQL's reads to +00:00. Written at its own
+        # zone, the same instant read from DuckDB at the machine's +07 and
+        # from PostgreSQL at UTC were seven hours apart (measured)
+        if getattr(value, "tzinfo", None) is not None:
+            import datetime as _dt
+            value = value.astimezone(_dt.timezone.utc)
         return value.strftime("%Y-%m-%d %H:%M:%S.%f")
     if cls == "date":
         # what both SQL renderings fall through to: PostgreSQL's `::text` and
@@ -632,7 +749,10 @@ DDL = {
         "json": ("nvarchar(max)", "nvarchar(max)"),
     },
     "clickhouse": {
-        OWN: ("String", "String"),
+        # the source's own type, as `neutral_columns` reads it without its
+        # Nullable: ClickHouse to ClickHouse built every column String and
+        # stopped on the first decimal written into one
+        OWN: ("String", "{0}"),
         "integer": ("Int64", "Int64"),
         "decimal": ("Decimal(38, 10)", "Decimal({0}, {1})"),
         "float": ("Float64", "Float64"),
@@ -664,6 +784,22 @@ DDL = {
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),
+    },
+    "duckdb": {
+        # a type of the same engine is made as the source declares it:
+        # measured, DuckDB to DuckDB built every column VARCHAR, and the
+        # read back stopped the copy on the first double and timestamp
+        OWN: ("VARCHAR", "{0}"),
+        "integer": ("BIGINT", "BIGINT"),
+        "decimal": ("DECIMAL(38,10)", "DECIMAL({0},{1})"),
+        "float": ("DOUBLE", "DOUBLE"),
+        "boolean": ("BOOLEAN", "BOOLEAN"),
+        "text": ("VARCHAR", "VARCHAR"),
+        "bytes": ("BLOB", "BLOB"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("TIMESTAMP", "TIMESTAMP"),
+        "time": ("TIME", "TIME"),
+        "json": ("JSON", "JSON"),
     },
     "ase": {
         OWN: ("text", "text"),
@@ -803,12 +939,17 @@ def ddl_type(engine, cls, numbers=()):
 CHANGE_OPS = ("insert", "update", "delete")
 
 
-def change(op, table, key, values=None):
+def change(op, table, key, values=None, before=None):
     """One change record, checked at the point it is made.
 
     Not a bare dict: an op this file does not know is a log format that
     changed under migkit, and finding that out where the record is built is
     cheaper than finding it out as a row that never arrived.
+
+    `before` is the whole row as it was, where the log keeps it (a binlog
+    with its full row image, a table with REPLICA IDENTITY FULL): what a
+    two-way tail holds the target's row to, to tell a row changed on both
+    sides from one only this side changed.
     """
     if op not in CHANGE_OPS:
         raise ValueError(f"unknown change op {op!r}, expected one of"
@@ -816,8 +957,11 @@ def change(op, table, key, values=None):
     if not key:
         raise ValueError(f"a {op} on {table} with no key cannot be applied -"
                          " migkit will not guess which row it meant")
-    return {"op": op, "table": str(table), "key": dict(key),
-            "values": dict(values or {})}
+    out = {"op": op, "table": str(table), "key": dict(key),
+           "values": dict(values or {})}
+    if before is not None:
+        out["before"] = dict(before)
+    return out
 
 
 #: classes whose values reach a writer as numbers or times, never as a
@@ -1130,7 +1274,7 @@ def comparable(engine, declared):
 # network to be folded, which `check` reports rather than leaves implied.
 IN_PROCESS = {"mongodb", "sqlite", "mssql", "parquet", "clickhouse",
               "dynamodb", "oracle", "db2", "opensearch", "cassandra",
-              "redshift", "snowflake", "bigquery", "ase"}
+              "redshift", "snowflake", "bigquery", "ase", "duckdb"}
 
 
 def renders(engine):
@@ -1142,8 +1286,8 @@ def renders(engine):
 # text above.
 #
 # migkit's own per-engine checksums cannot be used for this: PostgreSQL folds
-# rows with `sum(...::bit(64)::bigint)` and MySQL with `bit_xor(conv(...))`,
-# which are different functions of the same data and never meet. What both can
+# rows with `sum(...::bit(64)::bigint)` and MySQL sums a 32-bit prefix, which
+# are different functions of the same data and never meet. What both can
 # express is a sum over a fixed-width prefix of the row's MD5.
 #
 # 60 bits rather than 64, measured: MySQL's `conv()` returns a string, and

@@ -140,6 +140,10 @@ def test_a_delete_under_full_identity_drops_its_null_columns():
     assert names == ["id", "name", "amount", "flag"]
     assert "b" not in names and "doc" not in names
     rec = pgslot.change(parsed, ["id"])
+    # the previous row as the log kept it, NULLs left out - what a two-way
+    # tail holds the target's row to
+    before = rec.pop("before")
+    assert set(before) == {"id", "name", "amount", "flag"}, before
     assert rec == {"op": "delete", "table": "public.t", "key": {"id": 9},
                    "values": {}}
 

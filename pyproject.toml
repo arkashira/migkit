@@ -40,18 +40,29 @@ dependencies = [
     "mysql-replication>=1.0",
     "pymongo>=4.6",
     "redis>=5.0",
-    "kafka-python>=2.0",
+    "kafka-python>=2.2.15",
+    # Avro bodies for the change stream and schema-registry-aware copies
+    "fastavro>=1.9",
     # comparison and schema libraries driven by check/schema
     "reladiff",
     "datacompy",
     "pandas",
     "pyarrow",
     "sqlglot",
+    # DuckDB files as a side of a pair, and the diff of keys too many to
+    # hold
+    "duckdb>=1.1",
     # PostgreSQL structural diff. psycopg3 is pulled with the binary wrapper
     # on purpose: `results` asks only for psycopg[pool], which installs
     # without a libpq wrapper and then fails at import.
     "results",
     "psycopg[binary,pool]",
+    # how much this machine can give a move (sizing)
+    "psutil>=5.9",
+    # the files that hold values, encrypted to the hop's recipients
+    "pyrage>=1.2",
+    # a hop's `schedule` read as the cron expression it is written in
+    "croniter>=2.0",
     # cloud metadata for managed-service hops
     "boto3",
     "google-cloud-pubsub>=2.20",
@@ -73,7 +84,7 @@ diff = []
 dataframe = []
 s3 = []
 pgschema = []
-dev = ["pytest", "faker"]
+dev = ["pytest", "faker", "hypothesis"]
 
 [project.scripts]
 migkit = "migkit.cli:main"

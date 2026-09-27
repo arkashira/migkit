@@ -261,3 +261,154 @@ def test_a_finished_pair_table_is_asked_again(seeded, pg_pair, tmp_path):
                        " hold the same rows - copying it again"), said
     assert psql(pg_pair["dst"], "select payload from public.big where"
                                 " id = 7").stdout.strip() == "changed"
+
+
+def _big_target(pg_pair):
+    psql(pg_pair["dst"], "create table public.big (id bigint primary key,"
+                         " payload varchar(64), n numeric(12,2), raw bytea,"
+                         " note varchar(10))")
+
+
+def test_a_large_pair_table_is_copied_in_processes_by_range(
+        seeded, pg_pair, tmp_path, monkeypatch):
+    """The shared copier's work per row is Python's, which threads do not
+    share out: a table this size goes as ranges, each in a process."""
+    from migkit import ranges
+    from migkit.cli import _Checkpoint
+    monkeypatch.setattr(ranges, "LEAST", 10_000)
+    _big_target(pg_pair)
+    eng = _pair(pg_pair, tmp_path)
+    eng.hop.workers = 4
+    ck, said = _Checkpoint(tmp_path / "move.json"), []
+    eng.move_table("shop", "", "big", 500_000, ck, said.append)
+    st = _Checkpoint(tmp_path / "move.json")["shop.big"]
+    assert len(st["ranges"]) >= 4 and st["done"], st
+    assert sorted(st["ranges_done"]) == sorted(a for a, _ in st["ranges"])
+    assert any(m.endswith(f"of {len(st['ranges'])} ranges)") for m in said)
+    assert [r.status for r in eng.check_data("shop")
+            if r.check == "data"] == ["ok"]
+
+    # started again with one range not done: only that one is copied, and a
+    # done range's rows on the target are not touched
+    first, second = st["ranges"][0], st["ranges"][1]
+    psql(pg_pair["dst"], "update public.big set note = 'kept' where id ="
+                         f" {first[0] + 1}")
+    psql(pg_pair["dst"], "update public.big set note = 'stale' where id ="
+                         f" {second[0] + 1}")
+    saved = _Checkpoint(tmp_path / "move.json")
+    saved["shop.big"]["ranges_done"].remove(second[0])
+    del saved["shop.big"]["done"]
+    saved.save()
+    said = []
+    eng.move_table("shop", "", "big", 500_000,
+                   _Checkpoint(tmp_path / "move.json"), said.append)
+    copied = [m for m in said if " copied, " in m]
+    assert len(copied) == 1 and f"{second[0] + 1:,} to" in copied[0], said
+    assert psql(pg_pair["dst"], "select note from public.big where id ="
+                                f" {first[0] + 1}").stdout.strip() == "kept"
+    assert psql(pg_pair["dst"], "select note from public.big where id ="
+                                f" {second[0] + 1}").stdout.strip() != \
+        "stale"
+
+
+def test_a_range_in_a_process_the_target_changes_stops_the_move(
+        seeded, pg_pair, tmp_path, monkeypatch):
+    from migkit import ranges
+    from migkit.cli import _Checkpoint
+    monkeypatch.setattr(ranges, "LEAST", 10_000)
+    _big_target(pg_pair)
+    got = psql(pg_pair["dst"], SHOUT.format(table="big", key="id",
+                                            at="45000", col="payload"))
+    assert got.returncode == 0, got.stderr
+    eng = _pair(pg_pair, tmp_path)
+    eng.hop.workers = 4
+    with pytest.raises(SystemExit) as e:
+        eng.move_table("shop", "", "big", 500_000,
+                       _Checkpoint(tmp_path / "move.json"), [].append)
+    assert str(e.value).startswith("shop.big: written twice, 0 rows of a"
+                                   " batch are not on the target and 1 read"
+                                   " back different"), e.value
+    assert "by key 45000, in payload" in str(e.value)
+    st = _Checkpoint(tmp_path / "move.json")["shop.big"]
+    assert not st.get("done")
+
+
+def test_a_pair_table_with_no_key_resumes_by_stored_position(
+        server, pg_pair, tmp_path, monkeypatch):
+    """PostgreSQL to MySQL, a table with no key: in spans of where the
+    source stores its rows, each written in one statement and checkpointed
+    once it has - stopped, it goes on from the spans it finished."""
+    from migkit.cli import _Checkpoint
+    from migkit.engines.hetero import HeteroEngine
+    my("drop database if exists back; create database back;"
+       " create table back.log (at bigint, payload varchar(40))")
+    got = psql(pg_pair["src"], "create table public.log (at bigint,"
+                               " payload text); insert into public.log"
+                               " select g, 'entry-' || g from"
+                               " generate_series(1, 60000) g;"
+                               " analyze public.log")
+    assert got.returncode == 0, got.stderr
+    hop = Hop(name="pm", engine="hetero",
+              source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
+                              user="postgres", password="test"),
+              target=Endpoint(host="127.0.0.1", port=PORT, user="root",
+                              password="test"),
+              databases=["postgres"], db_map={"postgres": "back"},
+              options={"source_engine": "postgres",
+                       "target_engine": "mysql"})
+    hop.report_dir = lambda db=None: tmp_path
+    eng = HeteroEngine(hop)
+    monkeypatch.setattr(eng, "_read_rows", lambda db, t, chunk: 10_000)
+    real, calls = eng.dst_engine.neutral_write, []
+
+    def dies_on_the_third(*a, **k):
+        calls.append(1)
+        if len(calls) == 3:
+            raise RuntimeError("the connection went away")
+        return real(*a, **k)
+    monkeypatch.setattr(eng.dst_engine, "neutral_write", dies_on_the_third)
+    with pytest.raises(RuntimeError):
+        eng.move_table("postgres", "public", "log", 500_000,
+                       _Checkpoint(tmp_path / "move.json"), [].append)
+    st = _Checkpoint(tmp_path / "move.json")["postgres.log"]
+    assert len(st["spans"]) >= 4 and len(st["spans_done"]) == 2, st
+    monkeypatch.setattr(eng.dst_engine, "neutral_write", real)
+    again = []
+    monkeypatch.setattr(eng.dst_engine, "neutral_write",
+                        lambda *a, **k: again.append(1) or real(*a, **k))
+    eng.move_table("postgres", "public", "log", 500_000,
+                   _Checkpoint(tmp_path / "move.json"), [].append)
+    st = _Checkpoint(tmp_path / "move.json")["postgres.log"]
+    assert st["done"] and len(again) == len(st["spans"]) - 2, (again, st)
+    assert my("select count(*), count(distinct at) from back.log") == \
+        "60000\t60000"
+    assert [r.status for r in eng.check_data("postgres")
+            if r.check == "data"] == ["ok"]
+
+
+def test_rows_there_twice_do_not_cancel_out(engine):
+    """The checksum folded rows by BIT_XOR, where a row there twice cancels
+    itself. Measured before: a table with no key holding one row twice on
+    the source and another row twice on the target came back ok - the
+    same count, and both checksums zero."""
+    my("create table dups (id int, v varchar(8)); insert into dups values"
+       " (1, 'a'), (1, 'a'), (3, 'c')", "shop")
+    my("create table dups (id int, v varchar(8)); insert into dups values"
+       " (2, 'b'), (2, 'b'), (3, 'c')", "shop_copy")
+    got = [r for r in engine.check_data("shop", table="dups")
+           if r.scope.endswith("dups")]
+    assert [r.status for r in got] == ["diff"], [r.detail for r in got]
+
+
+def test_a_column_holding_a_value_twice_is_still_told_apart(engine):
+    """The same fold named the columns that differ: a column whose value
+    was changed on two rows to the same other value cancelled out too."""
+    my("create table pairs (id int primary key, v varchar(8));"
+       " insert into pairs values (1, 'a'), (2, 'a'), (3, 'c')", "shop")
+    my("create table pairs (id int primary key, v varchar(8));"
+       " insert into pairs values (1, 'b'), (2, 'b'), (3, 'c')", "shop_copy")
+    assert engine._column_fingerprint("shop", "pairs") != [], \
+        "no column named as differing"
+    got = [r for r in engine.check_data("shop", table="pairs")
+           if r.scope.endswith("pairs")]
+    assert [r.status for r in got] == ["diff"], [r.detail for r in got]

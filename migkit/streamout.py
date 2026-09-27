@@ -3,7 +3,9 @@ expect (backlog 35): what a message is, whatever carries it - a Kafka
 topic, a Kinesis stream.
 
 Hop options, the same for every stream:
-  format: json | debezium | canal     (json by default)
+  format: json | debezium | canal | avro   (json by default; avro on
+                                       Kafka, through the target's
+                                       `schema_registry`)
   topic: "{db}.{table}"               (a template naming each table's
                                        stream; the default)
   partition_by: <column>              (the row's key by default)
@@ -12,7 +14,7 @@ Hop options, the same for every stream:
 """
 import json
 
-FORMATS = ("json", "debezium", "canal")
+FORMATS = ("json", "debezium", "canal", "avro")
 
 
 def jsonable(value):
@@ -73,6 +75,13 @@ def encoded(hop, db, changes, now_ms, limit=None):
     """[(stream, partition key text, message bytes)] for `changes`, in
     their order, and {stream: messages skipped for size}."""
     fmt, rule, partition_by, most = options(hop)
+    if fmt == "avro":
+        # written through a schema registry, which only a Kafka target has
+        # (`avrostream`); the other streams take JSON
+        raise SystemExit("format: avro is written through a schema"
+                         " registry, which a Kafka target has and this"
+                         " stream does not - one of " + ", ".join(
+                             f for f in FORMATS if f != "avro"))
     most = limit or most
     out, skipped = [], {}
     for c in changes:

@@ -238,7 +238,9 @@ def test_every_catalog_query_the_engine_carries_actually_parses(dup_pair):
     for name, sql in sorted(queries.items()):
         # a query that takes parameters still has to parse; NULL stands in
         # for the value so the shape of the statement is what is tested
-        ready = sql.replace("%%", "%").replace("%s", "null")
+        # and a template (`{n}`) is filled as it is before it is run
+        ready = sql.replace("%%", "%").replace("%s", "null").replace(
+            "{n}", "1")
         got = subprocess.run(
             ["docker", "exec", NAMES[dup_pair["src"]], "psql", "-U",
              "postgres", "-At", "-q", "-v", "ON_ERROR_STOP=1", "-c", ready],

@@ -173,3 +173,123 @@ def test_a_topic_copied_to_nothing_is_named(brokers, tmp_path):
     time.sleep(2)
     _produce("lost", 0, 3)
     assert "lost" in _engine(tmp_path).moved_nothing("cluster")
+
+
+def _tail(eng, tmp_path):
+    said, ended = [], {}
+
+    def run():
+        try:
+            eng.tail_apply("cluster", True, tmp_path / "tail-token.json",
+                           said.append)
+        except BaseException as e:
+            ended["e"] = e
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, said, ended
+
+
+def _stop(thread):
+    if thread.is_alive():
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(thread.ident), ctypes.py_object(KeyboardInterrupt))
+    thread.join(timeout=30)
+
+
+def test_a_partition_still_arriving_is_confirmed_not_called_wrong(
+        brokers, tmp_path):
+    """Measured before: messages written while the tail was between
+    rounds made `check` say the partitions' content differed - the same
+    report as a target that lost them. The check now waits for the tail
+    to reach the source's end and compares the partitions again."""
+    from kafka.admin import KafkaAdminClient, NewTopic
+
+    from migkit import tailctl
+    from migkit.cli import _Checkpoint
+    admin = KafkaAdminClient(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+    admin.create_topics([NewTopic("arriving", num_partitions=2,
+                                  replication_factor=1)])
+    admin.close()
+    time.sleep(2)
+    _produce("arriving", 0, 60)
+    eng = _engine(tmp_path)
+    eng.move_table("cluster", "", "arriving", 40,
+                   _Checkpoint(tmp_path / "move.json"), lambda m: None)
+    thread, said, ended = _tail(eng, tmp_path)
+    try:
+        time.sleep(3)
+        # the tail held between rounds, as a repair holds it
+        assert tailctl.pause(tmp_path, 30)
+        _produce("arriving", 60, 20)
+        # let it go on once the check is comparing
+        threading.Timer(4, tailctl.resume, (tmp_path,)).start()
+        res = eng.check_data("cluster", table="arriving")
+    finally:
+        _stop(thread)
+    assert [r.status for r in res] == ["ok"], [r.detail for r in res]
+    assert "arriving[0], arriving[1] differed while their changes were" \
+        " still arriving" in res[0].detail, res[0].detail
+    assert not list(tmp_path.glob("data-topic-arriving.*"))
+
+
+def test_a_partition_that_lost_messages_stays_a_difference(brokers,
+                                                           tmp_path):
+    from kafka.admin import KafkaAdminClient, NewTopic
+
+    from migkit.cli import _Checkpoint
+    admin = KafkaAdminClient(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+    admin.create_topics([NewTopic("lossy", num_partitions=2,
+                                  replication_factor=1)])
+    admin.close()
+    time.sleep(2)
+    _produce("lossy", 0, 60)
+    eng = _engine(tmp_path)
+    eng.move_table("cluster", "", "lossy", 40,
+                   _Checkpoint(tmp_path / "move.json"), lambda m: None)
+    # a message the target has and the source never wrote
+    from kafka import KafkaProducer
+    producer = KafkaProducer(bootstrap_servers=f"127.0.0.1:{DST_PORT}")
+    producer.send("lossy", key=b"stray", value=b"stray", partition=1)
+    producer.flush()
+    producer.close()
+    thread, _, _ = _tail(eng, tmp_path)
+    try:
+        time.sleep(3)
+        res = eng.check_data("cluster", table="lossy")
+    finally:
+        _stop(thread)
+    assert [r.status for r in res] == ["diff"], [r.detail for r in res]
+    assert "lossy[1]" in res[0].detail and "lossy[0]" not in res[0].detail
+    # the source's last message is there; what follows it on the target
+    # the source never wrote
+    assert (tmp_path / "data-topic-lossy.changed").read_text() == "1\n"
+
+
+def test_a_snapshot_records_where_the_target_stood(brokers, tmp_path):
+    import json
+
+    from kafka import KafkaConsumer
+    from kafka.admin import KafkaAdminClient, NewTopic
+
+    from migkit.cli import _Checkpoint
+    admin = KafkaAdminClient(bootstrap_servers=f"127.0.0.1:{SRC_PORT}")
+    admin.create_topics([NewTopic("kept", num_partitions=2,
+                                  replication_factor=1)])
+    admin.close()
+    time.sleep(2)
+    _produce("kept", 0, 30)
+    eng = _engine(tmp_path)
+    eng.move_table("cluster", "", "kept", 40,
+                   _Checkpoint(tmp_path / "move.json"), lambda m: None)
+    c = KafkaConsumer("kept", bootstrap_servers=f"127.0.0.1:{DST_PORT}",
+                      group_id="billing", enable_auto_commit=False,
+                      auto_offset_reset="earliest")
+    c.poll(timeout_ms=5000)
+    c.commit()
+    c.close()
+    eng.snapshot_state("cluster", tmp_path)
+    got = json.loads((tmp_path / "dst-offsets.json").read_text())
+    assert got["ends"]["kept[0]"] == 15 and got["ends"]["kept[1]"] == 15
+    assert got["groups"]["billing"], got
+    assert set(got["groups"]["billing"]) <= {"kept[0]", "kept[1]"}
+    assert "cleanup.policy" in got["configs"]["kept"], got["configs"]

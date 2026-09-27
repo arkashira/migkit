@@ -282,6 +282,11 @@ class DbapiRows(NeutralCopier):
             self._run(cur, f"delete from {self._qualified(side, db, table)}"
                            + (f" where ({where})" if where else ""))
             gone = cur.rowcount
+            if gone is None or gone < 0:
+                # DuckDB answers a delete with a row holding the count and
+                # leaves rowcount at -1: "emptied -1 rows" was said
+                got = cur.fetchone() if cur.description else None
+                gone = int(got[0]) if got else 0
             conn.commit()
         finally:
             conn.close()

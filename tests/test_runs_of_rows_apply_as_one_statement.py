@@ -207,15 +207,20 @@ class _Counted:
             def execute(self, *a, **k):
                 sent.append(1)
                 return real.execute(*a, **k)
+
+            def copy_expert(self, *a, **k):
+                sent.append(1)
+                return real.copy_expert(*a, **k)
         return Cursor()
 
 
 @needs_docker
 def test_postgres_sends_a_statement_a_run_not_a_row(pg_pair, monkeypatch):
-    """Counted rather than timed: 5,000 rows are five statements of a
-    thousand, and one a row was 5,000. (The time measured was 0.06s
-    against 3.9s for 20,000; a timing under a loaded machine is not a
-    test.)"""
+    """Counted rather than timed: 5,000 rows in four lanes, each lane's
+    run into a staging table by one COPY and on - with the stage emptied -
+    by one statement, after the stage is made: three round trips a lane,
+    where one a row was 5,000. (The time measured was 0.06s against 3.9s
+    for 20,000 a row; a timing under a loaded machine is not a test.)"""
     from migkit.engines.postgres import PostgresEngine
     eng = _pg(pg_pair)
     port = pg_pair["dst"]
@@ -237,7 +242,7 @@ def test_postgres_sends_a_statement_a_run_not_a_row(pg_pair, monkeypatch):
             eng.neutral_apply("dst", "postgres", batch)
             monkeypatch.undo()
         assert _one(port, "select count(*) from public.s") == "10000"
-        assert len(sent["runs"]) == 5, len(sent["runs"])
+        assert len(sent["runs"]) == 12, len(sent["runs"])
         assert len(sent["one a row"]) == 5000, len(sent["one a row"])
     finally:
         _one(port, "drop table if exists public.s")
@@ -356,3 +361,64 @@ def test_the_reader_asks_a_tables_key_once_a_batch(mysql_server,
     changes, _ = eng.neutral_changes("src", "cx", token)
     assert [c["key"]["id"] for c in changes] == list(range(50)), changes
     assert asked == ["t"], asked
+
+
+@needs_docker
+def test_mysql_a_second_unique_index_never_moves_a_row_under_another(
+        mysql_server):
+    """`on duplicate key update` fires on whichever unique index a row
+    collides with: a new row carrying an e-mail an existing row is giving
+    up updated *that* row and was never made."""
+    my("drop database if exists cx; create database cx;"
+       " create table cx.u (id int primary key, email varchar(20),"
+       " name varchar(20), unique key (email));"
+       " insert into cx.u values (1, 'a', 'first')")
+    # the e-mail moves from row 1 to a new row 2, and the batch holds the
+    # new row first
+    eng = _my()
+    eng.neutral_apply("dst", "cx", [
+        {"op": "insert", "table": "u", "key": {"id": 2},
+         "values": {"id": 2, "email": "a", "name": "second"}},
+        {"op": "update", "table": "u", "key": {"id": 1},
+         "values": {"id": 1, "email": "b", "name": "first"}}])
+    assert my("select group_concat(concat_ws(':', id, email, name) order"
+              " by id) from cx.u") == "1:b:first,2:a:second"
+    # a value two rows really both claim is refused, not given to one
+    import pymysql
+    with pytest.raises(pymysql.err.IntegrityError, match="Duplicate"):
+        eng.neutral_apply("dst", "cx", [
+            {"op": "insert", "table": "u", "key": {"id": 3},
+             "values": {"id": 3, "email": "a", "name": "third"}}])
+    assert my("select group_concat(concat_ws(':', id, email, name) order"
+              " by id) from cx.u") == "1:b:first,2:a:second"
+    # and the copier's writer the same way
+    eng.neutral_write("dst", "cx", "u", [("id", "integer"),
+                                         ("email", "text"),
+                                         ("name", "text")],
+                      [(4, "d", "fourth"), (2, "c", "second again")])
+    assert my("select group_concat(concat_ws(':', id, email, name) order"
+              " by id) from cx.u") == \
+        "1:b:first,2:c:second again,4:d:fourth"
+
+
+@needs_docker
+def test_postgres_runs_land_under_a_wait_callback(pg_pair):
+    """Measured in the suite: once the diff library had been loaded in the
+    process it set a wait callback for every psycopg2 connection, and the
+    staged run stopped on `copy_expert cannot be used with an asynchronous
+    callback`. The run goes as statements then."""
+    import psycopg2.extensions
+    import psycopg2.extras
+    eng = _pg(pg_pair)
+    port = pg_pair["dst"]
+    _one(port, "drop table if exists public.cb;"
+               " create table public.cb (id int primary key, v text)")
+    psycopg2.extensions.set_wait_callback(psycopg2.extras.wait_select)
+    try:
+        eng.neutral_apply("dst", "postgres", [
+            {"op": "insert", "table": "public.cb", "key": {"id": i},
+             "values": {"id": i, "v": "x"}} for i in range(3000)])
+    finally:
+        psycopg2.extensions.set_wait_callback(None)
+    assert _one(port, "select count(*) from public.cb") == "3000"
+    _one(port, "drop table public.cb")

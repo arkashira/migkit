@@ -184,3 +184,26 @@ def test_a_change_of_some_columns_keeps_the_others(pair):
     rows = _sql("shop_new", "select id, region, cast(amount as varchar(10)),"
                             " note from dbo.o order by id")
     assert rows == [(7, "eu", "7.50", "kept"), (8, "us", "8.00", "new")]
+
+
+def test_a_row_still_arriving_is_confirmed_not_called_wrong(pair):
+    """Measured before: a row written while the tail was held made the
+    check call the table different - the same report as a target that lost
+    it. Now the check waits for the tail to reach the source and asks the
+    rows again, as it does for the other engines."""
+    from migkit import tailctl
+    where = pair.hop.report_dir("shop")
+
+    def write():
+        _sql("shop", "insert into dbo.o values (1, 'eu', 1.50, 'a')")
+
+    def held_then_checked():
+        assert tailctl.pause(where, 30)
+        _sql("shop", "update dbo.o set amount = 7.75 where id = 1",
+             "insert into dbo.o values (5, 'us', 5.00, 'e')")
+        threading.Timer(4, tailctl.resume, (where,)).start()
+        return pair.check_data("shop")
+    said, ended, got = _following(pair, write, held_then_checked)
+    assert not ended, ended
+    data = [r for r in got["check"] if r.check == "data"]
+    assert [r.status for r in data] == ["ok"], [r.detail for r in data]

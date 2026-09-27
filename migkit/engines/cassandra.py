@@ -12,6 +12,8 @@ key one row at a time. A `timestamp` holds milliseconds: a source value
 with microseconds arrives short of them, and the check says so, because
 it is a difference.
 """
+import json
+
 from .base import Engine, NeutralCopier, Result
 
 
@@ -286,3 +288,222 @@ class CassandraEngine(NeutralCopier, Engine):
                            " repair, before the cutover")]
         return [Result("deep", f"{db} target replication", "ok",
                        f"the target keeps {least} copies of each row")]
+
+    # ---- settings -------------------------------------------------------
+
+    #: what changes where a row lives or how long it stays: another
+    #: partitioner places every key elsewhere, a table's default time to
+    #: live expires rows the source keeps, a shorter gc grace lets a
+    #: deleted row come back from a node that missed the delete
+    CRITICAL_PARAMS = ("partitioner", "default_time_to_live",
+                       "gc_grace_seconds")
+
+    def _settings(self, side, db):
+        s, out = self._session(side), {}
+        try:
+            for r in s.execute("select name, value from"
+                               " system_views.settings"):
+                out[str(r.name)] = str(r.value)
+        except Exception as e:  # noqa: BLE001 - before 4.0 there is none
+            out["server"] = "not answered: " + str(e).splitlines()[0][:60]
+        ks = self._ks(side, db)
+        for r in s.execute("select replication, durable_writes from"
+                           " system_schema.keyspaces where keyspace_name ="
+                           " %s", (ks,)):
+            out["keyspace.replication"] = json.dumps(dict(r.replication),
+                                                     sort_keys=True)
+            out["keyspace.durable_writes"] = str(r.durable_writes)
+        for r in s.execute("select * from system_schema.tables where"
+                           " keyspace_name = %s", (ks,)):
+            row = r._asdict()
+            t = row.pop("table_name")
+            if self.hop.excluded(db, t):
+                continue
+            for k, v in row.items():
+                if k in ("keyspace_name", "id"):
+                    continue
+                out[f"{t}.{k}"] = json.dumps(
+                    dict(v) if hasattr(v, "items") else v, sort_keys=True,
+                    default=str)
+        return {k: v for k, v in out.items()
+                if not any(w in k.lower() for w in ("password", "keystore",
+                                                    "secret"))}
+
+    def check_params(self, db):
+        """The server's settings (its own virtual table), the keyspace's
+        replication and every table's options, both sides, through the
+        report every engine's settings go through."""
+        def pull(side):
+            try:
+                return self._settings(side, db)
+            except Exception as e:  # noqa: BLE001 - said by the report
+                return {self.UNREADABLE: str(e).splitlines()[0][:80]}
+        src, dst = pull("src"), pull("dst")
+        crit = sorted({n for n in set(src) | set(dst)
+                       if n.split(".")[-1] in self.CRITICAL_PARAMS})
+        return self._param_result(
+            db, src, dst, crit,
+            "give the target's tables the source's time to live and gc"
+            " grace, and the same partitioner, before cutover")
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target holds before a repair: each table's definition
+        and settings, and its rows counted. A snapshot of the files is
+        each node's own (`nodetool snapshot`), which a client does not
+        reach; that is said in the record rather than taken for done."""
+        s = self._session("dst")
+        out = {"no_snapshot": "a snapshot of a table's files is taken on"
+                              " each node, which a client cannot reach",
+               "settings": self._settings("dst", db), "rows": {}}
+        for t in self.neutral_tables("dst", db):
+            out["rows"][t] = s.execute(
+                f"select count(*) from {self._qualified('dst', db, t)}"
+            ).one()[0]
+        (state_dir / "dst-tables.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True, default=str))
+
+    # ---- rows copied as they are, by token ranges ---------------------------
+
+    #: token ranges a table is read in, per worker: small enough that the
+    #: workers finish together
+    RANGES_PER_WORKER = 8
+    LOW, HIGH = -2 ** 63, 2 ** 63 - 1
+
+    def _made_like(self, db, table):
+        """The target table made by the source's own definition - its
+        clustering order, collections, types and indexes - under the
+        target's keyspace name."""
+        import re
+        ks = self._ks("src", db)
+        cluster = self._session("src").cluster
+        cluster.refresh_table_metadata(ks, table)
+        text = cluster.metadata.keyspaces[ks].tables[table] \
+            .export_as_string()
+        into = self._q(self._ks("dst", db))
+        for stmt in [x.strip() for x in text.split(";\n") if x.strip()]:
+            stmt = re.sub(r"^(CREATE (?:TABLE|INDEX|CUSTOM INDEX)"
+                          r"(?: IF NOT EXISTS)?[^(]*?)\s(\S+?)\.",
+                          lambda m: f"{m.group(1)} {into}.", stmt, count=1)
+            stmt = re.sub(r"\bON\s+\S+?\.", f"ON {into}.", stmt, count=1) \
+                if stmt.upper().startswith(("CREATE INDEX",
+                                            "CREATE CUSTOM INDEX")) else stmt
+            self._session("dst").execute(stmt.rstrip(";"))
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table's rows copied as the source holds them, by ranges of
+        the partitioner's tokens read side by side, each row written back
+        with what is left of its time to live and its write time - so a
+        row that expires on the source expires on the target at the same
+        moment, and a later write on either side still wins as it would
+        have. A table the target lacks is made by the source's own
+        definition. A counter table is refused by name: a counter is added
+        to, never written."""
+        steps = [f"{t}: rows copied with their time to live and write"
+                 " time, by token ranges" for t in tables]
+        if not go:
+            return steps
+        from concurrent.futures import ThreadPoolExecutor
+        workers = max(1, int(getattr(self.hop, "workers_most", 0)
+                             or self.hop.workers or 1))
+        for t in list(shape_only) + list(tables):
+            if t not in self.neutral_tables("dst", db):
+                self._made_like(db, t)
+        for t in tables:
+            cols = self._columns("src", db, t)
+            if any(str(c.type) == "counter" for c in cols):
+                raise SystemExit(f"{t} holds counters, which are added to"
+                                 " and never written: it is not copied by"
+                                 " this path")
+            part = [c.column_name for c in sorted(
+                (c for c in cols if c.kind == "partition_key"),
+                key=lambda c: c.position)]
+            key = self.neutral_key("src", db, t)
+            plain = [c.column_name for c in cols
+                     if c.kind in ("regular", "static")]
+            # a collection that is not frozen has no single time to live
+            timed = [c.column_name for c in cols
+                     if c.kind in ("regular", "static")
+                     and not str(c.type).startswith(("list<", "set<",
+                                                     "map<"))]
+            q = self._q
+            read = self._session("src").prepare(
+                "select " + ", ".join(q(n) for n in key + plain)
+                + "".join(f", ttl({q(n)}), writetime({q(n)})" for n in timed)
+                + f" from {self._qualified('src', db, t)} where token("
+                + ", ".join(q(n) for n in part) + ") >= ? and token("
+                + ", ".join(q(n) for n in part) + ") <= ?")
+            dst = self._session("dst")
+            target = self._qualified("dst", db, t)
+            writes = {}
+
+            def statement(names):
+                if names not in writes:
+                    writes[names] = dst.prepare(
+                        f"insert into {target} ("
+                        + ", ".join(q(n) for n in key + list(names))
+                        + ") values (" + ", ".join("?" for _ in key + list(
+                            names)) + ") using ttl ? and timestamp ?")
+                return writes[names]
+            untimed_writes = {}
+
+            def untimed_statement(names):
+                # a collection's own write time is not asked for; it is
+                # written as now, beside the columns that keep theirs
+                if names not in untimed_writes:
+                    untimed_writes[names] = dst.prepare(
+                        f"insert into {target} ("
+                        + ", ".join(q(n) for n in key + list(names))
+                        + ") values (" + ", ".join(
+                            "?" for _ in key + list(names)) + ")")
+                return untimed_writes[names]
+            dst.execute(f"truncate {target}")
+            n = workers * self.RANGES_PER_WORKER
+            step = (self.HIGH - self.LOW) // n
+            bounds = [(self.LOW + i * step,
+                       self.HIGH if i == n - 1 else self.LOW + (i + 1) * step
+                       - 1) for i in range(n)]
+
+            def one(rng):
+                from cassandra.concurrent import execute_concurrent
+                moved, batch = 0, []
+                for row in self._session("src").execute(read, rng):
+                    k = list(row[:len(key)])
+                    vals = dict(zip(plain, row[len(key):len(key)
+                                                 + len(plain)]))
+                    meta = row[len(key) + len(plain):]
+                    groups = {}
+                    for i, name in enumerate(timed):
+                        ttl, wt = meta[2 * i], meta[2 * i + 1]
+                        if vals.get(name) is None or wt is None:
+                            continue
+                        groups.setdefault((ttl or 0, wt), []).append(name)
+                    untimed = tuple(nm for nm in plain if nm not in timed
+                                    and vals.get(nm) is not None)
+                    if untimed or not groups:
+                        batch.append((untimed_statement(untimed),
+                                      k + [vals[nm] for nm in untimed]))
+                    for (ttl, wt), names in groups.items():
+                        batch.append((statement(tuple(names)),
+                                      k + [vals[nm] for nm in names]
+                                      + [int(ttl), int(wt)]))
+                    moved += 1
+                    if len(batch) >= 500:
+                        self._sent(execute_concurrent(dst, batch,
+                                                      concurrency=64), t)
+                        batch = []
+                if batch:
+                    self._sent(execute_concurrent(dst, batch,
+                                                  concurrency=64), t)
+                return moved
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                moved = sum(pool.map(one, bounds))
+            if log:
+                log(f"{t}: {moved:,} rows copied in {n} token ranges")
+        return steps
+
+    @staticmethod
+    def _sent(results, table):
+        failed = [r for ok, r in results if not ok]
+        if failed:
+            raise SystemExit(f"{table}: the target refused {len(failed)}"
+                             f" rows: {str(failed[0])[:150]}")

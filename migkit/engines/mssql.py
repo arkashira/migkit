@@ -273,8 +273,16 @@ class MSSQLEngine(DbapiRows, Engine):
         rows_a = rows_b = 0
         bad_counts = []
         for t in tables:
-            cq = ("select count_big(*), isnull(sum(cast(binary_checksum(*)"
-                  f" as bigint)),0) from {t} with (nolock)")
+            # each row's hash as the server writes the row out, the same
+            # the drilldown compares, summed as a decimal so a row there
+            # twice counts twice. It was BINARY_CHECKSUM(*), which leaves
+            # out xml, text, ntext and image columns - measured, a table
+            # whose xml differed on every row passed as equal
+            cq = ("select count_big(*), isnull(sum(h), 0) from (select"
+                  " cast(convert(bigint, substring(hashbytes('SHA2_256',"
+                  " (select t.* for json path, include_null_values,"
+                  " without_array_wrapper)), 1, 7)) as decimal(38, 0)) h"
+                  f" from {t} t) rows_hashed")
             try:
                 a = self._cmd("src", db, cq)[0]
                 b = self._cmd("dst", db, cq)[0]
@@ -292,6 +300,11 @@ class MSSQLEngine(DbapiRows, Engine):
                 if drill == (0, 0, 0):
                     continue  # settled between the two reads = in-flight
                 if drill:
+                    # confirmed before it is called different: where a tail
+                    # follows the source, waited on and asked again
+                    _, healed, _ = self._resolve_inflight(db, [t], stream)
+                    if t in healed:
+                        continue
                     m, e, c = drill
                     bad.append(f"{t} missing={m} extra={e} changed={c}"
                                " (pk files written)")
@@ -316,10 +329,45 @@ class MSSQLEngine(DbapiRows, Engine):
                               " review, then apply"))
         else:
             res.append(Result("data", db, "ok",
-                              f"{len(tables)} tables, counts and checksums"
-                              " equal both sides (binary_checksum + FOR"
-                              " JSON hash drilldown)"))
+                              f"{len(tables)} tables, counts and every"
+                              " row's hash equal both sides"))
         return res
+
+    # --- the confirm pass (base `fenced_recheck`) ---------------------------
+
+    def _compare_pks(self, db, table, keys):
+        """(missing, extra, changed) among these keys, as the drilldown
+        writes them - each row's hash read again from both sides, now."""
+        pks = self._pk_cols(db, table)
+        if not pks:
+            return None
+        pkexpr = "+'\t'+".join(f"cast(t.{c} as varchar(100))" for c in pks)
+        keys = sorted(keys)
+        got = {"src": {}, "dst": {}}
+        for i in range(0, len(keys), 500):
+            part = ", ".join("'" + k.replace("'", "''") + "'"
+                             for k in keys[i:i + 500])
+            q = (f"select {pkexpr}, convert(varchar(64), hashbytes("
+                 "'SHA2_256', (select t.* for json path,"
+                 " include_null_values, without_array_wrapper)), 2)"
+                 f" from {table} t where {pkexpr} in ({part})")
+            for side in got:
+                got[side].update({r[0]: r[1] for r in
+                                  self._cmd(side, db, q)})
+        a, b = got["src"], got["dst"]
+        return (sorted(k for k in a if k not in b),
+                sorted(k for k in b if k not in a),
+                sorted(k for k in a if k in b and a[k] != b[k]))
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        d = self.hop.report_dir(db)
+        for kind, rows in (("missing", missing), ("extra", extra),
+                           ("changed", changed)):
+            f = d / f"data-{table}.{kind}"
+            if rows:
+                f.write_text("\n".join(rows) + "\n")
+            elif f.exists():
+                f.unlink()
 
     def check_deep(self, db):
         res = []

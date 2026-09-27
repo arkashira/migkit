@@ -59,74 +59,73 @@ GAPS = {
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "mssql": {
-        "confirm": (NOT_YET, "1"),
         "bulk-move": (NOT_YET, "0e"),
-        "users": (NOT_YET, "0e"),
     },
     "redis": {
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
-        "bulk-move": (NOT_YET, "0e"),
-        "delta": (NOT_YET, "0e"),
+        "bulk-move": (NOT_APPLICABLE, "a keyspace already moves key for key"
+                                      " in the server's own serialised form,"
+                                      " or whole by the server's own"
+                                      " replication; no dump a client can"
+                                      " load is faster than either"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "kafka": {
-        "confirm": (NOT_YET, "1"),
         "sequences": (NOT_APPLICABLE,
                       "offsets are assigned by the broker, not carried"),
-        "bulk-move": (NOT_YET, "0e"),
-        "users": (NOT_YET, "0e"),
+        "bulk-move": (NOT_APPLICABLE, "a topic is a log: it is copied"
+                                      " message for message, in order, by"
+                                      " the topic copier - no dump of a log"
+                                      " a client could load keeps its"
+                                      " order faster"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "0e"),
     },
     "sqlite": {
         "confirm": (NOT_APPLICABLE, _FILE_DB),
-        "bulk-move": (NOT_YET, "0e"),
         "stream": (NOT_APPLICABLE, _FILE_DB),
         "fence": (NOT_APPLICABLE, _FILE_DB),
         "delta": (NOT_APPLICABLE, _FILE_DB),
         "users": (NOT_APPLICABLE, "a SQLite database has no users"),
     },
+    "duckdb": {
+        "confirm": (NOT_APPLICABLE, _FILE_DB),
+        "stream": (NOT_APPLICABLE, _FILE_DB),
+        "fence": (NOT_APPLICABLE, _FILE_DB),
+        "delta": (NOT_APPLICABLE, _FILE_DB),
+        "users": (NOT_APPLICABLE, "a DuckDB database has no users"),
+        "params": (NOT_APPLICABLE, "a DuckDB file keeps no settings: they"
+                                   " are the process's that opens it"),
+        "statistics": (NOT_APPLICABLE, "DuckDB keeps its statistics as it"
+                                       " writes"),
+    },
     "parquet": {
         "sequences": (NOT_APPLICABLE, _FILES),
         "params": (NOT_APPLICABLE, _FILES),
-        "bulk-move": (NOT_YET, "34"),
-        "stream": (NOT_YET, "34"),
+        "stream": (NOT_APPLICABLE, _FILES),
         "fence": (NOT_APPLICABLE, _FILES),
         "confirm": (NOT_APPLICABLE, _FILES),
         "delta": (NOT_APPLICABLE, _FILES),
         "users": (NOT_APPLICABLE, "who may read the files is the storage's"
                                   " own access control, not the table's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "34"),
     },
     "clickhouse": {
         "sequences": (NOT_APPLICABLE, "ClickHouse has no sequences or"
                                       " auto-increment to carry"),
-        "params": (NOT_YET, "33"),
         "bulk-move": (NOT_YET, "33"),
         "stream": (NOT_YET, "33"),
         "fence": (NOT_YET, "33"),
         "confirm": (NOT_YET, "33"),
-        "delta": (NOT_YET, "33"),
-        "users": (NOT_YET, "33"),
         "statistics": (NOT_APPLICABLE, "a MergeTree reads by its sorting"
                                        " key and keeps no optimiser"
                                        " statistics to refresh"),
-        "snapshot": (NOT_YET, "33"),
     },
     "dynamodb": {
         "sequences": (NOT_APPLICABLE, "DynamoDB has no sequences or"
                                       " auto-increment to carry"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
-        "stream": (NOT_YET, "34"),
-        "fence": (NOT_YET, "34"),
-        "confirm": (NOT_YET, "34"),
-        "delta": (NOT_YET, "34"),
         "users": (NOT_APPLICABLE, "who may read a table is IAM's, not the"
                                   " table's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "34"),
     },
     "oracle": {
         "sequences": (NOT_YET, "11"),
@@ -167,28 +166,20 @@ GAPS = {
     "opensearch": {
         "sequences": (NOT_APPLICABLE, "an index has no sequences or"
                                       " auto-increment to carry"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
         "stream": (NOT_YET, "34"),
         "fence": (NOT_YET, "34"),
         "confirm": (NOT_YET, "34"),
-        "delta": (NOT_YET, "34"),
         "users": (NOT_YET, "34"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "34"),
     },
     "cassandra": {
         "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
                                       " auto-increment to carry"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
         "stream": (NOT_YET, "34"),
         "fence": (NOT_YET, "34"),
         "confirm": (NOT_YET, "34"),
         "delta": (NOT_YET, "34"),
-        "users": (NOT_YET, "34"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "34"),
     },
     **{name: {
         "deep": (NOT_YET, "33"),

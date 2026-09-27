@@ -17,11 +17,18 @@ class RedisEngine(Engine):
             raise SystemExit("pip install 'migkit[redis]' for redis support")
         # a key or a value need not be text: decoded so that every byte
         # comes back as it was sent, where strict decoding stopped the
-        # check on the first key that was not UTF-8
-        return redis.Redis(host=ep.host, port=ep.port,
-                           password=ep.password or None, db=int(db),
-                           socket_timeout=15, decode_responses=decode,
-                           encoding_errors="surrogateescape")
+        # check on the first key that was not UTF-8 - and sent back the
+        # same way, by the client's own packer: where hiredis is installed
+        # the client packs commands through it, strictly, and such a key
+        # stopped the copy with `UnicodeEncodeError` (measured)
+        from redis.connection import Encoder, PythonRespSerializer
+        encoder = Encoder("utf-8", "surrogateescape", decode)
+        pool = redis.ConnectionPool(
+            host=ep.host, port=ep.port, password=ep.password or None,
+            db=int(db), socket_timeout=15, decode_responses=decode,
+            encoding_errors="surrogateescape",
+            command_packer=PythonRespSerializer(6000, encoder.encode))
+        return redis.Redis(connection_pool=pool)
 
     def databases(self):
         if self.hop.databases:
@@ -1057,6 +1064,171 @@ class RedisEngine(Engine):
         def enc(ks):
             return [json.dumps(k) for k in ks]
         return enc(missing + gone), enc(extra), enc(changed)
+
+    # --- verifying only what changed ---------------------------------------
+    #: keys told of in one cycle past which the cycle compares them all
+    #: instead: a set that large is the keyspace written wholesale
+    DELTA_MOST = 200_000
+
+    def _listening(self, db):
+        """The listener of this process for the source's written keys, or
+        None where there is none yet."""
+        return getattr(self, "_listeners", {}).get(str(db))
+
+    def _listen(self, db):
+        """Start being told of every key the source has written from now:
+        a connection of migkit's is put in broadcast tracking (`CLIENT
+        TRACKING ... BCAST`), redirected to a second one that listens on the
+        server's invalidation channel. Nothing of the server's is changed -
+        tracking belongs to the connection and ends with it - and no key
+        is read to learn it."""
+        import threading
+        import uuid
+
+        import redis
+        ep = self.hop.source
+        name = f"migkit-delta-{uuid.uuid4().hex[:12]}"
+        # RESP2: over RESP3 (the client's default since 8) the server
+        # pushes each invalidation as its own kind of message, which the
+        # listening connection never hands over - measured, nothing heard
+        client = redis.Redis(host=ep.host, port=ep.port,
+                             password=ep.password or None, db=int(db),
+                             socket_timeout=15, client_name=name,
+                             protocol=2)
+        sub = client.pubsub(ignore_subscribe_messages=True)
+        sub.subscribe("__redis__:invalidate")
+        ids = [c["id"] for c in client.client_list(_type="pubsub")
+               if c.get("name") == name]
+        if not ids:
+            sub.close()
+            raise RuntimeError("the listening connection could not be found"
+                               " on the server")
+        tracker = redis.Connection(host=ep.host, port=ep.port,
+                                   password=ep.password or None,
+                                   socket_timeout=15, protocol=2)
+        tracker.connect()
+        tracker.send_command("CLIENT", "TRACKING", "ON", "REDIRECT", ids[0],
+                             "BCAST")
+        if tracker.read_response() not in (b"OK", "OK"):
+            raise RuntimeError("the source would not track its keys")
+        state = {"keys": set(), "whole": False, "lost": None,
+                 "since": time.time(), "stop": False,
+                 "lock": threading.Lock()}
+
+        def read():
+            while not state["stop"]:
+                try:
+                    msg = sub.get_message(timeout=1.0)
+                    # the tracking ends with its connection, and the client
+                    # connects the listener again by itself, under another
+                    # id the tracking does not send to - measured, a
+                    # listener cut off and back went on hearing nothing,
+                    # and the server's own tracking info still named the
+                    # old one. So the one it sends to is asked for by id
+                    tracker.send_command("CLIENT", "LIST", "ID", ids[0])
+                    if not tracker.read_response():
+                        raise RuntimeError("the listening connection was"
+                                           " closed")
+                except Exception as e:  # noqa: BLE001 - said by the cycle
+                    with state["lock"]:
+                        state["lost"] = f"{type(e).__name__}: {str(e)[:80]}"
+                    return
+                if not msg or msg.get("type") != "message":
+                    continue
+                keys = msg.get("data")
+                with state["lock"]:
+                    if keys is None:
+                        # the keyspace flushed: every key may have changed
+                        state["whole"] = True
+                    else:
+                        state["keys"].update(
+                            k.decode("utf-8", "surrogateescape")
+                            if isinstance(k, bytes) else str(k)
+                            for k in keys)
+                        if len(state["keys"]) > self.DELTA_MOST:
+                            state["whole"] = True
+        state["thread"] = threading.Thread(target=read, daemon=True)
+        state.update(sub=sub, tracker=tracker, client=client)
+        state["thread"].start()
+        if not hasattr(self, "_listeners"):
+            self._listeners = {}
+        self._listeners[str(db)] = state
+        return state
+
+    def delta_teardown(self, db):
+        state = getattr(self, "_listeners", {}).pop(str(db), None)
+        if not state:
+            return
+        state["stop"] = True
+        state["thread"].join(timeout=5)
+        for part in ("sub", "tracker", "client"):
+            try:
+                getattr(state[part], "close",
+                        getattr(state[part], "disconnect", None))()
+            except Exception:  # noqa: BLE001 - closing, nothing to keep
+                pass
+
+    def delta_verify(self, db, limit=20000, log=None):
+        """Only the keys written since the last cycle, as the source tells
+        them (`_listen`), compared on both sides as `check` compares a key;
+        a key that differed is compared again next cycle until it matches.
+
+        The first cycle has nothing to go on: it starts listening and
+        compares nothing, as a baseline does. A cycle whose listener lost
+        its connection cannot say what was written meanwhile, and says so
+        rather than pass; one told the keyspace was flushed, or of more
+        keys than a cycle compares, compares the keyspace whole. Both start
+        listening again."""
+        import json
+        state = self._listening(db)
+        if state is None:
+            self._listen(db)
+            return [Result("delta", f"db{db}", "ok",
+                           "listening for the keys the source writes from"
+                           " now: the next cycle compares them")]
+        with state["lock"]:
+            keys, whole, lost = state["keys"], state["whole"], state["lost"]
+            state["keys"], state["whole"] = set(), False
+        keys |= getattr(self, "_still_differ", {}).get(str(db), set())
+        if lost:
+            self.delta_teardown(db)
+            self._listen(db)
+            return [Result("delta", f"db{db}", "error",
+                           "the listener for written keys lost its"
+                           f" connection ({lost}): what was written since"
+                           f" {time.strftime('%H:%M:%S', time.localtime(state['since']))}"
+                           " was not seen - run check; listening again",
+                           "", f"migkit check {self.hop.name}")]
+        if whole:
+            got = self.check_data(db)
+            return [Result("delta", f"db{db}", got[0].status,
+                           "the keyspace was flushed or written wholesale,"
+                           " so it was compared whole: " + got[0].detail)] \
+                + got[1:]
+        kept = [k for k in keys if self._kept(db, [k])]
+        missing, extra, changed = (
+            [json.loads(k) for k in ks]
+            for ks in self._compare_pks(db, f"db{db}",
+                                        {json.dumps(k) for k in kept})) \
+            if kept else ([], [], [])
+        bad = set(missing) | set(extra) | set(changed)
+        if not hasattr(self, "_still_differ"):
+            self._still_differ = {}
+        self._still_differ[str(db)] = bad
+        if log:
+            log(f"{len(kept)} written keys compared, {len(bad)} differ")
+        if bad:
+            parts = [f"{n} {w}" for n, w in (
+                (len(missing), "missing on the target"),
+                (len(extra), "on the target only"),
+                (len(changed), "with another value")) if n]
+            return [Result("delta", f"db{db}", "diff",
+                           f"{len(bad)} of {len(kept)} written keys differ:"
+                           f" {', '.join(parts)} - compared again next cycle"
+                           )]
+        return [Result("delta", f"db{db}", "ok",
+                       f"{len(kept)} written keys, every one the same on"
+                       " the target")]
 
     def _write_pk_files(self, db, table, missing, extra, changed):
         self._write_drill(db, table, missing=missing, extra=extra,

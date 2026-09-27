@@ -177,6 +177,9 @@ def change(parsed, keys):
             " so migkit cannot say which row it meant. Set REPLICA IDENTITY"
             f" to a unique index on {table}, or exclude it")
     key = {k: source[k] for k in keys}
+    # the whole previous row, where the table keeps one (REPLICA IDENTITY
+    # FULL); only a key changing is not a row
+    before = old if old and set(old) - set(keys) else None
     if parsed["op"] == "delete":
-        return canon.change("delete", table, key)
-    return canon.change(parsed["op"], table, key, new)
+        return canon.change("delete", table, key, before=before)
+    return canon.change(parsed["op"], table, key, new, before=before)

@@ -315,20 +315,22 @@ def test_atlas_authoritative_demotes_textual_diff():
 def test_delta_available_on_all_engines():
     """Every engine either verifies deltas or has the gap declared. Redis
     used to pass this with a method that only returned an error; the
-    capability matrix does not count a method like that any more."""
+    capability matrix does not count a method like that any more - and
+    Redis now verifies the keys its source says it wrote."""
     from migkit import capabilities
-    for name in ("kafka", "mssql"):
+    for name in ("kafka", "mssql", "redis"):
         assert capabilities.implemented(name, "delta"), name
-    assert not capabilities.implemented("redis", "delta")
-    assert capabilities.GAPS["redis"]["delta"][0] == capabilities.NOT_YET
+    assert "delta" not in capabilities.GAPS["redis"]
+    assert capabilities.GAPS["cassandra"]["delta"][0] == \
+        capabilities.NOT_YET
 
 
-def test_redis_delta_is_honest_about_no_changelog():
-    """Still honest, now in the sentence every engine's gap gets, with what
-    to do meanwhile."""
+def test_a_delta_gap_says_what_to_do_meanwhile():
+    """Still honest where an engine has none, in the sentence every
+    engine's gap gets, with what to do meanwhile."""
     from migkit import capabilities
-    said = capabilities.unavailable("redis", "delta")
-    assert "not available for redis hops yet" in said, said
+    said = capabilities.unavailable("cassandra", "delta")
+    assert "not available for cassandra hops yet" in said, said
     assert "compares everything" in said, said
 
 

@@ -380,3 +380,70 @@ class ParquetEngine(NeutralCopier, Engine):
                                   f"{files} part files, every one read"
                                   " whole"))
         return out
+
+    # ---- files copied as they are ------------------------------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table's part files and description copied as they are,
+        byte for byte, by the filesystem (between two S3 locations of one
+        store, the store copies them itself): nothing read and written
+        again. A table already on the target has its part files removed
+        first; the description is written last, so a table stopped part
+        way is not taken for a finished one."""
+        steps = [f"{t}: part files copied as they are" for t in tables]
+        if not go:
+            return steps
+        import pyarrow.fs as pafs
+        sfs, _ = self._place("src")
+        dfs, _ = self._place("dst")
+        for t in shape_only:
+            if self._meta("dst", db, t) is None:
+                _, sd = self._dir("src", db, t)
+                _, dd = self._dir("dst", db, t)
+                dfs.create_dir(dd, recursive=True)
+                pafs.copy_files(posixpath.join(sd, META),
+                                posixpath.join(dd, META),
+                                source_filesystem=sfs,
+                                destination_filesystem=dfs)
+        for t in tables:
+            _, sd = self._dir("src", db, t)
+            _, dd = self._dir("dst", db, t)
+            _, old = self._parts("dst", db, t)
+            meta = posixpath.join(dd, META)
+            if dfs.get_file_info(meta).type == pafs.FileType.File:
+                dfs.delete_file(meta)
+            for p in old:
+                dfs.delete_file(p)
+            dfs.create_dir(dd, recursive=True)
+            _, parts = self._parts("src", db, t)
+            for p in parts:
+                pafs.copy_files(p, posixpath.join(dd, posixpath.basename(p)),
+                                source_filesystem=sfs,
+                                destination_filesystem=dfs)
+            pafs.copy_files(posixpath.join(sd, META), meta,
+                            source_filesystem=sfs, destination_filesystem=dfs)
+            if log:
+                log(f"{t}: {len(parts)} part files copied")
+        return steps
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The target's tables as they stand - every part file and its
+        description - copied beside the run's state, where a rollback puts
+        them back from, and listed with their sizes."""
+        import pyarrow.fs as pafs
+        dfs, _ = self._place("dst")
+        local = pafs.LocalFileSystem()
+        listed = {}
+        for t in self.neutral_tables("dst", db):
+            _, dd = self._dir("dst", db, t)
+            into = state_dir / "dst-files" / t
+            into.mkdir(parents=True, exist_ok=True)
+            files = [i for i in self._listing(dfs, dd)
+                     if i.type == pafs.FileType.File]
+            for i in files:
+                pafs.copy_files(i.path, str(into / posixpath.basename(i.path)),
+                                source_filesystem=dfs,
+                                destination_filesystem=local)
+            listed[t] = {posixpath.basename(i.path): i.size for i in files}
+        (state_dir / "dst-files.json").write_text(
+            json.dumps(listed, indent=2, sort_keys=True))
