@@ -5121,6 +5121,92 @@ digest, the fenced re-check and the exact batch; the physical rung adds
 block checksums under them. Order: 6, 8, 10 (small, measurable now),
 then 4 and 2's binary COPY, then 1 (the largest gain), then 7 and 9.
 
+### R20. The hardware as the only ceiling, the proof nearly free (added 2026-09-29, the owner: "faster still - brutal throughput, in everything, moving and verifying, with consistency and idempotence kept")
+
+Measured where migkit stands after F6: the MySQL tail's ceiling is the
+Python decoder (~78k changes/s), then apply (~6.7 us a change); the
+PostgreSQL tail spends 1.7 s parsing what the server decoded in 0.47 s;
+the fold spends 80% rendering rows. So the levers that remain are all
+one idea - **rows never pass through Python on the data plane**; Python
+decides, schedules and compares numbers - and one more - **the proof is
+kept up as the data moves, so verifying at the end costs almost
+nothing**. Each is measured before it is claimed; none gives up the
+range digest, the fenced re-check, exact batches or the final proof.
+
+**Moving**
+1. **Pass-through for a same-engine pair:** PostgreSQL `COPY (...) TO
+   STDOUT (FORMAT binary)` piped straight into `COPY ... FROM STDIN
+   (FORMAT binary)` on the target, per range, in parallel - the bytes
+   are never parsed; the range's digest is computed by each server in
+   SQL, not by Python. MySQL: the same with the pinned `LOAD DATA
+   LOCAL` fed from `SELECT ... INTO`-shaped streams (or MySQL Shell's
+   copy). Where a relay beside the source exists, the pipe runs there
+   compressed.
+2. **Arrow for a cross-engine pair:** read into Arrow record batches
+   (ADBC / ConnectorX / psycopg binary into Arrow / DuckDB scanners),
+   transform with pyarrow compute (vectorised, canon's rules as Arrow
+   kernels), write through binary COPY / LOAD DATA / bulk copy / Arrow
+   ingest - no per-row Python.
+3. **Compiled change path end to end (W9, R19 lever 9):** a compiled
+   binlog/pgoutput decoder (Rust `mysql_common`/Go `go-mysql`; the
+   replication protocol, not SQL peeks) handing Arrow batches to
+   migkit, and the collapse + write of a batch compiled too once
+   decoding is no longer the ceiling; streaming replication
+   (`START_REPLICATION` with binary pgoutput) instead of polling.
+4. **Session-level load settings where they are safe:** `COPY ... FREEZE`
+   into a table created or emptied in the same transaction;
+   `synchronous_commit = off` on the loading sessions (a crash loses at
+   most the last fraction of a second, which the final proof catches -
+   never "ok" without it); MySQL `unique_checks = 0` and, only where the
+   hop says the target has no replicas, `sql_log_bin = 0`. Never a
+   server setting.
+5. **Phases overlapped:** index builds of a table while the next copies
+   (PostgreSQL), verification of a range while the next loads, the
+   tail started as soon as the first table is done (with lever 8).
+6. **Compression and legs chosen by measurement:** zstd level picked
+   from measured CPU vs link (level 1 or none when CPU-bound, higher
+   on a slow link), legs added while the rate rises (built), the relay
+   beside the source and the writer beside the target (R17d) so the
+   link's RTT is paid once a batch.
+7. **Files:** dumps, Parquet and object copies moved with many parallel
+   ranged parts (s5cmd-style), server-side copies where source and
+   target share a provider, checksums taken while streaming (S3's
+   CRC64NVME comes free) - never a second read to verify.
+
+**Verifying**
+8. **The proof kept up as the data moves (incremental multiset
+   hashing):** the digest is a sum of row hashes, so it can be
+   maintained - each leaf's digest is written when its range is copied
+   (already computed), and the tail adds the new row's hash and
+   subtracts the old one for every change it applies (both sides: the
+   source's from the change's before and after images, the target's
+   from what it wrote). At cutover the proof is comparing two kept
+   numbers per leaf plus a re-read of the leaves the last seconds
+   touched - O(changes), not O(table). A periodic background re-read
+   of cold leaves guards against anything the stream did not see
+   (LtHash-style; before images required - REPLICA IDENTITY FULL /
+   `binlog_row_image=FULL`, else the touched keys are re-read).
+9. **One scan for the whole tree, any key (F1):** every leaf digest in
+   one `GROUP BY bucket` pass, buckets by a hash of the key, an in-SQL
+   IBLT when differences are few and the link is slow.
+10. **The fastest hash the pair allows:** same engine and version ->
+    the server's native row hash (`hash_record_extended` and the like,
+    no text rendering); cross-engine -> canonical rendering + md5,
+    the rendering pushed into SQL where it is 80% of the cost;
+    parallel workers on the server (`max_parallel_workers_per_gather`
+    as a session setting) for the digest scan.
+11. **Only what changed since the last proof:** tables and leaves
+    untouched since they were last proved (modification counters,
+    the tail's own record of keys touched) are not read again.
+12. **Parallel both sides at once**, the source's and the target's
+    digest of the same range read at the same moment on separate
+    connections, sized by the decision engine from both servers' load.
+
+Order: 8 and 9 (the proof nearly free), 1 (pass-through), 10, 11, 4,
+5, 2, 3, 6, 7 - each against the tool that leads it (pgcopydb and
+PeerDB for moving, Veridata/DVT/pgCompare for verifying), numbers in
+the docstrings.
+
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
 Pushed **without the full suite run** (the owner's call, out of tokens):
