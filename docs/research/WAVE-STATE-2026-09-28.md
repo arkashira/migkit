@@ -69,3 +69,30 @@ Then the queue above (live tail L/R/C/P items after tail_apply owners merge; eng
 - R20.4/5 session-level load settings (FREEZE, synchronous_commit off, unique_checks), phases overlapped
 - R20.2/3 Arrow cross-engine path; compiled decoder + streaming replication
 - R20.6/7 compression/legs by measurement; parallel ranged file moves
+- Running (R20, launched 2026-09-29): a31b892 proof kept up + one-scan tree + IBLT (16170-16179); a5244da pass-through binary COPY + safe session settings + overlap (16180-16189)
+- Running (R20): ae13c03 cross-engine without Python rows: DuckDB mover + source-rendered COPY text pipe (16190-16199)
+- Running (R21): ab097a0 two-address hops, init as a guide, keychain, DBA scripts, goal:, option registry + did-you-mean, import DMS/Debezium/pgloader configs (16200-16209)
+- Pending commits in main checkout: deep-checks squash (staged, waiting docker biwfsu0oc), then docs/backlog.md (R20 compete rule + R21) and docs/index.html (no internal tool names) as separate commits
+- 659b54f deep checks (aae6d11): partition coverage both engines, transient tables everywhere, narrowing/shift in one place (+numeric(12,2)->(12,4) caught), PG slot with EXPORT_SNAPSHOT + visibility wait, MySQL copy_point waits commits in flight (real hole measured on 8.4). Conflict with F6 in postgres.py resolved (both kept).
+- eb70ff6 docs: compete rule, R21, index.html no internal tool names
+- 3b05234 types (af1a0fe): G1-G4, G8 collation merges refused, preflight refusals canon.unfit, G15-G24 + XML/UUID/inet classes; not done: G5 Mongo types round trip, interval/vector/geometry classes, empty Cassandra collections, Oracle paths not run
+- post-merge docker check of types+deep+F6 running (bd4pknqya); deep-checks own docker check (biwfsu0oc) still queued
+- Batch B resumed: + aa5d0ed engine gaps
+- Running (R22): a90aadb resource model + bottleneck + per-resource controllers + ETA per phase (16220-16229); a939c23 hops removed (postgres_fdw pull, temp subscription, placement advice) + instance catalog/advisor + target class (16230-16239)
+- Running: addeddc types remainder (G5 Mongo, interval/vector/geometry, Cassandra empty collections, CH Array, nine digits) (16210-16219); ae854af backlog-index.md
+- 395c8e5 two-way rungs (a4d532b): marks.py ladder (PG origin/message/table, MySQL tagged GTID (own decoder)/comment/table, MariaDB skip flag/table), probe proof caught a real decoding bug, rung in token + next batch, doctor + teardown; costs measured (PG origin ~1ms/conn -> table outranks origin for counter hops; MySQL rungs in noise -> tagged GTID by footprint). Not done: MariaDB GTID-domain rung, many-node. Conflict in postgres.py (SESSION pin vs _first_line) resolved keep both. Docker check bdv1qvq3k.
+- Batch B resumed: + ad4afda 0f pgcopydb/Debezium (told: align Debezium modes to canon, rungs vs pass-through/tail)
+
+## PAUSING 2026-09-29 (owner: tokens low — let this round finish, then pause; cron stopped)
+- Cron a1c802b6 deleted. No new agents after a6bfe7c (R23.3 target interlock, 16240-16249).
+- Agents still running this round (merge when the owner resumes): ae866ee stored code, a2ba2fe cutover, aa2c527 outward, a5bea35 write paths, a8d572b SQL Server + x86 CI, a47bffb Oracle, ae351bc MySQL tools, ad4909f physical, aa5d0ed engine gaps, ad4afda 0f pgcopydb/Debezium, a31b892 R20 proof, a5244da R20 pass-through, ae13c03 R20 cross-engine, ab097a0 R21 UX, addeddc types remainder, a90aadb R22 model+ETA+memory, a939c23 R22 hops+instances, a6bfe7c R23.3 interlock.
+- Not resumed yet: a075608 0f DVT, a7120bc warehouse, a8c4cd1 copybook + IBM i.
+- On resume: merge each finished branch (squash, its tests + name guard, docker via lock), resume the three above, then the queue (R20 rest, R22 rest, R23 1-2 and 4-9, live tail, engine reach, W-items, F7, 0f remaining tools).
+- Merged so far on master (not pushed): 2a4c652, 6f07ceb, 32ed544, f3884fa, 659b54f, 3b05234, 395c8e5 (+ docs commits).
+- DONE (not merged, paused): aa2c527 outward F0 -> branch worktree-agent-aa2c527df35cffc64 head a503c25 (c580c69 work). Found+fixed: PG table copier ignored exclude and overwrote target-owned tables. TODO on merge: its pending PG docker run (/tmp/f0_docker_batch5.log); merge drift.transient + leftovers.bookkeeping into ONE list; mongosync docker test not run; SQL Server TLS can't verify via pymssql.
+
+## STOPPED ALL 2026-09-29 (owner: token low) — resume 8-10 at a time next round
+- All 17 running agents stopped; queued docker jobs killed; test containers removed; colima `migkit` profile stopped; context = colima.
+- WIP kept: committed on each branch, except a939c23, ab097a0, addeddc, ae13c03 = staged (secret-check blocked; fix the flagged test values before committing). aa2c527 DONE (merge first). a2ba2fe/ae351bc/ae866ee clean (already committed).
+- Resume order (8-10 at a time): merge aa2c527 -> resume cutover a2ba2fe, stored code ae866ee, R20 proof a31b892, R20 pass-through a5244da, interlock a6bfe7c, write paths a5bea35, types rest addeddc, UX ab097a0 -> then Oracle a47bffb, SQL Server a8d572b, MySQL tools ae351bc, physical ad4909f, engine gaps aa5d0ed, 0f pgcopydb ad4afda, R20 cross-engine ae13c03, R22 a90aadb/a939c23 -> then not-yet-resumed a075608 DVT, a7120bc warehouse, a8c4cd1 copybook.
+- Two-way merge 395c8e5 docker re-check (bdv1qvq3k) was killed before running: re-run on resume.
