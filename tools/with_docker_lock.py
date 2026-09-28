@@ -87,6 +87,10 @@ def main(argv):
         env = dict(os.environ)
         started = False
         before = _context()
+        if before in (None, "default") or str(before).startswith("colima-"):
+            # what another start or stop left behind, not what this
+            # machine runs on
+            before = "colima"
         if not vm and before != "colima" and before is not None \
                 and "DOCKER_CONTEXT" not in env:
             # a context another start left behind is not this machine's
