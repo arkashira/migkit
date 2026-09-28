@@ -2442,6 +2442,86 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## Where migkit would still lose with every item above done (2026-09-28)
+
+Asked by the owner: once the whole backlog is built, where do the
+world's paid tools still win, on every factor (not "no users yet").
+Structural first - limits that doing the backlog does not remove - then
+the gaps nothing above covers yet, now items of their own.
+
+**Structural (mitigated, not closed):**
+* **Oracle at high change rates, and Oracle as a target.** GoldenGate
+  captures and applies inside the kernel (integrated Extract and
+  Replicat, XStream, RAC threads, ASM, TDE-encrypted redo, downstream
+  capture on a standby so the source does no mining). migkit's paths are
+  LogMiner (slower, type limits, no continuous mine after 19c) or
+  OpenLogReplicator run as a separate program (GPL: driven, never
+  bundled). Mitigation: mine on a standby where LogMiner allows it, the
+  compiled reader as a rung, measured against the redo rate before a
+  hop is accepted.
+* **Reading the raw transaction log with no CDC feature on the source.**
+  Qlik, SharePlex and GoldenGate parse SQL Server, Oracle and Db2 log
+  formats themselves; migkit uses the engine's own change features
+  (Change Tracking / CDC, LogMiner, SQL replication), which a DBA must
+  turn on - migkit never changes a setting. Mitigation: `assess` names
+  exactly what to enable and its cost; a raw-log reader is not planned.
+* **Capabilities behind a closed licence:** mongosync (free only with
+  Atlas or Enterprise Advanced), RIOT-X (BSL), Kafka byte-level mirroring
+  with offsets kept (Cluster Linking, Shadowing; impossible from a
+  client), Redis Enterprise Active-Active CRDTs, XStream. Used where the
+  operator holds the licence; migkit's own path is the rung otherwise,
+  and says what it cannot give (e.g. offsets translated, not preserved).
+* **What only a cloud's control plane can do:** storage-level clones and
+  zero-ETL seeding, serverless capacity for the mover, Azure's MI link.
+  migkit drives the provider's API where one exists (R19 lever 1) and
+  cannot where none does.
+
+**Gaps not yet in any item (added now):**
+* **W1. The mover itself highly available and scaled out.** A CDC leg
+  that runs for months must not stop with one machine: a standby that
+  takes over within seconds from the shared position (the lease exists,
+  `test_another_machine_takes_the_run_over.py`), and one table's ranges
+  spread across machines with a conditional-write checkpoint (R5, looked
+  at and left). Paid peers: GoldenGate HA, Striim clusters, DMS Multi-AZ.
+* **W2. The estate, not the hop.** Discovery of every database on a
+  network or account, target sizing from the source's performance
+  history (Azure's SKU recommendations, Fleet Advisor), cost of the
+  target, and hundreds of migrations run and watched as one fleet; a
+  REST API, a Terraform provider and a Kubernetes operator over it; SSO
+  (OIDC/SAML) and SCIM on the view, not only a proxy's header.
+* **W3. Code conversion at enterprise breadth.** Beyond R11: PL/SQL
+  packages with the emulation libraries they need (orafce and the
+  like), T-SQL at depth, and the SQL embedded in application code
+  (AWS SCT scans Java, C# and .NET) found and converted, with the same
+  proof by execution.
+* **W4. Transformation in flight and masking for compliance.** Joins,
+  enrichment and windows on the stream (Striim, Informatica, Matillion),
+  and format-preserving encryption / tokenization (Informatica, Delphix)
+  beside the keyed HMAC of R5 - as hop rules under the same verify, which
+  then compares the transformed source with the target.
+* **W5. Sources the paid tools read and migkit does not:** mainframe
+  and legacy (Db2 for z/OS and IBM i, IMS, VSAM with COBOL copybooks,
+  EBCDIC and packed decimals), Teradata, Netezza, SAP (HANA, and SAP
+  application tables through its own extractors), Informix, Progress;
+  and SaaS applications, where the open connectors are ELv2 or AGPL and
+  cannot be wrapped - to be decided by what the next migration needs.
+* **W6. Types only commercial engines have:** Oracle SDO_GEOMETRY,
+  XMLType, object types and nested tables; SQL Server hierarchyid,
+  sql_variant, FILESTREAM; Db2 DECFLOAT and GRAPHIC - mapped, carried,
+  rendered for the digest, or refused before the move (the type-fidelity
+  research, 2026-09-28).
+* **W7. Resharding.** One database split across N targets by key, N
+  merged into one with DDL coordinated (TiDB DM's shard merge), and a
+  load that follows the target's own distribution (Citus, Vitess,
+  CockroachDB, Spanner).
+* **W8. Installed where nothing can be downloaded.** An offline bundle
+  (every wheel and every wrapped program, checksummed and signed), a
+  container image, and Windows; GoldenGate runs on every platform
+  including z/OS and AIX.
+* **W9. Compiled end to end at the very top of the rate.** R19 lever 9
+  compiles the decoder; above ~100k changes a second sustained the apply
+  side (collapse, render, write) needs the same, measured first.
+
 ## Where the paid tools and the clouds still lead (added 2026-09-24)
 
 From the comparison against GoldenGate + Veridata, Qlik Replicate, Striim,
