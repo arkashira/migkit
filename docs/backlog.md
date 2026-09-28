@@ -5593,12 +5593,37 @@ cutover, R21, types, users, workload). Not yet anywhere:
    message shaped per channel (cards where the channel has them), the
    same rules as now (no row values, the address never printed, a
    delivery failure said and the run going on), and a test per channel
-   against a local stub.
+   against a local stub. Approved by the owner in full (2026-09-29):
+   every channel Apprise reaches, wrapped as migkit's own receivers.
 9. **Documentation as part of the product:** a five-minute quickstart
    for each common pair, a page per engine saying what is carried,
    what is refused and why, recipes for the usual moves (a managed
    service to another, on-premises to cloud, one engine to another),
    in migkit's own words; measured by a new operator following it.
+
+### R24. The manual and the site, current and generated (added 2026-09-29)
+
+The owner will write use cases and an article on a real migration done
+with migkit; the web manual (`docs/index.html`, published from `docs/`)
+describes an older version. So:
+1. **The engine page generated from the code:** the supported engines,
+   aliases and every source x target pair with what each carries
+   (move, verify, follow, two-way, cutover, users, types refused)
+   rendered from `capabilities.matrix()` and `decide.coverage()` at
+   build time, so the site can never claim more or less than the code.
+2. **Features and how to use them**, in migkit's words, by goal (copy,
+   cutover, verify, two-way, keep in sync, upgrade), each with a
+   five-minute path from two addresses (R21) and the reports it
+   produces (R23.1).
+3. **Use cases** written as recipes (a managed service to another,
+   on-premises to cloud, one engine to another, a major-version
+   upgrade, a zero-downtime cutover), with example numbers from the
+   sandbox only.
+4. **Release notes and a changelog** per release, and the version shown
+   on the site.
+5. Checked like code: a test fails when a page names an internal tool
+   (the positioning rule), claims a pair the matrix does not have, or
+   shows a command or option that no longer exists.
 
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
