@@ -128,10 +128,12 @@ def test_chunked_total_equals_single_pass(pair, tmp_path):
     assert rows_a == 8000, r.detail        # never pass on an empty table
     assert "(1 chunks" in r.detail, r.detail
 
-    # and again in several ranges
-    eng2 = _engine(tmp_path / "chunked", 2000)
+    # and again in several ranges, in the same run: its salt, so the sums
+    # are of one kind
+    eng.hop.slice = 2000
+    eng.hop.report_dir = lambda db=None: tmp_path / "chunked"
     (tmp_path / "chunked").mkdir()
-    r2, _, _ = eng2._diff_table("shop", "big")
+    r2, _, _ = eng._diff_table("shop", "big")
     assert r2.status == "ok", r2.detail
     assert "(1 chunks" not in r2.detail, r2.detail
     assert _nums(r2.detail) == _nums(r.detail)

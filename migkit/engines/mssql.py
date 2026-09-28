@@ -243,10 +243,9 @@ class MSSQLEngine(DbapiRows, Engine):
         if n > self.DRILL_MAX_ROWS:
             return None
         pkexpr = "+'\t'+".join(f"cast(t.{c} as varchar(100))" for c in pks)
+        row, _ = self._row_json(db, t)
         q = (f"select {pkexpr}, convert(varchar(64), hashbytes('SHA2_256',"
-             " (select t.* for json path, include_null_values,"
-             " without_array_wrapper)), 2)"
-             f" from {t} t with (nolock)")
+             f" {row}), 2) from {t} t with (nolock)")
         src = {r[0]: r[1] for r in self._cmd("src", db, q)}
         dst = {r[0]: r[1] for r in self._cmd("dst", db, q)}
         missing = sorted(k for k in src if k not in dst)
@@ -269,19 +268,26 @@ class MSSQLEngine(DbapiRows, Engine):
         st = [r[0] for r in self._cmd("src", db, q)]
         dt = {r[0] for r in self._cmd("dst", db, q)}
         tables = [table] if table else [t for t in st if t in dt]
-        bad = []
+        bad, left = [], []
         rows_a = rows_b = 0
         bad_counts = []
+        salt = self.digest_salt()
         for t in tables:
             # each row's hash as the server writes the row out, the same
             # the drilldown compares, summed as a decimal so a row there
             # twice counts twice. It was BINARY_CHECKSUM(*), which leaves
             # out xml, text, ntext and image columns - measured, a table
-            # whose xml differed on every row passed as equal
+            # whose xml differed on every row passed as equal. 64 bits of
+            # it, behind the run's salt (`checkpoint.new_salt`)
+            try:
+                row, out = self._row_json(db, t)
+            except Exception as e:  # noqa: BLE001 - the table is named
+                bad.append(f"{t} error {e}")
+                continue
+            left += out
             cq = ("select count_big(*), isnull(sum(h), 0) from (select"
                   " cast(convert(bigint, substring(hashbytes('SHA2_256',"
-                  " (select t.* for json path, include_null_values,"
-                  " without_array_wrapper)), 1, 7)) as decimal(38, 0)) h"
+                  f" N'{salt}' + {row}), 1, 8)) as decimal(38, 0)) h"
                   f" from {t} t) rows_hashed")
             try:
                 a = self._cmd("src", db, cq)[0]
@@ -298,7 +304,15 @@ class MSSQLEngine(DbapiRows, Engine):
             if a != b:
                 drill = self._drilldown(db, t)
                 if drill == (0, 0, 0):
-                    continue  # settled between the two reads = in-flight
+                    # The sums differed and no row does: a write between
+                    # the reads, if they now agree - asked, not assumed.
+                    # Still different, nothing found where, and it is said.
+                    if self._cmd("src", db, cq)[0] != \
+                            self._cmd("dst", db, cq)[0]:
+                        bad.append(f"{t} differs, not localized: the sums"
+                                   " still differ and no row differs by"
+                                   " key")
+                    continue
                 if drill:
                     # confirmed before it is called different: where a tail
                     # follows the source, waited on and asked again
@@ -322,16 +336,68 @@ class MSSQLEngine(DbapiRows, Engine):
                                   f"{len(tables)} tables, rows"
                                   f" {rows_a:,}=={rows_b:,}"
                                   " (from the checksum pass, no extra scan)"))
+        said = ("; left out of the row hash, as every copy writes them"
+                f" anew: {', '.join(left[:8])}"
+                + (f" and {len(left) - 8} more" if len(left) > 8 else "")
+                if left else "")
         if bad:
-            res.append(Result("data", db, "diff", "; ".join(bad[:10]), "",
-                              "pk-level diffs in data-*.missing/extra/"
+            res.append(Result("data", db, "diff", "; ".join(bad[:10]) + said,
+                              "", "pk-level diffs in data-*.missing/extra/"
                               "changed; repair via tablediff -f fix.sql,"
                               " review, then apply"))
         else:
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
-                              " row's hash equal both sides"))
+                              " row's hash equal both sides" + said))
         return res
+
+    #: CLR types a row hash reads through their own rendering: `FOR JSON`
+    #: refuses them outright (Msg 13604), which left every table holding
+    #: one reported as an error and never compared. A shape as its SRID and
+    #: its well-known binary with Z and M; a hierarchy node as its path
+    CLR_RENDERED = {
+        "geography": "cast({c}.STSrid as varchar(11)) + ':'"
+                     " + convert(varchar(max), {c}.AsBinaryZM(), 2)",
+        "geometry": "cast({c}.STSrid as varchar(11)) + ':'"
+                    " + convert(varchar(max), {c}.AsBinaryZM(), 2)",
+        "hierarchyid": "{c}.ToString()",
+    }
+
+    def _row_json(self, db, t):
+        """(the row of `t` as JSON, aliased `t`; the columns left out).
+
+        Named, not `t.*`: in name order read from the source and run
+        alike on both sides, so a target whose columns stand in another
+        order hashes the same, and a HIDDEN column (a temporal table's
+        period) is compared rather than skipped; each column under a name
+        of its own, since `FOR JSON PATH` turns a name holding a dot into a
+        nested object. A `rowversion` is left out and named: the server
+        writes a new one into every row a copy inserts, so it differs on
+        every row of a table that was copied correctly. CLR types go
+        through `CLR_RENDERED`; one of an assembly nobody here knows,
+        through its own bytes.
+        """
+        cols = self._rows(
+            "src", db, "select c.name, ty.name, ty.is_assembly_type,"
+                       " c.system_type_id from sys.columns c join sys.types"
+                       " ty on ty.user_type_id = c.user_type_id where"
+                       f" c.object_id = object_id({MARK}) order by c.name",
+            (self._qualified("src", db, t),))
+        parts, left = [], []
+        for name, kind, assembly, system in cols:
+            c = f"t.{self._q(name)}"
+            if int(system) == 189:
+                left.append(f"{t}.{name} (rowversion)")
+                continue
+            if assembly and kind in self.CLR_RENDERED:
+                c = self.CLR_RENDERED[kind].format(c=c)
+            elif assembly:
+                c = f"cast({c} as varbinary(max))"
+            parts.append(f"{c} as [c{len(parts)}]")
+        if not parts:
+            return "N'{}'", left
+        return (f"(select {', '.join(parts)} for json path,"
+                " include_null_values, without_array_wrapper)", left)
 
     # --- the confirm pass (base `fenced_recheck`) ---------------------------
 
@@ -342,14 +408,14 @@ class MSSQLEngine(DbapiRows, Engine):
         if not pks:
             return None
         pkexpr = "+'\t'+".join(f"cast(t.{c} as varchar(100))" for c in pks)
+        row, _ = self._row_json(db, table)
         keys = sorted(keys)
         got = {"src": {}, "dst": {}}
         for i in range(0, len(keys), 500):
             part = ", ".join("'" + k.replace("'", "''") + "'"
                              for k in keys[i:i + 500])
             q = (f"select {pkexpr}, convert(varchar(64), hashbytes("
-                 "'SHA2_256', (select t.* for json path,"
-                 " include_null_values, without_array_wrapper)), 2)"
+                 f"'SHA2_256', {row}), 2)"
                  f" from {table} t where {pkexpr} in ({part})")
             for side in got:
                 got[side].update({r[0]: r[1] for r in
@@ -589,23 +655,40 @@ class MSSQLEngine(DbapiRows, Engine):
                            f" database [{db}] set change_tracking = on"
                            " (change_retention = 2 days, auto_cleanup = on),"
                            " then per table: alter table ... enable change_tracking")]
-        cur = self._cmd("src", db, "select change_tracking_current_version()")[0][0]
         if not state.exists():
+            cur = self._cmd("src", db,
+                            "select change_tracking_current_version()")[0][0]
             state.write_text(json.dumps({"ver": cur}))
             return [Result("delta", db, "ok", f"baseline CT version {cur}")]
         last = json.loads(state.read_text()).get("ver")
-        tabs = self._cmd("src", db,
-                       "select s.name+'.'+t.name from"
+        tabs = [r[0] for r in self._cmd(
+            "src", db, "select s.name+'.'+t.name from"
                        " sys.change_tracking_tables ct"
                        " join sys.tables t on t.object_id = ct.object_id"
-                       " join sys.schemas s on s.schema_id = t.schema_id")
+                       " join sys.schemas s on s.schema_id = t.schema_id")]
+
+        def read(c):
+            out = {}
+            for tbl in tabs:
+                self._run(c, "select count(*) from changetable(changes"
+                             f" {tbl}, {MARK}) ct", (int(last),))
+                out[tbl] = int(c.fetchone()[0])
+            return out
+        try:
+            changed, cur = self._ct_read("src", db, last, read)
+        except SystemExit as e:
+            # the changes since the last clean cycle are gone: nothing can
+            # re-verify them, and the next cycle must not start after them
+            state.unlink(missing_ok=True)
+            return [Result("delta", db, "diff",
+                           f"{e} - what changed since v{last} cannot be"
+                           " verified again, so 'in sync' would be a lie",
+                           "", "run a full check to re-baseline; raise the"
+                           " change retention to cover the time between"
+                           " checks")]
         res, clean, total = [], True, 0
-        for row in tabs:
-            tbl = row[0]
-            c = self._cmd("src", db,
-                        f"select count(*) from changetable(changes {tbl},"
-                        f" {last}) ct")
-            n = int(c[0][0]) if c and c[0][0].lstrip("-").isdigit() else 0
+        for tbl in tabs:
+            n = changed[tbl]
             if n == 0:
                 continue
             total += n
@@ -879,40 +962,100 @@ class MSSQLEngine(DbapiRows, Engine):
         from `token` would skip it."""
         if token is None:
             return None
-        gone = [t for t, low in self._rows(
-            side, db, "select s.name + '.' + t.name,"
-                      " change_tracking_min_valid_version(t.object_id) from"
-                      " sys.change_tracking_tables c join sys.tables t on"
-                      " t.object_id = c.object_id join sys.schemas s on"
-                      " s.schema_id = t.schema_id")
-            if low is not None and int(low) > int(token)]
+        conn = self._connect(side, db)
+        try:
+            return self._lost_since(conn.cursor(), token)
+        finally:
+            conn.close()
+
+    #: each tracked table and the oldest version its tracking still keeps
+    _MIN_VALID = ("select s.name + '.' + t.name,"
+                  " change_tracking_min_valid_version(t.object_id) from"
+                  " sys.change_tracking_tables c join sys.tables t on"
+                  " t.object_id = c.object_id join sys.schemas s on"
+                  " s.schema_id = t.schema_id")
+
+    def _lost_since(self, cur, token):
+        """`position_lost`, asked on a cursor already open - inside the
+        transaction that reads the changes, where it has to be asked."""
+        self._run(cur, self._MIN_VALID)
+        gone = [t for t, low in cur.fetchall()
+                if low is not None and int(low) > int(token)]
         if not gone:
             return None
         return (f"Change Tracking no longer keeps the changes of"
                 f" {', '.join(sorted(gone)[:6])} from version {token}: its"
                 " retention has cleaned them up")
 
+    def _ct_read(self, side, db, token, read):
+        """(`read(cursor)`, the version to read from next time): what
+        Change Tracking holds since `token`, read the way Microsoft
+        documents it has to be.
+
+        The version to go on from is taken first, so a change made while
+        the rows are read is read again next time rather than skipped.
+        Then, in one transaction - SNAPSHOT where the database allows it,
+        so every table is read as of one moment and a cleanup running
+        meanwhile cannot take rows out from under the read - each table's
+        oldest kept version is checked against `token`, the changes are
+        read, and the check is made again. The check before and after is
+        what an unguarded read lacked: the retention's cleanup, running
+        between a check and the read, removed the changes the check had
+        just said were there, the read returned fewer rows and no error,
+        and the tail went on past what it never received. Measured on SQL
+        Edge with the tracking of a table cleared between the check and
+        the read: an insert made before it was not among the changes, and
+        nothing said so. Either check failing stops, named.
+        """
+        conn = self._connect(side, db)
+        try:
+            conn.autocommit(True)
+            cur = conn.cursor()
+            self._run(cur, "select change_tracking_current_version(),"
+                           " snapshot_isolation_state from sys.databases"
+                           " where database_id = db_id()")
+            now, snap = cur.fetchone()
+            if snap == 1:
+                self._run(cur, "set transaction isolation level snapshot")
+            self._run(cur, "begin transaction")
+            try:
+                lost = self._lost_since(cur, token)
+                got = None if lost else read(cur)
+                lost = lost or self._lost_since(cur, token)
+            except Exception:
+                # the read failed: a table whose tracking was taken away
+                # fails a snapshot read - said as what it is, if so
+                try:
+                    self._run(cur, "if @@trancount > 0 rollback")
+                    lost = self._lost_since(cur, token)
+                except Exception:  # noqa: BLE001 - the first error stands
+                    lost = None
+                if lost:
+                    raise SystemExit(lost)
+                raise
+            self._run(cur, "commit")
+            if lost:
+                raise SystemExit(lost)
+            return got, int(now) if now is not None else None
+        finally:
+            conn.close()
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Each row changed since `token`, as it is now: a delete where it
-        is gone. The version is read before the rows, so a change made
-        while they are read is read again next time rather than skipped."""
+        is gone. Read through `_ct_read`, which stops rather than hand on
+        a read the retention has cut short."""
         from .. import canon
         if token is None:
             return [], self.change_point(side, db)
-        lost = self.position_lost(side, db, token)
-        if lost:
-            raise SystemExit(lost)
         self._all_tracked(side, db)
-        now = self.log_position(side, db)
-        found = []
+        plans = []
         for t in sorted(self._tracked(side, db)):
             if self.hop.excluded(db, *t.split(".", 1)):
                 continue
             key = self.neutral_key(side, db, t)
             cols = [n for n, _ in self.neutral_columns(side, db, t)]
             quoted = self._qualified(side, db, t)
-            rows = self._rows(
-                side, db,
+            plans.append((t, key, cols,
                 "select ct.sys_change_version, ct.sys_change_operation, "
                 + ", ".join(f"ct.{self._q(k)}" for k in key) + ", "
                 + ", ".join(f"r.{self._q(c)}" for c in cols)
@@ -921,7 +1064,17 @@ class MSSQLEngine(DbapiRows, Engine):
                 f" left join {quoted} r on "
                 + " and ".join(f"r.{self._q(k)} = ct.{self._q(k)}"
                                for k in key)
-                + " order by ct.sys_change_version", (int(token),))
+                + " order by ct.sys_change_version"))
+
+        def read(cur):
+            out = []
+            for t, key, cols, sql in plans:
+                self._run(cur, sql, (int(token),))
+                out.append((t, key, cols, cur.fetchall()))
+            return out
+        got, now = self._ct_read(side, db, token, read)
+        found = []
+        for t, key, cols, rows in got:
             for r in rows:
                 version, op = r[0], str(r[1]).strip()
                 ident = dict(zip(key, r[2:2 + len(key)]))

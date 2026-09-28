@@ -256,3 +256,52 @@ def test_boundary_ranges_checkpoint_like_any_other(tmp_path):
     cp.begin("shop.t", EXPR, ranges)
     cp.record("shop.t", *ranges[0], 4, 11)
     assert Checkpoint(path).begin("shop.t", EXPR, ranges) == ranges[1:]
+
+
+def test_a_resumed_table_hashes_with_the_salt_its_partials_had(tmp_path):
+    """Sums taken behind one salt and sums behind another add up to
+    nothing either side holds: a resumed run keeps the salt its stored
+    ranges were hashed with, and a plan begun afresh draws a new one."""
+    from migkit.checkpoint import new_salt
+    path = str(tmp_path / "cp.json")
+    ranges = plan_ranges(1, 200, 100)
+    cp = Checkpoint(path)
+    cp.begin("public.t", EXPR, ranges)
+    assert cp.salt("public.t", "aa") == "aa"
+    cp.record("public.t", *ranges[0], 100, 5)
+
+    resumed = Checkpoint(path)                  # new process
+    resumed.begin("public.t", EXPR, ranges)
+    assert resumed.salt("public.t", "bb") == "aa"
+
+    other = Checkpoint(path)
+    other.begin("public.t", "md5(a||b||c)", ranges)
+    assert other.salt("public.t", "cc") == "cc"
+
+    salts = {new_salt() for _ in range(50)}
+    assert len(salts) == 50
+    assert all(len(s) == 16 and int(s, 16) >= 0 for s in salts)
+
+
+def test_both_sides_asking_at_once_get_one_salt(monkeypatch):
+    """The two sides of a comparison are read on two threads, and both ask
+    for the run's salt first: two salts drawn made equal tables differ."""
+    import threading
+    import time
+
+    from migkit import checkpoint
+    from migkit.engines.base import Engine
+    real = checkpoint.new_salt
+
+    def slow():
+        time.sleep(0.05)
+        return real()
+    monkeypatch.setattr(checkpoint, "new_salt", slow)
+    eng, got = Engine(None), []
+    ts = [threading.Thread(target=lambda: got.append(eng.digest_salt()))
+          for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(got) == 8 and len(set(got)) == 1, got

@@ -860,13 +860,33 @@ class MongoEngine(Engine):
             pass    # standalone, or the command is not permitted: lag unknown
         return Health(busy_ratio=busy, lag_seconds=lag)
 
+    def _db_hashes(self, db, names=None):
+        """(source, target) `dbHash` per collection, or (None, None) where
+        either side will not give it - a mongos, a user without the
+        privilege, a service that leaves the command out."""
+        cmd = {"dbHash": 1}
+        if names:
+            cmd["collections"] = list(names)
+        try:
+            return (self._client("src")[db].command(cmd)["collections"],
+                    self._client("dst")[self._d("dst", db)]
+                    .command(cmd)["collections"])
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def _server_hash(hashes, name):
+        """The collection's md5 from `dbHash`, or None where there is none
+        to trust: absent, or a note in its place - a collection without an
+        `_id` index is answered `no _id _index` on both sides, which read
+        as two equal hashes."""
+        h = (hashes or {}).get(name)
+        return h if isinstance(h, str) and len(h) == 32 and all(
+            c in "0123456789abcdef" for c in h) else None
+
     def check_data(self, db, table=None, stream=None, with_counts=False):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-        try:
-            a = s.command("dbHash")["collections"]
-            b = t.command("dbHash")["collections"]
-        except Exception:
-            a = b = None
+        a, b = self._db_hashes(db)
         sn = set(s.list_collection_names())
         tn = set(t.list_collection_names())
         names = [table] if table else sorted(c for c in sn & tn
@@ -877,18 +897,20 @@ class MongoEngine(Engine):
         from ..throttle import Throttle
         gate = Throttle(1, probe=lambda: self._health("src"))
         res = []
+        told = {}
         for name in names:
             if name.startswith("system."):
                 continue
-            if a is not None and a.get(name) == b.get(name) \
-                    and a.get(name) is not None:
+            ha, hb = self._server_hash(a, name), self._server_hash(b, name)
+            if ha and ha == hb:
                 if stream:
                     stream(f"{name}: ok")
                 res.append(Result("data", f"{db}.{name}", "ok",
-                                  f"dbHash {a.get(name)} both sides"))
+                                  f"dbHash {ha} both sides"))
                 continue
+            told[name] = bool(ha and hb)
             with gate.unit():
-                r = self._drilldown(db, name)
+                r = self._compare(db, name, told[name])
             if stream:
                 stream(f"{name}: {r.status}")
             res.append(r)
@@ -902,7 +924,7 @@ class MongoEngine(Engine):
             for i, r in enumerate(res):
                 name = r.scope.split(".", 1)[1] if "." in r.scope else ""
                 if r.check == "data" and name in healed:
-                    again = self._drilldown(db, name)
+                    again = self._compare(db, name, told.get(name, False))
                     if again.status == "ok":
                         again = Result("data", again.scope, "ok",
                                        f"{again.detail}; the difference was"
@@ -941,17 +963,16 @@ class MongoEngine(Engine):
     def _compare_pks(self, db, table, keys):
         """(missing, extra, changed) among these `_id`s, as the key files
         write them - read again from both sides, now."""
-        from bson import BSON
         from bson.json_util import dumps, loads
         ids = [loads(k) for k in keys]
-        src = self._client("src")[db][table]
-        dst = self._client("dst")[self._d("dst", db)][table]
+        src = self._raw(self._client("src")[db][table])
+        dst = self._raw(self._client("dst")[self._d("dst", db)][table])
 
         def read(coll):
             out = {}
             for i in range(0, len(ids), 1000):
                 for doc in coll.find({"_id": {"$in": ids[i:i + 1000]}}):
-                    out[dumps(doc["_id"])] = BSON.encode(doc)
+                    out[dumps(self._plain_id(doc))] = doc.raw
             return out
         a, b = read(src), read(dst)
         missing = [k for k in a if k not in b]
@@ -1152,6 +1173,13 @@ class MongoEngine(Engine):
         return {"_id": cond} if cond else {}
 
     def _range_hashes(self, coll, flt):
+        """Each document's `$toHashedIndexKey`, worked out by the server:
+        what the first walk after a differing `dbHash` ships, eight bytes a
+        document. Not a comparison of values: the hasher turns every number
+        into a 64-bit integer first, so 2.3 and 2.9 hash alike, and so do
+        5, NumberLong(5) and 5.0 - it finds where documents differ in
+        anything else, and `_compare` walks again by the bytes when it
+        finds nothing."""
         pipe = ([{"$match": flt}] if flt else []) + [
             {"$project": {"h": {"$toHashedIndexKey": "$$ROOT"}}}]
         try:
@@ -1160,8 +1188,54 @@ class MongoEngine(Engine):
         except Exception:
             return self._client_hashes(coll, flt)
 
-    def _drilldown(self, db, name):
-        """Compare every document by id, one `_id` range at a time.
+    def _compare(self, db, name, told):
+        """One collection compared document by document, and the answer
+        only `ok` when nothing is left unexplained.
+
+        `told` is whether both servers gave a `dbHash` and they differ.
+        Then the server-side id hash walks first, being cheap, and what it
+        finds is the answer. When it finds nothing the difference is one
+        it cannot see - a number changed in its fraction or its type
+        (measured on 7.0: 2.3 against 2.9, and NumberLong(5) against 5.0,
+        each reported `ok` with `dbHash` different) - so the same ranges
+        are walked again by each document's stored bytes, which see
+        everything, field order and types included. And when even that
+        finds nothing, `dbHash` is asked again: equal now, a write was
+        between the reads; still different, the collection differs and
+        says it could not say where, rather than ok.
+
+        Without a `dbHash` to go by (a mongos, a user without the right) the
+        id hash could only ever say "ok" wrongly or find what the bytes
+        find too, so the walk is by the bytes alone: every document
+        crosses the network, which is what exactness costs before a server
+        can hash a document itself. Measured, 200,000 documents of 232
+        bytes a side on MongoDB 7: the id hash walked them in 0.79 to
+        1.13 s, the bytes in 1.36 to 2.49 s."""
+        if told:
+            r = self._drilldown(db, name)
+            if r.status != "ok":
+                return r
+        r = self._drilldown(db, name, exact=True)
+        if r.status != "ok" or not told:
+            return r
+        a, b = self._db_hashes(db, [name])
+        ha, hb = self._server_hash(a, name), self._server_hash(b, name)
+        if ha and ha == hb:
+            return Result("data", r.scope, "ok",
+                          f"{r.detail}; dbHash, different at first, is"
+                          " equal asked again - a write was between the"
+                          " reads", r.report)
+        return Result("data", r.scope, "diff",
+                      "differs, not localized: dbHash differs"
+                      + (f" ({ha} against {hb})" if ha and hb else "")
+                      + " and no document differs by id or by its stored"
+                      f" bytes ({r.detail})", str(self.hop.report_dir(db)),
+                      "check again with no writes on either side; if it"
+                      " stays, copy the collection again")
+
+    def _drilldown(self, db, name, exact=False):
+        """Compare every document by id, one `_id` range at a time - by the
+        server's id hash, or `exact`ly by each document's stored bytes.
 
         This used to build a dict of every id and hash for both sides at once,
         which is why it refused to run past five million documents and sent
@@ -1173,12 +1247,16 @@ class MongoEngine(Engine):
         Comparing per range is sound because `_id` is unique - a document
         falls in exactly one range, and both sides are given the same
         boundaries, so nothing can be missing on one side merely for being
-        looked at in a different range.
+        looked at in a different range. The two walks keep their partials
+        apart: a range the id hash found equal proves nothing about its
+        bytes.
         """
         from bson.json_util import dumps
 
         from .. import checkpoint as _cp
         scope = f"{db}.{name}"
+        mark = f"{scope} by bytes" if exact else scope
+        hashes = self._client_hashes if exact else self._range_hashes
         s, t = self._client("src")[db][name], self._client("dst")[self._d("dst", db)][name]
         docs = s.count_documents({})
         ranges = self._id_plan(s, docs)
@@ -1191,16 +1269,17 @@ class MongoEngine(Engine):
         # rather than squeezing three things into two and hoping.
         keyed = [((f"{ty}|{lo}", f"{hi}"), (ty, lo, hi)) for ty, lo, hi in ranges]
         by_key = dict(keyed)
-        todo_keys = cp.begin(scope, "toHashedIndexKey", [k for k, _ in keyed])
+        todo_keys = cp.begin(mark, "bson md5" if exact else "toHashedIndexKey",
+                             [k for k, _ in keyed])
         todo = [by_key[k] for k in todo_keys]
-        done_before = cp.resumed(scope)
+        done_before = cp.resumed(mark)
 
         d = self.hop.report_dir(db)
         found = {"missing": [], "extra": [], "changed": []}
         for ty, lo, hi in todo:
             flt = self._range_filter(ty, lo, hi)
-            src = self._range_hashes(s, flt)
-            dst = self._range_hashes(t, flt)
+            src = hashes(s, flt)
+            dst = hashes(t, flt)
             found["missing"] += [src[k][0] for k in src if k not in dst]
             found["extra"] += [dst[k][0] for k in dst if k not in src]
             found["changed"] += [src[k][0] for k in src
@@ -1208,16 +1287,17 @@ class MongoEngine(Engine):
             if any(found.values()):
                 # a difference makes the stored partials useless: the next run
                 # must re-read this collection rather than trust a half-total
-                cp.clear(scope)
+                cp.clear(mark)
             else:
-                cp.record(scope, f"{ty}|{lo}", f"{hi}", len(src), 0)
-        checked = cp.total(scope)[0] if not any(found.values()) else 0
+                cp.record(mark, f"{ty}|{lo}", f"{hi}", len(src), 0)
+        checked = cp.total(mark)[0] if not any(found.values()) else 0
         if not any(found.values()):
-            cp.clear(scope)
+            cp.clear(mark)
             resumed = (f", resumed {done_before}/{len(ranges)}"
                        if done_before else "")
+            how = "by their bytes" if exact else "by id hash"
             return Result("data", scope, "ok",
-                          f"docs {checked:,} compared by id hash,"
+                          f"docs {checked:,} compared {how},"
                           f" {len(ranges)} ranges{resumed}")
         for bucket, ids in found.items():
             p = d / f"data-{name}.{bucket}"
@@ -1235,6 +1315,7 @@ class MongoEngine(Engine):
                       f" extra={len(found['extra'])}"
                       f" changed={len(found['changed'])}"
                       f" over {len(ranges)} ranges"
+                      + (" by their bytes" if exact else "")
                       + (f" kind={kind}" if kind else "")
                       + (f"; {whose}" if whose else ""), str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
@@ -1286,21 +1367,40 @@ class MongoEngine(Engine):
         return rows
 
     def _client_hashes(self, coll, flt=None):
-        """Hash documents locally when the server has no hashing operator.
+        """Each document's md5 over the bytes the server keeps, hashed here:
+        exact - a number's type and every digit, field order, everything a
+        document is - where the server's id hash is not.
 
-        Honours the same range filter as the server-side path, so the
-        fallback is restartable and bounded in memory too - a fallback that
-        reads the whole collection would reintroduce exactly the limit the
-        ranges exist to remove.
+        Honours the same range filter as the server-side path, so the walk
+        is restartable and bounded in memory too - a walk that reads the
+        whole collection would reintroduce exactly the limit the ranges
+        exist to remove. The documents are never decoded: what is hashed is
+        what the server sent, as the copy carries it.
         """
         import hashlib
-
-        import bson
         out = {}
-        for doc in coll.find(flt or {}, sort=[("_id", 1)]):
-            h = hashlib.md5(bson.encode(doc)).hexdigest()
-            out[repr(doc["_id"])] = (doc["_id"], h)
+        for doc in self._raw(coll).find(flt or {}, sort=[("_id", 1)]):
+            _id = self._plain_id(doc)
+            out[repr(_id)] = (_id, hashlib.md5(
+                doc.raw, usedforsecurity=False).hexdigest())
         return out
+
+    @staticmethod
+    def _raw(coll):
+        """The collection, its documents read as the bytes the server sends."""
+        from bson.raw_bson import RawBSONDocument
+        return coll.with_options(codec_options=coll.codec_options
+                                 .with_options(document_class=RawBSONDocument))
+
+    @staticmethod
+    def _plain_id(doc):
+        """A raw document's `_id` as a decoded one names it, so both walks
+        and the key files name a document alike."""
+        import bson
+        from bson.raw_bson import RawBSONDocument
+        _id = doc["_id"]
+        return bson.decode(_id.raw) if isinstance(_id, RawBSONDocument) \
+            else _id
 
     def snapshot_state(self, db, state_dir, kind="all"):
         (state_dir / "dst-shape.txt").write_text(repr(self._shape("dst", db)))
@@ -1615,10 +1715,13 @@ class MongoEngine(Engine):
         clean = True
         for coll, ids in sorted(touched.items()):
             bad = []
+            # by the stored bytes: decoded, 5 == 5.0 == NumberLong(5) and
+            # 1 == True in Python, and two dicts equal in any field order
+            one, two = self._raw(src[coll]), self._raw(dst[coll])
             for _id in ids.values():
-                a = src[coll].find_one({"_id": _id})
-                b = dst[coll].find_one({"_id": _id})
-                if a != b:
+                a = one.find_one({"_id": _id})
+                b = two.find_one({"_id": _id})
+                if (a and a.raw) != (b and b.raw):
                     bad.append(_id)
             if bad:
                 clean = False

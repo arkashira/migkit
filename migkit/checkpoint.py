@@ -36,6 +36,17 @@ def _key(lo, hi):
     return f"{'' if lo is None else lo}..{'' if hi is None else hi}"
 
 
+def new_salt():
+    """A salt for one run's row hashes, put in front of every row's text
+    before it is hashed. Two different tables sum alike with a chance of
+    2^-64 a comparison whatever the salt; what the salt changes is that the
+    chance is drawn again every run, so rows that happened to collide once
+    do not collide on every check after it. Hex, so it goes into any SQL
+    as a plain literal."""
+    import secrets
+    return secrets.token_hex(8)
+
+
 def fingerprint(expr, ranges):
     """Identity of a table's partial work.
 
@@ -105,6 +116,18 @@ class Checkpoint:
         """How many ranges were already complete when this run started."""
         e = self._data["tables"].get(table) or {}
         return len(e.get("done") or {})
+
+    def salt(self, table, fresh):
+        """The salt this table's row hashes are taken with: the one its
+        stored partials were hashed with, so a resumed run adds sums of one
+        kind; else `fresh`, kept with the partials to come. Called after
+        `begin`, which has already dropped partials of another plan."""
+        with self._lock:
+            entry = self._data["tables"].setdefault(
+                table, {"fingerprint": "", "done": {}})
+            if not entry.get("done") or not entry.get("salt"):
+                entry["salt"] = fresh
+            return entry["salt"]
 
     # ---- accumulating ----
 

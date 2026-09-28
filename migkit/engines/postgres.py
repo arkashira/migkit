@@ -2256,11 +2256,9 @@ class PostgresEngine(Engine):
         keyexpr = {}
 
         def _agg(h, kh):
-            s = (f"count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
-                 "::bit(64)::bigint::numeric), 0)")
+            s = f"count(*)||'|'||{self._summed(h)}"
             if kh:
-                s += (f"||'|'||coalesce(sum(('x'||substr({kh},1,16))"
-                      "::bit(64)::bigint::numeric), 0)")
+                s += f"||'|'||{self._summed(kh)}"
             return s
 
         def csum(side, t):
@@ -2300,14 +2298,14 @@ class PostgresEngine(Engine):
         # busy the server is. Measure it instead.
         rate = _cp.Rate()
 
-        def csum_range(side, t, col, lo, hi):
+        def csum_range(side, t, col, lo, hi, salt):
             sch, tbl = t.split(".", 1)
             h = self._row_hash_expr("src", db, t)
             pred = _cp.where(f'"{col}"', lo, hi)
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather = {w};"
-                f" select count(*)||'|'||coalesce(sum(('x'||substr({h},1,16))"
-                f"::bit(64)::bigint::numeric), 0) from {self._scope(db, t)}"
+                f" select count(*)||'|'||{self._summed(h, salt)}"
+                f" from {self._scope(db, t)}"
                 + (f" where {pred}" if pred else ""))
 
         def table_rows(side, t):
@@ -2366,11 +2364,13 @@ class PostgresEngine(Engine):
             expr = self._row_hash_expr("src", db, t)
             todo = cp.begin(t, expr, ranges)
             done_before = cp.resumed(t)
+            # the salt the stored partials were taken with, so they add up
+            salt = cp.salt(t, self.digest_salt())
             for rlo, rhi in todo:
                 with gate.unit():
                     started = time.monotonic()
                     try:
-                        a, b = both(csum_range, t, col, rlo, rhi)
+                        a, b = both(csum_range, t, col, rlo, rhi, salt)
                     except RuntimeError as e:
                         # partials already recorded survive for the next run
                         return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
@@ -2698,8 +2698,7 @@ class PostgresEngine(Engine):
         """
         h = self._row_hash_expr("src", db, relation)
         return self._psql(side, self._d(side, db),
-                          "select count(*)||'|'||coalesce(sum(('x'||substr("
-                          f"{h},1,16))::bit(64)::bigint::numeric), 0)"
+                          f"select count(*)||'|'||{self._summed(h)}"
                           f" from {relation} t")
 
     #: Tables an extension declared as its own configuration data. PostGIS
@@ -6277,6 +6276,19 @@ class PostgresEngine(Engine):
         " where i.indisprimary and n.nspname = %s and c.relname = %s"
         " order by a.attnum")
 
+    def _summed(self, h, salt=None):
+        """The one fold of a row hash over rows: `h`, an `md5(...)`
+        expression, taken behind the run's salt (`checkpoint.new_salt`),
+        its first 64 bits summed as numeric, so nothing wraps and a row
+        there twice counts twice. The salt draws the 2^-64 chance of two
+        different tables summing alike again every run, where without it
+        a pair of rows that collided once collided on every check."""
+        if not h.startswith("md5("):
+            raise ValueError(f"not a row hash: {h[:40]}")
+        salt = salt or self.digest_salt()
+        return (f"coalesce(sum(('x'||substr(md5('{salt}'||{h[4:]},1,16))"
+                "::bit(64)::bigint::numeric), 0)")
+
     def _key_hash_expr(self, side, db, table):
         """Expression hashing only the primary key of one row, or None.
 
@@ -6514,8 +6526,7 @@ class PostgresEngine(Engine):
             for t in bucket:
                 h = self._row_hash_expr("src", db, t)
                 lines.append(
-                    f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
-                    f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
+                    f"select '{t}|'||count(*)||'|'||{self._summed(h)}"
                     f" from {self._scope(db, t)};")
             lines.append("commit;")
             out.append("\n".join(lines))
@@ -6551,8 +6562,7 @@ class PostgresEngine(Engine):
                 # two servers store them in
                 h = self._row_hash_expr("src", db, t)
                 lines.append(
-                    f"select '{t}|'||count(*)||'|'||coalesce(sum(('x'||"
-                    f"substr({h},1,16))::bit(64)::bigint::numeric), 0)"
+                    f"select '{t}|'||count(*)||'|'||{self._summed(h)}"
                     f" from {self._scope(db, t)};")
             lines.append("commit;")
             return "\n".join(lines)
@@ -6825,9 +6835,7 @@ class PostgresEngine(Engine):
         # in for NULL, and a column holding chr(1) hashed as a NULL
         from .. import rowtext
         expr = ", ".join(
-            f"coalesce(sum(('x'||substr(md5("
-            f"{rowtext.postgres_row([c], alias='')}"
-            f"),1,16))::bit(64)::bigint::numeric), 0)"
+            self._summed(f"md5({rowtext.postgres_row([c], alias='')})")
             for c in cols)
         # the rows the check compared, not the whole table: under a row
         # filter the whole source differs from the target in every column

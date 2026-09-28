@@ -1708,21 +1708,40 @@ class MySQLEngine(Engine):
                                   f" `{self._d('dst', db)}`.`{t}`"
                                   f" where ({pred}) is not true")[0][0])
 
-    #: one row's 32-bit hash, summed: a sum of unsigned integers is an
-    #: exact DECIMAL here, and a row there twice counts twice. The fold was
-    #: BIT_XOR, where two equal rows cancel - measured, a table with no key
-    #: holding (1, 'a') twice on the source and (2, 'b') twice on the
-    #: target passed as equal, rows and checksums alike
+    #: one row's hash, salted, its first 64 bits summed: a sum of unsigned
+    #: integers is an exact DECIMAL here, and a row there twice counts
+    #: twice. The fold was BIT_XOR, where two equal rows cancel - measured,
+    #: a table with no key holding (1, 'a') twice on the source and
+    #: (2, 'b') twice on the target passed as equal, rows and checksums
+    #: alike
     @staticmethod
-    def _summed(expr):
-        return ("coalesce(sum(cast(conv(substring(md5(" + expr + "), 1, 8),"
-                " 16, 10) as unsigned)), 0)")
+    def _summed(expr, salt):
+        return (f"coalesce(sum(cast(conv(substring(md5(concat('{salt}', "
+                + expr + ")), 1, 16), 16, 10) as unsigned)), 0)")
 
-    def _checksum(self, side, db, t, expr, where="", key_expr=None):
-        cols = ["count(*)", "coalesce(sum(crc32(" + expr + ")), 0)",
-                self._summed(expr)]
+    def _checksum(self, side, db, t, expr, where="", key_expr=None,
+                  salt=None):
+        """(rows, the rows' sum, the keys' sum) of table `t` on one side.
+
+        The sum was two lanes of 32 bits: `crc32` of the row and the first
+        32 bits of its md5. CRC is linear, so a value swapped between two
+        rows of equal length leaves the xor of the two sides equal and the
+        sum equal about one time in 2^16, and 32 bits of md5 beside it made
+        the pair ~2^-48, not 2^-64; worse, a CRC can be steered, so two
+        different tables summing alike could be written down once and pass
+        every check after it - measured: a source row and a target row
+        found that way in a fraction of a second were reported `rows
+        1==1, checksum 76043c2d==76043c2d`. Now one lane of 64 md5 bits
+        behind a salt drawn for the run (`checkpoint.new_salt`): 2^-64 a
+        comparison, and a collision one run meets the next does not. And
+        cheaper without the CRC: measured on 1,000,000 rows of five columns
+        (~150 bytes) on MySQL 8.4 in a 2-CPU VM, the old sum took 2.67,
+        3.76 and 3.10 s, this one 2.33, 2.91 and 2.46 s.
+        """
+        salt = salt or self.digest_salt()
+        cols = ["count(*)", self._summed(expr, salt)]
         if key_expr:
-            cols.append(self._summed(key_expr))
+            cols.append(self._summed(key_expr, salt))
         q = (f"select {', '.join(cols)}"
              f" from {self._scope(side, db, t)} {where}")
         return tuple(self._q(side, q)[0])
@@ -1810,10 +1829,14 @@ class MySQLEngine(Engine):
         ranges = [clause(lo, hi) for lo, hi in pk_ranges]
         cp = (_cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
               if col else _cp.Checkpoint(None))
-        # "sum": ranges a run that folded by XOR recorded are not mixed in
-        todo = cp.begin(scope, "sum:" + expr, pk_ranges) if col \
+        # "md5-64": ranges a run that summed crc32 and 32 bits of md5, or
+        # folded by XOR, recorded are not mixed in; a resumed run hashes
+        # with the salt its partials were taken with
+        todo = cp.begin(scope, "md5-64:" + expr, pk_ranges) if col \
             else pk_ranges
         done_before = cp.resumed(scope) if col else 0
+        salt = cp.salt(scope, self.digest_salt()) if col \
+            else self.digest_salt()
 
         bad_ranges, kinds = [], set()
         rows_a = rows_b = sum_a = sum_b = 0
@@ -1822,29 +1845,29 @@ class MySQLEngine(Engine):
             for lo, hi in todo:
                 w = clause(lo, hi)
                 fa = pool.submit(self._checksum, "src", db, t, expr, w,
-                                 key_expr)
+                                 key_expr, salt)
                 fb = pool.submit(self._checksum, "dst", db, t, expr, w,
-                                 key_expr)
+                                 key_expr, salt)
                 futs[(lo, hi)] = (fa, fb)
             for (lo, hi), (fa, fb) in futs.items():
                 ra, rb = fa.result(), fb.result()
                 if ra != rb:
                     bad_ranges.append(clause(lo, hi))
-                    if key_expr and len(ra) > 3:
+                    if key_expr and len(ra) > 2:
                         from ..verdict import difference_kind
-                        k = difference_kind(ra[0], ra[3], rb[0], rb[3])
+                        k = difference_kind(ra[0], ra[2], rb[0], rb[2])
                         if k:
                             kinds.add(k)
                     if col:
                         cp.clear(scope)
                     continue
                 if col:
-                    cp.record(scope, lo, hi, ra[0], int(ra[2] or 0))
+                    cp.record(scope, lo, hi, ra[0], int(ra[1] or 0))
                 else:
                     rows_a += ra[0]
                     rows_b += rb[0]
-                    sum_a += int(ra[2] or 0)
-                    sum_b += int(rb[2] or 0)
+                    sum_a += int(ra[1] or 0)
+                    sum_b += int(rb[1] or 0)
         if not bad_ranges:
             if col:
                 rows_a, sum_s = cp.total(scope)
@@ -1973,10 +1996,25 @@ class MySQLEngine(Engine):
             elif p.exists():
                 p.unlink()
         if not (missing or extra or changed):
-            # checksum differed but per-pk found none = in-flight CDC lag
+            # The sums differed and no row does: a write between the
+            # reads, if the sums now agree - asked, not assumed. Where they
+            # still differ, nothing found the difference, and it is said.
+            still = [w for w in ranges
+                     if self._checksum("src", db, t, expr, w)
+                     != self._checksum("dst", db, t, expr, w)]
+            if still:
+                return Result("data", scope, "diff",
+                              "differs, not localized: the checksum still"
+                              f" differs over {len(still)} of"
+                              f" {len(ranges)} ranges and no row differs"
+                              " by key", str(d),
+                              "check again with no writes on either side;"
+                              " if it stays, copy the table again"), \
+                    len(src), len(dst)
             return Result("data", scope, "ok",
-                          "checksum flicker settled (in-flight replication),"
-                          " 0 rows actually differ"), len(src), len(dst)
+                          "the checksum that differed is equal asked again"
+                          " (a write was between the reads), 0 rows"
+                          " differ"), len(src), len(dst)
         detail = (f"missing={len(missing)} extra={len(extra)}"
                   f" changed={len(changed)}")
         fp = self._column_fingerprint(db, t)
@@ -2007,7 +2045,8 @@ class MySQLEngine(Engine):
         # but a NULL and the literal that stood in for it still collided, and
         # the encoding is meant to be the same everywhere
         from .. import rowtext
-        expr = ", ".join(self._summed(rowtext.mysql_row([c]))
+        salt = self.digest_salt()
+        expr = ", ".join(self._summed(rowtext.mysql_row([c]), salt)
                          for c in cols)
         try:
             a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]

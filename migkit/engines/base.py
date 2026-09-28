@@ -1,3 +1,4 @@
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -105,6 +106,10 @@ class RepairAction:
     by: str = ""
 
 
+#: held while an engine draws its run's salt (`Engine.digest_salt`)
+_SALT_DRAWN = threading.Lock()
+
+
 class Engine:
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = False
@@ -115,6 +120,19 @@ class Engine:
 
     def __init__(self, hop):
         self.hop = hop
+
+    def digest_salt(self):
+        """This run's salt for the row hashes a same-engine check sums on
+        both servers (`checkpoint.new_salt`): one per engine, so both sides
+        of one comparison hash alike and the next run draws again. Drawn
+        under a lock: the two sides are read on two threads, and two first
+        asks drawing one salt each made identical tables differ -
+        measured, 20 equal rows on PostgreSQL read as DIFF."""
+        with _SALT_DRAWN:
+            if not getattr(self, "_digest_salt", None):
+                from .. import checkpoint
+                self._digest_salt = checkpoint.new_salt()
+            return self._digest_salt
 
     def databases(self):
         raise NotImplementedError
