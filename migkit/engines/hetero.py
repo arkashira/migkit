@@ -3123,16 +3123,44 @@ class HeteroEngine(Engine):
         batch after this one."""
         import json as _json
         import secrets
+
+        from .. import marks
+        saved = marks.saved(token_path)
         try:
-            got = _json.loads(token_path.read_text()).get("batch")
-            if got is not None:
-                return int(got)
-        except (OSError, ValueError, TypeError, AttributeError):
+            if saved.get("batch") is not None:
+                return int(saved["batch"])
+        except (ValueError, TypeError):
             pass
         base = secrets.randbits(48)
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(_json.dumps({"token": token, "batch": base}))
+        token_path.write_text(_json.dumps(HeteroEngine._token_body(
+            token, base, saved.get("rung")), default=str))
         return base
+
+    def two_way_teardown(self, db, token_path, go):
+        """What a two-way tail's marks left on the target, taken away: the
+        table where the table was the rung, the replication origins where
+        those were. [statements, run where `go`]"""
+        from .. import marks
+        rung = marks.kept_rung(token_path)
+        if rung is None:
+            return []
+        fn = getattr(self.dst_engine, "mark_teardown", None)
+        return fn("dst", db, rung, go) if fn else []
+
+    @staticmethod
+    def _token_body(token, batch=None, rung=None, pending=None):
+        """What a tail's token file holds: the position, and on a two-way
+        tail the number of the last batch saved (`twoway.exact`), the rung
+        its marks stand on (`marks`) and the batch being applied."""
+        out = {"token": token}
+        if batch is not None:
+            out["batch"] = batch
+        if rung:
+            out["rung"] = rung
+        if pending:
+            out["next"] = pending
+        return out
 
     def _committed_ahead(self, db, token, batch, token_path, log):
         """(position, batch) to go on from: the saved ones, or the batch
@@ -3141,13 +3169,18 @@ class HeteroEngine(Engine):
         twice."""
         import json as _json
 
-        from .. import twoway
-        got = twoway.committed_ahead(self.dst_engine, db, batch)
+        from .. import marks, twoway
+        saved = marks.saved(token_path)
+        rung = marks.kept_rung(token_path)
+        got = twoway.committed_ahead(self.dst_engine, db, batch, rung,
+                                     saved.get("next"))
         if got is None:
             return token, batch
         token, batch = got
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(_json.dumps({"token": token, "batch": batch}))
+        token_path.write_text(_json.dumps(self._token_body(token, batch,
+                                                           rung),
+                                          default=str))
         log(f"the target had committed batch {batch} before its position"
             " was saved here: going on after it, not applying it again")
         return token, batch
@@ -3424,12 +3457,15 @@ class HeteroEngine(Engine):
         log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)")
             + (f", resuming from {str(token)[:40]}" if token else ""))
-        from .. import drift, failpoint, notify, tailctl, twoway
+        from .. import drift, failpoint, marks, notify, tailctl, twoway
         two_way = twoway.settings(self.hop) is not None
         # batches numbered where one applied twice would be wrong: the
         # target's mark of the last one it committed says whether the
         # position saved here is one batch behind it
         exact = go and two_way and twoway.exact(self.hop)
+        # how what it applies is marked on the target, kept in the token
+        rung = marks.settle(self, db, token_path, exact, log) \
+            if go and two_way else None
         batch = self._saved_batch(token_path, token) if exact else 0
         if exact:
             token, batch = self._committed_ahead(db, token, batch,
@@ -3560,6 +3596,15 @@ class HeteroEngine(Engine):
                             self.dst_engine._batch_seen = _json.dumps(
                                 {"token": token, "batch": batch + 1},
                                 default=str)
+                            if rung != "table":
+                                # where the batch ends, written before it
+                                # is applied: a rung that says only that it
+                                # was committed cannot say where
+                                token_path.write_text(_json.dumps(
+                                    self._token_body(
+                                        saved_token, batch, rung,
+                                        {"token": token, "batch": batch + 1}),
+                                    default=str))
                         if go:
                             self.dst_engine.neutral_apply("dst", db, changes)
                             failpoint.hit("tail.applied")
@@ -3568,8 +3613,9 @@ class HeteroEngine(Engine):
                             batch += 1 if exact else 0
                             token_path.parent.mkdir(parents=True, exist_ok=True)
                             token_path.write_text(_json.dumps(
-                                {"token": token, "batch": batch} if exact
-                                else {"token": token}))
+                                self._token_body(
+                                    token, batch if exact else None, rung),
+                                default=str))
                             saved_token = token
                             failpoint.hit("tail.saved")
                             accounts.save()
@@ -3584,8 +3630,9 @@ class HeteroEngine(Engine):
                             # position is how far the target is, which is what
                             # a fence reads
                             token_path.write_text(_json.dumps(
-                                {"token": token, "batch": batch} if exact
-                                else {"token": token}))
+                                self._token_body(
+                                    token, batch if exact else None, rung),
+                                default=str))
                             saved_token = token
                         if go and accounts.rows:
                             accounts.save()

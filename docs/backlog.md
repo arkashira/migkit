@@ -4244,8 +4244,9 @@ migkit's design, in the order it pays:
 
 ### R3. Two-way and many-node topologies, conflicts (MySQL native
 two-way, migkit's own tails both ways and conflict policies done
-2026-09-27; MariaDB's own flag, tagged GTIDs and many-node topologies
-todo)
+2026-09-27; the ladder of marks - origins, messages, tagged GTIDs,
+MariaDB's own flag, comments - done 2026-09-28; MariaDB's GTID domain
+and many-node topologies todo)
 
 Built and run (`test_mysql_streams_both_ways.py`, two MySQL 8.4 servers
 each a replica of the other): `loops_prevented` for MySQL asks what keeps
@@ -4311,7 +4312,8 @@ transaction (no lanes) whose `migkit_origin` mark says which batch it was;
 the tail going on after a stop, or after a connection lost at commit, asks
 the target and goes on after a batch it had committed (measured with a
 failpoint between the commit and the saved position: added once).
-Still to: MariaDB `skip_replication`, tagged GTIDs, many-node topologies.
+Still to: MariaDB's GTID domain, many-node topologies (the marks: done
+2026-09-28, below).
 
 **Decided 2026-09-27 (the owner: "the smartest way, a ladder of our own
 if that is what it takes"): how migkit's own writes are told apart is a
@@ -4382,6 +4384,63 @@ that fails (3) is not a rung, however fast. What no other tool does, and
 this must: choose per side from those measurements, prove the choice
 with a probe before applying, keep every batch exact on every rung a
 counter hop uses, and change no setting on either server.
+
+Done 2026-09-28 (`migkit/marks.py`, `migkit/binlog_marks.py`;
+`test_two_way_marks_climb_the_ladder.py`, `test_two_way_marks_on_mariadb.py`,
+`test_two_way_rungs_are_ranked_by_measurement.py`). The rungs are data -
+what each gives, what it needs of the side, how it is proved, what it was
+measured to cost - and `choose_rung` is the one place they are ranked,
+the seam the decision layer takes over. PostgreSQL: a replication origin
+of migkit's (`migkit_twoway_<hop>`, the batch's number handed over as the
+origin's position), a transactional logical message (prefix `migkit`),
+the table. MySQL: a tagged GTID (the hop's own UUID, tag `migkit`, the
+batch's number), a comment on every applied statement read back from the
+rows-query event where the server already logs those, the table. MariaDB:
+`skip_replication`, the table. The reader of a side knows every rung's
+mark at once, so the tail applying into it and the one reading it need
+not agree on anything. Measured before anything was claimed
+(`bench/marks_probe_pg.py`, `bench/marks_probe_my.py`): `test_decoding`
+never prints an origin (14 and 16), and `only-local` has the server leave
+those transactions out before decoding; the binary protocol sends an
+Origin message on both, and `origin = none` only from 16; GRANT EXECUTE
+opens the origin functions on 14 as on 16; a second session cannot take
+an origin one holds. MySQL 8.4: the binlog reader cannot open the tagged
+GTID event (type 42), so migkit decodes it (a format version, the size,
+numbered fields of variable-length integers, the UUID as sixteen of
+them); it needs TRANSACTION_GTID_TAG and one of SESSION_VARIABLES_ADMIN,
+SYSTEM_VARIABLES_ADMIN, REPLICATION_APPLIER; **a transaction under a GTID
+already executed is skipped with its statements answering as though they
+ran** - so a number is never handed out twice, and a batch the target
+committed whose end this machine did not record stops the tail instead of
+being applied again. A statement's leading comment reaches the rows-query
+event as sent. MariaDB 11.8: the flag (0x8000) is on every event of the
+transaction, and a user with no global privilege may set it. Ranked by
+cost measured through migkit's own applier (`bench/marks_cost.py`,
+microseconds a one-row transaction against none in the same round, the
+median of ten rounds; mark added / reader): PostgreSQL 16 origin 676/600,
+message none/625, table 204/612 (none's own rounds spread 476-614) -
+taking an origin costs a connection about a millisecond and the applier
+opens one a batch, so **the table outranks the origin there** for a hop
+that counts, and the message leads for one that does not; MySQL 8.4
+gtid_tag 277/155, comment 197/136, table 325/199, all inside the spread
+of none's rounds (1274-1840) on a shared machine, so the footprint
+decides and the tagged GTID leads; MariaDB 11.8 skip_flag 237/152, table
+575/189. Footprint breaks only ties within a brand's spread. Every rung is proved
+before it is trusted - a probe through it, read back by migkit's own
+reader (a temporary slot on PostgreSQL; the binlog from just before it,
+under a replica id of the proof's own, on MySQL) - and the proof paid for
+itself at once: the first decoding of the tagged GTID was wrong, the probe
+came back as the application's, and the climb fell to the comment (the
+cost run showed it too: 300 of 300 carried back). The rung is kept in the
+tail's token with the batch being applied (`next`), since an origin or a
+GTID says only that a batch was committed, not where it ended; a failpoint
+between commit and save under each exact rung adds once. `doctor` names
+each side's rung and what it leaves, and for the flag, that the target's
+own replicas filtering such events miss migkit's writes and that a
+transaction the application marks so itself is left out too; `move --mode
+cdc --drop` on a two-way hop takes away what its rung left (the table, the
+origins). Left: MariaDB's GTID domain (a domain of migkit's own changes
+what the target's own replicas track; not built until measured).
 
 ### R4. Avro, schema registries, MSK sign-in (done 2026-09-27, but the
 MSK handshake)

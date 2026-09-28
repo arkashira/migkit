@@ -396,6 +396,9 @@ def doctor(install):
                 said = _leg_said(eng, side, one, ep)
                 if said:
                     console.print(f"  {said}")
+                said = _two_way_said(hop, eng, one) if side == "dst" else ""
+                if said:
+                    console.print(f"  {said}")
             except Exception as e:
                 console.print(f"{name} {side}: [red]FAIL[/red] {e}")
         said = _placement_said(rtt)
@@ -458,6 +461,21 @@ def _leg_said(eng, side, db, ep):
             " as it is. Ask the server for TLS and verify its certificate"
             " (sslmode verify-full, ssl-mode VERIFY_IDENTITY), or carry the"
             " connection through a tunnel")
+
+
+def _two_way_said(hop, eng, db):
+    """How a two-way hop's tail marks what it applies on the target, and
+    what that leaves there (`marks.said`); nothing for any other hop."""
+    from . import marks, twoway
+    if twoway.settings(hop) is None or not db:
+        return ""
+    try:
+        tailer = eng if hasattr(eng, "dst_engine") else _tail_pair(eng)
+        if tailer is None:
+            return ""
+        return marks.said(tailer.dst_engine, _tail_token(hop, db), db)
+    except Exception:  # noqa: BLE001 - a probe never fails doctor
+        return ""
 
 
 def _link_said(eng, side, db, name):
@@ -2102,6 +2120,27 @@ def _tail(hop, eng, db, go):
             shared.stop()
 
 
+def _two_way_teardown(hop, eng, db, go):
+    """`move --mode cdc --drop` of a two-way tail: what its marks left on
+    the target taken away (`marks`) - after the tail has stopped, since a
+    tail still applying would only put it back."""
+    from . import tailctl
+    tailer = eng if hasattr(eng, "two_way_teardown") else _tail_pair(eng)
+    for d in ([db] if db else (hop.databases or eng.databases())):
+        path = _tail_token(hop, d)
+        console.print(f"[bold]{d}[/bold]")
+        if go and tailctl.alive(path.parent):
+            raise SystemExit(f"{d}: the tail is still running; stop it"
+                             " first, then take its marks away")
+        steps = tailer.two_way_teardown(d, path, go)
+        for s in steps or ["nothing of its marks stays on the target"]:
+            console.print(f"  {s}")
+        if go:
+            _changelog(hop, {"op": "two-way-drop", "db": d})
+    if not go:
+        console.print("\ndry-run, add --go to execute")
+
+
 def _tail_pair(eng):
     """The change tail for an engine that reads its own change log and can
     apply one, run as a pair of itself - or None where it cannot."""
@@ -2355,6 +2394,10 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return _move_full(hop, eng, db, table, chunk, go)
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
+    from . import twoway
+    if mode == "cdc" and do_drop and twoway.settings(hop) is not None \
+            and (has_tail or _tail_pair(eng) is not None):
+        return _two_way_teardown(hop, eng, db, go)
     if mode == "cdc" and eng.maps_columns():
         # the servers' own replication carries whole rows; the pair's tail
         # applies the mapping to every change (`_replicate` says the same)

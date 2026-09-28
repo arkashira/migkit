@@ -68,6 +68,9 @@ def sides(mysql, pg_pair):
     port = pg_pair["dst"]
     psql(port, "select pg_drop_replication_slot(slot_name) from"
                " pg_replication_slots where slot_name like 'migkit_%'")
+    psql(port, "select pg_replication_origin_drop(roname) from"
+               " pg_replication_origin where roname like"
+               " 'migkit\\_twoway\\_%'")
     psql(port, "drop database if exists app")
     assert psql(port, "create database app").returncode == 0
     assert psql(port, "create table public.acct (id int primary key,"
@@ -81,6 +84,9 @@ def sides(mysql, pg_pair):
     yield port
     psql(port, "select pg_drop_replication_slot(slot_name) from"
                " pg_replication_slots where slot_name like 'migkit_%'")
+    psql(port, "select pg_replication_origin_drop(roname) from"
+               " pg_replication_origin where roname like"
+               " 'migkit\\_twoway\\_%'")
 
 
 def _hops(tmp_path, pg_port, ranks=None, **two_way):

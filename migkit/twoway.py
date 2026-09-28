@@ -14,13 +14,14 @@ hop's policy - or the tail stopped on it.
       delta: [balance, stock]       # counters: both sides' changes added
 
 How migkit's own writes are told apart: every transaction a two-way tail
-applies writes first a row of a table of its own on that side
-(`migkit_origin`, a row per applying thread, its count moved), and the
-tail reading that side the other way sees that row first in the
-transaction and leaves the whole transaction out. The table is written in
-the application's database, so it is made only where a hop asks for two
-ways. Where the servers' own replication can run both ways instead
-(`loops_prevented`), that needs no table.
+applies carries a mark first, and the tail reading that side the other
+way leaves the whole transaction out. Which mark is chosen per side from
+a ladder (`marks`): a replication origin, a logical message, a tagged
+GTID, MariaDB's skip flag, a comment on each statement, or a row of a
+table of migkit's own (`migkit_origin`, a row per applying thread, its
+count moved) - the fastest the side allows and proves, kept in the tail's
+token. Where the servers' own replication can run both ways instead
+(`loops_prevented`), none is needed.
 
 A conflict is told from the target's row as it is now, held to what the
 change says the row was before it (the full row a binlog keeps, or a
@@ -147,14 +148,30 @@ def seen_of(text):
     return got if isinstance(got, dict) and "batch" in got else None
 
 
-def committed_ahead(dst, db, batch):
+def committed_ahead(dst, db, batch, rung="table", pending=None):
     """(position, number) of a batch the target committed after the one
     the tail saved last, or None: the target's mark is written in the
-    batch's own transaction, so it is there exactly when the batch is."""
-    got = dst.origin_seen("dst", db)
-    if got and int(got.get("batch", -1)) == batch + 1:
-        return got["token"], batch + 1
-    return None
+    batch's own transaction, so it is there exactly when the batch is.
+    The table's mark says where the batch ended too; a replication origin
+    or a GTID only says the batch was committed, and where it ended is
+    what the tail wrote down before applying it (`pending`)."""
+    if rung in (None, "table"):
+        got = dst.origin_seen("dst", db)
+        if got and int(got.get("batch", -1)) == batch + 1:
+            return got["token"], batch + 1
+        return None
+    if not dst.mark_committed("dst", db, rung, batch + 1):
+        return None
+    if not pending or int(pending.get("batch", -1)) != batch + 1:
+        raise SystemExit(
+            f"two_way: the target committed batch {batch + 1} of this tail,"
+            " and this machine has no record of where in the source's log"
+            " that batch ended - its position was saved elsewhere, or"
+            " lost. Applying it again would add its counters twice, and"
+            " going on from an older position would too; nothing was"
+            " applied. Give this tail back the position file it saved, or"
+            " move again with --mode full+cdc")
+    return pending["token"], batch + 1
 
 
 def _typed(cls, value):

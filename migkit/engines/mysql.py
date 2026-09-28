@@ -13,6 +13,10 @@ from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
 
+#: MariaDB's flag in an event's header for a transaction its session
+#: wrote under `skip_replication` (`marks`)
+SKIP_REPLICATION = 0x8000
+
 
 def _both_ways():
     """The servers' own replication both ways, as a rung: what it needs of
@@ -802,18 +806,22 @@ class MySQLEngine(Engine):
                        **{t: "log_bin_compress" for t in range(166, 172)}}
 
     @staticmethod
-    def _row_events(stream):
+    def _row_events(stream, marks=()):
         """The stream's events, with each compressed transaction's opened
         in its place (`binlog_payload`), and `COMMITTED` wherever a
         transaction has ended: after its XID, after a compressed one, and
         after a statement that commits on its own. A position is only ever
-        kept at one of those - see `neutral_changes`."""
+        kept at one of those - see `neutral_changes`. `marks`: the events
+        a two-way tail's marks travel in (`binlog_marks`), kept too."""
         from pymysqlreplication.event import QueryEvent, XidEvent
 
         from ..binlog_payload import TransactionPayloadEvent
         for ev in stream:
             if isinstance(ev, TransactionPayloadEvent):
-                yield from (e for e in ev.events if hasattr(e, "rows"))
+                # a two-way tail's mark in a statement's text travels
+                # inside the compressed transaction with its rows
+                yield from (e for e in ev.events if hasattr(e, "rows")
+                            or isinstance(e, marks))
                 yield COMMITTED
             elif isinstance(ev, XidEvent):
                 yield COMMITTED
@@ -854,9 +862,63 @@ class MySQLEngine(Engine):
     READS_ORIGIN_MARK = True
 
     def origin_mark(self, side, db):
-        """This thread's row of `migkit_origin` written first in the
-        transaction being applied (`twoway`); the table made once where it
-        is not there."""
+        """The mark of the rung this side stands on (`marks`), set first on
+        the batch's connection: the transaction's GTID tagged migkit, the
+        session's `skip_replication`, a comment on every statement it
+        sends, or this thread's row of `migkit_origin`."""
+        from .. import marks, twoway
+        rung = self.__dict__.get("_mark_rung") or "table"
+        if rung in ("gtid_tag", "skip_flag", "comment"):
+            with self._writer(side, db) as conn:
+                if rung == "comment":
+                    # asked of each batch's session: the server's setting
+                    # can be turned off after the rung was chosen, and a
+                    # mark nobody logs is no mark
+                    with conn.cursor() as cur:
+                        cur.execute("select"
+                                    " @@session.binlog_rows_query_log_events")
+                        if not int(cur.fetchone()[0]):
+                            raise SystemExit(
+                                "two_way: the target stopped logging each"
+                                " statement's text with its rows"
+                                " (binlog_rows_query_log_events), which is"
+                                " how this tail's writes were told apart"
+                                " there. Nothing of the batch was applied;"
+                                " start the tail again and it chooses"
+                                " another way")
+                    conn.cursorclass = _marked_cursor()
+                    return
+                with conn.cursor() as cur:
+                    if rung == "gtid_tag":
+                        cur.execute("set gtid_next = %s", (self._gtid_next(
+                            side, marks.batch_of(self)),))
+                    else:
+                        cur.execute("set skip_replication = 1")
+            return
+        name = self._origin_table(side, db)
+        with self._writer(side, db) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"insert into {name} (origin, n, seen) values"
+                            " (%s, 1, %s) on duplicate key update n = n + 1,"
+                            " seen = coalesce(values(seen), seen)",
+                            (twoway.thread_origin(self.hop),
+                             twoway.batch_seen(self)))
+
+    @staticmethod
+    def _mark_in(ev):
+        """{"kind", "ident"} where `ev` - a tagged GTID or a statement's
+        text (`binlog_marks`) - is a two-way tail's mark, else None."""
+        from ..binlog_marks import MARK_COMMENT, TAG
+        if getattr(ev, "tag", None) is not None:
+            return {"kind": "gtid_tag", "ident": ev.gtid} \
+                if ev.tag == TAG else None
+        if str(getattr(ev, "query", "")).startswith(MARK_COMMENT):
+            return {"kind": "comment", "ident": None}
+        return None
+
+    def _origin_table(self, side, db):
+        """`migkit_origin`'s name, the table made once where it is not
+        there."""
         import threading
 
         from .. import twoway
@@ -883,13 +945,197 @@ class MySQLEngine(Engine):
                 finally:
                     conn.close()
                 self._origin_made = True
-        with self._writer(side, db) as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"insert into {name} (origin, n, seen) values"
-                            " (%s, 1, %s) on duplicate key update n = n + 1,"
-                            " seen = coalesce(values(seen), seen)",
-                            (twoway.thread_origin(self.hop),
-                             twoway.batch_seen(self)))
+        return name
+
+    def twoway_uuid(self, probe=False):
+        """The UUID of the GTIDs a two-way tail applies under: the hop's
+        own, so no other writer's numbers can be taken for its batches;
+        its proof's apart from its batches'."""
+        import uuid
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, "migkit two-way "
+                              + ("probe " if probe else "") + self.hop.name))
+
+    def _gtid_next(self, side, batch):
+        """The GTID of the transaction being applied: the batch's number
+        where the hop numbers them (`twoway.exact`), otherwise the next
+        after the highest this hop's UUID has executed on the side - a
+        GTID the server has executed already is skipped by it without a
+        word (measured, `bench/marks_probe_my.py`), so one is never
+        handed out twice."""
+        import threading
+
+        from ..binlog_marks import TAG, gtid_top
+        uid = self.twoway_uuid()
+        if batch is not None:
+            return f"{uid}:{TAG}:{int(batch)}"
+        lock = self.__dict__.setdefault("_gtid_lock", threading.Lock())
+        with lock:
+            if "_gtid_n" not in self.__dict__:
+                got = self._q(side, "select @@global.gtid_executed")
+                self._gtid_n = gtid_top(got[0][0] if got else "", uid, TAG)
+            self._gtid_n += 1
+            return f"{uid}:{TAG}:{self._gtid_n}"
+
+    def mark_facts(self, side, db):
+        """What decides the rungs this side allows (`marks.choose_rung`)."""
+        import re
+
+        import pymysql
+
+        from .. import twoway
+        got = self._q(side, "select version(), @@version_comment")
+        banner = " ".join(str(x) for x in (got[0] if got else ()))
+        mariadb = "mariadb" in banner.lower()
+        version = tuple(int(x) for x in re.findall(r"\d+", banner)[:3])
+
+        def var(name):
+            try:
+                got = self._q(side, f"select @@{name}")
+            except pymysql.err.MySQLError:
+                return None
+            return got[0][0] if got else None
+        grants, create = self._grants(side, self._d(side, db))
+        exists = self._q(side, "select count(*) from information_schema"
+                               ".tables where table_schema = %s and"
+                               " table_name = %s",
+                         (self._d(side, db), twoway.TABLE))[0][0]
+        return {"family": "mysql", "mariadb": mariadb, "version": version,
+                "gtid_mode": None if mariadb else var("global.gtid_mode"),
+                "rows_query": not mariadb and str(var(
+                    "binlog_rows_query_log_events")) in ("1", "ON"),
+                "grants": grants, "can_create": bool(exists) or create}
+
+    def _grants(self, side, db):
+        """(the privileges this user holds on every database, whether it
+        may make a table in `db`). The privileges are None where a role
+        grants them and its own cannot be read here - then a rung's proof
+        decides."""
+        import re
+        out, roles, create = set(), False, False
+        for (line,) in self._q(side, "show grants"):
+            m = re.match(r"GRANT (.+?) ON (\S+) TO ", str(line))
+            if not m:
+                roles = True
+                continue
+            privs = {p.strip().upper() for p in m.group(1).split(",")}
+            on = m.group(2).replace("`", "")
+            if on == "*.*":
+                out |= privs
+            if on in ("*.*", f"{db}.*") and privs & {"ALL PRIVILEGES",
+                                                     "CREATE"}:
+                create = True
+        if "ALL PRIVILEGES" in out:
+            out |= {"SUPER", "CREATE"}
+        return (None if roles else out), create or roles
+
+    def mark_committed(self, side, db, rung, batch):
+        """Whether this side committed batch `batch` under the hop's mark,
+        as the side itself keeps it: the batch's GTID among those it
+        executed."""
+        from ..binlog_marks import TAG
+        if rung != "gtid_tag":
+            raise SystemExit(f"two_way: {rung} keeps no batch here")
+        got = self._q(side, "select gtid_subset(%s, @@global.gtid_executed)",
+                      (f"{self.twoway_uuid()}:{TAG}:{int(batch)}",))
+        return bool(got and got[0][0])
+
+    def mark_prove(self, side, db, rung):
+        """None where a probe written through `rung` comes back from this
+        side's binlog as migkit's own, read by migkit's own reader
+        (`neutral_changes`) from just before it, else why not. The probe
+        is an empty transaction under a GTID of the proof's own, or a row
+        of `migkit_origin` put and taken away in one transaction."""
+        import dataclasses
+        import secrets
+
+        import pymysql
+
+        from ..binlog_marks import TAG
+        try:
+            start = self.change_point(side, db)
+        except (pymysql.err.MySQLError, SystemExit) as e:
+            return ("its binlog cannot be read here: "
+                    + str(e).strip().splitlines()[0][:200])
+        try:
+            conn = self._conn(side)
+        except pymysql.err.MySQLError as e:
+            return str(e).strip().splitlines()[0][:200]
+        ident = f"probe:{secrets.token_hex(8)}"
+        try:
+            if rung == "gtid_tag":
+                ident = (f"{self.twoway_uuid(probe=True)}:{TAG}"
+                         f":{secrets.randbits(62) + 1}")
+                with conn.cursor() as cur:
+                    cur.execute("set gtid_next = %s", (ident,))
+                    cur.execute("begin")
+                    cur.execute("commit")
+                    cur.execute("set gtid_next = 'AUTOMATIC'")
+                    cur.execute("select gtid_subset(%s,"
+                                " @@global.gtid_executed)", (ident,))
+                    if not cur.fetchone()[0]:
+                        return "the server did not keep the probe's GTID"
+            elif rung in ("skip_flag", "comment", "table"):
+                table = self._origin_table(side, db)
+                if rung == "comment":
+                    conn.cursorclass = _marked_cursor()
+                with conn.cursor() as cur:
+                    if rung == "skip_flag":
+                        cur.execute("set skip_replication = 1")
+                    cur.execute(f"insert into {table} (origin, n) values"
+                                " (%s, 1)", (ident,))
+                    cur.execute(f"delete from {table} where origin = %s",
+                                (ident,))
+                conn.commit()
+            else:
+                return f"{rung} is not a rung of MySQL's"
+        except pymysql.err.MySQLError as e:
+            return str(e).strip().splitlines()[0][:200]
+        finally:
+            conn.close()
+        # read as the tail on the other way reads it, under a replica id of
+        # the proof's own: one the server already streams to is cut off
+        sid = int(self.hop.options.get("server_id", 4379))
+        reader = type(self)(dataclasses.replace(self.hop, options={
+            **self.hop.options, "server_id": 2 ** 31 + sid % 2 ** 31}))
+        # read on to the probe: what the application wrote meanwhile is
+        # no part of the proof, and a table of its own the tail would stop
+        # on does not hide what was read before it
+        token, why, seen = start, None, []
+        try:
+            for _ in range(1000):
+                out, token = reader.neutral_changes(side, db, token,
+                                                    limit=10_000)
+                seen += reader._marks_seen
+                if any(s["ident"] == ident for s in seen) or \
+                        len(out) < 10_000:
+                    break
+        except (SystemExit, pymysql.err.MySQLError) as e:
+            seen += reader.__dict__.get("_marks_seen") or []
+            why = ("its binlog cannot be read here: "
+                   + str(e).strip().splitlines()[0][:200])
+        finally:
+            held = reader.__dict__.pop("_binlog_held", None)
+            if held:
+                held["stream"].close()
+        if [s for s in seen if s["kind"] == rung and s["ident"] == ident]:
+            return None
+        return why or ("the probe came back as the application's change,"
+                       " not as migkit's own")
+
+    def mark_teardown(self, side, db, rung, go):
+        """What the rung left on this side, taken away: the table, where
+        it was the rung or made for the proof. A GTID stays among those
+        the server executed, as every GTID does. The statements, run where
+        `go`."""
+        from .. import twoway
+        steps = []
+        if rung in ("table", "skip_flag", "comment"):
+            steps.append(f"drop table if exists"
+                         f" {self._my_ident(self._d(side, db))}"
+                         f".`{twoway.TABLE}`")
+        for sql in steps if go else ():
+            self._q(side, sql)
+        return steps
 
     def origin_seen(self, side, db):
         """What the last batch this hop committed here said it was
@@ -954,6 +1200,7 @@ class MySQLEngine(Engine):
                     f"    {name}=FULL                   -- parameter group")
         from pymysqlreplication.event import GtidEvent, QueryEvent, XidEvent
 
+        from ..binlog_marks import register as register_marks
         from ..binlog_payload import register
         token = dict(token or {}) or self.change_point(side, db)
         start = dict(token)
@@ -973,10 +1220,15 @@ class MySQLEngine(Engine):
         # start for each of them.
         held = self.__dict__.pop("_binlog_held", None)
         # a two-way tail's own transactions begin with its mark, and are
-        # left out whole (`twoway`); kept with the position when a read
-        # stops inside one
+        # left out whole (`twoway`, `marks`); kept with the position when a
+        # read stops inside one. Every rung's mark is known here, whichever
+        # the tail applying into this side stands on
         two_way = bool((self.hop.options or {}).get("two_way"))
-        marked = bool(token.get("marked"))
+        marked = token.get("marked")
+        marked = {"kind": marked if isinstance(marked, str) else "table",
+                  "ident": None} if marked else None
+        mark_events = register_marks() if two_way else ()
+        seen = self.__dict__["_marks_seen"] = []
         if held and (held["token"], held["where"]) == (token, (side, db)):
             stream, events = held["stream"], held["events"]
             boundary, in_txn, skip = held["boundary"], held["in_txn"], 0
@@ -995,9 +1247,10 @@ class MySQLEngine(Engine):
                 only_schemas=[self._d(side, db)],
                 only_events=[WriteRowsEvent, UpdateRowsEvent,
                              DeleteRowsEvent, NotImplementedEvent,
-                             XidEvent, QueryEvent, GtidEvent, register()],
+                             XidEvent, QueryEvent, GtidEvent, register(),
+                             *mark_events],
                 filter_non_implemented_events=False)
-            events = self._row_events(stream)
+            events = self._row_events(stream, mark_events)
             boundary = {"log_file": token.get("log_file"),
                         "log_pos": token.get("log_pos")}
             in_txn, skip = 0, int(token.get("skip_rows") or 0)
@@ -1015,7 +1268,7 @@ class MySQLEngine(Engine):
                 if ev is COMMITTED:
                     boundary = {"log_file": stream.log_file,
                                 "log_pos": stream.log_pos}
-                    in_txn, skip, marked, gtid = 0, 0, False, None
+                    in_txn, skip, marked, gtid = 0, 0, None, None
                     token = dict(boundary)
                     if len(out) >= limit:
                         keep = True
@@ -1023,6 +1276,16 @@ class MySQLEngine(Engine):
                     continue
                 if isinstance(ev, GtidEvent):
                     gtid = str(ev.gtid).lower()
+                    continue
+                if isinstance(ev, mark_events):
+                    # the transaction's tagged GTID, before its BEGIN, or a
+                    # statement's text, before its rows
+                    if getattr(ev, "tag", None) is not None:
+                        gtid = str(ev.gtid).lower()
+                    got = self._mark_in(ev)
+                    if got and not marked:
+                        marked = got
+                        seen.append(marked)
                     continue
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:
@@ -1036,10 +1299,21 @@ class MySQLEngine(Engine):
                 first = in_txn
                 in_txn += len(ev.rows)
                 table = ev.table
+                if two_way and not marked and getattr(
+                        ev.packet, "flags", 0) & SKIP_REPLICATION:
+                    marked = {"kind": "skip_flag", "ident": None}
+                    seen.append(marked)
                 if two_way and table == "migkit_origin":
-                    marked = True
+                    if not marked:
+                        marked = {"kind": "table", "ident": None}
+                        seen.append(marked)
+                    if marked["ident"] is None and ev.rows:
+                        one = ev.rows[0]
+                        marked["ident"] = (one.get("values") or one.get(
+                            "after_values") or {}).get("origin")
                 token = dict(boundary, skip_rows=in_txn,
-                             **({"marked": True} if marked else {}))
+                             **({"marked": marked["kind"]} if marked
+                                else {}))
                 rows = ev.rows[skip - first:] if skip > first else ev.rows
                 if marked:
                     continue
@@ -6400,6 +6674,29 @@ class _Committed:
 
 
 COMMITTED = _Committed()
+
+_MARKED = []
+
+
+def _marked_cursor():
+    """pymysql's cursor with every statement it sends begun by migkit's
+    mark (`binlog_marks.MARK_COMMENT`): the server logs the text as it was
+    sent, beside the rows it wrote, where it logs statements' text at
+    all."""
+    if not _MARKED:
+        import pymysql.cursors
+
+        from ..binlog_marks import MARK_COMMENT
+
+        class Marked(pymysql.cursors.Cursor):
+            def _query(self, q):
+                if isinstance(q, (bytes, bytearray)):
+                    q = MARK_COMMENT.encode() + bytes(q)
+                else:
+                    q = MARK_COMMENT + q
+                return super()._query(q)
+        _MARKED.append(Marked)
+    return _MARKED[0]
 
 
 #: set while a batch is written again: no bulk load for it

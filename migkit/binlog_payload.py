@@ -98,8 +98,9 @@ class TransactionPayloadEvent(BinLogEvent):
                                                   TableMapEvent,
                                                   UpdateRowsEvent,
                                                   WriteRowsEvent)
+        from .binlog_marks import registered
         allowed = {TableMapEvent, WriteRowsEvent, UpdateRowsEvent,
-                   DeleteRowsEvent, QueryEvent, XidEvent}
+                   DeleteRowsEvent, QueryEvent, XidEvent, *registered()}
         for raw in inner_events(payload):
             # the ok byte a packet from the server starts with; the events
             # in a payload carry no checksum of their own

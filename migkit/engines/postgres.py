@@ -120,6 +120,10 @@ def _copy_text(rows):
 SESSION = "-c extra_float_digits=3 -c bytea_output=hex"
 
 
+def _first_line(e):
+    return (str(e).strip().splitlines() or [type(e).__name__])[0][:200]
+
+
 def _tls_query(ep):
     """An endpoint's TLS as a connection URL's query: its own settings, or
     TLS where the server offers it, as libpq does by default."""
@@ -1285,28 +1289,23 @@ class PostgresEngine(Engine):
     READS_ORIGIN_MARK = True
 
     def origin_mark(self, side, db):
-        """This thread's row of `migkit_origin` written first in the
-        transaction being applied (`twoway`); the table made once, on a
-        connection of its own, where it is not there."""
-        import threading
-
-        from .. import twoway
-        lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
-        with lock:
-            if not self.__dict__.get("_origin_made"):
-                conn = self._conn(side, self._d(side, db))
-                try:
-                    conn.autocommit = True
-                    with conn.cursor() as cur:
-                        cur.execute("create table if not exists"
-                                    f" public.{twoway.TABLE} (origin text"
-                                    " primary key, n bigint not null"
-                                    " default 0, seen text)")
-                        cur.execute(f"alter table public.{twoway.TABLE}"
-                                    " add column if not exists seen text")
-                finally:
-                    conn.close()
-                self._origin_made = True
+        """The mark of the rung this side stands on (`marks`), written
+        first in the transaction being applied: this thread's row of
+        `migkit_origin`, a logical message, or the session taken under a
+        replication origin of the hop's."""
+        from .. import marks, pgslot, twoway
+        rung = self.__dict__.get("_mark_rung") or "table"
+        if rung == "origin":
+            with self._writer(side, db) as conn:
+                self._origin_session(conn, side, db, marks.batch_of(self))
+            return
+        if rung == "message":
+            with self._writer(side, db) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("select pg_logical_emit_message(true, %s,"
+                                " %s)", (pgslot.MARK_PREFIX, self.hop.name))
+            return
+        self._origin_table(side, db)
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
                 cur.execute(f"insert into public.{twoway.TABLE}"
@@ -1316,6 +1315,290 @@ class PostgresEngine(Engine):
                             f"excluded.seen, public.{twoway.TABLE}.seen)",
                             (twoway.thread_origin(self.hop),
                              twoway.batch_seen(self)))
+
+    def _origin_table(self, side, db):
+        """`migkit_origin`, made once, on a connection of its own, where it
+        is not there."""
+        import threading
+
+        from .. import twoway
+        lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
+        with lock:
+            if self.__dict__.get("_origin_made"):
+                return
+            conn = self._conn(side, self._d(side, db))
+            try:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("create table if not exists"
+                                f" public.{twoway.TABLE} (origin text"
+                                " primary key, n bigint not null"
+                                " default 0, seen text)")
+                    cur.execute(f"alter table public.{twoway.TABLE}"
+                                " add column if not exists seen text")
+            finally:
+                conn.close()
+            self._origin_made = True
+
+    #: the prefix of the replication origins two-way tails apply under: a
+    #: reader leaves out what carries one, and stops where any other
+    #: origin applies into the same server
+    TWOWAY_ORIGIN = "migkit_twoway_"
+
+    def twoway_origin(self):
+        import re
+        base = re.sub(r"[^a-z0-9_]", "_", str(self.hop.name).lower())
+        return f"{self.TWOWAY_ORIGIN}{base}"[:200]
+
+    def _origin_session(self, conn, side, db, batch):
+        """The batch's connection taken under an origin of the hop's: the
+        hop's own where batches are numbered - its progress is then the
+        batch's number (`pg_replication_origin_xact_setup`), and as one
+        session holds an origin at a time, one a connection just closed
+        still holds is waited for - otherwise the first of the hop's
+        origins no other lane holds, made where there is none yet.
+        Measured on PostgreSQL 14 and 16: a second session asking for an
+        origin another holds is refused (`already active for PID`)."""
+        import time
+
+        import psycopg2
+
+        from .. import marks
+        first = self.twoway_origin()
+        names = [first] if batch is not None else [first] + [
+            f"{first}_{k}" for k in range(1, max(int(self.hop.workers or 1),
+                                                 1) + 1)]
+        end = time.time() + 30
+        with conn.cursor() as cur:
+            while True:
+                for name in names:
+                    cur.execute("savepoint migkit_origin")
+                    try:
+                        cur.execute("select"
+                                    " pg_replication_origin_session_setup(%s)",
+                                    (name,))
+                    except psycopg2.errors.UndefinedObject:
+                        cur.execute("rollback to savepoint migkit_origin")
+                        self._origin_named(side, db, name)
+                        cur.execute("select"
+                                    " pg_replication_origin_session_setup(%s)",
+                                    (name,))
+                    except psycopg2.errors.ObjectInUse:
+                        cur.execute("rollback to savepoint migkit_origin")
+                        continue
+                    cur.execute("release savepoint migkit_origin")
+                    if batch is not None:
+                        cur.execute("select pg_replication_origin_xact_setup"
+                                    "(%s::pg_lsn, now())",
+                                    (marks.lsn(batch),))
+                    return name
+                if time.time() > end:
+                    raise SystemExit(
+                        f"two_way: the replication origin {first} stayed held"
+                        " by another session for 30s - is another tail of"
+                        " this hop applying?")
+                time.sleep(0.05)
+
+    def _origin_named(self, side, db, name):
+        """The replication origin `name`, made where it is not there."""
+        import psycopg2
+        conn = self._conn(side, self._d(side, db))
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("select pg_replication_origin_create(%s) where"
+                            " not exists (select 1 from pg_replication_origin"
+                            " where roname = %s)", (name, name))
+        except psycopg2.errors.UniqueViolation:
+            pass
+        finally:
+            conn.close()
+
+    def mark_facts(self, side, db):
+        """What decides the rungs this side allows (`marks.choose_rung`),
+        in one round trip. The origin functions are asked of by name in
+        the catalogue: their arguments are not the same on every
+        version."""
+        like = self.TWOWAY_ORIGIN.replace("_", "\\_")
+        got = self._psql(side, self._d(side, db), (
+            "select current_setting('server_version_num') || chr(31) ||"
+            " ((select rolsuper from pg_roles where rolname = current_user)"
+            "  or coalesce((select bool_and(has_function_privilege(oid,"
+            "  'execute')) from pg_proc where proname in"
+            "  ('pg_replication_origin_create',"
+            "   'pg_replication_origin_session_setup',"
+            "   'pg_replication_origin_xact_setup',"
+            "   'pg_replication_origin_progress',"
+            "   'pg_replication_origin_advance')), false))::text || chr(31)"
+            " || coalesce((select string_agg(roname, chr(30)) from"
+            f"  pg_replication_origin where roname not like '{like}%'), '')"
+            " || chr(31) || (has_schema_privilege('public', 'create') or"
+            "  to_regclass('public.migkit_origin') is not null)::text"))
+        version, grants, foreign, create = got.split("\x1f")
+        return {"family": "postgres", "version": int(version),
+                "origin_grants": grants == "true",
+                "foreign_origins": [n for n in foreign.split("\x1e") if n],
+                "can_create": create == "true"}
+
+    def mark_committed(self, side, db, rung, batch):
+        """Whether this side committed batch `batch` under the hop's mark,
+        as the side itself keeps it: its origin's progress. Only ever
+        equal to the batch asked of - an origin's progress moves only
+        forward, and a new run's batches are numbered afresh
+        (`mark_prove` sets it back)."""
+        from .. import marks
+        if rung != "origin":
+            raise SystemExit(f"two_way: {rung} keeps no batch here")
+        name = self.twoway_origin()
+        got = self._psql(side, self._d(side, db),
+                         "select pg_replication_origin_progress(roname,"
+                         " false)::text from pg_replication_origin where"
+                         f" roname = '{name}'").strip()
+        return bool(got) and marks.number(got) == int(batch)
+
+    def mark_prove(self, side, db, rung):
+        """None where a probe written through `rung` comes back from this
+        side's log as migkit's own, read by migkit's own reader
+        (`_slot_lines`), else why not. Read through a temporary slot made
+        before the probe, which goes with its session: nothing of the
+        proof stays but what the rung itself leaves."""
+        import secrets
+
+        import psycopg2
+
+        from .. import marks, pgslot
+        target = self._d(side, db)
+        nonce = f"probe:{secrets.token_hex(8)}"
+        slot = f"migkit_probe_{secrets.token_hex(6)}"
+        try:
+            reader = self._conn(side, target)
+        except psycopg2.Error as e:
+            return _first_line(e)
+        reader.autocommit = True
+        try:
+            with reader.cursor() as cur:
+                cur.execute("set statement_timeout = '60s'")
+                try:
+                    cur.execute("select pg_create_logical_replication_slot"
+                                "(%s, %s, true)", (slot, self.PLUGIN))
+                except psycopg2.Error as e:
+                    return f"its log cannot be read here: {_first_line(e)}"
+            writer = self._conn(side, target)
+            try:
+                with writer.cursor() as cur:
+                    if rung == "origin":
+                        name = self.twoway_origin()
+                        self._origin_named(side, db, name)
+                        # a new run's batches are numbered afresh, and an
+                        # origin's progress only moves forward
+                        cur.execute("select pg_replication_origin_advance"
+                                    "(%s, '0/0')", (name,))
+                        cur.execute("select"
+                                    " pg_replication_origin_session_setup(%s);"
+                                    " select pg_replication_origin_xact_setup"
+                                    "('0/1', now())", (name,))
+                        cur.execute("select pg_logical_emit_message(true, %s,"
+                                    " %s)", (pgslot.MARK_PREFIX + "_probe",
+                                             nonce))
+                        writer.commit()
+                        # given back now, not when the session ends
+                        cur.execute("select"
+                                    " pg_replication_origin_session_reset()")
+                    elif rung == "message":
+                        cur.execute("select pg_logical_emit_message(true, %s,"
+                                    " %s)", (pgslot.MARK_PREFIX, nonce))
+                    elif rung == "table":
+                        self._origin_table(side, db)
+                        cur.execute("insert into public.migkit_origin"
+                                    " (origin, n) values (%s, 1); delete from"
+                                    " public.migkit_origin where origin = %s",
+                                    (nonce, nonce))
+                    else:
+                        return f"{rung} is not a rung of PostgreSQL's"
+                writer.commit()
+            except psycopg2.Error as e:
+                writer.rollback()
+                return _first_line(e)
+            finally:
+                writer.close()
+
+            def peek(local):
+                with reader.cursor() as cur:
+                    cur.execute("select lsn::text, xid::text, data from"
+                                " pg_logical_slot_peek_changes(%s, NULL,"
+                                " NULL" + (", 'only-local', 'true'"
+                                           if local else "") + ")", (slot,))
+                    return cur.fetchall()
+
+            def ask(sql):
+                with reader.cursor() as cur:
+                    cur.execute(sql)
+                    return "\n".join(str(r[0]) for r in cur.fetchall())
+
+            def holds(rows):
+                return any(nonce in data for _, _, data in rows)
+            _, local = self._log_end(ask, target, True)
+            rows = peek(local)
+            if rung == "origin":
+                if not holds(peek(False)):
+                    return "the probe did not reach the log"
+                if holds(rows):
+                    return ("the reader did not leave out what carries the"
+                            " origin")
+                with reader.cursor() as cur:
+                    cur.execute("select pg_replication_origin_progress(%s,"
+                                " false)::text", (self.twoway_origin(),))
+                    at = cur.fetchone()[0]
+                    cur.execute("select pg_replication_origin_advance(%s,"
+                                " '0/0')", (self.twoway_origin(),))
+                if at is None or marks.number(at) != 1:
+                    return ("the origin did not keep the position the probe"
+                            f" committed ({at})")
+                return None
+            # the probe's own transaction: the application's, landing in
+            # the same moments, is no part of the proof
+            mine = self._transaction_of(rows, nonce)
+            if not mine:
+                return "the probe did not reach the log"
+            self._marks_seen = []
+            out, _ = self._slot_lines(side, db, mine, None, True, ask=ask)
+            if out or not [s for s in self._marks_seen
+                           if s["ident"] == nonce and s["kind"] == rung]:
+                return ("the probe came back as the application's change,"
+                        " not as migkit's own")
+            return None
+        finally:
+            reader.close()
+
+    @staticmethod
+    def _transaction_of(rows, needle):
+        """The rows of the one transaction in what a slot gave that holds
+        `needle`, BEGIN to COMMIT, or [] where none does."""
+        block = []
+        for row in rows:
+            data = row[2]
+            if data.startswith("BEGIN"):
+                block = []
+            block.append(row)
+            if data.startswith("COMMIT") and any(needle in r[2]
+                                                 for r in block):
+                return block
+        return []
+
+    def mark_teardown(self, side, db, rung, go):
+        """What the rung left on this side, taken away: the table, or the
+        hop's replication origins. The statements, run where `go`."""
+        from .. import twoway
+        steps = []
+        if rung == "table":
+            steps.append(f"drop table if exists public.{twoway.TABLE}")
+        elif rung == "origin":
+            like = self.twoway_origin().replace("_", "\\_")
+            steps.append("select pg_replication_origin_drop(roname) from"
+                         f" pg_replication_origin where roname like '{like}%'")
+        for sql in steps if go else ():
+            self._psql(side, self._d(side, db), sql)
+        return steps
 
     def origin_seen(self, side, db):
         """What the last batch this hop committed here said it was
@@ -1660,7 +1943,6 @@ class PostgresEngine(Engine):
         0.47s and parsing them here 1.7s; the whole tail 16.1s before,
         7.3s on one connection.
         """
-        from .. import pgslot
         ask = self._slot_text(side, db)
         name = self._slot_ready(side, db, resuming_from=token, ask=ask)
         if token:
@@ -1668,33 +1950,92 @@ class PostgresEngine(Engine):
             # stop keeping it
             self._slot_rows(side, db, "select pg_replication_slot_advance("
                                       "%s, %s)", (name, token))
+        # a two-way tail's own transactions are left out whole, or they go
+        # back where they came from (`twoway`, `marks`)
+        two_way = bool((self.hop.options or {}).get("two_way"))
         # up to where the log is now: when that is read whole, the position
         # moves there even with nothing in it for this hop, so a fence
         # waiting for the tail to reach the log's end sees it get there. It
         # stayed at the last change, and on a quiet database never did.
-        upto = ask("select pg_current_wal_lsn()").strip()
+        upto, local = self._log_end(ask, self._d(side, db), two_way)
         # each change with its transaction's xid, for the tail to hold to
         # the marks the table copier kept (`mark_covers`)
         rows = self._slot_rows(side, db, "select lsn::text, xid::text, data"
                                          " from pg_logical_slot_peek_changes("
-                                         "%s, %s, %s)",
-                               (name, upto, int(limit)))
-        out, last = [], token
-        keys = {}
-        # a two-way tail's own transactions begin with its mark; each is
-        # left out whole, or it goes back where it came from (`twoway`)
-        two_way = bool((self.hop.options or {}).get("two_way"))
-        marked = False
+                                         "%s, %s, %s"
+                               + (", 'only-local', 'true'" if local else "")
+                               + ")", (name, upto, int(limit)))
+        self._marks_seen = []
+        out, last = self._slot_lines(side, db, rows, token, two_way, name,
+                                     ask)
+        if len(rows) < int(limit) and upto and (
+                last is None or self.position_reached(upto, last)):
+            last = upto
+        return out, last
+
+    def _log_end(self, ask, target, two_way):
+        """(where the log is now, whether the server leaves out what
+        carries an origin), asked through `ask(sql)`. A two-way side where
+        a tail applies under a replication origin of migkit's (`marks`)
+        has what carries one left out by the server before it is decoded
+        (`only-local`) - and where another origin applies into the same
+        server too, its changes would go with them, so the tail stops and
+        says so."""
+        if not two_way:
+            return ask("select pg_current_wal_lsn()").strip(), False
+        got = ask("select pg_current_wal_lsn()::text || chr(31) ||"
+                  " coalesce((select string_agg(roname, chr(30)) from"
+                  " pg_replication_origin), '')")
+        upto, _, names = got.strip().partition("\x1f")
+        names = [n for n in names.split("\x1e") if n]
+        ours = [n for n in names if n.startswith(self.TWOWAY_ORIGIN)]
+        theirs = [n for n in names if not n.startswith(self.TWOWAY_ORIGIN)]
+        if ours and theirs:
+            raise SystemExit(
+                f"two_way: a tail applies into {target} under a replication"
+                f" origin of migkit's ({', '.join(ours)}), and"
+                f" {', '.join(theirs)} applies into it too. Leaving out what"
+                " migkit applied there would leave out what the other"
+                " applies, and those changes would never reach the other"
+                " side. Tear the two-way tail into this side down (move"
+                " --mode cdc --drop), or the other; its next start chooses"
+                " another way to mark what it applies")
+        return upto, bool(ours)
+
+    def _slot_lines(self, side, db, rows, last, two_way, slot=None,
+                    ask=None):
+        """(changes, position) out of what a slot gave, (lsn, xid, text) a
+        row: the tail's reader and the proof of a rung (`mark_prove`) read
+        through this one loop. A transaction that begins with migkit's
+        mark - a logical message of its prefix, or a row of
+        `migkit_origin` - is left out whole, and noted in `_marks_seen`
+        with what identifies it."""
+        from .. import pgslot
+        out, keys, marked = [], {}, None
+        seen = self.__dict__.setdefault("_marks_seen", [])
         for lsn, xid, data in rows:
-            parsed = pgslot.parse_line(data)
             last = lsn or last
             if data.startswith("BEGIN"):
-                marked = False
+                marked = None
+                continue
+            if two_way and marked is None:
+                said = pgslot.mark_message(data)
+                if said is not None:
+                    marked = {"kind": "message", "ident": said}
+                    seen.append(marked)
+                    continue
+            parsed = pgslot.parse_line(data)
             if parsed is None:
                 continue
             table = parsed["table"]
             if two_way and str(table).split(".")[-1] == "migkit_origin":
-                marked = True
+                if marked is None:
+                    marked = {"kind": "table", "ident": None}
+                    seen.append(marked)
+                if marked["ident"] is None:
+                    marked["ident"] = next(
+                        (v for n, _, v, _ in parsed["new"] or parsed["old"]
+                         if n == "origin"), None)
             if marked:
                 continue
             if self.hop.excluded(db, *str(table).split(".")):
@@ -1711,14 +2052,12 @@ class PostgresEngine(Engine):
                         " will stop here again, because peeking never throws"
                         " anything away. Give the table a key or a unique"
                         " REPLICA IDENTITY, or step past it with:\n"
-                        f"    select pg_replication_slot_advance('{name}',"
+                        f"    select pg_replication_slot_advance('{slot}',"
                         " pg_current_wal_lsn());"
                         "  -- skips everything pending, including this")
             out.append(pgslot.change(parsed, keys[table],
-                                     int(xid) if xid.isdigit() else None))
-        if len(rows) < int(limit) and upto and (
-                last is None or self.position_reached(upto, last)):
-            last = upto
+                                     int(xid) if str(xid or "").isdigit()
+                                     else None))
         return out, last
 
     def snapshot_mark(self, side, db):

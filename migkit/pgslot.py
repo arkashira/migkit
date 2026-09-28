@@ -142,6 +142,61 @@ def parse_line(line):
     return {"table": head.strip(), "op": op, "old": old, "new": new}
 
 
+#: the prefix of the logical message a two-way tail writes first in each
+#: transaction it applies (`marks`)
+MARK_PREFIX = "migkit"
+_MESSAGE = f"message: transactional: 1 prefix: {MARK_PREFIX}, sz: "
+
+
+def mark_message(line):
+    """The content of migkit's own transactional message, or None for any
+    other line. Read off PostgreSQL 14 and 16:
+
+        message: transactional: 1 prefix: migkit, sz: 5 content:hello
+
+    printed after the transaction's BEGIN and before its rows. A message
+    written outside a transaction prints `transactional: 0` and belongs
+    to none, and one under another prefix is not migkit's."""
+    line = (line or "").strip()
+    if not line.startswith(_MESSAGE):
+        return None
+    _, sep, content = line[len(_MESSAGE):].partition(" content:")
+    return content if sep else None
+
+
+def _cstring(buf, at):
+    end = buf.index(b"\x00", at)
+    return buf[at:end].decode("utf-8", "replace"), end + 1
+
+
+def pgoutput_origin(buf):
+    """(origin name, its commit position) of the binary protocol's Origin
+    message: 'O', the commit's position on the origin as an Int64, the
+    name null-terminated."""
+    buf = bytes(buf)
+    if buf[:1] != b"O":
+        return None
+    lsn = int.from_bytes(buf[1:9], "big")
+    name, _ = _cstring(buf, 9)
+    return name, f"{lsn >> 32:X}/{lsn & 0xFFFFFFFF:X}"
+
+
+def pgoutput_message(buf, streamed=False):
+    """(transactional, prefix, content) of the binary protocol's Message:
+    'M', the transaction's id where it is being streamed, a flag byte (1
+    for a transactional message), the message's position as an Int64,
+    the prefix null-terminated, an Int32 length and the content."""
+    buf = bytes(buf)
+    if buf[:1] != b"M":
+        return None
+    at = 5 if streamed else 1
+    transactional = bool(buf[at])
+    at += 1 + 8
+    prefix, at = _cstring(buf, at)
+    size = int.from_bytes(buf[at:at + 4], "big")
+    return transactional, prefix, buf[at + 4:at + 4 + size]
+
+
 def value(declared, raw, quoted):
     """One field turned back into something a driver can be handed.
 
