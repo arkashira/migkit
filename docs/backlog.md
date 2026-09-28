@@ -5517,6 +5517,21 @@ cutover, R21, types, users, workload). Not yet anywhere:
    the formats audit and change-management processes already take (PDF
    or HTML for people, CSV/JSON for tools), made tamper-evident by the
    audit chain. It claims only what was measured.
+   **Each report deeper than the one it is measured against** (the
+   owner): the premigration assessment (DMS's lists an issue; migkit's
+   says how many rows, which keys as examples, what it will cost, the
+   exact statement or setting that fixes it, and what migkit does about
+   it by itself), the validation report (DMS/DTS say a table failed;
+   migkit's says which rows, which columns, since when, whether it
+   settled under the fence, and the repair with its undo), the schema
+   and code conversion assessment (a vendor's counts of objects and
+   effort; migkit's says per object converted, proved by execution, or
+   not, with the counterexample), the comparison report (Veridata's and
+   Datafold's per-table differences; migkit's adds the proof method, the
+   exact localized rows, keyless tables and every engine pair), and the
+   run report (phases, rates, the binding resource, the downtime
+   measured) - one family of reports, the same look, HTML/PDF for people
+   and JSON/CSV for tools, each saying how to recompute it.
 2. **Rehearse, then forecast:** a goal that runs the whole path on a
    clone or a sample the operator names, and turns what it measured
    into the forecast for the real run - time per phase, downtime,
@@ -5558,7 +5573,12 @@ cutover, R21, types, users, workload). Not yet anywhere:
    EventBridge. migkit: tasks for GitHub Actions, Argo and Airflow,
    OpenTelemetry traces beside the Prometheus metrics, Grafana
    dashboards shipped with the rules, with W2's API and Terraform
-   provider (to be confirmed tool by tool before it is claimed).
+   provider (to be confirmed tool by tool before it is claimed). And
+   what the tools inside migkit already expose is carried out through
+   migkit's own surface, under its names: Debezium's JMX metrics, the
+   bulk programs' progress, DVT's results and the verifiers' timings
+   become migkit's Prometheus metrics, OpenTelemetry spans and report
+   entries, so a team watches one thing whatever ran underneath.
 10. **Notifications wherever the team is:** today Slack, Discord, Teams,
    PagerDuty and a JSON webhook. The others: DMS through SNS and
    EventBridge (so anything behind them), Airbyte Slack and webhooks,
