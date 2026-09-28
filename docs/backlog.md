@@ -2442,6 +2442,131 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## Research round 2026-09-28: what it found, first things first
+
+Sixteen reports in `docs/research/*-2026-09-28.md` (mechanisms of the
+clouds, the replication products, the CDC specialists, the DTS and
+distributed-SQL toolkits; the paid and open tools with a scorecard each;
+security and throughput; diff algorithms; cutover; type fidelity; stored
+code; Oracle, SQL Server and Db2; Python's hot paths). Each ends in a gap
+table with effort and a docker recipe; this section is the order.
+
+**F0. Wrong answers and lost rows, found by reading the code - before
+any feature (each measured in docker first, then fixed with a test that
+fails on the old code):**
+* MongoDB: `$toHashedIndexKey` makes every number an int64, so 2.3 ->
+  2.9 or NumberLong -> Double hash alike; a collection whose `dbHash`
+  differs and whose drilldown finds nothing is reported ok. Re-walk with
+  the raw-BSON hash. (diff-algorithms)
+* `prove_converted` (`engines/hetero.py`) says ok when every routine is
+  a procedure it never ran; triggers and events are not checked; one
+  failing call fails its whole side without naming the input.
+  (stored-code-conversion)
+* SQL Server Change Tracking read outside a SNAPSHOT transaction - the
+  cleanup can drop changes silently; `rowversion` in the row hash makes
+  every copied row differ; CLR types (`geography`) fail the hash query
+  so those tables are never compared. (oracle-mssql-db2)
+* Types (type-fidelity G1-G4, G8): PostgreSQL `infinity` rendered as
+  NULL; BC years render as AD; sub-microsecond digits cut on both sides
+  at read so a lossy move digests equal; `extra_float_digits` not pinned
+  so a rounded float compares equal; keys distinct on the source that a
+  case/accent/pad-insensitive target collation merges, overwritten by
+  the MySQL upsert - count the collisions before the move.
+* Cutover: the PostgreSQL fence takes `pg_current_wal_lsn()` (a commit
+  acknowledged under `synchronous_commit=off` can sit past it:
+  `pg_current_wal_insert_lsn()`); `fence_wait` counts only active slots
+  (another consumer's caught-up slot can pass the fence while the hop's
+  reconnects); `rollback` raises only the target's sequences, so going
+  back collides on the old source. (cutover)
+* MySQL digest: `sum(crc32)` is linear (a value swapped between rows is
+  missed ~2^-16) and the md5 part is 32 bits - widen to 64, salt each
+  run. (diff-algorithms)
+* mongosync committed on the deprecated `lagTimeSeconds` (absent on
+  1.22 -> early commit); Redis restores a relative TTL, drops
+  IDLETIME/FREQ, and reads one cluster node only. (oss-nonrelational)
+* The PostgreSQL tail through `psql`: a text value holding a newline
+  may split the output and stall the tail - measure. (fast-python)
+* Small and outward: `pt-table-sync` runs without `--no-version-check`
+  (calls home); `doctor` installs Atlas's proprietary build; Liquibase
+  5 is FSL; `leftovers.py` misses gh-ost's `_ghk` and the schemas of
+  pgcopydb, pglogical, Spock, Bucardo, pg_repack, pgstream; datacompy's
+  report names itself to the operator. (oss-relational, WIP of 0f)
+* Security defaults: TLS `prefer` / `CERT_NONE` by default; seven
+  `hashlib.md5` sites without `usedforsecurity=False`; a publication
+  `FOR ALL TABLES`; the view's token in the URL. (security scorecard)
+
+**F1. Verification faster and exact for every key shape
+(diff-algorithms):** one scan returns every leaf of the digest tree
+(`GROUP BY bucket`, sums add up the tree) instead of `_bisect`'s
+log2(d)+2 sequential reads; buckets by a hash of the key so composite,
+text and cross-engine keys localize; an in-SQL IBLT (sum cells) sends
+~130 KB for 100 differences in 10^8 rows and works without a key; the
+self-check that the differences found add up to the change in count and
+sum; generations under writes. Passes A-D composed by the decision
+engine.
+
+**F2. Cutover as one timed path with automatic undo (cutover):** the
+existing `move --mode cdc --drop --go` driven by a `cutover:` hop
+option: preflight, reverse stream armed and verified, freeze chosen per
+engine and proved, drain to a position taken after the freeze, final
+verify of what changed, counters, jobs to one side, flip; any failure or
+a blown budget undoes it. Budget: PostgreSQL 2-10 s, MySQL < 3 s behind
+a pooler. **Waits on the owner:** freezing the source, a marker row,
+toggling jobs and the reverse stream write to the source - allowed only
+for a hop that turns `cutover:` on, reversible, behind approvals?
+
+**F3. Stored code (stored-code-conversion, paid-cloud-products):** per
+routine the decision engine picks among the operator's own file,
+sqlglot, migkit's rules, Ora2Pg and SQLines (GPL/Apache, driven as
+programs), then a model loop that gets the failing diff back - ranked by
+measured proof pass rate. Proof only by execution in the sandbox on the
+same fixture both sides, inputs from constants, real values and
+coverage-guided search (Hypothesis), `plpgsql_check` as a gate; ok only
+with execution evidence and full coverage; residue in three classes.
+sqlglot's limits are listed (no procedural bodies, `CONNECT BY` passed
+through, `TRY_CAST` -> `CAST`).
+
+**F4. Types (type-fidelity):** eight new canon classes (uuid, array,
+interval, inet, vector, xml, geometry, 9-place timestamp), value-normal
+decimals, float4 widened before rendering, infinity marked uncomparable,
+JSON folded in-process; the refusals before the move (unsigned 64-bit,
+NUL bytes, 4-byte characters, DynamoDB > 38 digits); the type x
+engine-pair table in its section 11.
+
+**F5. Engines (oracle-mssql-db2):** Oracle Free runs natively
+(`gvenzl/oracle-free:slim-faststart`); LogMiner reader of migkit's own;
+SHA-256 summed, never Oracle's `CHECKSUM` (cancels duplicates); direct
+path load. SQL Server bulk through `mssql-python` bulk copy (keeps
+identity and NULLs; `pymssql`'s cannot keep identity), staged then
+promoted inside migkit's transaction. Db2, ASE, Informix need x86.
+**Waits on the owner:** a 6 GB colima VM and/or a Rosetta profile;
+free x86 CI on GitHub for the public repo.
+
+**F6. Speed of migkit's own paths (fast-python):** the MySQL tail is
+probably held by the GIL, not by decoding (decode 8.6 us, whole tail
+15.3 us a change, `_ReadAhead` a thread) - the decoder in a child
+process may take it from ~65k to ~150k changes/s (measure R-B first);
+one persistent connection for the PostgreSQL tail instead of three
+`psql` processes a batch; rendering is 80% of the fold - specialise it
+per column before any compiled renderer. Not now: free-threaded 3.14t,
+subinterpreters, PyPy for all of migkit, orjson or XXH3 in the digest.
+
+**F7. The rest, by report:** each report's gap table is the item list
+for its area - pgcopydb split and index jobs, mydumper `--rows` /
+`--checksum-all`, MySQL Shell, CLONE and `pg_basebackup` rungs
+(oss-relational); RedisShake, MM2 with a source-offset header, DSBulk,
+ClickHouse `remote()` with dedup tokens, OpenSearch RFS, DynamoDB
+export/import (oss-nonrelational); changing a running tail's table set,
+pausing only the table a DDL touched, the Kafka consumer-offset clamp,
+a scheduled tail that stops when caught up (paid-cloud-products); the
+source-commit timestamp in the beat, batches ended at the last COMMIT,
+changed-columns merge (goldengate-qlik-hvr); statistics-based chunk
+edges, exact batches by default on one-way tails, events decoded under
+the schema as of their position (dts-tidb-vitess); warehouse loads with
+the Storage Write API and Snowpipe channels as exact paths
+(aws-azure-google-snowflake); the 16 security fixes (security scorecard).
+Correction carried: AWS ended DMS Fleet Advisor on 2026-05-20.
+
 ## Where migkit would still lose with every item above done (2026-09-28)
 
 Asked by the owner: once the whole backlog is built, where do the
