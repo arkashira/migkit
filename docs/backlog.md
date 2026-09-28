@@ -5376,7 +5376,17 @@ missing is one model that knows *which* resource binds and plans to it:
    - the bandwidth-delay product sets the window and the batch), and
    the path's cost per row for the chosen strategy (bytes a row on the
    wire, CPU a row where it is converted). Measured by short probes
-   before the move and kept current during it.
+   before the move and kept current during it. **Memory is one of the
+   resources, driven by large values** (the owner: AWS DMS asks for a
+   LOB size - too large and the replication instance is OOM-killed, too
+   small and values are silently truncated): each table's largest and
+   99th-percentile row measured before the move; per-worker memory =
+   batch bytes in flight + the largest row times the pieces buffered +
+   the driver's own overhead; concurrency never more than free memory
+   allows, so wide tables get few workers and small batches and narrow
+   ones many; a value larger than the budget streamed in pieces (R10),
+   never truncated; a watchdog shrinks workers before the kernel kills
+   anything, and says so. No operator ever sets a LOB size.
 2. **The bottleneck named, and concurrency sized to it:** throughput is
    the least of the stages' rates (a roofline); workers = what saturates
    the binding stage and not one more (Little's law: concurrency = rate
