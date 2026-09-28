@@ -2675,6 +2675,48 @@ fixed per manual fix, dependence on emulation. In progress with the
 stored-code agent (P2, P18, emulation, shrinking, z3, learned rules);
 P10 queued as its own item.
 
+### Leapfrog: engine reach (docs/research/leapfrog-engine-reach-2026-09-28.md)
+
+Today: Db2 is LUW only; warehouse sides write rows with no staged bulk
+load, no exactly-once write and no server-side digest; nothing for
+Teradata, Netezza, Vertica, Exasol, HANA, Databricks/Iceberg,
+mainframe, IBM i, SAP application data, Cosmos NoSQL or SaaS. In order:
+1. **Exact warehouse loads + one SHA-256 row digest in each engine's
+   SQL** (item 33): BigQuery committed streams with row offsets (tested
+   on goccy/bigquery-emulator - the free sandbox blocks DML and
+   streaming), Snowpipe Streaming channels with offset tokens
+   (`snowpipe-streaming`, Apache-2.0), Redshift COPY with its load
+   commits, Delta `txn` through delta-rs, Iceberg snapshot properties;
+   the batch number carried so a replay never lands twice.
+2. **The copybook engine + IBM i:** COBOL copybooks and EBCDIC/packed
+   and zoned decimals (Cobrix Apache-2.0 through a JVM, Stingray MIT,
+   `ebcdic` incl. Thai cp838) for VSAM/flat-file extracts, testable on
+   arm64 with no mainframe; IBM i through IBM's ODBC driver (arm64
+   native) / Mapepire / jt400, changes followed through
+   `QSYS2.DISPLAY_JOURNAL`, `HASH_ROW` as the digest. Db2 for z/OS
+   through `ibm_db` needs the operator's Db2 Connect licence (installed
+   with acceptance); no open log reader exists for Db2 z/OS, IMS or
+   CICS/VSAM changes - said.
+3. **Teradata** (teradatasql, FastExport/FastLoad through TPT where
+   installed, HASHROW for digests; ClearScape or the Vantage Express VM
+   for tests).
+4. **One change-topic reader** for engines that publish changes as a
+   documented stream (TiDB, Couchbase, Aurora DSQL, CockroachDB) - one
+   reader in the cross-engine tail covers all four.
+5. **Cosmos DB NoSQL** (vNext emulator runs on arm64; deletes need
+   "all versions and deletes" mode, which needs continuous backup).
+6. **SAP application data** only through ODP over OData (`pyodata`,
+   Apache-2.0) with migkit's own delta tokens - ODP over RFC is
+   forbidden to non-SAP tools (Note 3255746) and direct database reads
+   break SAP's runtime licences; PyRFC is archived.
+7. **SaaS:** dlt and its verified sources (Apache-2.0) as dependencies;
+   Stitch's Singer taps (AGPL - importable now); Airbyte's certified
+   connectors (ELv2) installed with acceptance and run as programs;
+   Salesforce change capture through its Pub/Sub API (72 h retention).
+Licence changes noted: CockroachDB and ScyllaDB are no longer open
+source, Couchbase server is BSL, Greenplum closed (forks Cloudberry,
+WarehousePG), MariaDB Xpand discontinued.
+
 ## Where migkit would still lose with every item above done (2026-09-28)
 
 Asked by the owner: once the whole backlog is built, where do the
