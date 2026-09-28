@@ -5625,6 +5625,32 @@ describes an older version. So:
    (the positioning rule), claims a pair the matrix does not have, or
    shows a command or option that no longer exists.
 
+### R25. What a real migration still scripted around migkit (added 2026-09-29)
+
+Compared, item by item, with a validation-and-repair package the owner
+built around an early migkit for a real move between two clouds (its
+contents stay private; only the shape of the gaps is written here).
+Almost every script it holds is covered by the items above once built -
+verify and count and hash, sequences, users and grants, settings
+parity, freeze and active sessions, CDC positions, lag, standby
+preflight, numeric scale, the final report and its evidence, instance
+class, performance on a clone, the tunnels, the runner beside the
+databases. What is not yet anywhere:
+1. **Driving the managed services when an organisation mandates them:**
+   create, start, watch, stop and tear down an AWS DMS task, a
+   Tencent/Alibaba DTS job, including their reverse legs, from the hop -
+   migkit choosing and verifying around them as rungs (their state read
+   into migkit's plan, their errors in migkit's words), so a team that
+   must use the provider's mover still gets one tool.
+2. **The cloud side of readiness:** the clusters' network (VPC,
+   subnets, security groups, routes), maintenance windows and pending
+   maintenance, instance classes on both sides, snapshots and restores
+   through the provider's API, audited before the move and in `assess`.
+3. **The organisation's own change sheet:** the plan's steps exported
+   with ids that map onto a team's task sheet, and each step's progress
+   and evidence written back, so the migration's tracking is not typed
+   by hand.
+
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
 Pushed **without the full suite run** (the owner's call, out of tokens):
