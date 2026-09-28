@@ -108,9 +108,9 @@
 <pre><code>git clone https://github.com/arkashira/migkit
 cd migkit &amp;&amp; ./bootstrap.sh &amp;&amp; source .venv/bin/activate</code></pre>
   <p><code>bootstrap.sh</code> creates the venv, installs libpq, pulls optional
-  drivers (mysql, mongo, redis, kafka) and the tools migkit drives
-  (pg_dump/mydumper/pgloader, atlas, reladiff). Anything that will not install is
-  skipped - every feature has a built-in fallback. Run
+  drivers (mysql, mongo, redis, kafka) and everything else migkit works
+  with. Anything that will not install is skipped - every feature has a
+  built-in fallback. Run
   <code>migkit doctor --install</code> to fill gaps on another machine.</p>
 
   <h2 id="configure">Configure a hop</h2>
@@ -288,8 +288,9 @@ migkit sync  my-hop --kind sequences --apply  # align counters, safely
   <h2 id="engines">Engines</h2>
   <p><b>Native:</b> postgres, mysql, mssql, mongodb, sqlite, redis, kafka.
   <b>Aliases:</b> mariadb, percona, aurora, alloydb, documentdb, azure-sql, tdsql.
-  <b>Generic (reladiff):</b> snowflake, bigquery, redshift, clickhouse, oracle,
-  duckdb, trino. <b>Cross-engine:</b> MySQL-&gt;PostgreSQL verified end to end.</p>
+  <b>Also:</b> snowflake, bigquery, redshift, clickhouse, oracle,
+  duckdb, trino. <b>Across engines:</b> any source to any target - migkit
+  finds the fastest way that stays exact for each pair and each table.</p>
 
   <footer>
     migkit - verify, repair, and move databases across engines.

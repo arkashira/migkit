@@ -2458,7 +2458,17 @@ store). What was still nowhere:
   partitioned table by its own count and digest, names a partition the
   target has but empty where the source's is not, and a partition the
   target lacks; the same for MySQL partitions (`information_schema
-  .partitions`). Folds into A5.
+  .partitions`). Folds into A5. *Done (2026-09-28):* measured before on
+  both engines, a partition empty on the target, one only the target has
+  and one whose rows changed all left the deep check OK, and on MySQL four
+  hash partitions against three too (there the counts and data were also
+  OK where the rows sat in MAXVALUE, or in fewer hash partitions). Now every leaf partition
+  (`pg_inherits`, recursively) and every MySQL partition (`PARTITION (p)`)
+  is held to its own count and digest, and named empty, missing, extra,
+  stranded in the catch-all, with a different bound, or different in
+  content - one wording for both engines (`verdict.partition_differences`),
+  every partition listed in `deep-partitions.diff`.
+  Test: `test_a_partition_that_arrived_empty_is_named.py`.
 * **The slot before the snapshot, proved.** The rule from the RDS legs:
   the change slot is made first and the copy's snapshot exported from
   the slot's own transaction (`CREATE_REPLICATION_SLOT ... EXPORT_SNAPSHOT`),
@@ -2468,16 +2478,60 @@ store). What was still nowhere:
   snapshot, copy and tail, and the target still ends equal. Every engine
   with a position (MySQL's binlog position under the same lock as the
   consistent read, Mongo's resume token before the first read) under the
-  same test.
+  same test. *Done (2026-09-28):* the property is
+  `test_the_position_is_taken_before_the_copy_reads.py`, on a model where a
+  change is visible in an order of its own (per row in commit order,
+  across rows not - research L2); taken away, the order or the wait loses
+  a row. Every full+cdc path: a PostgreSQL hop hands it to the server's
+  subscription, whose table sync is the server's own slot and snapshot;
+  every tail path (a pair, mapped columns, MySQL to MySQL) starts from
+  `copy_point`. PostgreSQL's is now the slot made over the replication
+  protocol with its exported snapshot, then a wait until everything that
+  snapshot counts as done is visible to a read (the SQL function and a
+  wait on the commit log where replication connections are refused).
+  Measured on 16: a commit held by a synchronous standby that never
+  answers is in the log and out of sight, and the slot's creation waited
+  for it both ways; rows written between the slot and the first read,
+  between tables and before the tail arrive
+  (`test_rows_written_around_the_slot_arrive.py`). MySQL's binlog end was
+  *not* such a position - measured on 8.4 with the commit held 1.5 s
+  (`binlog_group_commit_sync_delay`): read mid-commit it was past an
+  insert no read could see. `copy_point` now waits out the commits under
+  way (`waiting for handler commit`), or takes `Binlog_snapshot_*` where
+  the server gives it; replaying from the start of the binlog file was
+  tried and dropped - measured, it brought back rows from before a `DROP
+  DATABASE`. Still open: the wait needs `PROCESS` (without it nothing is
+  waited for, as before); MongoDB's resume token and MariaDB's/Percona's
+  snapshot position are not measured here.
 * **Uniform time shift and type narrowing on MySQL.** #22 of the smart
   check work: the PostgreSQL deep checks for a constant per-row epoch
   delta (a systematic tz bug) and for a target column narrower than the
   source's are to be confirmed as ported to MySQL (the code carries the
-  words; the tests must show the MySQL findings by name).
+  words; the tests must show the MySQL findings by name). *Done
+  (2026-09-28):* both engines had both checks, each with its own copy of
+  the reasoning; by their code neither named `numeric(12,2)` into
+  `numeric(12,4)` (two integer digits fewer), nor PostgreSQL an unbounded
+  `numeric` into a bounded one. The reasoning is now one place
+  (`verdict.narrowing` over `canon.capacity`, `verdict.uniform_shift`),
+  called by both; a shift of two deltas an hour apart is named as a zone
+  with daylight saving, and rows changed each by their own amount are
+  left to the row comparison. Test:
+  `test_a_shifted_or_narrowed_column_is_named_on_every_engine.py`
+  (mysql:8.4 and the PostgreSQL pair, the same seeds, the same lines).
 * **An online rewrite's working tables.** `drift.transient` knows
   gh-ost's and pt-osc's names; pg_repack's (`repack` schema, `log_*`
   tables and its triggers) and MySQL Shell's are added, so a table being
-  rewritten under the tail is neither copied nor reported.
+  rewritten under the tail is neither copied nor reported. *Done
+  (2026-09-28):* pg_repack's, Vitess's, Spirit's, Facebook's
+  OnlineSchemaChange's, LHM's and the server's own `#sql-` copies, and the
+  triggers they put on the table; MySQL Shell's load leaves no working
+  table (its view placeholders carry the view's name; the `#sql-` copies
+  of the ALTERs that add its deferred indexes are the server's). A name
+  an application could choose too (`_archive_old`) counts only beside the
+  table it would copy. Left out of the move's table list, the counts, the
+  data, the object inventory and the shape watch. Still open: the change
+  tail reads gh-ost's and pt-osc's names by the name alone.
+  Test: `test_an_online_rewrites_working_tables_are_left_alone.py`.
 * **`schema_authority: atlas` needs an alias shape** (4-จ from the old
   queue): how the hop names the authority's own alias for a table the
   hop renames; open, small.
@@ -5231,10 +5285,72 @@ GoldenGate, DuckDB, ConnectorX), or skip the SQL layer (base backups,
 CLONE, storage snapshots, TiDB Lightning's SST ingest). R20 takes all
 three, chosen per table.
 
+Every path above competes with the tools migkit already drives -
+pgcopydb, mydumper, pgloader, Debezium, DVT, reladiff - as rungs of the
+decision engine measured on the same data (the owner, 2026-09-29):
+where theirs is better or faster for a task it is used, where migkit's
+is it is used, and migkit decides per table and per task.
+
 Order: 8 and 9 (the proof nearly free), 1 (pass-through), 13, 14, 10, 11, 4,
 5, 2, 3, 6, 7 - each against the tool that leads it (pgcopydb and
 PeerDB for moving, Veridata/DVT/pgCompare for verifying), numbers in
 the docstrings.
+
+### R21. Easy enough to use without thinking (added 2026-09-29, the owner: "however good the tool, nobody uses it if it is hard and full of things they do not understand - configuring it must take no thought, with helpers that do it for them")
+
+Measured on the code the same day: 13 commands (fine); the starter
+config still shows `workers`, `big_rows` and `slice` (knobs the owner's
+rule says nobody sets), an `engine` and a `service` the operator has to
+know, a password field that invites plaintext; 64 hop option keys read
+across the code; `init` writes a static template and asks nothing. So:
+
+1. **Two addresses are a hop.** `source: postgres://app@db1/shop`,
+   `target: mysql://app@db2/shop` - the engine, the pair (same-engine or
+   across), the port and the databases come from the addresses and
+   from the servers themselves; the cloud and managed service
+   (RDS/Aurora/Cloud SQL/Azure/Tencent/Alibaba) from the host and what
+   the server reports. Everything else is decided by migkit and shown,
+   not asked. The long form stays valid.
+2. **`init` becomes the guide** (the same command, no new mode): asks
+   for the two addresses (or reads them from the environment), connects,
+   says what it found (engines, versions, sizes, tables without keys,
+   types that need care, what the source allows - CDC on or off,
+   grants, a replica or a primary), proposes the plan in plain words
+   with an estimate of time and cost, and writes the smallest config
+   that says it - only what differs from what migkit would decide.
+   Passwords never written in plain text: stored in the OS keychain
+   (`keyring`) or as an `env:` reference, the choice offered.
+3. **What the DBA must do, written for them:** where a grant, a setting
+   or an extension is missing, `init`/`doctor` write the exact
+   least-privilege script for that engine and that service (with the
+   cloud's own spelling - parameter groups, flags), and re-check after.
+4. **Nothing to tune:** workers, batch sizes, chunking, compression,
+   legs, the path per table - all decided and adapted by migkit; a hop
+   key that sets one becomes a ceiling at most, and the starter config
+   shows none. Options keep sane defaults; `doctor` flags any key that
+   does nothing or fights migkit's own choice.
+5. **One word for what you want:** a hop option `goal:` - `copy`
+   (one-off move), `cutover` (move, follow, verify, switch with the
+   least downtime), `verify` (prove two databases equal), `two-way`,
+   `keep-in-sync` - sets the right defaults for everything under it;
+   the CLI stays as it is.
+6. **Config checked like code:** unknown keys with "did you mean",
+   wrong types, contradictions (a filter on a table that is excluded),
+   secrets in plain text, all before anything runs, in migkit's words.
+7. **Coming from another tool:** read an AWS DMS task, a Tencent/Alibaba
+   DTS job, a Debezium connector config or a pgloader load file and
+   write the hop that does the same - switching costs nothing.
+8. **The view helps too:** the dashboard gets a setup page doing what
+   `init` does, for operators who prefer a form (behind the same
+   roles and host checks).
+9. **Every message says what to do next**, in plain words, with the
+   exact command or statement.
+
+Measured by: time from nothing to a verified move for a new operator
+(scripted in docker with each engine pair), number of config lines a
+typical hop needs (target: the two addresses and nothing else), and
+questions the guide asks (target: none beyond the addresses and a
+password).
 
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
