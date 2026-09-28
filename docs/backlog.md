@@ -2974,7 +2974,18 @@ the gaps nothing above covers yet, now items of their own.
   like), T-SQL at depth, and the SQL embedded in application code
   (AWS SCT scans Java, C# and .NET) found and converted, with the same
   proof by execution.
-* **W4. Transformation in flight and masking for compliance.** Joins,
+* **W4. Transformation in flight and masking for compliance** - built on
+  what migkit already holds rather than a streaming engine of its own
+  (the owner, 2026-09-29: "faster, smarter, deeper than Striim"): each
+  batch of changes the tail reads becomes an Arrow table, a hop's
+  `transform:` SQL runs over it in DuckDB (already a dependency) -
+  filters, projections, casts, joins to reference tables read from
+  either side and cached, windows over a batch and state kept per key
+  between batches - and the result goes to the target through the same
+  exact batches, so exactly-once, the proof and the undo still hold; the
+  verify then compares the transformed source with the target by
+  running the same SQL over the source's rows. Beside it, the plain
+  rename/filter/column rules stay the fast path where no SQL is given. Joins,
   enrichment and windows on the stream (Striim, Informatica, Matillion),
   and format-preserving encryption / tokenization (Informatica, Delphix)
   beside the keyed HMAC of R5 - as hop rules under the same verify, which
