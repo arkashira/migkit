@@ -38,6 +38,7 @@ PHASES = {
     "sync": "copying online while the source keeps changing, then"
             " committing",
     "copy-table": "copying table by table",
+    "keyspace": "copying the keyspace straight from source to target",
     "indexes-off": "dropping secondary indexes for the load",
     "indexes-on": "rebuilding the secondary indexes",
     "statistics": "refreshing the target's statistics",

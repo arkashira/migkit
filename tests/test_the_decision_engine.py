@@ -315,7 +315,10 @@ def test_the_mover_is_the_first_way_whose_programs_are_here(monkeypatch):
     assert movers.pick("hetero") == "pgloader"
     assert movers.pick("mongodb") == "mongosync"
     assert movers.pick("sqlite") == "native"
-    assert movers.pick("redis") == "builtin"
+    # the Redis products' own copy, installed; `fitted` holds it to its
+    # terms (`tests/test_the_redis_products_tool_runs_only_where_its_
+    # terms_allow.py`)
+    assert movers.pick("redis") == "riotx"
     assert movers.pick("mysql", table="app.t") == "builtin"
     # the container is asked about only for a PostgreSQL hop
     assert asked == [1]

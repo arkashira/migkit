@@ -19,10 +19,11 @@ import threading
 import time
 from urllib.parse import quote
 
-from .util import run, tool_env, which
+from . import leftovers
+from .util import quiet_argv, run, tool_env, which
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper",
-        "pgloader", "mongodump", "mongosync", "native")
+        "pgloader", "mongodump", "mongosync", "riotx", "native")
 
 
 def _native(engine):
@@ -80,6 +81,12 @@ def _ladder():
         Rung("mongodump", "the dump and restore",
              needs=(_moves("mongodump"),
                     _installed("mongodump", "mongorestore"))),
+        # Redis's own tool, where its terms allow it: `fitted` gives way
+        # to migkit's copier for any other target
+        Rung("riotx", "the Redis products' own copy",
+             needs=(_moves("riotx"), _installed("riotx")),
+             because="many keys at once, and a cluster's nodes side by"
+                     " side"),
         Rung("native", "the engine's own means", needs=(_moves("native"),)),
         # a single table goes by the table copier: resuming by chunk
         # matters more than raw speed there
@@ -149,7 +156,9 @@ def fitted(hop, engine, via):
             opts.get("target_engine", "postgres"))),
         mapping=lambda: getattr(hop, "mapping", None) or {},
         # asked of the servers, once, and only for the online sync
-        unfit=lambda: _mongosync_unfit(hop))
+        unfit=lambda: _mongosync_unfit(hop),
+        # asked of the target, and only for the Redis products' copy
+        terms=lambda: _riotx_unfit(hop))
     ladder = _ladder()
     at = [r.name for r in ladder].index(via)
     got = climb(hop.name, (dataclasses.replace(ladder[at], needs=_FITS[via]),)
@@ -176,7 +185,10 @@ def _fits():
     return {"pgloader": one_pass,
             "mongosync": (Need("a hop it can carry",
                                lambda f: f["unfit"] is None,
-                               lambda f: f["unfit"]),)}
+                               lambda f: f["unfit"]),),
+            "riotx": (Need("a target its terms allow",
+                           lambda f: f["terms"] is None,
+                           lambda f: f["terms"]),)}
 
 
 #: what a way needs of the hop beyond its engine and its programs, asked
@@ -291,6 +303,7 @@ def supported(engine, via):
             "pgloader": engine == "hetero",
             "mongodump": engine == "mongodb",
             "mongosync": engine == "mongodb",
+            "riotx": engine == "redis",
             "native": _native(engine)}.get(via, True)
 
 
@@ -330,7 +343,8 @@ def stream_supported(engine):
 #: the command lines go to the run's debug log, and what a failing one said
 #: is passed on with its name taken out.
 DRIVEN = ("pg_dump", "pg_restore", "pgcopydb", "psql", "mydumper",
-          "myloader", "pgloader", "mongodump", "mongorestore", "mongosync")
+          "myloader", "pgloader", "mongodump", "mongorestore", "mongosync",
+          "riotx")
 #: environment variables whose values are secrets, for the debug log
 _SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
 #: (DebugLog, secrets) for the run in progress, set by `run_via`
@@ -342,7 +356,7 @@ _DEBUG = None
 _RUNNING = None
 _RUNNING_LOCK = threading.Lock()
 LOADERS = ("pg_restore", "myloader", "mongorestore")
-COPIERS = ("pgcopydb", "pgloader", "mongosync")
+COPIERS = ("pgcopydb", "pgloader", "mongosync", "riotx")
 
 
 def _program_role(program):
@@ -447,6 +461,7 @@ def _sh(cmd, env=None, log=None, progress=None):
     while the step runs is the phase line its caller logs.
     """
     from . import wording
+    cmd = quiet_argv(cmd)
     _debug(cmd, env)
     if progress is None:
         with _spawned(subprocess.Popen(cmd, env=tool_env(env), text=True,
@@ -1018,7 +1033,8 @@ def pgdump_move(hop, db, workers, go, log):
               routed=len(routed)),
         ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
          "-Fd", "-j", workers, "--data-only", "-v", "-f", outdir,
-         *[a for name in left_out for a in ("-T", name)]])
+         *[a for name in left_out for a in ("-T", name)],
+         *leftovers.pg_dump_args()])
     load = Step(
         phase("load", workers=workers),
         ["pg_restore", "-h", t.host, "-p", t.port, "-U", t.user,
@@ -1268,7 +1284,8 @@ def _pg_schema(hop, db, section, tables, whole, log=None):
     out = hop.report_dir(db) / f"schema-{section}.dump"
     dump = ["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
             "-d", db, "-Fc", "--schema-only", f"--section={section}",
-            *pick, "-f", str(out)]
+            *pick, *(leftovers.pg_dump_args() if whole else []),
+            "-f", str(out)]
     load = ["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
             "-d", hop.target_db(db), f"--section={section}", "--no-owner",
             "--no-privileges", str(out)]
@@ -1753,8 +1770,12 @@ def excluded_tables(hop, db, tables, qualifier="public"):
     `qualifier` is what an unqualified name is prefixed with. PostgreSQL
     tables arrive as `schema.table` already; MySQL's arrive bare, and
     Debezium wants them as `database.table`, so the caller says which.
+
+    Another tool's bookkeeping is among them whether or not the hop
+    excludes anything (`leftovers.bookkeeping`, through `hop.excluded()`):
+    it is not the application's to carry.
     """
-    if not getattr(hop, "exclude", None):
+    if not hasattr(hop, "excluded"):
         return []
     out = []
     for ident in sorted(tables):
@@ -2386,6 +2407,11 @@ def _mongo_uri(ep, secret=False):
     hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
     uri = f"mongodb://{auth}{hosts}/"
     extra = ep.options.get("uri_options", "")
+    # the connection's TLS, the same the driver makes (`Endpoint.mongo_tls`)
+    tls = ep.mongo_tls() if hasattr(ep, "mongo_tls") else {}
+    if tls:
+        from urllib.parse import urlencode
+        extra = "&".join(p for p in (extra, urlencode(tls)) if p)
     if extra:
         uri += "?" + extra
     return uri
@@ -2493,7 +2519,16 @@ def _mongosync_unfit(hop):
 
     It keeps each database's name, needs both sides to be a replica set
     or sharded cluster of MongoDB 6.0 or later, and reads no row filter.
-    Asked of the servers, once; one that cannot be asked is a reason."""
+    Asked of the servers, once; one that cannot be asked is a reason.
+
+    And it is licensed for MongoDB Atlas and Enterprise Advanced
+    deployments only: a hop runs it where it says it has one
+    (`mongodb_entitlement: atlas | enterprise`), and the open path
+    otherwise."""
+    if not mongodb_entitled(hop):
+        return ("the online sync is licensed for MongoDB Atlas and"
+                " Enterprise Advanced only, and the hop declares neither"
+                " (mongodb_entitlement: atlas or enterprise)")
     if any(hop.target_db(d) != d for d in (hop.databases or [])) or any(
             k != v for k, v in (hop.db_map or {}).items()):
         return "the online sync keeps each database's name, and the hop maps one"
@@ -2511,6 +2546,107 @@ def _mongosync_unfit(hop):
         if int(version[0]) < 6:
             return f"the {label} is older than MongoDB 6.0"
     return None
+
+
+#: what a hop says to declare the MongoDB licence the online sync's terms
+#: ask for
+ENTITLEMENTS = {"atlas": "MongoDB Atlas", "enterprise": "Enterprise Advanced",
+                "enterprise-advanced": "Enterprise Advanced"}
+
+
+def mongodb_entitled(hop):
+    """The MongoDB licence the hop declares, or ''."""
+    said = str((getattr(hop, "options", None) or {}).get(
+        "mongodb_entitlement") or "").strip().lower()
+    return ENTITLEMENTS.get(said, "")
+
+
+#: the names Redis Cloud's databases are reached by: a target there is one
+#: of Redis's own products whatever else is known of it
+REDIS_CLOUD = (".redislabs.com", ".redis-cloud.com", ".rlrcp.com")
+#: what a target endpoint says to declare itself one of Redis's products
+#: where its name cannot: `redis_product: community | cloud | software`
+REDIS_PRODUCTS = ("community", "cloud", "software")
+
+
+def _riotx_unfit(hop):
+    """Why Redis's own copy tool may not carry this hop, or None.
+
+    Its licence (BSL 1.1, Redis Ltd.) grants production use only with
+    Redis Community Edition, Redis Cloud and Redis Software, so the target
+    must be one: Redis itself, not Valkey, KeyDB or Dragonfly (the server
+    says which, `variants`), and reached as Redis Cloud by its name or
+    declared one of the three by the hop (`redis_product`) - a managed
+    service elsewhere runs the same Redis and is not Redis's product. And
+    it takes one key pattern where the hop may leave several out."""
+    t = hop.target
+    said = str((t.options or {}).get("redis_product") or "").strip().lower()
+    cloud = str(t.host or "").lower().endswith(REDIS_CLOUD)
+    if not (cloud or said in REDIS_PRODUCTS):
+        return ("the Redis products' own copy tool is licensed only into"
+                " Redis Community Edition, Redis Cloud or Redis Software,"
+                " and the target is not known to be one (redis_product:"
+                " community, cloud or software on the target, where it is)")
+    if getattr(hop, "exclude", None):
+        return ("the hop leaves keys out, and the Redis products' own copy"
+                " tool takes one pattern of keys to carry")
+    from .engines.redis import RedisEngine
+    try:
+        brand = RedisEngine(hop)._brands()[1].name
+    except Exception as e:  # noqa: BLE001 - said, as the reason
+        return f"the target could not be asked what it is ({type(e).__name__})"
+    if brand and brand != "redis":
+        return (f"the target runs {brand}, not Redis, and the Redis"
+                " products' own copy tool is licensed only into Redis")
+    return None
+
+
+def riotx_move(hop, db, workers, go, log):
+    """A Redis keyspace into one of Redis's own products through their
+    replication tool (`replicate`, scan mode): every key's value, type and
+    expiry, a cluster's every node on either side, many at once.
+
+    Its terms are the operator's to accept (`tools.TERMS`), and the target
+    is held to them (`_riotx_unfit`). Both addresses and passwords go in
+    its environment, which it reads for every option (`RIOT_SOURCE_*`,
+    `RIOT_TARGET_*`), not on a command line anyone can list. What the
+    target held of the database is removed first, as migkit's own copier
+    does, and `check` compares the two after. Not run on this machine:
+    installing it is accepting its terms, which is the operator's to do."""
+    from .engines.redis import RedisEngine
+    from .wording import Step, phase
+    eng = RedisEngine(hop)
+    argv = ["riotx", "replicate", "--mode", "scan",
+            "--threads", str(max(1, int(workers)))]
+    env = {}
+    for side, ep, word in (("src", hop.source, "SOURCE"),
+                           ("dst", hop.target, "TARGET")):
+        tls = ep.redis_tls()
+        scheme = "rediss" if tls else "redis"
+        env[f"RIOT_{word}_URI"] = (f"{scheme}://{ep.host}:{int(ep.port)}"
+                                   f"/{int(db)}")
+        if ep.user:
+            env[f"RIOT_{word}_USER"] = ep.user
+        if ep.password:
+            env[f"RIOT_{word}_PASS"] = ep.password
+        if tls:
+            env[f"RIOT_{word}_TLS"] = "true"
+            env[f"RIOT_{word}_TLS_VERIFY"] = (
+                "NONE" if tls.get("ssl_cert_reqs") == "none" else "FULL")
+            if tls.get("ssl_ca_certs"):
+                argv += [f"--{word.lower()}-cacert", tls["ssl_ca_certs"]]
+        if go and eng._cluster(side):
+            env[f"RIOT_{word}_CLUSTER"] = "true"
+    step = Step(phase("keyspace", workers=workers), argv)
+    if not go:
+        return [step, "# dry-run, add --go to execute"]
+    gone = eng.empty_target(db)
+    if gone and log:
+        log(f"db{db}: emptied {gone:,} keys the target held before the copy")
+    if log:
+        log(step)
+    _sh(argv, env, log)
+    return [step]
 
 
 def _free_port():
@@ -2615,6 +2751,28 @@ def mongosync_move(hop, db, workers, go, log):
     return steps
 
 
+#: seconds a sync that can commit may go on not saying its lag before the
+#: commit is refused
+LAG_UNSAID_WAIT = 60
+#: seconds behind the source at which the commit is made
+COMMIT_LAG = 1
+
+
+def commit_ready(progress):
+    """(whether to commit now, the lag it read) from one `/progress`.
+
+    Only on `canCommit` and the overall lag, `lag.overallLagSeconds`. The
+    top-level `lagTimeSeconds` this read before is deprecated since 1.21
+    and absent from 1.22, where `(absent or 0) <= 1` read as caught up and
+    committed while changes were still arriving. A lag it does not report
+    is None - never 0."""
+    lag = (progress.get("lag") or {}).get("overallLagSeconds")
+    if isinstance(lag, bool) or not isinstance(lag, (int, float)):
+        lag = None
+    return (bool(progress.get("canCommit")) and lag is not None
+            and lag <= COMMIT_LAG), lag
+
+
 def _mongosync_run(port, proc, start, db, log):
     import time as _t
     end = _t.time() + 60
@@ -2636,11 +2794,28 @@ def _mongosync_run(port, proc, start, db, log):
         raise RuntimeError(f"the online sync refused to start:"
                            f" {got.get('errorDescription') or got}")
     said, last = None, _t.time()
+    unsaid = None
     while True:
         p = _sync_api(port, "GET", "progress").get("progress") or {}
         if proc.poll() is not None:
             raise RuntimeError("the online sync stopped before it"
                                " could commit")
+        ready, lag = commit_ready(p)
+        if ready:
+            break
+        if p.get("canCommit") and lag is None:
+            # it says it can commit and not how far behind it is: a build
+            # that stopped reporting the lag this reads, where committing
+            # would stop the copy with changes still to apply
+            unsaid = unsaid or _t.time()
+            if _t.time() - unsaid > LAG_UNSAID_WAIT:
+                raise RuntimeError(
+                    "the online sync says it can commit and does not say"
+                    " how far behind the source it is; not committed, so"
+                    " no change is left behind - the copy it made stays,"
+                    " and the check says what it holds")
+        else:
+            unsaid = None
         copy = p.get("collectionCopy") or {}
         done, total = (copy.get("estimatedCopiedBytes"),
                        copy.get("estimatedTotalBytes"))
@@ -2650,8 +2825,6 @@ def _mongosync_run(port, proc, start, db, log):
             if now != said:
                 log(now)
                 said, last = now, _t.time()
-        if p.get("canCommit") and (p.get("lagTimeSeconds") or 0) <= 1:
-            break
         _t.sleep(1)
     got = _sync_api(port, "POST", "commit", {})
     if not got.get("success"):
@@ -3589,7 +3762,7 @@ def _movers():
     return {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
             "mydumper": mydumper_move, "pgloader": pgloader_move,
             "mongodump": mongodump_move, "mongosync": mongosync_move,
-            "native": native_move}
+            "riotx": riotx_move, "native": native_move}
 
 
 #: the programs each bulk path runs, in the order it runs them
@@ -3599,6 +3772,7 @@ PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
             "pgloader": ("pgloader",),
             "mongodump": ("mongodump", "mongorestore"),
             "mongosync": ("mongosync",),
+            "riotx": ("riotx",),
             "native": ()}
 #: how a report names them: never by the program's own name
 ROLES = ("dump program", "load program")

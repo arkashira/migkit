@@ -36,7 +36,8 @@ class CassandraEngine(NeutralCopier, Engine):
             auth = (PlainTextAuthProvider(ep.user, ep.password)
                     if ep.user else None)
             cluster = Cluster([ep.host], port=int(ep.port or 9042),
-                              auth_provider=auth, connect_timeout=15)
+                              auth_provider=auth, connect_timeout=15,
+                              **ep.cassandra_tls())
             self._sessions[at] = cluster.connect()
         return self._sessions[at]
 

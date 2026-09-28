@@ -25,7 +25,8 @@ class Tally:
         if not isinstance(data, (bytes, bytearray)):
             data = repr(tuple(data)).encode()
         self.n += 1
-        self.total += int(hashlib.md5(bytes(data)).hexdigest()[:16], 16)
+        self.total += int(hashlib.md5(bytes(data), usedforsecurity=False)
+                          .hexdigest()[:16], 16)
 
     def feed(self, chunk):
         """A piece of a stream of newline-ended rows, as a COPY in text

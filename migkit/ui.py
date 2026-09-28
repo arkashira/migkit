@@ -110,11 +110,22 @@ async function act(what, hop, db) {
     body: JSON.stringify({hop, db})});
   load();
 }
+async function signin() {
+  // the code migkit printed rides in the address's fragment, which a
+  // browser never sends anywhere: handed over once, in a header, for the
+  // cookie, and taken out of the address bar and its history
+  const code = location.hash.slice(1);
+  if (!code) return;
+  history.replaceState(null, '', location.pathname);
+  await fetch('/api/login', {method: 'POST', headers: {
+    'X-Migkit-Login': code}});
+}
 async function load() {
   const r = await fetch('/api/data');
   if (r.status === 403) {
     document.getElementById('sum').textContent =
-      'open the address migkit printed when it started';
+      'open the address migkit printed when it started - it opens the' +
+      ' view once; start it again for another browser';
     return;
   }
   const data = await r.json();
@@ -175,8 +186,7 @@ async function load() {
       `<span class="hop">${esc(a.hop)}</span></div>`).join('');
   }
 }
-load();
-setInterval(load, 10000);
+signin().then(() => { load(); setInterval(load, 10000); });
 </script></body></html>"""
 
 
@@ -394,14 +404,24 @@ class Handler(BaseHTTPRequestHandler):
     """The dashboard, and the few things it may do: hold a tail between
     batches and let it go on. Bound to 127.0.0.1; a request is served only
     for this machine's own names (a page elsewhere cannot reach it through
-    a name it controls), data and actions only with the token this start
-    printed - kept in a cookie no script and no other site can read - and
-    an action only with the header only this page sends. Every action is
-    written to the hop's record."""
+    a name it controls), data and actions only with the token kept in a
+    cookie no script and no other site can read - set once, for the code
+    this start printed - and an action only with the header only this
+    page sends. Every action is written to the hop's record.
 
-    #: set by `serve`: the token this start printed, and its port
+    The token itself was printed, in the address's query: it sat in the
+    browser's history and the terminal's scrollback and opened the view
+    for as long as the process ran, to anyone who read either. What is
+    printed now is a code in the address's fragment - which a browser
+    sends nowhere - good for one sign-in, after which that address opens
+    nothing."""
+
+    #: set by `serve`: the token the cookie holds, never printed; the code
+    #: printed, good once; and the port
     token = ""
+    once = ""
     port = 0
+    _signing = None
 
     def log_message(self, *a):
         pass
@@ -444,6 +464,28 @@ class Handler(BaseHTTPRequestHandler):
         return bool(self.token) and got is not None and hmac.compare_digest(
             got.value, self.token)
 
+    def _sign_in(self):
+        """The cookie, for the code this start printed - once. The first
+        to hand it over is signed in and the code is spent, so the
+        printed address, wherever it was kept, opens nothing after."""
+        import hmac
+        import threading
+        given = self.headers.get("X-Migkit-Login", "")
+        lock = Handler._signing or threading.Lock()
+        Handler._signing = lock
+        with lock:
+            good = bool(Handler.once and self.token) and hmac.compare_digest(
+                given, Handler.once)
+            if good:
+                Handler.once = ""
+        if not good:
+            return self._send(403, "text/plain", "that address has been"
+                                                 " used, or was never this"
+                                                 " one's")
+        return self._send(204, "text/plain", "", headers=(
+            ("Set-Cookie", f"migkit_ui={self.token}; HttpOnly;"
+                           " SameSite=Strict; Path=/"),))
+
     def _csrf(self):
         import hashlib
         import hmac
@@ -451,18 +493,11 @@ class Handler(BaseHTTPRequestHandler):
                         hashlib.sha256).hexdigest()
 
     def do_GET(self):
-        from urllib.parse import parse_qs, urlparse
+        from urllib.parse import urlparse
         if not self._host_ok():
             return self._send(403, "text/plain", "not this host")
         url = urlparse(self.path)
         if url.path in ("/", "/index.html"):
-            given = (parse_qs(url.query).get("t") or [""])[0]
-            if given and given == self.token:
-                return self._send(
-                    303, "text/plain", "", headers=(
-                        ("Set-Cookie", f"migkit_ui={self.token}; HttpOnly;"
-                                       " SameSite=Strict; Path=/"),
-                        ("Location", "/")))
             return self._send(200, "text/html; charset=utf-8", PAGE)
         if url.path == "/metrics":
             return self._send(200, "text/plain; version=0.0.4",
@@ -503,6 +538,8 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(size) if size else b""
         if not self._host_ok():
             return self._send(403, "text/plain", "not this host")
+        if urlparse(self.path).path == "/api/login":
+            return self._sign_in()
         if not self._authed() or not hmac.compare_digest(
                 self.headers.get("X-Migkit-Csrf", ""), self._csrf()):
             return self._send(403, "text/plain", "not from this page")
@@ -544,9 +581,10 @@ def serve(port):
     from .config import load_hops
     import secrets
     Handler.token, Handler.port = secrets.token_urlsafe(24), port
+    Handler.once = secrets.token_urlsafe(24)
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"migkit ui: http://127.0.0.1:{port}/?t={Handler.token}"
-          " (ctrl-c to stop)")
+    print(f"migkit ui: http://127.0.0.1:{port}/#{Handler.once}"
+          " (opens the view once; ctrl-c to stop)")
     # the hops that run on a schedule of their own are fired from here,
     # the one process of migkit's that runs anyway (`migkit.schedule`)
     stop = threading.Event()

@@ -141,6 +141,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: <...> cannot mark what migkit applies
 
+* two_way.delta: <...> cannot add to a value where it stands
+
 ## `migkit/engines/cassandra.py`
 
 * the keyspace <...> is not on the target, and how many copies it keeps is not migkit's to choose: create it, or give the target endpoint `replication`
@@ -229,6 +231,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * hetero <...>-><...>: <...> is still written for mysql->postgres only. `check` works on this pair; this does not.
 
+* <...>: values on the source would not arrive on <...> as they are, so nothing was copied: <...> ... | <...> Decide what each of these should be - on the source, or in a view the hop reads - or give the target a column that holds them, and move again. Where a change is what is wanted, the hop's `accept_changes` names the columns (`table.column`) that may arrive as the target keeps them.
+
 * this pair cannot repair rows: <...> -> <...> does not implement both halves of the read/write contract, so there is nothing to carry the rows with. `migkit assess` lists what the pair can do
 
 * <...> is no longer on both sides, so the rows the last check listed cannot be placed
@@ -260,6 +264,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: mapping.columns leaves out part of its key, so a change cannot be placed on the target by it. Keep the key's columns.
 
 * <...>: the source's schema changed under the tail - <...> ... | <...>. The target does not have <...> yet, so nothing after <...> was applied. Bring the target's schema level with the source's, then run the tail again; it resumes from there.
+
+* <...>.<...>: the tail read <...> changes and accounts for <...> - <...> to apply, <...> left out. Nothing of the batch was applied, and the position stays at <...>: the batch is read again when the tail starts
 
 ## `migkit/engines/kafka.py`
 
@@ -329,6 +335,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the binlog is off on this server, so there is no change log to read - turn on log_bin, or move without CDC
 
+* <...> commits on the source have not finished after <...>s (threads <...>). A copy read now could miss one the change tail starts after, so nothing was copied - move again once they are through.
+
 * the MySQL client is not installed on this machine: migkit doctor --install
 
 * <...> is not in the form this migkit reads (<...>). Re-run `migkit check --check data` to write it again before syncing
@@ -379,6 +387,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * wal_level is <...> on this server and a logical slot needs 'logical'. Nothing migkit does client-side can make the WAL carry row images it was not told to carry. alter system set wal_level = 'logical'; -- then restart rds.logical_replication = 1 -- parameter group, then reboot
 
+* <...> transactions committed before the change position are still out of sight of any read after <...>s (transaction ids <...>) - a synchronous standby that does not answer holds a commit this way. A copy read now would miss them and the change tail starts after them, so nothing was copied. Make the standby answer, or take it out of synchronous_standby_names, and move again.
+
 * no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance('<...>', pg_current_wal_lsn()); -- skips everything pending, including this
 
 * the <...>: <...>. The connection was refused before it ran anything.
@@ -390,6 +400,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: copied twice, and the target reads back <...> rows where <...> were copied, or the same number holding different values. The target changes what it is given, or another writer is writing these rows. The copy stopped here; the ranges before it read back equal
 
 * MIGKIT_SUBSCRIBE_TIMEOUT=<...> is not a whole number of seconds greater than zero
+
+* the source publishes a table of the hop's that the target does not have (<...>): the change stream carries no DDL, so the table is made on the target first - migkit check names it, migkit sync --kind schema --apply makes it - and this run again
 
 ## `migkit/engines/pubsub.py`
 
@@ -404,6 +416,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 ## `migkit/engines/redis.py`
 
 * pip install 'migkit[redis]' for redis support
+
+* <...>: the source would not hand over a key: <...>
 
 * <...>: the target refused a key it was handed: <...>. A payload version error means it runs an older Redis than the source, whose values do not load into an older version
 
@@ -535,7 +549,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way.on_conflict: last_update_wins compares a column each row carries its last change's time in - name it as two_way.column
 
+* two_way.on_conflict: source_priority keeps the row of the side ranked higher - give both as two_way.source_rank and two_way.target_rank, apart
+
 * two_way: the <...> (<...>) cannot mark what migkit applies or leave it out when read, so every change would come back to where it began. Two ways run through migkit between PostgreSQL and MySQL (or MariaDB) sides
+
+* two_way.delta: <...>.<...> is <...>, not a number - a counter is added to on both sides, so it has to be one
 
 * two_way: <...> on <...> <...>: the target's row changed there too, and on_conflict is error. Both versions are in conflicts.jsonl; decide the row on both sides, then run the tail again
 

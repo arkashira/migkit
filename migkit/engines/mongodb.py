@@ -25,6 +25,10 @@ class MongoEngine(Engine):
         hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
         uri = f"mongodb://{auth}{hosts}/"
         extra = ep.options.get("uri_options", "")
+        tls = ep.mongo_tls()
+        if tls:
+            from urllib.parse import urlencode
+            extra = "&".join(p for p in (extra, urlencode(tls)) if p)
         # retryReads = the driver re-issues a read after a network blip
         if "retryReads" not in extra:
             extra = (extra + "&retryReads=true") if extra else "retryReads=true"
@@ -1813,6 +1817,7 @@ class MongoEngine(Engine):
         items += self._brand_rows()
         sv, dv = self._server_versions()
         items.append(self._version_row(sv, dv))
+        items += self._leg_items()
 
         inv = self._handwork()
         items += inv.rows() + inv.summary()

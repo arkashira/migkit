@@ -74,6 +74,10 @@ def pair():
                            capture_output=True)
 
 
+#: what a hop says to be allowed the online sync (its vendor's terms)
+ENTITLED = {"mongodb_entitlement": "enterprise"}
+
+
 def _hop(tmp_path, **extra):
     def ep(port):
         return Endpoint(host="127.0.0.1", port=port, user="", password="")
@@ -126,9 +130,10 @@ def test_the_database_arrives_and_the_source_is_not_written(pair, tmp_path,
 @needs_docker
 def test_it_gives_way_where_the_hop_or_servers_cannot_take_it(pair,
                                                               tmp_path):
-    via, why = movers.fitted(_hop(tmp_path), "mongodb", "mongosync")
+    via, why = movers.fitted(_hop(tmp_path, options=ENTITLED), "mongodb",
+                             "mongosync")
     assert (via, why) == ("mongosync", None)
-    renamed = _hop(tmp_path, db_map={"app": "app2"})
+    renamed = _hop(tmp_path, db_map={"app": "app2"}, options=ENTITLED)
     via, why = movers.fitted(renamed, "mongodb", "mongosync")
     assert via != "mongosync" and "keeps each database's name" in why
     gone = Hop(name="x", engine="mongodb",
@@ -137,7 +142,8 @@ def test_it_gives_way_where_the_hop_or_servers_cannot_take_it(pair,
                                options={"uri_options":
                                         "serverSelectionTimeoutMS=500"}),
                target=Endpoint(host="127.0.0.1", port=DST[1], user="",
-                               password=""), databases=["app"])
+                               password=""), databases=["app"],
+               options=ENTITLED)
     via, why = movers.fitted(gone, "mongodb", "mongosync")
     assert via != "mongosync" and "could not be asked" in why, why
 

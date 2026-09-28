@@ -311,7 +311,8 @@ class ParquetEngine(NeutralCopier, Engine):
         if key:
             ends = repr([[rows[0][i] for i in key], [rows[-1][i] for i in key],
                          len(rows)])
-            name = f"part-{hashlib.sha1(ends.encode()).hexdigest()[:16]}"
+            name = "part-" + hashlib.sha1(
+                ends.encode(), usedforsecurity=False).hexdigest()[:16]
         else:
             _, have = self._parts(side, db, table)
             name = f"part-{len(have):08d}"

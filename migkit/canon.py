@@ -1558,7 +1558,8 @@ def digest_step(total, text):
     cannot drift from the one that accumulates in SQL.
     """
     import hashlib
-    h = hashlib.md5(("" if text is None else str(text)).encode()).hexdigest()
+    h = hashlib.md5(("" if text is None else str(text)).encode(),
+                    usedforsecurity=False).hexdigest()
     return total + int(h[:DIGEST_HEX], 16)
 
 

@@ -2397,9 +2397,36 @@ class Engine:
             items += self._client_tool_versions(self.CLIENT_TOOLS, dv)
         items += self._assess_extra()
         items += self._pooler_items()
+        items += self._leg_items()
         items += self._preflight_items()
         items += self._scope_items()
         return items
+
+    def _leg_items(self):
+        """Each side's connection, as migkit makes it: verified, or a
+        failure where its rows cross a network without the server's
+        certificate being checked - a connection anyone on the path can
+        stand in the middle of (`tls.posture`). A side on this machine, or
+        carried by the hop's tunnel, passes."""
+        from .. import tls
+        family = self.ENGINE_FAMILY or self.CANON_ENGINE
+        out = []
+        for side, ep in (("source", self.hop.source),
+                         ("target", self.hop.target)):
+            if not ep.configured():
+                continue
+            got = tls.posture(ep, family)
+            if got is None:
+                continue
+            level = {"local": "pass", "verified": "pass",
+                     "unknown": "warn"}.get(got["state"], "fail")
+            word = {"local": "local", "verified": "verified",
+                    "unverified": "NOT verified", "plain": "NOT encrypted",
+                    "unknown": "not known"}[got["state"]]
+            out.append({"level": level, "scope": "connection",
+                        "item": f"{side} connection {word}",
+                        "detail": got["detail"]})
+        return out
 
     #: past this many tables in scope, managed services warn (DMS says so
     #: outright); a per-table plan and a per-table verdict both grow with it

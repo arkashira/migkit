@@ -31,10 +31,47 @@ TOOL_PATHS = _own_script_dirs() + [
     "/opt/homebrew/bin", "/usr/local/bin"]
 
 
+#: what keeps a program migkit runs from calling its vendor while it runs:
+#: the operator never agreed to a connection that leaves the machine with
+#: the versions of their servers in it. Measured on 2026-09-28 through a
+#: logging proxy and an empty home: the schema differ opened
+#: `vercheck.ariga.io:443` on `version` and on `schema diff`, the other
+#: differ (4.33) opened `config.liquibase.com:443` on `diff`; with these
+#: set, neither opened anything. The online MongoDB sync is told in its
+#: own configuration file (`disableTelemetry`), which is where it reads it
+NO_CALL_HOME_ENV = {"ATLAS_NO_UPDATE_NOTIFIER": "true",
+                    "ATLAS_NO_ANON_TELEMETRY": "true",
+                    "ATLAS_NO_UPGRADE_SUGGESTIONS": "true",
+                    "LIQUIBASE_ANALYTICS_ENABLED": "false",
+                    "DO_NOT_TRACK": "1"}
+
+#: the same for programs that read it from their command line only, by
+#: the start of the program's name: every Percona tool checks for updates
+#: by default, sending the versions of the operating system, Perl, MySQL
+#: and its driver to `v.percona.com` once a day, and prints what it hears
+#: on standard output - ahead of the statements a repair reads from it
+NO_CALL_HOME_ARGS = {"pt-": ("--no-version-check",)}
+
+
+def quiet_argv(cmd):
+    """`cmd` with the switches that keep its program from calling home,
+    right after the program's name; unchanged for a program that has
+    none, or a shell string."""
+    if isinstance(cmd, str) or not cmd:
+        return cmd
+    name = str(cmd[0]).rsplit("/", 1)[-1]
+    for start, switches in NO_CALL_HOME_ARGS.items():
+        if name.startswith(start):
+            add = [s for s in switches if s not in cmd]
+            return [cmd[0], *add, *cmd[1:]]
+    return cmd
+
+
 def tool_env(extra=None):
     import os
     env = dict(os.environ)
     env["PATH"] = ":".join(TOOL_PATHS) + ":" + env.get("PATH", "")
+    env.update(NO_CALL_HOME_ENV)
     if extra:
         env.update(extra)
     return env
@@ -125,6 +162,7 @@ def run(cmd, env=None, input=None, timeout=None, check=True, retries=3):
     that read returncode themselves (e.g. atlas diff = non-zero on diff);
     a transient failure is retried regardless of check."""
     attempt = 0
+    cmd = quiet_argv(cmd)
     while True:
         attempt += 1
         p = subprocess.run(

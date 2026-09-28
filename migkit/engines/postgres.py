@@ -1246,7 +1246,7 @@ class PostgresEngine(Engine):
         a session needs it, emptied after each use."""
         import hashlib
         name = "migkit_stage_" + hashlib.md5(
-            f"{sch}.{tbl}".encode()).hexdigest()[:12]
+            f"{sch}.{tbl}".encode(), usedforsecurity=False).hexdigest()[:12]
         made = self.__dict__.setdefault("_staged", set())
         if len(made) > 10_000:
             # sessions long closed; a stage not remembered is only made
@@ -2224,6 +2224,7 @@ class PostgresEngine(Engine):
 
     def _dump_schema_native(self, side, db, physical=None):
         ep = self.hop.source if side == "src" else self.hop.target
+        from .. import leftovers as _lo
         from ..movers import _pg_pattern
         left = [a for sch, tbl in sorted(self._left_out_of_schema(db, side))
                 for a in ("--exclude-table", _pg_pattern(f"{sch}.{tbl}"))]
@@ -2232,7 +2233,8 @@ class PostgresEngine(Engine):
                  "--no-owner",
                  "--no-privileges", "--no-security-labels", "--no-tablespaces",
                  "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
-                 "--exclude-table", "*.migkit_changelog*", *left],
+                 "--exclude-table", "*.migkit_changelog*", *left,
+                 *_lo.pg_dump_args()],
                 env={**ep.libpq_env(),
                      "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
         noise = self._noise()
@@ -2325,13 +2327,24 @@ class PostgresEngine(Engine):
     def _leave_out_of_diff(self, db, migration, reverse=False):
         """Take the tables the pair compares out of both sides the
         structural differ inspected, with every object that hangs off
-        them. `reverse` is the differ run the other way round."""
+        them, and another tool's schemas whole - the schema, its tables and
+        what they own (`leftovers.NOT_DATA_SCHEMAS`). `reverse` is the
+        differ run the other way round."""
+        from ..leftovers import NOT_DATA_SCHEMAS
         sides = (("dst", migration.changes.i_from),
                  ("src", migration.changes.i_target))
         if reverse:
             sides = (("src", migration.changes.i_from),
                      ("dst", migration.changes.i_target))
         for side, inspected in sides:
+            for schema in NOT_DATA_SCHEMAS:
+                inspected.exclude_schema(schema)
+            schemas = getattr(inspected, "schemas", None)
+            if hasattr(schemas, "items"):
+                for k in [k for k, v in schemas.items()
+                          if getattr(v, "schema", k) in NOT_DATA_SCHEMAS
+                          or k in NOT_DATA_SCHEMAS]:
+                    del schemas[k]
             left = self._left_out_of_schema(db, side)
             if not left:
                 continue
@@ -2464,7 +2477,8 @@ class PostgresEngine(Engine):
     def _schema_excludes(self, db):
         """What the schema comparison leaves out: migkit's own objects, and
         the tables the pair compares through the mapping."""
-        return ["__*", "*.migkit_changelog"] + [
+        from ..leftovers import NOT_DATA_SCHEMAS
+        return ["__*", "*.migkit_changelog", *sorted(NOT_DATA_SCHEMAS)] + [
             f"{sch}.{tbl}" for side in ("src", "dst")
             for sch, tbl in sorted(self._left_out_of_schema(db, side))]
 
@@ -2562,9 +2576,11 @@ class PostgresEngine(Engine):
         """The inventory's names for the tables the pair compares and
         everything on them: the table, its constraints and triggers
         (`schema.table.name`), and its indexes, which are named apart."""
+        from ..leftovers import NOT_DATA_SCHEMAS
         left = self._left_out_of_schema(db, side)
         if not left:
-            return lambda name: False
+            # another tool's schema, and everything in it
+            return lambda name: str(name).split(".")[0] in NOT_DATA_SCHEMAS
         pairs = ", ".join(f"('{sch}', '{tbl}')" for sch, tbl in sorted(left))
         idx = set(self._psql(side, db,
             "select n.nspname||'.'||ci.relname from pg_index i"
@@ -2575,7 +2591,8 @@ class PostgresEngine(Engine):
             ).splitlines())
         whole = {f"{sch}.{tbl}" for sch, tbl in left}
         return lambda name: (name in whole or name in idx
-                             or name.rsplit(".", 1)[0] in whole)
+                             or name.rsplit(".", 1)[0] in whole
+                             or str(name).split(".")[0] in NOT_DATA_SCHEMAS)
 
     def check_objects(self, db):
         from .. import drift
@@ -6417,6 +6434,7 @@ class PostgresEngine(Engine):
                                          "show server_version")
         items.append(self._version_row(sv, dv))
         items += self._pooler_items()
+        items += self._leg_items()
 
         # read replica (pg_is_in_recovery=t) rejects writes incl SELECT FOR
         # UPDATE (25006): fatal as a target, ok-for-checks as a source
@@ -6762,6 +6780,10 @@ class PostgresEngine(Engine):
         except RuntimeError as e:
             add("warn", "cannot list replication slots on the source",
                 f"{str(e).splitlines()[-1][:90]} - unknown, not clean")
+        # the tables and columns a loader or an online schema change adds all
+        # begin with an underscore (`_dlt_loads`, `_orders_ghk`,
+        # `_airbyte_raw_id`), so only those are listed, not every column
+        user = "table_schema not in ('pg_catalog','information_schema')"
         for db in self.databases():
             try:
                 for q, kind in (
@@ -6769,7 +6791,13 @@ class PostgresEngine(Engine):
                         ("select pubname from pg_publication", "publication"),
                         ("select evtname from pg_event_trigger",
                          "event trigger"),
-                        ("select extname from pg_extension", "extension")):
+                        ("select extname from pg_extension", "extension"),
+                        ("select table_schema||'.'||table_name from"
+                         " information_schema.tables where table_name like"
+                         f" '\\_%' and {user}", "table"),
+                        ("select table_schema||'.'||table_name||'.'||"
+                         "column_name from information_schema.columns where"
+                         f" column_name like '\\_%' and {user}", "column")):
                     for name in self._psql("src", db, q).splitlines():
                         if name:
                             found.append((kind, name))
@@ -7769,7 +7797,11 @@ class PostgresEngine(Engine):
             " and n.nspname not in ('pg_catalog','information_schema')"
             " and n.nspname not like 'pg\\_%'"
             " and n.nspname not like '\\_\\_%' order by 1")
-        got = [tuple(x.split("|")) for x in out.splitlines() if x]
+        # what the hop excludes is the target's, and another tool's
+        # bookkeeping nobody's: the copier took both, and wrote over a
+        # table the target owns with the source's rows
+        got = [tuple(x.split("|")) for x in out.splitlines()
+               if x and not self.hop.excluded(db, *x.split("|"))]
         # an online schema change's working tables are not the
         # application's rows, and go when it swaps them in
         from .. import drift
@@ -8304,23 +8336,95 @@ class PostgresEngine(Engine):
                             " changed since that copy is carried by"
                             " nothing - move with --mode full+cdc, which"
                             " copies under the subscription"}
+        try:
+            tables = [t for (t,) in self._plan_rows(
+                "src", db, "select schemaname||'.'||tablename from pg_tables"
+                " where schemaname not in ('pg_catalog','information_schema')"
+                " order by 1") if not self.hop.excluded(db, *t.split(".", 1))]
+            publish = self._publication_sql(name, tables)
+        except RuntimeError as e:
+            # a plan shown while the source cannot be reached: the list is
+            # read from the source when the plan runs (`LISTED_WHEN_RUN`)
+            tables = []
+            why = str(e).strip().splitlines()[-1][:120] if str(e) else ""
+            publish = (f"{self.LISTED_WHEN_RUN} {name}: the hop's tables, as"
+                       " the source lists them when this runs - it could"
+                       f" not be asked now ({why})")
         return {**note,
-            # a second `--mode cdc` found the first one's publication and
-            # stopped on `already exists`
-            "src": ["do $$ begin if not exists (select 1 from pg_publication"
-                    f" where pubname = '{name}') then create publication"
-                    f" {name} for all tables; end if; end $$;"],
+            "src": [publish],
             "dst": [f"create subscription {name} connection '{conn}'"
                     f" publication {name} with (copy_data ="
                     f" {'true' if copy_data else 'false'}"
                     + (f", streaming = {streaming}" if streaming else "")
                     + (", origin = none" if origin else "")
-                    + ");"],
+                    + ");"] + self._refresh_sql(db, name, tables),
             "drop_src": [f"drop publication if exists {name};"],
             "drop_dst": [f"drop subscription if exists {name};"],
             "status": "select subname, received_lsn, latest_end_lsn,"
                       " latest_end_time from pg_stat_subscription",
         }
+
+    def _publication_sql(self, name, tables):
+        """The publication of exactly the hop's tables: `FOR TABLE` every
+        table the hop moves, made once and set to that list again on every
+        run after.
+
+        It was `FOR ALL TABLES`, which is wrong three ways. It needs a
+        superuser, where a list needs only the owner of the tables - the
+        role the application's migrations already run as. It publishes
+        the tables the hop excludes, which the target owns, and the
+        subscription writes the source's rows into them. And it publishes
+        tables the target does not have - another tool's bookkeeping
+        (`leftovers.bookkeeping`), a table the hop leaves out - and
+        `CREATE SUBSCRIPTION` refuses to start over a published table it
+        cannot find (`relation ... does not exist`).
+
+        `FOR TABLES IN SCHEMA` (15 and later) would take in tables made
+        later, but needs a superuser as well and carries whatever the hop
+        excludes in those schemas. And a table made later is not carried
+        by any publication alone: a subscription takes on a new published
+        table only at `REFRESH PUBLICATION`, and only once the target has
+        the table, since the change stream carries no DDL. So a table a
+        later run finds - on both sides by then; `check` names it until it
+        is - is added here by `SET TABLE` and taken on by the refresh that
+        run asks of the subscription (`_refresh_sql`): the same step either
+        way, with no superuser and nothing the hop leaves out."""
+        listed = [".".join(self._quote_ident(p) for p in self._split(t))
+                  for t in tables]
+        made = (f"create publication {name}"
+                + (f" for table {', '.join(listed)}" if listed else ""))
+        # a second `--mode cdc` found the first one's publication and
+        # stopped on `already exists`; now it sets the list again
+        again = (f" else alter publication {name} set table"
+                 f" {', '.join(listed)};" if listed else "")
+        return ("do $$ begin if not exists (select 1 from pg_publication"
+                f" where pubname = '{name}') then {made};{again} end if;"
+                " end $$;")
+
+    def _refresh_sql(self, db, name, tables):
+        """`REFRESH PUBLICATION` where the hop's subscription is already on
+        the target and lacks some of the hop's tables - a run after tables
+        were made on both sides - so their rows are copied and their
+        changes follow. Nothing on a first run, where the subscription is
+        made with every table the publication lists."""
+        if not tables:
+            return []
+        try:
+            has = {t for (t,) in self._plan_rows(
+                "dst", db, "select n.nspname||'.'||c.relname from"
+                " pg_subscription_rel r join pg_subscription s on s.oid ="
+                " r.srsubid join pg_class c on c.oid = r.srrelid join"
+                " pg_namespace n on n.oid = c.relnamespace where s.subname"
+                f" = '{name}'")}
+            there = self._plan_rows("dst", db, "select 1 from"
+                                               " pg_subscription where"
+                                               f" subname = '{name}'")
+        except RuntimeError:
+            return []
+        if not there or not set(tables) - has:
+            return []
+        return [f"alter subscription {name} refresh publication with"
+                " (copy_data = true);"]
 
     def loops_prevented(self, db):
         """Why streams both ways would send changes round for ever here,
@@ -8354,6 +8458,31 @@ class PostgresEngine(Engine):
         if not src or not dst or src < 140000 or dst < 140000:
             return None
         return "parallel" if dst >= 160000 else "on"
+
+    def _plan_rows(self, side, db, sql):
+        """The rows of one query a plan is made from, in one attempt with a
+        short wait, as `_server_version` asks: a plan is shown whether or
+        not a server answers, and through the retries every other read
+        takes, a source and a target that did not answer held two plans
+        for 303 s (measured; 20 s before the tables were listed, 33 s
+        this way). A RuntimeError where it cannot be asked."""
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+        try:
+            conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+                                    password=ep.password,
+                                    dbname=self._d(side, db),
+                                    connect_timeout=5, **ep.libpq_tls())
+        except psycopg2.Error as e:
+            raise RuntimeError(str(e).strip()) from None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return cur.fetchall()
+        except psycopg2.Error as e:
+            raise RuntimeError(str(e).strip()) from None
+        finally:
+            conn.close()
 
     def _server_version(self, side, db):
         """`server_version_num` of one side, or None where it cannot be
@@ -8396,11 +8525,18 @@ class PostgresEngine(Engine):
     #: ignored - the worst shape a setting can have. `statement_timeout` is
     #: the one that works, and nothing is created when it fires, so a
     #: bounded attempt costs nothing but the wait it saves.
-    DIALS_ACROSS = ("create subscription",)
+    DIALS_ACROSS = ("create subscription", "alter subscription")
     SUBSCRIBE_TIMEOUT = 45
+
+    #: how a plan made while the source could not be listed writes its
+    #: publication; the statement is made when it runs
+    LISTED_WHEN_RUN = "-- create publication"
 
     def apply_replication_stmt(self, side, db, stmt):
         import os
+        if stmt.startswith(self.LISTED_WHEN_RUN):
+            stmt = self._publication_sql(self._repl_name(),
+                                         self.neutral_tables("src", db))
         head = stmt.strip().lower()
         if not any(head.startswith(p) for p in self.DIALS_ACROSS):
             return self._psql(side, db, stmt)
@@ -8422,6 +8558,15 @@ class PostgresEngine(Engine):
                 # the stream a first run started: making it again stopped
                 # on this, and the status printed next says how it is doing
                 return ""
+            if head.startswith("alter subscription") \
+                    and "does not exist" in str(e):
+                raise SystemExit(
+                    "the source publishes a table of the hop's that the"
+                    f" target does not have ({self._worst_line(str(e))}):"
+                    " the change stream carries no DDL, so the table is made"
+                    " on the target first - migkit check names it, migkit"
+                    " sync --kind schema --apply makes it - and this run"
+                    " again")
             raise SystemExit(self._subscribe_failed(str(e), secs))
 
     @staticmethod

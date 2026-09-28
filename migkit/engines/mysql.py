@@ -5162,6 +5162,7 @@ class MySQLEngine(Engine):
         dv = self._q("dst", "select version()")[0][0]
         items.append(self._version_row(sv, dv, parts=2))
         items += self._pooler_items()
+        items += self._leg_items()
         # each with the value to set, not only the verdict
         for name, want, lvl, fix in (
                 ("log_bin", "ON", "fail",
@@ -5546,6 +5547,14 @@ class MySQLEngine(Engine):
                         "src", "select table_name from information_schema"
                                ".tables where table_schema = %s", (db,)):
                     found.append(("table", name))
+                # a loader's columns all begin with an underscore
+                # (`_sling_loaded_at`), so only those are listed
+                for (name,) in self._q(
+                        "src", "select concat(table_name, '.', column_name)"
+                               " from information_schema.columns where"
+                               " table_schema = %s and column_name like"
+                               " '\\\\_%%'", (db,)):
+                    found.append(("column", name))
             except Exception as e:
                 add("warn", f"cannot list tables in {db}",
                     f"{str(e)[:90]} - unknown, not clean")

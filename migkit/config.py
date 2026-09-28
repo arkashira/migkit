@@ -63,6 +63,11 @@ REPORTS = _reports_root()
 #: application's
 MIGKIT_OWN = ("migkit_origin",)
 
+#: engines whose objects are keys or topics an application names as it
+#: likes, not tables and schemas another tool creates for its own state:
+#: a key called `percona` is the application's
+KEYED_ENGINES = ("redis", "kafka")
+
 
 @dataclass
 class Endpoint:
@@ -80,11 +85,20 @@ class Endpoint:
     #: libpq's own names: `sslmode` (verify-full checks the certificate and
     #: the name on it), `sslrootcert`, `sslcert`, `sslkey`, `sslcrl`. Left
     #: out, libpq prefers TLS where the server offers it and checks nothing
+    #: - unless the server's certificate verifies, when it is checked
+    #: (`tls.auto`)
     LIBPQ_TLS = ("sslmode", "sslrootcert", "sslcert", "sslkey", "sslcrl")
 
     def libpq_tls(self):
-        return {k: str(self.options[k]) for k in self.LIBPQ_TLS
-                if self.options.get(k)}
+        got = {k: str(self.options[k]) for k in self.LIBPQ_TLS
+               if self.options.get(k)}
+        if "sslmode" not in got:
+            from . import tls
+            found = tls.auto(self, "postgres", got.get("sslrootcert"))
+            if found:
+                got.update(sslmode="verify-full",
+                           sslrootcert=got.get("sslrootcert") or found)
+        return got
 
     def libpq_env(self):
         """The same, as the environment every program on libpq reads."""
@@ -96,10 +110,15 @@ class Endpoint:
         checked, and the name on it unless `ssl_verify_identity: false`),
         `ssl_cert` and `ssl_key` (a client certificate), or `ssl: true` for
         TLS with nothing checked. Left out, the client takes TLS where the
-        server offers it and checks nothing (measured on 8.4)."""
+        server offers it and checks nothing (measured on 8.4) - unless the
+        server's certificate verifies, when it is checked (`tls.auto`)."""
         o = self.options
-        if o.get("ssl_ca"):
-            out = {"ssl_ca": str(o["ssl_ca"]), "ssl_verify_cert": True,
+        ca = o.get("ssl_ca")
+        if not ca and not o.get("ssl"):
+            from . import tls
+            ca = tls.auto(self, "mysql")
+        if ca:
+            out = {"ssl_ca": str(ca), "ssl_verify_cert": True,
                    "ssl_verify_identity": bool(o.get("ssl_verify_identity",
                                                      True))}
             out.update({k: str(o[k]) for k in ("ssl_cert", "ssl_key")
@@ -115,6 +134,110 @@ class Endpoint:
                                     str(o.get("ssl_key") or "") or None)
             return {"ssl": ctx}
         return {}
+
+    # ---- TLS of the engines that had none of their own -----------------
+    #: The same names on MongoDB, Redis and Cassandra: `tls: true` (the
+    #: certificate checked against the system's authorities),
+    #: `tls_ca_file` (against these), `tls_cert_file` and `tls_key_file`
+    #: (a client certificate; MongoDB's in one file, `tls_cert_file`),
+    #: `tls_crl_file` (MongoDB), `tls_insecure: true` (encrypted, nothing
+    #: checked - which `assess` fails on). Left out, as before - unless the
+    #: server's certificate verifies, when it is checked (`tls.auto`).
+
+    def _tls_wanted(self, how="direct"):
+        """(on, authorities, insecure) from the options, or from asking the
+        server where they say nothing."""
+        o = self.options
+        insecure = bool(o.get("tls_insecure"))
+        ca = o.get("tls_ca_file")
+        if o.get("tls") or ca or insecure or o.get("tls_cert_file"):
+            return True, (str(ca) if ca else None), insecure
+        from . import tls
+        found = tls.auto(self, how)
+        return bool(found), found, False
+
+    def mongo_tls(self):
+        """The URI options of a MongoDB connection's TLS, for the driver and
+        for the programs that take a URI alike. An operator's own
+        `uri_options` that speak of TLS are theirs, and left alone."""
+        extra = str(self.options.get("uri_options") or "").lower()
+        if "tls=" in extra or "ssl=" in extra:
+            return {}
+        hosts = self.options.get("hosts")
+        if hosts and not self.host:
+            # a replica set's first member answers for its certificate
+            first = str(hosts).split(",")[0].strip()
+            name, sep, port = first.rpartition(":")
+            if not sep or not port.isdigit():
+                name, port = first, "27017"
+            probe = Endpoint(host=name, port=int(port),
+                             options=self.options)
+            on, ca, insecure = probe._tls_wanted()
+        else:
+            on, ca, insecure = self._tls_wanted()
+        if not on:
+            return {}
+        out = {"tls": "true"}
+        if ca:
+            out["tlsCAFile"] = ca
+        if self.options.get("tls_cert_file"):
+            out["tlsCertificateKeyFile"] = str(self.options["tls_cert_file"])
+        if self.options.get("tls_crl_file"):
+            out["tlsCRLFile"] = str(self.options["tls_crl_file"])
+        if insecure:
+            out["tlsInsecure"] = "true"
+        return out
+
+    def redis_tls(self):
+        """The keyword arguments of a Redis connection's TLS, as redis-py's
+        client and its cluster client take them."""
+        on, ca, insecure = self._tls_wanted()
+        if not on:
+            return {}
+        out = {"ssl": True, "ssl_cert_reqs": "none" if insecure
+               else "required", "ssl_check_hostname": not insecure}
+        if ca:
+            out["ssl_ca_certs"] = ca
+        for k, v in (("tls_cert_file", "ssl_certfile"),
+                     ("tls_key_file", "ssl_keyfile")):
+            if self.options.get(k):
+                out[v] = str(self.options[k])
+        return out
+
+    def cassandra_tls(self):
+        """The driver's `ssl_context` and `ssl_options` for a Cassandra
+        connection's TLS, or {}. The name on the certificate is checked
+        with it unless `tls_insecure`."""
+        on, ca, insecure = self._tls_wanted()
+        if not on:
+            return {}
+        import ssl
+        ctx = ssl.create_default_context(cafile=ca) if ca \
+            else ssl.create_default_context()
+        if insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        if self.options.get("tls_cert_file"):
+            ctx.load_cert_chain(str(self.options["tls_cert_file"]),
+                                str(self.options.get("tls_key_file") or "")
+                                or None)
+        return {"ssl_context": ctx,
+                "ssl_options": {"server_hostname": self.host}}
+
+    def mssql_tls(self):
+        """A SQL Server connection's encryption, as the driver names it:
+        `encrypt: require | request | off`. The driver migkit reads SQL
+        Server through encrypts the login and the rows where asked and
+        checks no certificate; `assess` says so."""
+        raw = self.options.get("encrypt")
+        enc = {True: "require", False: "off"}.get(raw) if isinstance(
+            raw, bool) else str(raw or "").strip().lower()
+        if enc in ("true", "yes", "on", "strict"):
+            enc = "require"
+        if enc in ("false", "no"):
+            enc = "off"
+        return {"encryption": enc} if enc in ("require", "request",
+                                              "off") else {}
 
 
 class IamEndpoint(Endpoint):
@@ -231,6 +354,13 @@ class Hop:
         if parts and parts[-1] in MIGKIT_OWN:
             # migkit's own bookkeeping on a side, never the application's
             return True
+        if self.engine not in KEYED_ENGINES:
+            # another tool's bookkeeping - a schema a replicator keeps on
+            # the source, a loader's load table: its state, not the
+            # application's rows (`leftovers.bookkeeping`)
+            from .leftovers import bookkeeping
+            if bookkeeping(*parts):
+                return True
         cands = {".".join(parts[i:]) for i in range(len(parts))}
         return any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands)
 

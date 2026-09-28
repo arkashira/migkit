@@ -370,10 +370,16 @@ def test_capabilities_degrade_without_programs(monkeypatch):
 
 
 
-def test_installing_says_how_many_not_which(monkeypatch):
-    """`doctor --install` printed `installing mydumper ...` per package."""
+def test_installing_says_how_many_not_which(monkeypatch, tmp_path):
+    """`doctor --install` printed `installing mydumper ...` per package.
+    (The terms of a program that is not open source are the one place a
+    name is said - they cannot be accepted otherwise - so here they are
+    accepted beforehand, as an unattended install does.)"""
     from migkit import tools
     from tests.test_the_report_does_not_name_its_tools import TOOLS
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MIGKIT_ACCEPT_TERMS", "all")
+    monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
     monkeypatch.setattr(tools, "which", lambda n: None)
     monkeypatch.setattr(tools.shutil, "which",
                         lambda n: "/bin/brew" if n == "brew" else None)

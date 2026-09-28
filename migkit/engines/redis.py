@@ -17,18 +17,102 @@ class RedisEngine(Engine):
             raise SystemExit("pip install 'migkit[redis]' for redis support")
         # a key or a value need not be text: decoded so that every byte
         # comes back as it was sent, where strict decoding stopped the
-        # check on the first key that was not UTF-8 - and sent back the
-        # same way, by the client's own packer: where hiredis is installed
-        # the client packs commands through it, strictly, and such a key
-        # stopped the copy with `UnicodeEncodeError` (measured)
-        from redis.connection import Encoder, PythonRespSerializer
-        encoder = Encoder("utf-8", "surrogateescape", decode)
+        # check on the first key that was not UTF-8
         pool = redis.ConnectionPool(
+            connection_class=self._connection_class(side, decode),
             host=ep.host, port=ep.port, password=ep.password or None,
             db=int(db), socket_timeout=15, decode_responses=decode,
-            encoding_errors="surrogateescape",
-            command_packer=PythonRespSerializer(6000, encoder.encode))
+            encoding_errors="surrogateescape")
         return redis.Redis(connection_pool=pool)
+
+    def _connection_class(self, side, decode):
+        """What every connection to a side is made of, whichever client
+        holds it: the side's TLS (`Endpoint.redis_tls`), and a key sent
+        back byte for byte - by the client's own packer where hiredis is
+        installed, which packs strictly, and a key that was not UTF-8
+        stopped the copy with `UnicodeEncodeError` (measured)."""
+        import redis
+        from redis.connection import Encoder, PythonRespSerializer
+        ep = self.hop.source if side == "src" else self.hop.target
+        tls = {k: v for k, v in ep.redis_tls().items() if k != "ssl"}
+        pack = Encoder("utf-8", "surrogateescape", decode).encode
+
+        class Connection(redis.SSLConnection if tls else redis.Connection):
+            def __init__(self, **kw):
+                kw.update(tls)
+                kw["command_packer"] = PythonRespSerializer(6000, pack)
+                super().__init__(**kw)
+        return Connection
+
+    def _cluster(self, side):
+        """Whether a side is a Redis Cluster, asked once."""
+        seen = self.__dict__.setdefault("_is_cluster", {})
+        if side not in seen:
+            try:
+                seen[side] = bool(int(self._client(side).info("cluster")
+                                      .get("cluster_enabled") or 0))
+            except Exception:  # noqa: BLE001 - a server that will not say
+                seen[side] = False
+        return seen[side]
+
+    def _keys(self, side, db=0, decode=True):
+        """The client a key is read and written through. On a cluster, one
+        that sends each key to the node serving its slot, and a pipeline
+        to every node its keys are on: the side's own server answers only
+        for its own slots (`MOVED` for the rest). Elsewhere, the side's
+        own client."""
+        if not self._cluster(side):
+            return self._client(side, db, decode)
+        made = self.__dict__.setdefault("_clusters", {})
+        if (side, decode) not in made:
+            from redis.cluster import RedisCluster
+            ep = self.hop.source if side == "src" else self.hop.target
+            made[(side, decode)] = RedisCluster.from_url(
+                f"redis://{ep.host}:{int(ep.port)}",
+                password=ep.password or None, socket_timeout=15,
+                decode_responses=decode, encoding_errors="surrogateescape",
+                connection_class=self._connection_class(side, decode))
+        return made[(side, decode)]
+
+    def _nodes(self, side, db=0, decode=True):
+        """[(name, client)] of the servers that hold a side's keys: every
+        master of a cluster, in the order of their names, so a walk that
+        stopped goes on where it stopped; the side's own server
+        elsewhere. A SCAN of one node of a cluster sees the keys of its
+        own slots and no others."""
+        if not self._cluster(side):
+            return [("", self._client(side, db, decode))]
+        return sorted(((n.name, n.redis_connection)
+                       for n in self._keys(side, 0, decode).get_primaries()),
+                      key=lambda n: n[0])
+
+    def _dbsize(self, side, db):
+        """How many keys a side holds: every master's, on a cluster. The
+        cluster client sends `DBSIZE` to one node (measured: 201 of a
+        three-master cluster's 603 keys)."""
+        return sum(int(c.dbsize()) for _, c in self._nodes(side, db))
+
+    def _walk(self, side, db, decode=True, count=1000, start=None):
+        """The keys of a side, a page at a time: (keys, then), `then` where
+        the walk goes on from after this page - {"node", "cursor"} - or
+        None once every node is done. `start`, a `then` of an earlier walk,
+        goes on from there."""
+        nodes = self._nodes(side, db, decode)
+        names = [n for n, _ in nodes]
+        at, cursor = 0, 0
+        if start and start.get("node", "") in names:
+            at, cursor = names.index(start.get("node", "")), \
+                int(start.get("cursor") or 0)
+        for j in range(at, len(nodes)):
+            name, client = nodes[j]
+            while True:
+                cursor, keys = client.scan(cursor, count=count)
+                then = ({"node": name, "cursor": cursor} if cursor else
+                        {"node": names[j + 1], "cursor": 0}
+                        if j + 1 < len(nodes) else None)
+                yield keys, then
+                if not cursor:
+                    break
 
     def databases(self):
         if self.hop.databases:
@@ -185,12 +269,11 @@ class RedisEngine(Engine):
         return [k for k in keys if not self.hop.excluded(str(db), k)]
 
     def _count(self, side, db):
-        client = self._client(side, db)
         if not self.hop.exclude:
-            return client.dbsize()
+            return self._dbsize(side, db)
         # the server's own count includes the excluded keys, so the kept
         # ones are counted by walking them
-        return sum(len(b) for b in self._scan_batches(client, 0, True, db))
+        return sum(len(b) for b in self._scan_batches(side, 0, True, db))
 
     def list_move_tables(self, db):
         """A keyspace is the unit: it has no tables inside it."""
@@ -213,14 +296,16 @@ class RedisEngine(Engine):
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
         """The keyspace, key for key as stored - each value in the
-        server's own serialised form with what is left of its time to
-        live - through the same read-write the repair uses.
+        server's own serialised form, with its expiry and how recently or
+        how often it was read (`_carry`) - through the same read-write the
+        repair uses. Every master of a cluster, one after another.
 
-        Resumed from the scan's cursor in the checkpoint. A key written
-        while the scan runs may or may not be carried, as the server
-        documents for any scan: `check`, and the tail where there is one,
-        are what settle it. A fresh start first removes what the target
-        holds that the hop does not leave out: it is not this copy's."""
+        Resumed from the scan's node and cursor in the checkpoint. A key
+        written while the scan runs may or may not be carried, as the
+        server documents for any scan: `check`, and the tail where there is
+        one, are what settle it. A fresh start first removes what the
+        target holds that the hop does not leave out: it is not this
+        copy's."""
         from ..wording import progress
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
@@ -232,76 +317,199 @@ class RedisEngine(Engine):
             ck.save()
             log(f"{key}: done earlier; a keyspace cannot be asked whether"
                 " it still matches, so it is copied again")
-        src = self._client("src", db, decode=False)
-        dst = self._client("dst", db, decode=False)
+        names = [n for n, _ in self._nodes("src", db, False)]
+        if "cursor" in st and st.get("node", "") not in names:
+            # the cluster's masters are not the ones the copy stopped on: a
+            # cursor is a position on one node, so it starts again
+            st.clear()
+            log(f"{key}: the source's nodes changed since the copy stopped,"
+                " so it starts again")
+        src = self._keys("src", db, decode=False)
+        dst = self._keys("dst", db, decode=False)
         if "cursor" not in st:
-            gone, cursor = 0, 0
-            while True:
-                cursor, keys = dst.scan(cursor, count=self.COPY_BATCH)
-                keys = self._raw_kept(db, keys)
-                if keys:
-                    gone += dst.unlink(*keys)
-                if cursor == 0:
-                    break
-            st.update(cursor=0, moved=0)
+            gone = self.empty_target(db)
+            st.update(cursor=0, node=names[0] if names else "", moved=0)
             ck.save()
             if gone:
                 log(f"{key}: emptied {gone:,} keys the target held before"
                     " the copy")
-        cursor = int(st["cursor"])
         moved = from_keys = int(st.get("moved", 0))
         # the server's count includes what the hop leaves out; walking the
         # keyspace once more for a total would double the reading
-        total = None if self.hop.exclude else src.dbsize()
+        total = None if self.hop.exclude else self._dbsize("src", db)
         began = time.monotonic()
         batch = max(1, min(int(chunk), self.COPY_BATCH))
-        while True:
-            cursor, keys = src.scan(cursor, count=batch)
+        how = self._carry_plan(db)
+        for keys, then in self._walk("src", db, False, batch,
+                                     start={"node": st.get("node", ""),
+                                            "cursor": st["cursor"]}):
             keys = self._raw_kept(db, keys)
             if keys:
-                read = src.pipeline(transaction=False)
-                for k in keys:
-                    read.dump(k)
-                    read.pttl(k)
-                got = read.execute()
-                write = dst.pipeline(transaction=False)
-                for k, payload, ttl in zip(keys, got[0::2], got[1::2]):
-                    if payload is None or ttl == -2:
-                        continue    # gone since the scan found it
-                    write.restore(k, ttl if ttl and ttl > 0 else 0, payload,
-                                  replace=True)
-                    moved += 1
-                try:
-                    write.execute()
-                except Exception as e:
-                    raise SystemExit(
-                        f"{key}: the target refused a key it was handed:"
-                        f" {str(e)[:90]}. A payload version error means it"
-                        " runs an older Redis than the source, whose values"
-                        " do not load into an older version") from None
-            st.update(cursor=cursor, moved=moved)
-            ck.save()
+                moved += self._carry(src, dst, keys, how, key, log)
+            if then is not None:
+                st.update(cursor=then["cursor"], node=then["node"],
+                          moved=moved)
+                ck.save()
             if keys:
                 log(progress(key, moved, total, began, time.monotonic(),
                              unit="keys", since=from_keys))
-            if cursor == 0:
+            if then is None:
                 break
-        st["done"] = True
+        st.update(cursor=0, moved=moved, done=True)
         ck.save()
+
+    def empty_target(self, db):
+        """Remove what the target holds of this database that the hop does
+        not leave out - every copy's fresh start - and return how many.
+        One key a command: on a cluster, keys of several slots in one
+        UNLINK are refused (`CROSSSLOT`)."""
+        dst = self._keys("dst", db, decode=False)
+        gone = 0
+        for keys, _ in self._walk("dst", db, False, self.COPY_BATCH):
+            keys = self._raw_kept(db, keys)
+            if keys:
+                drop = dst.pipeline(transaction=False)
+                for k in keys:
+                    drop.unlink(k)
+                gone += sum(drop.execute())
+        return gone
+
+    # ---- a key as the source holds it ------------------------------------
+
+    #: the source's eviction policies that count reads (LFU): their keys
+    #: carry how often they were read, the others how long since
+    LFU = ("allkeys-lfu", "volatile-lfu")
+
+    def _carry_plan(self, db):
+        """How keys are read and written for this run, asked once: whether
+        the source answers `PEXPIRETIME` (7.0 and later; before, the expiry
+        is its clock plus `PTTL`), which access history its policy keeps,
+        and whether the target takes `ABSTTL`, `IDLETIME` and `FREQ` on a
+        `RESTORE` (5.0 and later)."""
+        import re
+
+        import redis
+        src = self._client("src", db)
+        # asked of the command table, not with a key: a key of the probe's
+        # was served by another node of a cluster, which answered `MOVED`,
+        # and read as a server without the command. A server without it
+        # answers `[nil]`, which the client's reader fails on (TypeError)
+        try:
+            known = src.execute_command("COMMAND", "INFO", "PEXPIRETIME")
+            expiry = "pexpiretime" if known else "pttl"
+        except Exception:  # noqa: BLE001 - no such command, then
+            expiry = "pttl"
+        try:
+            pol = str(src.config_get("maxmemory-policy").get(
+                "maxmemory-policy", ""))
+        except redis.ResponseError:
+            # a managed server keeps CONFIG to itself, and says it in INFO
+            pol = str(src.info("memory").get("maxmemory_policy", ""))
+        try:
+            claim = str(self._client("dst", db).info("server").get(
+                "redis_version", ""))
+        except redis.RedisError:
+            claim = ""
+        v = tuple(int(x) for x in re.findall(r"\d+", claim)[:2])
+        return {"expiry": expiry,
+                "history": "freq" if pol in self.LFU else "idletime",
+                "abs": v >= (5, 0), "said": False}
+
+    def _carry(self, src, dst, keys, how, label="", log=None):
+        """Copy `keys` from `src` to `dst` as the source holds them, and
+        return how many landed.
+
+        The expiry is carried as the moment it falls due (`ABSTTL`), read
+        once: the relative TTL this sent before was read a pipeline ahead
+        of the write, so every key landed living longer than on the source
+        by the time between - by as long as a slow target took, on every
+        key. Measured on Redis 7 with a target whose writes took 2 s: 200
+        keys landed 2,013 to 2,015 ms late before, 0 ms now; a key idle 2 s
+        on the source was idle 0 s on the target before, and kept its idle
+        time now. How long since each key was read (`IDLETIME`) or how often
+        (`FREQ`, under an LFU policy) comes with it, so the target evicts
+        the keys the source would have evicted rather than whichever were
+        copied last. The history is read before the payload: `DUMP` is a
+        read, and counts as one. A key whose moment has passed by the time
+        it is written is not created - the server's own rule for `ABSTTL`.
+        A target older than 5.0 is sent the time left to that moment,
+        worked out at the write."""
+        import redis
+        hist = how["history"]
+        read = src.pipeline(transaction=False)
+        for k in keys:
+            read.object(hist, k)
+            if how["expiry"] == "pexpiretime":
+                read.pexpiretime(k)
+            else:
+                read.pttl(k)
+            read.dump(k)
+        clock = None
+        if how["expiry"] != "pexpiretime":
+            sec, usec = self._client("src").time()
+            clock = sec * 1000 + usec // 1000
+        read_at = time.monotonic()
+        got = read.execute(raise_on_error=False)
+        rows = []
+        for k, h, exp, payload in zip(keys, got[0::3], got[1::3],
+                                      got[2::3]):
+            if isinstance(exp, Exception) or isinstance(payload, Exception):
+                raise SystemExit(f"{label}: the source would not hand over a"
+                                 f" key: {str(exp if isinstance(exp, Exception) else payload)[:90]}")
+            if payload is None or exp == -2:
+                continue    # gone since the scan found it
+            at = 0 if exp is None or exp < 0 else \
+                exp if clock is None else clock + exp
+            rows.append((k, at, payload,
+                         None if isinstance(h, Exception) else h))
+
+        def send(abs_ok):
+            write = dst.pipeline(transaction=False)
+            n = 0
+            for k, at, payload, h in rows:
+                if abs_ok:
+                    extra = ({"frequency": h} if hist == "freq" else
+                             {"idletime": h}) if h is not None else {}
+                    write.restore(k, at, payload, replace=True,
+                                  absttl=bool(at), **extra)
+                else:
+                    left = 0
+                    if at:
+                        now = (clock + int((time.monotonic() - read_at)
+                                           * 1000)) if clock is not None \
+                            else int(time.time() * 1000)
+                        left = at - now
+                        if left <= 0:
+                            continue    # fallen due since it was read
+                    write.restore(k, left, payload, replace=True)
+                n += 1
+            write.execute()
+            return n
+        try:
+            return send(how["abs"])
+        except redis.ResponseError as e:
+            if how["abs"] and "syntax" in str(e).lower():
+                # a server that claims 5.0 and takes none of the three
+                how["abs"] = False
+                if log and not how["said"]:
+                    how["said"] = True
+                    log(f"{label}: the target takes no absolute expiry or"
+                        " access history on a restore; keys carry the time"
+                        " left to their expiry instead")
+                return send(False)
+            raise SystemExit(
+                f"{label}: the target refused a key it was handed:"
+                f" {str(e)[:90]}. A payload version error means it runs an"
+                " older Redis than the source, whose values do not load"
+                " into an older version") from None
 
     def moved_nothing(self, db):
         """The keyspace holds keys on the source and none on the target,
         counting only what the hop does not leave out."""
         try:
             def any_kept(side):
-                client = self._client(side, db, decode=False)
-                cursor = 0
-                while True:
-                    cursor, keys = client.scan(cursor, count=self.COPY_BATCH)
-                    if self._raw_kept(db, keys):
-                        return True
-                    if cursor == 0:
-                        return False
+                return any(self._raw_kept(db, keys) for keys, _ in
+                           self._walk(side, db, False, self.COPY_BATCH))
             return [f"db{db}"] if any_kept("src") and not any_kept("dst") \
                 else []
         except Exception:  # noqa: BLE001 - None: cannot be asked
@@ -311,18 +519,15 @@ class RedisEngine(Engine):
         """What the target held before a repair: how many keys of each
         kind, and the modules loaded. The keys a repair replaces are kept
         whole beside it, in the repair's own undo file."""
-        client = self._client("dst", db, decode=False)
-        kinds, cursor = {}, 0
-        while True:
-            cursor, keys = client.scan(cursor, count=self.COPY_BATCH)
+        client = self._keys("dst", db, decode=False)
+        kinds = {}
+        for keys, _ in self._walk("dst", db, False, self.COPY_BATCH):
             read = client.pipeline(transaction=False)
             for k in self._raw_kept(db, keys):
                 read.type(k)
             for t in read.execute():
                 t = t.decode()
                 kinds[t] = kinds.get(t, 0) + 1
-            if cursor == 0:
-                break
         (state_dir / "dst-shape.txt").write_text(repr(sorted(kinds.items())))
 
     def check_schema(self, db):
@@ -370,9 +575,9 @@ class RedisEngine(Engine):
         deep = bool(self.hop.options.get("deep", False))
 
         def kinds(side):
-            client = self._client(side, db)
+            client = self._keys(side, db)
             seen = {}
-            for keys in self._scan_batches(client, sample, deep, db):
+            for keys in self._scan_batches(side, sample, deep, db):
                 pipe = client.pipeline(transaction=False)
                 for k in keys:
                     pipe.type(k)
@@ -476,20 +681,24 @@ class RedisEngine(Engine):
                 changed.append(k)
         return missing, changed
 
-    def _scan_batches(self, client, sample, deep, db=0):
-        """Batches of keys from one side, up to the sample cap."""
-        cursor = 0
-        seen = 0
-        while True:
-            cursor, keys = client.scan(cursor, count=1000)
-            keys = self._kept(db, keys)
-            if not deep and seen + len(keys) > sample:
-                keys = keys[:max(0, sample - seen)]
-            if keys:
-                seen += len(keys)
-                yield keys
-            if cursor == 0 or (not deep and seen >= sample):
-                break
+    def _scan_batches(self, side, sample, deep, db=0):
+        """Batches of keys from one side, up to the sample cap - shared
+        out among a cluster's masters, so a sample is taken from every
+        node and not from the first one's keys alone."""
+        nodes = self._nodes(side, db)
+        share = -(-int(sample) // len(nodes)) if nodes else 0
+        for _, client in nodes:
+            cursor = seen = 0
+            while True:
+                cursor, keys = client.scan(cursor, count=1000)
+                keys = self._kept(db, keys)
+                if not deep and seen + len(keys) > share:
+                    keys = keys[:max(0, share - seen)]
+                if keys:
+                    seen += len(keys)
+                    yield keys
+                if cursor == 0 or (not deep and seen >= share):
+                    break
 
     def check_data(self, db, table=None, stream=None):
         """Both directions, because scanning the source only sees one of
@@ -505,8 +714,8 @@ class RedisEngine(Engine):
         does not.
         """
         from ..throttle import Throttle
-        s = self._client("src", db)
-        t = self._client("dst", db)
+        s = self._keys("src", db)
+        t = self._keys("dst", db)
         sample = int(self.hop.options.get("sample", 5000))
         deep = bool(self.hop.options.get("deep", False))
         checked = 0
@@ -518,7 +727,7 @@ class RedisEngine(Engine):
         src_gate = Throttle(1, probe=lambda: self._health("src"))
         dst_gate = Throttle(1, probe=lambda: self._health("dst"))
         missing, changed = [], []
-        for keys in self._scan_batches(s, sample, deep, db):
+        for keys in self._scan_batches("src", sample, deep, db):
             with src_gate.unit():
                 gone, differ = self._batch_compare(s, t, keys)
             missing.extend(gone)
@@ -528,7 +737,7 @@ class RedisEngine(Engine):
                 stream(f"db{db}: {checked} keys compared")
         extra = []
         seen_dst = 0
-        for keys in self._scan_batches(t, sample, deep, db):
+        for keys in self._scan_batches("dst", sample, deep, db):
             with dst_gate.unit():
                 pipe = s.pipeline(transaction=False)
                 for k in keys:
@@ -644,10 +853,11 @@ class RedisEngine(Engine):
     def apply(self, db, action):
         """Copy the keys back with DUMP/RESTORE, then remove the strays.
 
-        DUMP carries the type and the expiry with the value, so one path
-        covers strings, hashes, lists, sets, sorted sets and streams alike -
-        measured across two servers, a hash came back a hash and a key with
-        600s left came back with 599992 ms.
+        DUMP carries the type with the value, so one path covers strings,
+        hashes, lists, sets, sorted sets and streams alike - measured
+        across two servers, a hash came back a hash - and the expiry and
+        access history go with it the way the copier sends them
+        (`_carry`).
 
         It is also version-bound, and loudly: measured, a payload taken from
         Redis 7.4 and restored into Redis 6.2 answers `DUMP payload version
@@ -662,8 +872,9 @@ class RedisEngine(Engine):
         """
         import base64
         import json
-        raw_s = self._client("src", db, decode=False)
-        raw_t = self._client("dst", db, decode=False)
+        raw_s = self._keys("src", db, decode=False)
+        raw_t = self._keys("dst", db, decode=False)
+        how = self._carry_plan(db)
         undo_dir = self.hop.report_dir(db) / "undo"
         undo_dir.mkdir(parents=True, exist_ok=True)
         undo = undo_dir / f"db{db}.keys.jsonl"
@@ -684,14 +895,11 @@ class RedisEngine(Engine):
             done = 0
             for key in missing + changed:
                 remember(raw_t, key, handle)
-                payload = raw_s.dump(key.encode())
-                if payload is None:
-                    continue    # gone from the source since the check
-                ttl = raw_s.pttl(key.encode())
                 try:
-                    raw_t.restore(key.encode(), ttl if ttl and ttl > 0 else 0,
-                                  payload, replace=True)
-                except Exception as e:
+                    # gone from the source since the check: nothing lands
+                    self._carry(raw_s, raw_t, [key.encode()], how,
+                                f"db{db}")
+                except SystemExit as e:
                     raise SystemExit(
                         f"RESTORE of {key!r} was refused by the target:"
                         f" {str(e)[:90]}. {done} keys were copied before"
@@ -707,20 +915,17 @@ class RedisEngine(Engine):
                 raw_t.delete(key.encode())
 
     def check_deep(self, db):
-        s = self._client("src", db)
-        t = self._client("dst", db)
+        s = self._keys("src", db)
+        t = self._keys("dst", db)
         sample = int(self.hop.options.get("sample", 5000))
         res = []
         # ttl drift: movers frequently drop or reset expirations; a key
         # that outlives its source ttl serves stale data forever
-        cursor = 0
         seen = 0
         no_ttl = []
         drifted = []
         big = []
-        while seen < sample:
-            cursor, keys = s.scan(cursor, count=1000)
-            keys = self._kept(db, keys)
+        for keys in self._scan_batches("src", sample, False, db):
             if keys:
                 ps = s.pipeline(transaction=False)
                 pt = t.pipeline(transaction=False)
@@ -747,8 +952,6 @@ class RedisEngine(Engine):
                     elif abs(a - b) > max(60000, a * 0.1):
                         drifted.append(f"{k} src={a // 1000}s"
                                        f" dst={b // 1000}s")
-            if cursor == 0:
-                break
         ttl_bad = ([f"{len(no_ttl)} keys lost their ttl on target:"
                     f" {', '.join(no_ttl[:4])}"] if no_ttl else []) \
             + ([f"{len(drifted)} ttls drifted >10%:"
@@ -778,8 +981,8 @@ class RedisEngine(Engine):
 
     def watch_sample(self, db):
         return {"db": f"db{db}", "ts": time.time(),
-                "src_rows": self._client("src", db).dbsize(),
-                "dst_rows": self._client("dst", db).dbsize()}
+                "src_rows": self._dbsize("src", db),
+                "dst_rows": self._dbsize("dst", db)}
 
     # --- the server's own replication (REPLICAOF) ---------------------------
 
@@ -1044,7 +1247,7 @@ class RedisEngine(Engine):
         writes them - read again from both sides, now."""
         import json
         names = [json.loads(k) for k in keys]
-        s, t = self._client("src", db), self._client("dst", db)
+        s, t = self._keys("src", db), self._keys("dst", db)
         ps, pt = s.pipeline(transaction=False), t.pipeline(transaction=False)
         for k in names:
             ps.type(k)
@@ -1081,7 +1284,26 @@ class RedisEngine(Engine):
         TRACKING ... BCAST`), redirected to a second one that listens on the
         server's invalidation channel. Nothing of the server's is changed -
         tracking belongs to the connection and ends with it - and no key
-        is read to learn it."""
+        is read to learn it. On a cluster, every master is listened to:
+        a node tells of the keys of its own slots only."""
+        import threading
+        state = {"keys": set(), "whole": False, "lost": None,
+                 "since": time.time(), "stop": False,
+                 "lock": threading.Lock(), "parts": []}
+        try:
+            for name, _ in self._nodes("src", db, False):
+                host, port = (name.rsplit(":", 1) if name else
+                              (self.hop.source.host, self.hop.source.port))
+                self._listen_node(host, int(port), db, state)
+        except Exception:
+            self._stop_parts(state)
+            raise
+        if not hasattr(self, "_listeners"):
+            self._listeners = {}
+        self._listeners[str(db)] = state
+        return state
+
+    def _listen_node(self, host, port, db, state):
         import threading
         import uuid
 
@@ -1091,10 +1313,12 @@ class RedisEngine(Engine):
         # RESP2: over RESP3 (the client's default since 8) the server
         # pushes each invalidation as its own kind of message, which the
         # listening connection never hands over - measured, nothing heard
-        client = redis.Redis(host=ep.host, port=ep.port,
-                             password=ep.password or None, db=int(db),
-                             socket_timeout=15, client_name=name,
-                             protocol=2)
+        made = self._connection_class("src", False)
+        on = {} if self._cluster("src") else {"db": int(db)}
+        client = redis.Redis(connection_pool=redis.ConnectionPool(
+            connection_class=made, host=host, port=port,
+            password=ep.password or None, socket_timeout=15,
+            client_name=name, protocol=2, **on))
         sub = client.pubsub(ignore_subscribe_messages=True)
         sub.subscribe("__redis__:invalidate")
         ids = [c["id"] for c in client.client_list(_type="pubsub")
@@ -1103,17 +1327,13 @@ class RedisEngine(Engine):
             sub.close()
             raise RuntimeError("the listening connection could not be found"
                                " on the server")
-        tracker = redis.Connection(host=ep.host, port=ep.port,
-                                   password=ep.password or None,
-                                   socket_timeout=15, protocol=2)
+        tracker = made(host=host, port=port, password=ep.password or None,
+                       socket_timeout=15, protocol=2)
         tracker.connect()
         tracker.send_command("CLIENT", "TRACKING", "ON", "REDIRECT", ids[0],
                              "BCAST")
         if tracker.read_response() not in (b"OK", "OK"):
             raise RuntimeError("the source would not track its keys")
-        state = {"keys": set(), "whole": False, "lost": None,
-                 "since": time.time(), "stop": False,
-                 "lock": threading.Lock()}
 
         def read():
             while not state["stop"]:
@@ -1147,26 +1367,27 @@ class RedisEngine(Engine):
                             for k in keys)
                         if len(state["keys"]) > self.DELTA_MOST:
                             state["whole"] = True
-        state["thread"] = threading.Thread(target=read, daemon=True)
-        state.update(sub=sub, tracker=tracker, client=client)
-        state["thread"].start()
-        if not hasattr(self, "_listeners"):
-            self._listeners = {}
-        self._listeners[str(db)] = state
-        return state
+        thread = threading.Thread(target=read, daemon=True)
+        state["parts"].append({"sub": sub, "tracker": tracker,
+                               "client": client, "thread": thread})
+        thread.start()
+
+    @staticmethod
+    def _stop_parts(state):
+        state["stop"] = True
+        for part in state.get("parts", []):
+            part["thread"].join(timeout=5)
+            for what in ("sub", "tracker", "client"):
+                try:
+                    getattr(part[what], "close",
+                            getattr(part[what], "disconnect", None))()
+                except Exception:  # noqa: BLE001 - closing, nothing to keep
+                    pass
 
     def delta_teardown(self, db):
         state = getattr(self, "_listeners", {}).pop(str(db), None)
-        if not state:
-            return
-        state["stop"] = True
-        state["thread"].join(timeout=5)
-        for part in ("sub", "tracker", "client"):
-            try:
-                getattr(state[part], "close",
-                        getattr(state[part], "disconnect", None))()
-            except Exception:  # noqa: BLE001 - closing, nothing to keep
-                pass
+        if state:
+            self._stop_parts(state)
 
     def delta_verify(self, db, limit=20000, log=None):
         """Only the keys written since the last cycle, as the source tells

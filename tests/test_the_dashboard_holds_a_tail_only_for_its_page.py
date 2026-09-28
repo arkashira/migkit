@@ -33,15 +33,23 @@ def board(tmp_path, monkeypatch):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), ui.Handler)
     port = srv.server_address[1]
     monkeypatch.setattr(ui.Handler, "token", "tok-" + "x" * 20)
+    monkeypatch.setattr(ui.Handler, "once", ONCE)
     monkeypatch.setattr(ui.Handler, "port", port)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield port, where
     srv.shutdown()
 
 
-def _ask(port, method, path, body=None, host=None, cookie=None, csrf=None):
+#: the code the start printed, in the address's fragment
+ONCE = "once-" + "z" * 20
+
+
+def _ask(port, method, path, body=None, host=None, cookie=None, csrf=None,
+         login=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     headers = {"Host": host or f"127.0.0.1:{port}"}
+    if login:
+        headers["X-Migkit-Login"] = login
     if cookie:
         headers["Cookie"] = cookie
     if csrf:
@@ -57,10 +65,10 @@ def _ask(port, method, path, body=None, host=None, cookie=None, csrf=None):
 def test_only_the_printed_address_opens_the_data(board):
     port, _ = board
     assert _ask(port, "GET", "/api/data")[0] == 403
-    status, cookie, _ = _ask(port, "GET", "/?t=wrong")
-    assert status == 200 and cookie is None
-    status, cookie, _ = _ask(port, "GET", "/?t=tok-" + "x" * 20)
-    assert status == 303 and "HttpOnly" in cookie and "SameSite=Strict" \
+    status, cookie, _ = _ask(port, "POST", "/api/login", login="wrong")
+    assert status == 403 and cookie is None
+    status, cookie, _ = _ask(port, "POST", "/api/login", login=ONCE)
+    assert status == 204 and "HttpOnly" in cookie and "SameSite=Strict" \
         in cookie
     jar = cookie.split(";")[0]
     status, _, body = _ask(port, "GET", "/api/data", cookie=jar)
@@ -76,7 +84,7 @@ def test_only_the_printed_address_opens_the_data(board):
 def test_a_tail_is_held_and_let_go_only_from_the_page(board):
     from migkit import audit, tailctl
     port, where = board
-    jar = _ask(port, "GET", "/?t=tok-" + "x" * 20)[1].split(";")[0]
+    jar = _ask(port, "POST", "/api/login", login=ONCE)[1].split(";")[0]
     csrf = json.loads(_ask(port, "GET", "/api/data", cookie=jar)[2])["csrf"]
     body = {"hop": "h", "db": "app"}
     # no token, no header, the wrong header, another host: refused
@@ -178,3 +186,55 @@ def test_each_person_sees_and_does_what_the_hop_gives_them(shared):
     status, body = _as(port, "eve@elsewhere.test", "GET", "/api/data")
     assert [h["name"] for h in json.loads(body)["hops"]] == ["open"]
     assert _as(port, "eve@elsewhere.test", "GET", "/report/pay")[0] == 404
+
+
+# ---- the token stays out of the address -------------------------------------
+
+def test_the_printed_address_opens_the_view_once(board):
+    """It printed `/?t=<token>`: the token sat in the browser's history
+    and the terminal's scrollback, and opened the view for as long as the
+    process ran. The code printed now is spent by the first sign-in."""
+    port, _ = board
+    first = _ask(port, "POST", "/api/login", login=ONCE)
+    assert first[0] == 204
+    again = _ask(port, "POST", "/api/login", login=ONCE)
+    assert again[0] == 403 and again[1] is None
+    # the cookie holds the token, which was never printed
+    assert ONCE not in first[1] and "tok-" in first[1]
+    # the address with the token in its query is nothing now
+    status, cookie, _ = _ask(port, "GET", "/?t=tok-" + "x" * 20)
+    assert status == 200 and cookie is None
+    # a sign-in from a name that is not this machine's
+    assert _ask(port, "POST", "/api/login", login=ONCE,
+                host="evil.example.com")[0] == 403
+
+
+def test_serve_prints_no_token_in_a_query(monkeypatch, capsys):
+    from migkit import schedule, ui
+
+    class Srv:
+        def __init__(self, *a):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+    monkeypatch.setattr(ui, "ThreadingHTTPServer", Srv)
+    monkeypatch.setattr(schedule, "loop", lambda *a: None)
+    monkeypatch.setattr(ui.Handler, "token", "")
+    monkeypatch.setattr(ui.Handler, "once", "")
+    ui.serve(18999)
+    said = capsys.readouterr().out
+    assert "http://127.0.0.1:18999/#" in said, said
+    assert "?t=" not in said and ui.Handler.token not in said
+    assert ui.Handler.once and ui.Handler.once in said
+    assert ui.Handler.once != ui.Handler.token
+
+
+def test_the_page_signs_in_from_the_fragment_and_clears_it():
+    """The browser half: the code is read from the fragment, sent in a
+    header, and taken out of the address bar before anything loads."""
+    from migkit import ui
+    page = ui.PAGE
+    assert "location.hash" in page and "'X-Migkit-Login'" in page
+    assert "history.replaceState" in page
+    assert page.index("signin()") < page.rindex("load();")

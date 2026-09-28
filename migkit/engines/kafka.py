@@ -1320,7 +1320,7 @@ class KafkaEngine(Engine):
             return "empty"
         consumer.assign([tp])
         consumer.seek(tp, start)
-        h = hashlib.md5()
+        h = hashlib.md5(usedforsecurity=False)
         got = 0
         while got < end - start:
             batch = consumer.poll(timeout_ms=5000)

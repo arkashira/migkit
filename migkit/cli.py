@@ -321,6 +321,19 @@ def init(here, force):
                       " Override with MIGKIT_CONF=/path/to/hops.yaml")
 
 
+def _ask_terms(program, terms):
+    """The one question `doctor --install` asks: whether the operator
+    accepts the terms of a program that is not open source. It names the
+    program - terms of a program nobody is told the name of cannot be
+    accepted - and the licence, where to read it, what migkit uses it for
+    and what happens if the answer is no."""
+    console.print(f"\n[bold]{program}[/bold] is not open source: its terms"
+                  f" are {terms.licence}.\n  read them at {terms.url}\n"
+                  f"  migkit uses it for {terms.allows}.\n"
+                  f"  declined: {terms.otherwise}.")
+    return click.confirm(f"  accept the terms of {program}?", default=False)
+
+
 @main.command()
 @click.option("--install", is_flag=True,
               help="auto-install every missing external tool via the platform"
@@ -348,7 +361,11 @@ def doctor(install):
                       " values left out)")
     _hops_table(required=False)
     if install:
-        _tools.install_missing(lambda m: console.print(f"  {m}"))
+        import sys
+        # asked only of a person at a terminal: an install with nobody
+        # there accepts nothing, unless MIGKIT_ACCEPT_TERMS says so
+        _tools.install_missing(lambda m: console.print(f"  {m}"),
+                               ask=_ask_terms if sys.stdin.isatty() else None)
     t = Table("capability", "what it does", "status")
     mark = {"ready": "[green]ready[/green]",
             "reduced": "[yellow]reduced[/yellow]",
@@ -359,6 +376,9 @@ def doctor(install):
         if state != "ready":
             short += missing
     console.print(t)
+    said = _tools.schema_reading_note()
+    if said:
+        console.print(f"note: {said}")
     if short:
         console.print("\nto enable everything on this machine:"
                       " [bold]migkit doctor --install[/bold]")
@@ -444,14 +464,28 @@ def _leg_said(eng, side, db, ep):
         not (ep.options or {}).get("tunnel_to")
     if local:
         return ""
+    # whether the certificate is checked is migkit's side of the
+    # connection, which no server can say: a failure every run until it is
+    from . import tls
+    try:
+        pos = tls.posture(ep, eng.ENGINE_FAMILY or eng.CANON_ENGINE)
+    except Exception:  # noqa: BLE001 - a probe never fails doctor
+        pos = None
+    if pos and pos["state"] in ("unverified", "plain"):
+        return (f"[red]FAIL[/red] connection NOT"
+                f" {'verified' if pos['state'] == 'unverified' else 'encrypted'}"
+                f": {pos['detail']}")
     try:
         got = eng.leg_encryption(side, db)
     except Exception:  # noqa: BLE001 - a probe never fails doctor
-        return ""
+        got = None
     if got is None:
-        return ""
+        return (f"verified: {pos['detail']}" if pos
+                and pos["state"] == "verified" else "")
     if got["encrypted"]:
-        return f"encrypted: {got['how']}"
+        return f"encrypted: {got['how']}" + (
+            ", the certificate verified" if pos
+            and pos["state"] == "verified" else "")
     through = (ep.options or {}).get("tunnel_to")
     if through:
         return (f"not encrypted by the database; carried through the"

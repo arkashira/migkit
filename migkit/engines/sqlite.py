@@ -844,7 +844,7 @@ class SQLiteEngine(NeutralCopier, Engine):
             return None, 0, (f'"{t}" has neither a primary key nor a rowid,'
                              " so there is no repeatable order to read it in")
         cols = ", ".join("rowid" if use_rowid else f'"{c}"' for c in order)
-        h = hashlib.md5()
+        h = hashlib.md5(usedforsecurity=False)
         n = 0
         after = None
         conn = self._reader(side)

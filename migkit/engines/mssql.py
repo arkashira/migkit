@@ -754,7 +754,8 @@ class MSSQLEngine(DbapiRows, Engine):
         return pymssql.connect(server=ep.host, port=str(ep.port),
                                user=ep.user, password=ep.password,
                                database=self._d(side, db), login_timeout=15,
-                               charset="UTF-8", tds_version="7.4")
+                               charset="UTF-8", tds_version="7.4",
+                               **ep.mssql_tls())
 
     def _q(self, name):
         return "[" + str(name).replace("]", "]]") + "]"

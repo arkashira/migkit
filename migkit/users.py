@@ -28,7 +28,7 @@ PG_SYS = {'rdsadmin', 'rdstopmgr', 'rds_superuser', 'rdsrepladmin',
 
 def _h(x):
     b = x if isinstance(x, bytes) else str(x or "").encode()
-    return hashlib.md5(b).hexdigest()[:10]
+    return hashlib.md5(b, usedforsecurity=False).hexdigest()[:10]
 
 
 def _mysql_sysuser(u):
@@ -478,7 +478,8 @@ def _ms_conn(ep, db="master"):
     import pymssql
     return pymssql.connect(server=ep.host, port=int(ep.port or 1433),
                            user=ep.user, password=ep.password, database=db,
-                           autocommit=True, login_timeout=15)
+                           autocommit=True, login_timeout=15,
+                           **ep.mssql_tls())
 
 
 def _ms_rows(ep, db, sql):
@@ -1010,6 +1011,10 @@ def _mongo_client(ep):
     # replica sets use options.hosts, single servers use host+port
     hosts = ep.options.get("hosts") or f"{ep.host}:{ep.port}"
     opts = ep.options.get("uri_options", "") or ""
+    tls = ep.mongo_tls()
+    if tls:
+        from urllib.parse import urlencode
+        opts = "&".join(p for p in (opts, urlencode(tls)) if p)
     uri = (f"mongodb://{quote(str(ep.user))}:{quote(str(ep.password))}"
            f"@{hosts}/?{opts}")
     return _retry(lambda: MongoClient(uri, serverSelectionTimeoutMS=15000))
@@ -1160,7 +1165,7 @@ def _redis_client(ep):
     import redis
     return redis.Redis(host=ep.host, port=ep.port, username=ep.user or None,
                        password=ep.password or None, socket_timeout=15,
-                       decode_responses=True)
+                       decode_responses=True, **ep.redis_tls())
 
 
 def _redis_create(hop, apply, say):

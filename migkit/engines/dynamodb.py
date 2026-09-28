@@ -138,7 +138,8 @@ class DynamoDBEngine(NeutralCopier, Engine):
         where = str(ep.options.get("endpoint_url") or ep.host or "aws")
         d = Path(config.REPORTS) / "_dynamodb"
         d.mkdir(parents=True, exist_ok=True)
-        return d / (hashlib.sha1(where.encode()).hexdigest()[:16] + ".json")
+        return d / (hashlib.sha1(where.encode(), usedforsecurity=False)
+                    .hexdigest()[:16] + ".json")
 
     def _described(self, side, db, table):
         """(columns [(name, declared)], key) from what migkit left when it
