@@ -7,10 +7,57 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from ..decide import Need, Rung
 from ..util import keepalive as _keepalive, run, which, with_retry
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
+
+
+def _both_ways():
+    """The servers' own replication both ways, as a rung: what it needs of
+    each side, asked in the order `loops_prevented` says them."""
+    needs = [Need("a server id of each side's own",
+                  lambda f: f["src"]["id"] != f["dst"]["id"],
+                  lambda f: f"both sides have server_id {f['src']['id']}:"
+                            " each would take the other's changes for its"
+                            " own and drop them")]
+    for side, name in (("src", "the source"), ("dst", "the target")):
+        needs += [
+            Need("its own changes dropped",
+                 lambda f, s=side: f[s]["same"] != "1",
+                 f"{name} applies changes carrying its own server id"
+                 " (replicate_same_server_id), so a change would go round"
+                 " for ever"),
+            Need("GTIDs on", lambda f, s=side: f[s]["gtid"] in (None, "ON"),
+                 lambda f, s=side, n=name:
+                 f"GTIDs are {f[s]['gtid']} on {n}: without them a change"
+                 " that comes back is applied again - set gtid_mode = ON"
+                 " and enforce_gtid_consistency = ON on both"),
+            Need("what it applies passed on",
+                 lambda f, s=side: f[s]["passes"] not in ("0", "OFF"),
+                 f"{name} does not pass on what it applies"
+                 " (log_replica_updates), so a change made on one side"
+                 " never reaches a third, and one made on it is not known"
+                 " to have been applied")]
+
+    def apart(f):
+        a, b = f["src"], f["dst"]
+        return not (f["keyed"] and (int(a["step"] or 1) < 2
+                                    or int(b["step"] or 1) < 2
+                                    or a["offset"] == b["offset"]))
+    needs.append(Need(
+        "auto-increment values of each side's own", apart,
+        lambda f: "both sides hand out the same auto-increment values"
+                  f" (increment {f['src']['step']} and {f['dst']['step']},"
+                  f" offset {f['src']['offset']} and"
+                  f" {f['dst']['offset']}), and a row made on each at once"
+                  " collides - set auto_increment_increment = 2 on both,"
+                  " and auto_increment_offset = 1 on one and 2 on the"
+                  " other"))
+    return Rung("replicas both ways", "the servers' own replication both"
+                                      " ways",
+                gives=frozenset({"apart"}), needs=tuple(needs))
 
 
 class MySQLEngine(Engine):
@@ -5702,6 +5749,9 @@ class MySQLEngine(Engine):
         return ([f"set global replica_parallel_workers = {n};"],
                 f"replica_parallel_workers = {n}")
 
+    #: each side a replica of the other, as `loops_prevented` asks it
+    BOTH_WAYS = _both_ways()
+
     def loops_prevented(self, db):
         """Why replicas both ways would send changes round, or have the two
         sides make the same key, or "" where neither can happen.
@@ -5713,7 +5763,13 @@ class MySQLEngine(Engine):
         both, so a change is applied once however it arrives. And rows made
         on both sides at once take the same auto-increment values unless
         each side hands out its own: an increment of at least two, and a
-        different offset on each."""
+        different offset on each.
+
+        Each is a need of one rung, `BOTH_WAYS`, climbed in `decide`: the
+        first that does not hold is the answer, and the count of
+        auto-increment columns is asked only once the settings allow."""
+        from ..decide import Facts, climb
+
         def read(side, *names):
             for name in names:
                 try:
@@ -5730,39 +5786,15 @@ class MySQLEngine(Engine):
             "step": read(side, "auto_increment_increment"),
             "offset": read(side, "auto_increment_offset")}
             for side in ("src", "dst")}
-        a, b = said["src"], said["dst"]
-        if a["id"] == b["id"]:
-            return (f"both sides have server_id {a['id']}: each would take"
-                    " the other's changes for its own and drop them")
-        for side, name in (("src", "the source"), ("dst", "the target")):
-            if said[side]["same"] == "1":
-                return (f"{name} applies changes carrying its own server id"
-                        " (replicate_same_server_id), so a change would go"
-                        " round for ever")
-            if said[side]["gtid"] not in (None, "ON"):
-                return (f"GTIDs are {said[side]['gtid']} on {name}: without"
-                        " them a change that comes back is applied again"
-                        " - set gtid_mode = ON and enforce_gtid_consistency"
-                        " = ON on both")
-            if said[side]["passes"] in ("0", "OFF"):
-                return (f"{name} does not pass on what it applies"
-                        " (log_replica_updates), so a change made on one"
-                        " side never reaches a third, and one made on it"
-                        " is not known to have been applied")
-        keyed = self._q("src", "select count(*) from"
-                               " information_schema.columns where"
-                               " table_schema = %s and extra like"
-                               " '%%auto_increment%%'", (db,))
-        if keyed and int(keyed[0][0]) and (
-                int(a["step"] or 1) < 2 or int(b["step"] or 1) < 2
-                or a["offset"] == b["offset"]):
-            return ("both sides hand out the same auto-increment values"
-                    f" (increment {a['step']} and {b['step']}, offset"
-                    f" {a['offset']} and {b['offset']}), and a row made on"
-                    " each at once collides - set auto_increment_increment"
-                    " = 2 on both, and auto_increment_offset = 1 on one and"
-                    " 2 on the other")
-        return ""
+
+        def keyed():
+            got = self._q("src", "select count(*) from"
+                                 " information_schema.columns where"
+                                 " table_schema = %s and extra like"
+                                 " '%%auto_increment%%'", (db,))
+            return int(got[0][0]) if got else 0
+        got = climb(db, (self.BOTH_WAYS,), Facts(said, keyed=keyed))
+        return "" if got.rung else got.reason
 
     def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
         """The statements that make the target a replica of the source.

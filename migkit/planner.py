@@ -11,7 +11,8 @@ The facts behind them come from the source's own catalogue in one query
 per database (`table_facts`): an estimate of the rows, and whether there
 is a key. Rules that choose on speed wait for measurements to choose on
 (backlog 28); the ones here are the ones a wrong answer would make
-incorrect, not slow.
+incorrect, not slow. Each table's choice is a climb of `ways` in
+`decide`, the one way every choice migkit makes is decided.
 """
 from dataclasses import dataclass
 
@@ -52,35 +53,52 @@ def _about(fact):
     return f" ({', '.join(said)})" if said else ""
 
 
+def ways(via):
+    """The ways a table can go when its database goes by `via`, in the
+    order a table takes them (`decide`): the bulk copy where it carries
+    everything the table asks, the table copier where it does not, and
+    nothing for a table the hop leaves out."""
+    from .decide import Rung
+    from .movers import ROW_FILTER_MOVERS
+    bulk = {"carried"} | ({"row filter"} if via in ROW_FILTER_MOVERS
+                          else set())
+    return (Rung(BULK, "the bulk copy", gives=frozenset(bulk),
+                 because="the fastest path here"),
+            Rung(COPIER, "the table copier",
+                 gives=frozenset({"carried", "row filter",
+                                  "column mapping"})),
+            Rung(LEFT, WORDS[LEFT], gives=frozenset({LEFT})))
+
+
 def plan(hop, db, via, tables, qualifier="public", facts=None):
     """One `Decision` per table, in name order.
 
     `via` is the bulk path the database goes by; a table it cannot carry
     correctly goes table by table instead. `facts` is `table_facts`'
     answer, keyed like `tables`, or None where the engine gives none.
+    What a table asks - to be left alone, its row filter applied, its
+    columns mapped - is climbed against `ways(via)`.
     """
     from . import movers
+    from .decide import climb
     facts = facts or {}
-    filters_here = via not in movers.ROW_FILTER_MOVERS and bool(
-        movers._filtered_here(hop, db))
+    filtered = bool(movers._filtered_here(hop, db))
+    rungs = ways(via)
     out = []
     for ident in sorted(tables):
         parts = [p for p in str(ident).split(".") if p]
         name = _name(parts, qualifier)
         about = _about(facts.get(ident) or facts.get(name))
         if hop.excluded(db, *parts):
-            out.append(Decision(name, LEFT, "the hop excludes it"))
-        elif filters_here and hop.row_filter(db, *parts):
-            out.append(Decision(name, COPIER,
-                                "its row filter is applied on both sides,"
-                                " which the bulk copy cannot do" + about))
-        elif hop.column_rules(db, *parts):
-            out.append(Decision(name, COPIER,
-                                "its columns are mapped - kept, dropped or"
-                                " renamed - which the bulk copy cannot do"
-                                + about))
+            need = (LEFT,)
         else:
-            out.append(Decision(name, BULK, "the fastest path here" + about))
+            need = ("carried",) + (
+                ("row filter",) if filtered and hop.row_filter(db, *parts)
+                else ()) + (("column mapping",)
+                            if hop.column_rules(db, *parts) else ())
+        got = climb(name, rungs, need=need)
+        out.append(Decision(name, got.path,
+                            got.reason + ("" if got.path == LEFT else about)))
     return out
 
 

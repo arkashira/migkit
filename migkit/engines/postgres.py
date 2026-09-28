@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..config import REPORTS
+from ..decide import Rung
 from ..util import run, tool_env, which
 from .base import Engine, RepairAction, Result
 
@@ -7381,18 +7382,23 @@ class PostgresEngine(Engine):
     def move_key(self, db, sch, tbl):
         return f"{sch or 'public'}.{tbl}"
 
+    #: how a range the copier wrote is proved (`_copy_checked`)
+    VERIFY_WAYS = (Rung("digest", "digesting the range on both servers"),
+                   Rung("read back", "reading the range back from the"
+                                     " target"))
+
     def _verify_way(self):
         """"digest" or "read back": each tried once, then the one that
-        proved a row in less time."""
-        cost = self.__dict__.setdefault("_verify_cost", {})
-        for way in ("digest", "read back"):
-            if way not in cost:
-                return way
-        return min(cost, key=lambda w: cost[w])
+        proved a row in less time - a climb of `VERIFY_WAYS` on this run's
+        own costs."""
+        from ..decide import Costs, climb
+        cost = self.__dict__.setdefault("_verify_cost", Costs())
+        return climb("a range", self.VERIFY_WAYS, costs=cost).path
 
     def _verify_took(self, way, seconds, rows):
-        cost = self.__dict__.setdefault("_verify_cost", {})
-        cost[way] = seconds / max(int(rows or 0), 1)
+        from ..decide import Costs
+        self.__dict__.setdefault("_verify_cost", Costs()).saw(way, rows,
+                                                              seconds)
 
     PAYLOAD_SQL = "select repeat(md5(random()::text), {n})"
 

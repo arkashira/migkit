@@ -192,6 +192,51 @@ Measured before it replaces anything: the four existing choices climb
 the ladder and reach the same answers on the current suite, then the
 speed rules (item 0) become rungs ranked by the benchmark's numbers.
 
+*Built (2026-09-28), `migkit/decide.py`:*
+* **A rung** gives capabilities, needs predicates over facts, is proved
+  by a probe and is costed in seconds a unit, with its footprint beside
+  it. Each fact is read once, and only for a rung still in the running
+  (`Facts`).
+* **The climb** drops the rungs that lack something, ranks the rest,
+  proves the top one and falls a rung saying why. A rung never timed
+  goes first, the rest go by measured cost, and a tie within 5% goes to
+  the smaller footprint. The reason names only the ways the list
+  prefers over the chosen one.
+* **A strategy** is composed of parts. The combinations whose parts fit
+  each other are ranked by the sum of their parts' measured costs; F1's
+  passes A-D are composed that way in a test.
+* **Kept beside the position:** the choice goes in a `-ways.json` file
+  next to the checkpoint or the tail's token (`choose_kept`), and goes
+  with it. Costs are kept for the run (`Costs`) or for the hop beside
+  its rates (`HopCosts`).
+
+The four choices go through it with their answers unchanged:
+* `movers.pick` and `fitted` climb one ladder (`_ladder`). The rungs
+  below the pick are `fitted`'s fallback, so the two cannot disagree.
+* `planner.plan` climbs `ways(via)`. The planner's reasons come out word
+  for word.
+* PostgreSQL's verify way climbs `VERIFY_WAYS` on the run's own costs.
+* MySQL's `loops_prevented` is the needs of one rung (`BOTH_WAYS`). The
+  answer is the first need missing, and the auto-increment columns are
+  counted only once the settings allow two ways.
+
+`decide.coverage()` is the matrix of shape by engine, declared as
+`capabilities.GAPS` is and resolved against the code: a way removed turns
+its cell stale. Ten shapes by 23 engines: 115 cells with a way, 57 not
+applicable, 58 not yet. A `yes` means migkit carries the shape correctly
+today. A table without a key, or with a text key, still goes in one pass
+or by where its rows are stored, until F1's hash buckets resume it by
+bucket. Tests: `tests/test_the_decision_engine.py`.
+
+Still open:
+* ranking the mover by the hop's measured rates. It waits on the
+  benchmark (28), because a whole run's rate at one size does not carry
+  to another, and a database is not moved twice to learn which way is
+  faster.
+* `doctor` naming each side's rung.
+* the two-way marks and the change reader (fast-python 13) as ladders
+  through `choose_kept`, by their owners.
+
 **The bar (the owner, 2026-09-27): not "as good as the best of them" but
 above every one of them on every axis, on every engine and across
 engines - any source, any target, one platform.** What that means, axis

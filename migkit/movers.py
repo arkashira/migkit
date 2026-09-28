@@ -33,33 +33,68 @@ def _native(engine):
     return cls is not None and callable(getattr(cls, "native_bulk", None))
 
 
-def pick(engine, table=""):
-    """Fastest installed tool for whole-db moves, builtin for single tables
-    (chunk resume matters more than raw speed there)."""
-    if table:
-        return "builtin"
-    if engine == "postgres":
-        # the version-matched container first: it overlaps copy, index and
-        # constraint work, builds indexes after the rows land, and needs no
-        # intermediate directory - none of which the dump path does
-        if pgcopydb_available():
-            return "pgcopydb"
-        if which("pg_dump") and which("pg_restore"):
-            return "pgdump"
-    if engine == "mysql" and which("mydumper") and which("myloader"):
-        return "mydumper"
-    if engine == "hetero" and which("pgloader"):
-        return "pgloader"
-    if engine == "mongodb" and which("mongosync"):
+def _moves(via):
+    from .decide import Need
+    return Need("an engine it moves", lambda f: supported(f["engine"], via),
+                "{rung} does not move this engine's hops")
+
+
+def _installed(*programs):
+    from .decide import Need
+    return Need("its programs installed",
+                lambda f: all(which(p) for p in programs))
+
+
+def _ladder():
+    """The ways a whole database moves, in the order the measurements
+    gave: the first that holds is taken (`decide.climb`). Ranked by the
+    list and not by a hop's rates: a whole run's rate at one size does not
+    carry to another, and a database is not moved twice to learn which
+    way is faster - the benchmark (item 28) ranks them."""
+    from .decide import Need, Rung
+    return (
+        # the version-matched container first: it overlaps copy, index
+        # and constraint work, builds indexes after the rows land, and
+        # needs no intermediate directory - none of which the dump path
+        # does
+        Rung("pgcopydb", "the streaming copy",
+             needs=(_moves("pgcopydb"),
+                    Need("its version-matched build",
+                         lambda f: pgcopydb_available())),
+             because="copy, index and constraint work overlap, and indexes"
+                     " are built after the rows land"),
+        Rung("pgdump", "the dump and restore in parallel",
+             needs=(_moves("pgdump"), _installed("pg_dump", "pg_restore"))),
+        Rung("mydumper", "the parallel dump and load",
+             needs=(_moves("mydumper"),
+                    _installed("mydumper", "myloader"))),
+        Rung("pgloader", "the one-pass load",
+             needs=(_moves("pgloader"), _installed("pgloader"))),
         # online, and consistent as of its commit - a dump of a source
         # still taking writes is neither; `fitted` falls back where the
         # hop or the servers cannot take it
-        return "mongosync"
-    if engine == "mongodb" and which("mongodump") and which("mongorestore"):
-        return "mongodump"
-    if _native(engine):
-        return "native"
-    return "builtin"
+        Rung("mongosync", "the online sync",
+             gives=frozenset({"online", "consistent as of"}),
+             needs=(_moves("mongosync"), _installed("mongosync")),
+             because="online, and consistent as of its commit"),
+        Rung("mongodump", "the dump and restore",
+             needs=(_moves("mongodump"),
+                    _installed("mongodump", "mongorestore"))),
+        Rung("native", "the engine's own means", needs=(_moves("native"),)),
+        # a single table goes by the table copier: resuming by chunk
+        # matters more than raw speed there
+        Rung("builtin", "the table copier",
+             gives=frozenset({"resume by chunk", "row filter",
+                              "column mapping"})),
+    )
+
+
+def pick(engine, table=""):
+    """Fastest installed tool for whole-db moves, builtin for single tables
+    (chunk resume matters more than raw speed there)."""
+    from .decide import climb
+    return climb(table or engine, _ladder(), {"engine": engine},
+                 ("resume by chunk",) if table else ()).path
 
 
 def chosen(engine, table=""):
@@ -95,32 +130,58 @@ def fitted(hop, engine, via):
     other pair it reads the wrong server as the wrong kind; on a hop with
     an exclude list it loads the tables the target owns. The table copier
     carries all of those, so the decision is made here, from the hop.
+
+    `via` stands first with what it needs of the hop (`_FITS`), and the
+    ways below it in `_ladder` are the fallback: one ladder for the pick
+    and the fit, so the two cannot disagree on what comes next.
     """
-    if via == "mongosync":
-        why = _mongosync_unfit(hop)
-        if not why:
-            return via, None
-        return ("mongodump" if which("mongodump") and which("mongorestore")
-                else "builtin"), why
-    if via != "pgloader":
+    if via not in _FITS:
         return via, None
+    import dataclasses
+
+    from .decide import Facts, climb
     from .engines import ALIASES
     opts = hop.options or {}
-    pair = tuple(ALIASES.get(n, n) for n in (
-        opts.get("source_engine", "mysql"),
-        opts.get("target_engine", "postgres")))
-    mapping = getattr(hop, "mapping", None) or {}
-    if pair != ("mysql", "postgres"):
-        why = "the one-pass load reads MySQL into PostgreSQL only"
-    elif getattr(hop, "exclude", None):
-        why = ("the one-pass load has no way to leave out the tables the"
-               " hop excludes")
-    elif any(mapping.get(k) for k in ("tables", "columns", "where")):
-        why = ("the one-pass load reads no table, column or row mapping,"
-               " and the hop has one")
-    else:
+    facts = Facts(
+        {"engine": engine, "hop": hop},
+        pair=lambda: tuple(ALIASES.get(n, n) for n in (
+            opts.get("source_engine", "mysql"),
+            opts.get("target_engine", "postgres"))),
+        mapping=lambda: getattr(hop, "mapping", None) or {},
+        # asked of the servers, once, and only for the online sync
+        unfit=lambda: _mongosync_unfit(hop))
+    ladder = _ladder()
+    at = [r.name for r in ladder].index(via)
+    got = climb(hop.name, (dataclasses.replace(ladder[at], needs=_FITS[via]),)
+                + ladder[at + 1:], facts)
+    if got.path == via:
         return via, None
-    return "builtin", why
+    return got.path, next(why for r, why in got.passed if r.name == via)
+
+
+def _fits():
+    from .decide import Need
+    one_pass = (
+        Need("MySQL into PostgreSQL",
+             lambda f: f["pair"] == ("mysql", "postgres"),
+             "the one-pass load reads MySQL into PostgreSQL only"),
+        Need("no exclude list", lambda f: not getattr(f["hop"], "exclude",
+                                                      None),
+             "the one-pass load has no way to leave out the tables the hop"
+             " excludes"),
+        Need("no mapping", lambda f: not any(
+            f["mapping"].get(k) for k in ("tables", "columns", "where")),
+            "the one-pass load reads no table, column or row mapping, and"
+            " the hop has one"))
+    return {"pgloader": one_pass,
+            "mongosync": (Need("a hop it can carry",
+                               lambda f: f["unfit"] is None,
+                               lambda f: f["unfit"]),)}
+
+
+#: what a way needs of the hop beyond its engine and its programs, asked
+#: by `fitted` of the way the pick took
+_FITS = _fits()
 
 
 #: Movers that can be given a row predicate per table, measured rather
