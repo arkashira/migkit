@@ -5,6 +5,13 @@ same container names and ports; two of them at once collide and, on a
 small machine, exhaust its memory. `python tools/with_docker_lock.py
 <command...>` waits for the lock at /tmp/migkit-docker.lock, checks the
 memory has room, runs the command, and lets the next one in.
+
+`--vm migkit` runs the command against a second colima profile of its
+own (aarch64, 6 GB, Rosetta on, for Oracle Free and the x86-only
+engines): the profile is started when the command needs it and memory
+allows, the command sees it through `DOCKER_CONTEXT=colima-migkit`, and
+the profile is stopped afterwards. The default profile, and whatever
+another session runs on it, is never touched.
 """
 import fcntl
 import os
@@ -13,6 +20,11 @@ import sys
 import time
 
 LOCK = "/tmp/migkit-docker.lock"
+#: the profile for the engines the default one cannot hold
+VM = {"migkit": ["--arch", "aarch64", "--cpu", "4", "--memory", "6",
+                 "--disk", "40", "--vm-type", "vz", "--vz-rosetta"]}
+#: free memory a start needs, in percent
+ROOM = {None: 12, "migkit": 30}
 
 
 def _free_percent():
@@ -27,16 +39,47 @@ def _free_percent():
     return None
 
 
+def _wait_for_room(need, most=900):
+    waited = 0
+    while (_free_percent() or 100) < need and waited < most:
+        time.sleep(15)
+        waited += 15
+    if (_free_percent() or 100) < need:
+        raise SystemExit(f"memory stayed under {need}% free for {most}s;"
+                         " not starting")
+
+
+def _running(profile):
+    got = subprocess.run(["colima", "status", "-p", profile],
+                         capture_output=True, text=True)
+    return got.returncode == 0
+
+
 def main(argv):
+    vm = None
+    if argv[:1] == ["--vm"]:
+        vm, argv = argv[1], argv[2:]
+        if vm not in VM:
+            raise SystemExit(f"--vm {vm}: not one of {', '.join(VM)}")
     if not argv:
-        raise SystemExit("usage: with_docker_lock.py <command> [args...]")
+        raise SystemExit("usage: with_docker_lock.py [--vm migkit]"
+                         " <command> [args...]")
     with open(LOCK, "a+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        waited = 0
-        while (_free_percent() or 100) < 12 and waited < 600:
-            time.sleep(15)
-            waited += 15
-        return subprocess.call(argv)
+        _wait_for_room(ROOM[vm])
+        env = dict(os.environ)
+        started = False
+        if vm:
+            if not _running(vm):
+                subprocess.run(["colima", "start", "-p", vm] + VM[vm],
+                               check=True)
+                started = True
+            env["DOCKER_CONTEXT"] = f"colima-{vm}"
+        try:
+            return subprocess.call(argv, env=env)
+        finally:
+            if started:
+                subprocess.run(["colima", "stop", "-p", vm])
 
 
 if __name__ == "__main__":

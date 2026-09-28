@@ -2442,6 +2442,76 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## Decided by the owner 2026-09-28 - all of it is to be built
+
+* **Everything below and in "Research round 2026-09-28" and "Where
+  migkit would still lose" is to be done**, in the order F0 first, then
+  the rest, better, smarter and deeper than the tools it is measured
+  against - never flat.
+* **Cutover may write to the source** - only for a hop that turns
+  `cutover:` on, only during the cutover, every step reversible, behind
+  the approvals that exist. migkit says in `assess`, `doctor` and the
+  dry run exactly what it will do on each side and why; a hop without
+  `cutover:` is told what the operator must do by hand instead
+  (freeze, drain, sequences, jobs, reverse leg) and gets the same
+  proofs around it. With it, migkit guarantees the whole path.
+* **Every tool worth wrapping is a dependency**, forced: pip packages in
+  `pyproject.toml` (mssql-python, python-oracledb, opensearch-py,
+  confluent-kafka, and the rest the reports name), programs through
+  `doctor --install` without asking again (mydumper, MySQL Shell,
+  RedisShake, DSBulk, Ora2Pg, SQLines, plpgsql_check...). A tool whose
+  licence forbids bundling (GPL/AGPL programs) is driven as a separate
+  program, never imported; a tool whose licence is not open (Atlas's
+  default build, Liquibase 5 FSL, Sling's GPL CLI, RIOT-X BSL) is
+  replaced by the open build or an open equivalent - Atlas Community,
+  Liquibase 4.x pinned, and so on.
+* **Everything a wrapped tool can do is used**, chosen by migkit's logic:
+  mydumper `--rows`/`--checksum-all`/masking, MySQL Shell
+  dump/load/copy, MySQL CLONE, `pg_basebackup`, psycopg3 pipeline mode,
+  pgcopydb's split and index jobs, SQL Server bulk through mssql-python
+  (staged, then promoted in migkit's transaction so a batch stays
+  exact), Oracle direct path load (the same), pt-table-checksum only on
+  native replicas and always paired with migkit's sum digest.
+* **Close the structural four as far as they go:**
+  * *Oracle at high rates:* migkit's own LogMiner reader (RDS-capable,
+    no licence), mining on a standby where the edition allows it, a
+    compiled reader as a rung, OpenLogReplicator driven as a separate
+    program where the operator runs it next to the redo; measured
+    against the source's redo rate before a hop is accepted, and Oracle
+    as a target through direct path loads staged and promoted.
+  * *With and without the engine's CDC feature:* where Change Tracking,
+    CDC or supplemental logging is on, migkit uses it; where it is off,
+    migkit reads what the server lets a reader see without it - SQL
+    Server's log through `fn_dblog`/`fn_dump_dblog` and log backups,
+    Oracle through LogMiner on archived logs, Db2 through `db2ReadLog`
+    - to the depth each proves in the sandbox, and says exactly what is
+    missing and what enabling it would buy.
+  * *Closed-licence capabilities, rebuilt from open parts:* mongosync's
+    job from change streams + raw BSON + the verifier's generations;
+    offset-preserving Kafka mirroring approximated by a source-offset
+    header and exact consumer-group translation (and Cluster Linking
+    driven where licensed); Redis two-way by migkit's marks and
+    conflict policies (CRDT-like counters by `delta`); XStream's job by
+    LogMiner. Each rebuilt capability is measured against what it
+    replaces and better where it can be (verified as it lands).
+  * *What only a cloud's control plane can do:* driven through the
+    provider's API where it exists (snapshot copy, clone, restore to a
+    point, zero-ETL where offered, Azure MI link), and the process
+    imitated where it does not (a snapshot restored then fast-forwarded
+    by the slot, a mover that scales its own workers).
+* **W1-W9 are items to build**, not notes.
+* **The machine:** a second colima profile `migkit` (aarch64, 6 GB,
+  Rosetta on) for Oracle Free and the x86 engines, started only when a
+  test needs it and memory allows, stopped after
+  (`tools/with_docker_lock.py --vm migkit`); the default profile and
+  the other session's containers are not touched. And free x86 CI on
+  GitHub (`ubuntu-latest`) for SQL Server, Db2 and ASE.
+* **Leapfrog research, before building these:** stored-code and
+  application-SQL conversion; engine reach (mainframe, SAP, Teradata,
+  Netezza, warehouses, SaaS with open licences); changing a running
+  tail's table set and DDL during a tail. Not to match DTS, DMS,
+  Informatica and the converters - to pass them.
+
 ## Research round 2026-09-28: what it found, first things first
 
 Sixteen reports in `docs/research/*-2026-09-28.md` (mechanisms of the
