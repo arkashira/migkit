@@ -82,6 +82,227 @@ This is the ground migkit stands on.
 
 ## P0: the decision layer underneath everything
 
+**Decided 2026-09-27 (the owner): one way of deciding for every choice
+migkit makes, not one per feature - and not a ladder if a ladder is not
+the best way.** The owner's words: find the best way, the smartest and
+fastest, one that supports every shape ("a check or a move that cannot
+take a table without a key is not acceptable - we make it work"), one
+standard that is migkit's own logic, not flat, built for the features
+still to come: the fastest move, the most exact and fastest validation,
+idempotent, the highest throughput. So the design below is a **decision
+engine that composes a strategy from parts**, and a ladder is only what
+it looks like when one part has a single axis. migkit already decides in
+four places, each in its own way: `movers.pick` (a fixed chain by what is installed),
+`planner.plan` (per table, by the hop's rules, no measurement),
+PostgreSQL's `_verify_way` (each way tried once, then the cheaper - the
+only one that measures), and `loops_prevented` (MySQL only). The two-way
+rungs of R3 would have been a fifth. They become one thing, `ladder`,
+that every choice goes through, so a rule learned once holds everywhere
+and a new choice costs one list of rungs:
+
+* **A rung** names what it gives (the capabilities: `apart`, `exact`,
+  `row filter`, `column mapping`, `resume by key`, `consistent as of`,
+  ...), what it needs (version, grant, program installed, a server
+  setting already on, a key on the table), how it is proved (a probe
+  run end to end before it is trusted: the loop mark read back through
+  migkit's own reader, a program's `--help` holding the option, a
+  100-row copy verified, the digest way timed) and how it is costed (a
+  measurement, kept: rows a second, seconds a row, the cost a
+  transaction).
+* **The climb**, per unit of work - a table, a side, a leg, a batch -
+  from the facts (`table_facts`, versions, grants, the network's RTT and
+  bandwidth, the checkpoint): drop every rung that lacks something the
+  work needs (a counter hop drops `apart`-only rungs; a filtered table
+  drops rungs without `row filter`), rank the rest by measured cost,
+  prove the top one, fall a rung on a failed proof and say so. The
+  footprint (a table made, a slot, a file) is the tie-breaker, never the
+  ranking: a rung with a footprint that measures faster and steadier is
+  the top rung (the owner's rule, R3).
+* **Idempotent and exact by construction:** the choice is written where
+  the work's position is written (the checkpoint, the tail's token), so
+  a restart climbs the same rung, and a rung that cannot say what it
+  applied twice (`exact`) is never given work that must not be applied
+  twice. The costs learned live with the hop's rates
+  (`planner.record_rate`), so the second run chooses from the first
+  run's numbers and the benchmark's, never from a guess.
+* **Said in migkit's words:** every choice carries its reason
+  (`planner.Decision`), the dry run reads them out per table, `doctor`
+  names the rung each side and leg stands on and the footprint it leaves,
+  and no program is named.
+* **Composed, not picked from a list:** a strategy for a unit of work
+  is a combination - how it is read (a program's dump, COPY, a server
+  cursor, a relay beside the source), how it is chunked (key ranges by
+  quantile, physical ranges by ctid or page, hash buckets of the whole
+  row, partitions, a file at a time), how it is written (COPY stage,
+  multi-row statements, LOAD DATA, a program's load, native bulk), how
+  it is verified as it lands (a digest a range, rows read back, a count
+  and a fold), how it resumes (by key, by bucket, by position), how its
+  changes are followed and marked. Each part has its candidates with
+  what they give, need, prove and cost; the engine keeps only the
+  combinations whose parts fit each other and the work's shape, and
+  ranks them by measured throughput under the constraint that
+  correctness and exactness are never traded. A new part, or a new
+  candidate for a part, is one entry - nothing else changes.
+* **Every shape has a way, and that is tested:** a table without a key
+  or a unique index, a key of many columns or of text, a table too
+  large for one range, one with large values, one partitioned, a source
+  that is read-only or standby, a user without the grant a program
+  needs, a target that must stay read-only, a link too slow for one
+  stream. For each shape and each engine the engine must produce at
+  least one strategy, and the matrix of shape by engine is a test that
+  fails where none exists (the way `capabilities.matrix` fails on a cell
+  never built). **Keyless tables in particular:** chunked by hash
+  buckets of the whole row computed on the server (`mod(hash(row), n)`,
+  `n` sized from the row count), each bucket copied, verified by its
+  count and digest, and resumed as a unit; duplicate identical rows
+  carried by their counts; on PostgreSQL the physical range (ctid) as
+  the faster way where the table is not being rewritten; changes
+  applied by the whole row as the key (`REPLICA IDENTITY FULL`,
+  `binlog_row_image=FULL`), and where the source cannot give that, said
+  before the move, not after.
+* **Reusable on purpose:** the same module decides the mover per table,
+  the verify way per table, the two-way mark per side, the tunnel legs
+  per link, the apply path per batch (COPY stage or statements), the
+  read path (relay or direct), and whatever comes next (the stored-code
+  converter per routine in R11, the engine cell in R13). One list of
+  rungs each; the climb, the proof, the costing, the record and the
+  wording are shared.
+
+Measured before it replaces anything: the four existing choices climb
+the ladder and reach the same answers on the current suite, then the
+speed rules (item 0) become rungs ranked by the benchmark's numbers.
+
+**The bar (the owner, 2026-09-27): not "as good as the best of them" but
+above every one of them on every axis, on every engine and across
+engines - any source, any target, one platform.** What that means, axis
+by axis, and the mechanism that gets there; nothing below is claimed
+until it is measured against the tool that leads that axis:
+
+* **Telling migkit's own writes apart, any pair of engines.** Every
+  other tool does it inside one family (GoldenGate's tags on Oracle,
+  origins PostgreSQL to PostgreSQL, server ids MySQL to MySQL). migkit's
+  mark is neutral: *the first write in whatever atomic unit the engine
+  has* - a transaction (PostgreSQL, MySQL, MongoDB 4.0+, SQL Server,
+  Oracle), a logged batch (Cassandra), MULTI/EXEC (Redis, seen whole
+  through PSYNC), a transact-write (DynamoDB), a header on every message
+  (Kafka, as the Redpanda migrator marks offsets) - with the native tag
+  (origin, tagged GTID) in its place wherever one exists and proves.
+  So MySQL to MongoDB to PostgreSQL both ways, and a mesh of any
+  engines, carries provenance and never loops. Nobody does this across
+  engines.
+* **Exactly once, every engine, not at least once.** DMS's batch
+  apply, Debezium, MirrorMaker 2 (without EOS), mongosync's
+  re-application after a restart are at-least-once, safe only where
+  every row has a key and every change is its final state. migkit's
+  mark carries the batch's number where the engine has no native
+  progress (origins, `gtid_executed`), so the target always answers
+  "which batch did you last commit" and no batch lands twice - which is
+  what counters, keyless rows and append-only targets need. A rung
+  without it is never given such work.
+* **Verified as it lands, to the row, on both sides of any pair.**
+  Veridata and DVT verify after; DMS validates by partitions of rows
+  with a lag re-check; pgcopydb compares after. migkit verifies each
+  range as it is written (done for the table copier and bulk paths),
+  re-checks what was in flight behind an LSN fence (done), and bisects
+  to the row across engines by the canonical rendering (`canon`), with
+  keyless tables by whole-row hash buckets (above). The target must be
+  read-only or its writes named (done for PostgreSQL and MySQL; every
+  engine, R13).
+* **Faster: the parts, each measured, combined.** A relay beside the
+  source reading compressed (done), key-quantile or physical ranges,
+  COPY staging or LOAD DATA or native bulk, indexes deferred only where
+  measured faster (PostgreSQL yes, MySQL no), parallel index builds,
+  workers sized from the host, the servers and the link, throttled by
+  the source's own load (done), legs in parallel on a long link (done).
+  The bar in numbers, from the research: PeerDB's ~150 MB/s PostgreSQL
+  to PostgreSQL on a 1 TB table (source-network-bound), MySQL Shell's
+  >200 MB/s load, Alibaba DTS's 180-200k rows/s full load and 11k
+  rows/s incremental at the large class, DMS batch apply ~7k changes/s.
+  Measured in docker against pgcopydb, MySQL Shell and the builtin
+  paths before any speed is claimed (item 28, the benchmark).
+* **One platform.** The neutral row, change, type and DDL (`canon`), the
+  neutral read and write every engine implements, the pair (`hetero`),
+  the capability matrix that fails on a cell not built (R13), and the
+  decision engine above them: one hop file, one command, the same
+  answer on every engine and pair.
+
+**0f. Every wrapped program and library used whole, smarter, and topped
+up (the owner, 2026-09-27).** "We already hold DVT and Debezium inside
+migkit. Use every tool and library to the fullest - all of its features,
+not one feature and done - but smarter than it is used on its own; where
+our own function pulls more out of it, write that; where research finds
+another tool or library that adds a capability, take it." Measured on
+the code the same day, what migkit asks of what it wraps against what
+each offers:
+
+* **DVT** (`data-validation`): used - column validation with `count`,
+  `sum`, `min`, `max` and `--filters`, and `connections`. Not used -
+  row validation by hash or by concatenated comparison fields
+  (`validate row --hash --primary-keys --comparison-fields`), custom
+  query validation on both sides, `--threshold` (a tolerance for
+  aggregates that drift), `--grouped-columns` (aggregates per group, the
+  cheap way to find *where* a sum differs), `bit_xor`, `std`, `avg`,
+  random-row sampling (`--use-random-row --random-row-batch-size`),
+  `--filter-status fail` (only the failures back), `--exclude-columns`,
+  `--trim-whitespace`, `--case-insensitive-match`, `--cast-to-bigint`,
+  YAML config files run as a batch, labels, the result handlers. The
+  top-up: its grouped aggregates to bisect a differing table to the
+  group, then migkit's own row compare on that group only.
+* **pgcopydb**: used - `clone`/`copy` with `--dir`, `--no-owner`,
+  `--filters`, `--table-jobs`, `--resume`, `--not-consistent`,
+  `--snapshot`, `--drop-if-exists`, `compare schema`, `compare data`,
+  `list tables`, `follow` with slot, origin, plugin and endpos, the
+  sentinel. Not used - `--split-tables-larger-than` (same-table
+  concurrency, the thing its author credits its speed to),
+  `--index-jobs` and `--restore-jobs` (index and constraint builds in
+  parallel), `--large-objects-jobs` / `--skip-large-objects`,
+  `--use-copy-binary`, `--skip-vacuum`, `--skip-analyze`,
+  `--estimate-table-sizes`, `--skip-split-by-ctid`, `--skip-extensions`
+  / `--skip-collations` / `--skip-db-properties`, `--no-role-passwords`,
+  `--fail-fast`, `--restart`, `--requirements`, `list progress` and
+  `--summary` (its own progress and timing per table for the planner's
+  rates), `stream sentinel get` as a lag reading. The top-up: migkit's
+  facts (`table_facts`, the largest tables, the link's bandwidth) set
+  its jobs and split threshold per run, not defaults.
+* **Debezium** (embedded server): used - incremental and blocking
+  snapshots through the signal channel, heartbeats, read-only mode,
+  `topic.prefix`, tombstones, schema history, `table.include`,
+  `snapshot.mode`, `decimal.handling`. Not used -
+  `skipped.operations`, `column.mask.hash.*` / `column.truncate.*` /
+  `column.include`, `provide.transaction.metadata` (transaction
+  boundaries, which migkit's exact batches could ride on),
+  `snapshot.select.statement.overrides` (row filters at snapshot),
+  `snapshot.locking.mode`, `max.batch.size` / `max.queue.size` /
+  `poll.interval.ms` (sized by migkit's sizing, not left default),
+  `time.precision.mode` / `binary.handling.mode` (aligned to `canon`),
+  `event.processing.failure.handling.mode`, the SMTs (`ExtractNewRecordState`,
+  routing, `MaskField`), `pause-snapshot` / `resume-snapshot` /
+  `stop-snapshot` signals, `log-signal`, the notification channel
+  (snapshot progress as events).
+* The same audit is owed for each of the rest - mydumper/myloader
+  (`--rows`, `--chunk-filesize`, `--innodb-optimize-keys`, `--trx-tables`,
+  `--omit-from-file`, masking functions, `--checksum-all`, `--where`),
+  MySQL Shell, pg_dump/pg_restore (`-j`, `--section`), pgloader,
+  reladiff (bisection depth, `--threads`, `--bisection-factor`,
+  `--materialize`), mongosync (the whole `/start` body: `buildIndexes`,
+  `reversible`, `preExistingDestinationData`, `detectRandomId`,
+  `verification`, `/reverse`, `/progress` lag fields), mongodump
+  (`--oplog`, `--numInsertionWorkersPerCollection`, `--archive`,
+  `--nsFrom/--nsTo`), redis-shake (readers, Lua function, filters,
+  `status_port`), MirrorMaker 2 (offset syncs, checkpoints, ACL and
+  config sync, exactly-once), DSBulk (`schema.splits`, checkpoint and
+  replay, `count` modes, `preserveTimestamp`/`preserveTtl`), CDM
+  (`trackRun`, `autocorrect`, guardrail), clickhouse-backup (diff, RBAC,
+  embedded mode, API callbacks), elasticdump, atlas/liquibase/migra
+  (lint, diff, dry run), sqlglot (transpile, optimize, lineage), the
+  drivers (psycopg3 pipeline and binary COPY, asyncpg
+  `copy_records_to_table`, pymongo raw batches and client bulk_write,
+  confluent-kafka transactions, valkey-glide batches). The research
+  reports under `docs/research/` list each tool's full surface; the
+  audit turns each into a table of used / unused / topped-up, kept like
+  `capabilities.matrix`, and a feature not used has a reason written
+  (measured slower, unsafe, or not yet).
+
 **0. Choose per table, from measured facts, and combine.**
 
 *Started (2026-09-24):* `migkit/planner.py` makes one decision per table,
@@ -2154,6 +2375,53 @@ without a server. It still waits for an x86 runner to be run for real.
 
 ---
 
+### Audited again 2026-09-27 against every memory note
+
+Every open item in the project's memory was grepped against this file
+and the code. Most were already here or already built (the MySQL bulk
+path's password off argv, options read from the program's `--help`,
+`--omit-from-file`, the truncate with key checks off, `_all_tables`, the
+target's database name on the load; users compared and created on every
+engine; the publication made idempotently; `system.*` collections left
+out; NULL against empty string; consumer-group lag parity; the state
+store). What was still nowhere:
+
+* **Partition coverage.** Measured on a DTS leg: the current month's
+  partitions (`order_items`, `orders`, `order_status_history`,
+  `packages_2026_08`) arrived with 0 rows while the parents' totals
+  looked plausible. `check` compares each partition (child table) of a
+  partitioned table by its own count and digest, names a partition the
+  target has but empty where the source's is not, and a partition the
+  target lacks; the same for MySQL partitions (`information_schema
+  .partitions`). Folds into A5.
+* **The slot before the snapshot, proved.** The rule from the RDS legs:
+  the change slot is made first and the copy's snapshot exported from
+  the slot's own transaction (`CREATE_REPLICATION_SLOT ... EXPORT_SNAPSHOT`),
+  never a snapshot then a slot - the gap between them is silent and
+  unrecoverable, counts do not catch it, only content hashes do. Held by
+  a property test: writes interleaved at every point between slot,
+  snapshot, copy and tail, and the target still ends equal. Every engine
+  with a position (MySQL's binlog position under the same lock as the
+  consistent read, Mongo's resume token before the first read) under the
+  same test.
+* **Uniform time shift and type narrowing on MySQL.** #22 of the smart
+  check work: the PostgreSQL deep checks for a constant per-row epoch
+  delta (a systematic tz bug) and for a target column narrower than the
+  source's are to be confirmed as ported to MySQL (the code carries the
+  words; the tests must show the MySQL findings by name).
+* **An online rewrite's working tables.** `drift.transient` knows
+  gh-ost's and pt-osc's names; pg_repack's (`repack` schema, `log_*`
+  tables and its triggers) and MySQL Shell's are added, so a table being
+  rewritten under the tail is neither copied nor reported.
+* **`schema_authority: atlas` needs an alias shape** (4-จ from the old
+  queue): how the hop names the authority's own alias for a table the
+  hop renames; open, small.
+* **reladiff as a rung, not a default:** it has no jsonb rendering and
+  breaks on Python 3.14; the decision engine keeps it for the pairs it
+  proves on and says why it was not used elsewhere (0f).
+* **Waiting on the owner (unchanged):** the PyPI upload and whether the
+  name `migkit` is free; a brew tap.
+
 ## Where the paid tools and the clouds still lead (added 2026-09-24)
 
 From the comparison against GoldenGate + Veridata, Qlik Replicate, Striim,
@@ -3463,6 +3731,76 @@ the target and goes on after a batch it had committed (measured with a
 failpoint between the commit and the saved position: added once).
 Still to: MariaDB `skip_replication`, tagged GTIDs, many-node topologies.
 
+**Decided 2026-09-27 (the owner: "the smartest way, a ladder of our own
+if that is what it takes"): how migkit's own writes are told apart is a
+ladder, climbed per side, proved end to end before it is trusted.** The
+table is the bottom rung, not the design. Two things a rung can give:
+*apart* (the tail reading that side leaves migkit's transactions out) and
+*exact* (the target itself says which batch it last committed, so a batch
+is never applied twice - what counters need, `exact`). Per side:
+
+* PostgreSQL:
+  1. **A replication origin of migkit's own**
+     (`pg_replication_origin_session_setup`, the batch's position handed
+     to `pg_replication_origin_xact_setup`): apart *and* exact - the
+     origin's progress is the last committed batch, the very machinery a
+     subscription uses. Grantable from 16, superuser before. The reader
+     leaves out what carries an origin (server-side `origin = none` from
+     16; the origin message in the stream before that).
+  2. **A transactional logical message first in the transaction**
+     (`pg_logical_emit_message(true, 'migkit', ...)`): apart, any user,
+     no table, one WAL record a transaction; decoded from 14. Exact only
+     with the table's batch mark beside it.
+  3. **The table** (`migkit_origin`, any version, needs CREATE): apart
+     and exact.
+* MySQL and MariaDB:
+  1. **A GTID of migkit's own**: MySQL 8.3+ tagged GTIDs
+     (`gtid_next = 'UUID:migkit:n'`, migkit's own UUID, n the batch
+     number, `TRANSACTION_GTID_TAG`): apart by the tag, exact because
+     `gtid_executed` names the batches committed. MariaDB: a
+     `gtid_domain_id` of migkit's own plus `gtid_seq_no` (SUPER): the
+     same two things.
+  2. **MariaDB `skip_replication`** (SUPER; the flag in the event header,
+     read by the reader): apart only.
+  3. **A comment on every applied statement**, read back from the
+     rows-query or annotate event: apart only, and only where the server
+     already logs them (`binlog_rows_query_log_events`,
+     `binlog_annotate_row_events`) - migkit changes no server setting.
+  4. **The table**: apart and exact.
+
+The rule: the highest rung the side's version and the tail's grants
+allow; a hop with counters (`exact`) skips a rung that is apart only. Then
+the proof, before anything is applied: the tail writes one probe
+transaction on that side through the chosen rung, reads that side's log
+from just before it with its own reader, and must see the probe come
+back marked as migkit's own - a rung that does not prove itself is said
+and the next one down is tried. The rung chosen is written in the tail's
+token so a restart keeps it, both directions may sit on different rungs,
+and `doctor` names each side's rung and footprint (the table, where it
+is the rung, and the two-way teardown drops it). Measured in docker per
+version and grant before any rung is claimed: PostgreSQL 13/14/16,
+MySQL 8.0/8.4, MariaDB 11 - what pymysqlreplication and migkit's own
+pgoutput decoder deliver of tags, flags, origins and messages.
+
+**The owner's rule for the order of the rungs (2026-09-27): what wins is
+what is measured faster, checks better and holds up better - the
+footprint is the tie-breaker, not the ranking. If the table rung proves
+faster or steadier than a tag on some version, the table is the top rung
+there, and that is fine.** So the ladder is not ordered by taste but by
+three measurements a rung must pass, per engine version, in docker
+before it is ranked: (1) the applier's rate with the rung on against
+the rung off (`bench/run.py`, transactions a second and the cost a
+transaction of the mark, the tag or the origin call); (2) the reader's
+rate and what it must decode to leave a transaction out (server-side
+filtering counts for it); (3) the failure battery of R7 run under the
+rung - the connection lost at commit, the tail killed between apply and
+save, the target failed over, the tail restarted from an old token - with
+zero changes carried back and every batch applied exactly once. A rung
+that fails (3) is not a rung, however fast. What no other tool does, and
+this must: choose per side from those measurements, prove the choice
+with a probe before applying, keep every batch exact on every rung a
+counter hop uses, and change no setting on either server.
+
 ### R4. Avro, schema registries, MSK sign-in (done 2026-09-27, but the
 MSK handshake)
 
@@ -4122,6 +4460,108 @@ To build, in the order they pay:
    with per-column guards for the known losses.
 7. **confluent-kafka** in place of kafka-python, lz4 or zstd on produce.
 
+### R19. Faster than the fastest, without giving up a row (added
+2026-09-28, the owner: "can we beat them with logic, technique or
+process, at no cost to correctness or idempotence?")
+
+Yes, on both the bulk and the changes, and none of it is a new way to
+write rows faster than the server can - it is work not done, bytes not
+sent, round trips not made, and verification done while it is nearly
+free. Each lever names why it is faster, why nothing is lost, and what
+it is measured against before it is claimed.
+
+**Bulk**
+
+1. **Physical where the source allows it, logical everywhere else.** A
+   base backup (`pg_basebackup` with server-side zstd and streamed WAL,
+   MySQL's `CLONE INSTANCE FROM` 8.0.17+, XtraBackup, Mongo's file
+   snapshot with `--oplog`) copies the pages, indexes included - no row
+   decode, no index rebuild, no verification of rows needed for the
+   bulk (block checksums prove the pages). Then the tail from a slot
+   made *before* the backup, fast-forwarded to the backup's own end
+   position (which the restored target knows: its control file's
+   checkpoint, the clone's `gtid_executed`, the oplog's last entry), so
+   nothing is applied twice and nothing is missed - exact. Where the
+   cloud gives a storage snapshot (an RDS snapshot copied across
+   accounts, an Aurora clone, an EBS or ZFS snapshot), the same, and a
+   terabyte lands in minutes. A rung of the decision engine, chosen only
+   when the same major version and the privilege are there
+   (`REPLICATION`, `BACKUP_ADMIN`); refused, not guessed, on a managed
+   source that blocks it. Measured against pgcopydb on the same pair.
+2. **Bytes not sent.** The relay beside the source reads the rows there
+   and sends them compressed (zstd, built; 3-5x fewer bytes on ordinary
+   rows), and several TCP legs on a long link (built) - where the
+   source's egress or the link's window is the limit, as it was for
+   PeerDB's 150 MB/s, that limit moves by the compression ratio. Binary
+   COPY, not text, on both ends (pgcopydb sends text unless asked).
+   Measured against pgcopydb over a link with RTT and loss added.
+3. **Rows not copied.** A run after a rehearsal, a retry after a stop
+   or a re-sync before cutover copies only the ranges whose digest
+   differs (built for the copier and the bulk paths): the others re-do
+   the full load. Extended to the physical rung by page-level
+   comparison where the engine exposes page checksums.
+4. **Verification while it is nearly free.** A range's digest is read
+   on the target right after its COPY, while its pages are still in the
+   cache, and on the source from the same rows just read - so verifying
+   as it lands costs a fraction of verifying after, which is what
+   Veridata, DVT and `pgcopydb compare` do, cold. Measured: verify-as-
+   it-lands against verify-after on the same table.
+5. **Parallelism that does not collapse.** Workers grown while rows a
+   second rises and cut back on the source's own stress (built, R1);
+   pgcopydb and MySQL Shell run a fixed number of jobs, which on a
+   shared server is either too few or the cause of its own slowdown.
+   Per table, the split by key quantiles or ctid so no worker idles on
+   a short table while one carries a long one (built). Indexes deferred
+   only where measured faster (PostgreSQL), built in parallel while
+   later tables still copy, loaded in key order where the engine
+   rewards it (MySQL).
+6. **LOAD DATA LOCAL made safe.** Measured 36% faster on MySQL and set
+   aside because `local_infile` lets the server ask the client for any
+   file. The client answers only with the chunk migkit prepared and
+   refuses every other name - the same guard MySQL Shell's copy uses -
+   so the 36% is taken.
+
+**Changes**
+
+7. **The writer beside the target, the reader beside the source** (R17d).
+   The tail's apply runs on an agent next to the target and receives
+   whole batches compressed; the reader runs next to the source. Each
+   side talks to its database at LAN latency, and the RTT of the link
+   is paid once a batch instead of once a statement - which is what
+   DMS's single replication instance pays, and why its latency climbs
+   with distance. Exactness unchanged: the batch's mark and number
+   travel with it.
+8. **Changes not applied.** During the copy, a change to a key in a
+   range not yet copied is dropped - the copy will read that row's
+   later state anyway - and only changes to ranges already copied are
+   applied (Netflix's DBLog watermark, Debezium's incremental snapshot
+   buffer; migkit's interleaving invariants are already held by
+   `test_a_copy_and_its_changes_interleave_safely.py`). On a write-heavy
+   source this removes most of the apply work of the catch-up phase.
+   Correct because a range is copied as it is when read and every
+   change after that read is applied.
+9. **Decoding off the Python thread.** Measured before it is built
+   (R2.6): where the reader's decode is the ceiling, a compiled sidecar
+   (go-mysql for binlogs, pglogrepl for WAL) hands migkit neutral
+   records as Arrow batches; the tail's logic, marks and exactness stay
+   in migkit. Debezium decodes in Java; a Python decoder cannot match it
+   at the highest rates.
+10. **Round trips removed on the statement path.** psycopg3's pipeline
+    mode and binary COPY for the runs too small for the staging path
+    (100 statements at 300 ms RTT: 30 s to 0.3 s, per its docs); on
+    MySQL, the staging path through the safe LOAD DATA of lever 6 and
+    `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`.
+11. **Exact batches make idempotence cheaper, not dearer.** Because the
+    target says which batch it last committed (R3), the tail after a
+    stop resumes after it instead of replaying a window of changes it
+    cannot tell apart - less work on every restart, and the only design
+    among those compared where a counter survives a restart.
+
+None of these lowers what is verified: every lever keeps the range
+digest, the fenced re-check and the exact batch; the physical rung adds
+block checksums under them. Order: 6, 8, 10 (small, measurable now),
+then 4 and 2's binary COPY, then 1 (the largest gain), then 7 and 9.
+
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
 Pushed **without the full suite run** (the owner's call, out of tokens):
@@ -4129,15 +4569,33 @@ everything since `1da6415` (the R-items marked done above, the fixes after
 the last full suite, the follow plan worded in migkit's own terms, and the
 R3 counters). The last full suite (before the last of these) was 2244
 passed / 28 failed; the deterministic failures were fixed, the rest were
-load-timing ones that pass alone. **First thing next round: the full suite
-once, and fix what it finds.** The research passes below were stopped
-before any result came back; rerun them. Rule from the owner: implement
+load-timing ones that pass alone. **The full suite runs once, at release** (the owner's rule, for
+speed); until then each change runs only the tests it touches. The research passes below were stopped
+before any result came back; rerun them. One earlier pass did finish: MongoDB's tools (mongosync, migration-verifier, the dump tools, MongoShake, dbHash, pymongo raw batches) in `docs/research/mongodb-tools-2026-09-27.md`, and Redis/Valkey's (RedisShake, RIOT/RIOT-X licence, RDB parsers and the Redis/Valkey format split, DUMP/RESTORE, redis-full-check's rounds, what managed services block) in `docs/research/redis-tools-2026-09-27.md`, and Kafka's (MirrorMaker 2's offset syncs and checkpoints, KIP-1279, Replicator, the Redpanda migrator's offset translation by a header, Python clients, partitioner and transaction pitfalls) in `docs/research/kafka-tools-2026-09-27.md`, and Cassandra/Scylla's (DSBulk, CDM, ZDM proxy, scylla-migrator, sstable loading, commitlog and Scylla CDC, WRITETIME/TTL rules, counters) in `docs/research/cassandra-scylla-tools-2026-09-27.md`, and DynamoDB, files and lakes, generic pipelines and vector/graph notes (export and import to S3 and their silent failures, rclone, s5cmd, S3 checksums, DuckDB, pyarrow, pyiceberg, delta-rs, Redpanda Connect/bento, Airbyte and Singer licences, dlt) in `docs/research/dynamodb-lakes-pipelines-2026-09-27.md`, and the published throughput of DMS, both DTS products, pgcopydb, MySQL Shell, mydumper, TiDB Lightning (GoldenGate, Qlik, Vitess, mongosync and pg_dump -j publish none) in `docs/research/throughput-published-2026-09-27.md`, and ClickHouse and Elasticsearch/OpenSearch's (clickhouse-backup, remote() copies and their dedup and retry rules, BACKUP/RESTORE, part hashes only comparable after a physical copy, PeerDB now AGPLv3, elasticdump, Migration Assistant's reindex-from-snapshot and leases, remote reindex, snapshot compatibility, CCR, the Python clients) in `docs/research/clickhouse-opensearch-tools-2026-09-27.md`, and the published rates of the change and load tools (PeerDB, Artie, Estuary, Fivetran/HVR, ConnectorX, dlt, ADBC, DuckDB's scanner, ClickHouse remote()) and of each load technique (COPY vs INSERT, COPY FREEZE, parallel index builds, LOAD DATA, deferred indexes hurting MySQL, zstd, TCP window and loss) in `docs/research/throughput-cdc-techniques-2026-09-27.md`, and the security of 18 open-source tools, factor by factor (TLS, secrets, files at rest, footprint and grants, audit, masking, network, RBAC, supply chain, FIPS), with twelve practices to take from them, in `docs/research/security-oss-tools-2026-09-27.md`, and the security of the managed and commercial services (DMS, Google DMS/Datastream, Azure, Alibaba and Tencent DTS, GoldenGate, Qlik, Fivetran, Striim, Debezium, Airbyte, Estuary) with twelve practices worth copying, in `docs/research/security-managed-tools-2026-09-27.md`; none committed yet. Rule from the owner: implement
 everything first, run the suite once, fix once, commit once.
+
+**How migkit is implemented (the owner's rule, 2026-09-27, for this
+project only):** implement to the end; tests are written with each
+feature and run small - only the tests the feature touches, incremental,
+as it lands; when every item is done, the full suite once, and then the
+fixing. Never the full suite in the middle, never a commit that waits on
+it.
+
+**Standing rule for the next round and every round after (the owner,
+2026-09-27):** every program and library migkit wraps is used to the
+fullest - all of its capabilities, not one - and all of them together,
+with migkit's own logic choosing the tool, choosing the capability, and
+pulling out of the combination the best and fastest result - always,
+with the complexity and the intelligence of the choice in migkit, by
+task and by what the task needs, everything wrapped in migkit (0f above:
+the used / unused / topped-up table per tool, a reason for every
+capability left unused, top-ups where migkit's own function gets more
+out of a tool, and any tool or library research finds that adds a
+capability is taken in).
 
 Asked by the owner and still to do, in order:
 
-1. **Research, all of it, before building** (the four passes were started
-   and stopped unfinished to save tokens; rerun them):
+1. **Research, all of it, before building** (the passes on the paid products' mechanisms - GoldenGate, Qlik, HVR, IBM, SharePlex; the CDC/ELT specialists; DTS, TiDB, Vitess, MOLT, Voyager; AWS, Azure, Google, Snowflake - all died on the rate limit before any result, and the four general passes were stopped to save tokens; rerun them all):
    * paid and cloud products (DMS, DTS, Tencent DTS, Google DMS and
      Datastream, Azure DMS, GoldenGate and Veridata, Qlik, Fivetran/HVR,
      Striim, Informatica, IBM IIDR, SharePlex, Airbyte, Estuary, PeerDB,
@@ -4185,13 +4643,23 @@ Asked by the owner and still to do, in order:
 4. The owner's bar for all of it: faster, smarter, deeper and more exact
    than every tool compared, a cutover with no data problem, high
    throughput and strong security.
-5. Then: memory and swap checked, the suite once in `/tmp/migkit-suite`
+5. At release only: memory and swap checked, the suite once in `/tmp/migkit-suite`
    (no `conf/hops.yaml`, `MIGKIT_CONF` an empty file), everything fixed,
    `git diff --cached` scanned, the secrets check, one one-line commit,
    push.
-6. Ask the owner: `migkit_origin` is a table in the application's
-   database, made only where a hop asks for two ways - confirm that is
-   allowed beside the rule that migkit creates nothing on the target.
+6. Decided by the owner (2026-09-27): `migkit_origin`, a table in the
+   application's database made only where a hop asks for two ways, is
+   allowed - the exception to the rule that migkit creates nothing on the
+   target. The same device the others use: GoldenGate's trace table
+   (`ADD TRACETABLE`, a row written first in each applied transaction so
+   the capture on that side leaves the transaction out), Bucardo's and
+   SymmetricDS's own tables on every side, Estuary's watermarks table,
+   the DTS products' helper schemas. Where a side can tag its own
+   transactions instead (GoldenGate's `EXCLUDETAG`, PostgreSQL 16's
+   origin filter, MariaDB `skip_replication`, MySQL 8.3+ tagged GTIDs),
+   R3 still prefers the tag, chosen per target, and the table is the
+   fallback. Still to: the two-way teardown drops the table, and `doctor`
+   names it as migkit's footprint.
 
 ### Order for this round
 
