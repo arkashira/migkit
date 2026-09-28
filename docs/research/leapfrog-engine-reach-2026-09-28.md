@@ -1,8 +1,14 @@
 # Engine reach: what the paid tools read and write that migkit does not, and the open path to each (research as of 2026-09-28)
 
-Status: IN PROGRESS. Done: 0 (code), 1 (mainframe/IBM i), 2 (warehouses).
-Next: 3 (SAP), 4 (other engines), 5 (SaaS licences), 6 (ranked table).
-This block is rewritten as each lands.
+Status: COMPLETE for sections 0-6. Public sources only; nothing run, no
+database touched. Marked "to verify" where only one secondary source or
+none was found: Exasol and HANA `HASH_SHA256` spelling, Firebird
+`CRYPT_HASH` and its arm64 image, Netezza `hash()` algorithm codes, the
+`nzpy` licence (three sources disagree), the Salesforce Pub/Sub proto
+repo licence, `influxdb3-python` licence (one listing), whether
+ODP-over-OData works on the ABAP trial image, whether the Cosmos vNext
+emulator serves all-versions-and-deletes, ClearScape's current limits.
+The ranking in section 6 is a judgement, argued in its preamble.
 
 Scope: backlog W5 (sources the paid tools read), item 33 (targets that are
 not databases), F5 (Oracle/SQL Server/Db2 engine facts). Not repeated here:
@@ -134,9 +140,10 @@ cassandra; sybase/sap-ase -> ase.
 
 ### 1.4 Design for migkit
 
-* **`db2` gains a platform** (`platform: luw | zos | i`), read from
-  `SYSIBM.SYSDUMMY1`/`GETVARIABLE('SYSIBM.PLATFORM')`-style probes at
-  connect. Same `DbapiRows` read/write. **S.**
+* **`db2` gains a platform** (`platform: luw | zos | i`), declared by the
+  endpoint and confirmed at connect from the server's product id (the
+  DRDA/CLI server-info the driver reports; exact probe to fix against a
+  server). Same `DbapiRows` read/write. **S.**
   * Connect: `ibm_db` for LUW and z/OS (SQL1598N turned into "this needs
     Db2 Connect: a licence file or server activation, the operator's");
     for IBM i, ODBC (native on macOS arm64) or Mapepire when `ibm_db`
@@ -249,7 +256,7 @@ only what that report lacks is here.
 | **SAP HANA** | `hdbcli` - **SAP Developer Licence, no redistribution** (install from PyPI by the operator, never bundled or baked into an image) | `executemany` array insert; `IMPORT FROM` CSV server files; no client bulk API | transaction + mark | `HASH_SHA256(<varbinary>)` (to verify on a server) | `saplabs/hanaexpress` (HANA 2.0 SPS08, Jul 2025 build 2.00.088; amd64 only; 32 GB memory cap; free licence incl. production); **HANA Cloud free tier** (16 GB, 1 vCPU, 80 GB; stopped nightly, deleted after 30 days unstarted; BTP trial 90 days) |
 | **Databricks / Delta** | `databricks-sql-connector` - Apache-2.0; `deltalake` (delta-rs) - Apache-2.0 | `COPY INTO` from cloud storage (idempotent: files already loaded are skipped even if changed; `force` disables); delta-rs writes Parquet + log directly | **Delta `txn` action**: `CommitProperties(app_transactions=[Transaction(app_id, version)])` in delta-rs, `txnAppId`/`txnVersion` in Spark; the log keeps the latest version per app id; delta-rs leaves the check to the caller (`DeltaTable.transaction_version(app_id)`) - check-then-write is racy with two writers on one app id | `sha2(x, 256)`, `xxhash64`, aggregate with `sum`/`bit_xor` | **Databricks Free Edition** (permanent, since Jun 2025; one 2X-Small serverless SQL warehouse; non-commercial); delta-rs on local disk needs no server at all |
 | **Iceberg** (any engine) | `pyiceberg` - Apache-2.0 | `append`/`overwrite` Arrow tables | **snapshot summary properties** committed atomically with the data (`snapshot_properties={...}`, 0.7.0+): the Kafka Connect Iceberg sink keeps its offsets there; Polars tags each commit with a uuid and skips if a retained snapshot carries it; open pyiceberg bug #4022 (retry after an empty-table overwrite can delete the landed snapshot's manifests) | engine's own | local SQL catalog + file warehouse, no server |
-| **Snowflake** | `snowflake-connector-python` (Apache-2.0); **`snowpipe-streaming`** 1.8.1 (Sep 2026; Rust core; Apache-2.0 classifier; wheels incl. macOS arm64 and Linux aarch64) | stage + `COPY INTO` (64-day load metadata); Snowpipe Streaming high-performance (GA Sep 2025, PIPE object auto-created `<TABLE>-STREAMING`) | **named channel + offset token**: `open_channel(name)` returns the last committed token; replay after it | `HASH_AGG(*)` (order-independent, counts duplicates, stable across scale changes) for same-engine; `SHA2(x,256)` for cross-engine | trial account only (no emulator); LocalStack's Snowflake emulator is commercial |
+| **Snowflake** | `snowflake-connector-python` (Apache-2.0); **`snowpipe-streaming`** 1.8.1 (Sep 2026; Rust core; Apache-2.0 classifier; wheels incl. macOS arm64 and Linux aarch64) | stage + `COPY INTO` (64-day load metadata); Snowpipe Streaming high-performance (GA Sep 2025, PIPE object auto-created `<TABLE>-STREAMING`) | **named channel + offset token**: `open_channel(name)` returns the last committed token; replay after it | `HASH_AGG(*)` (order-independent, counts duplicates, stable across scale changes) for same-engine; `SHA2(x,256)` for cross-engine | trial account only (no open emulator found) |
 | **BigQuery** | `google-cloud-bigquery-storage` (Apache-2.0) | Storage Write API with **Arrow rows** (serialized schema in the first request, record batches after; request < 10 MB) | **COMMITTED stream + row offsets**: `ALREADY_EXISTS` = already written, skip; `OUT_OF_RANGE` = retry from last success; store stream name + offset with the source checkpoint | `BIT_XOR(FARM_FINGERPRINT(TO_JSON_STRING(t)))` same-engine (XOR cancels duplicate pairs: pair with `COUNT(*)`); `SHA256` cross-engine | sandbox (free, no card; 10 GB, 1 TB query/month; tables expire after 60 days; **no DML and no streaming**, so neither delete-then-load nor the Storage Write API can be tested there - a billed project with a spend cap is needed); **`goccy/bigquery-emulator`** v0.8.1 (MIT; multi-arch incl. arm64 since the pure-Go SQL backend; gRPC Storage Write API with COMMITTED/PENDING streams and Arrow; issue #342 "failed to find stream" from a Java client) for the offset logic in CI |
 | **Redshift** | `redshift_connector` (Apache-2.0) / psycopg | `UNLOAD`/`COPY` via S3 | stage table + `MERGE` + mark in one transaction | `FNV_HASH(v, seed)` 64-bit, type-width-dependent (INT vs BIGINT differ), chained per column; no `BIT_XOR` aggregate - sum as `DECIMAL(38)`; `SHA2(x,256)` cross-engine | Redshift Serverless free trial credit; no emulator |
 | **Synapse dedicated / Fabric Warehouse** | `mssql-python` / pyodbc | `COPY INTO` from ADLS/Blob | no load metadata: staging + mark in one transaction | `HASHBYTES('SHA2_256', ...)`; `CHECKSUM_AGG` is XOR-weak | Fabric trial capacity (time-limited) |
@@ -418,3 +425,196 @@ only what that report lacks is here.
   prints the runtime-licence warning and stops unless the operator
   declares a full-use licence. **S.**
 
+## 4. Other operational engines (short, ranked by how often a migration asks for them)
+
+Ranking is a judgement from what the paid tools list first and what the
+clouds push migrations toward; "rides" means an existing migkit engine
+carries it with an alias plus a capability overlay.
+
+| # | engine | reach path for migkit | open client (licence) | change follow | same-engine digest | test bed (arm64 / free CI) | effort |
+|---|---|---|---|---|---|---|---|
+| 1 | **Azure Cosmos DB for NoSQL** (Mongo and Cassandra APIs already ride `mongodb`/`cassandra`) | new engine: parallel reads per feed range; writes by transactional batch per partition key (100 ops), 429 + retry-after honoured as migkit's own backoff | `azure-cosmos` (MIT) | change feed pull model with a continuation token per feed range. **Latest-version mode has no deletes**; **all-versions-and-deletes** (GA Jun 2026, Python >= 4.9.1b1) needs continuous backup on the account and **cannot start from the beginning** - so: take the token *before* the bulk read, and refuse a follow without AVAD unless the app soft-deletes | none cheap (every query costs RUs): in-process digest, system properties (`_rid _self _etag _attachments _ts`) stripped | **vNext Linux emulator** GA Jun 2026, **x64 and ARM64**, NoSQL gateway mode, change feed supported; AVAD in the emulator unknown - test on a real account | **M** |
+| 2 | **TiDB** | target rides `mysql` today; as a source, **binlog is not there** - read TiCDC | PyMySQL etc.; TiCDC (Apache-2.0) | **TiCDC** to Kafka in Debezium/Canal/Avro protocol, consumed by migkit's `kafka` reader into the hetero tail; or TiCDC's storage sink | `ADMIN CHECKSUM TABLE` (CRC64-XOR over KV, what Lightning uses) | `tiup playground` / `pingcap/*` images, arm64 | **S** (alias + TiCDC wiring) |
+| 3 | **YugabyteDB** | rides `postgres` | psycopg; YB's Debezium fork | **PG replication protocol with `pgoutput`/`yboutput` slots** since 2024.1.1 (labelled EA in current docs). YB LSNs are **not byte offsets** and are not comparable across slots - migkit's LSN arithmetic and fence must not assume PG semantics; no DDL between slot creation and end of snapshot; table-rewriting DDL streamable only from 2026.1 | PG `md5`/`sha256` | `yugabytedb/yugabyte` image | **S-M** |
+| 4 | **Aurora DSQL** (target, newly common) | rides `postgres` with a hard overlay: **3,000 rows and 10 MiB per write transaction**, one DDL per transaction and no DDL+DML mix, Repeatable Read only, 5-minute transaction cap, no TRUNCATE (DELETE), `CREATE INDEX ASYNC`, no triggers/PL/pgSQL/extensions/temp tables; sequences and identity since Feb 2026 (use large CACHE), foreign keys since Aug 27 2026 (CASCADE counts toward the 3,000) | psycopg + IAM token | **no logical replication**; **DSQL CDC (GA Jul 8 2026) to Kinesis**, one net record per changed row per transaction - migkit's `kinesis` engine as the reverse leg's reader | PG functions | AWS only (free-tier allowance) | **S-M** (batch clamp is the work) |
+| 5 | **Google Cloud Spanner** | new engine; PG-dialect databases could ride `postgres` through PGAdapter (Java) for reads | `google-cloud-spanner` (Apache-2.0) | **change streams** (`READ_<stream>` partitions that split/merge - the hard part); commit timestamp = fence | `SHA256`, `FARM_FINGERPRINT` + `BIT_XOR` at one read timestamp | **emulator** 1.5.x, x86 **and arm64**, change streams supported (emulator crashes on `ALTER CHANGE STREAM ... SET FOR` after a tracked column is dropped, #371); in-memory, no auth | **M-L** |
+| 6 | **CockroachDB** | rides `postgres` for reads/writes (`COPY`, `IMPORT INTO`) | psycopg | **changefeeds** (sinkless `EXPERIMENTAL CHANGEFEED FOR` to the SQL client, or Kafka/webhook sinks) with **resolved timestamps** as the fence; no `pgoutput` | `SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE ... AS OF SYSTEM TIME` (documented for PCR; hits "integer out of range" in 26.x tests) | `cockroachdb/cockroach` arm64; **not open source** (BSL since 2019, Core retired Nov 18 2024; Enterprise Free <US$10M revenue, telemetry mandatory) | **S-M** |
+| 7 | **TimescaleDB** | rides `postgres`; hypertables are chunk child tables | psycopg | logical replication of hypertables goes through chunks; compressed chunks (Timescale Licence, not Apache) are not decodable by logical decoding - decompress or copy by time range | PG functions | `timescale/timescaledb` arm64 | **S-M** |
+| 8 | **Couchbase** | new engine: KV get/upsert by key, SQL++ for scans | Python SDK (Apache-2.0) | **DCP** through the Kafka connector (`kafka-connect-couchbase`, Apache-2.0; works on CE) into the `kafka` reader; no maintained Python DCP client | in-process | official image arm64; server is **BSL 1.1** (source) / CE licence (<= 5 nodes, 4 cores/node, no XDCR); EE free for dev/test | **M** |
+| 9 | **Firestore** | MongoDB-compatible Enterprise edition (GA Aug 2025; mongodump/mongorestore supported) rides `mongodb`; Native mode needs its own engine | `google-cloud-firestore` (Apache-2.0) | Mongo-compat: change streams (Preview, created in the console with a retention); Native: no change log (listeners only) | in-process | Firestore emulator (Java 21; `--edition=enterprise`); Mongo wire in the emulator unconfirmed | **S** (compat) / **M** (native) |
+| 10 | **Informix** | new engine on ODBC/`ibm_db` (DRDA) | IBM drivers | server's free CDC API (`syscdcv1`), Java client only (Debezium Informix connector) | in-process | x86 image only (see `oracle-mssql-db2` s.5) | **M-L** |
+| 11 | **Progress OpenEdge** | new engine over the SQL broker (ODBC, DataDirect driver shipped with OpenEdge) | pyodbc + licensed driver | **OpenEdge CDC** is a **licensed add-on** (or Advanced Enterprise): `_Cdc-Change-Tracking` ordered by `_Change-sequence` plus per-table change tables, read by SQL, consumer deletes by sequence range | in-process | no free image; ABL data can overflow SQL widths (`dbtool` fixes), `DATETIME-TZ` errors through SQL | **M** |
+| 12 | **SAP ASE / Sybase IQ** | ASE exists; IQ needs the SQL Anywhere client (`sqlanydb` wrapper over a proprietary library) | - | none open (RepAgent is licensed) | ASE `hashbytes`; IQ in-process | none free | IQ **M**, low value |
+| 13 | **Neo4j** | backlog R16c (deferred) | `neo4j` driver (Apache-2.0); server Community GPLv3 | **CDC (`db.cdc.query`) only in Enterprise / Aura Virtual Dedicated Cloud**, needs `txLogEnrichment` DIFF/FULL; bulk `neo4j-admin import/load` bypass it | in-process over canonical node/edge text | official image arm64; Enterprise eval licence for CDC | **M-L** |
+| 14 | **InfluxDB** (1.x/2.x to 3) | new engine: SQL over Flight into Arrow; writes as line protocol (series + timestamp is the natural upsert key, so replays land on themselves) | `influxdb3-python` (Apache-2.0 per listing); server 3 Core **MIT/Apache-2.0** (5-database limit, no compactor) | none | in-process | `influxdb:3-core` arm64 | **M** |
+| 15 | **Bigtable / HBase** | new engine: row-key scans, mutations | `google-cloud-bigtable` (Apache-2.0); `happybase` (MIT) over Thrift | Bigtable change streams; HBase replication/WAL are Java | in-process | Bigtable emulator in gcloud; HBase images | **M-L**, low value |
+| 16 | **Vector DBs** (pgvector rides `postgres`; Milvus, Qdrant, Weaviate) | engines per backlog R16: id-keyed scans (`query_iterator`, `scroll`, cursor `after`), upserts by id | `pymilvus` (Apache-2.0), `qdrant-client` (Apache-2.0), `weaviate-client` (BSD-3) | Milvus `milvus-cdc` (Apache-2.0); others none | vectors compared as float32 bytes, never through text; index parameters carried and reported | all arm64 images | **M** each |
+| 17 | **Firebird** | new engine | `firebird-driver` (MIT); server IPL/IDPL (open) | Firebird 4+ replication is log shipping between servers, not a client API: triggers or key-set diff | Firebird 4+ `CRYPT_HASH(x USING SHA256)` (to verify) | official `firebirdsql/firebird` image (arm64 to verify) | **S-M**, low value |
+| 18 | **ScyllaDB Alternator** | rides `dynamodb` with `endpoint_url` | boto3 | **Alternator Streams GA in ScyllaDB 2026.2** (10 s default delay; a PutItem arrives as REMOVE+MODIFY; no Kinesis destination); server source-available since Dec 2024 (free <= 50 vCPU / 10 TB; last AGPL is 6.2.x) | in-process | `scylladb/scylla` image with Alternator port | **S** |
+| 19 | **MariaDB Xpand** | rides `mysql` for reads; **not sold since Oct 2023** - exit migrations only | PyMySQL | - | in-process | none | **S** |
+
+Elasticsearch/OpenSearch already exist (`opensearch.py`).
+
+**Pattern worth building once:** four engines here (TiDB, Couchbase,
+Aurora DSQL, CockroachDB with a Kafka sink) deliver their changes as a
+Kafka or Kinesis stream in a documented envelope. A single "follow a
+change topic in Debezium/Canal/TiCDC/DSQL envelope" reader in the hetero
+tail, with the envelope's own position (TiCDC commit-ts, CRDB resolved
+timestamp, DSQL sequence) as the fence, reaches all of them. **M** once.
+
+## 5. SaaS applications: which open connectors may legally be dependencies
+
+migkit is MIT. A dependency must be under a licence that lets anyone
+redistribute and run migkit, including as a service: MIT, BSD, Apache-2.0,
+MPL-2.0/EPL-2.0/LGPL used unmodified as separate files or libraries.
+AGPL/GPL, ELv2, BSL and proprietary code can at most be **driven** as a
+separate program the operator installs (the rule migkit already applies
+to OpenLogReplicator), never imported, vendored or baked into an image.
+
+| family | licence found | usable as a migkit dependency? |
+|---|---|---|
+| **dlt** core, incl. `dlt.sources.rest_api` (moved into core at 1.0) and `sql_database` | Apache-2.0 | **yes** |
+| **dlt verified sources** (`dlt-hub/verified-sources`: Salesforce, HubSpot, Stripe, Zendesk, Jira, GitHub, Google Sheets, Notion, Shopify, Pipedrive...) | Apache-2.0 (code copied into the project by `dlt init`) | **yes**, pinned and vendored by commit |
+| dltHub paid tiers (`dlthub` package), dltHub AI Workbench/Harness | commercial EULA / "dltHub AI Source Available License" (use outside dltHub services not permitted) | no |
+| Meltano **singer-sdk** | Apache-2.0 | yes |
+| SDK-built MeltanoLabs taps | per tap: `tap-github` Apache-2.0; `tap-salesforce` (MeltanoLabs fork of singer-io) **AGPL-3.0**; `tap-hubspot` Apache-2.0 on PyPI but README text reads like ELv2 | only after reading each LICENSE |
+| **singer-io taps** (Stitch: Salesforce, HubSpot, Stripe, Marketo, Intercom, Klaviyo, Google Sheets, Jira, Shopify...) | **AGPL-3.0** across the org | **no** - drive only, unmodified |
+| `pipelinewise-*` taps | AGPL-3.0 (PyPI badge on one says MIT; the LICENSE file says AGPL) | no |
+| **Airbyte CDK**, PyAirbyte | MIT | yes, but they only matter with connectors |
+| **Airbyte certified connectors** | **ELv2** in `metadata.yaml`: `source-salesforce` (2.9.2), `source-hubspot` (6.9.3), `source-github`, `source-jira` (also `source-postgres`, `source-mysql` per the 2026-09-27 report) | **no** (ELv2 forbids offering as a managed service; not OSI) - drive only; the licence FAQ does not list which connectors are MIT |
+| `erpl`/`erpl-web` (SAP, Dynamics, M365 into DuckDB) | BSL-1.1 | no |
+| vendor SDKs used directly (e.g. Salesforce Pub/Sub API from `forcedotcom/pub-sub-api`'s `pubsub_api.proto` + `grpcio` + Apache Avro) | gRPC/Avro Apache-2.0; the proto repo's licence not confirmed | yes for gRPC/Avro; generate stubs from the proto only after its licence is read |
+
+**Design for migkit (only where a migration, not an analytics feed, is
+the point):**
+* A **`saas` source engine that runs a dlt source in-process** and
+  receives Arrow tables into the hetero writer. A "database" is a
+  configured dlt source; a table is a resource; the key is the
+  resource's `primary_key`; the incremental cursor (dlt state) is the
+  position. **M** for the bridge, **S** per source after that.
+* **Verification without a server digest:** counts from the API's own
+  count endpoints (Salesforce `SELECT COUNT() FROM <object>` per
+  `SystemModstamp` window), then a second extraction by key windows
+  through the in-process digest; values rendered from the source's
+  declared field types, not dlt's inferred ones (dlt's pandas backend
+  loses decimal precision, the 2026-09-27 report).
+* **Salesforce, the most-asked one, has a real change log:** Change Data
+  Capture over the **Pub/Sub API** (gRPC, Avro payloads, `replay_id`
+  not contiguous - store it exactly, never compute; events kept **72
+  hours**; `ManagedSubscribe` (beta) commits the replay id server-side).
+  Bulk through Bulk API 2.0 query jobs. A tail that has been down longer
+  than 72 hours must re-extract by `SystemModstamp` and reconcile - the
+  guard `assess` names. **M.**
+* Everything else stays "not reached" until a migration asks, as W5
+  already says.
+
+## 6. Ranked table
+
+Value = how often a migration that would otherwise buy Qlik, Precisely,
+Informatica, IBM or Fivetran needs it, times how much of the paid tool's
+advantage the open path removes. Effort per section above.
+
+| # | engine | reach today in migkit | best paid tool | open path + licence | test environment | effort | value |
+|---|---|---|---|---|---|---|---|
+| 1 | Snowflake / BigQuery / Databricks-Delta / Iceberg exact loads | sides exist (row DML; BigQuery load job after delete); no staged bulk, no exact-once primitive, no in-server digest | Fivetran, Qlik, Informatica | Storage Write API COMMITTED+offsets (Apache-2.0 client); Snowpipe Streaming channels (`snowpipe-streaming`, Apache-2.0); Delta `txn` via delta-rs (Apache-2.0); Iceberg snapshot properties (pyiceberg, Apache-2.0); SHA-256 digest in SQL | goccy/bigquery-emulator (MIT, arm64); delta-rs/pyiceberg on local disk; Snowflake trial; Databricks Free Edition | M-L | **very high** |
+| 2 | Teradata | none (DVT reaches it for verify only) | Qlik (TPT target, context-column source), Informatica | `teradatasql` (proprietary, free) FastExport/FastLoad via escape functions; MERGE + batch mark; SHA-256 needs a UDF | ClearScape Analytics Experience (hosted, free, limited); Vantage Express VM (UTM on Apple Silicon) | M | **very high** |
+| 3 | VSAM / sequential files with COBOL copybooks (and IMS unloads) | none | Precisely Connect CDC SQData, IBM Classic, Qlik | Cobrix (Apache-2.0, JVM) as second reader; own Python decoder or Stingray (MIT, py>=3.12); `ebcdic` (BSD-2); z/OSMF record mode or FTP `SITE RDW` | fixtures on arm64; GnuCOBOL-written records; MVS 3.8j TK5 on Hercules (QPL) for real VSAM + FTP | M-L | **high** |
+| 4 | Db2 for i (IBM i) incl. journal CDC | none (Db2 engine is LUW only) | Precisely MIMIX/Connect CDC, Qlik, IBM | ODBC (IBM, free, native macOS arm64) or Mapepire (Apache-2.0) or jt400 (IPL-1.0); follow by `QSYS2.DISPLAY_JOURNAL`; `HASH_ROW` digest; Debezium IBM i connector (Apache-2.0) as rung | PUB400 (manual, non-commercial); no emulator | M-L | **high** |
+| 5 | Db2 for z/OS | none | Qlik (R4Z, IFCID 306), IBM IIDR, Precisely | `ibm_db` + **operator's Db2 Connect licence**; `HASH(x,2)`; follow only by timestamp/key-set diff or Debezium ZOS mode (incubating, IIDR licence) | IBM Z Xplore / Z Trial (manual only) | M | high |
+| 6 | Azure Cosmos DB for NoSQL | Mongo and Cassandra APIs ride existing engines; NoSQL none | Informatica, Qlik (via Kafka), Striim | `azure-cosmos` (MIT); change feed (AVAD for deletes, needs continuous backup) | vNext emulator, x64 + ARM64 | M | high |
+| 7 | SAP ECC/S4 application data | none | Qlik (SAP Application), Fivetran HVR, Theobald, SAP SLT/Datasphere | **ODP over OData** via `pyodata` (Apache-2.0) + own delta-token handling; DB-level only with a full-use DB licence; ODP-RFC forbidden (Note 3255746), PyRFC archived | ABAP Cloud Developer Trial (amd64, 16-32 GB; ODP-OData unproved) | M-L | high |
+| 8 | Change-topic follower (TiDB TiCDC, Couchbase DCP connector, Aurora DSQL CDC, CockroachDB changefeeds) | kafka/kinesis readers exist, envelopes not | Qlik, Striim, Fivetran | one envelope-aware reader in the hetero tail; all producers Apache-2.0 or cloud | tiup playground, Couchbase image, CRDB image (all arm64); DSQL AWS only | M once | high |
+| 9 | Aurora DSQL (target) | would ride postgres and fail on the 3,000-row / 10 MiB transaction cap | AWS DMS does not target it (Apr 2026 blog) | postgres overlay: batch clamp, one DDL per txn, `CREATE INDEX ASYNC`, DELETE not TRUNCATE; reverse leg from DSQL CDC via kinesis | AWS | S-M | medium-high |
+| 10 | SAP HANA (as a database) | none | Qlik (trigger/log), Fivetran HVR (log agent), Informatica | `hdbcli` (SAP developer licence, operator installs); `HASH_SHA256`; trigger-based follow only with full-use licence | `saplabs/hanaexpress` (amd64); HANA Cloud free tier | M | medium |
+| 11 | Netezza / IBM PDA | none | Qlik, Informatica, AWS SCT agents | `nzpy` (IBM; licence metadata inconsistent) external tables `REMOTESOURCE 'python'`; `createxid`/`deletexid` follow before GROOM; `hash(x,2)` if toolkit installed | NPS SaaS trial credit only | M | medium (exits) |
+| 12 | Greenplum / Cloudberry / WarehousePG | would ride postgres untested | Qlik, Informatica | psycopg; `gpfdist`; Apache-2.0 forks | `apache/incubator-cloudberry` image | S-M | medium (exits after closure) |
+| 13 | Spanner | none (DVT verifies) | Datastream, Striim, Qlik | `google-cloud-spanner` (Apache-2.0); partitioned reads at a timestamp; change streams | emulator arm64 with change streams | M-L | medium |
+| 14 | YugabyteDB / CockroachDB / TiDB | TiDB target rides mysql; others ride postgres untested | Qlik, Striim, vendor tools | aliases + native CDC (YB pgoutput slots EA; CRDB changefeeds; TiCDC) + native fingerprints (`ADMIN CHECKSUM TABLE`, `SHOW EXPERIMENTAL_FINGERPRINTS`) | all arm64 images | S-M each | medium |
+| 15 | Vertica | generic (verify only) | Qlik, Informatica | `vertica-python` (Apache-2.0) COPY STDIN; `AT EPOCH` consistent reads; `SHA256()` | no CE image any more; x86 CI with `opentext/vertica-k8s` unlicensed | M | medium |
+| 16 | SaaS (Salesforce first) | none | Fivetran, Informatica, Qlik | dlt + verified sources (Apache-2.0); Salesforce Pub/Sub CDC (72 h replay); Singer AGPL and Airbyte ELv2 connectors driven only | Salesforce Developer Edition org (free) | M bridge, S per source | medium |
+| 17 | Couchbase | none | Qlik (via Kafka), Striim | Python SDK (Apache-2.0) + DCP Kafka connector (Apache-2.0) | official image arm64 (server BSL/CE licence) | M | medium-low |
+| 18 | Informix | none | Qlik, Precisely, IBM | ODBC/`ibm_db`; server CDC API via Debezium (Java) | x86 image | M-L | medium-low |
+| 19 | Progress OpenEdge | none | Qlik (via ODBC), Precisely | pyodbc + licensed DataDirect driver; OpenEdge CDC tables (licensed add-on) | none free | M | medium-low |
+| 20 | Exasol | none | Informatica, Qlik (target) | `pyexasol` (MIT) HTTP transport IMPORT/EXPORT | `exasol/docker-db` x86 only | M | low-medium |
+| 21 | Firestore | Mongo-compat rides mongodb | Fivetran | `google-cloud-firestore` (Apache-2.0) | Java emulator | S / M | low-medium |
+| 22 | TimescaleDB, InfluxDB | Timescale rides postgres untested; Influx none | Fivetran, vendor tools | psycopg / `influxdb3-python` (Apache-2.0), line protocol upserts | arm64 images | S-M / M | low-medium |
+| 23 | Vector DBs (Milvus, Qdrant, Weaviate) | pgvector rides postgres | Airbyte (load only), vendor tools | Apache-2.0 / BSD-3 clients; byte-exact vector compare | arm64 images | M each | low-medium |
+| 24 | Neo4j | none (R16c deferred) | vendor tools | `neo4j` driver (Apache-2.0); CDC Enterprise-only | arm64 image | M-L | low |
+| 25 | Bigtable/HBase, Firebird, Sybase IQ, MariaDB Xpand, IMS live | none | Qlik/Precisely (IMS), vendors | see sections 1.2 and 4 | mixed | S-L | low |
+
+**Order that follows from the table** (each item arrives with its
+verification or does not arrive, the backlog's rule):
+1. Exact warehouse loads and the SQL-side SHA-256 digest (row 1): the
+   sides already exist, the test beds are free and run on arm64.
+2. The copybook engine (row 3) and the IBM i platform of `db2` with the
+   journal tail (row 4): the largest paid-tool moats with a fully open
+   path; copybook work needs no server at all.
+3. Teradata (row 2) on the DB-API base with FastLoad/FastExport.
+4. The change-topic follower (row 8), then the aliases it unlocks
+   (rows 9, 12, 14).
+5. Cosmos DB NoSQL (row 6); SAP ODP-over-OData (row 7) once a customer
+   system or a proved trial image exists.
+6. The rest when a migration asks.
+
+## Sources
+
+Mainframe / IBM i
+* Qlik R4Z components: https://help.qlik.com/en-US/replicate/May2025/Content/Global_Common/Content/SharedReplicateHDD/R4Z_Install_Config/r4z-components-and-the-associated-environment.htm
+* Db2 IFCID 0306: https://www.ibm.com/docs/en/db2-for-zos/13.0.0?topic=ifi-reading-complete-log-data-ifcid-0306
+* Db2 z/OS HASH (FL 506): https://www.ibm.com/docs/en/db2-for-zos/12.0.0?topic=functions-hash
+* ibm_db and Db2 Connect licence (SQL1598N): https://github.com/ibmdb/python-ibmdb/issues/888
+* Precisely SQData VSAM/IMS capture: https://docs.precisely.services/docs/sftw/sqdata-webhelp/4.0/en-us/webhelp/HTML/web_vsam.html ; https://docs.precisely.services/docs/sftw/sqdata-webhelp/4.0/en-us/webhelp/HTML/ims_log_reader_capture.html
+* IMS X'99' data capture: https://www.ibm.com/support/pages/ims-99-log-record-creation-when-multiple-ims-change-data-capture-exits-are-coded
+* QSYS2.DISPLAY_JOURNAL: https://www.ibm.com/support/pages/qsys2displayjournal ; HASH_ROW: https://www.ibm.com/support/pages/hashrow-built-function
+* Debezium IBM i connector: https://github.com/debezium/debezium-connector-ibmi ; Debezium 2.6 notes: https://debezium.io/blog/2024/03/06/debezium-2-6-beta1-released/
+* Debezium Db2 ZOS mode: https://debezium.io/documentation/reference/stable/connectors/db2.html
+* JTOpen licence: https://github.com/IBM/JTOpen/blob/main/LICENSE.md ; Mapepire: https://github.com/Mapepire-IBMi/mapepire-python
+* IBM i ODBC: https://ibmi-oss-docs.readthedocs.io/en/latest/odbc/installation.html
+* PUB400: https://www.itjungle.com/2024/03/04/pub400-your-free-ibm-i-playground/
+* Cobrix: https://github.com/AbsaOSS/cobrix ; Stingray: https://pypi.org/project/stingray-reader/ ; MDU: https://github.com/aws-samples/mainframe-data-utilities ; ebcdic: https://pypi.org/project/ebcdic/ ; JRecord/cb2xml: https://github.com/bmTas/JRecord
+* z/OSMF record mode: https://www.ibm.com/docs/en/zos/2.5.0?topic=services-zos-data-set-file-rest-interface ; mvsMF note: https://github.com/mvslovers/mvsmf/issues/361 ; Zowe SDK: https://github.com/zowe/zowe-client-python-sdk
+* Hercules: https://github.com/SDL-Hercules-390/hyperion ; TK5 arm64 image: https://hub.docker.com/r/praths/mvs-tk5 ; ZD&T status: https://community.ibm.com/community/user/question/alternatives-to-zdt-personal-edition-for-individuals-help ; IBM Z Xplore: https://ibmzxplore.ibm.com/
+
+Warehouses
+* teradatasql: https://github.com/Teradata/python-driver ; DVT Teradata UDF: https://github.com/GoogleCloudPlatform/professional-services-data-validator/issues/1314 ; Qlik Teradata context columns: https://help.qlik.com/en-US/replicate/May2022/Content/Replicate/Main/Teradata/set_up_teradata_change_processing.htm
+* ClearScape: https://developers.teradata.com/quickstarts/get-access-to-vantage/clearscape-analytics-experience/getting-started-with-csae/ ; Vantage Express: https://developers.teradata.com/quickstarts/get-access-to-vantage/on-your-local/getting-started-vbox/
+* nzpy: https://github.com/IBM/nzpy ; Netezza hash: https://www.ibm.com/docs/en/netezza?topic=set-hashing-functions-1 ; createxid CDC: https://aws.amazon.com/blogs/big-data/accelerate-your-data-warehouse-migration-to-amazon-redshift-part-7/
+* vertica-python: https://github.com/vertica/vertica-python ; CE discontinued: https://docs.vertica.com/25.3.x/en/getting-started/community-edition-ce/ ; historical queries: https://docs.vertica.com/24.3.x/en/data-analysis/queries/historical-queries/
+* Greenplum forks: https://github.com/apache/cloudberry/ ; https://github.com/warehouse-pg/warehouse-pg
+* pyexasol: https://pypi.org/project/pyexasol/ ; docker-db: https://github.com/exasol/docker-db
+* hdbcli: https://pypi.org/project/hdbcli/ ; HANA express: https://hub.docker.com/r/saplabs/hanaexpress ; HANA Cloud free tier: https://developers.sap.com/tutorials/hana-cloud-mission-trial-1.html ; HVR HANA capture: https://fivetran.com/docs/hvr6/requirements/source-and-target-requirements/sap-hana-requirements/sap-hana-as-source
+* Databricks COPY INTO: https://docs.databricks.com/aws/en/sql/language-manual/delta-copy-into ; Free Edition: https://docs.databricks.com/aws/en/getting-started/free-edition-limitations ; delta-rs idempotent writes: https://github.com/delta-io/delta-rs/issues/3821
+* pyiceberg snapshot properties: https://py.iceberg.apache.org/api/ ; pyiceberg #4022: https://github.com/apache/iceberg-python/issues/4022
+* Snowpipe Streaming SDK: https://pypi.org/project/snowpipe-streaming/ ; channels: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-channels ; HASH_AGG: https://docs.snowflake.com/en/sql-reference/functions/hash_agg
+* BigQuery Storage Write API: https://docs.cloud.google.com/bigquery/docs/write-api-streaming ; sandbox: https://docs.cloud.google.com/bigquery/docs/sandbox ; emulator: https://github.com/goccy/bigquery-emulator
+* Redshift FNV_HASH: https://docs.aws.amazon.com/redshift/latest/dg/r_FNV_HASH.html
+
+SAP
+* Note 3255746 summaries: https://theobald-software.com/en/blog/sap-note-3255746 ; https://docs.matillion.com/metl/docs/tech-note-sap-3255746/
+* Runtime licence restrictions: https://snapanalytics.co.uk/sap-licence-constraints-explainer/
+* PyRFC archive: https://github.com/SAP-archive/PyRFC/issues/372 ; NW RFC SDK: https://support.sap.com/en/product/connectors/nwrfcsdk.html
+* pyodata: https://github.com/SAP/python-pyodata ; ODP OData delta: https://techcommunity.microsoft.com/blog/azuresynapseanalyticsblog/extracting-sap-data-using-odata---part-7---delta-extraction-using-sap-extractors/2865383 ; DeltaLinksOf recovery: https://github.com/DataZooDE/erpl-web/issues/250
+* CDS CDC extraction: https://community.sap.com/t5/enterprise-resource-planning-blog-posts-by-sap/cds-based-data-extraction-part-ii-delta-handling/ba-p/13425761
+* ABAP trial image: https://hub.docker.com/r/sapse/abap-cloud-developer-trial ; https://github.com/SAP-docs/abap-platform-trial-image
+* Cluster tables: https://blogs.sap.com/2018/06/23/myth-and-truth-about-cluster-pool-tables-on-hana/
+* erpl licences: https://github.com/DataZooDE/erpl-web ; https://github.com/DataZooDE/erpl
+
+Other engines
+* Cosmos change feed modes: https://learn.microsoft.com/en-us/azure/cosmos-db/change-feed-modes ; vNext emulator: https://learn.microsoft.com/en-us/azure/cosmos-db/emulator-linux
+* YugabyteDB logical replication: https://docs.yugabyte.com/stable/additional-features/change-data-capture/using-logical-replication/
+* Aurora DSQL: quotas https://docs.aws.amazon.com/aurora-dsql/latest/userguide/CHAP_quotas.html ; CDC GA https://aws.amazon.com/about-aws/whats-new/2026/07/amazon-aurora-dsql-cdc-ga/ ; foreign keys https://aws.amazon.com/about-aws/whats-new/2026/08/aurora-dsql-foreign-key-constraints/
+* Spanner emulator: https://github.com/GoogleCloudPlatform/cloud-spanner-emulator ; issue #371: https://github.com/GoogleCloudPlatform/cloud-spanner-emulator/issues/371
+* CockroachDB licensing: https://www.cockroachlabs.com/docs/stable/licensing-faqs
+* ScyllaDB licence: https://www.scylladb.com/source-available-faq/ ; Alternator Streams GA: https://www.scylladb.com/2026/06/29/scylladb-2026-2/
+* Couchbase BSL: https://www.couchbase.com/blog/couchbase-adopts-bsl-license/ ; editions: https://docs.couchbase.com/server/current/introduction/editions.html
+* Firestore MongoDB compatibility: https://firebase.blog/posts/2025/08/firestore-mongodb-general-availability/
+* Neo4j CDC: https://neo4j.com/docs/cdc/current/
+* InfluxDB 3 Core: https://github.com/influxdata/influxdb
+* OpenEdge CDC: https://docs.progress.com/bundle/openedge-database-change-data-capture/page/Change-Tracking-Table.html
+* MariaDB Xpand: https://www.theregister.com/2023/10/13/mariadb_restructure/
+
+SaaS
+* dlt verified sources: https://github.com/dlt-hub/verified-sources ; dltHub licences: https://dlthub.com/docs/hub/EULA
+* singer-io org (AGPL-3.0): https://github.com/orgs/singer-io/repositories ; MeltanoLabs: https://github.com/orgs/MeltanoLabs/repositories ; singer-sdk: https://sdk.meltano.com/
+* Airbyte metadata: https://raw.githubusercontent.com/airbytehq/airbyte/master/airbyte-integrations/connectors/source-salesforce/metadata.yaml (and source-hubspot, source-github, source-jira) ; licence FAQ: https://docs.airbyte.com/platform/developer-guides/licenses/license-faq
+* Salesforce Pub/Sub API: https://github.com/forcedotcom/pub-sub-api ; durability: https://developer.salesforce.com/docs/platform/pub-sub-api/guide/event-message-durability.html

@@ -2717,6 +2717,59 @@ Licence changes noted: CockroachDB and ScyllaDB are no longer open
 source, Couchbase server is BSL, Greenplum closed (forks Cloudberry,
 WarehousePG), MariaDB Xpand discontinued.
 
+### Leapfrog: a live tail's table set, raw logs, closed capabilities rebuilt (docs/research/leapfrog-live-tail-and-raw-logs-2026-09-28.md)
+
+26 items with an order in the report (start: L7, L2, L8, R1, R7).
+* **L1-L8, the table set and DDL of a running tail.** None of the eight
+  tools does it cleanly (DMS, Qlik, TiDB DM and Debezium stop the task;
+  Vitess cannot add tables; Informatica restarts every subtask; DTS
+  refuses past 10 minutes of lag). migkit: one stream, a state per
+  table; a table added gets its own snapshot and joins at an exact seam
+  while the others keep applying; only the table a DDL touched is
+  parked (its changes spooled to disk so the source's log is not held)
+  and additive DDL is applied at its log position. **L2, correctness:**
+  on PostgreSQL snapshot visibility does not follow commit-LSN order,
+  so "apply every commit after an LSN" can lose a transaction - the
+  seam is decided by xid visibility against the range's
+  `pg_current_snapshot()` (sent to the lever-8 and slot-before-snapshot
+  work). **L7:** every batch, per table, changes read = applied +
+  dropped as superseded + spooled - the check that would have caught
+  TiDB DM dropping rows of added tables (tiflow #12859) and PostgreSQL
+  before 17.5 losing changes on `ALTER PUBLICATION ADD TABLE`.
+* **R1-R9, with and without the engine's change feature:** depths
+  D0-D4 printed by `assess` per table, with the statement that would
+  raise each. R7: lift MySQL's refusal of `MINIMAL`/`NOBLOB`/
+  `PARTIAL_JSON` row images - exact by re-reading the row at the change
+  (small). R9: PostgreSQL at `wal_level=replica` reaches convergent
+  change reading through `pg_walinspect`/`pg_waldump` on the WAL archive
+  (walminer 4 is paid). R2: SQL Server without CT/CDC - restore the
+  source's log-backup chain onto a SQL Server migkit owns and read the
+  log there: no privilege and no setting on the source (`sp_replcmds`
+  needs a published database - not a way round). R4/R5: Oracle without
+  supplemental logging - flashback reads (`AS OF SCN` by ROWID) turn
+  partial updates into full images; NOLOGGING operations detected.
+  Db2 without `DATA CAPTURE CHANGES` reaches only D1 (D2 on
+  undocumented layouts) - said.
+* **C1-C6, closed capabilities rebuilt from open parts:** C1 mongosync's
+  job from 4.0+ sources to any destination, consistent at any moment,
+  the unique-index conversion off the cutover path, and an audit of the
+  users holding `bypassWriteBlockingMode` (the `restore` role) whose
+  writes pass the block; C2 Kafka offsets kept identical from a client
+  for gap-free partitions (pad the empty target partition, then
+  `DeleteRecords`), C3 otherwise an offset map written in the same
+  transaction as the data - exact, against MM2's error of up to
+  `offset.lag.max` plus re-delivery; C4 Redis/Valkey two-site
+  active-active rules (lists and streams refused); C5 XStream's
+  downstream capture as LogMiner on an Oracle Free mining instance
+  migkit owns; C6 RIOT-X's live mode made lossless by a resuming PSYNC
+  client or an `OBJECT IDLETIME` sweep under `CLIENT NO-TOUCH`.
+* **P1-P3, cloud processes without an API:** a mover that scales on the
+  source's own stress and scales down at a range boundary (DMS
+  Serverless waits 60 minutes); seeding from ZFS/LVM/EBS snapshots
+  moving only changed blocks, then fast-forwarded; a zero-ETL-like
+  continuous hop for any source and warehouse, keyless tables and
+  additive DDL without a resync.
+
 ## Where migkit would still lose with every item above done (2026-09-28)
 
 Asked by the owner: once the whole backlog is built, where do the

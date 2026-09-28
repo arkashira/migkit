@@ -22,7 +22,8 @@ a8d572b SQL Server bulk (mssql-python staged) + .github/workflows/x86-engines.ym
 a47bffb Oracle full side (python-oracledb, direct path staged, SHA-256 sum digest, LogMiner reader)
 ae351bc MySQL tools whole (mydumper --rows/--checksum-all, MySQL Shell rung)
 ad4909f R19 lever 1 physical rungs (pg_basebackup + fast-forward, CLONE, RDS/Aurora via boto3/moto)
-Research: ac2ac5c leapfrog conversion; a3888957 leapfrog engine reach
+Research done: leapfrog conversion, leapfrog engine reach (both folded into backlog). Research done: leapfrog live tail + raw logs (folded)
+Running (wave 3): a7120bc warehouse exact loads + SQL digest (ports 16150-16159)
 ## Queued (launch when a slot frees; research first)
 - (launched) research leapfrog live tail + raw logs -> ad9432de
 - Fold the 3 leapfrog reports into backlog before building their items.
@@ -37,3 +38,5 @@ Research: ac2ac5c leapfrog conversion; a3888957 leapfrog engine reach
 - F7 lists per report (RedisShake rung, MM2 + source-offset header + group translation, DSBulk, OpenSearch RFS, DynamoDB export/import, changing a running tail's table set, Kafka offset clamp at cutover, self-stopping tail, types sized from data, SingleStore alias, source-commit timestamp in beat, batches end at COMMIT, changed-columns merge, statistics-based chunk edges, exact batches default one-way, schema-as-of-position decode, warehouse exact loads (Storage Write API, Snowpipe channels), 16 security fixes remaining)
 - R2.5-6, R3 many-node, R10 LOB pieces MySQL, R12 Db2/ASE (x86 CI), R13 cells, R16a vectors, R17d writer beside target, R18 zstd spill/Arrow/Kafka client, DTS gaps, problems Partly, planner speed rules, docs refresh (threat-model stale at-rest)
 - P10 cross-engine workload replay (pt-upgrade style on workload.py) — from leapfrog-conversion
+- Engine reach (after warehouses): copybook engine + IBM i journal follow (ports 16160+), Teradata, change-topic reader (TiDB/Couchbase/DSQL/CockroachDB), Cosmos NoSQL, SAP OData+pyodata, SaaS via dlt/Singer (AGPL ok)/Airbyte ELv2 as programs
+- LIVE TAIL (after watermark a21bbd1 + F6 a3081c8 + two-way a4d532b merge — they own tail_apply/_ReadAhead/token): L1-L8 table set + DDL in a running tail, L7 per-table accounting; R7 MySQL MINIMAL/NOBLOB/PARTIAL_JSON (small, mysql.py neutral_changes); R2 SQL Server log-backup chain on migkit-owned server; R9 PG wal_level=replica via pg_walinspect; R4/R5 Oracle flashback full images (after Oracle agent); C1 mongosync rebuild; C2/C3 Kafka exact offsets; C4 Redis two-site; C5 LogMiner mining instance; C6 lossless Redis live; P1-P3
