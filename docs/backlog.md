@@ -5490,6 +5490,62 @@ on docker pairs with throttled CPU, I/O and network (tc/toxiproxy),
 the binding resource named correctly in each case, and no run slower
 than today's `Pace`.
 
+### R23. What people who migrate actually want, and what is still missing (added 2026-09-29)
+
+Asked by the owner: what does a migration tool people really want look
+like, and what does migkit lack. What they want, in their words: *did I
+lose anything, and can I show it*; *how long, how much downtime, how
+much money - before I start*; *it must not hurt production or my
+target*; *the cutover must not go wrong, and I must be able to go
+back*; *setup without a manual*; *I can see where it is*; *the odd
+things (types, sequences, users, jobs, LOBs) are handled for me*; *the
+application still works and is not slower*; *it runs where my
+databases are*. Most of that is in the items above (verify, R19-R22,
+cutover, R21, types, users, workload). Not yet anywhere:
+
+1. **A sign-off pack per migration:** one human-readable document -
+   what moved, the proof per table (counts and digests both sides), when,
+   how long, the downtime measured, who approved each step, what was
+   left behind and removed - signed with the audit chain, for the
+   owner, the auditor and the application team.
+2. **Rehearse, then forecast:** a goal that runs the whole path on a
+   clone or a sample the operator names, and turns what it measured
+   into the forecast for the real run - time per phase, downtime,
+   bytes, cost - with the confidence of a sample of that size; the real
+   run later compared with its forecast.
+3. **An interlock on the target:** the plan shows each side's identity
+   (cluster id, host, version, size, whether it holds data) and `--go`
+   refuses when the target is the source itself, when it looks like a
+   production system the hop does not name as the target, or when it
+   holds data and the hop has not said what to do with it; the
+   identities are checked again at the start of every write step.
+4. **Performance after a change of engine:** `workload.py` compares the
+   source's own reads on the same engine; after a change of engine the
+   translated workload (P10) is timed too, writes as well as reads, and
+   the target is advised (indexes, statistics, the settings its load
+   needs) before cutover.
+5. **Copies for testing:** a referentially complete subset (the closure
+   of foreign keys from the rows chosen) with masking, into a staging
+   or developer database - the same engine pairs, the same proof of
+   what was copied.
+6. **The runbook for this hop:** generated from the plan - the
+   timeline, who does what (DBA, application team, migkit), the go/no-go
+   checks, the rollback triggers and steps - kept current as the plan
+   changes; `advise` today gives one playbook per service.
+7. **A major-version upgrade as a goal:** `goal: upgrade` - the same
+   engine at a new version with the least downtime, choosing between
+   the in-place upgrade and a logical move by measurement, with the
+   extensions and their versions checked first.
+8. **Working inside the team's tools:** tasks for GitHub Actions, Argo
+   and Airflow, OpenTelemetry traces beside the Prometheus metrics, and
+   Grafana dashboards shipped with the rules (with W2's API and
+   Terraform provider).
+9. **Documentation as part of the product:** a five-minute quickstart
+   for each common pair, a page per engine saying what is carried,
+   what is refused and why, recipes for the usual moves (a managed
+   service to another, on-premises to cloud, one engine to another),
+   in migkit's own words; measured by a new operator following it.
+
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
 Pushed **without the full suite run** (the owner's call, out of tokens):
