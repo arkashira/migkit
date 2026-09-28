@@ -3575,6 +3575,31 @@ class Engine:
         """
         raise self._no_canon("read a change log")
 
+    def snapshot_mark(self, side, db):
+        """What this side has committed and made visible by now, as text a
+        change can be held to (`mark_covers`), or None where the engine
+        cannot say. Taken by the table copier before it reads a range, and
+        kept with the range when it is done (`ranges.finished`).
+
+        Not a log position: a transaction's place in the log is fixed
+        before it is visible to a reader - PostgreSQL writes its commit
+        record, then flushes it, then shows it; MySQL writes its binlog,
+        then commits in the engine - so a read begun after a position was
+        taken can still miss a transaction written before it. And a
+        PostgreSQL change carries the position of the change, not of its
+        commit, so a long transaction's changes sit before a position its
+        commit comes after. The mark is what the server says is visible,
+        which is what the read sees."""
+        return None
+
+    def mark_covers(self, side, db, mark, change):
+        """Whether `change` was committed and visible when `mark` was
+        taken on this side (`snapshot_mark`): True, False, or None where
+        it cannot be said - the change names no transaction, or the mark
+        was taken on another server. Only True lets the tail leave a
+        change out."""
+        return None
+
     def stream_room(self, side, db, token):
         """How much longer the source keeps what a tail at `token` has not
         read yet, before that falls out of its log: `{"seconds": n}` or

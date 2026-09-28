@@ -4968,6 +4968,37 @@ it is measured against before it is claimed.
    source this removes most of the apply work of the catch-up phase.
    Correct because a range is copied as it is when read and every
    change after that read is applied.
+   **Done 2026-09-28**, decided by what the source shows, not by a log
+   position: each range keeps the source's mark taken just before its
+   read (PostgreSQL's snapshot `xmin:xmax:xip` with the cluster it was
+   taken on, MySQL's executed GTID set; `ranges.started`, in the copy's
+   own checkpoint), each change carries its transaction (the decoded
+   xid, the binlog's GTID), and the tail leaves a change out where the
+   marks of every range it touches - both, for a key it moves - show it
+   committed (`hetero._CopiedRanges`, `ranges.already_read`). A position
+   rule loses a transaction logged before the position and shown after
+   the read (PostgreSQL shows commits out of log order; MySQL writes its
+   binlog before the engine commits; a PostgreSQL change carries the
+   position of the change, not of its commit). A range not begun is left
+   to the copy only while the process that planned it holds the move's
+   lease and the source shows the change before the checkpoint is read.
+   Every batch is accounted for per table - read = applied + left out
+   and why - before it is applied (`hetero._Accounts`,
+   `tail-accounts.json`). Held by `test_the_tail_leaves_out_what_the_
+   copy_read.py` (commits shown out of log order; fails on the position
+   rule, on skipping what a mark does not show, on a range taken as read
+   whatever its mark, on a range not begun left to a stopped copy, and on
+   one left to the copy before the source shows the change). Measured,
+   PostgreSQL 16, 200,000 rows in 8 ranges with a writer running: 35-42%
+   of the catch-up's changes left out, the applier busy 0.58s against
+   1.11s; the catch-up's wall clock 7.5s against 9.8s in one run and even
+   in two, reading the log being most of it here (lever 9). MySQL 8.4
+   with GTIDs, 60,000 rows by MySQL's own copier in processes: 205 of
+   661 left out, the target equal, and every change of a transaction
+   larger than a read carrying its GTID whether the reader is held open
+   or started again (`test_a_tail_after_a_mysql_copy_applies_only_what_
+   the_copy_did_not_read.py`). With GTIDs off, or on MariaDB, nothing is
+   left out.
 9. **Decoding off the Python thread.** Measured before it is built
    (R2.6): where the reader's decode is the ceiling, a compiled sidecar
    (go-mysql for binlogs, pglogrepl for WAL) hands migkit neutral

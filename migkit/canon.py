@@ -939,7 +939,7 @@ def ddl_type(engine, cls, numbers=()):
 CHANGE_OPS = ("insert", "update", "delete")
 
 
-def change(op, table, key, values=None, before=None):
+def change(op, table, key, values=None, before=None, txn=None):
     """One change record, checked at the point it is made.
 
     Not a bare dict: an op this file does not know is a log format that
@@ -950,6 +950,11 @@ def change(op, table, key, values=None, before=None):
     with its full row image, a table with REPLICA IDENTITY FULL): what a
     two-way tail holds the target's row to, to tell a row changed on both
     sides from one only this side changed.
+
+    `txn` is the transaction the change committed in, as the source names
+    it (a PostgreSQL xid, a MySQL GTID), where the log says: what the tail
+    holds to the table copier's marks (`Engine.mark_covers`). The tail
+    takes it off before anything is applied.
     """
     if op not in CHANGE_OPS:
         raise ValueError(f"unknown change op {op!r}, expected one of"
@@ -961,6 +966,8 @@ def change(op, table, key, values=None, before=None):
            "values": dict(values or {})}
     if before is not None:
         out["before"] = dict(before)
+    if txn is not None:
+        out["txn"] = txn
     return out
 
 

@@ -154,8 +154,9 @@ def value(declared, raw, quoted):
     return canon.from_text(cls, raw) if cls else raw
 
 
-def change(parsed, keys):
-    """A parsed line as a `canon.change` record, given the table's key.
+def change(parsed, keys, txn=None):
+    """A parsed line as a `canon.change` record, given the table's key -
+    and the transaction it committed in, where the caller read it.
 
     `keys` comes from the catalogue rather than from the line, because the
     line does not always carry one: an UPDATE that did not move the key has
@@ -181,5 +182,6 @@ def change(parsed, keys):
     # FULL); only a key changing is not a row
     before = old if old and set(old) - set(keys) else None
     if parsed["op"] == "delete":
-        return canon.change("delete", table, key, before=before)
-    return canon.change(parsed["op"], table, key, new, before=before)
+        return canon.change("delete", table, key, before=before, txn=txn)
+    return canon.change(parsed["op"], table, key, new, before=before,
+                        txn=txn)

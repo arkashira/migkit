@@ -83,12 +83,12 @@ class Slots:
             raise failed
 
 
-    def each_process(self, items, fn, done):
+    def each_process(self, items, fn, done, begin=None):
         """fn(item) in a process of its own for every item, as many at once
         as the move's slots allow, and done(item, result) here as each
-        finishes - so what finished is recorded even if a later one fails.
-        One that fails starts no more, lets those running finish, and is
-        raised.
+        finishes - so what finished is recorded even if a later one fails;
+        begin(item) here as each is handed over. One that fails starts no
+        more, lets those running finish, and is raised.
 
         The process is `python -m migkit.ranges`, handed `fn` and the item
         on its input: the standard library's own process pools start by
@@ -106,6 +106,8 @@ class Slots:
             if worker is None or not worker.alive():
                 worker = mine.worker = _Worker()
                 kept.append(worker)
+            if begin is not None:
+                begin(item)
             got = worker.run(fn, item)
             done(item, got)
             return got
@@ -219,12 +221,20 @@ def _child():
 active = Slots(1)
 
 
-def plan(st, lo, hi, edges_fn, save):
+def plan(st, lo, hi, edges_fn, save, table=None):
     """The ranges of a table, planned once and kept in its checkpoint
     entry `st` so a run started again copies the same ranges: [(after,
     upto)] still to copy. Rows the source gained past either end since the
     plan was made get a range of their own; a checkpoint written before
-    ranges (`last`, one range at a time) counts what it had done."""
+    ranges (`last`, one range at a time) counts what it had done.
+
+    `table` is the table as the source's change log names it, kept with
+    the process copying it, for the tail (`already_read`)."""
+    import os
+    import socket
+    if table is not None:
+        st["table"] = table
+    st["copying"] = {"host": socket.gethostname(), "pid": os.getpid()}
     if "ranges" not in st:
         st["ranges"] = [list(r) for r in split(lo, hi, edges_fn())]
         st["ranges_done"] = [a for a, u in st["ranges"]
@@ -255,6 +265,60 @@ def finished(st, after, save):
         st["last"] = reach
     save()
     failpoint.hit("range.saved")
+
+
+def started(st, after, mark, save):
+    """A range about to be read: the source's mark taken just before it
+    (`Engine.snapshot_mark`; None where it gave none), saved before the
+    read begins - so a range with nothing kept has not been read."""
+    st.setdefault("ranges_seen", {})[str(after)] = mark
+    save()
+
+
+def already_read(st, values, covers, ahead=False):
+    """Whether a change to the rows keyed `values` is in what the table
+    copier read of the table whose checkpoint entry is `st`, or will be -
+    so the tail leaves it out instead of applying it.
+
+    A range is copied as it is when read, and every change after that
+    read is applied; a change before it is superseded by the read. So a
+    change is left out where every value it touches - its row's key, and
+    the new one where it moves the key - lies in a range that
+
+    * began its read under a mark that covers the change (`covers(mark)`
+      True, `Engine.mark_covers`): what the read wrote holds the change
+      or a later state of the row, a delete included; or
+    * has not begun, where `ahead` says the table's copy is running now
+      and the change was visible before `st` was read: the read comes
+      after it.
+
+    Anything else is applied, as before: a table copied with no ranges
+    (no key, copied whole or in one pass), a value outside the plan (a
+    row the source gained past its ends), a range read under no mark or
+    one that cannot say, a range not begun whose copy is not known to be
+    running - a copy that stopped may never come back to it, and a table
+    copied again some other way is not what this entry says."""
+    import bisect
+    rs = st.get("ranges")
+    if not rs or not values:
+        return False
+    seen = st.get("ranges_seen") or {}
+    for v in values:
+        if not isinstance(v, int) or isinstance(v, bool):
+            return False
+        # asked for every change the tail reads: found by halves, the
+        # plan kept in key order
+        i = bisect.bisect_left(rs, v, key=lambda r: r[0]) - 1
+        if i < 0 or v > rs[i][1]:
+            return False
+        at = str(rs[i][0])
+        if at in seen:
+            if seen[at] is None or covers(seen[at]) is not True:
+                return False
+        elif not ahead or st.get("done") \
+                or rs[i][0] in (st.get("ranges_done") or ()):
+            return False
+    return True
 
 
 def spans_to_copy(st, spans, there, count_of, restart, log, label):

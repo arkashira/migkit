@@ -98,6 +98,25 @@ class _BucketRecord:
 KEEP = object()
 
 
+def holder(path, remote=None):
+    """The record of whoever holds the lease at `path` now - renewed
+    within its term and, on this machine, its process still there - or
+    None. Reads only: nothing is taken or renewed."""
+    if remote is not None:
+        have, _ = remote.read_record(path)
+        if have == _BucketRecord.RELEASED:
+            have = None
+    else:
+        try:
+            have = json.loads(path.read_text())
+        except (OSError, ValueError):
+            have = None
+    if not isinstance(have, dict) or have.get("expires", 0) <= time.time() \
+            or Lease._dead(have):
+        return None
+    return have
+
+
 class Lease:
     def __init__(self, path, what="a write operation", remote=None):
         self.path = path

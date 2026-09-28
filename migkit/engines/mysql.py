@@ -800,7 +800,7 @@ class MySQLEngine(Engine):
                     f" FULL: {why}.\n"
                     f"    set global {name} = 'FULL';   -- self-managed\n"
                     f"    {name}=FULL                   -- parameter group")
-        from pymysqlreplication.event import QueryEvent, XidEvent
+        from pymysqlreplication.event import GtidEvent, QueryEvent, XidEvent
 
         from ..binlog_payload import register
         token = dict(token or {}) or self.change_point(side, db)
@@ -828,7 +828,7 @@ class MySQLEngine(Engine):
         if held and (held["token"], held["where"]) == (token, (side, db)):
             stream, events = held["stream"], held["events"]
             boundary, in_txn, skip = held["boundary"], held["in_txn"], 0
-            keys_of = held["keys_of"]
+            keys_of, gtid = held["keys_of"], held["gtid"]
         else:
             if held:
                 held["stream"].close()
@@ -843,7 +843,7 @@ class MySQLEngine(Engine):
                 only_schemas=[self._d(side, db)],
                 only_events=[WriteRowsEvent, UpdateRowsEvent,
                              DeleteRowsEvent, NotImplementedEvent,
-                             XidEvent, QueryEvent, register()],
+                             XidEvent, QueryEvent, GtidEvent, register()],
                 filter_non_implemented_events=False)
             events = self._row_events(stream)
             boundary = {"log_file": token.get("log_file"),
@@ -854,17 +854,23 @@ class MySQLEngine(Engine):
             # second - one-row transactions at 472 a second left the tail
             # 38 seconds behind when the writer stopped (`bench/run.py`)
             keys_of = {}
+            # the transaction's GTID, which a position at its start reads
+            # again: what the tail holds to the copier's marks
+            gtid = None
         out, skipped, keep = [], set(), False
         try:
             for ev in events:
                 if ev is COMMITTED:
                     boundary = {"log_file": stream.log_file,
                                 "log_pos": stream.log_pos}
-                    in_txn, skip, marked = 0, 0, False
+                    in_txn, skip, marked, gtid = 0, 0, False, None
                     token = dict(boundary)
                     if len(out) >= limit:
                         keep = True
                         break
+                    continue
+                if isinstance(ev, GtidEvent):
+                    gtid = str(ev.gtid).lower()
                     continue
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:
@@ -901,7 +907,7 @@ class MySQLEngine(Engine):
                         vals = self.binlog_names(named, table, row["values"])
                         out.append(canon.change(
                             "insert", table,
-                            {k: vals[k] for k in keys}, vals))
+                            {k: vals[k] for k in keys}, vals, txn=gtid))
                     elif isinstance(ev, UpdateRowsEvent):
                         before = self.binlog_names(named, table,
                                                    row["before_values"])
@@ -912,12 +918,12 @@ class MySQLEngine(Engine):
                         out.append(canon.change(
                             "update", table,
                             {k: before[k] for k in keys}, after,
-                            before=before))
+                            before=before, txn=gtid))
                     else:
                         vals = self.binlog_names(named, table, row["values"])
                         out.append(canon.change(
                             "delete", table, {k: vals[k] for k in keys},
-                            before=vals))
+                            before=vals, txn=gtid))
                 if len(out) >= limit:
                     keep = True
                     break
@@ -952,7 +958,7 @@ class MySQLEngine(Engine):
                 self.__dict__["_binlog_held"] = {
                     "token": token, "where": (side, db), "stream": stream,
                     "events": events, "boundary": boundary,
-                    "in_txn": in_txn, "keys_of": keys_of}
+                    "in_txn": in_txn, "keys_of": keys_of, "gtid": gtid}
             else:
                 stream.close()
         if skipped:
@@ -1067,6 +1073,50 @@ class MySQLEngine(Engine):
         finally:
             stream.close()
         return None
+
+    def snapshot_mark(self, side, db):
+        """The GTIDs the server has executed by now, where it gives each
+        transaction one (`gtid_mode` ON, or ON_PERMISSIVE for those that
+        have one): a GTID joins the set once its transaction has
+        committed in the engine, after its binlog was written - the order
+        Debezium's read-only incremental snapshot holds its watermarks to
+        as well. None where GTIDs are off, and on MariaDB, whose GTIDs are
+        another thing: nothing is then left out."""
+        try:
+            got = self._q(side, "select @@global.gtid_mode,"
+                                " @@global.gtid_executed")
+        except Exception:  # noqa: BLE001 - no GTIDs on this server
+            return None
+        if not got or str(got[0][0]).upper() not in ("ON", "ON_PERMISSIVE"):
+            return None
+        return "".join(str(got[0][1] or "").split()).lower() or None
+
+    @staticmethod
+    def mark_covers(side, db, mark, change):
+        """Whether the change's GTID is in the executed set `mark`:
+        `uuid:1-5:7,uuid2:3`, and from 8.3 `uuid:tag:1-3` - a tag names
+        the intervals after it."""
+        gtid = change.get("txn")
+        if not isinstance(mark, str) or not isinstance(gtid, str):
+            return None
+        parts = gtid.lower().split(":")
+        try:
+            uuid, tag, n = parts[0], ":".join(parts[1:-1]), int(parts[-1])
+        except ValueError:
+            return None
+        for member in mark.split(","):
+            items = member.split(":")
+            if items[0] != uuid:
+                continue
+            now = ""
+            for item in items[1:]:
+                lo, _, hi = item.partition("-")
+                if not lo.isdigit():
+                    now = item
+                    continue
+                if now == tag and int(lo) <= n <= int(hi or lo):
+                    return True
+        return False
 
     def change_point(self, side, db):
         """Where the binlog is now, as the token `neutral_changes` resumes
@@ -5180,7 +5230,8 @@ class MySQLEngine(Engine):
                     "src", db, ranges.bounds_sql(
                         self._quote_ident, f"`{db}`.`{t}`", intpk, every,
                         rf))]
-            todo = ranges.plan(st, lo, hi, edges, ck.save) if has else []
+            todo = (ranges.plan(st, lo, hi, edges, ck.save, table=t)
+                    if has else [])
             # a connection each: a range copied beside another holds its
             # own transaction on the target
             local = threading.local()
@@ -5190,6 +5241,8 @@ class MySQLEngine(Engine):
                 if not hasattr(local, "conns"):
                     local.conns = (self._conn("src"), self._conn("dst"))
                     opened.append(local.conns)
+                ranges.started(st, after, self.snapshot_mark("src", db),
+                               ck.save)
                 rng_sql = (f"`{intpk}` > {int(after)} and `{intpk}` <="
                            f" {int(upto)}")
                 sent = self._range_checked(
@@ -5224,7 +5277,10 @@ class MySQLEngine(Engine):
                             f" {len(st['ranges'])} ranges)")
                     slots.each_process(
                         [(hop, db, t, intpk, a, u, rf, key) for a, u in todo],
-                        _copy_my_range, done)
+                        _copy_my_range, done,
+                        lambda item: ranges.started(
+                            st, item[4], self.snapshot_mark("src", db),
+                            ck.save))
                 else:
                     slots.each(todo, one)
             finally:

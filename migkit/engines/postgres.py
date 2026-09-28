@@ -1376,8 +1376,11 @@ class PostgresEngine(Engine):
         # stayed at the last change, and on a quiet database never did.
         upto = self._psql(side, target, "select pg_current_wal_lsn()"
                           ).strip()
+        # each change with its transaction's xid, for the tail to hold to
+        # the marks the table copier kept (`mark_covers`)
         rows = self._psql(side, target,
-                          "select lsn::text || chr(31) || data from"
+                          "select lsn::text || chr(31) || xid::text"
+                          " || chr(31) || data from"
                           f" pg_logical_slot_peek_changes('{name}',"
                           f" '{upto}', {int(limit)})")
         out, last = [], token
@@ -1388,6 +1391,7 @@ class PostgresEngine(Engine):
         marked = False
         for line in rows.splitlines():
             lsn, _, data = line.partition("\x1f")
+            xid, _, data = data.partition("\x1f")
             parsed = pgslot.parse_line(data)
             last = lsn or last
             if data.startswith("BEGIN"):
@@ -1416,11 +1420,72 @@ class PostgresEngine(Engine):
                         f"    select pg_replication_slot_advance('{name}',"
                         " pg_current_wal_lsn());"
                         "  -- skips everything pending, including this")
-            out.append(pgslot.change(parsed, keys[table]))
+            out.append(pgslot.change(parsed, keys[table],
+                                     int(xid) if xid.isdigit() else None))
         if len(rows.splitlines()) < int(limit) and upto and (
                 last is None or self.position_reached(upto, last)):
             last = upto
         return out, last
+
+    def snapshot_mark(self, side, db):
+        """The server's snapshot now, `xmin:xmax:xip,...` (PostgreSQL 13's
+        `pg_current_snapshot`, `txid_current_snapshot` before it), after
+        the server it was taken on (`_marked_on`): every transaction it
+        shows committed is visible to any read begun after it, which is
+        what a range copied from here reflects."""
+        on = self._marked_on(side, db)
+        for fn in ("pg_current_snapshot", "txid_current_snapshot"):
+            try:
+                got = self.run_rule(side, db, f"select {fn}()::text")
+            except Exception:  # noqa: BLE001 - older name, or no answer
+                continue
+            if got and got[0][0] and on:
+                return f"{on}|{got[0][0]}"
+        return None
+
+    def _marked_on(self, side, db):
+        """The server a mark belongs to: its cluster's system identifier,
+        or, where this user may not read that, when it started - an xid
+        means nothing on another cluster, and a checkpoint kept from a
+        copy of another source would otherwise be held to this one's."""
+        got = self.__dict__.setdefault("_marks_on", {})
+        if side not in got:
+            said = self.stream_identity(side, db)
+            if said:
+                got[side] = f"cluster {said['cluster']}"
+            else:
+                try:
+                    row = self.run_rule(side, db, "select"
+                                        " pg_postmaster_start_time()::text")
+                    got[side] = f"started {row[0][0]}" if row else None
+                except Exception:  # noqa: BLE001 - no mark, then
+                    got[side] = None
+        return got[side]
+
+    def mark_covers(self, side, db, mark, change):
+        """A committed xid is visible to the snapshot when it is below its
+        `xmin`, or below its `xmax` and not among those in progress. The
+        log names the xid in 32 bits and the snapshot in 64: it is taken
+        as the one nearest the snapshot's, which the server keeps within
+        2^31 of every xid still in use."""
+        xid = change.get("txn")
+        if not isinstance(mark, str) or not isinstance(xid, int) \
+                or isinstance(xid, bool):
+            return None
+        on, _, snap = mark.rpartition("|")
+        if not on or on != self._marked_on(side, db):
+            return None
+        try:
+            xmin, xmax, xip = snap.split(":")
+            xmin, xmax = int(xmin), int(xmax)
+            running = {int(x) for x in xip.split(",") if x}
+        except ValueError:
+            return None
+        d = (xid - xmax) & 0xFFFFFFFF
+        full = xmax + (d - 2 ** 32 if d >= 2 ** 31 else d)
+        if full < xmin:
+            return True
+        return full < xmax and full not in running
 
     def log_position(self, side, db):
         if self._in_recovery(side, db):
@@ -7465,11 +7530,13 @@ class PostgresEngine(Engine):
                 return []
             return [r[0] for r in self.run_rule("src", db, ranges.bounds_sql(
                 self._quote_ident, qt, pk, every, rf))]
-        todo = ranges.plan(st, lo, hi, edges, ck.save) if has == "1" else []
+        todo = (ranges.plan(st, lo, hi, edges, ck.save, table=key)
+                if has == "1" else [])
         cols = self._copy_cols(db, sch, tbl)
 
         def one(rng):
             after, upto = rng
+            ranges.started(st, after, self.snapshot_mark("src", db), ck.save)
             pred = f'"{pk}" > {after} and "{pk}" <= {upto}'
             if rf:
                 pred = f"({pred}) and ({rf})"
