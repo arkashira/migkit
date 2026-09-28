@@ -1056,12 +1056,14 @@ def fold_rows(classes, rows, total=0):
     """(rows folded, running digest) over rows of values, rendered by
     their classes and folded one row at a time as `digest_step` folds -
     the one fold every engine that digests in this process uses, and the
-    number the SQL engines' own digests are held to."""
-    from . import rowtext
+    number the SQL engines' own digests are held to. Each column's
+    rendering is chosen once (`render.renderer`)."""
+    from . import render, rowtext
+    fns = [render.renderer(c) for c in classes]
     n = 0
     for row in rows:
         total = digest_step(total, rowtext.encode(
-            [render_value(c, v) for c, v in zip(classes, row)]))
+            [f(v) for f, v in zip(fns, row)]))
         n += 1
     return n, total
 

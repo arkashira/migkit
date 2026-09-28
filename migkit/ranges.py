@@ -131,16 +131,25 @@ def _weight(got):
     return n if isinstance(n, int) else 1
 
 
+class WorkerGone(RuntimeError):
+    """A worker process that stopped without answering."""
+
+
 class _Worker:
     """A `python -m migkit.ranges` process that copies range after range:
     each asked as a length and a pickled `(fn, item)` on its input, each
     answered as a length and a pickled `(ok, result or exception)` on its
-    output. What it prints goes to a file, for the error if it dies."""
+    output. What it prints goes to a file, for the error if it dies.
 
-    def __init__(self):
+    Asked and answered apart (`send`, `receive`) where the asker has other
+    work meanwhile: the tail's reader decodes the next batch while the one
+    before it is applied (`hetero._ReadProcess`)."""
+
+    def __init__(self, what="a copy process"):
         import subprocess
         import sys
         import tempfile
+        self.what = what
         self.said = tempfile.TemporaryFile()
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "migkit.ranges"], stdin=subprocess.PIPE,
@@ -150,31 +159,49 @@ class _Worker:
         return self.proc.poll() is None
 
     def run(self, fn, item):
+        self.send(fn, item)
+        return self.receive()
+
+    def send(self, fn, item):
         import pickle
         import struct
         data = pickle.dumps((fn, item))
         try:
             self.proc.stdin.write(struct.pack(">Q", len(data)) + data)
             self.proc.stdin.flush()
+        except Exception:  # noqa: BLE001 - it died before it was asked
+            self._gone()
+
+    def receive(self):
+        import pickle
+        import struct
+        try:
             head = self.proc.stdout.read(8)
             body = (self.proc.stdout.read(struct.unpack(">Q", head)[0])
                     if len(head) == 8 else b"")
             ok, got = pickle.loads(body)
         except Exception:  # noqa: BLE001 - it died before it answered
-            self.proc.kill()
-            self.proc.wait()
-            self.said.seek(0)
-            last = self.said.read().decode(errors="replace").strip()
-            raise RuntimeError(
-                "a copy process stopped without an answer: "
-                + (last.splitlines()[-1] if last else
-                   f"exit code {self.proc.returncode}"))
+            self._gone()
         if not ok:
             raise got
         return got
 
-    def close(self):
+    def _gone(self):
+        self.proc.kill()
+        self.proc.wait()
+        self.said.seek(0)
+        last = self.said.read().decode(errors="replace").strip()
+        raise WorkerGone(
+            f"{self.what} stopped without an answer: "
+            + (last.splitlines()[-1] if last else
+               f"exit code {self.proc.returncode}"))
+
+    def close(self, wait=True):
+        """Its input closed and its end awaited; `wait=False` stops it
+        where it is, for an answer nobody will read."""
         try:
+            if not wait:
+                self.proc.kill()
             self.proc.stdin.close()
             self.proc.wait(timeout=30)
         except Exception:  # noqa: BLE001 - it is going anyway

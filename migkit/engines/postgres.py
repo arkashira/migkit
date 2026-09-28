@@ -416,9 +416,12 @@ class PostgresEngine(Engine):
              order by a.attnum""")
         return [tuple(l.split("\x1f", 1)) for l in out.splitlines() if l]
 
-    def neutral_key(self, side, db, table):
+    def neutral_key(self, side, db, table, ask=None):
+        """The primary key's columns, in its order. `ask(sql)` as
+        `_slot_ready` takes it."""
         sch, tbl = self._split(table)
-        out = self._psql(side, self._d(side, db), f"""
+        out = (ask or (lambda sql: self._psql(side, self._d(side, db), sql)))(
+            f"""
             select a.attname
               from pg_index i
               join pg_class c on c.oid = i.indrelid
@@ -1258,9 +1261,11 @@ class PostgresEngine(Engine):
         base = re.sub(r"[^a-z0-9_]", "_", str(self.hop.name).lower())
         return f"migkit_{base}"[:63]
 
-    def _slot_ready(self, side, db, resuming_from=None):
+    def _slot_ready(self, side, db, resuming_from=None, ask=None):
         """Make sure the slot exists and is one migkit can read. Returns its
-        name.
+        name. `ask(sql)` answers a statement's text, by default through the
+        client program; the tail asks on the connection it keeps
+        (`_slot_text`).
 
         `resuming_from` is a position a tail saved. A slot that has to be
         made while one is held means the old slot is gone - dropped, or the
@@ -1275,9 +1280,11 @@ class PostgresEngine(Engine):
         """
         name = self.slot_name()
         target = self._d(side, db)
-        got = self._psql(side, target,
-                         "select plugin from pg_replication_slots"
-                         f" where slot_name = '{name}'").strip()
+        if ask is None:
+            def ask(sql):
+                return self._psql(side, target, sql)
+        got = ask("select plugin from pg_replication_slots"
+                  f" where slot_name = '{name}'").strip()
         if not got and resuming_from:
             raise SystemExit(
                 f"the slot {name} is gone from the source, and the tail had"
@@ -1286,7 +1293,7 @@ class PostgresEngine(Engine):
                 " from now would skip them without a trace. Move again with"
                 " --mode full+cdc, which makes the slot before it copies")
         if not got:
-            level = self._psql(side, target, "show wal_level").strip()
+            level = ask("show wal_level").strip()
             if level != "logical":
                 raise SystemExit(
                     f"wal_level is {level} on this server and a logical slot"
@@ -1297,9 +1304,8 @@ class PostgresEngine(Engine):
                     "   -- then restart\n"
                     "    rds.logical_replication = 1"
                     "                -- parameter group, then reboot")
-            self._psql(side, target,
-                       "select pg_create_logical_replication_slot"
-                       f"('{name}', '{self.PLUGIN}')")
+            ask("select pg_create_logical_replication_slot"
+                f"('{name}', '{self.PLUGIN}')")
             return name
         if got != self.PLUGIN:
             raise SystemExit(
@@ -1348,6 +1354,69 @@ class PostgresEngine(Engine):
                           " pg_replication_slots"
                           f" where slot_name = '{name}'").strip()
 
+    def _slot_session(self, side, db):
+        """The connection the tail reads its slot on: opened the first time
+        and kept for every batch after, in the session the client program
+        was given - UTC, ISO dates, no statement timeout - since the slot's
+        text is printed in it. Autocommit: each statement is its own
+        transaction, as each program was."""
+        held = self.__dict__.setdefault("_slot_held", {})
+        where = (side, self._d(side, db))
+        conn = held.get(where)
+        if conn is not None and not conn.closed:
+            return conn
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+        conn = psycopg2.connect(
+            host=ep.host, port=ep.port, user=ep.user, password=ep.password,
+            dbname=where[1], connect_timeout=15, client_encoding="UTF8",
+            keepalives=1,
+            keepalives_idle=int(os.environ.get("MIGKIT_KEEPALIVE_IDLE",
+                                               "60")),
+            keepalives_interval=10, keepalives_count=5,
+            options="-c TimeZone=UTC -c DateStyle=ISO"
+                    " -c statement_timeout=0", **ep.libpq_tls())
+        conn.autocommit = True
+        held[where] = conn
+        return conn
+
+    def _slot_rows(self, side, db, sql, args=None):
+        """The rows of one statement on the slot's connection. One kept
+        from an earlier batch and gone since - the server restarted, an
+        idle timeout or a pooler ended it - is opened again and the
+        statement asked once more: each one asked here reads, or moves the
+        slot to a position it may already be at, which is the same move."""
+        import psycopg2
+        held = self.__dict__.get("_slot_held", {}).get(
+            (side, self._d(side, db)))
+        kept = held is not None and not held.closed
+        for again in (False, True):
+            conn = self._slot_session(side, db)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, args)
+                    return cur.fetchall() if cur.description else []
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                if not conn.closed:
+                    # the server answered: an error of the statement's own
+                    raise
+                self.__dict__["_slot_held"].pop((side, self._d(side, db)),
+                                                None)
+                if again or not kept:
+                    raise
+
+    def release_changes(self):
+        for conn in self.__dict__.pop("_slot_held", {}).values():
+            conn.close()
+
+    def _slot_text(self, side, db):
+        """`ask(sql)` on the slot's connection: the first column of each row
+        as text, one a line - what the client program printed for them."""
+        def ask(sql):
+            return "\n".join("" if r[0] is None else str(r[0])
+                             for r in self._slot_rows(side, db, sql))
+        return ask
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of a logical slot, as neutral records.
 
@@ -1361,38 +1430,46 @@ class PostgresEngine(Engine):
         from the previous call is how a caller says "everything up to here is
         applied", and only then does the slot move past it. So the slot is
         advanced by evidence of success rather than by the act of looking.
+
+        **On one connection, kept** (`_slot_session`). Each batch started
+        the client program three times - the slot moved on, the log's end
+        asked, the changes peeked - a process and a connection each, and
+        the changes came back as the lines it printed: a text value holding
+        a line break arrived as two lines and stopped the tail on half a
+        value at every try (`unterminated value`), and a carriage return
+        came back a newline. The position and the change are read as the
+        two columns they are. Measured, PostgreSQL 16 to PostgreSQL 16 on a
+        laptop, 320,000 changes queued (`bench/tail_rates.py`): a hundred
+        starts of the program took 4.3s, the server decoding all 320,000
+        0.47s and parsing them here 1.7s; the whole tail 16.1s before,
+        7.3s on one connection.
         """
         from .. import pgslot
-        name = self._slot_ready(side, db, resuming_from=token)
-        target = self._d(side, db)
+        ask = self._slot_text(side, db)
+        name = self._slot_ready(side, db, resuming_from=token, ask=ask)
         if token:
             # the caller applied everything up to this LSN, so the server may
             # stop keeping it
-            self._psql(side, target,
-                       f"select pg_replication_slot_advance('{name}',"
-                       f" '{token}')")
+            self._slot_rows(side, db, "select pg_replication_slot_advance("
+                                      "%s, %s)", (name, token))
         # up to where the log is now: when that is read whole, the position
         # moves there even with nothing in it for this hop, so a fence
         # waiting for the tail to reach the log's end sees it get there. It
         # stayed at the last change, and on a quiet database never did.
-        upto = self._psql(side, target, "select pg_current_wal_lsn()"
-                          ).strip()
+        upto = ask("select pg_current_wal_lsn()").strip()
         # each change with its transaction's xid, for the tail to hold to
         # the marks the table copier kept (`mark_covers`)
-        rows = self._psql(side, target,
-                          "select lsn::text || chr(31) || xid::text"
-                          " || chr(31) || data from"
-                          f" pg_logical_slot_peek_changes('{name}',"
-                          f" '{upto}', {int(limit)})")
+        rows = self._slot_rows(side, db, "select lsn::text, xid::text, data"
+                                         " from pg_logical_slot_peek_changes("
+                                         "%s, %s, %s)",
+                               (name, upto, int(limit)))
         out, last = [], token
         keys = {}
         # a two-way tail's own transactions begin with its mark; each is
         # left out whole, or it goes back where it came from (`twoway`)
         two_way = bool((self.hop.options or {}).get("two_way"))
         marked = False
-        for line in rows.splitlines():
-            lsn, _, data = line.partition("\x1f")
-            xid, _, data = data.partition("\x1f")
+        for lsn, xid, data in rows:
             parsed = pgslot.parse_line(data)
             last = lsn or last
             if data.startswith("BEGIN"):
@@ -1407,7 +1484,7 @@ class PostgresEngine(Engine):
             if self.hop.excluded(db, *str(table).split(".")):
                 continue
             if table not in keys:
-                keys[table] = self.neutral_key(side, db, table)
+                keys[table] = self.neutral_key(side, db, table, ask=ask)
                 if not keys[table]:
                     raise SystemExit(
                         f"no primary key on {table} - a change to a keyless"
@@ -1423,7 +1500,7 @@ class PostgresEngine(Engine):
                         "  -- skips everything pending, including this")
             out.append(pgslot.change(parsed, keys[table],
                                      int(xid) if xid.isdigit() else None))
-        if len(rows.splitlines()) < int(limit) and upto and (
+        if len(rows) < int(limit) and upto and (
                 last is None or self.position_reached(upto, last)):
             last = upto
         return out, last

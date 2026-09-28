@@ -434,9 +434,12 @@ def test_the_property_would_notice_a_change_left_out_wrongly(
             return real(st_, values, covers, ahead=True)
         monkeypatch.setattr(ranges, "already_read", wrong)
 
-    # found, not shrunk: the failure is the answer here
-    @settings(max_examples=1000, deadline=None, database=None,
-              phases=[Phase.generate],
+    # found, not shrunk: the failure is the answer here. A fixed search
+    # (derandomize): drawn at random, 1,000 examples missed the
+    # not_shown case about one run in six (measured), and a check of
+    # the property's teeth that passes by luck is no check
+    @settings(max_examples=3000, deadline=None, database=None,
+              derandomize=True, phases=[Phase.generate],
               suppress_health_check=[HealthCheck.too_slow])
     @given(before=st.lists(write, max_size=15),
            steps=st.lists(step, min_size=10, max_size=80),

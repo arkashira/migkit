@@ -2676,6 +2676,59 @@ one persistent connection for the PostgreSQL tail instead of three
 per column before any compiled renderer. Not now: free-threaded 3.14t,
 subinterpreters, PyPy for all of migkit, orjson or XXH3 in the digest.
 
+*Done (2026-09-28), measured on a laptop shared with other runs, 320,000
+changes queued (200,000 inserts, an update of every other row, a delete
+of every tenth, a thousand rows a transaction; `bench/tail_rates.py`):*
+* **The MySQL tail was held by the interpreter's lock (R-B).** MySQL 8.4
+  to PostgreSQL 16, before: the binlog decoded alone 4.6s (3.9s of CPU),
+  the batches applied alone 5.5s (4.0s of CPU), the whole tail 7.7s on
+  7.7s of CPU - one core, and the CPU the sum of the two parts.
+* **The apply, trimmed.** A key's identity without a sort where the key
+  is one column, a row's shape worked out once for each order its names
+  come in (`base._ident`, `_net_rows`, `_apply_net`): applied alone 5.1s
+  to 4.3s. The garbage collector's passes held to what the batches leave
+  while a tail runs (`hetero._batch_gc`: what was there before frozen, a
+  young pass every 50,000 new objects): 4.3s to 2.7s.
+* **The decoder in a process of its own** (`hetero._ReadProcess`, on the
+  range workers' process protocol): the same library and code, the
+  records pickled across (1.1us a change there, 0.8us back). The whole
+  tail 5.6s with the reader in a thread and 4.9s in a process (41,600,
+  57,400 and 66,000 changes a second, before, thread and process; a
+  second run 6.2s and 4.9s, the measured choice again the process). The
+  reader is now the limit: decoded alone 4.1s against 2.7s applied. Which
+  way a tail reads is measured, not set (`hetero._Reader`): `python-thread`
+  and `python-process` each timed on the tail's own full batches, the
+  cheaper kept (a tie to the thread), the ranking by seconds a change
+  written beside the position (`tail-read.json`) for the decision engine
+  to climb; a process needs two processors and a hop that can be handed
+  over, and one that stops is started again from the position asked, then
+  left for the thread. The process decodes the window the thread decodes,
+  batch for batch and position for position, over every MySQL column kind
+  and a transaction larger than a batch; a two-way counter's batch
+  committed before its position was saved is not applied again
+  (`test_the_binlog_is_read_in_a_process_as_in_a_thread.py`,
+  `test_the_tail_reads_on_the_way_measured_faster.py`).
+* **The PostgreSQL tail on one connection (R-C).** Before: four client
+  program starts a batch (43 ms each), the server's decoding of all
+  320,000 0.47s, parsing them here 1.7s, the whole PostgreSQL to
+  PostgreSQL tail 16.1s. On one kept connection, the slot moved only when
+  the position comes back, a connection lost between batches opened again
+  and the statement asked once more: 7.3s. The stall the report suspected
+  was real: a text value holding a line break stopped the tail on
+  `unterminated value` at every try (and a carriage return came back a
+  newline); read as the two columns they are, every line break arrives
+  whole (`test_the_postgres_tail_reads_on_one_connection.py`, failing
+  before).
+* **The fold's renderer chosen once a column** (`render.renderer`, which
+  sends every value it does not write straight to `canon.render_value`):
+  200,000 rows of eight columns 0.58s to 0.39s, timestamps 0.58s to
+  0.31s; held to `render_value` byte for byte over generated values of
+  every class, and every straight path broken on purpose was caught
+  (`test_a_column_renders_as_canon_renders.py`).
+* Next where this leaves it: the decoder is the ceiling of a MySQL tail
+  now, so a compiled decoder (R19 lever 9) is the lever that pays; the
+  PostgreSQL tail's next is streaming `pgoutput`.
+
 **F7. The rest, by report:** each report's gap table is the item list
 for its area - pgcopydb split and index jobs, mydumper `--rows` /
 `--checksum-all`, MySQL Shell, CLONE and `pg_basebackup` rungs
@@ -4097,7 +4150,9 @@ child whose parent never came. 6 measured first (2026-09-27): the binlog reader 
 changes in 2.58s (116,000 a second) on its own, while the whole tail
 applied 320,000 in 4.9s (65,000 a second) - the applier is the limit, and
 the reader already runs beside it (`_ReadAhead`); decoding moves out of
-process only once the apply passes the reader.
+process only once the apply passes the reader. It did (2026-09-28, F6):
+beside it in a thread the two took turns on one core, and with the apply
+trimmed and the decoder in a process of its own the reader is the limit.
 
 What others do: MySQL write-set and GoldenGate parallel replicat order only
 the changes whose keys overlap; MariaDB applies optimistically and retries

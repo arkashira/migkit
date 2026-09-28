@@ -11,6 +11,40 @@ def _stop_on_term(signum, frame):
     raise KeyboardInterrupt
 
 
+#: new objects between two young passes of the collector while a tail runs
+GC_YOUNG = 50_000
+_GC = {"tails": 0, "was": None}
+
+
+def _batch_gc():
+    """The garbage collector's passes, for as long as a tail applies: what
+    the process held before the tail began is frozen out of them, and a
+    young pass waits for `GC_YOUNG` new objects rather than 700. A batch is
+    tens of thousands of change records and rows, freed by their counts as
+    it is applied and never in a cycle, and every pass walked them:
+    measured, the 320,000 changes of `bench/tail_rates.py` applied into
+    PostgreSQL in 4.3s with the collector as it was and 2.7s with it held
+    (3.3s and 2.0s of CPU). Returns what puts the collector back, once the
+    last tail of the process is done."""
+    import gc
+    import threading
+    lock = _GC.setdefault("lock", threading.Lock())
+    with lock:
+        if not _GC["tails"]:
+            _GC["was"] = gc.get_threshold()
+            gc.freeze()
+            gc.set_threshold(GC_YOUNG, *_GC["was"][1:])
+        _GC["tails"] += 1
+
+    def back():
+        with lock:
+            _GC["tails"] -= 1
+            if not _GC["tails"]:
+                gc.set_threshold(*_GC["was"])
+                gc.unfreeze()
+    return back
+
+
 class HeteroEngine(Engine):
     """A hop whose two sides are different database engines.
 
@@ -2920,6 +2954,15 @@ class HeteroEngine(Engine):
     #: most it grows to while it is behind
     TAIL_BATCH, TAIL_BATCH_MOST = 1000, 16000
 
+    def _change_reader(self, db, token_path, log):
+        """What reads the tail's next batch while one is applied, where the
+        source's position only says where to read from (`READS_AHEAD`);
+        None where the tail reads, then applies."""
+        if not getattr(self.src_engine, "READS_AHEAD", False):
+            return None
+        return _Reader(self.src_engine, db, token_path.parent, log,
+                       self.TAIL_BATCH_MOST)
+
     def tail_apply(self, db, go, token_path, log):
         """Carry changes from one engine's log into the other, until stopped.
 
@@ -2977,9 +3020,7 @@ class HeteroEngine(Engine):
         limit = self.TAIL_BATCH
         # the next batch read while this one is applied, where the source's
         # position is only where to read from (`READS_AHEAD`)
-        ahead = (_ReadAhead(self.src_engine, db)
-                 if go and getattr(self.src_engine, "READS_AHEAD", False)
-                 else None)
+        ahead = self._change_reader(db, token_path, log) if go else None
         targets = self._tail_targets(db)
         # the changes the table copier already read are left out, and how
         # many were (`_CopiedRanges`)
@@ -3011,6 +3052,8 @@ class HeteroEngine(Engine):
                 term = signal.signal(signal.SIGTERM, _stop_on_term)
             except ValueError:
                 pass
+        # the collector's passes held to what the batches leave (`_batch_gc`)
+        gc_back = _batch_gc() if go else None
         try:
             if running:
                 running.__enter__()
@@ -3164,8 +3207,12 @@ class HeteroEngine(Engine):
         except KeyboardInterrupt:
             log(f"stopped after {seen} changes; rerun to resume")
         finally:
+            if gc_back is not None:
+                gc_back()
             if ahead is not None:
                 ahead.close()
+            else:
+                self.src_engine.release_changes()
             try:
                 if window:
                     window.__exit__(*sys.exc_info())
@@ -3540,3 +3587,286 @@ class _ReadAhead:
                 pass
             self.pending = None
         self.pool.shutdown(wait=True)
+        release = getattr(self.eng, "release_changes", None)
+        if release is not None:
+            release()
+
+
+#: what a process of `_ReadProcess` keeps from one read to the next: the
+#: source's engine, whose reader holds its stream open between reads
+_READING = {}
+
+
+def _read_changes(item):
+    """What the reader's process runs: one read of the source's changes."""
+    cls, hop, db, token, limit = item
+    eng = _READING.get((cls, hop.name, db))
+    if eng is None:
+        eng = _READING[(cls, hop.name, db)] = cls(hop)
+    return eng.neutral_changes("src", db, token, limit=limit)
+
+
+class _ReadProcess:
+    """The tail's next read made in a process of its own, while the batch
+    before it is applied here.
+
+    `_ReadAhead` reads in a thread, and a thread shares the interpreter's
+    lock: the binlog is decoded in Python as the batch is applied in
+    Python, so the two took turns on one core. Measured, MySQL 8.4 to
+    PostgreSQL 16 on a laptop, 320,000 changes queued
+    (`bench/tail_rates.py`): decoded alone in 4.1s (3.5s of CPU), applied
+    alone in 2.7s (2.0s of CPU); the whole tail with the reader in a thread
+    5.6s on 5.7s of CPU - one core, the sum of the two - and with it in a
+    process 4.9s, 2.6s of CPU here and 4.2s there (a second run: 6.2s and
+    4.9s). The reader is the limit now.
+
+    The same reader in the same library, so nothing new is trusted to
+    decode a row; what crosses is the change records, pickled - measured,
+    1.1us a change there and 0.8us back here, 4.2 MB a 32,000. The same
+    positions as `_ReadAhead`: a read ahead is used only where the batch
+    asked for starts where it did, and the process knows nothing of what
+    was applied - the tail saves the position after the apply, as it did.
+    A process that stops is started again and asked from the position the
+    tail asks from, which is the one it saved."""
+
+    def __init__(self, eng, db):
+        self.cls, self.hop, self.db = type(eng), eng.hop, db
+        self.worker = None
+        self.pending = None
+
+    def _ask(self, token, limit):
+        from ..ranges import _Worker
+        if self.worker is None or not self.worker.alive():
+            # measured, started, its modules loaded and its engine made in
+            # 0.06-0.08s: nothing gained by starting it earlier
+            self.worker = _Worker("the change reader's process")
+        self.worker.send(_read_changes,
+                         (self.cls, self.hop, self.db, token, limit))
+
+    def _read(self, token, limit):
+        from ..ranges import WorkerGone
+        for again in (False, True):
+            try:
+                self._ask(token, limit)
+                return self.worker.receive()
+            except WorkerGone:
+                self.worker = None
+                if again:
+                    raise
+
+    def next(self, token, limit):
+        from ..ranges import WorkerGone
+        got = None
+        if self.pending is not None:
+            at, self.pending = self.pending, None
+            try:
+                answer = self.worker.receive()
+            except WorkerGone:
+                self.worker = None
+            except Exception:  # noqa: BLE001 - raised where it was asked for
+                if at == token:
+                    raise
+            else:
+                if at == token:
+                    got = answer
+        if got is None:
+            got = self._read(token, limit)
+        changes, after = got
+        # read on from where this one ended, at the size it will be asked
+        # for: behind, twice this one
+        try:
+            self._ask(after, limit if len(changes) < limit else limit * 2)
+            self.pending = after
+        except WorkerGone:
+            # started again at the next read, from where that one asks
+            self.worker = None
+        return changes, after
+
+    def close(self):
+        if self.worker is not None:
+            # an answer read ahead is one nobody will read
+            self.worker.close(wait=self.pending is None)
+            self.worker, self.pending = None, None
+
+
+#: how the tail reads a source whose position only says where to read
+#: from (`READS_AHEAD`): (name, what an operator reads, footprint), in the
+#: order a way never timed is tried. Each is timed while the tail is
+#: behind and the faster kept (`_Reader`) - the data a decision engine
+#: ranks, by seconds a change
+READ_RUNGS = (
+    ("python-thread", "in a thread beside the writer", 0),
+    ("python-process", "in a process of its own", 1),
+)
+
+
+class _Reader:
+    """The tail's reads on the way measured faster on this source and
+    this machine.
+
+    What is timed is the tail itself while it is behind: seconds a change
+    from one read to the next, the apply included, over batches of the
+    largest size (`most`). The first batch read after a change of way is
+    not timed - nothing was read ahead for it. Each way is timed `TIMED`
+    batches; then the cheaper is kept, a tie within two significant
+    figures going to the smaller footprint, and the numbers are written
+    beside the tail's position (`FILE`), so a tail started again on this
+    machine starts on the way chosen - measured on a laptop, a process
+    1.4x as fast in its timed batches as a thread. A process needs a
+    second processor to run beside the writer on, and a hop it can be
+    handed. A way that fails - its process stopping twice without an
+    answer - is left for the run, and the read asked again, from the same
+    position, the other way."""
+
+    FILE = "tail-read.json"
+    TIMED = 2
+
+    def __init__(self, eng, db, where, log, most):
+        self.eng, self.db, self.where, self.log = eng, db, where, log
+        self.most = most
+        self.names = [n for n, _, _ in READ_RUNGS if self._can(n)]
+        self.costs, self.timing, self.readers = {}, {}, {}
+        self.on, self.fresh, self.last = self.names[0], False, None
+        self.chosen = None
+        self._remembered()
+
+    @staticmethod
+    def _cpus():
+        import os
+        try:
+            return len(os.sched_getaffinity(0))
+        except AttributeError:
+            return os.cpu_count() or 1
+
+    def _can(self, name):
+        if name != "python-process":
+            return True
+        import pickle
+        try:
+            # what the process is handed to read with
+            pickle.dumps((type(self.eng), self.eng.hop))
+        except Exception:  # noqa: BLE001 - it cannot be handed over
+            return False
+        return self._cpus() >= 2
+
+    def _machine(self):
+        import platform
+        return {"host": platform.node(), "cpus": self._cpus()}
+
+    def _remembered(self):
+        import json
+        try:
+            got = json.loads((self.where / self.FILE).read_text())
+        except (OSError, ValueError, TypeError):
+            return
+        if not isinstance(got, dict) or \
+                got.get("machine") != self._machine():
+            return
+        costs = {n: float(c) for n, c in
+                 (got.get("seconds_per_change") or {}).items()
+                 if n in self.names and c is not None}
+        if got.get("read changes") in self.names and \
+                set(costs) == set(self.names):
+            self.costs = costs
+            self.on = self.chosen = got["read changes"]
+
+    def ranked(self):
+        """[(name, seconds a change or None)], in the order the next
+        choice would try them: never timed first, then the cheaper, the
+        footprint deciding a tie."""
+        import math
+        foot = {n: f for n, _, f in READ_RUNGS}
+        untried = [n for n in self.names if n not in self.costs]
+        tried = sorted((n for n in self.names if n in self.costs),
+                       key=lambda n: self.costs[n])
+        out = []
+        while tried:
+            first = self.costs[tried[0]]
+            digits = (-int(math.floor(math.log10(first))) + 1
+                      if first > 0 else 0)
+            tie = [n for n in tried
+                   if round(self.costs[n], digits) == round(first, digits)]
+            out += sorted(tie, key=lambda n: (foot[n], self.names.index(n)))
+            tried = [n for n in tried if n not in tie]
+        return [(n, self.costs.get(n)) for n in untried + out]
+
+    def _rung(self, name):
+        if name not in self.readers:
+            self.readers[name] = (_ReadProcess if name == "python-process"
+                                  else _ReadAhead)(self.eng, self.db)
+        return self.readers[name]
+
+    def _switch(self, name):
+        if name == self.on:
+            return
+        was = self.readers.pop(self.on, None)
+        if was is not None:
+            was.close()
+        self.on, self.fresh = name, True
+
+    def _timed(self, token, now):
+        if self.last is None:
+            return
+        name, n, after, began, skip = self.last
+        self.last = None
+        # a read asked again after a lost connection, a batch not read
+        # while behind, or the first on its way: not a measure of it
+        if skip or after != token or n < self.most or self.chosen:
+            return
+        seen = self.timing.setdefault(name, [0, 0.0, 0])
+        seen[0] += n
+        seen[1] += now - began
+        seen[2] += 1
+        if seen[2] < self.TIMED:
+            return
+        self.costs[name] = seen[1] / seen[0]
+        order = self.ranked()
+        if order[0][1] is None:
+            self._switch(order[0][0])
+            return
+        self.chosen = order[0][0]
+        self._switch(self.chosen)
+        self._keep()
+        said = dict((n, s) for n, s, _ in READ_RUNGS)
+        other = [(n, c) for n, c in order[1:] if c]
+        self.log(f"changes are read {said[self.chosen]}"
+                 + (f": {other[0][1] / order[0][1]:.1f}x as fast on this"
+                    f" source as {said[other[0][0]]}" if other else ""))
+
+    def _keep(self):
+        import json
+        import os
+        self.where.mkdir(parents=True, exist_ok=True)
+        tmp = self.where / (self.FILE + ".tmp")
+        tmp.write_text(json.dumps({
+            "read changes": self.chosen,
+            "seconds_per_change": dict(self.ranked()),
+            "machine": self._machine()}, indent=1))
+        os.replace(tmp, self.where / self.FILE)
+
+    def next(self, token, limit):
+        import time as _time
+
+        from ..ranges import WorkerGone
+        now = _time.monotonic()
+        self._timed(token, now)
+        name, skip = self.on, self.fresh
+        self.fresh = False
+        try:
+            changes, after = self._rung(name).next(token, limit)
+        except WorkerGone as e:
+            self.log(f"the change reader's process stopped ({e}); reading"
+                     " in a thread from the same position")
+            self.readers.pop(name, None)
+            self.names.remove(name)
+            self.costs.pop(name, None)
+            self.chosen = "python-thread" if self.chosen else None
+            self.on, name, skip = "python-thread", "python-thread", True
+            changes, after = self._rung(name).next(token, limit)
+        self.last = (name, len(changes), after, now, skip)
+        return changes, after
+
+    def close(self):
+        for reader in self.readers.values():
+            reader.close()
+        self.readers = {}

@@ -1016,6 +1016,14 @@ class MySQLEngine(Engine):
                 " duplicate. Add a key, or exclude the table")
         return out, token
 
+    def release_changes(self):
+        """The binlog stream `neutral_changes` holds between reads, closed:
+        a reader opened elsewhere under the same server id would have the
+        server end it anyway."""
+        held = self.__dict__.pop("_binlog_held", None)
+        if held:
+            held["stream"].close()
+
     def _binlog_position(self, side):
         """(file, position) the binlog is at now, or None when it is off.
 
