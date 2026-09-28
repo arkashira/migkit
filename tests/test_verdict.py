@@ -162,3 +162,40 @@ def test_counted_kind_reports_both_sides_when_they_are_unequal():
     from migkit.verdict import difference_kind_from_counts
     assert difference_kind_from_counts(2, 5, 0) == \
         "rows-missing by=2,rows-extra by=5"
+
+
+def _part(rows, digest="d", bound="", catchall=False):
+    return {"rows": rows, "digest": digest, "bound": bound,
+            "catchall": catchall}
+
+
+def test_a_partition_is_named_the_same_way_whichever_engine_read_it():
+    src = {"p1": _part(5), "p2": _part(3, "x"), "p3": _part(4),
+           "pmax": _part(0, "0", "MAXVALUE", True)}
+    dst = {"p1": _part(5), "p2": _part(0, "0"),
+           "pmax": _part(4, "y", "MAXVALUE", True), "p9": _part(0, "0")}
+    got = verdict.partition_differences("t", src, dst)
+    assert got[:3] == [
+        "t partition p3: missing on target, the source's holds 4 rows",
+        "t partition p2: empty on target, the source's holds 3 rows",
+        "t partition pmax: 4 rows stranded in the catch-all on target"
+        " (src=0 dst=4)"], got
+    assert "t partition p9: extra on target (empty)" in got
+    assert not [line for line in got if "p1" in line]
+
+
+def test_a_partition_renamed_on_the_way_is_paired_by_its_bound():
+    src = {"events_2026_08": _part(3, "x", "FOR VALUES FROM (1) TO (2)")}
+    dst = {"events_p8": _part(3, "y", "FOR VALUES FROM (1) TO (2)")}
+    assert verdict.partition_differences("t", src, dst) == [
+        "t partition events_2026_08: 3 rows both sides, content differs",
+        "t partition events_2026_08: named events_p8 on target"]
+
+
+def test_a_partition_without_a_digest_is_held_to_its_count():
+    same = verdict.partition_differences("t", {"p": _part(3, None)},
+                                         {"p": _part(3, "x")})
+    assert same == []
+    assert verdict.partition_differences(
+        "t", {"p": _part(3, None)}, {"p": _part(2, "x")}) == [
+        "t partition p: src=3 dst=2 rows"]

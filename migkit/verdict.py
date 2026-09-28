@@ -73,6 +73,189 @@ def difference_kind_from_counts(missing, extra, changed):
     return ""
 
 
+def _rows(n):
+    return f"{n} row{'' if n == 1 else 's'}"
+
+
+def partition_differences(table, src, dst):
+    """What differs between one partitioned table's partitions, a line each.
+
+    `src` and `dst` are `{partition: {"rows", "digest", "bound",
+    "catchall"}}` as each engine reads them - PostgreSQL's leaf partitions,
+    MySQL's `PARTITION (p)` - so the words are the same on both. A digest
+    of None was not computed, and only the counts are held to each other.
+
+    Measured on a DTS leg: the current month's partitions arrived empty
+    while the parents' totals looked plausible, the rows sitting in the
+    catch-all or nowhere. A partition is paired by name, and one renamed on
+    the way by its bound.
+    """
+    lines = []
+    only_src = {n: p for n, p in src.items() if n not in dst}
+    only_dst = {n: p for n, p in dst.items() if n not in src}
+    pairs = [(n, n) for n in sorted(set(src) & set(dst))]
+    by_bound = {}
+    for n, p in only_dst.items():
+        if p.get("bound"):
+            by_bound.setdefault(p["bound"], []).append(n)
+    for n in sorted(only_src):
+        there = by_bound.get(only_src[n].get("bound") or "")
+        if there and len(there) == 1 and there[0] in only_dst:
+            d = there[0]
+            pairs.append((n, d))
+            lines.append((2, f"{table} partition {n}: named {d} on target"))
+            del only_dst[d]
+    for n in sorted(set(only_src) - {s for s, _ in pairs}):
+        rows = int(only_src[n].get("rows") or 0)
+        lines.append((0, f"{table} partition {n}: missing on target"
+                         + (f", the source's holds {_rows(rows)}" if rows
+                            else " (empty on the source)")))
+    for n in sorted(only_dst):
+        rows = int(only_dst[n].get("rows") or 0)
+        lines.append((1, f"{table} partition {n}: extra on target"
+                         + (f", holding {_rows(rows)}" if rows
+                            else " (empty)")))
+    for sn, dn in pairs:
+        s, d = src[sn], dst[dn]
+        a, b = int(s.get("rows") or 0), int(d.get("rows") or 0)
+        if s.get("bound") and d.get("bound") and s["bound"] != d["bound"]:
+            lines.append((1, f"{table} partition {sn}: bound differs"
+                             f" src({s['bound']}) dst({d['bound']})"))
+        if a and not b:
+            lines.append((0, f"{table} partition {sn}: empty on target, the"
+                             f" source's holds {_rows(a)}"))
+        elif b > a and (s.get("catchall") or d.get("catchall")):
+            lines.append((0, f"{table} partition {sn}: {_rows(b - a)}"
+                             f" stranded in the catch-all on target"
+                             f" (src={a} dst={b})"))
+        elif a != b:
+            lines.append((1, f"{table} partition {sn}: src={a} dst={b} rows"))
+        elif s.get("digest") is not None and d.get("digest") is not None \
+                and str(s["digest"]) != str(d["digest"]):
+            lines.append((1, f"{table} partition {sn}: {_rows(a)} both"
+                             " sides, content differs"))
+    return [line for _, line in sorted(lines, key=lambda x: x[0])]
+
+
+def uniform_shift(name, src, dst, least=3):
+    """The line naming a timestamp column every row of which the target
+    holds shifted by a timezone's offset, or None.
+
+    `src` and `dst` map a row's key to its instant as epoch seconds, read
+    with the session pinned to UTC on both sides, so a faithful copy
+    differs by 0. A single delta on every row is a conversion applied to
+    the whole column - a mover's non-UTC session - not rows corrupted one
+    by one. So are two deltas an hour apart, neither zero: a zone with
+    daylight saving, whose offset depends on the row's date. Anything else
+    is left to the row comparison, which names the rows.
+    """
+    deltas = [float(dst[k]) - float(src[k]) for k in src if k in dst]
+    if len(deltas) < least:
+        return None
+    if max(deltas) - min(deltas) < 1:
+        avg = sum(deltas) / len(deltas)
+        if abs(avg) < 1:
+            return None
+        secs = round(avg)
+        return (f"{name}: every row shifted {secs}s"
+                f" (~{secs / 3600:.1f}h)")
+    seen = sorted({round(x) for x in deltas})
+    if len(seen) == 2 and seen[1] - seen[0] == 3600 and 0 not in seen \
+            and all(x % 900 == 0 for x in seen):
+        return (f"{name}: every row shifted {seen[0]}s or {seen[1]}s"
+                f" (~{seen[0] / 3600:.1f}h/{seen[1] / 3600:.1f}h, a zone"
+                " with daylight saving)")
+    return None
+
+
+def _capacity(engine, declared):
+    """`canon.capacity`, and a length or precision nobody set read as the
+    unlimited one it is rather than as unmeasured."""
+    from . import canon
+    cap = canon.capacity(engine, declared)
+    if cap is None:
+        name = str(declared).lower().split("(")[0].strip()
+        if name in canon.CHAR_TYPES.get(engine, ()) and "(" not in \
+                str(declared):
+            return ("chars", None)
+        if name in canon.NUMERIC_TYPES.get(engine, ()) and "(" not in \
+                str(declared):
+            return ("numeric", None, None)
+    return cap
+
+
+def narrowing(engine, src_type, dst_type):
+    """Why a value that fits the source's column can fail to fit the
+    target's, in words - or None. The deep checks of every SQL engine ask
+    here, over `canon.capacity`, which is what counts the rows that would
+    not fit (`_capacity_gaps`).
+
+    A character limit and a byte limit (MySQL's TEXT family) are compared
+    only where the answer is certain whatever the charset: more characters
+    than the other side has bytes, or more bytes than it has characters.
+    """
+    from . import canon
+    s, d = _capacity(engine, src_type), _capacity(engine, dst_type)
+    if s is None or d is None:
+        return None
+    kinds = (s[0], d[0])
+    if kinds in (("chars", "bytes"), ("bytes", "chars")):
+        if d[1] is not None and (s[1] is None or s[1] > d[1]):
+            return f"{src_type} -> {dst_type} (longer values are cut)"
+        return None
+    if s[0] != d[0]:
+        return None
+    if s[0] in ("chars", "bytes"):
+        if d[1] is not None and (s[1] is None or s[1] > d[1]):
+            return f"{src_type} -> {dst_type} (longer values are cut)"
+        return None
+    if s[0] == "int":
+        return (f"{src_type} -> {dst_type} (overflow)"
+                if canon.narrower(s, d) else None)
+    if d[1] is None:
+        return None
+    if s[1] is None:
+        return (f"{src_type} -> {dst_type} (any precision -> {d[1]}"
+                " digits: overflow or rounds)")
+    if s[2] > d[2]:
+        return (f"{src_type} -> {dst_type} (scale {s[2]} -> {d[2]}:"
+                " rounds)")
+    if s[1] - s[2] > d[1] - d[2]:
+        return (f"{src_type} -> {dst_type} (integer digits"
+                f" {s[1] - s[2]} -> {d[1] - d[2]}: overflow)")
+    return None
+
+
+def narrowing_result(db, narrow):
+    """The deep check's answer about narrower target columns, from
+    `narrowing`'s lines, in one set of words for every engine."""
+    from .engines.base import Result
+    if narrow:
+        return Result("deep", f"{db} narrowing", "diff",
+                      f"{len(narrow)} target columns NARROWER than"
+                      " source (silent truncation/overflow risk): "
+                      + "; ".join(narrow[:6]), "",
+                      "widen the target column to match source before"
+                      " loading, or values are cut/rounded/overflowed")
+    return Result("deep", f"{db} narrowing", "ok",
+                  "no target column narrower than source")
+
+
+def timeshift_result(db, shifts):
+    """The deep check's answer about timestamps shifted as a whole, from
+    `uniform_shift`'s lines."""
+    from .engines.base import Result
+    if shifts:
+        return Result("deep", f"{db} timeshift", "diff",
+                      "uniform timezone offset (systematic, not"
+                      " row-level corruption): " + "; ".join(shifts[:5]),
+                      "", "the target stored a non-UTC wall clock; re-load"
+                      " with the source's session timezone, or convert the"
+                      " column by the offset")
+    return Result("deep", f"{db} timeshift", "ok",
+                  "no uniform timestamp offset detected")
+
+
 #: the checks whose answer is about the tables' shape or contents, which a
 #: DDL on the source in the middle of the run leaves describing a table
 #: that is no longer there

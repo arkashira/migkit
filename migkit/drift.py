@@ -18,10 +18,84 @@ import re
 #: swaps them in, and that is what a shape comparison sees.
 ONLINE_SCHEMA_CHANGE = re.compile(r"^_.+_(gho|ghc|del|new|old)$")
 
+#: working tables no application names its own: pg_repack's log and copy
+#: of the table it rewrites, and their indexes and sequences, in the schema
+#: it keeps for itself (`repack.log_16384`, `repack.table_16384`); the
+#: server's own copy of a table an ALTER rebuilds (`#sql-...`) - all MySQL
+#: Shell's load leaves in a schema besides its view placeholders, which
+#: carry the view's own name, when it adds the indexes it deferred; Vitess's
+#: shadow and retired tables (`_vt_hld_...`, `_vt_HOLD_...`,
+#: `_<uuid>_<time>_vrepl`); Spirit's sentinel
+OWN_NAMES = (re.compile(r"^repack\.(log|table|index)_\d+(_.*)?$"),
+             re.compile(r"^#sql"),
+             re.compile(r"^_vt_(hld|prg|evc|drp|vrp|hold|purge|evac|drop)_",
+                        re.I),
+             re.compile(r"^_[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}"
+                        r"_[0-9a-f]{12}_\d{14}_vrepl$"),
+             re.compile(r"^_spirit_sentinel$"))
 
-def transient(table):
-    """True for a table an online schema change is working in."""
-    return bool(ONLINE_SCHEMA_CHANGE.match(str(table).split(".")[-1]))
+#: names an application could also choose, a working table only beside the
+#: table it is a copy of - the group is that table's name: gh-ost's and
+#: pt-online-schema-change's (above), Spirit's checkpoint, Facebook's
+#: OnlineSchemaChange, and LHM's new and archived copies
+BESIDE_ITS_TABLE = (re.compile(r"^_(.+)_(?:gho|ghc|del|new|old|chkpnt)$"),
+                    re.compile(r"^_(.+)_\d{14}_del$"),
+                    re.compile(r"^__osc_(?:new|chg|old)_(.+)$"),
+                    re.compile(r"^lhmn_(.+)$"),
+                    re.compile(r"^lhma_(?:\d+_)+(.+)$"))
+
+#: the triggers those tools put on the table they copy, which leave with
+#: them: pg_repack's, pt-online-schema-change's, Facebook's and LHM's
+TRANSIENT_TRIGGERS = re.compile(
+    r"^(z_)?repack_trigger$|^pt_osc_.+_(ins|upd|del)$"
+    r"|^__osc_(ins|upd|del)_.+$|^lhmt_(ins|upd|del)_.+$")
+
+
+def transient(table, among=None):
+    """True for a table an online schema change is working in.
+
+    `among`, the names of the tables on the same side, is what lets a name
+    an application could also have chosen count: `_orders_new` is a working
+    table beside `orders` and an application's own without it. Without
+    `among` those names are read as they always were - gh-ost's and
+    pt-online-schema-change's by their name alone - and the rest only where
+    no application would choose it.
+    """
+    name = str(table)
+    leaf = name.split(".")[-1]
+    if any(p.match(name) or p.match(leaf) for p in OWN_NAMES):
+        return True
+    if among is None:
+        return bool(ONLINE_SCHEMA_CHANGE.match(leaf))
+    schema = name.rpartition(".")[0]
+    others = {str(t) for t in among}
+    for p in BESIDE_ITS_TABLE:
+        got = p.match(leaf)
+        if got and (got.group(1) in others
+                    or (schema and f"{schema}.{got.group(1)}" in others)):
+            return True
+    return False
+
+
+def maybe_transient(table):
+    """Whether the name alone could be an online schema change's working
+    table - asked before reading what else the side holds."""
+    name = str(table)
+    leaf = name.split(".")[-1]
+    return any(p.match(name) or p.match(leaf)
+               for p in OWN_NAMES + BESIDE_ITS_TABLE)
+
+
+def transient_among(tables):
+    """The tables of one side that an online schema change is working in."""
+    tables = [str(t) for t in tables]
+    return {t for t in tables if transient(t, tables)}
+
+
+def transient_trigger(name):
+    """True for a trigger an online schema change put on the table it is
+    copying."""
+    return bool(TRANSIENT_TRIGGERS.match(str(name).split(".")[-1]))
 
 
 def reader(engine):
@@ -52,9 +126,10 @@ def shape(engine, side, db):
         return None
     # a table the hop leaves alone is not moved, so its DDL is not the
     # move's business; nor is the scaffolding of an online schema change
+    working = transient_among(got)
     return {t: cols for t, cols in got.items()
             if not engine.hop.excluded(db, *str(t).split("."))
-            and not transient(t)}
+            and t not in working}
 
 
 def changes(before, after):

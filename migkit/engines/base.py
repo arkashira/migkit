@@ -829,6 +829,64 @@ class Engine:
                       f"{narrowed} columns are narrower on the target and no"
                       " row exceeds any of them yet")
 
+    def _partitions_verdict(self, db, tables, scheme, catchall, unread=()):
+        """The deep check's answer about partitioned tables, whichever
+        engine read them.
+
+        `tables` is `{table: (source partitions, target partitions)}` in the
+        shape `verdict.partition_differences` compares, `scheme` the lines
+        already found about the tables themselves (partitioned on one side
+        only, a key or method that differs), `catchall` what this engine
+        calls the partition rows land in when none other takes them, and
+        `unread` the columns a digest could not cover. Every partition
+        compared is written to `deep-partitions.diff`, with its rows and
+        digest on each side, beside the other deep findings.
+        """
+        from .. import verdict
+        lines = list(scheme)
+        for table in sorted(tables):
+            s, d = tables[table]
+            lines += verdict.partition_differences(table, s, d)
+        path = self.hop.report_dir(db) / "deep-partitions.diff"
+        parts = sum(len(s) for s, _ in tables.values())
+        if not tables and not scheme:
+            path.unlink(missing_ok=True)
+            return Result("deep", f"{db} partitions", "ok",
+                          "no partitioned tables")
+        if not lines:
+            path.unlink(missing_ok=True)
+            counted = sum(1 for s, d in tables.values() for n, p in s.items()
+                          if p.get("digest") is None
+                          or (d.get(n) or {}).get("digest") is None)
+            return Result("deep", f"{db} partitions", "ok",
+                          f"{len(tables)} partitioned tables, {parts}"
+                          " partitions: schemes match and every partition"
+                          " holds the same rows on both sides"
+                          + (f" ({counted} compared by count only)"
+                             if counted else "")
+                          + (f"; not in the digest: {'; '.join(unread[:3])}"
+                             if unread else ""))
+        listing = []
+        for table in sorted(tables):
+            s, d = tables[table]
+            for n in sorted(set(s) | set(d)):
+                for side, got in (("src", s.get(n)), ("dst", d.get(n))):
+                    listing.append(
+                        f"{side} {table} {n} " + (
+                            f"rows={got.get('rows')} digest={got.get('digest')}"
+                            f" bound={got.get('bound') or '-'}" if got
+                            else "absent"))
+                listing.append("")
+        path.write_text("\n".join(lines) + "\n\n" + "\n".join(listing))
+        return Result("deep", f"{db} partitions", "diff",
+                      "; ".join(lines[:6])
+                      + (f"; ... {len(lines) - 6} more" if len(lines) > 6
+                         else ""), str(path),
+                      "create the partitions the target lacks, move the rows"
+                      f" out of its {catchall} partition and copy again the"
+                      " partitions whose rows differ, before cutover - see"
+                      " deep-partitions.diff")
+
     #: Instants to ask every zone about. A zone is its *history*, so asking
     #: only for today's offset would miss the changes that actually break a
     #: migration - Brazil abolished DST in 2019, Iran in 2022. Measured:
@@ -3588,6 +3646,16 @@ class Engine:
         changed.
         """
         raise self._no_canon("read a change log")
+
+    def copy_point(self, side, db):
+        """Where the tail that follows a copy starts: a position every
+        change before which a read made after it can see. A position read
+        beside a copy's reads can be past a change that is committed and
+        not yet visible - the copy misses it and the tail starts after it
+        (`test_the_position_is_taken_before_the_copy_reads`). Where the
+        engine's `change_point` has no such change before it, it is that.
+        What the tail may leave out after it is `mark_covers`'s to say."""
+        return self.change_point(side, db)
 
     def snapshot_mark(self, side, db):
         """What this side has committed and made visible by now, as text a

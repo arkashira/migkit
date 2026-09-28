@@ -194,11 +194,21 @@ sides. Measured on a range-partitioned source against a plain target of the
 same name: `deep postgres partitions: DIFF public.events: not partitioned on
 target`. Test: `test_deep_partitions_pg.py`.
 
-**Missing:** it names the table, not the partitions that will be missing at
-the next boundary - `pg_partman`'s own traps (the default partition that has
-to be drained before a child can be created, `async_partitioning_in_progress`
-silently stopping maintenance, a unique key that must include the partition
-key) are not modelled.
+Every partition is held to its own count and digest on both engines
+(2026-09-28): PostgreSQL's leaves under `pg_inherits`, MySQL's with
+`PARTITION (p)`. Measured before, on both: a partition empty on the target,
+one only the target has and one whose rows changed all read `partitions
+OK`, and on MySQL four hash partitions against three too; there the counts
+and the data were OK as well where the rows sat in MAXVALUE or in fewer
+hash partitions. Now each is named - `public.events partition public.events_2026_08: empty on
+target, the source's holds 30 rows` - and listed in `deep-partitions.diff`.
+Test: `test_a_partition_that_arrived_empty_is_named.py`.
+
+**Missing:** the partitions that will be missing at the next boundary -
+`pg_partman`'s own traps (the default partition that has to be drained
+before a child can be created, `async_partitioning_in_progress` silently
+stopping maintenance, a unique key that must include the partition key) are
+not modelled.
 
 ### A7. The order the target is built in
 

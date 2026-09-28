@@ -1183,6 +1183,87 @@ class MySQLEngine(Engine):
                 " log to read - turn on log_bin, or move without CDC")
         return {"log_file": pos[0], "log_pos": pos[1]}
 
+    def copy_point(self, side, db):
+        """Where the tail that follows a copy starts: a binlog position
+        with no transaction before it that a read cannot see yet.
+
+        `change_point` is not that. MySQL writes a transaction to the binlog
+        before the storage engine commits it, and the binlog's end is read
+        in between. Measured on 8.4, the commit held there for 1.5 s with
+        `binlog_group_commit_sync_delay` on a sandbox source: the position
+        read 0.4 s into an insert was already past it (1173, where the
+        insert ended; 907 before it) and the row was not there for any
+        read (`count(*)` 0); a copy read then misses the row and a tail
+        from there skips it. `performance_schema.log_status` said 1173 as
+        well.
+
+        A server that says where its consistent snapshot stands in the
+        binlog (MariaDB, Percona: `Binlog_snapshot_file`/`_position`)
+        gives that - exact, since that snapshot sees every transaction
+        before it. Elsewhere the binlog's end is read, and then every
+        commit under way is waited out (`_commits_under_way`): one whose
+        events are before the position is among them until it is visible.
+
+        Not the start of the binlog file, though rotating does wait for
+        every commit before it (measured on 8.4: `FLUSH BINARY LOGS` in the
+        middle of the held commit returned once the row could be read).
+        Replayed from there, the tail applied row changes from before a
+        `DROP DATABASE`, which the log does not carry as rows - measured in
+        `test_full_cdc_misses_nothing`: a row the source no longer had came
+        back on the target, and a keyless table dropped since stopped the
+        tail.
+        """
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("start transaction with consistent snapshot")
+                cur.execute("show status like 'binlog\\_snapshot\\_%'")
+                got = {str(k).lower(): v for k, v in cur.fetchall()}
+        finally:
+            conn.rollback()
+            conn.close()
+        at, pos = (got.get("binlog_snapshot_file"),
+                   got.get("binlog_snapshot_position"))
+        if at and str(pos or "").isdigit():
+            return {"log_file": str(at), "log_pos": int(pos)}
+        point = self.change_point(side, db)
+        self._commits_under_way(side)
+        return point
+
+    #: how long a copy waits for the commits under way when its position
+    #: is taken, before it stops rather than read around them
+    COMMIT_WAIT = 600
+
+    def _commits_under_way(self, side):
+        """Return once every thread that is committing now has finished.
+
+        A thread is in its commit from the storage engine's prepare to its
+        commit (`waiting for handler commit`, measured on 8.4 throughout
+        the held commit above), and commits land in binlog order - so once
+        those are through, nothing before a position read just before is
+        out of sight. A thread seen committing again later is committing a
+        later transaction, whose events are after the position; waiting
+        for it costs only the wait. Without `PROCESS` the server shows only
+        this session's threads, and nothing is waited for.
+        """
+        q = ("select id from information_schema.processlist"
+             " where id <> connection_id()"
+             " and lower(coalesce(state, '')) like '%commit%'")
+        first = {r[0] for r in self._q(side, q)}
+        began = time.time()
+        while first:
+            first &= {r[0] for r in self._q(side, q)}
+            if first and time.time() - began > self.COMMIT_WAIT:
+                raise SystemExit(
+                    f"{len(first)} commits on the source have not finished"
+                    f" after {self.COMMIT_WAIT}s (threads"
+                    f" {', '.join(str(x) for x in sorted(first)[:5])}). A"
+                    " copy read now could miss one the change tail starts"
+                    " after, so nothing was copied - move again once they"
+                    " are through.")
+            if first:
+                time.sleep(0.05)
+
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         row = canon.row_expr("mysql", columns)
@@ -1404,10 +1485,21 @@ class MySQLEngine(Engine):
         # a mapped table's indexes are over the columns the mapping names
         left = {side: self._left_out_of_schema(db, side)
                 for side in ("src", "dst")}
+        # an online schema change's working tables, their indexes and the
+        # triggers it put on the table it copies go when it finishes
+        from .. import drift
+        working = {side: drift.transient_among(self._all_tables(side, db))
+                   for side in ("src", "dst")}
 
         def kept(side, typ, name):
-            return not (typ == "index"
-                        and str(name).split(".", 1)[0] in left[side])
+            name = str(name)
+            if typ == "trigger":
+                return not drift.transient_trigger(name)
+            if typ == "table":
+                return name not in working[side]
+            table = name.split(".", 1)[0]
+            return not (typ == "index" and (table in left[side]
+                                            or table in working[side]))
         for typ, sql in queries.items():
             a = {r[0] for r in self._q("src", sql, (db,))
                  if kept("src", typ, r[0])}
@@ -1525,8 +1617,15 @@ class MySQLEngine(Engine):
         return [r[0] for r in rows]
 
     def _tables(self, side, db):
-        return [t for t in self._all_tables(side, db)
-                if not self.hop.excluded(db, t)]
+        """The tables a move carries and a check compares: not the ones
+        the hop excludes, nor an online schema change's working tables
+        (`drift.transient`), which are not the application's rows and go
+        when it swaps them in."""
+        from .. import drift
+        got = self._all_tables(side, db)
+        working = drift.transient_among(got)
+        return [t for t in got
+                if t not in working and not self.hop.excluded(db, t)]
 
     #: a primary key's columns, only the ones the table shows: MariaDB adds
     #: a system-versioned table's hidden `row_end` to its key, and a check
@@ -3230,47 +3329,23 @@ class MySQLEngine(Engine):
         # narrowing = silent truncation/overflow: a target column shorter than
         # the source (fewer chars, less decimal scale/precision, smaller int,
         # or unsigned turned signed) quietly cuts or wraps values.
-        CHAR_T = ("char", "varchar", "tinytext", "text", "mediumtext",
-                  "longtext")
-        INTW = {"tinyint": 1, "smallint": 2, "mediumint": 3, "int": 4,
-                "bigint": 8}
-        nq = ("select concat(table_name,'.',column_name), data_type,"
-              " coalesce(character_maximum_length,0),"
-              " coalesce(numeric_precision,0), coalesce(numeric_scale,0),"
-              " column_type from information_schema.columns"
+        # The reasoning is the one every engine's deep check asks
+        # (`verdict.narrowing`), over the declared types read here.
+        from .. import verdict
+        nq = ("select concat(table_name,'.',column_name), column_type"
+              " from information_schema.columns"
               " where table_schema=%s and table_name not like 'migkit%%'")
-        scn = {r[0]: r[1:] for r in self._q("src", nq, (db,))}
-        dcn = {r[0]: r[1:] for r in self._q("dst", nq, (ddb,))}
+        scn = dict(self._q("src", nq, (db,)))
+        dcn = dict(self._q("dst", nq, (ddb,)))
         narrow = []
         for k in sorted(scn):
             if k not in dcn:
                 continue
-            st, scm, spr, ssc, sct = scn[k]
-            dt, dcm, dpr, dsc, dct = dcn[k]
-            why = None
-            if st in CHAR_T and scm and dcm and int(dcm) < int(scm):
-                why = f"char {scm} -> {dcm}"
-            elif st == "decimal" and ssc and int(dsc) < int(ssc):
-                why = f"decimal scale {ssc} -> {dsc} (rounds)"
-            elif st == "decimal" and spr and int(dpr) < int(spr):
-                why = f"decimal precision {spr} -> {dpr} (overflow)"
-            elif INTW.get(st, 0) > INTW.get(dt, 99):
-                why = f"{st} -> {dt} (overflow)"
-            elif "unsigned" in sct and "unsigned" not in dct \
-                    and st in INTW:
-                why = f"unsigned -> signed ({sct} -> {dct})"
+            why = verdict.narrowing("mysql", str(scn[k]).replace(
+                " zerofill", ""), str(dcn[k]).replace(" zerofill", ""))
             if why:
                 narrow.append(f"{k}: {why}")
-        if narrow:
-            res.append(Result("deep", f"{db} narrowing", "diff",
-                              f"{len(narrow)} target columns NARROWER than"
-                              " source (silent truncation/overflow risk): "
-                              + "; ".join(narrow[:6]), "",
-                              "widen the target column to match source before"
-                              " loading, or values are cut/rounded/overflowed"))
-        else:
-            res.append(Result("deep", f"{db} narrowing", "ok",
-                              "no target column narrower than source"))
+        res.append(verdict.narrowing_result(db, narrow))
 
         # a constant per-row offset on a datetime/timestamp column is a tz
         # conversion bug (mover applied a non-UTC session), not row corruption.
@@ -3294,24 +3369,11 @@ class MySQLEngine(Engine):
                      f" order by `{p}` limit 200")
                 return {str(r[0]): r[1] for r in self._rows_utc(side, q)
                         if r[1] is not None}
-            sm, dm = rows("src", db), rows("dst", ddb)
-            deltas = [float(dm[k]) - float(sm[k]) for k in sm if k in dm]
-            if len(deltas) < 3:
-                continue
-            avg = sum(deltas) / len(deltas)
-            if max(deltas) - min(deltas) < 1 and abs(avg) >= 1:
-                secs = round(avg)
-                shifts.append(f"{t}.{col}: every row shifted"
-                              f" {secs}s (~{secs / 3600:.1f}h)")
-        if shifts:
-            res.append(Result("deep", f"{db} timeshift", "diff",
-                              "uniform timezone offset (systematic, not"
-                              " row-level corruption): " + "; ".join(shifts[:5]),
-                              "", "target stored a non-UTC wall clock; re-load"
-                              " with the source session timezone"))
-        else:
-            res.append(Result("deep", f"{db} timeshift", "ok",
-                              "no uniform timestamp offset detected"))
+            line = verdict.uniform_shift(f"{t}.{col}", rows("src", db),
+                                         rows("dst", ddb))
+            if line:
+                shifts.append(line)
+        res.append(verdict.timeshift_result(db, shifts))
 
         # charset corruption: a text column downgraded from utf8mb4 to a
         # narrower charset (utf8mb3/latin1) on the target truncates or drops
@@ -3362,55 +3424,10 @@ class MySQLEngine(Engine):
                               " excess"))
 
         # partitioned tables (mysql): a missing partition sends rows to the
-        # MAXVALUE catch-all, a changed method/expression reroutes them.
-        def _parts(side, dbn):
-            out = {}
-            for t, meth, expr, desc in self._q(side,
-                    "select table_name, partition_method,"
-                    " coalesce(partition_expression,''), partition_description"
-                    " from information_schema.partitions where table_schema=%s"
-                    " and partition_name is not null", (dbn,)):
-                e = out.setdefault(t, {"m": meth, "e": expr, "b": set()})
-                e["b"].add(desc)
-            return out
-        sp, dp = _parts("src", db), _parts("dst", ddb)
-        pbad = []
-        for t, si in sorted(sp.items()):
-            di = dp.get(t)
-            if not di:
-                pbad.append(f"{t}: partitioned on source, not on target")
-                continue
-            if (si["m"], si["e"]) != (di["m"], di["e"]):
-                pbad.append(f"{t}: partition scheme differs"
-                            f" src({si['m']} {si['e']}) dst({di['m']} {di['e']})")
-                continue
-            miss = si["b"] - di["b"]
-            if miss:
-                pbad.append(f"{t}: {len(miss)} partition bound(s) missing on"
-                            f" target: {', '.join(sorted(miss)[:2])}")
-            if "MAXVALUE" in di["b"]:
-                mv = self._q("dst", "select partition_name from"
-                             " information_schema.partitions where"
-                             " table_schema=%s and table_name=%s and"
-                             " partition_description='MAXVALUE'", (ddb, t))
-                if mv:
-                    n = self._q("dst", f"select count(*) from `{ddb}`.`{t}`"
-                                f" partition (`{mv[0][0]}`)")[0][0]
-                    if n > 0:
-                        pbad.append(f"{t}: {n} rows stranded in MAXVALUE"
-                                    f" partition ({mv[0][0]})")
-        if not sp:
-            res.append(Result("deep", f"{db} partitions", "ok",
-                              "no partitioned tables"))
-        elif pbad:
-            res.append(Result("deep", f"{db} partitions", "diff",
-                              "; ".join(pbad[:6]), "",
-                              "recreate the missing partitions and move rows"
-                              " out of MAXVALUE before cutover"))
-        else:
-            res.append(Result("deep", f"{db} partitions", "ok",
-                              f"{len(sp)} partitioned tables, schemes and"
-                              " bounds match"))
+        # MAXVALUE catch-all, a changed method/expression reroutes them, and
+        # a partition can arrive empty with the table's total plausible -
+        # the counts and the data check read the table whole
+        res.append(self._deep_partitions(db, ddb))
 
         # generated/computed columns (mysql)
         genq = ("select table_name, column_name, extra,"
@@ -3644,6 +3661,102 @@ class MySQLEngine(Engine):
                           + ", ".join(held[:5]) + "); they go back when it"
                           " stops")
         return None
+
+    #: partitions read in one statement at most
+    PARTITIONS_PER_READ = 200
+
+    def _deep_partitions(self, db, ddb):
+        """Every partitioned table's method and expression on both sides,
+        and every partition held to its own count and digest, read with
+        `PARTITION (p)` (`Engine._partitions_verdict`)."""
+        try:
+            return self._partitions_compared(db, ddb)
+        except Exception as e:  # noqa: BLE001 - said, and the rest runs
+            return Result("deep", f"{db} partitions", "error",
+                          "could not read the partitions:"
+                          f" {str(e).splitlines()[-1][:120]}")
+
+    def _partitions_compared(self, db, ddb):
+        def scheme_of(side, dbn):
+            out = {}
+            for t, meth, expr, name, desc in self._q(side,
+                    "select table_name, partition_method,"
+                    " coalesce(partition_expression, ''), partition_name,"
+                    " coalesce(partition_description, '')"
+                    " from information_schema.partitions where table_schema=%s"
+                    " and partition_name is not null"
+                    " order by table_name, partition_ordinal_position",
+                    (dbn,)):
+                if self.hop.excluded(db, t):
+                    continue
+                e = out.setdefault(t, {"m": meth, "e": expr, "p": {}})
+                # a partition's subpartitions answer a row each
+                e["p"].setdefault(name, desc)
+            return out
+        sp, dp = scheme_of("src", db), scheme_of("dst", ddb)
+        plain = {side: set(self._all_tables(side, db))
+                 for side in ("src", "dst")}
+        scheme, tables = [], {}
+        for t, si in sorted(sp.items()):
+            di = dp.get(t)
+            if not di:
+                scheme.append(f"{t}: partitioned on source, not on target"
+                              if t in plain["dst"] else
+                              f"{t}: missing on target (partitioned by"
+                              f" {si['m']} on the source)")
+                continue
+            if (si["m"], si["e"]) != (di["m"], di["e"]):
+                scheme.append(f"{t}: partition scheme differs"
+                              f" src({si['m']} {si['e']})"
+                              f" dst({di['m']} {di['e']})")
+            tables[t] = (self._partition_rows("src", db, t, si["p"]),
+                         self._partition_rows("dst", db, t, di["p"]))
+        for t, di in sorted(dp.items()):
+            if t not in sp and t in plain["src"]:
+                scheme.append(f"{t}: partitioned on target ({di['m']}"
+                              f" {di['e']}), not on source")
+        return self._partitions_verdict(db, tables, scheme, "MAXVALUE")
+
+    def _partition_rows(self, side, db, t, parts):
+        """{partition: {"rows", "digest", "bound", "catchall"}} of one
+        table on one side, every partition's count and digest (the same
+        row text and sum the data check folds a table with) in one
+        statement. A side the source's row text cannot be read on - a
+        column the target lacks - is counted, and its digest left None."""
+        try:
+            return self._partition_read(side, db, t, parts,
+                                        self._row_expr(db, t))
+        except Exception:  # noqa: BLE001 - counted, then
+            return self._partition_read(side, db, t, parts, None)
+
+    def _partition_read(self, side, db, t, parts, expr):
+        dbn = self._d(side, db)
+        pred = (self.hop.row_filter(db, t)
+                if hasattr(self.hop, "row_filter") else None)
+        names = list(parts)
+        out = {}
+        for at in range(0, len(names), self.PARTITIONS_PER_READ):
+            reads = []
+            for i, name in enumerate(names[at:at + self.PARTITIONS_PER_READ],
+                                     start=at):
+                bound = parts[name] or ""
+                out[name] = {"rows": 0, "digest": None, "bound": bound,
+                             "catchall": bound == "DEFAULT" or (
+                                 bool(bound) and all(
+                                     b.strip().upper() == "MAXVALUE"
+                                     for b in bound.split(",")))}
+                one = (f"{self._my_ident(dbn)}.{self._my_ident(t)}"
+                       f" partition ({self._my_ident(name)})")
+                one = (f"(select * from {one} where {pred}) t" if pred
+                       else f"{one} t")
+                digest = (self._summed(expr, self.digest_salt()) if expr
+                          else "null")
+                reads.append(f"select {i}, count(*), {digest} from {one}")
+            for i, rows, dig in self._q(side, " union all ".join(reads)):
+                got = out[names[int(i)]]
+                got["rows"] = int(rows)
+                got["digest"] = None if dig is None else str(dig)
+        return out
 
     OWNED = (("views", "table_schema", "table_name"),
              ("routines", "routine_schema", "routine_name"),

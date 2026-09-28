@@ -2016,7 +2016,7 @@ def _position_before_copy(eng, d):
     if not getattr(src, "CHANGE_POINT_READS_ONLY", False):
         return None
     try:
-        return src.change_point("src", d)
+        return src.copy_point("src", d)
     except (Exception, SystemExit):
         return None
 

@@ -375,9 +375,13 @@ class PostgresEngine(Engine):
         # without the hop's exclude list, as every other engine's list is:
         # measured, a PostgreSQL-to-MySQL move copied an excluded table
         # into the target that owned it, and stopped only because the
-        # target's copy was already there
-        return [t for t in self._all_tables(side, db)
-                if not self.hop.excluded(db, *t.split(".", 1))]
+        # target's copy was already there. Nor an online schema change's
+        # working tables (`drift.transient`), as on MySQL.
+        from .. import drift
+        got = self._all_tables(side, db)
+        working = drift.transient_among(got)
+        return [t for t in got if t not in working
+                and not self.hop.excluded(db, *t.split(".", 1))]
 
     def column_catalog(self, side, db):
         """{schema.table: [(column, type), ...]} in one query - what a move
@@ -1261,7 +1265,8 @@ class PostgresEngine(Engine):
         base = re.sub(r"[^a-z0-9_]", "_", str(self.hop.name).lower())
         return f"migkit_{base}"[:63]
 
-    def _slot_ready(self, side, db, resuming_from=None, ask=None):
+    def _slot_ready(self, side, db, resuming_from=None, ask=None,
+                    make=None):
         """Make sure the slot exists and is one migkit can read. Returns its
         name. `ask(sql)` answers a statement's text, by default through the
         client program; the tail asks on the connection it keeps
@@ -1304,6 +1309,9 @@ class PostgresEngine(Engine):
                     "   -- then restart\n"
                     "    rds.logical_replication = 1"
                     "                -- parameter group, then reboot")
+            if make is not None:
+                make(side, db, name)
+                return name
             ask("select pg_create_logical_replication_slot"
                 f"('{name}', '{self.PLUGIN}')")
             return name
@@ -1347,8 +1355,12 @@ class PostgresEngine(Engine):
         The position is the slot's own rather than the server's current
         one: a slot that already existed keeps changes from before now, and
         replaying those converges where skipping them would not.
+
+        A slot made here is made with its snapshot (`_slot_with_its_snapshot`)
+        - a copy reads after this, and nothing before the position may be out
+        of its sight.
         """
-        name = self._slot_ready(side, db)
+        name = self._slot_ready(side, db, make=self._slot_with_its_snapshot)
         return self._psql(side, self._d(side, db),
                           "select confirmed_flush_lsn::text from"
                           " pg_replication_slots"
@@ -1416,6 +1428,128 @@ class PostgresEngine(Engine):
             return "\n".join("" if r[0] is None else str(r[0])
                              for r in self._slot_rows(side, db, sql))
         return ask
+
+    #: how long a copy waits for commits before its position to become
+    #: visible, before it stops rather than read around them
+    VISIBLE_WAIT = 600
+
+    def _slot_with_its_snapshot(self, side, db, name):
+        """Make the slot a copy follows, and return once every change before
+        its position is visible to any read made from now on.
+
+        A position and a snapshot taken apart can miss a commit between
+        them: PostgreSQL makes a commit visible when it leaves the
+        ProcArray, which is not the order of the log - a snapshot can see a
+        later commit and miss an earlier one (the research of 2026-09-28,
+        L2). Measured on 16: a commit held by a synchronous standby that
+        does not answer is in the log and out of sight, and the slot's
+        creation waits for that one, by either way of making it
+        (`test_rows_written_around_the_slot_arrive`); what the waiting does
+        not promise is a commit that reaches the log while the slot is
+        being made. The slot made over the replication protocol hands back
+        the snapshot its position is exact against (`EXPORT_SNAPSHOT`).
+        What that snapshot holds is compared with a snapshot taken now; a
+        transaction it counts as done that a read now would not see is
+        waited for. After that, a read sees everything before the position,
+        and whatever it sees after it the tail applies again by key, which
+        converges.
+
+        A server that refuses a replication connection (a pooler, a
+        `pg_hba.conf` without it) gets the slot from the SQL function, and
+        the wait is on what the commit log says has committed and a read
+        cannot see yet - the same transactions, but for one that is between
+        writing its commit and marking it.
+        """
+        import psycopg2
+        from psycopg2.extras import LogicalReplicationConnection
+        ep = self.hop.source if side == "src" else self.hop.target
+        target = self._d(side, db)
+        try:
+            rep = psycopg2.connect(
+                host=ep.host, port=ep.port, user=ep.user,
+                password=ep.password, dbname=target, connect_timeout=15,
+                connection_factory=LogicalReplicationConnection,
+                **ep.libpq_tls())
+        except psycopg2.OperationalError:
+            rep = None
+        if rep is None:
+            self._psql(side, target, "select pg_create_logical_replication_slot"
+                                     f"('{name}', '{self.PLUGIN}')")
+            return self._visible_by_the_commit_log(side, db, name)
+        try:
+            cur = rep.cursor()
+            cur.execute(f'CREATE_REPLICATION_SLOT "{name}" LOGICAL'
+                        f" {self.PLUGIN} EXPORT_SNAPSHOT")
+            snapshot = cur.fetchone()[2]
+            conn = self._conn(side, target)
+            try:
+                conn.rollback()
+                conn.set_session(isolation_level="REPEATABLE READ",
+                                 readonly=True)
+                with conn.cursor() as c:
+                    c.execute("set transaction snapshot %s", (snapshot,))
+                    c.execute("select txid_current_snapshot()::text")
+                    exported = c.fetchone()[0]
+                conn.rollback()
+            finally:
+                conn.close()
+        finally:
+            rep.close()
+        xmin, xmax, done_then = self._snapshot_parts(exported)
+
+        def unseen():
+            _, _, running = self._snapshot_parts(self._psql(
+                side, target, "select txid_current_snapshot()::text"))
+            # done in the slot's snapshot, still running for a read now
+            return sorted(x for x in running
+                          if x < xmax and x not in done_then)
+        self._wait_visible(side, db, name, unseen)
+
+    def _visible_by_the_commit_log(self, side, db, name):
+        target = self._d(side, db)
+
+        def unseen():
+            _, _, running = self._snapshot_parts(self._psql(
+                side, target, "select txid_current_snapshot()::text"))
+            if not running:
+                return []
+            listed = ",".join(str(x) for x in running)
+            got = self._psql(side, target,
+                             "select x from unnest(array[" + listed
+                             + "]::bigint[]) x where txid_status(x)"
+                             " = 'committed'")
+            return sorted(int(x) for x in got.split() if x)
+        self._wait_visible(side, db, name, unseen)
+
+    @staticmethod
+    def _snapshot_parts(text):
+        """(xmin, xmax, {in progress}) from `txid_current_snapshot()`."""
+        xmin, xmax, xip = (str(text).strip().split(":") + ["", ""])[:3]
+        return int(xmin), int(xmax), {int(x) for x in xip.split(",") if x}
+
+    def _wait_visible(self, side, db, name, unseen):
+        began = time.time()
+        while True:
+            held = unseen()
+            if not held:
+                return
+            if time.time() - began > self.VISIBLE_WAIT:
+                # the slot was made for this copy, which is not happening
+                self._psql(side, self._d(side, db),
+                           "select pg_drop_replication_slot(slot_name) from"
+                           " pg_replication_slots"
+                           f" where slot_name = '{name}'")
+                raise SystemExit(
+                    f"{len(held)} transactions committed before the change"
+                    " position are still out of sight of any read after"
+                    f" {self.VISIBLE_WAIT}s (transaction ids"
+                    f" {', '.join(str(x) for x in held[:5])}) - a"
+                    " synchronous standby that does not answer holds a"
+                    " commit this way. A copy read now would miss them and"
+                    " the change tail starts after them, so nothing was"
+                    " copied. Make the standby answer, or take it out of"
+                    " synchronous_standby_names, and move again.")
+            time.sleep(0.2)
 
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of a logical slot, as neutral records.
@@ -2020,14 +2154,26 @@ class PostgresEngine(Engine):
                              or name.rsplit(".", 1)[0] in whole)
 
     def check_objects(self, db):
+        from .. import drift
         sides = {}
         for side in ("src", "dst"):
             m = {}
             left = self._objects_left_out_of_schema(db, side)
-            for line in self._psql(side, db, INVENTORY_SQL).splitlines():
-                t, _, name = line.partition("|")
-                if not left(name):
-                    m.setdefault(t, set()).add(name)
+            lines = [l.partition("|")[::2] for l in
+                     self._psql(side, db, INVENTORY_SQL).splitlines()]
+            # an online schema change's working tables, with what hangs off
+            # them, and the triggers it put on the table it copies, go
+            # when it finishes (`drift.transient`)
+            tables = [n for t, n in lines if t == "table"]
+            working = drift.transient_among(tables)
+            for t, name in lines:
+                if left(name) or (t == "trigger"
+                                  and drift.transient_trigger(name)):
+                    continue
+                if name in working or name.rsplit(".", 1)[0] in working \
+                        or (t != "table" and drift.transient(name, tables)):
+                    continue
+                m.setdefault(t, set()).add(name)
             sides[side] = m
         inv = {}
         for t in sorted(set(sides["src"]) | set(sides["dst"])):
@@ -2184,7 +2330,26 @@ class PostgresEngine(Engine):
         noise = self._noise()
         if noise and tbl.startswith(noise):
             return False
+        from .. import drift
+        if drift.maybe_transient(t) and t in self._working_tables(db):
+            return False
         return not self.hop.excluded(db, sch, tbl)
+
+    def _working_tables(self, db):
+        """The tables an online schema change is working in, on either
+        side (`drift.transient`): not the application's rows, and on the
+        other side by nature. Read once per database."""
+        from .. import drift
+        known = self.__dict__.setdefault("_working_of", {})
+        if db not in known:
+            found = set()
+            for side in ("src", "dst"):
+                try:
+                    found |= drift.transient_among(self._all_tables(side, db))
+                except Exception:  # noqa: BLE001 - a target not made yet
+                    continue
+            known[db] = found
+        return known[db]
 
     def check_counts(self, db):
         st = [t for t in self._psql("src", db, self.USER_TABLES).splitlines()
@@ -4334,41 +4499,28 @@ class PostgresEngine(Engine):
         # integer than the source silently truncates, rounds, or overflows
         # values (DMS caps unlimited text at varchar(8000); scale loss eats
         # money). Called out on its own, at higher severity than cosmetic drift.
-        CHAR_T = ("character varying", "character", "text")
-        INTW = {"smallint": 2, "integer": 4, "bigint": 8}
+        # The reasoning is the one every engine's deep check asks
+        # (`verdict.narrowing`), over the declared types read here.
+        from .. import verdict
+
+        def declared(line):
+            # from the right: a column's default may hold the separator
+            head, cm, pr, sca = (["", "", ""] + line.rsplit("|", 3))[-4:]
+            t = (head.split("|") + [""])[1]
+            if cm and t in ("character varying", "character"):
+                return f"{t}({cm})"
+            if pr and t in ("numeric", "decimal"):
+                return f"{t}({pr},{sca or 0})"
+            return t
         narrow = []
         for k in sorted(sc):
             if k not in dc:
                 continue
-            sp, dp = sc[k].split("|"), dc[k].split("|")
-            if len(sp) < 7 or len(dp) < 7:
-                continue
-            st, dt = sp[1], dp[1]
-            scm, dcm, spr, ssc = sp[4], dp[4], sp[5], sp[6]
-            dpr, dsc = dp[5], dp[6]
-            why = None
-            if st in CHAR_T and dcm and (not scm or int(dcm) < int(scm)):
-                why = f"char {scm or 'unlimited'} -> {dcm}"
-            elif st in ("numeric", "decimal") and ssc and dsc \
-                    and int(dsc) < int(ssc):
-                why = f"numeric scale {ssc} -> {dsc} (rounds)"
-            elif st in ("numeric", "decimal") and spr and dpr \
-                    and int(dpr) < int(spr):
-                why = f"numeric precision {spr} -> {dpr} (overflow)"
-            elif INTW.get(st, 0) > INTW.get(dt, 99):
-                why = f"{st} -> {dt} (overflow)"
+            why = verdict.narrowing("postgres", declared(sc[k]),
+                                    declared(dc[k]))
             if why:
                 narrow.append(f"{k}: {why}")
-        if narrow:
-            res.append(Result("deep", f"{db} narrowing", "diff",
-                              f"{len(narrow)} target columns NARROWER than"
-                              " source (silent truncation/overflow risk): "
-                              + "; ".join(narrow[:6]), "",
-                              "widen the target column to match source before"
-                              " loading, or values are cut/rounded/overflowed"))
-        else:
-            res.append(Result("deep", f"{db} narrowing", "ok",
-                              "no target column narrower than source"))
+        res.append(verdict.narrowing_result(db, narrow))
 
         # a constant, per-row offset on a timestamp column is the fingerprint
         # of a timezone conversion bug (a mover applying a non-UTC session),
@@ -4405,24 +4557,10 @@ class PostgresEngine(Engine):
                           self._psql("dst", db, q).splitlines() if "\t" in l)
             except (RuntimeError, ValueError):
                 continue
-            deltas = [float(dm[k]) - float(sm[k]) for k in sm if k in dm]
-            if len(deltas) < 3:
-                continue
-            avg = sum(deltas) / len(deltas)
-            if max(deltas) - min(deltas) < 1 and abs(avg) >= 1:
-                secs = round(avg)
-                shifts.append(f"{tbl}.{col}: every row shifted"
-                              f" {secs}s (~{secs / 3600:.1f}h)")
-        if shifts:
-            res.append(Result("deep", f"{db} timeshift", "diff",
-                              "uniform timezone offset (systematic, not"
-                              " row-level corruption): " + "; ".join(shifts[:5]),
-                              "", "target stored a non-UTC wall clock; re-load"
-                              " with the source session timezone or convert"
-                              " the column"))
-        else:
-            res.append(Result("deep", f"{db} timeshift", "ok",
-                              "no uniform timestamp offset detected"))
+            line = verdict.uniform_shift(f"{tbl}.{col}", sm, dm)
+            if line:
+                shifts.append(line)
+        res.append(verdict.timeshift_result(db, shifts))
 
         # NULL vs empty-string: Oracle stores '' as NULL, Postgres keeps them
         # distinct, so a migration can silently flip IS NULL semantics and
@@ -4503,59 +4641,10 @@ class PostgresEngine(Engine):
 
         # partitioned tables: a mover can land rows in the DEFAULT catch-all
         # partition, miss a partition bound entirely, or even change the
-        # partition key - all of which reroute or strand data silently.
-        parts = [l.split("|", 1) for l in self._psql("src", db,
-                 "select c.relnamespace::regnamespace||'.'||c.relname"
-                 "||'|'||pg_get_partkeydef(c.oid)"
-                 " from pg_partitioned_table p"
-                 " join pg_class c on c.oid = p.partrelid"
-                 " where c.relnamespace::regnamespace::text not like 'pg\\_%'"
-                 " and c.relnamespace::regnamespace::text not like"
-                 " '\\_\\_%'").splitlines() if "|" in l]
-        pbad = []
-        for tbl, keydef in parts:
-            dkey = self._psql("dst", db,
-                              f"select pg_get_partkeydef('{tbl}'::regclass)")
-            if not dkey:
-                pbad.append(f"{tbl}: not partitioned on target (was {keydef})")
-                continue
-            if dkey != keydef:
-                pbad.append(f"{tbl}: partition key differs"
-                            f" src({keydef}) dst({dkey})")
-                continue
-            bq = ("select coalesce(pg_get_expr(ch.relpartbound, ch.oid),'')"
-                  " from pg_inherits i join pg_class ch on ch.oid = i.inhrelid"
-                  f" where i.inhparent = '{tbl}'::regclass")
-            sb = set(self._psql("src", db, bq).splitlines()) - {""}
-            dbnd = set(self._psql("dst", db, bq).splitlines()) - {""}
-            miss = sb - dbnd
-            if miss:
-                pbad.append(f"{tbl}: {len(miss)} partition bound(s) missing on"
-                            f" target: {', '.join(sorted(miss)[:2])}")
-            dflt = self._psql("dst", db,
-                              "select c.relnamespace::regnamespace||'.'"
-                              "||c.relname from pg_inherits i"
-                              " join pg_class c on c.oid = i.inhrelid"
-                              f" where i.inhparent = '{tbl}'::regclass"
-                              " and pg_get_expr(c.relpartbound, c.oid)"
-                              " = 'DEFAULT'")
-            if dflt:
-                n = self._psql("dst", db, f"select count(*) from {dflt}")
-                if n and int(n) > 0:
-                    pbad.append(f"{tbl}: {n} rows stranded in default"
-                                f" partition ({dflt})")
-        if not parts:
-            res.append(Result("deep", f"{db} partitions", "ok",
-                              "no partitioned tables"))
-        elif pbad:
-            res.append(Result("deep", f"{db} partitions", "diff",
-                              "; ".join(pbad[:6]), "",
-                              "recreate the missing partitions and move rows"
-                              " out of the default before cutover"))
-        else:
-            res.append(Result("deep", f"{db} partitions", "ok",
-                              f"{len(parts)} partitioned tables, schemes and"
-                              " bounds match, default empty"))
+        # partition key - all of which reroute or strand data silently. And
+        # a partition can arrive empty while its parent's total looks
+        # plausible, so each is held to its own count and digest.
+        res.append(self._deep_partitions(db))
 
         # generated columns: a bulk load can write a literal into a stored
         # generated column (so it no longer equals its expression), the
@@ -5218,6 +5307,117 @@ class PostgresEngine(Engine):
         note = (f"{len(miss)} table and {len(smiss)} sequence grants the"
                 " mover did not carry")
         return RepairAction(db, "grants", stmts, undo, note)
+
+    #: leaf partitions read in one statement at most: the statement is one
+    #: argument to psql, and Linux caps a single argument at 128 KB
+    PARTITIONS_PER_READ = 200
+
+    def _deep_partitions(self, db):
+        """Every partitioned table's key on both sides, and every leaf
+        partition under it held to its own count and digest
+        (`Engine._partitions_verdict`)."""
+        try:
+            return self._partitions_compared(db)
+        except Exception as e:  # noqa: BLE001 - said, and the rest runs
+            return Result("deep", f"{db} partitions", "error",
+                          "could not read the partitions:"
+                          f" {str(e).splitlines()[-1][:120]}")
+
+    def _partitions_compared(self, db):
+        def keyed(side):
+            out = {}
+            for line in self._psql(side, db,
+                    "select n.nspname||'.'||c.relname"
+                    "||chr(31)||pg_get_partkeydef(c.oid)"
+                    "||chr(31)||c.relispartition::int"
+                    " from pg_partitioned_table p"
+                    " join pg_class c on c.oid = p.partrelid"
+                    " join pg_namespace n on n.oid = c.relnamespace"
+                    " where n.nspname not like 'pg\\_%'"
+                    " and n.nspname not like '\\_\\_%'"
+                    " and n.nspname <> 'information_schema'").splitlines():
+                name, key, sub = (line.split("\x1f") + ["", ""])[:3]
+                if key and self._keep_tbl(db, name):
+                    out[name] = (key, sub == "1")
+            return out
+        src, dst = keyed("src"), keyed("dst")
+        plain = {side: set(self._psql(side, db, self.USER_TABLES).splitlines())
+                 for side in ("src", "dst")}
+        scheme, tables, unread = [], {}, []
+        for t, (key, sub) in sorted(src.items()):
+            if t not in dst:
+                scheme.append(f"{t}: not partitioned on target (was {key})"
+                              if t in plain["dst"] else
+                              f"{t}: missing on target (partitioned by {key}"
+                              " on the source)")
+                continue
+            if dst[t][0] != key:
+                scheme.append(f"{t}: partition key differs"
+                              f" src({key}) dst({dst[t][0]})")
+            if sub:
+                # its leaves are read from the table at the top
+                continue
+            try:
+                sc, dc, notes = self._comparable_columns(db, self, t, self, t)
+            except Exception as e:  # noqa: BLE001 - counted, then
+                sc, dc = [], []
+                notes = [str(e).splitlines()[-1][:90]]
+            if notes:
+                unread.append(f"{t}: {'; '.join(notes)}")
+            sch, tbl = self._split(t)
+            where = (self.hop.row_filter(db, sch, tbl)
+                     if hasattr(self.hop, "row_filter") else None)
+            tables[t] = (self._partition_leaves("src", db, t, sc, where),
+                         self._partition_leaves("dst", db, t, dc, where))
+        for t, (key, _) in sorted(dst.items()):
+            if t not in src and t in plain["src"]:
+                scheme.append(f"{t}: partitioned on target ({key}), not on"
+                              " source")
+        return self._partitions_verdict(db, tables, scheme, "DEFAULT", unread)
+
+    def _partition_leaves(self, side, db, parent, columns, where):
+        """{leaf partition: {"rows", "digest", "bound", "catchall"}} under
+        `parent` on one side - a partition that is itself partitioned holds
+        no rows of its own, so its leaves are what is read - with every
+        leaf's count and digest in one statement."""
+        from .. import canon
+        sch, tbl = self._split(parent)
+        lit = (f"{self._quote_ident(sch)}.{self._quote_ident(tbl)}"
+               .replace("'", "''"))
+        got = self._psql(side, db,
+            "with recursive tree(relid) as ("
+            f" select inhrelid from pg_inherits where inhparent = '{lit}'"
+            "::regclass union all select i.inhrelid from pg_inherits i"
+            " join tree t on i.inhparent = t.relid)"
+            " select n.nspname||chr(31)||c.relname||chr(31)"
+            "||coalesce(pg_get_expr(c.relpartbound, c.oid), '')"
+            " from tree join pg_class c on c.oid = tree.relid"
+            " join pg_namespace n on n.oid = c.relnamespace"
+            " where c.relkind <> 'p' order by 1")
+        leaves = [l.split("\x1f") for l in got.splitlines()
+                  if l.count("\x1f") == 2]
+        digest = (canon.digest_expr("postgres",
+                                    canon.row_expr("postgres", columns))
+                  + "::text" if columns else "''")
+        out = {}
+        for at in range(0, len(leaves), self.PARTITIONS_PER_READ):
+            reads = []
+            for lsch, lname, bound in leaves[at:at + self.PARTITIONS_PER_READ]:
+                name = f"{lsch}.{lname}"
+                out[name] = {"rows": 0, "digest": None, "bound": bound,
+                             "catchall": bound == "DEFAULT"}
+                reads.append(
+                    f"select '{name.replace(chr(39), chr(39) * 2)}'"
+                    f"||chr(31)||count(*)::text||chr(31)||{digest}"
+                    f" from {self._quote_ident(lsch)}"
+                    f".{self._quote_ident(lname)}" + self._where(where))
+            for line in self._psql(side, db, " union all ".join(reads)
+                                   ).splitlines():
+                name, rows, dig = (line.split("\x1f") + ["", ""])[:3]
+                if name in out:
+                    out[name]["rows"] = int(rows or 0)
+                    out[name]["digest"] = dig or None
+        return out
 
     def _deep_ownership(self, db):
         """Object owners, which the structural differ does not compare.
@@ -7146,7 +7346,12 @@ class PostgresEngine(Engine):
             " and n.nspname not in ('pg_catalog','information_schema')"
             " and n.nspname not like 'pg\\_%'"
             " and n.nspname not like '\\_\\_%' order by 1")
-        return [tuple(x.split("|")) for x in out.splitlines() if x]
+        got = [tuple(x.split("|")) for x in out.splitlines() if x]
+        # an online schema change's working tables are not the
+        # application's rows, and go when it swaps them in
+        from .. import drift
+        working = drift.transient_among(f"{s}.{t}" for s, t in got)
+        return [(s, t) for s, t in got if f"{s}.{t}" not in working]
 
     def _int_pk(self, db, sch, tbl):
         rows = self._psql("src", db,

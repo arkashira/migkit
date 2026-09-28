@@ -1991,7 +1991,7 @@ class HeteroEngine(Engine):
                 " check while it runs")]
         state = self.hop.report_dir(db) / "pair-delta-token.json"
         if not state.exists():
-            state.write_text(json.dumps(src.change_point("src", db)))
+            state.write_text(json.dumps(src.copy_point("src", db)))
             return [Result("delta", db, "ok", "baseline recorded, changes"
                            " are tracked from this point on")]
         token = json.loads(state.read_text())
@@ -2941,7 +2941,7 @@ class HeteroEngine(Engine):
         if token_path.exists():
             return False
         from .. import tailctl
-        point = self.src_engine.change_point("src", db)
+        point = self.src_engine.copy_point("src", db)
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(_json.dumps({"token": point}))
         (token_path.parent / "tail-shape.json").unlink(missing_ok=True)
