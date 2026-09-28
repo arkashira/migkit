@@ -170,19 +170,29 @@ def test_microseconds_the_target_cannot_hold_are_a_difference(
     replication = "{'class': 'SimpleStrategy', 'replication_factor': 1}"
     eng = _pair("postgres", "cassandra", pg, _cs(replication=replication),
                 tmp_path)
-    # read back as it is written: the move stops at the batch, naming the
-    # column the target cannot hold as it was given
+    # counted on the source before anything is copied, and refused
     with pytest.raises(SystemExit) as e:
         _move(eng, tmp_path, "fine.json")
+    said = " ".join(str(e.value).split())
+    assert "fine.at: 1 row holds more than 3 digits of a second, which" \
+        " cassandra rounds or cuts to 3 - id 1" in said, said
+    assert "orders" not in said, said
+    # let through by the hop, it is read back as it is written: the move
+    # stops at the batch, naming the column the target cannot hold as it
+    # was given
+    accepted = {"source_engine": "postgres", "target_engine": "cassandra",
+                "accept_changes": ["fine.at"]}
+    eng = _pair("postgres", "cassandra", pg, _cs(replication=replication),
+                tmp_path, options=accepted)
+    with pytest.raises(SystemExit) as e:
+        _move(eng, tmp_path, "fine-accepted.json")
     assert str(e.value).startswith("cssrc.fine: written twice, 0 rows of a"
                                    " batch are not on the target and 1 read"
                                    " back different from the source - the"
                                    " first by key 1, in at."), e.value
     # and with the hop's read-back turned off, `check` finds it after
     eng = _pair("postgres", "cassandra", pg, _cs(replication=replication),
-                tmp_path, options={"source_engine": "postgres",
-                                   "target_engine": "cassandra",
-                                   "verify_batches": False})
+                tmp_path, options={**accepted, "verify_batches": False})
     _move(eng, tmp_path, "fine-unchecked.json")
     got = _data(eng)
     assert got["cssrc.fine"].status == "diff", got["cssrc.fine"].__dict__

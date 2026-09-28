@@ -718,18 +718,154 @@ class Engine:
     #: kind. One place, because the two engines spell all of these the same
     #: way - `char_length`, `octet_length` and `abs` are standard.
     def _capacity_probe(self, col, cap):
+        """(the rows that do not fit, the largest value) for a capacity:
+        the first is `canon.unfit_sql`'s, the one question a move across
+        engines asks before it starts too."""
+        from .. import canon
         kind = cap[0]
+        asked = {"chars": ("chars", cap[1]), "bytes": ("bytes", cap[1]),
+                 "int": ("int-range", tuple(cap[1:3])),
+                 "numeric": ("digits", tuple(cap[1:3]))}.get(kind)
+        if asked is None:
+            raise ValueError(f"no capacity probe for kind {kind!r}")
+        where = canon.unfit_sql(self.CANON_ENGINE, asked[0], col, asked[1])
         if kind == "chars":
-            return f"char_length({col}) > {cap[1]}", f"max(char_length({col}))"
+            return where, f"max(char_length({col}))"
         if kind == "bytes":
-            return (f"octet_length({col}) > {cap[1]}",
-                    f"max(octet_length({col}))")
-        if kind == "int":
-            return f"{col} < {cap[1]} or {col} > {cap[2]}", f"max(abs({col}))"
-        if kind == "numeric":
-            limit = 10 ** (cap[1] - cap[2])
-            return f"abs({col}) >= {limit}", f"max(abs({col}))"
-        raise ValueError(f"no capacity probe for kind {kind!r}")
+            return where, f"max(octet_length({col}))"
+        return where, f"max(abs({col}))"
+
+    #: rows of a table read at once when the values are asked here
+    UNFIT_BATCH = 5000
+
+    def count_unfit(self, side, db, table, columns, checks, key=(),
+                    where=None, examples=3):
+        """[(rows, [key of an example row, ...])] for each (column, kind,
+        arg) in `checks` - how many of this table's rows hold a value of
+        that kind (`canon.unfit`), and which.
+
+        Asked in the engine's own SQL where `canon.unfit_sql` has a
+        predicate for it - one scan for every check of the table, and a
+        second read, of at most `examples` rows, only for a check that
+        found some. The rest are read into this process a batch at a time
+        and asked by `canon.unfit_value`, which is what every engine
+        without SQL gets. `columns` is [(name, class)] for the checked
+        columns and the key."""
+        from .. import canon
+        out = [[0, []] for _ in checks]
+        preds, here = {}, []
+        classes = dict(columns)
+        for i, (col, kind, arg) in enumerate(checks):
+            p = canon.unfit_sql(self.CANON_ENGINE, kind,
+                                self._quote_ident(col), arg,
+                                classes.get(col))
+            if p is None:
+                here.append(i)
+            elif p != "false":
+                preds[i] = p
+        if preds:
+            at = self._qualified(side, db, table)
+            scope = f" and ({where})" if where else ""
+            order = list(preds)
+            got = self.run_rule(side, db, "select " + ", ".join(
+                f"count(case when {preds[i]} then 1 end)" for i in order)
+                + f" from {at}" + (f" where {where}" if where else ""))
+            for i, n in zip(order, got[0]):
+                out[i][0] = int(n or 0)
+                if out[i][0] and key:
+                    rows = self.run_rule(
+                        side, db,
+                        "select " + ", ".join(self._quote_ident(k)
+                                              for k in key)
+                        + f" from {at} where ({preds[i]}){scope}"
+                        + f" limit {int(examples)}")
+                    out[i][1] = [tuple(r) for r in rows]
+        if here:
+            names = [n for n, _ in columns]
+            place = {i: names.index(checks[i][0]) for i in here}
+            keys = [names.index(k) for k in key if k in names]
+            for rows in self._every_row(side, db, table, columns, where):
+                for r in rows:
+                    for i in here:
+                        _, kind, arg = checks[i]
+                        if canon.unfit_value(kind, r[place[i]], arg):
+                            out[i][0] += 1
+                            if len(out[i][1]) < examples and keys:
+                                out[i][1].append(tuple(r[k] for k in keys))
+        return [(n, ex) for n, ex in out]
+
+    def _every_row(self, side, db, table, columns, where=None):
+        """Every row of a table, a batch at a time: by its key where it
+        has one among `columns` - `neutral_batches` of a keyed table is
+        its first batch - and in one pass where it has none."""
+        names = {n for n, _ in columns}
+        key = (self.neutral_key(side, db, table) if self.RESUMES_BY_KEY
+               else [])
+        scope = {"where": where} if where else {}
+        if not key or not set(key) <= names:
+            yield from self.neutral_batches(side, db, table, columns,
+                                            self.UNFIT_BATCH, **scope)
+            return
+        after = None
+        while True:
+            rows, last = self.neutral_read(side, db, table, columns, after,
+                                           self.UNFIT_BATCH, **scope)
+            if rows:
+                yield rows
+            if not rows or last is None:
+                return
+            after = last
+
+    def decimal_extent(self, side, db, table, column, where=None):
+        """(most digits before the point, most after it) that one decimal
+        column holds, NaN and the infinities left out - what a column
+        built for it on a target with a fixed scale has to keep. Read
+        here from the values; an engine with SQL for it says so."""
+        from decimal import Decimal
+        whole = frac = 0
+        for rows in self._every_row(side, db, table,
+                                    [(column, "decimal")], where):
+            for (v,) in rows:
+                if v is None:
+                    continue
+                if hasattr(v, "to_decimal"):
+                    v = v.to_decimal()
+                v = v if isinstance(v, Decimal) else Decimal(str(v))
+                if not v.is_finite():
+                    continue
+                t = v.as_tuple()
+                frac = max(frac, -t.exponent)
+                whole = max(whole, len(t.digits) + t.exponent)
+        return whole, frac
+
+    def refuse_unfit(self, db, tables=None):
+        """Stop before a move where a value would not arrive on the target
+        as it is. Nothing to stop for where both sides are one engine
+        moving its own way; a pair of engines says (`HeteroEngine`)."""
+        return None
+
+    def json_rewritten(self, side, db, numbers):
+        """The numbers of `numbers` (their JSON text) this side's JSON
+        type would store as a different number, or None where it keeps
+        every JSON number it is given."""
+        return None
+
+    def key_merges(self, side, db, columns, batches, examples=3):
+        """(groups, [[key, key, ...], ...]) - of the keys in `batches`
+        (lists of tuples, one value per column of `columns`, [(name,
+        collation or None)]), how many groups this side's own comparison
+        takes for one key, and a few of them. None where this side keeps
+        every two distinct keys apart, which is the default: an engine
+        whose text comparison can fold case, accents or trailing spaces
+        says so by answering."""
+        return None
+
+    def column_facts(self, side, db, table):
+        """{column: {"null": whether it takes NULL, "charset": ...}} - what
+        a column is beyond its type, for `canon.unfit`. {} where this
+        engine says nothing more; `table` None is a table migkit would
+        build here, and the facts every column of it would have."""
+        return {}
 
     def _capacity_gaps(self, db):
         """Rows the target has no room for, counted before anything moves.
@@ -2685,6 +2821,23 @@ class Engine:
             if not scls or not dcls:
                 out["unreadable"].append((name, swhy or dwhy))
                 continue
+            if scls == dcls and scls in canon.FOLDED_HERE and same and \
+                    str(src_types[name]).lower() == \
+                    str(dst_types[name]).lower():
+                # one engine and one type: its own text of the value is one
+                # text on both sides, rendered where the rows are
+                scls = dcls = (canon.JSON_ONE if scls == "json"
+                               else canon.OWN)
+            if scls == dcls == "decimal":
+                scls = dcls = canon.decimal_class(
+                    src_engine.CANON_ENGINE, src_types[name],
+                    dst_engine.CANON_ENGINE, dst_types[name])
+            if {scls, dcls} in ({"xml", "text"}, {"uuid", "text"},
+                                {"inet", "text"}):
+                # a document, a UUID or an address kept as text on one
+                # side: compared as what it is, which is the same text
+                # where it was the same
+                scls = dcls = (scls if scls != "text" else dcls)
             if {scls, dcls} == {"text", "bytes"}:
                 # a type that holds bytes as readily as text reads as
                 # bytes beside a column that is bytes: rendered as text it
@@ -3030,15 +3183,18 @@ class Engine:
 
     @staticmethod
     def _by_key_query(quoted_table, columns, key, keys, quote, mark,
-                      scope=None):
+                      scope=None, engine=""):
         """The select every SQL engine here needs, written once.
 
         A single-column key uses `in (...)`; a composite one uses a row
         value, which PostgreSQL, MySQL and SQLite all accept. `scope` is a
         row filter in this engine's SQL: a row outside it is not there.
+        `engine` names whose `canon.read_expr` each column is selected
+        through.
         """
         from .. import canon
-        cols = ", ".join(quote(n) for n, _ in columns)
+        cols = ", ".join(canon.read_expr(engine, quote(n), c)
+                         for n, c in columns)
         if len(key) == 1:
             where = f"{quote(key[0])} in ({', '.join([mark] * len(keys))})"
             args = [canon.sql_value(k[0]) for k in keys]

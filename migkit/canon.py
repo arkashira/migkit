@@ -56,15 +56,35 @@ where it is exact, shortest text where it is not, and the seam sits where each
 form stops being trustworthy rather than where it is convenient.
 
 Anything a rendering cannot represent at all - Infinity and NaN, which
-PostgreSQL stores and MySQL refuses - is reported as uncomparable and counted.
-A row migkit did not verify is a number in the report, never a silence.
+PostgreSQL stores and MySQL refuses, a timestamp of `infinity`, a year before
+Christ - is marked as uncomparable with its own name (`uncomparable`): two
+sides holding the same such value still meet, and nothing else meets it. And
+a value the target would not keep as it is - rounded, cut, turned into a
+double or a default - is counted on the source and refused before the move
+(`unfit`), rather than found by the digest after it.
 """
 
 # Neutral classes. An engine's declared type is mapped onto one of these and
 # the rendering is chosen from the class, so adding an engine is a mapping
 # rather than a new set of pairwise rules.
 CLASSES = ("integer", "decimal", "float", "boolean", "text", "bytes",
-           "date", "timestamp", "time", "json", "own text")
+           "date", "timestamp", "time", "json", "own text", "number",
+           "xml", "uuid", "inet", "json on one engine")
+
+#: JSON compared between two columns of one engine and one type: that
+#: engine's own normal form of it, rendered on the server as it always was.
+#: Across two engines the two forms differ (`FOLDED_HERE`); within one they
+#: are one function of the value, and folding a table in this process only
+#: for that would have cost every same-engine range check its speed.
+JSON_ONE = "json on one engine"
+
+#: A decimal compared by its value rather than by the digits it was
+#: written with: `1.5`, `1.50` and `1.5000000000` are one number. Given to
+#: a pair of decimal columns that do not write a value with the same
+#: number of digits after the point (`decimal_class`) - PostgreSQL's plain
+#: `numeric`, which keeps the scale each value came with, against the
+#: `decimal(65,10)` built for it on MySQL printed every row different.
+NUMBER = "number"
 
 #: A type with no rendering shared across engines - an interval, a range, a
 #: text search vector - compared between two servers of the same engine by
@@ -72,6 +92,22 @@ CLASSES = ("integer", "decimal", "float", "boolean", "text", "bytes",
 #: are the same engine and declare the same type: across engines the two
 #: texts were never checked to agree, and that is what `None` says.
 OWN = "own text"
+
+#: Digits after the second in a rendering of a timestamp or a time: six,
+#: and nine - the most any engine here holds (SQL Server keeps seven,
+#: ClickHouse, Oracle, DuckDB and Snowflake nine) - where the value carries
+#: a digit past the sixth. Six was all Python's own types hold, and a value
+#: read at six on both sides of a move that cut the seventh to ninth
+#: compared equal. Nine only where there is something in them, so a value
+#: every engine holds renders as it always has - a SQLite or DynamoDB
+#: column holding the text of a time migkit wrote reads as that text still -
+#: and one a six-digit engine could not hold cannot meet one it can.
+FRACTION = 9
+
+
+def _past_micro(ns):
+    """The seventh to ninth digit of a second, where there are any."""
+    return f"{ns:03d}" if ns else ""
 
 # Where the fixed-decimal rendering of a binary float is exact on both sides.
 #
@@ -92,6 +128,21 @@ FLOAT_MAX = "1e45"
 # carrying one fails the whole query rather than marking one row. 0x1F is a
 # control character no rendering here produces and both engines accept.
 UNCOMPARABLE = "\x1funcomparable"
+
+
+def uncomparable(what):
+    """The marker for one value no shared rendering can write, followed by
+    the engine's own word for it: `NaN`, `-Infinity`, `infinity`, a year
+    before Christ.
+
+    One marker for all of them made a NaN on one side and an Infinity on
+    the other the same text, and a PostgreSQL timestamp of `infinity`
+    rendered through `to_char` came back NULL - measured, a target holding
+    NULL where the source held `infinity` compared equal. With the word
+    after it, two sides holding the same such value still meet (a NaN in a
+    PostgreSQL double and in a MongoDB double are one NaN), and nothing
+    else meets them: no rendering of a real value starts with 0x1F."""
+    return f"{UNCOMPARABLE}:{what}"
 
 
 class Added:
@@ -186,8 +237,8 @@ TYPES = {
         "boolean": "boolean", "bool": "boolean",
         "character": "text", "character varying": "text", "varchar": "text",
         "bpchar": "text", "char": "text", "text": "text", "name": "text",
-        "uuid": "text", "inet": "text", "cidr": "text", "macaddr": "text",
-        "xml": "text",
+        "uuid": "uuid", "inet": "inet", "cidr": "inet", "macaddr": "text",
+        "xml": "xml",
         # a text search vector prints its lexemes sorted and once each, and
         # a query its normalised form, so their text is the value itself
         "tsvector": "text", "tsquery": "text",
@@ -270,7 +321,7 @@ TYPES = {
         "bit": "boolean",
         "char": "text", "varchar": "text", "nchar": "text",
         "nvarchar": "text", "text": "text", "ntext": "text",
-        "uniqueidentifier": "text", "xml": "text", "sysname": "text",
+        "uniqueidentifier": "uuid", "xml": "xml", "sysname": "text",
         "binary": "bytes", "varbinary": "bytes", "image": "bytes",
         "date": "date",
         "datetime": "timestamp", "datetime2": "timestamp",
@@ -300,8 +351,8 @@ TYPES = {
         "decimal": "decimal", "decimal32": "decimal", "decimal64": "decimal",
         "decimal128": "decimal", "decimal256": "decimal",
         "bool": "boolean",
-        "string": "text", "fixedstring": "text", "uuid": "text",
-        "enum8": "text", "enum16": "text", "ipv4": "text", "ipv6": "text",
+        "string": "text", "fixedstring": "text", "uuid": "uuid",
+        "enum8": "text", "enum16": "text", "ipv4": "inet", "ipv6": "inet",
         "date": "date", "date32": "date",
         "datetime": "timestamp", "datetime64": "timestamp",
     },
@@ -314,6 +365,7 @@ TYPES = {
         "boolean": "boolean", "text": "text", "bytes": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
         "s": "text", "n": "decimal", "b": "bytes", "bool": "boolean",
+        "uuid": "uuid",
     },
     # Oracle: a DATE holds a time of day too. A time with a zone is left
     # out, as a text of its own would drop the zone. `NUMBER` with no
@@ -349,10 +401,13 @@ TYPES = {
         "decimal": "decimal", "numeric": "decimal",
         "float": "float", "real": "float", "double": "float",
         "boolean": "boolean",
-        "varchar": "text", "text": "text", "uuid": "text",
+        "varchar": "text", "text": "text", "uuid": "uuid",
         "blob": "bytes",
         "date": "date", "timestamp": "timestamp",
         "timestamp with time zone": "timestamp", "time": "time",
+        # read with all nine of their digits (`nanotime`)
+        "timestamp_ns": "timestamp", "timestamp_ms": "timestamp",
+        "timestamp_s": "timestamp",
         "json": "json",
     },
     # SAP ASE, by `systypes` names
@@ -416,6 +471,7 @@ TYPES = {
         "integer": "integer", "decimal": "decimal", "float": "float",
         "boolean": "boolean", "text": "text", "bytes": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
+        "uuid": "uuid",
     },
     # Cassandra and ScyllaDB. Collections and user types stay unmapped. A
     # `timestamp` holds milliseconds.
@@ -424,7 +480,7 @@ TYPES = {
         "bigint": "integer", "varint": "integer", "counter": "integer",
         "decimal": "decimal", "float": "float", "double": "float",
         "boolean": "boolean", "text": "text", "varchar": "text",
-        "ascii": "text", "uuid": "text", "timeuuid": "text", "inet": "text",
+        "ascii": "text", "uuid": "uuid", "timeuuid": "uuid", "inet": "inet",
         "blob": "bytes", "date": "date", "timestamp": "timestamp",
         "time": "time",
     },
@@ -446,6 +502,28 @@ TYPES = {
 # real boolean renders to 0/1 to meet it.
 
 
+#: classes an array's elements can be of and still be a JSON array, whose
+#: values JSON writes the same on every engine
+ARRAY_ELEMENTS = ("integer", "decimal", "float", "boolean", "text")
+
+
+def array_element(engine, declared):
+    """The element type of an array type (`integer[]`, `INTEGER[3]`,
+    ClickHouse's `Array(Nullable(Int64))`), or None for any other type."""
+    text = str(declared or "").strip()
+    low = text.lower()
+    if engine == "clickhouse" and low.startswith("array(") \
+            and low.endswith(")"):
+        inner = text[len("array("):-1].strip()
+        for wrapper in ("Nullable(", "LowCardinality("):
+            while inner.startswith(wrapper) and inner.endswith(")"):
+                inner = inner[len(wrapper):-1].strip()
+        return inner
+    if "[" in low and engine != "clickhouse":
+        return text[:low.index("[")].strip()
+    return None
+
+
 def type_class(engine, declared):
     """Neutral class for an engine's declared type, or None when unmapped.
 
@@ -456,7 +534,16 @@ def type_class(engine, declared):
     if not declared:
         return None
     base = str(declared).strip().lower()
-    for cut in ("(", "[", " ("):
+    element = array_element(engine, declared)
+    if element is not None:
+        # an array of the type, not the type: `integer[]` was classed
+        # `integer`, so it was rendered through `int()` of a list and built
+        # as a bigint on a target. An array of numbers, text or booleans is
+        # the JSON array of them - what a JSON column on another engine
+        # holds it as, and compared as JSON is; any other is named
+        return ("json" if type_class(engine, element) in ARRAY_ELEMENTS
+                else None)
+    for cut in ("(", " ("):
         if cut in base:
             base = base.split(cut)[0].strip()
     if base.endswith(" unsigned"):
@@ -467,6 +554,12 @@ def type_class(engine, declared):
         # holds when it holds something, so they are dropped; anything left
         # over one real type is ambiguous and stays unmapped.
         seen = {t.strip() for t in base.split("|")} - {"null", "missing", ""}
+        if len(seen) > 1 and {TYPES.get(engine, {}).get(t)
+                              for t in seen} == {"integer"}:
+            # a driver writes a whole number as a 32-bit one when it fits
+            # and a 64-bit one when it does not, so one field holds both;
+            # left unmapped, it was never compared
+            return "integer"
         if len(seen) != 1:
             return None
         base = seen.pop()
@@ -478,11 +571,19 @@ def _mysql(col, cls):
     if cls == "float":
         # banded: exact decimal in the middle, the engine's own shortest text
         # outside it, because the decimal cast saturates above 1e45 and
-        # underflows below 1e-20 - both silently, both to a shared string
+        # underflows below 1e-20 - both silently, both to a shared string.
+        #
+        # Through a double first (`* 1e0`, which is exact and keeps the
+        # sign): MySQL writes a FLOAT's own text at six significant digits.
+        # Measured on 8.4, the float 3.4028234e38 printed `3.40282e38`
+        # and 1e-40 `9.99995e-41`, where its double is
+        # `3.4028234663852886e38` and `9.99994610111476e-41` - what
+        # PostgreSQL's `real::float8` prints for the same float
+        f = f"({c} * 1e0)"
         return (f"case when {c} is null then null"
-                f" when {c} <> 0 and (abs({c}) >= {FLOAT_MAX}"
-                f" or abs({c}) < {FLOAT_MIN}) then cast({c} as char)"
-                f" else cast(cast({c} as decimal(65,{FLOAT_SCALE})) as char)"
+                f" when {f} <> 0 and (abs({f}) >= {FLOAT_MAX}"
+                f" or abs({f}) < {FLOAT_MIN}) then cast({f} as char)"
+                f" else cast(cast({f} as decimal(65,{FLOAT_SCALE})) as char)"
                 f" end")
     if cls == "bytes":
         return f"hex({c})"
@@ -497,15 +598,39 @@ def _mysql(col, cls):
         # row by row and different by digest. `+ 0` keeps an unsigned
         # bigint an integer
         return f"cast(({c} + 0) as char)"
+    if cls == NUMBER:
+        return _value_text(c, f"cast({c} as char)", "locate('.', {t}) > 0",
+                           "trim(trailing '.' from trim(trailing '0' from"
+                           " {t}))")
+    if cls == "uuid":
+        # a text column holding a UUID beside a column that is one: in
+        # small letters where it is written the one way a UUID is
+        return (f"case when {c} regexp '{UUID_FORM}' then lower({c})"
+                f" else cast({c} as char) end")
     return f"cast({c} as char)"
+
+
+def _value_text(c, t, has_point, trimmed):
+    """A decimal's text with the trailing zeros of its fraction off, and
+    the point with them, and a zero without a sign: `NUMBER` in SQL, one
+    shape for both engines (`trim_scale` is PostgreSQL 13 and later)."""
+    return (f"case when {c} is null then null when {c} = 0 then '0'"
+            f" when {has_point.format(t=t)} then {trimmed.format(t=t)}"
+            f" else {t} end")
 
 
 def _postgres(col, cls):
     c = f'"{col}"'
     if cls == "float":
+        # a `real` as the double it is: its own text is the shortest that
+        # reads back as the *float*, `0.1`, where MySQL's cast and every
+        # driver that hands the float over as a double see
+        # 0.10000000149011612 (measured on 16: `0.1::real::float8::text`)
+        c = f"{c}::float8"
         # `e+20` -> `e20` is what makes the outer band agree with MySQL, and
         # Infinity/NaN have no MySQL counterpart at all, so they are marked
-        # rather than rendered
+        # rather than rendered - each by its own name, so a NaN and an
+        # Infinity are not the same text
         outer = (f"replace({c}::text, 'e+', 'e')")
         # `x <> x` is the portable NaN test everywhere except here:
         # PostgreSQL defines NaN as equal to itself so it can index and sort
@@ -513,7 +638,8 @@ def _postgres(col, cls):
         # the renderer and come out as the literal text `NaN`. Measured.
         return (f"case when {c} is null then null"
                 f" when {c} = 'Infinity'::float8 or {c} = '-Infinity'::float8"
-                f" or {c} = 'NaN'::float8 then '{UNCOMPARABLE}'"
+                f" or {c} = 'NaN'::float8"
+                f" then '{uncomparable('')}' || {c}::text"
                 f" when {c} <> 0 and (abs({c}) >= {FLOAT_MAX}"
                 f" or abs({c}) < {FLOAT_MIN}) then {outer}"
                 # through the text form, not straight to numeric. PostgreSQL's
@@ -531,13 +657,30 @@ def _postgres(col, cls):
     if cls == "bytes":
         return f"upper(encode({c}, 'hex'))"
     if cls == "timestamp":
-        return f"to_char({c}, 'YYYY-MM-DD HH24:MI:SS.US')"
+        # `to_char` of `infinity` is NULL, and of a year before Christ the
+        # same digits as the year after: measured on 16, `infinity` and a
+        # NULL rendered alike, and `0044-03-15 BC` as `0044-03-15`. No
+        # other engine holds either, so each is marked with its own text
+        return (f"case when {c} is null then null"
+                f" when not isfinite({c}) or {c} < '0001-01-01'"
+                f" or {c} >= '10000-01-01'"
+                f" then '{uncomparable('')}' || {c}::text"
+                f" else to_char({c}, 'YYYY-MM-DD HH24:MI:SS.US') end")
     if cls == "time":
         return f"to_char({c}, 'HH24:MI:SS.US')"
-    if cls == "json":
+    if cls in ("json", JSON_ONE):
         # a `json` column keeps the text it was handed, spacing and duplicate
-        # keys and all; `jsonb` is the normalised form MySQL's JSON matches
-        return f"{c}::jsonb::text"
+        # keys and all; `jsonb` is the normalised form. `to_jsonb` rather
+        # than `::jsonb`, which an array does not take
+        return f"to_jsonb({c})::text"
+    if cls == "decimal":
+        # through `numeric`, which a numeric already is: a `money` prints
+        # its locale's text - `$1,234.56` - where its number is 1234.56
+        return f"{c}::numeric::text"
+    if cls == NUMBER:
+        return _value_text(f"{c}::numeric", f"{c}::numeric::text",
+                           "position('.' in {t}) > 0",
+                           "rtrim(rtrim({t}, '0'), '.')")
     return f"{c}::text"
 
 
@@ -556,6 +699,49 @@ def _sqlite(col, cls):
 BUILDERS = {"mysql": _mysql, "postgres": _postgres, "sqlite": _sqlite}
 
 
+#: engines whose decimal keeps the scale each value was written with, where
+#: the column declares none: `1.50` reads back `1.50`
+KEEPS_SCALE = {"postgres", "mongodb", "cassandra"}
+
+
+def decimal_class(src, src_declared, dst, dst_declared):
+    """`decimal` for a pair of decimal columns that write every value with
+    the same digits after the point - the same fixed scale on both, or
+    both keeping each value's own - and `number` for any other pair, which
+    is then compared by value (`NUMBER`)."""
+    a, b = _fixed_decimal(src, src_declared), _fixed_decimal(dst,
+                                                             dst_declared)
+    if a and b and a[1] == b[1]:
+        return "decimal"
+    if not a and not b and src in KEEPS_SCALE and dst in KEEPS_SCALE:
+        return "decimal"
+    return NUMBER
+
+
+def read_expr(engine, quoted, cls):
+    """What to select for a column read to be *moved* - the value as the
+    driver should get it - where the column's own text would lose part of
+    it on the way.
+
+    A single-precision float is the case: MySQL sends a FLOAT as text at
+    six significant digits, and PostgreSQL a `real` as the shortest text
+    that reads back as the float rather than as a double. Measured on
+    MySQL 8.4 through the driver, a FLOAT holding 16777216 arrived as
+    16777200.0 and one holding 3.4028234e38 as 3.40282e38: a move changed
+    the value by 16, and nothing stopped it. Read as a double - exact for
+    every float, and a no-op for a double - the value arrives whole, and
+    is the same number every other reader and both renderings see."""
+    if cls == "float":
+        if engine == "mysql":
+            return f"({quoted} * 1e0)"
+        if engine == "postgres":
+            return f"{quoted}::float8"
+    if cls == "decimal" and engine == "postgres":
+        # a `money` column arrives as its locale's text otherwise
+        return f"{quoted}::numeric"
+    return quoted
+
+
 def _float_text(d):
     """The banded float rendering, in Python.
 
@@ -567,8 +753,10 @@ def _float_text(d):
     """
     import math
     from decimal import Decimal, localcontext
-    if math.isinf(d) or math.isnan(d):
-        return UNCOMPARABLE
+    if math.isnan(d):
+        return uncomparable("NaN")
+    if math.isinf(d):
+        return uncomparable("Infinity" if d > 0 else "-Infinity")
     if d == 0:
         # -0.0 formats with a leading minus that neither engine produces
         d = 0.0
@@ -580,12 +768,34 @@ def _float_text(d):
                       "f")
 
 
+#: Classes whose SQL renderings do not write what the in-process one does,
+#: so a table holding one is folded in this process on every engine. An
+#: address: MySQL keeps one as text, which SQL there does not parse. XML:
+#: no engine here writes its canonical form (`xml_text`). JSON:
+#: MySQL writes `1.10` back as `1.1` and `100000000000000000000` as
+#: `1e20` (measured on 8.4), `jsonb` keeps both as written, and a `json`
+#: value holding `\u0000` stopped the whole digest at `::jsonb`.
+FOLDED_HERE = frozenset({"json", "xml", "inet"})
+
+
+def fold_batches(columns, batches):
+    """(rows, digest) over batches of rows - `fold_rows` across them, as a
+    digest `neutral_digest` gives."""
+    classes = [c for _, c in columns]
+    total, n = 0, 0
+    for batch in batches:
+        k, total = fold_rows(classes, batch, total)
+        n += k
+    return n, str(total)
+
+
 def json_text(value):
-    """A JSON value as PostgreSQL's `jsonb` writes it, which MySQL's JSON
-    matches: an object's keys by their length and then their bytes, the
-    last of a key given twice, `", "` and `": "` between, a number the
-    decimal it was written as, and text escaped as JSON escapes it. The
-    in-process side of the `json` rendering the two SQL ones give."""
+    """A JSON value as PostgreSQL's `jsonb` writes it: an object's keys by
+    their length and then their bytes, the last of a key given twice,
+    `", "` and `": "` between, and text escaped as JSON escapes it - with
+    every number written as its value (`NUMBER`): `1.10` and `1.1`, and
+    `1e20` and `100000000000000000000`, are one number to every reader of
+    JSON and are printed differently by the two engines' own text of it."""
     import json
     from decimal import Decimal
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -605,7 +815,7 @@ def json_text(value):
         if isinstance(x, float):
             return one(Decimal(repr(x)))
         if isinstance(x, Decimal):
-            return format(x, "f")
+            return render_value(NUMBER, x)
         if isinstance(x, str):
             return json.dumps(x, ensure_ascii=False)
         if isinstance(x, dict):
@@ -617,6 +827,88 @@ def json_text(value):
             return "[" + ", ".join(one(e) for e in x) + "]"
         return json.dumps(str(x), ensure_ascii=False)
     return one(value)
+
+
+#: A UUID written the one way every engine with a UUID type prints it,
+#: in either case: 8-4-4-4-12 hexadecimal digits
+UUID_FORM = ("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+             "-[0-9a-fA-F]{12}$")
+
+
+def uuid_text(value):
+    """A UUID as PostgreSQL, SQL Server's driver, ClickHouse, DuckDB and
+    Cassandra all print one - 8-4-4-4-12 in small letters - and a text
+    that holds one in capitals the same way; any other text as it is. A
+    UUID kept as text in capitals beside a `uuid` read as a difference in
+    every row."""
+    import re
+    import uuid
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    text = value if isinstance(value, str) else str(value)
+    return text.lower() if re.fullmatch(UUID_FORM, text) else text
+
+
+def inet_text(value):
+    """A network address as `address/prefix`, the prefix always written
+    and the address as RFC 5952 writes it - lowercase, zeros compressed,
+    an IPv4-mapped IPv6 address with its IPv4 part dotted, as PostgreSQL
+    and ClickHouse print one. PostgreSQL writes `10.0.0.1` for a host and
+    `10.0.0.1/24` for one with a mask, ClickHouse's `IPv4` has no mask,
+    and a text column holds whatever case the application wrote: without
+    the prefix and the form made one, the same address read as different
+    and a masked one could not be told from its host. Text that is no
+    address is compared as it is."""
+    import ipaddress
+    text = str(value).strip()
+    try:
+        iface = ipaddress.ip_interface(text)
+    except ValueError:
+        return text
+    ip = iface.ip
+    mapped = getattr(ip, "ipv4_mapped", None)
+    addr = f"::ffff:{mapped}" if mapped else ip.compressed
+    return f"{addr}/{iface.network.prefixlen}"
+
+
+def xml_text(value):
+    """An XML value as its Canonical XML 2.0 (W3C), comments kept, with the
+    text that is nothing but whitespace between elements left out.
+
+    SQL Server stores an `xml` value parsed and writes it back its own
+    way - without the declaration and without the whitespace between
+    elements, by its own documentation - where PostgreSQL keeps the text
+    it was given. The canonical form is the one both come to, and is what
+    the standard says two equal documents write, so a value is compared
+    as the document it is. Content that is not one document (PostgreSQL
+    keeps a fragment of several) is canonicalised inside a root of its
+    own and written without it; text that parses as neither is compared
+    as it is."""
+    import xml.etree.ElementTree as ET
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+    text = value if isinstance(value, str) else str(value)
+
+    def one(root):
+        for el in root.iter():
+            if el.text is not None and not el.text.strip():
+                el.text = None
+            if el.tail is not None and not el.tail.strip():
+                el.tail = None
+        return ET.canonicalize(ET.tostring(root, encoding="unicode"),
+                               with_comments=True)
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    try:
+        return one(ET.fromstring(text, parser=parser))
+    except ET.ParseError:
+        pass
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    try:
+        whole = one(ET.fromstring(f"<migkit-fragment>{text}"
+                                  "</migkit-fragment>", parser=parser))
+    except ET.ParseError:
+        return text
+    return whole[len("<migkit-fragment>"):-len("</migkit-fragment>")]
 
 
 def render_value(cls, value):
@@ -653,10 +945,26 @@ def render_value(cls, value):
             value = value.to_decimal()
         return format(value if isinstance(value, Decimal) else Decimal(value),
                       "f")
+    if cls == NUMBER:
+        from decimal import Decimal
+        if hasattr(value, "to_decimal"):
+            value = value.to_decimal()
+        value = value if isinstance(value, Decimal) else Decimal(value)
+        if not value.is_finite():
+            return format(value, "f")
+        # `normalize` writes 100 as 1E+2, which `f` turns back into 100;
+        # a zero has no sign on any engine
+        return "0" if value == 0 else format(value.normalize(), "f")
     if cls == "text":
         return value if isinstance(value, str) else str(value)
-    if cls == "json":
+    if cls in ("json", JSON_ONE):
         return json_text(value)
+    if cls == "xml":
+        return xml_text(value)
+    if cls == "uuid":
+        return uuid_text(value)
+    if cls == "inet":
+        return inet_text(value)
     if cls == "bytes":
         return bytes(value).hex().upper()
     if cls == "boolean":
@@ -664,9 +972,10 @@ def render_value(cls, value):
         # MySQL tinyint(1) already is
         return "1" if value else "0"
     if cls == "timestamp":
-        # the same six-place form `to_char(..., 'US')` and
-        # `date_format(..., '%f')` produce. BSON dates carry milliseconds, so
-        # the last three digits are zeros - which is the truth about what the
+        # the six-place form `to_char(..., 'US')` and `date_format(...,
+        # '%f')` produce, and the three digits after them where a value
+        # carries any (`FRACTION`). BSON dates carry milliseconds, so the
+        # last three digits are zeros - which is the truth about what the
         # field can hold, not a rounding migkit chose.
         #
         # An instant with its zone is written as UTC shows it, as the SQL
@@ -674,17 +983,39 @@ def render_value(cls, value):
         # pinned to UTC, and MySQL's reads to +00:00. Written at its own
         # zone, the same instant read from DuckDB at the machine's +07 and
         # from PostgreSQL at UTC were seven hours apart (measured)
+        ns = getattr(value, "nanosecond", 0) or 0
+        if isinstance(value, str):
+            # a value the driver could not make a datetime of - MySQL's
+            # zero date - as `date_format` writes it
+            head, _, frac = value.partition(".")
+            return f"{head}.{(frac + '0' * 6)[:6]}"
         if getattr(value, "tzinfo", None) is not None:
             import datetime as _dt
             value = value.astimezone(_dt.timezone.utc)
-        return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+        return value.strftime("%Y-%m-%d %H:%M:%S.%f") + _past_micro(ns)
     if cls == "date":
         # what both SQL renderings fall through to: PostgreSQL's `::text` and
-        # MySQL's `cast(d as char)` both print `2024-01-02`
-        return value.strftime("%Y-%m-%d")
+        # MySQL's `cast(d as char)` both print `2024-01-02`; a zero date
+        # comes from the driver as that text already
+        return value if isinstance(value, str) else value.strftime(
+            "%Y-%m-%d")
     if cls == "time":
         # `to_char(t, 'HH24:MI:SS.US')` and `time_format(t, '%H:%i:%s.%f')`
-        return value.strftime("%H:%M:%S.%f")
+        import datetime as _dt
+        if isinstance(value, _dt.timedelta):
+            # a MySQL TIME, which the driver hands over as a duration
+            # because it is one: -838:59:59 to 838:59:59. Measured on 8.4,
+            # `time_format` writes `-01:00:00.000000` and
+            # `100:00:00.000000`; `.strftime` did not exist on it, so every
+            # in-process reading of a MySQL TIME raised
+            us = (value.days * 86400 + value.seconds) * 10 ** 6 \
+                + value.microseconds
+            h, rest = divmod(abs(us), 3600 * 10 ** 6)
+            m, rest = divmod(rest, 60 * 10 ** 6)
+            s_, f = divmod(rest, 10 ** 6)
+            return f"{'-' if us < 0 else ''}{h:02d}:{m:02d}:{s_:02d}.{f:06d}"
+        return value.strftime("%H:%M:%S.%f") \
+            + _past_micro(getattr(value, "nanosecond", 0))
     if cls == OWN:
         # both sides came through the same driver, so the same value is the
         # same Python object and the same text
@@ -711,11 +1042,14 @@ DDL = {
         "float": ("double precision", "double precision"),
         "boolean": ("boolean", "boolean"),
         "text": ("text", "varchar({0})"),
+        "uuid": ("uuid", "uuid"),
+        "inet": ("inet", "inet"),
         "bytes": ("bytea", "bytea"),
         "date": ("date", "date"),
         "timestamp": ("timestamp(6)", "timestamp({0})"),
         "time": ("time(6)", "time({0})"),
         "json": ("jsonb", "jsonb"),
+        "xml": ("xml", "xml"),
     },
     "mysql": {
         OWN: ("text", "{0}"),
@@ -728,11 +1062,14 @@ DDL = {
         # not `text`: MySQL cannot index or key a TEXT column without a
         # prefix length, and a key column is exactly what a mover needs
         "text": ("varchar(1024)", "varchar({0})"),
+        "uuid": ("char(36)", "char(36)"),
+        "inet": ("varchar(49)", "varchar(49)"),
         "bytes": ("longblob", "varbinary({0})"),
         "date": ("date", "date"),
         "timestamp": ("datetime(6)", "datetime({0})"),
         "time": ("time(6)", "time({0})"),
         "json": ("json", "json"),
+        "xml": ("longtext", "longtext"),
     },
     "mssql": {
         OWN: ("nvarchar(max)", "{0}"),
@@ -742,11 +1079,14 @@ DDL = {
         "boolean": ("bit", "bit"),
         # a key column cannot be `max`; a length the source gave is kept
         "text": ("nvarchar(max)", "nvarchar({0})"),
+        "uuid": ("uniqueidentifier", "uniqueidentifier"),
+        "inet": ("varchar(49)", "varchar(49)"),
         "bytes": ("varbinary(max)", "varbinary({0})"),
         "date": ("date", "date"),
         "timestamp": ("datetime2(6)", "datetime2({0})"),
         "time": ("time(6)", "time({0})"),
         "json": ("nvarchar(max)", "nvarchar(max)"),
+        "xml": ("xml", "xml"),
     },
     "clickhouse": {
         # the source's own type, as `neutral_columns` reads it without its
@@ -758,6 +1098,8 @@ DDL = {
         "float": ("Float64", "Float64"),
         "boolean": ("Bool", "Bool"),
         "text": ("String", "String"),
+        "uuid": ("UUID", "UUID"),
+        "inet": ("String", "String"),
         "bytes": ("String", "String"),
         "date": ("Date32", "Date32"),
         "timestamp": ("DateTime64(6)", "DateTime64({0})"),
@@ -769,6 +1111,8 @@ DDL = {
         "float": ("BINARY_DOUBLE", "BINARY_DOUBLE"),
         "boolean": ("NUMBER(1)", "NUMBER(1)"),
         "text": ("VARCHAR2(4000 CHAR)", "VARCHAR2({0} CHAR)"),
+        "uuid": ("VARCHAR2(36 CHAR)", "VARCHAR2(36 CHAR)"),
+        "inet": ("VARCHAR2(49 CHAR)", "VARCHAR2(49 CHAR)"),
         "bytes": ("BLOB", "BLOB"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
@@ -780,6 +1124,8 @@ DDL = {
         "float": ("DOUBLE", "DOUBLE"),
         "boolean": ("BOOLEAN", "BOOLEAN"),
         "text": ("VARCHAR(4000)", "VARCHAR({0})"),
+        "uuid": ("CHAR(36)", "CHAR(36)"),
+        "inet": ("VARCHAR(49)", "VARCHAR(49)"),
         "bytes": ("BLOB", "VARBINARY({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
@@ -795,6 +1141,8 @@ DDL = {
         "float": ("DOUBLE", "DOUBLE"),
         "boolean": ("BOOLEAN", "BOOLEAN"),
         "text": ("VARCHAR", "VARCHAR"),
+        "uuid": ("UUID", "UUID"),
+        "inet": ("VARCHAR", "VARCHAR"),
         "bytes": ("BLOB", "BLOB"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP", "TIMESTAMP"),
@@ -808,6 +1156,8 @@ DDL = {
         "float": ("double precision", "double precision"),
         "boolean": ("bit", "bit"),
         "text": ("text", "varchar({0})"),
+        "uuid": ("char(36)", "char(36)"),
+        "inet": ("varchar(49)", "varchar(49)"),
         "bytes": ("image", "varbinary({0})"),
         "date": ("date", "date"),
         "timestamp": ("bigdatetime", "bigdatetime"),
@@ -820,6 +1170,8 @@ DDL = {
         "float": ("double precision", "double precision"),
         "boolean": ("boolean", "boolean"),
         "text": ("varchar(65535)", "varchar({0})"),
+        "uuid": ("char(36)", "char(36)"),
+        "inet": ("varchar(49)", "varchar(49)"),
         "bytes": ("varbyte(1024000)", "varbyte({0})"),
         "date": ("date", "date"),
         "timestamp": ("timestamp", "timestamp"),
@@ -833,6 +1185,8 @@ DDL = {
         "float": ("FLOAT", "FLOAT"),
         "boolean": ("BOOLEAN", "BOOLEAN"),
         "text": ("VARCHAR", "VARCHAR({0})"),
+        "uuid": ("VARCHAR(36)", "VARCHAR(36)"),
+        "inet": ("VARCHAR(49)", "VARCHAR(49)"),
         "bytes": ("BINARY", "BINARY({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP_NTZ(9)", "TIMESTAMP_NTZ({0})"),
@@ -846,6 +1200,8 @@ DDL = {
         "float": ("FLOAT64", "FLOAT64"),
         "boolean": ("BOOL", "BOOL"),
         "text": ("STRING", "STRING({0})"),
+        "uuid": ("STRING", "STRING"),
+        "inet": ("STRING", "STRING"),
         "bytes": ("BYTES", "BYTES({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("DATETIME", "DATETIME"),
@@ -859,6 +1215,8 @@ DDL = {
         "float": ("double", "double"),
         "boolean": ("boolean", "boolean"),
         "text": ("text", "text"),
+        "uuid": ("uuid", "uuid"),
+        "inet": ("text", "text"),
         "bytes": ("blob", "blob"),
         "date": ("date", "date"),
         "timestamp": ("timestamp", "timestamp"),
@@ -871,6 +1229,8 @@ DDL = {
         "float": ("real", "real"),
         "boolean": ("integer", "integer"),
         "text": ("text", "text"),
+        "uuid": ("text", "text"),
+        "inet": ("text", "text"),
         "bytes": ("blob", "blob"),
         "date": ("text", "text"),
         "timestamp": ("text", "text"),
@@ -900,8 +1260,48 @@ def params(declared):
     return tuple(out)
 
 
-def ddl_type(engine, cls, numbers=()):
-    """The column type to create for a class on this engine.
+#: Single-precision float types, by the name each engine declares them
+#: under. A float of the source is built as one on the target: widened into
+#: a double it keeps its value, and shows the application
+#: 0.10000000149011612 where it had read 0.1.
+FLOAT4 = {
+    "mysql": ("float",), "postgres": ("real", "float4"),
+    "mssql": ("real",), "clickhouse": ("float32",),
+    "oracle": ("binary_float",), "db2": ("real",),
+    "duckdb": ("float", "real", "float4"), "ase": ("real",),
+    "redshift": ("real", "float4"), "cassandra": ("float",),
+}
+
+#: The single-precision type to build, where an engine has one
+FLOAT4_DDL = {
+    "postgres": "real", "mysql": "float", "mssql": "real",
+    "clickhouse": "Float32", "oracle": "BINARY_FLOAT", "db2": "REAL",
+    "duckdb": "FLOAT", "ase": "real", "redshift": "real",
+    "cassandra": "float",
+}
+
+
+def ddl_numbers(engine, declared, cls):
+    """The numbers a target column is built from: the source's own
+    (`params`), and for a float its width - `(4,)` for a single-precision
+    one - which its declared name carries rather than its parentheses."""
+    if cls == "float":
+        base = str(declared or "").strip().lower().split("(")[0].strip()
+        return (4,) if base in FLOAT4.get(engine, ()) else ()
+    return params(declared)
+
+
+#: The widest text a key column can be built as, where the widest text a
+#: column can be is not: InnoDB keys at most 3,072 bytes, 768 characters of
+#: utf8mb4 (measured on 8.4, a `varchar(1024)` key was `Specified key was
+#: too long; max key length is 3072 bytes`, so a PostgreSQL `text` key could
+#: not be moved at all), and SQL Server keys no `max` and 900 bytes.
+KEY_TEXT = {"mysql": "varchar(768)", "mssql": "nvarchar(450)"}
+
+
+def ddl_type(engine, cls, numbers=(), key=False):
+    """The column type to create for a class on this engine - for a column
+    of the table's key where `key`.
 
     Raises for an engine or class with no mapping rather than falling back to
     something plausible: a table created with the wrong column type is harder
@@ -913,6 +1313,11 @@ def ddl_type(engine, cls, numbers=()):
     pair = table.get(cls)
     if pair is None:
         raise ValueError(f"no DDL type for class {cls!r} on {engine}")
+    if key and cls == "text" and not numbers and engine in KEY_TEXT:
+        return KEY_TEXT[engine]
+    if cls == "float":
+        return (FLOAT4_DDL.get(engine, pair[0]) if tuple(numbers) == (4,)
+                else pair[0])
     wide, parametrised = pair
     if not numbers or "{0}" not in parametrised:
         return wide
@@ -977,11 +1382,14 @@ PLAIN = frozenset({"integer", "decimal", "float", "boolean", "date",
                    "timestamp", "time"})
 
 
-def sql_rows(classes, rows):
+def sql_rows(classes, rows, keep=()):
     """`rows` with `sql_value` applied where a column can need it: a
     million rows of eight columns called it eight million times, and half
-    of those were numbers and times it passes through untouched."""
-    need = [i for i, c in enumerate(classes) if c not in PLAIN]
+    of those were numbers and times it passes through untouched. The
+    columns at `keep` are handed on as they are (an array column, which
+    takes a list as the array it is)."""
+    need = [i for i, c in enumerate(classes) if c not in PLAIN
+            and i not in keep]
     if not need:
         return rows
     out = []
@@ -1006,8 +1414,7 @@ def sql_value(value):
     types it was not written for would be a second, quieter rendering.
     """
     if isinstance(value, (dict, list)):
-        import json
-        return json.dumps(value, sort_keys=True, default=str)
+        return json_write(value)
     if isinstance(value, (memoryview, bytearray)):
         # psycopg2 hands a `bytea` column back as a memoryview, and pymysql
         # has no escape rule for one - measured, it stored the *text* of the
@@ -1016,6 +1423,54 @@ def sql_value(value):
         # an address. The digest is what caught it.
         return bytes(value)
     return value
+
+
+def json_write(value):
+    """A document as JSON text for a driver to send, every number written
+    as the digits it holds - a Decimal `1.50` as `1.50`, not a float and
+    not a string.
+
+    `json.dumps(..., default=str)` was here: it wrote a Decimal as the
+    string `"1.50"`, a datetime and bytes as strings of their Python text,
+    and the target stored a string where the source held a number. What
+    JSON has no form for - NaN, an infinity, a date, bytes - is refused by
+    name rather than written as something else."""
+    import json
+    import math
+    from decimal import Decimal
+
+    def one(x):
+        if x is None:
+            return "null"
+        if x is True:
+            return "true"
+        if x is False:
+            return "false"
+        if isinstance(x, int):
+            return str(x)
+        if isinstance(x, float):
+            if not math.isfinite(x):
+                raise ValueError(f"{x!r} has no JSON form")
+            return repr(x)
+        if hasattr(x, "to_decimal"):
+            # BSON's Decimal128, as the decimal it holds
+            x = x.to_decimal()
+        if isinstance(x, Decimal):
+            if not x.is_finite():
+                raise ValueError(f"{x} has no JSON form")
+            return str(x)
+        if isinstance(x, str):
+            return json.dumps(x, ensure_ascii=False)
+        if isinstance(x, dict):
+            return "{" + ", ".join(
+                f"{json.dumps(str(k), ensure_ascii=False)}: {one(v)}"
+                for k, v in sorted(x.items(), key=lambda kv: str(kv[0])))\
+                + "}"
+        if isinstance(x, (list, tuple)):
+            return "[" + ", ".join(one(e) for e in x) + "]"
+        raise ValueError(f"a {type(x).__name__} inside a document has no"
+                         f" JSON form: {x!r}")
+    return one(value)
 
 
 def from_text(cls, text):
@@ -1048,8 +1503,35 @@ def from_text(cls, text):
         raw = str(text)
         if raw.startswith("\\x"):
             return bytes.fromhex(raw[2:])
-        return raw.encode()
+        return _bytea_escaped(raw)
     return text
+
+
+def _bytea_escaped(raw):
+    """PostgreSQL's other text for bytes (`bytea_output = escape`): a
+    printable byte as its character, a backslash doubled, anything else
+    `\\ooo` in octal. Read as the characters' own UTF-8, `\\000\\377A`
+    was nine bytes where the value is three. Text that is not in that form
+    is taken as the characters' bytes, as before."""
+    out, i = bytearray(), 0
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\":
+            if raw[i + 1:i + 2] == "\\":
+                out.append(92)
+                i += 2
+                continue
+            digits = raw[i + 1:i + 4]
+            if len(digits) == 3 and all(d in "01234567" for d in digits):
+                out.append(int(digits, 8))
+                i += 4
+                continue
+            return raw.encode()
+        if not " " <= ch <= "~":
+            return raw.encode()
+        out.append(ord(ch))
+        i += 1
+    return bytes(out)
 
 
 def fold_rows(classes, rows, total=0):
@@ -1125,6 +1607,29 @@ TIME_MEANING = {
         "timestamp": INSTANT,
         "datetime": WALL, "date": WALL, "time": WALL, "year": WALL,
     },
+    # From each engine's own definition of the type: whether it keeps a
+    # point in time (stored as one, shown in some zone) or the digits of a
+    # clock with no zone. Oracle's LOCAL TIME ZONE keeps the instant and
+    # shows it in the session's zone. ClickHouse, MongoDB and Cassandra
+    # have only the instant, and a wall clock moved into one is written as
+    # that clock read at a zone migkit pins; which zone that was is the
+    # meaning the hop carries, so they are not in this table
+    "mssql": {"datetime": WALL, "datetime2": WALL, "smalldatetime": WALL,
+              "date": WALL, "time": WALL, "datetimeoffset": INSTANT},
+    "oracle": {"date": WALL, "timestamp": WALL,
+               "timestamp with time zone": INSTANT,
+               "timestamp with local time zone": INSTANT},
+    "duckdb": {"timestamp": WALL, "timestamp_ns": WALL, "timestamp_ms": WALL,
+               "timestamp_s": WALL, "timestamp with time zone": INSTANT,
+               "date": WALL, "time": WALL},
+    "bigquery": {"datetime": WALL, "timestamp": INSTANT, "date": WALL,
+                 "time": WALL},
+    "snowflake": {"timestamp_ntz": WALL, "timestamp_ltz": INSTANT,
+                  "timestamp_tz": INSTANT, "date": WALL, "time": WALL},
+    "redshift": {"timestamp without time zone": WALL,
+                 "timestamp with time zone": INSTANT, "date": WALL,
+                 "time without time zone": WALL},
+    "db2": {"timestamp": WALL, "date": WALL, "time": WALL},
 }
 
 
@@ -1169,6 +1674,41 @@ INT_RANGES = {
         "bigint unsigned": (0, 18446744073709551615),
     },
 }
+
+_I64 = (-2 ** 63, 2 ** 63 - 1)
+_I32 = (-2 ** 31, 2 ** 31 - 1)
+_I16 = (-2 ** 15, 2 ** 15 - 1)
+INT_RANGES.update({
+    "mssql": {"tinyint": (0, 255), "smallint": _I16, "int": _I32,
+              "bigint": _I64},
+    "clickhouse": {**{f"int{b}": (-2 ** (b - 1), 2 ** (b - 1) - 1)
+                      for b in (8, 16, 32, 64, 128, 256)},
+                   **{f"uint{b}": (0, 2 ** b - 1)
+                      for b in (8, 16, 32, 64, 128, 256)}},
+    "duckdb": {"tinyint": (-128, 127), "smallint": _I16, "integer": _I32,
+               "bigint": _I64, "hugeint": (-2 ** 127, 2 ** 127 - 1),
+               "utinyint": (0, 255), "usmallint": (0, 65535),
+               "uinteger": (0, 2 ** 32 - 1), "ubigint": (0, 2 ** 64 - 1),
+               "uhugeint": (0, 2 ** 128 - 1)},
+    # `varint` holds any integer and `counter` a signed 64-bit one
+    "cassandra": {"tinyint": (-128, 127), "smallint": _I16, "int": _I32,
+                  "bigint": _I64, "counter": _I64},
+    "db2": {"smallint": _I16, "integer": _I32, "bigint": _I64},
+    "ase": {"tinyint": (0, 255), "smallint": _I16, "int": _I32,
+            "integer": _I32, "bigint": _I64,
+            "unsigned smallint": (0, 65535),
+            "unsigned int": (0, 2 ** 32 - 1),
+            "unsigned bigint": (0, 2 ** 64 - 1)},
+    "redshift": {"smallint": _I16, "integer": _I32, "bigint": _I64},
+    "bigquery": {"int64": _I64},
+    "parquet": {"int64": _I64},
+    "snowflake": {"integer": (-(10 ** 38 - 1), 10 ** 38 - 1)},
+    # SQLite and the drivers of MongoDB and Cassandra store a whole number in
+    # at most 64 bits, whatever the column or field is declared
+    "sqlite": {n: _I64 for n in ("int", "integer", "tinyint", "smallint",
+                                 "mediumint", "bigint", "int2", "int8")},
+    "mongodb": {"int": _I64, "long": _I64},
+})
 
 CHAR_TYPES = {
     "postgres": ("character varying", "varchar", "character", "char",
@@ -1265,6 +1805,618 @@ def narrower(src, dst):
     raise ValueError(f"no rule for capacity kind {src[0]!r}")
 
 
+# Values that would not arrive as themselves.
+#
+# A cross-engine move can change a value without an error: MySQL rounds a
+# decimal's extra fraction digits even in strict mode (Note 1265 only),
+# ClickHouse writes 0 or '' for a NULL into a column that is not Nullable,
+# the PostgreSQL driver reads `infinity` as 9999-12-31 and `24:00:00` as
+# 00:00:00, a MySQL JSON column turns a number it cannot hold as a 64-bit
+# integer into a double. Or the target refuses a row halfway through: a
+# NUL character into PostgreSQL text, an unsigned 64-bit integer into a
+# bigint, a NaN into MySQL. Either way the move is the wrong place to find
+# out. Each such case is a *kind* here - a question the source can be asked
+# about one column before anything is read to be moved, answered with a
+# count and the keys of a few rows, so the operator decides what each value
+# should become instead of the move deciding it silently.
+#
+# `unfit` says which kinds a column pair needs asking; `unfit_sql` asks the
+# source in its own SQL where it has any; `unfit_value` asks a value read
+# into this process, for every other engine and for what SQL cannot see.
+# The two are held to the same answers by the tests.
+
+#: kinds, and what a row of each is, as the report says it
+UNFIT_WORDS = {
+    "nonfinite": "infinity or -infinity, which {dst} has no value for (read"
+                 " through a driver it becomes 9999-12-31)",
+    "years": "a year before 1 AD or after 9999, which {dst} cannot hold",
+    "time24": "the time 24:00:00, which is read as 00:00:00 on its way to"
+              " {dst}",
+    "timeday": "a TIME outside 00:00:00 to 23:59:59.999999 - a duration,"
+               " which a time of day on {dst} cannot hold",
+    "fraction": "more than {arg} digits of a second, which {dst} rounds or"
+                " cuts to {arg}",
+    "numeric-nonfinite": "NaN or an infinity in a decimal, which {dst} has no"
+                         " value for",
+    "float-nonfinite": "NaN or an infinity, which {dst} refuses",
+    "scale": "more than {arg} digits after the point, which {dst} rounds to"
+             " {arg} without an error",
+    "digits": "more digits before the point than {dst}'s decimal({arg[0]},"
+              "{arg[1]}) holds",
+    "sigdigits": "more than {arg} significant digits, which {dst} cannot hold"
+                 " exactly",
+    "magnitude": "a number outside the range {dst} holds ({arg[0]} to"
+                 " {arg[1]})",
+    "int-range": "a whole number outside {arg[0]}..{arg[1]}, the range of"
+                 " the {dst} column",
+    "chars": "more than {arg} characters, the {dst} column's limit",
+    "bytes": "more than {arg} bytes, the {dst} column's limit",
+    "utf16": "more than {arg} UTF-16 code units, the {dst} column's limit (a"
+             " character outside the Basic Multilingual Plane takes two)",
+    "nul": "the character U+0000, which {dst} text refuses",
+    "supplementary": "a character outside the Basic Multilingual Plane (an"
+                     " emoji, say), which the {arg} column on {dst} cannot"
+                     " hold",
+    "charset": "a character the {arg} column on {dst} has no code for",
+    "inet-mask": "an address with a mask, which the {dst} column keeps"
+                 " without it",
+    "array-bounds": "an array that does not start at 1, which a JSON array"
+                    " on {dst} cannot say",
+    "json-form": "a value inside a document that JSON has no form for - a"
+                 " date, bytes, NaN, an object id - which {dst}'s JSON"
+                 " cannot hold as it is",
+    "json-number": "a JSON number {dst} stores as a double that is not the"
+                   " same number - a whole number past 64 bits, or a"
+                   " decimal of more than 15 significant digits its JSON"
+                   " reads as another",
+    "null": "NULL, which the {dst} column is not Nullable for and writes as"
+            " 0 or ''",
+    "not-null": "NULL, which the {dst} column does not take - the load would"
+                " stop there",
+    "merge": "keys distinct here that {dst}'s {arg} takes for one key - the"
+             " later row would overwrite the earlier",
+    "signed-zero": "keys that differ only by the sign of a zero, which {dst}"
+                   " takes for one key - the later row would overwrite the"
+                   " earlier",
+}
+
+
+#: the most digits after the second each engine's types keep, whatever a
+#: declaration asks for: PostgreSQL takes `timestamp(9)` and keeps six
+MOST_DIGITS = {"postgres": 6, "mysql": 6, "mssql": 7, "redshift": 6,
+               "bigquery": 6, "parquet": 6, "db2": 12}
+
+
+def _temporal_digits(engine, declared):
+    """How many digits after the second a temporal type keeps, or None
+    where migkit has not measured it."""
+    got = _declared_digits(engine, declared)
+    most = MOST_DIGITS.get(engine)
+    return min(got, most) if got is not None and most else got
+
+
+def _declared_digits(engine, declared):
+    name, nums = _split_declared(declared)
+    base = name.split(" ")[0]
+    if engine == "postgres":
+        return nums[0] if nums else 6
+    if engine == "mysql":
+        return nums[0] if nums else 0
+    if engine == "mssql":
+        if base in ("datetime2", "time", "datetimeoffset"):
+            return nums[0] if nums else 7
+        return {"datetime": 2, "smalldatetime": 0}.get(base)
+    if engine == "clickhouse":
+        return (nums[0] if nums else 3) if base == "datetime64" else \
+            0 if base == "datetime" else None
+    if engine in ("oracle", "db2"):
+        return (nums[0] if nums else 6) if base == "timestamp" else \
+            0 if base == "date" else None
+    if engine == "duckdb":
+        return {"timestamp_ns": 9, "timestamp_ms": 3,
+                "timestamp_s": 0}.get(base, 6)
+    if engine in ("mongodb", "cassandra"):
+        return 9 if (engine, base) == ("cassandra", "time") else 3
+    if engine == "snowflake":
+        return nums[0] if nums else 9
+    if engine in ("bigquery", "redshift", "parquet"):
+        return 6
+    return None
+
+
+def _fixed_decimal(engine, declared):
+    """(precision, scale) a decimal column is held to, or None where it
+    keeps what it is given (PostgreSQL's `numeric` with no typmod)."""
+    name, nums = _split_declared(declared)
+    if engine == "clickhouse" and name in ("decimal32", "decimal64",
+                                           "decimal128", "decimal256"):
+        return ({"decimal32": 9, "decimal64": 18, "decimal128": 38,
+                 "decimal256": 76}[name], nums[0] if nums else 0)
+    if engine in ("mssql", "ase") and name in ("money", "smallmoney"):
+        return (19, 4) if name == "money" else (10, 4)
+    if engine == "bigquery" and name in ("numeric", "bignumeric"):
+        return (38, 9) if name == "numeric" else (76, 38)
+    if name in ("decimal", "numeric", "number", "dec") and nums:
+        return (nums[0], nums[1] if len(nums) > 1 else 0)
+    if engine == "mysql" and name in ("decimal", "numeric"):
+        return (10, 0)
+    return None
+
+
+#: What a value of a class is stored as on an engine that makes a table
+#: on the first write, so has no column type to be read before: a MongoDB
+#: date keeps milliseconds, a whole number the driver writes as 64 bits
+#: at most, a decimal as a Decimal128 of 34 digits
+WRITTEN_AS = {
+    "mongodb": {"timestamp": "date", "integer": "long", "decimal": "decimal",
+                "float": "double", "text": "string", "bytes": "bindata",
+                "boolean": "bool"},
+}
+
+#: The widest decimal each engine builds: (precision, scale)
+DECIMAL_MOST = {"mysql": (65, 30), "mssql": (38, 38), "clickhouse": (76, 76),
+                "db2": (31, 31), "duckdb": (38, 38), "ase": (38, 38),
+                "redshift": (38, 37), "snowflake": (38, 37),
+                "bigquery": (76, 38)}
+
+#: decimal types that hold at most this many significant digits and keep
+#: no scale of their own
+SIGNIFICANT = {"dynamodb": 38, "mongodb": 34, "oracle": 38,
+               "snowflake": 38}
+
+#: engines that refuse a float's NaN and infinities
+NO_NONFINITE_FLOAT = {"mysql", "mssql", "dynamodb", "db2", "ase",
+                      "opensearch"}
+
+#: engines whose decimal holds NaN and the infinities
+NONFINITE_DECIMAL = {"postgres", "mongodb"}
+
+#: MySQL character sets that hold the Basic Multilingual Plane and nothing
+#: past it
+BMP_CHARSETS = {"utf8mb3", "utf8", "ucs2"}
+
+#: MySQL's single-byte character sets, by the codec that holds exactly
+#: what each does (MySQL's `latin1` is Windows-1252, not ISO 8859-1)
+CODECS = {"latin1": "cp1252", "latin2": "iso8859_2", "ascii": "ascii",
+          "cp1250": "cp1250", "cp1251": "cp1251", "cp1256": "cp1256",
+          "cp1257": "cp1257", "greek": "iso8859_7", "hebrew": "iso8859_8",
+          "latin5": "iso8859_9", "latin7": "iso8859_13", "koi8r": "koi8_r",
+          "koi8u": "koi8_u", "tis620": "tis_620"}
+
+#: address types that keep no mask
+ADDRESS_ONLY = {"clickhouse": ("ipv4", "ipv6"), "cassandra": ("inet",)}
+
+#: DynamoDB's number range
+DYNAMO_RANGE = ("1e-130", "1e126")
+
+
+def unfit(src, src_declared, dst, dst_declared, facts=None,
+          src_facts=None):
+    """[(kind, arg)] to ask of one source column before it is moved into
+    one target column - `dst_declared` is the target's type as it stands,
+    or as migkit is about to build it. `facts` is what the target says
+    of the column beyond its type: `null` (False where it takes none),
+    `charset`; `src_facts` the same of the source's column.
+
+    Only kinds that can happen for this pair: asking a question whose
+    answer is always nothing costs a scan and says nothing."""
+    facts = facts or {}
+    scls, dcls = type_class(src, src_declared), type_class(dst, dst_declared)
+    out = []
+    if dcls == "json" and src not in ("postgres", "mysql"):
+        # a document store's value is a document of its own types, of
+        # which JSON holds only some - a field migkit has no class for as
+        # well as one it has
+        out.append(("json-form", None))
+    if not scls:
+        return out
+    other = src != dst
+    if scls in ("timestamp", "date") and src == "postgres" and other:
+        out += [("nonfinite", None), ("years", None)]
+    if scls == "time" and other:
+        if src == "postgres":
+            out.append(("time24", None))
+        if src == "mysql":
+            out.append(("timeday", None))
+    if scls in ("timestamp", "time") and dcls in ("timestamp", "time"):
+        mine, theirs = (_temporal_digits(src, src_declared),
+                        _temporal_digits(dst, dst_declared))
+        if theirs is not None and (mine is None or mine > theirs):
+            out.append(("fraction", theirs))
+    if scls == "decimal" and src in NONFINITE_DECIMAL \
+            and dst not in NONFINITE_DECIMAL:
+        out.append(("numeric-nonfinite", None))
+    if scls == "float" and dst in NO_NONFINITE_FLOAT:
+        out.append(("float-nonfinite", None))
+    if scls in ("integer", "decimal", "float") and dcls in ("integer",
+                                                            "decimal"):
+        rng = INT_RANGES.get(dst, {}).get(_split_declared(dst_declared)[0])
+        fixed = _fixed_decimal(dst, dst_declared) if dcls == "decimal" \
+            else None
+        if dcls == "integer" and scls != "integer":
+            # a fraction into a whole number is rounded away
+            out.append(("scale", 0))
+        if dcls == "integer" and rng:
+            mine = INT_RANGES.get(src, {}).get(
+                _split_declared(src_declared)[0])
+            if scls != "integer" or not mine or mine[0] < rng[0] \
+                    or mine[1] > rng[1]:
+                out.append(("int-range", rng))
+        elif fixed:
+            mine = _fixed_decimal(src, src_declared) \
+                if scls == "decimal" else None
+            if scls != "integer" and (mine is None or mine[1] > fixed[1]):
+                out.append(("scale", fixed[1]))
+            wide = INT_RANGES.get(src, {}).get(
+                _split_declared(src_declared)[0])
+            if scls == "integer" and wide:
+                fits = max(-wide[0], wide[1]) < 10 ** (fixed[0] - fixed[1])
+            else:
+                fits = mine is not None and \
+                    mine[0] - mine[1] <= fixed[0] - fixed[1] and \
+                    mine[1] <= fixed[1]
+            if not fits:
+                out.append(("digits", fixed))
+    # a whole number of a known range cannot pass either limit: 38 digits
+    # hold every 64-bit integer, and 1e126 is past every one of them
+    bounded = scls == "integer" and INT_RANGES.get(src, {}).get(
+        _split_declared(src_declared)[0], (None, 10 ** 38))[1] < 10 ** 38
+    if scls in ("integer", "decimal") and dst in SIGNIFICANT \
+            and dcls in ("decimal", None) and not bounded \
+            and not _fixed_decimal(dst, dst_declared):
+        out.append(("sigdigits", SIGNIFICANT[dst]))
+    if scls in ("integer", "decimal", "float") and dst == "dynamodb" \
+            and not bounded:
+        out.append(("magnitude", DYNAMO_RANGE))
+    if scls == "text" and dcls == "text":
+        cap = capacity(dst, dst_declared)
+        mine = capacity(src, src_declared)
+        if cap and cap[0] in ("chars", "bytes") and cap[1] is not None \
+                and (not mine or mine[0] != cap[0] or narrower(mine, cap)
+                     or mine[1] is None):
+            out.append((cap[0], cap[1]))
+        name, nums = _split_declared(dst_declared)
+        if dst == "mssql" and name in ("nvarchar", "nchar") and nums:
+            out.append(("utf16", nums[0]))
+        if dst == "postgres" and src != "postgres":
+            out.append(("nul", None))
+        charset = str(facts.get("charset") or "").lower()
+        if charset in BMP_CHARSETS:
+            out.append(("supplementary", charset))
+        elif charset in CODECS:
+            out.append(("charset", charset))
+    if scls == "json" and dst == "mysql" and src != "mysql":
+        out.append(("json-number", None))
+    if scls == "json" and src == "postgres" and dst != "postgres" \
+            and array_element(src, src_declared) is not None:
+        out.append(("array-bounds", None))
+    if scls == "inet" and dcls == "inet" \
+            and str(dst_declared or "").strip().lower() in ADDRESS_ONLY.get(
+                dst, ()):
+        out.append(("inet-mask", None))
+    if facts.get("null") is False \
+            and (src_facts or {}).get("null") is not False:
+        out.append(("null" if dst == "clickhouse" else "not-null", None))
+    return out
+
+
+def unfit_words(kind, arg, dst):
+    """What a row of `kind` is, in a sentence about the target."""
+    return UNFIT_WORDS[kind].format(dst=dst, arg=arg)
+
+
+def _pow10(n):
+    """10**n as an exact numeric literal both SQL engines read as a
+    decimal: MySQL reads `1e40` as a double."""
+    return "1" + "0" * n if n >= 0 else "0." + "0" * (-n - 1) + "1"
+
+
+def _unfit_sql_postgres(kind, c, arg, cls=None):
+    # a number as the decimal it is: a double through its own text, which
+    # is exact where `float8::numeric` keeps fifteen digits; anything else
+    # through `numeric`, which a `money`'s text is not
+    n = f"({c}::text::numeric)" if cls == "float" else f"({c}::numeric)"
+    t = f"({c}::text)"
+
+    def finite(p):
+        # asked only of a finite number, in that order: `and` in SQL does
+        # not promise to look at its left side first
+        return (f"case when {c}::text in ('NaN', 'Infinity', '-Infinity')"
+                f" then false else {p} end")
+    if kind == "nonfinite":
+        return f"not isfinite({c})"
+    if kind == "years":
+        return (f"isfinite({c}) and ({c} < '0001-01-01'"
+                f" or {c} >= '10000-01-01')")
+    if kind == "time24":
+        return f"{c} = '24:00:00'"
+    if kind == "fraction":
+        if arg >= 6:
+            return "false"
+        return (f"(extract(microseconds from {c})::bigint"
+                f" % {10 ** (6 - arg)}) <> 0")
+    if kind == "numeric-nonfinite":
+        return f"{c}::text in ('NaN', 'Infinity', '-Infinity')"
+    if kind == "float-nonfinite":
+        return (f"{c}::float8 in ('NaN'::float8, 'Infinity'::float8,"
+                f" '-Infinity'::float8)")
+    if kind == "scale":
+        return finite(f"{n} <> round({n}, {arg})")
+    if kind == "digits":
+        return finite(f"abs(round({n}, {arg[1]}))"
+                      f" >= {_pow10(arg[0] - arg[1])}")
+    if kind == "sigdigits":
+        return finite(f"length(trim(both '0' from"
+                      f" replace(abs({n})::text, '.', ''))) > {arg}")
+    if kind == "magnitude":
+        return finite(f"{n} <> 0 and (abs({n}) >= {arg[1]}::numeric"
+                      f" or abs({n}) < {arg[0]}::numeric)")
+    if kind == "int-range":
+        return f"{c} < {arg[0]} or {c} > {arg[1]}"
+    # the text kinds through `::text`: a `tsvector`, an `inet` or a `uuid`
+    # is compared as its text, and `char_length` takes none of them
+    if kind == "chars":
+        return f"char_length({t}) > {arg}"
+    if kind == "bytes":
+        return f"octet_length(convert_to({t}, 'UTF8')) > {arg}"
+    if kind == "utf16":
+        return (f"char_length({t}) + char_length(regexp_replace({t},"
+                f" '[^\\U00010000-\\U0010FFFF]', '', 'g')) > {arg}")
+    if kind == "nul":
+        return "false"
+    if kind == "supplementary":
+        return f"{t} ~ '[\\U00010000-\\U0010FFFF]'"
+    if kind == "json-number":
+        # a row holding a number that can change (`json_candidate`); the
+        # target then says which of them do
+        return (f"exists (select 1 from jsonb_path_query(to_jsonb({c}),"
+                f" 'strict $.**') v where jsonb_typeof(v) = 'number' and"
+                f" case when v::text ~ '^-?[0-9]+$'"
+                f" then v::text::numeric not between -9223372036854775808"
+                f" and 18446744073709551615"
+                f" else length(trim(both '0' from regexp_replace("
+                f"split_part(lower(v::text), 'e', 1), '[^0-9]', '', 'g')))"
+                f" > 15 end)")
+    if kind == "array-bounds":
+        # PostgreSQL writes an array whose first index is not 1 with its
+        # bounds in front: `[0:1]={5,6}`
+        return f"{c}::text like '[%'"
+    if kind == "inet-mask":
+        return (f"masklen({c}) < case family({c}) when 4 then 32"
+                f" else 128 end")
+    if kind in ("null", "not-null"):
+        return f"{c} is null"
+    return None
+
+
+def _unfit_sql_mysql(kind, c, arg, cls=None):
+    if kind == "timeday":
+        return f"{c} < '00:00:00' or {c} >= '24:00:00'"
+    if kind == "fraction":
+        if arg >= 6:
+            return "false"
+        return f"microsecond({c}) % {10 ** (6 - arg)} <> 0"
+    if kind in ("nonfinite", "years", "time24", "numeric-nonfinite",
+                "float-nonfinite"):
+        # MySQL holds none of these
+        return "false"
+    if kind == "scale":
+        return f"{c} <> round({c}, {arg})"
+    if kind == "digits":
+        return f"abs(round({c}, {arg[1]})) >= {_pow10(arg[0] - arg[1])}"
+    if kind == "sigdigits":
+        return (f"length(trim(both '0' from replace(cast(abs({c}) as char),"
+                f" '.', ''))) > {arg}")
+    if kind == "magnitude":
+        return (f"{c} <> 0 and (abs({c}) >= {arg[1]}"
+                f" or abs({c}) < {arg[0]})")
+    if kind == "int-range":
+        return f"{c} < {arg[0]} or {c} > {arg[1]}"
+    if kind == "chars":
+        return f"char_length({c}) > {arg}"
+    if kind == "bytes":
+        return f"octet_length({c}) > {arg}"
+    if kind == "nul":
+        # in its bytes: under a `_ci` collation the search matched a row
+        # with no NUL in it (measured on 8.4)
+        return f"instr(cast({c} as binary), x'00') > 0"
+    if kind == "supplementary":
+        # converted into a character set that has only the first plane,
+        # a character outside it becomes `?`: any byte that changed is one
+        return (f"cast({c} as binary) <> cast(convert({c} using utf8mb3)"
+                f" as binary)")
+    if kind in ("null", "not-null"):
+        return f"{c} is null"
+    return None
+
+
+def _unfit_sql_clickhouse(kind, c, arg, cls=None):
+    """ClickHouse's: a source of billions of rows is not read into this
+    process to be asked."""
+    if kind in ("nonfinite", "years", "time24", "timeday",
+                "numeric-nonfinite"):
+        return "false"
+    if kind == "fraction":
+        if arg >= 9:
+            return "false"
+        return (f"toUnixTimestamp64Nano(toDateTime64({c}, 9))"
+                f" % {10 ** (9 - arg)} != 0")
+    if kind == "float-nonfinite":
+        return f"isNaN({c}) or isInfinite({c})"
+    if kind == "scale":
+        return f"{c} != truncate({c}, {arg})"
+    if kind == "int-range":
+        return f"{c} < {arg[0]} or {c} > {arg[1]}"
+    if kind == "chars":
+        return f"lengthUTF8({c}) > {arg}"
+    if kind == "bytes":
+        return f"length({c}) > {arg}"
+    if kind == "nul":
+        return f"position({c}, char(0)) > 0"
+    if kind == "supplementary":
+        return f"match({c}, '[\\\\x{{10000}}-\\\\x{{10FFFF}}]')"
+    if kind in ("null", "not-null"):
+        return f"{c} is null"
+    return None
+
+
+UNFIT_SQL = {"postgres": _unfit_sql_postgres, "mysql": _unfit_sql_mysql,
+             "clickhouse": _unfit_sql_clickhouse}
+
+
+def unfit_sql(engine, kind, quoted, arg, cls=None):
+    """A predicate true for the rows of `kind`, in this engine's SQL, or
+    None where it has none and the rows are to be read and asked here.
+    `cls` is the column's class, where the SQL depends on it."""
+    build = UNFIT_SQL.get(engine)
+    return build(kind, quoted, arg, cls) if build else None
+
+
+def _json_numbers(value):
+    """Every number in a JSON document, as the Decimal or int it was
+    written as."""
+    import json
+    from decimal import Decimal
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+    if isinstance(value, str):
+        value = json.loads(value, parse_float=Decimal, parse_int=int)
+    stack = [value]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, dict):
+            stack.extend(x.values())
+        elif isinstance(x, (list, tuple)):
+            stack.extend(x)
+        elif isinstance(x, bool) or x is None or isinstance(x, str):
+            continue
+        elif isinstance(x, (int, float, Decimal)):
+            yield x
+
+
+def unfit_value(kind, value, arg):
+    """Whether one value read into this process is a row of `kind`. What
+    a driver cannot hand over at all (an `infinity`, a year before
+    Christ) is never one here: those kinds are asked in SQL."""
+    import datetime
+    import math
+    from decimal import Decimal, localcontext
+    if kind in ("null", "not-null"):
+        return value is None
+    if value is None or value is ABSENT:
+        return False
+    if hasattr(value, "to_decimal"):
+        value = value.to_decimal()
+    if kind == "timeday":
+        return isinstance(value, datetime.timedelta) and not (
+            datetime.timedelta(0) <= value < datetime.timedelta(days=1))
+    if kind == "fraction":
+        ns = getattr(value, "nanosecond", 0) or 0
+        us = getattr(value, "microsecond", None)
+        if us is None and isinstance(value, datetime.timedelta):
+            us = value.microseconds
+        if us is None:
+            return False
+        return (us * 1000 + ns) % (10 ** (9 - arg)) != 0
+    if kind == "numeric-nonfinite":
+        return isinstance(value, Decimal) and not value.is_finite()
+    if kind == "float-nonfinite":
+        if isinstance(value, float):
+            return not math.isfinite(value)
+        return isinstance(value, Decimal) and not value.is_finite()
+    if kind in ("scale", "digits", "sigdigits", "magnitude"):
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return False
+            value = Decimal(repr(value))
+        if isinstance(value, int):
+            value = Decimal(value)
+        if not isinstance(value, Decimal) or not value.is_finite():
+            return False
+        with localcontext() as ctx:
+            ctx.prec = 400
+            if kind == "scale":
+                return value != value.quantize(Decimal(1).scaleb(-arg))
+            if kind == "digits":
+                return abs(value.quantize(Decimal(1).scaleb(-arg[1]))) \
+                    >= Decimal(10) ** (arg[0] - arg[1])
+            if kind == "sigdigits":
+                return len(value.normalize().as_tuple().digits) > arg \
+                    and value != 0
+            return value != 0 and (abs(value) >= Decimal(arg[1])
+                                   or abs(value) < Decimal(arg[0]))
+    if kind == "int-range":
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return False
+        return n < arg[0] or n > arg[1]
+    if kind in ("chars", "bytes", "utf16", "nul", "supplementary",
+                "charset"):
+        if not isinstance(value, str):
+            return False
+        if kind == "charset":
+            try:
+                value.encode(CODECS[arg])
+            except UnicodeEncodeError:
+                return True
+            return False
+        if kind == "chars":
+            return len(value) > arg
+        if kind == "bytes":
+            return len(value.encode("utf-8", "surrogatepass")) > arg
+        if kind == "utf16":
+            return len(value.encode("utf-16-le", "surrogatepass")) // 2 > arg
+        if kind == "nul":
+            return "\x00" in value
+        return any(ord(ch) > 0xFFFF for ch in value)
+    if kind == "json-number":
+        try:
+            return any(json_candidate(n) for n in _json_numbers(value))
+        except (ValueError, TypeError):
+            return False
+    if kind == "inet-mask":
+        import ipaddress
+        try:
+            iface = ipaddress.ip_interface(str(value).strip())
+        except ValueError:
+            return False
+        return iface.network.prefixlen < iface.max_prefixlen
+    if kind == "json-form":
+        if isinstance(value, (str, bytes, bytearray, memoryview)):
+            return False
+        try:
+            json_write(value)
+        except ValueError:
+            return True
+        return False
+    return False
+
+
+def json_candidate(n):
+    """Whether a JSON number can come back from MySQL's JSON as another
+    number: a whole one outside what it keeps as a 64-bit integer, or a
+    decimal past the 15 significant digits every double holds. Measured
+    on 8.4, `9088544342.689999` - a double's own shortest text - came back
+    `9088544342.69`, and `123456789.123456789` `123456789.1234568`; which
+    of these longer ones change is the target's to say
+    (`json_rewritten`), so this only picks what to ask it."""
+    from decimal import Decimal
+    if isinstance(n, bool):
+        return False
+    if isinstance(n, int):
+        return not -2 ** 63 <= n <= 2 ** 64 - 1
+    if isinstance(n, float):
+        n = Decimal(repr(n))
+    if not isinstance(n, Decimal) or not n.is_finite():
+        return True
+    if n.as_tuple().exponent >= 0:
+        return not -2 ** 63 <= int(n) <= 2 ** 64 - 1
+    return len(n.normalize().as_tuple().digits) > 15
+
+
 def comparable(engine, declared):
     """(class, why-not). Exactly one of the two is set."""
     cls = type_class(engine, declared)
@@ -1320,7 +2472,11 @@ def digest_expr(engine, row_expr):
         return (f"coalesce(sum(cast(conv(substr(md5({row_expr}),1,"
                 f"{DIGEST_HEX}),16,10) as decimal(65,0))), 0)")
     if engine == "postgres":
-        return (f"coalesce(sum(('x'||substr(md5({row_expr}),1,{DIGEST_HEX}))"
+        # the row's UTF-8 bytes, as MySQL and this process hash: `md5(text)`
+        # hashes the database's own encoding, and in a LATIN1 database `é`
+        # is one byte there and two everywhere else
+        return (f"coalesce(sum(('x'||substr(md5(convert_to({row_expr},"
+                f" 'UTF8')),1,{DIGEST_HEX}))"
                 f"::bit({DIGEST_BITS})::bigint::numeric), 0)")
     if engine == "sqlite":
         # SQLite has neither md5 nor a wide enough number. Measured: `sum()`

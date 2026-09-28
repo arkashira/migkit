@@ -1669,6 +1669,11 @@ def _move_full(hop, eng, db, table, chunk, go):
             console.print("  time: " + planner.estimate(
                 hop, "builtin", _source_rows(eng, d)))
             continue
+        # a value the target would round, cut or refuse stops the move
+        # here, before the first table is copied; a table an earlier run
+        # began was asked then
+        eng.refuse_unfit(d, [f"{s}.{t}" if s else t for s, t in tables
+                             if not ck.get(eng.move_key(d, s, t))])
         from . import drift
         share = _sharing(hop) if not table else None
         before = drift.shape(eng, "src", d)
@@ -2301,6 +2306,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     # before anything is copied: a filter this mover cannot
                     # apply would silently move every row
                     movers.refuse_unpushable_filters(hop, d, v, engine)
+                    if go:
+                        eng.refuse_unfit(d)
                     console.print(f"[bold]{d}[/bold] bulk copy:")
                     from . import drift
                     before = drift.shape(eng, "src", d) if go else None

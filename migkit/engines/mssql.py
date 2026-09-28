@@ -768,6 +768,84 @@ class MSSQLEngine(DbapiRows, Engine):
                       " t.is_ms_shipped = 0 order by 1")
             if not self.hop.excluded(db, *t.split(".", 1))]
 
+    def column_facts(self, side, db, table):
+        """Whether each column takes NULL, and the collation its text is
+        compared by - the database's own for a table migkit builds here,
+        `SQL_Latin1_General_CP1_CI_AS` unless someone chose otherwise,
+        which takes `a` and `A` for one key."""
+        if table is None:
+            got = self._rows(side, db, "select cast(databasepropertyex("
+                                       "db_name(), 'Collation') as"
+                                       " nvarchar(128))")
+            return {None: {"null": True, "collation": got[0][0]}}
+        return {str(n): {"null": bool(null), "collation": co}
+                for n, null, co in self._rows(
+                    side, db, "select c.name, c.is_nullable,"
+                              " c.collation_name from sys.columns c where"
+                              f" c.object_id = object_id({MARK})",
+                    (self._qualified(side, db, table),))}
+
+    def key_merges(self, side, db, columns, batches, examples=3):
+        """Asked of this server's own collation, as MySQL's is: the keys go
+        into a temporary table whose columns compare as the target's do,
+        and the server groups them. Under every collation, `_BIN2` too,
+        SQL Server compares two strings with the trailing spaces of the
+        shorter made up, so `a` and `a ` are one key whatever the column
+        says."""
+        if all(co is None for _, co in columns):
+            return None
+        q = self._q
+        defs = ", ".join(
+            f"{q(n)} nvarchar(4000) collate {co or 'Latin1_General_BIN2'}"
+            for n, co in columns)
+        cols = ", ".join(q(n) for n, _ in columns)
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"create table #migkit_key_merges ({defs})")
+            insert = ("insert into #migkit_key_merges values ("
+                      + ", ".join(["%s"] * len(columns)) + ")")
+            for rows in batches:
+                if rows:
+                    cur.executemany(insert, rows)
+            cur.execute(f"select count(*) from (select 1 as one from"
+                        f" #migkit_key_merges group by {cols} having"
+                        " count(*) > 1) g")
+            groups = int(cur.fetchone()[0])
+            shown = []
+            if groups:
+                cur.execute(f"select top ({int(examples)}) {cols} from"
+                            f" #migkit_key_merges group by {cols} having"
+                            " count(*) > 1")
+                for rep in cur.fetchall():
+                    # every row, not `distinct`: that compares by the
+                    # collation too, and gave back one of the group
+                    cur.execute(f"select {cols} from"
+                                " #migkit_key_merges where " + " and ".join(
+                                    f"{q(n)} = %s" for n, _ in columns),
+                                tuple(rep))
+                    shown.append([tuple(r) for r in cur.fetchall()])
+            cur.execute("drop table #migkit_key_merges")
+        finally:
+            conn.close()
+        return groups, shown
+
+    #: `char(10)` holding 'abc' comes back 'abc       ' (the test's own
+    #: premise, on Azure SQL Edge) and read as a difference from
+    #: PostgreSQL's `char(10)`, which reads 'abc'
+    PADDED = ("char", "nchar")
+
+    def _nanos_text(self, quoted, declared):
+        """A `datetime2` or `time` of seven digits as the server writes
+        it: the driver hands back six."""
+        from .. import canon
+        name, nums = canon._split_declared(declared)
+        if name in ("datetime2", "time") and (nums[0] if nums else 7) > 6:
+            return (f"convert(varchar(27), {quoted}, 121)"
+                    if name == "datetime2" else
+                    f"convert(varchar(16), {quoted})")
+        return None
+
     def neutral_columns(self, side, db, table):
         return [(n, t) for n, t in self._rows(
             side, db, f"select c.name, {self.DECLARED.format(c='c')} from"

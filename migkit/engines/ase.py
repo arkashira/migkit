@@ -36,6 +36,10 @@ class AseEngine(DbapiRows, Engine):
     OVER_NETWORK = True
     PARAMSTYLE = "qmark"
     LIMIT = "top"
+    #: a `char`, `nchar` or `unichar` that takes no NULL is stored padded
+    #: to its length, by the ASE reference's own account; read without the
+    #: padding, as every other engine's fixed-length text is compared
+    PADDED = ("char", "nchar", "unichar")
 
     def _driver(self, side):
         import os

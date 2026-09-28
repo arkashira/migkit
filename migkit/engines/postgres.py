@@ -109,6 +109,17 @@ def _copy_text(rows):
     out.seek(0)
     return out
 
+#: What every session migkit opens on PostgreSQL is pinned to, whatever the
+#: server, the database or the role was set to: a double printed with every
+#: digit it takes to read back as itself, and bytes as hex. Measured on 16
+#: under `alter database ... set extra_float_digits = 0`, the sum 0.1 + 0.2
+#: printed `0.3` - equal to a target that holds 0.3 - where pinned it
+#: prints `0.30000000000000004`; and a logical decoding session under
+#: `bytea_output = escape` prints bytes in a form only the hex reader here
+#: did not know.
+SESSION = "-c extra_float_digits=3 -c bytea_output=hex"
+
+
 def _tls_query(ep):
     """An endpoint's TLS as a connection URL's query: its own settings, or
     TLS where the server offers it, as libpq does by default."""
@@ -158,7 +169,8 @@ class PostgresEngine(Engine):
         env = {**ep.libpq_env(),
                "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
                "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO"
-                            f" -c statement_timeout={statement_timeout}"}
+                            f" -c statement_timeout={statement_timeout}"
+                            f" {SESSION}"}
         p = run(["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
                  "-d", self._dsn(side, db), "-X", "-At", "-q", "-v",
                  "ON_ERROR_STOP=1", "-c", sql],
@@ -440,15 +452,34 @@ class PostgresEngine(Engine):
     def _conn(self, side, db):
         import psycopg2
         ep = self.hop.source if side == "src" else self.hop.target
-        extra = {}
+        options = SESSION
         if side == "dst" and db in self.__dict__.get("_as_replica", ()):
-            extra["options"] = "-c session_replication_role=replica"
+            options += " -c session_replication_role=replica"
         conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
                                 password=ep.password, dbname=db,
                                 connect_timeout=15, **ep.libpq_tls(),
-                                **extra)
+                                options=options)
         self._read_hstore(conn, side, db)
+        self._read_json(conn)
         return conn
+
+    @staticmethod
+    def _read_json(conn):
+        """A `json` or `jsonb` value read with its numbers as the decimals
+        they are. The driver's own reading makes each a float: measured,
+        `{"n": 123456789.123456789}` arrived as 123456789.12345679 and
+        `1.10` as 1.1, and a move wrote those - a changed document, which
+        the digest then found on the target and not on the way."""
+        import json
+        from decimal import Decimal
+
+        from psycopg2.extras import register_default_json, \
+            register_default_jsonb
+
+        def loads(text):
+            return json.loads(text, parse_float=Decimal)
+        register_default_json(conn, loads=loads)
+        register_default_jsonb(conn, loads=loads)
 
     #: a database name no server has, for asking a pooler who it is
     NO_SUCH_DATABASE = "migkit_no_such_database"
@@ -760,9 +791,11 @@ class PostgresEngine(Engine):
     def _read_query(self, side, db, table, columns, after, limit, where):
         """(sql, args, key, names) for `neutral_read` and
         `neutral_batches`: one statement shape for both."""
+        from .. import canon
         sch, tbl = self._split(table)
         names = [n for n, _ in columns]
-        cols = ", ".join(f'"{n}"' for n in names)
+        cols = ", ".join(canon.read_expr("postgres", f'"{n}"', c)
+                         for n, c in columns)
         key = self.neutral_key(side, db, table)
         resume, args = "", []
         if key and after is not None:
@@ -811,6 +844,36 @@ class PostgresEngine(Engine):
             return (rows, None)
         return (rows, tuple(rows[-1][i] for i in idx))
 
+    def column_facts(self, side, db, table):
+        """Whether each column takes NULL. A table migkit builds here takes
+        NULL outside its key."""
+        if table is None:
+            return {None: {"null": True}}
+        return {str(n): {"null": str(null) == "true"} for n, null in (
+            line.split("\x1f") for line in self._psql(
+                side, self._d(side, db),
+                "select attname || chr(31) || (not attnotnull)::text from"
+                " pg_attribute where attrelid ="
+                f" '{self._qualified(side, db, table).replace(chr(39), '')}'"
+                "::regclass and attnum > 0 and not attisdropped"
+            ).splitlines() if line)}
+
+    def decimal_extent(self, side, db, table, column, where=None):
+        """The server's own `scale()` and the length of the whole part,
+        in one scan rather than every value read here. Through `numeric`,
+        which a `money` is not."""
+        q = self._quote_ident(column)
+        c = f"{q}::numeric"
+        got = self.run_rule(
+            side, db,
+            f"select coalesce(max(scale({c})), 0), coalesce(max(case when"
+            f" abs({c}) >= 1 then length(trunc(abs({c}))::text) else 0"
+            f" end), 0) from {self._qualified(side, db, table)} where"
+            f" {q}::text not in ('NaN', 'Infinity', '-Infinity')"
+            + (f" and ({where})" if where else ""))
+        frac, whole = got[0]
+        return int(whole), int(frac)
+
     def neutral_rows_by_key(self, side, db, table, columns, key, keys,
                             where=None):
         if not key or not keys:
@@ -818,7 +881,7 @@ class PostgresEngine(Engine):
         sch, tbl = self._split(table)
         sql, args = self._by_key_query(
             f'"{sch}"."{tbl}"', columns, key, list(keys), lambda n: f'"{n}"',
-            "%s", where.replace("%", "%%") if where else None)
+            "%s", where.replace("%", "%%") if where else None, "postgres")
         with self._conn(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, args)
@@ -865,8 +928,11 @@ class PostgresEngine(Engine):
                                 f" commit drop as select {cols} from"
                                 f" {quoted} with no data")
                     into = "migkit_batch"
+                arrays = self._array_columns(side, db, table)
                 with cur.copy(f"copy {into} ({cols}) from stdin") as copy:
-                    for r in canon.sql_rows([c for _, c in columns], rows):
+                    for r in canon.sql_rows(
+                            [c for _, c in columns], rows,
+                            {i for i, n in enumerate(names) if n in arrays}):
                         copy.write_row(r)
                 if keyed:
                     sets = ", ".join(f'"{n}" = excluded."{n}"'
@@ -877,6 +943,20 @@ class PostgresEngine(Engine):
                         f" migkit_batch on conflict ({conflict}) do "
                         + (f"update set {sets}" if sets else "nothing"))
         return len(rows)
+
+    def _array_columns(self, side, db, table):
+        """The columns of a table that are arrays, asked once: a list on
+        its way into one is the array, where into any other column
+        (`jsonb`) it is the JSON array `sql_value` writes. An array is
+        read as its list, to be carried to another engine as JSON
+        (`canon.array_element`), and written back here as a list."""
+        from .. import canon
+        known = self.__dict__.setdefault("_arrays_of", {})
+        at = (side, db, str(table))
+        if at not in known:
+            known[at] = {n for n, t in self.neutral_columns(side, db, table)
+                         if canon.array_element("postgres", t) is not None}
+        return known[at]
 
     def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a table")
@@ -1124,7 +1204,9 @@ class PostgresEngine(Engine):
         tail = (f" on conflict ({conflict}) do update set {sets}" if sets
                 else f" on conflict ({conflict}) do nothing")
         override = self._insert_override(side, db, table, names)
-        values = [[canon.sql_value(r[n]) for n in names] for r in full]
+        arrays = self._array_columns(side, db, table)
+        values = [[r[n] if n in arrays else canon.sql_value(r[n])
+                   for n in names] for r in full]
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
                 # COPY is refused while a wait callback is set for the whole
@@ -1387,7 +1469,7 @@ class PostgresEngine(Engine):
                                                "60")),
             keepalives_interval=10, keepalives_count=5,
             options="-c TimeZone=UTC -c DateStyle=ISO"
-                    " -c statement_timeout=0", **ep.libpq_tls())
+                    f" -c statement_timeout=0 {SESSION}", **ep.libpq_tls())
         conn.autocommit = True
         held[where] = conn
         return conn
@@ -1718,6 +1800,9 @@ class PostgresEngine(Engine):
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
+        if any(c in canon.FOLDED_HERE for _, c in columns):
+            return canon.fold_batches(columns, self.neutral_batches(
+                side, db, table, columns, 5000, where=where))
         sch, tbl = self._split(table)
         row = canon.row_expr("postgres", columns)
         got = self._psql(side, self._d(side, db),
@@ -5783,7 +5868,7 @@ class PostgresEngine(Engine):
         ep = self.hop.source if side == "src" else self.hop.target
         env = tool_env({**ep.libpq_env(),
                         "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": "-c statement_timeout=0"})
+                        "PGOPTIONS": f"-c statement_timeout=0 {SESSION}"})
         p = subprocess.run(
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
              "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
@@ -6601,8 +6686,7 @@ class PostgresEngine(Engine):
         env = tool_env({**ep.libpq_env(),
                         "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
                         "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO"
-                                     " -c statement_timeout=0"
-                                     " -c extra_float_digits=3"})
+                                     f" -c statement_timeout=0 {SESSION}"})
         return subprocess.Popen(
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
              "-d", self._d(side, db), "-X", "-At", "-q", "-v",
@@ -7412,7 +7496,8 @@ class PostgresEngine(Engine):
         """
         s, t = self.hop.source, self.hop.target
         env_s = tool_env({**s.libpq_env(),
-                          "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"})
+                          "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15",
+                          "PGOPTIONS": SESSION})
         quiet = {**t.libpq_env(),
                  "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
         # as a replica, which a trigger does not fire for - the way the bulk
@@ -7515,7 +7600,8 @@ class PostgresEngine(Engine):
             return None
         host, port = t.far
         env = " ".join(f"{k}={shlex.quote(v)}" for k, v in
-                       {**s.libpq_env(), "PGCONNECT_TIMEOUT": "15"}.items())
+                       {**s.libpq_env(), "PGCONNECT_TIMEOUT": "15",
+                        "PGOPTIONS": SESSION}.items())
         read = " ".join(shlex.quote(a) for a in [
             "psql", "-h", host, "-p", str(port), "-U", s.user, "-d", db,
             "-X", "-q", "-v", "ON_ERROR_STOP=1",
@@ -7590,7 +7676,8 @@ class PostgresEngine(Engine):
         from ..tally import Tally
         ep = self.hop.source if side == "src" else self.hop.target
         env = tool_env({**ep.libpq_env(),
-                        "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
+                        "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
+                        "PGOPTIONS": SESSION})
         got = subprocess.Popen(
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
              "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",

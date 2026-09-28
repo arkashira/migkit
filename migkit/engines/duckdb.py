@@ -46,6 +46,13 @@ class DuckDBEngine(DbapiRows, Engine):
     def _qualified(self, side, db, table):
         return f"{self._q(self._d(side, db) or 'main')}.{self._q(table)}"
 
+    def _nanos_text(self, quoted, declared):
+        """A `TIMESTAMP_NS` as its nine digits: the library reads it back
+        at six (measured, `...00.123456789` as `...00.123456`)."""
+        if str(declared).strip().upper() == "TIMESTAMP_NS":
+            return f"strftime({quoted}, '%Y-%m-%d %H:%M:%S.%n')"
+        return None
+
     def _create_name(self, side, db, table):
         return self._qualified(side, db, str(table).split(".")[-1])
 
@@ -103,8 +110,16 @@ class DuckDBEngine(DbapiRows, Engine):
             return 0
         names = [n for n, _ in columns]
         arrays = []
+        from .. import nanotime
         for col in zip(*rows):
             values = [canon.sql_value(v) for v in col]
+            if any(getattr(v, "nanosecond", 0) for v in values):
+                # Arrow reads a datetime at six digits; a value carrying
+                # more goes as the whole count of nanoseconds it is
+                arrays.append(pa.array(
+                    [None if v is None else nanotime.epoch_ticks(v, 9)
+                     for v in values], pa.timestamp("ns")))
+                continue
             try:
                 arrays.append(pa.array(values))
             except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):

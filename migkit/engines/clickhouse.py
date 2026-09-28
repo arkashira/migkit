@@ -14,13 +14,28 @@ SKIP_DBS = {"system", "information_schema", "INFORMATION_SCHEMA"}
 
 
 def _unwrap(declared):
-    """`Nullable(LowCardinality(String))` -> `String`: what a value is,
-    without how it is stored."""
+    """`LowCardinality(Nullable(String))` -> `String`: what a value is,
+    without how it is stored. Taken off in whatever order they are nested:
+    that one is the only order ClickHouse takes the two in, and a single
+    pass stripping `Nullable(` first left `Nullable(String)` behind, a type
+    with no class, so the column was named and never compared."""
     t = str(declared).strip()
-    for wrapper in ("Nullable(", "LowCardinality("):
-        while t.startswith(wrapper) and t.endswith(")"):
-            t = t[len(wrapper):-1].strip()
+    peeled = True
+    while peeled:
+        peeled = False
+        for wrapper in ("Nullable(", "LowCardinality("):
+            if t.startswith(wrapper) and t.endswith(")"):
+                t = t[len(wrapper):-1].strip()
+                peeled = True
     return t
+
+
+def _nullable(declared):
+    """Whether a ClickHouse column takes NULL, whatever else wraps it."""
+    t = str(declared).strip()
+    while t.startswith("LowCardinality(") and t.endswith(")"):
+        t = t[len("LowCardinality("):-1].strip()
+    return t.startswith("Nullable(")
 
 
 class ClickHouseEngine(NeutralCopier, Engine):
@@ -65,10 +80,39 @@ class ClickHouseEngine(NeutralCopier, Engine):
     #: decoded here only where the column is declared text
     AS_BYTES = {"String": "bytes", "FixedString": "bytes"}
 
-    def _values(self, columns, rows):
+    def _values(self, columns, rows, wide=()):
+        from .. import nanotime
         classes = [c for _, c in columns]
-        return [[self._value(c, v) for c, v in zip(classes, r)]
+        at = {i for i, (n, _) in enumerate(columns) if n in wide}
+        return [[nanotime.parse(v) if i in at else self._value(c, v)
+                 for i, (c, v) in enumerate(zip(classes, r))]
                 for r in rows]
+
+    @staticmethod
+    def _digits(declared):
+        """(digits after the second, zone or None) of a `DateTime64`, or
+        None for any other type."""
+        import re
+        m = re.match(r"\s*DateTime64\(\s*(\d+)\s*(?:,\s*'([^']*)')?",
+                     str(declared))
+        return (int(m.group(1)), m.group(2)) if m else None
+
+    def _wide_times(self, side, db, table):
+        """{column: `toString` of it} for the `DateTime64` columns of more
+        than six digits: the driver reads them at six (measured,
+        `DateTime64(9)` `...00.123456789` as `...00.123456`), the server's
+        text of one has all nine. Asked once per table."""
+        known = self.__dict__.setdefault("_wide_times_of", {})
+        at = (side, db, str(table))
+        if at not in known:
+            columns = self.neutral_columns(side, db, table)
+            wide = {n: f"toString({self._q(n)})" for n, t in columns
+                    if (self._digits(t) or (0,))[0] > 6}
+            if not columns:
+                # a table not there yet is asked again once it is
+                return wide
+            known[at] = wide
+        return known[at]
 
     @staticmethod
     def _value(cls, v):
@@ -119,6 +163,19 @@ class ClickHouseEngine(NeutralCopier, Engine):
                       " = {d:String} and table = {t:String} order by"
                       " position", {"d": self._d(side, db), "t": table})]
 
+    def column_facts(self, side, db, table):
+        """Which columns take NULL. One that does not writes a NULL it is
+        given as 0 or '' - `input_format_null_as_default`, on by default -
+        so a NULL the source holds has to be counted before it is moved.
+        A table migkit builds makes every column outside its key Nullable,
+        and a key the source keys by holds no NULL."""
+        if table is None:
+            return {None: {"null": True}}
+        return {n: {"null": _nullable(t)} for n, t in self._rows(
+            side, db, "select name, type from system.columns where database"
+                      " = {d:String} and table = {t:String}",
+            {"d": self._d(side, db), "t": table})}
+
     def neutral_key(self, side, db, table):
         got = self._rows(side, db, "select sorting_key from system.tables"
                                    " where database = {d:String} and name ="
@@ -144,8 +201,9 @@ class ClickHouseEngine(NeutralCopier, Engine):
                          f" ({', '.join(places)})")
         if where:
             conds.append(f"({where})")
-        sql = (f"select {', '.join(self._q(n) for n in names)} from"
-               f" {self._qualified(side, db, table)}"
+        wide = self._wide_times(side, db, table)
+        sql = (f"select {', '.join(wide.get(n, self._q(n)) for n in names)}"
+               f" from {self._qualified(side, db, table)}"
                + (f" where {' and '.join(conds)}" if conds else "")
                + (f" order by {', '.join(self._q(k) for k in key)}"
                   if key else "")
@@ -178,7 +236,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
         try:
             rows = self._values(columns, client.query(
                 sql, parameters=params,
-                query_formats=self.AS_BYTES).result_rows)
+                query_formats=self.AS_BYTES).result_rows,
+                self._wide_times(side, db, table))
         finally:
             client.close()
         if not rows or not key or not set(key) <= set(names):
@@ -194,8 +253,9 @@ class ClickHouseEngine(NeutralCopier, Engine):
             with client.query_row_block_stream(
                     sql, parameters=params, query_formats=self.AS_BYTES,
                     settings={"max_block_size": int(size)}) as stream:
+                wide = self._wide_times(side, db, table)
                 for block in stream:
-                    yield self._values(columns, block)
+                    yield self._values(columns, block, wide)
         finally:
             client.close()
 
@@ -215,12 +275,14 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 f" ({', '.join(tuples)})")
         if where:
             cond = f"({cond}) and ({where})"
+        wide = self._wide_times(side, db, table)
         client = self._client(side, db)
         try:
             rows = self._values(columns, client.query(
-                f"select {', '.join(self._q(n) for n, _ in columns)} from"
-                f" {self._qualified(side, db, table)} where {cond}",
-                parameters=params, query_formats=self.AS_BYTES).result_rows)
+                f"select {', '.join(wide.get(n, self._q(n)) for n, _ in columns)}"
+                f" from {self._qualified(side, db, table)} where {cond}",
+                parameters=params, query_formats=self.AS_BYTES).result_rows,
+                wide)
         finally:
             client.close()
         return self._by_key_map(columns, key, rows)
@@ -288,6 +350,10 @@ class ClickHouseEngine(NeutralCopier, Engine):
         key = [k for k in self.neutral_key(side, db, table) if k in names]
         client = self._client(side, db)
         try:
+            # the key's values as they are, for the delete; the rows as
+            # they are written, for the insert
+            written = self._wall_clock(client, self._ticks(
+                client, side, db, table, names, rows))
             rows = self._wall_clock(client, rows)
             if key:
                 at = [names.index(k) for k in key]
@@ -305,11 +371,37 @@ class ClickHouseEngine(NeutralCopier, Engine):
                     f" ({', '.join(tuples)})", parameters=params,
                     settings={"lightweight_deletes_sync": 2})
             client.insert(table,
-                          [[canon.sql_value(v) for v in r] for r in rows],
+                          [[canon.sql_value(v) for v in r] for r in written],
                           column_names=names, database=self._d(side, db))
         finally:
             client.close()
         return len(rows)
+
+    def _ticks(self, client, side, db, table, names, rows):
+        """A time going into a `DateTime64` of more than six digits as the
+        count of its ticks, every digit it carries in it: the driver
+        writes a datetime at six (`nanotime`). Wall clock in the column's
+        zone, or the server's, as `_wall_clock` hands the rest over."""
+        import datetime
+        from zoneinfo import ZoneInfo
+
+        from .. import nanotime
+        wide = {n: self._digits(t) for n, t in
+                self.neutral_columns(side, db, table)
+                if (self._digits(t) or (0,))[0] > 6}
+        at = [(i, wide[n]) for i, n in enumerate(names) if n in wide]
+        if not at:
+            return rows
+        server = ZoneInfo(client.command("select timezone()"))
+        out = []
+        for r in rows:
+            r = list(r)
+            for i, (digits, zone) in at:
+                if isinstance(r[i], datetime.datetime):
+                    r[i] = nanotime.epoch_ticks(
+                        r[i], digits, ZoneInfo(zone) if zone else server)
+            out.append(r)
+        return out
 
     @staticmethod
     def _wall_clock(client, rows):

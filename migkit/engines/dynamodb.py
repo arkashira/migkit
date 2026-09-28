@@ -255,11 +255,15 @@ class DynamoDBEngine(NeutralCopier, Engine):
         if kind == "BOOL":
             return bool(raw)
         if kind == "S" and cls == "timestamp":
-            return datetime.datetime.fromisoformat(raw)
+            # all nine digits of a second where it was written with them
+            # (`nanotime`); `fromisoformat` keeps six
+            from .. import nanotime
+            return nanotime.parse(raw)
         if kind == "S" and cls == "date":
             return datetime.date.fromisoformat(raw)
         if kind == "S" and cls == "time":
-            return datetime.time.fromisoformat(raw)
+            from .. import nanotime
+            return nanotime.parse(raw)
         return raw
 
     def _scan(self, side, db, table, names=None, limit=None):

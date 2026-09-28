@@ -267,11 +267,115 @@ class MySQLEngine(Engine):
         return [r[0] for r in self._q(side, self.PK_SQL,
                                       (self._d(side, db), table))]
 
+    def json_rewritten(self, side, db, numbers):
+        """Asked of this server: the numbers go in as one JSON array and
+        what it gives back is held to them by value, so `1.10` read back
+        as `1.1`, or `1e20` as `1e20`, is not a change and
+        `9088544342.689999` read back as `9088544342.69` is."""
+        import json
+        from decimal import Decimal
+        out = set()
+        numbers = list(numbers)
+        for i in range(0, len(numbers), 500):
+            part = numbers[i:i + 500]
+            got = self._q(side, "select cast(cast(%s as json) as char)",
+                          ("[" + ", ".join(part) + "]",))
+            back = json.loads(str(got[0][0]), parse_float=Decimal,
+                              parse_int=Decimal)
+            for sent, came in zip(part, back):
+                if Decimal(sent) != came:
+                    out.add(sent)
+        return out
+
+    #: collations under which two different strings are never one key
+    EXACT_COLLATIONS = ("utf8mb4_0900_bin", "binary")
+
+    def key_merges(self, side, db, columns, batches, examples=3):
+        """Asked of this server's own collation rather than modelled: the
+        keys go into a temporary table whose columns are compared as the
+        target's are, and the server groups them. `utf8mb4_0900_ai_ci`
+        takes `a`, `A` and an `e` with a combining accent for `é` as one,
+        and a PAD SPACE collation (`utf8mb4_general_ci`, `utf8mb4_bin`)
+        `a` and `a ` - a model of that in another engine's SQL misses a
+        case the first time a language it did not think of turns up, and a
+        missed one is a row overwritten by the upsert, which never errs.
+        The table lives in this session and goes with it."""
+        if all(co is None or co in self.EXACT_COLLATIONS
+               for _, co in columns):
+            return None
+        q = self._my_ident
+        tmp = f"{q(self._d(side, db))}.{q('migkit_key_merges')}"
+        # as wide as a row of them may be (65,535 bytes, four to a
+        # character): a key longer than the target's column is refused by
+        # the length it is counted against, not cut here
+        wide = 16383 // len(columns)
+        defs = ", ".join(
+            f"{q(n)} varchar({wide}) character set"
+            f" {co.split('_')[0] if co else 'utf8mb4'}"
+            f" collate {co or 'utf8mb4_0900_bin'}" for n, co in columns)
+        cols = ", ".join(q(n) for n, _ in columns)
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"create temporary table {tmp} ({defs})")
+                insert = (f"insert into {tmp} values ("
+                          + ", ".join(["%s"] * len(columns)) + ")")
+                for rows in batches:
+                    if rows:
+                        cur.executemany(insert, rows)
+                cur.execute(f"select count(*) from (select 1 from {tmp}"
+                            f" group by {cols} having count(*) > 1) g")
+                groups = int(cur.fetchone()[0])
+                shown = []
+                if groups:
+                    cur.execute(f"select {cols} from {tmp} group by {cols}"
+                                f" having count(*) > 1 limit {int(examples)}")
+                    for rep in cur.fetchall():
+                        cur.execute(
+                            # every row, not `distinct`: that compares
+                            # by the collation too, and gave back one
+                            f"select {cols} from {tmp} where "
+                            + " and ".join(f"{q(n)} = %s"
+                                           for n, _ in columns), rep)
+                        shown.append([tuple(r) for r in cur.fetchall()])
+                cur.execute(f"drop temporary table {tmp}")
+        finally:
+            conn.close()
+        return groups, shown
+
+    def column_facts(self, side, db, table):
+        """Whether each column takes NULL, and the character set and
+        collation it keeps its text in - what decides which characters it
+        can hold and which two keys it takes for one. A table migkit builds
+        here takes its database's defaults, or the server's where the
+        database is not there yet."""
+        if table is None:
+            got = self._q(side, "select default_character_set_name,"
+                                " default_collation_name from"
+                                " information_schema.schemata where"
+                                " schema_name = %s", (self._d(side, db),))
+            if not got:
+                got = self._q(side, "select @@character_set_server,"
+                                    " @@collation_server")
+            return {None: {"null": True, "charset": str(got[0][0]),
+                           "collation": str(got[0][1])}}
+        return {str(n): {"null": str(null).upper() == "YES",
+                         "charset": cs and str(cs),
+                         "collation": co and str(co)}
+                for n, null, cs, co in self._q(
+                    side, "select column_name, is_nullable,"
+                          " character_set_name, collation_name from"
+                          " information_schema.columns where table_schema"
+                          " = %s and table_name = %s",
+                    (self._d(side, db), table))}
+
     def _read_query(self, side, db, table, columns, after, limit, where):
         """(sql, args, key, names) for `neutral_read` and
         `neutral_batches`: one statement shape for both."""
+        from .. import canon
         names = [n for n, _ in columns]
-        cols = ", ".join(f"`{n}`" for n in names)
+        cols = ", ".join(canon.read_expr("mysql", f"`{n}`", c)
+                         for n, c in columns)
         key = self.neutral_key(side, db, table)
         resume, args = "", []
         if key and after is not None:
@@ -324,7 +428,7 @@ class MySQLEngine(Engine):
         sql, args = self._by_key_query(
             f"`{self._d(side, db)}`.`{table}`", columns, key, list(keys),
             lambda n: f"`{n}`", "%s",
-            where.replace("%", "%%") if where else None)
+            where.replace("%", "%%") if where else None, "mysql")
         rows = [list(r) for r in self._q(side, sql, args)]
         return self._by_key_map(columns, key, rows)
 
@@ -446,7 +550,8 @@ class MySQLEngine(Engine):
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
-        defs = [f"`{col[0]}` {canon.ddl_type('mysql', col[1], col[2])}"
+        defs = [f"`{col[0]}`"
+                f" {canon.ddl_type('mysql', col[1], col[2], col[0] in key)}"
                 + self._column_tail(col[3] if len(col) > 3 else None,
                                     "mysql")
                 for col in columns]
@@ -1266,6 +1371,9 @@ class MySQLEngine(Engine):
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
+        if any(c in canon.FOLDED_HERE for _, c in columns):
+            return canon.fold_batches(columns, self.neutral_batches(
+                side, db, table, columns, 5000, where=where))
         row = canon.row_expr("mysql", columns)
         r = self._q(side, f"select count(*),"
                           f" {canon.digest_expr('mysql', row)}"

@@ -224,7 +224,10 @@ def test_the_values_mysql_cannot_hold_are_marked_not_rendered(pair):
             " (1e300)")
         got = _pg(f"select {c.expr('postgres', 'd', 'float')} from ext"
                   " order by 1").splitlines()
-        assert got.count(c.UNCOMPARABLE) == 3, got
+        marked = [g for g in got if g.startswith(c.UNCOMPARABLE)]
+        # each by its own name, so a NaN is not an Infinity
+        assert sorted(marked) == sorted(c.uncomparable(w) for w in
+                                        ("Infinity", "-Infinity", "NaN")), got
         assert "1e300" in got, got
         assert "NaN" not in got, got
 

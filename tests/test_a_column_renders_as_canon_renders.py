@@ -18,7 +18,7 @@ from decimal import Decimal
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from migkit import canon, render, rowtext
+from migkit import canon, nanotime, render, rowtext
 
 
 class _Sub(datetime.datetime):
@@ -72,7 +72,21 @@ VALUES = {
     "time": st.times() | st.times(timezones=_zones) | _naive
     | st.text(max_size=3),
     "json": _json | _json.map(lambda v: str(v)) | st.text(max_size=6),
+    canon.JSON_ONE: _json | st.text(max_size=6),
+    canon.NUMBER: _decimals | st.integers() | _decimals.map(_Decimal128)
+    | st.text(max_size=6),
+    "xml": st.sampled_from(['<a  b="1"/>', "<a> <b>t</b> </a>", "x<b/>y",
+                            "not <xml"]) | st.text(max_size=6),
+    "uuid": st.uuids() | st.uuids().map(str)
+    | st.uuids().map(lambda u: str(u).upper()) | st.text(max_size=6),
+    "inet": st.ip_addresses() | st.ip_addresses().map(str)
+    | st.text(max_size=6),
 }
+# the digits past the microsecond a value read at nine carries, and a
+# MySQL TIME, which the driver hands over as a duration
+VALUES["timestamp"] = VALUES["timestamp"] | st.tuples(
+    _naive, st.integers(0, 999)).map(lambda p: nanotime.of(*p))
+VALUES["time"] = VALUES["time"] | st.timedeltas()
 
 
 def _either(fn, *args):

@@ -22,6 +22,10 @@ class DbapiRows(NeutralCopier):
     LIMIT = "fetch"
     #: rows per statement when deleting by key before a write
     DELETE_BATCH = 500
+    #: fixed-length character types, whose values come back padded with
+    #: spaces to the column's length: read without them, as PostgreSQL's
+    #: `char(n)` reads and as every other engine's is compared
+    PADDED = ()
 
     # ---- what an engine provides ---------------------------------------
 
@@ -39,6 +43,58 @@ class DbapiRows(NeutralCopier):
 
     def _d(self, side, db):
         return self.hop.target_db(db) if side == "dst" else db
+
+    def _nanos_text(self, quoted, declared):
+        """The expression reading a column of this declared type as the
+        server's own text of it with every digit after the second, where
+        it holds more than six - Python's types hold six, and the driver
+        cuts the rest (`nanotime`). None where it holds six or fewer."""
+        return None
+
+    def _wide_times(self, side, db, table):
+        """{column: the expression reading it whole} for a table's
+        columns of more than six digits after the second. Asked once per
+        table, with which of its columns are `PADDED`."""
+        known = self.__dict__.setdefault("_wide_times_of", {})
+        at = (side, db, str(table))
+        pads = self.__dict__.setdefault("_padded_of", {})
+        if at not in known and not self.PADDED and \
+                type(self)._nanos_text is DbapiRows._nanos_text:
+            # an engine with neither: nothing to ask its catalogue about
+            known[at], pads[at] = {}, set()
+        if at not in known:
+            padded = {p.lower() for p in self.PADDED}
+            wide, pad = {}, set()
+            columns = self.neutral_columns(side, db, table)
+            for name, typ in columns:
+                got = self._nanos_text(self._q(name), typ)
+                if got:
+                    wide[name] = got
+                if str(typ).split("(")[0].strip().lower() in padded:
+                    pad.add(name)
+            if not columns:
+                # a table not there yet is asked again once it is
+                pads[at] = pad
+                return wide
+            known[at], pads[at] = wide, pad
+        return known[at]
+
+    def _whole_times(self, side, db, table, names, rows):
+        """`rows` with every column `_wide_times` read as text turned back
+        into its value, all its digits kept, and a padded character value
+        without its padding."""
+        from .. import nanotime
+        wide = self._wide_times(side, db, table)
+        padded = self.__dict__["_padded_of"][(side, db, str(table))]
+        at = [i for i, n in enumerate(names) if n in wide]
+        pad = [i for i, n in enumerate(names) if n in padded]
+        for r in rows:
+            for i in at:
+                r[i] = nanotime.parse(r[i])
+            for i in pad:
+                if isinstance(r[i], str):
+                    r[i] = r[i].rstrip(" ")
+        return rows
 
     def _before_insert(self, cur, side, db, table):
         """Anything the engine needs said before explicit values go into
@@ -108,7 +164,9 @@ class DbapiRows(NeutralCopier):
         cond = (" where " + " and ".join(parts)) if parts else ""
         order = (" order by " + ", ".join(self._q(k) for k in key)
                  if key else "")
-        return (self._select(", ".join(self._q(n) for n in names),
+        wide = self._wide_times(side, db, table)
+        return (self._select(", ".join(wide.get(n, self._q(n))
+                                       for n in names),
                              self._qualified(side, db, table), cond, order,
                              limit if key else None),
                 args, key, names)
@@ -119,15 +177,16 @@ class DbapiRows(NeutralCopier):
                      where=None):
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  after, limit, where)
-        rows = self._rows(side, db, sql, args)
+        rows = self._whole_times(side, db, table, names,
+                                 self._rows(side, db, sql, args))
         if not rows or not key or not all(k in names for k in key):
             return (rows, None)
         return (rows, tuple(rows[-1][names.index(k)] for k in key))
 
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):
-        sql, args, _, _ = self._read_query(side, db, table, columns, None,
-                                           None, where)
+        sql, args, _, names = self._read_query(side, db, table, columns,
+                                               None, None, where)
         conn = self._connect(side, db)
         try:
             cur = conn.cursor()
@@ -136,7 +195,8 @@ class DbapiRows(NeutralCopier):
                 rows = cur.fetchmany(size)
                 if not rows:
                     break
-                yield [list(r) for r in rows]
+                yield self._whole_times(side, db, table, names,
+                                        [list(r) for r in rows])
         finally:
             conn.close()
 
@@ -148,7 +208,8 @@ class DbapiRows(NeutralCopier):
         keys = list(keys)
         one = "(" + " and ".join(f"{self._q(k)} = {MARK}" for k in key) + ")"
         found = []
-        cols = ", ".join(self._q(n) for n, _ in columns)
+        wide = self._wide_times(side, db, table)
+        cols = ", ".join(wide.get(n, self._q(n)) for n, _ in columns)
         for i in range(0, len(keys), self.DELETE_BATCH):
             part = keys[i:i + self.DELETE_BATCH]
             cond = " or ".join([one] * len(part))
@@ -158,7 +219,8 @@ class DbapiRows(NeutralCopier):
                                           f" {self._qualified(side, db, table)}"
                                           f" where {cond}",
                                 [canon.sql_value(v) for k in part for v in k])
-        return self._by_key_map(columns, key, found)
+        return self._by_key_map(columns, key, self._whole_times(
+            side, db, table, [n for n, _ in columns], found))
 
     def neutral_digest(self, side, db, table, columns, where=None):
         """Folded here, over rows the driver hands back as values, with the
@@ -298,7 +360,8 @@ class DbapiRows(NeutralCopier):
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
         defs = [f"{self._q(col[0])}"
-                f" {canon.ddl_type(self.CANON_ENGINE, col[1], col[2])}"
+                f" {canon.ddl_type(self.CANON_ENGINE, col[1], col[2],
+                                   col[0] in key)}"
                 + self._column_tail(col[3] if len(col) > 3 else None,
                                     self.CANON_ENGINE)
                 for col in columns]

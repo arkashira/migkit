@@ -62,6 +62,15 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     def databases(self):
         return list(self.hop.databases)
 
+    def _nanos_text(self, quoted, declared):
+        """A `TIMESTAMP` of seven to nine digits as the server writes it:
+        the driver hands back six."""
+        from .. import canon
+        name, nums = canon._split_declared(declared)
+        if name == "timestamp" and nums and nums[0] > 6:
+            return f"to_char({quoted}, 'YYYY-MM-DD HH24:MI:SS.FF9')"
+        return None
+
     # ---- what a table is -------------------------------------------------
 
     def neutral_tables(self, side, db):

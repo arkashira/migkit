@@ -72,7 +72,9 @@ def _scan_fields(body):
         if open_bracket < 0:
             raise ValueError(f"no column type in {body[i:i + 60]!r}")
         name = body[i:open_bracket]
-        close_bracket = body.find("]", open_bracket)
+        # the bracket followed by the colon: an array's type has brackets
+        # of its own (`integer[]`), and the first `]` ended it too soon
+        close_bracket = body.find("]:", open_bracket)
         if close_bracket < 0:
             raise ValueError(f"unclosed type in {body[i:i + 60]!r}")
         declared = body[open_bracket + 1:close_bracket]
@@ -150,8 +152,56 @@ def value(declared, raw, quoted):
     from . import canon
     if not quoted and raw == NULL_TOKEN:
         return None
+    element = canon.array_element("postgres", declared)
+    if element is not None:
+        return array(raw, canon.type_class("postgres", element))
     cls = canon.type_class("postgres", declared)
     return canon.from_text(cls, raw) if cls else raw
+
+
+def array(raw, cls):
+    """PostgreSQL's text of an array - `{1,NULL,"a b"}`, `{{1,2},{3,4}}`,
+    `[0:1]={5,6}` - as the nested list it is, each element turned back
+    into its value by its class."""
+    from . import canon
+    text = str(raw)
+    if text.startswith("["):
+        text = text[text.index("=") + 1:]
+    at = 0
+
+    def one():
+        nonlocal at
+        if text[at] == "{":
+            at += 1
+            out = []
+            if text[at] == "}":
+                at += 1
+                return out
+            while True:
+                out.append(one())
+                if text[at] == ",":
+                    at += 1
+                    continue
+                if text[at] == "}":
+                    at += 1
+                    return out
+                raise ValueError(f"no , or }} at {at} in {text!r}")
+        if text[at] == '"':
+            at += 1
+            chars = []
+            while text[at] != '"':
+                if text[at] == "\\":
+                    at += 1
+                chars.append(text[at])
+                at += 1
+            at += 1
+            return canon.from_text(cls, "".join(chars))
+        end = at
+        while text[end] not in ",}":
+            end += 1
+        word, at = text[at:end], end
+        return None if word.upper() == "NULL" else canon.from_text(cls, word)
+    return one()
 
 
 def change(parsed, keys, txn=None):

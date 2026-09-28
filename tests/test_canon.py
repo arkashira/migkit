@@ -82,7 +82,7 @@ def test_json_crosses_through_the_normalised_form():
     """A PostgreSQL `json` column keeps the text it was handed - spacing,
     key order and all - while `jsonb` and MySQL's JSON both normalise. Going
     through jsonb is what makes the two sides agree."""
-    assert "::jsonb::text" in c.expr("postgres", "j", "json")
+    assert "to_jsonb(" in c.expr("postgres", "j", "json")
     assert c.type_class("postgres", "json") == "json"
     assert c.type_class("postgres", "jsonb") == "json"
 

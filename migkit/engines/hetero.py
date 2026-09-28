@@ -654,6 +654,11 @@ class HeteroEngine(Engine):
                               else "pass", "scope": "pair",
                               "item": f"{db} zero dates",
                               "detail": got.detail})
+            if self._can_move_neutrally():
+                got = self._unfit_result(db)
+                items.append({"level": {"diff": "fail", "ok": "pass"}.get(
+                                  got.status, "warn"), "scope": "pair",
+                              "item": got.scope, "detail": got.detail})
         return items
 
     def _zero_date_result(self, db):
@@ -686,6 +691,382 @@ class HeteroEngine(Engine):
             + " - the copy stops at the first one", "",
             "decide what each means - NULL, or a real date - and set it on"
             " the source, or in a view the hop reads, before the move")
+
+    def _fit_plan(self, db, src_t):
+        """(checks, columns, key, where) for one source table: every
+        (source column, kind, arg) `canon.unfit` says to ask before its
+        values are moved into the table on the target as it stands - or as
+        this pair would build it - with the columns and key to read them
+        by, and the hop's row filter."""
+        from .. import canon
+        leaf = self._leaf(self._rename(src_t))
+        declared = {n: self.src_engine.canonical_type("src", db, t)
+                    for n, t in self.src_engine.neutral_columns("src", db,
+                                                                src_t)}
+        mapped, back = self._mapped_types(db, src_t, declared)
+        there = ([] if self.dst_engine.target_missing(db)
+                 else self.dst_engine.neutral_tables("dst", db))
+        pairs, _, _, _ = self.match_tables([src_t], there, self._rename)
+        dst_t = pairs[0][1] if pairs else None
+        facts = self.dst_engine.column_facts("dst", db, dst_t)
+        mine = self.src_engine.column_facts("src", db, src_t)
+        if dst_t is not None:
+            dst_types = {n: self.dst_engine.canonical_type("dst", db, t)
+                         for n, t in self.dst_engine.neutral_columns(
+                             "dst", db, dst_t)}
+        elif self.dst_engine.CREATES_ON_WRITE:
+            # nothing to build, and what each value becomes is the engine's
+            written = canon.WRITTEN_AS.get(self.dst_engine.CANON_ENGINE, {})
+            dst_types = {n: written.get(canon.type_class(
+                self.src_engine.CANON_ENGINE, t)) for n, t in mapped.items()}
+        else:
+            dst_types = {}
+            columns, built_key = self._target_shape(db, src_t, leaf)
+            for name, cls, numbers, *_ in columns:
+                try:
+                    dst_types[name] = canon.ddl_type(
+                        self.dst_engine.CANON_ENGINE, cls, numbers,
+                        name in built_key)
+                except ValueError:
+                    continue
+        checks, classes = [], {}
+        for name, typ in sorted(mapped.items()):
+            if dst_t is not None and name not in dst_types:
+                continue
+            got = canon.unfit(self.src_engine.CANON_ENGINE, typ,
+                              self.dst_engine.CANON_ENGINE,
+                              dst_types.get(name),
+                              facts.get(name) or facts.get(None) or {},
+                              mine.get(back[name]) or {})
+            if got:
+                classes[back[name]] = canon.type_class(
+                    self.src_engine.CANON_ENGINE, typ)
+            checks += [(back[name], kind, arg) for kind, arg in got]
+        key = self.src_engine.neutral_key("src", db, src_t) if checks else []
+        for k in key:
+            classes.setdefault(k, canon.type_class(
+                self.src_engine.CANON_ENGINE, declared.get(k)))
+        return (checks, sorted(classes.items()), key,
+                self._row_scope(db, src_t)[0], dst_types)
+
+    def unfit_values(self, db, src_t):
+        """[(source column, kind, arg, rows, example keys)] - the values of
+        one source table that would not arrive on the target as they are
+        (`canon.unfit`), counted on the source. Asked once per table per
+        run: a whole-database move asks every table before the first is
+        copied, and the copier asks again only for a table nothing asked
+        yet."""
+        known = self.__dict__.setdefault("_unfit_known", {})
+        if (db, src_t) in known:
+            return known[(db, src_t)]
+        checks, columns, key, where, _ = self._fit_plan(db, src_t)
+        found = []
+        if checks:
+            got = self.src_engine.count_unfit("src", db, src_t, columns,
+                                              checks, key, where)
+            found = [(col, kind, arg, n, examples)
+                     for (col, kind, arg), (n, examples)
+                     in zip(checks, got) if n]
+        for i, (col, kind, arg, n, examples) in enumerate(found):
+            if kind == "json-number":
+                held = self._json_rewrites(db, src_t, col, columns, key,
+                                           where)
+                if held is not None:
+                    found[i] = (col, kind, arg) + held
+        found = [f for f in found if f[3]]
+        found += [(", ".join(cols), kind, arg, groups, examples)
+                  for cols, kind, arg, groups, examples
+                  in self._merged_keys(db, src_t)]
+        known[(db, src_t)] = found
+        return found
+
+    def _json_rewrites(self, db, src_t, col, columns, key, where):
+        """(rows, example keys) of the rows of one JSON column holding a
+        number the target stores as another - asked of the target
+        (`json_rewritten`) for the numbers `canon.json_candidate` picks,
+        which are the only ones that can change. None where the target
+        keeps every JSON number, and the count stands as the source
+        gave it."""
+        from .. import canon
+        pred = canon.unfit_sql(self.src_engine.CANON_ENGINE, "json-number",
+                               self.src_engine._quote_ident(col), None)
+        scope = " and ".join(f"({p})" for p in (where, pred) if p) or None
+        classes = dict(columns)
+        read = [(col, "json")] + [(k, classes.get(k)) for k in key
+                                  if k != col]
+        held = []
+        for rows in self.src_engine._every_row("src", db, src_t, read,
+                                               scope):
+            for r in rows:
+                try:
+                    got = [str(n) for n in canon._json_numbers(r[0])
+                           if canon.json_candidate(n)]
+                except (TypeError, ValueError):
+                    continue
+                if got:
+                    held.append((tuple(r[1:]), got))
+        changed = self.dst_engine.json_rewritten(
+            "dst", db, sorted({t for _, got in held for t in got}))
+        if changed is None:
+            return None
+        hit = [k for k, got in held if any(t in changed for t in got)]
+        return len(hit), hit[:3]
+
+    def _merged_keys(self, db, src_t):
+        """(columns, kind, arg, groups, examples) for each unique key of
+        the source table - its primary key and every plain unique index -
+        whose distinct values the target's comparison would take for one
+        key, or []. What the target compares text by is its own column's
+        collation, or its database's for a table it would build
+        (`key_merges`); a float key it compares by value, where -0.0 and
+        0.0 are one - Cassandra alone keeps them apart. Only a key with a
+        text or a float column is asked: whole numbers, dates and bytes
+        compare exactly everywhere."""
+        from .. import canon
+        declared = {n: self.src_engine.canonical_type("src", db, t)
+                    for n, t in self.src_engine.neutral_columns("src", db,
+                                                                src_t)}
+        _, back = self._mapped_types(db, src_t, declared)
+        forward = {v: k for k, v in back.items()}
+        keys = [self.src_engine.neutral_key("src", db, src_t)]
+        try:
+            keys += [cols for _, unique, cols, plain in
+                     self.src_engine.neutral_indexes("src", db, src_t)
+                     if unique and plain and cols]
+        except Exception:  # noqa: BLE001 - the primary key alone
+            pass
+        classes = {n: canon.type_class(self.src_engine.CANON_ENGINE, t)
+                   for n, t in declared.items()}
+        keys = [k for k in keys if k and all(c in forward for c in k)
+                and any(classes.get(c) in ("text", "float") for c in k)]
+        if not keys:
+            return []
+        there = ([] if self.dst_engine.target_missing(db)
+                 else self.dst_engine.neutral_tables("dst", db))
+        pairs, _, _, _ = self.match_tables([src_t], there, self._rename)
+        facts = self.dst_engine.column_facts(
+            "dst", db, pairs[0][1] if pairs else None)
+        where = self._row_scope(db, src_t)[0]
+        out = []
+        for cols in keys:
+            names = [forward[c] for c in cols]
+            if len(set(names)) != len(names):
+                continue
+            coll = [((facts.get(t) or facts.get(None) or {}).get("collation")
+                     if classes.get(c) == "text" else None)
+                    for c, t in zip(cols, names)]
+
+            def batches():
+                # a key with a NULL in it is no key a unique index holds
+                # to anything
+                read = [(c, classes.get(c)) for c in cols]
+                for rows in self.src_engine._every_row(
+                        "src", db, src_t, read, where):
+                    yield [tuple(v if classes.get(c) == "text"
+                                 else canon.render_value(classes.get(c), v)
+                                 for c, v in zip(cols, r)) for r in rows
+                           if None not in r]
+            got = self.dst_engine.key_merges(
+                "dst", db, list(zip(names, coll)), batches())
+            if got and got[0]:
+                out.append((cols, "merge",
+                            "/".join(sorted({c for c in coll if c})),
+                            got[0], got[1]))
+            elif any(classes.get(c) == "float" for c in cols) and \
+                    self.dst_engine.CANON_ENGINE != "cassandra":
+                got = self._signed_zero_keys(db, src_t, cols, classes,
+                                             where)
+                if got[0]:
+                    out.append((cols, "signed-zero", None) + got)
+        return out
+
+    def _signed_zero_keys(self, db, src_t, cols, classes, where,
+                          examples=3):
+        """(groups, [[key, key], ...]) of keys that differ only by the sign
+        of a zero - -0.0 against 0.0, which the source keeps as two keys
+        and a target comparing by value takes for one."""
+        seen, groups = {}, []
+        read = [(c, classes.get(c)) for c in cols]
+        for rows in self.src_engine._every_row("src", db, src_t, read,
+                                               where):
+            for r in rows:
+                if None in r:
+                    continue
+                # -0.0 == 0.0 in Python as well: a key is told apart by
+                # the text of its floats, which keeps the sign
+                same = tuple(0.0 if isinstance(v, float) and v == 0 else v
+                             for v in r)
+                mine = tuple(repr(v) if isinstance(v, float) else v
+                             for v in r)
+                if same in seen and seen[same][0] != mine:
+                    groups.append([seen[same][1], tuple(r)])
+                else:
+                    seen.setdefault(same, (mine, tuple(r)))
+        return len(groups), groups[:examples]
+
+    def _unfit_words(self, found, key):
+        from .. import canon
+        parts = []
+        for col, kind, arg, n, examples in found:
+            if kind in ("merge", "signed-zero"):
+                shown = "; ".join(" and ".join(
+                    repr(k[0]) if len(k) == 1 else repr(tuple(k))
+                    for k in group) for group in examples)
+                parts.append(f"{col}: {n:,} group{'s' if n != 1 else ''} of "
+                             + canon.unfit_words(kind, arg, self.dst_name)
+                             + (f" - {shown}" if shown else ""))
+                continue
+            shown = ", ".join(
+                (str(k[0]) if len(k) == 1 else
+                 "(" + ", ".join(str(v) for v in k) + ")")
+                for k in examples)
+            parts.append(
+                f"{col}: {n:,} {'row holds' if n == 1 else 'rows hold'} "
+                + canon.unfit_words(kind, arg, self.dst_name)
+                + (f" - {', '.join(key)} {shown}" if shown else ""))
+        return parts
+
+    def _accepted(self, src_t, col):
+        """Whether the hop's `accept_changes` names this column: a list of
+        `table.column` patterns (shell wildcards, the table by its name on
+        the source) whose values the operator has decided may arrive as
+        the target keeps them - refused by default, as each is a value
+        that changes on the way."""
+        from fnmatch import fnmatch
+        said = f"{self._leaf(src_t)}.{col}"
+        return any(fnmatch(said, str(p)) for p in
+                   (self.hop.options or {}).get("accept_changes") or [])
+
+    def _unfit_tables(self, db, tables=None):
+        """({source table: (found, key)}, {the same for what the hop's
+        `accept_changes` let through}) with something found, over the
+        tables this hop moves (or `tables`)."""
+        if tables is None:
+            tables = [f"{s}.{t}" if s else t
+                      for s, t in self.list_move_tables(db)]
+        out, let = {}, {}
+        for src_t in tables:
+            if self.hop.excluded(db, *str(src_t).split(".")):
+                continue
+            found = self.unfit_values(db, src_t)
+            refused = [f for f in found if not self._accepted(src_t, f[0])]
+            accepted = [f for f in found if f not in refused]
+            key = self.src_engine.neutral_key("src", db, src_t) \
+                if found else []
+            if refused:
+                out[src_t] = (refused, key)
+            if accepted:
+                let[src_t] = (accepted, key)
+        return out, let
+
+    def _unfit_result(self, db):
+        """The deep check's line for it, and assess's."""
+        scope = f"{db} values the target would change"
+        try:
+            got, let = self._unfit_tables(db)
+        except SystemExit as e:
+            return Result("deep", scope, "error", str(e)[:200])
+        except Exception as e:  # noqa: BLE001 - said, not raised
+            return Result("deep", scope, "error",
+                          "could not be counted, so unknown rather than"
+                          f" none: {str(e).splitlines()[-1][:120]}")
+        taken = [f"{self._leaf(t)}.{p}" for t, (found, key) in let.items()
+                 for p in self._unfit_words(found, key)]
+        if not got and taken:
+            return Result(
+                "deep", scope, "warn",
+                "the hop accepts these changing on the way"
+                " (`accept_changes`): " + "; ".join(taken[:6])
+                + (" ..." if len(taken) > 6 else ""))
+        if not got:
+            return Result("deep", scope, "ok",
+                          f"every value the source holds arrives on"
+                          f" {self.dst_name} as it is")
+        parts = [f"{self._leaf(t)}.{p}" for t, (found, key) in got.items()
+                 for p in self._unfit_words(found, key)]
+        return Result(
+            "deep", scope, "diff",
+            "; ".join(parts[:6]) + (" ..." if len(parts) > 6 else ""), "",
+            "decide what each of these should be - on the source, or in a"
+            " view the hop reads - or give the target a column that holds"
+            " them, before the move")
+
+    def _pair_temporal_meaning(self, db):
+        """Whether a temporal column records the same kind of time on the
+        target as on the source - an instant, or a wall clock - across the
+        two engines. The same question `_temporal_meaning` asks within one
+        engine, asked of each side's own meaning of its own type: a
+        PostgreSQL `timestamptz` built as a MySQL `datetime` or a SQL
+        Server `datetime2` loses the offset on the way, and no digest of
+        what arrived can see it."""
+        from .. import canon
+        mismatched, unmapped, checked = [], 0, 0
+        try:
+            there = ([] if self.dst_engine.target_missing(db)
+                     else self.dst_engine.neutral_tables("dst", db))
+            pairs, _, _, _ = self.match_tables(
+                self.src_engine.neutral_tables("src", db), there,
+                self._rename)
+            for src_t, dst_t in pairs:
+                mapped, _ = self._mapped_types(db, src_t, dict(
+                    self.src_engine.neutral_columns("src", db, src_t)))
+                dst_types = dict(self.dst_engine.neutral_columns("dst", db,
+                                                                 dst_t))
+                for name, src_type in sorted(mapped.items()):
+                    if name not in dst_types:
+                        continue
+                    a = canon.time_meaning(self.src_engine.CANON_ENGINE,
+                                           src_type)
+                    b = canon.time_meaning(self.dst_engine.CANON_ENGINE,
+                                           dst_types[name])
+                    if a is None or b is None:
+                        if canon.type_class(self.src_engine.CANON_ENGINE,
+                                            src_type) in ("timestamp",
+                                                          "time"):
+                            unmapped += 1
+                        continue
+                    checked += 1
+                    if a != b:
+                        mismatched.append((self._leaf(src_t), name,
+                                           src_type, a, dst_types[name], b))
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return Result("deep", f"{db} temporal meaning", "error",
+                          "could not compare the temporal columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        got = self._temporal_meaning_result(db, mismatched, unmapped,
+                                            checked)
+        if got.status != "diff":
+            return got
+        # across two engines an instant is carried as its UTC wall clock
+        # (every session migkit opens is pinned to UTC), so no value is
+        # lost - what the column means to the application is what changed
+        return Result(got.check, got.scope, "warn",
+                      got.detail + "; the values were carried as the UTC"
+                      " clock of each instant, so nothing is lost if the"
+                      " application reads them as UTC", got.report,
+                      got.fix_hint)
+
+    def refuse_unfit(self, db, tables=None):
+        """Stop before anything is copied where a value would not arrive
+        as it is: rounded, cut, turned into a double or a default, or
+        refused by the target halfway through the load. Named by table,
+        column and kind, with how many rows and the keys of a few."""
+        got, _ = self._unfit_tables(db, tables)
+        if not got:
+            return
+        lines = [f"  {self._leaf(t)}.{p}" for t, (found, key) in got.items()
+                 for p in self._unfit_words(found, key)]
+        raise SystemExit(
+            f"{db}: values on the source would not arrive on"
+            f" {self.dst_name} as they are, so nothing was copied:\n"
+            + "\n".join(lines[:20])
+            + ("\n  ..." if len(lines) > 20 else "")
+            + "\nDecide what each of these should be - on the source, or in"
+              " a view the hop reads - or give the target a column that"
+              " holds them, and move again. Where a change is what is"
+              " wanted, the hop's `accept_changes` names the columns"
+              " (`table.column`) that may arrive as the target keeps"
+              " them.")
 
     def _one_side(self, engine, side):
         """`engine` looking at one side's server as both of its own.
@@ -994,6 +1375,11 @@ class HeteroEngine(Engine):
         from .. import canon
         src_t = f"{sch}.{tbl}" if sch else tbl
         leaf = self._leaf(src_t)
+        if not ck.get(self.move_key(db, "", leaf)):
+            # nothing of this table is on the target yet: a value it would
+            # not take as it is stops the move here, before the table is
+            # built or a row read
+            self.refuse_unfit(db, [src_t])
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
             self.dst_engine.neutral_tables("dst", db), self._rename)
@@ -1486,8 +1872,11 @@ class HeteroEngine(Engine):
             if cls is None:
                 unknown.append(f"{name} ({typ})")
                 continue
-            columns.append((name, cls, canon.params(typ),
-                            rules.get(name) or {}))
+            numbers = canon.ddl_numbers(self.src_engine.CANON_ENGINE, typ,
+                                        cls)
+            if cls == "decimal" and not numbers:
+                numbers = self._measured_decimal(db, src_table, back[name])
+            columns.append((name, cls, numbers, rules.get(name) or {}))
         if unknown:
             raise SystemExit(
                 f"{leaf} is not on the target and migkit cannot build it:"
@@ -1502,6 +1891,40 @@ class HeteroEngine(Engine):
         except Exception:
             key = []
         return columns, key
+
+    def _measured_decimal(self, db, src_table, column):
+        """(precision, scale) to build a decimal the source declares
+        without one (PostgreSQL's plain `numeric`) as, on a target whose
+        decimal has a fixed scale: the target's own default, widened to the
+        most digits before and after the point the source holds. () where
+        the target keeps any decimal as it is given, or where even its
+        widest does not hold them - then the table is built at the default
+        and what does not fit is counted and refused before the move.
+
+        The default was the whole answer: `decimal(65,10)` on MySQL, which
+        rounds a longer fraction without an error in strict mode (Note
+        1265) - measured, 0.12345678901234 arrived as 0.1234567890."""
+        from .. import canon
+        dst = self.dst_engine.CANON_ENGINE
+        try:
+            wide = canon._fixed_decimal(dst, canon.ddl_type(dst, "decimal"))
+        except ValueError:
+            return ()
+        most = canon.DECIMAL_MOST.get(dst)
+        if not wide or not most:
+            return ()
+        known = self.__dict__.setdefault("_decimal_extents", {})
+        at = (db, str(src_table), column)
+        if at not in known:
+            known[at] = self.src_engine.decimal_extent(
+                "src", db, src_table, column,
+                self._row_scope(db, src_table)[0])
+        whole, frac = known[at]
+        scale = max(wide[1], frac)
+        precision = max(wide[0], whole + scale)
+        if scale > most[1] or precision > most[0]:
+            return ()
+        return (precision, scale)
 
     def create_missing(self, db, log=None):
         """The tables the target lacks, built the way the copier builds
@@ -1822,6 +2245,10 @@ class HeteroEngine(Engine):
             proved = None
         out = [r for r in (self.dst_engine.set_aside(db),
                            self._zero_date_result(db),
+                           self._unfit_result(db)
+                           if self._can_move_neutrally() else None,
+                           self._pair_temporal_meaning(db)
+                           if self._can_compare_neutrally() else None,
                            self.dst_engine._fk_orphans(db)) if r]
         return (out or super().check_deep(db)) + ([proved] if proved else [])
 
