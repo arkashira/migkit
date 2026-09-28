@@ -2455,16 +2455,26 @@ store). What was still nowhere:
   `cutover:` is told what the operator must do by hand instead
   (freeze, drain, sequences, jobs, reverse leg) and gets the same
   proofs around it. With it, migkit guarantees the whole path.
+* **Licence, decided 2026-09-28 (the owner: "take everything in as a
+  package, change migkit's licence to whatever it takes"):** migkit is
+  now AGPL-3.0-or-later, so GPL, LGPL, AGPL, Apache and MIT libraries
+  are imported and combined freely. Tools that are not open source
+  (RIOT-X under BSL, mongosync under MongoDB's customer terms, Liquibase
+  5 under FSL, Atlas's default build) are wrapped whole and installed
+  from the start, with the operator accepting each one's terms once at
+  install time (`doctor --install`, or `MIGKIT_ACCEPT_TERMS` for an
+  unattended install) - never accepted silently on their behalf - and
+  used always, for every task their terms allow; for a task their terms
+  forbid (RIOT-X into anything but Redis's own products, mongosync
+  without an Atlas or Enterprise entitlement) the open path does it and
+  migkit says why.
 * **Every tool worth wrapping is a dependency**, forced: pip packages in
   `pyproject.toml` (mssql-python, python-oracledb, opensearch-py,
   confluent-kafka, and the rest the reports name), programs through
   `doctor --install` without asking again (mydumper, MySQL Shell,
-  RedisShake, DSBulk, Ora2Pg, SQLines, plpgsql_check...). A tool whose
-  licence forbids bundling (GPL/AGPL programs) is driven as a separate
-  program, never imported; a tool whose licence is not open (Atlas's
-  default build, Liquibase 5 FSL, Sling's GPL CLI, RIOT-X BSL) is
-  replaced by the open build or an open equivalent - Atlas Community,
-  Liquibase 4.x pinned, and so on.
+  RedisShake, DSBulk, Ora2Pg, SQLines, plpgsql_check...). (Superseded the same
+  day by the licence decision above: copyleft is imported, closed tools
+  are installed with the operator's acceptance.)
 * **Everything a wrapped tool can do is used**, chosen by migkit's logic:
   mydumper `--rows`/`--checksum-all`/masking, MySQL Shell
   dump/load/copy, MySQL CLONE, `pg_basebackup`, psycopg3 pipeline mode,

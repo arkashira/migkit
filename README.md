@@ -6,7 +6,7 @@
 [![engines](https://img.shields.io/badge/engines-postgres,%20mysql,%20mongodb,%20mssql,%20sqlite,%20redis,%20kafka,%20parquet,%20clickhouse,%20dynamodb,%20opensearch,%20cassandra-2a78d6)](#supported-engines)
 [![cross-engine](https://img.shields.io/badge/cross--engine-mysql_to_postgres-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
-[![license](https://img.shields.io/badge/license-MIT-0ca30c)](LICENSE)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-0ca30c)](LICENSE)
 
 migkit does everything *around* a database migration: it prepares the target,
 tells you exactly when to start the mover, watches the load, validates the
@@ -312,7 +312,7 @@ you get *through* migkit, including the tools it wraps at full capability.
 | Self-hosted, no vendor lock-in | yes | no | yes | yes | partial |
 | Zero footprint on the target | yes | no | yes | yes | partial |
 | Engines | 9 + cross | cloud-scoped | 8 | mysql | oracle-centric |
-| License | free (MIT) | paid | free | free | commercial |
+| License | free (AGPL-3.0) | paid | free | free | commercial |
 
 <sub>"Through migkit" = the wrapped tool driven under a single command,
 plus migkit's own verify/repair layer.</sub>
@@ -385,5 +385,10 @@ suite on Ubuntu runners.
 
 ## License
 
-MIT - see [LICENSE](LICENSE). (Confirm before publishing if a
-freemium/proprietary model is preferred instead.)
+AGPL-3.0-or-later - see [LICENSE](LICENSE). migkit takes in, as its own
+dependencies, every open tool and library that adds a capability,
+copyleft ones included, and the Affero GPL is the licence all of them
+can be combined under. The programs and libraries it drives keep their
+own licences; those that are not open source are installed only after
+the operator accepts their terms (`migkit doctor --install`) and used
+only for what those terms allow.

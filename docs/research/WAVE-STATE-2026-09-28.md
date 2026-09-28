@@ -1,20 +1,38 @@
-# migkit implementation wave 1 — launched 2026-09-28 (agents in git worktrees, branch from 0b64ddb)
-Merge rule: when an agent reports done -> `git worktree list` -> in main checkout: `git merge --squash <branch>` (or cherry-free: `git diff 0b64ddb..<branch> | git apply -3`), resolve conflicts by ownership below, run ONLY that task's tests + test_the_report_does_not_name_its_tools.py, then `git worktree remove` + `git branch -D`. One squashed commit per task, one-line message, no trailers. Push only when the owner says.
-Ownership (do not let two tasks edit the same function):
-1 decide.py + movers.pick/chosen/fitted + planner.plan + postgres._verify_way + mysql.loops_prevented (agent "decision engine core")
-2 twoway.py + pgslot.py origin filter + postgres/mysql origin_mark/origin_seen + tagged GTID/skip_replication readers + doctor two-way lines + hetero token 'rung' field (agent "two-way mark rungs")
-3 hetero.tail_apply watermark skip + checkpoint/ranges read paths (agent "tail watermark lever")
-4 postgres/mysql _apply_upserts/_apply_added/_stage/_copy_text/neutral_write, LOAD DATA LOCAL safe handler, psycopg3 pipeline/binary COPY (agent "write-path levers 6 and 10")
-5 movers.py pgcopydb argv/progress/follow + Debezium config gen + tools-used table (agent "0f pgcopydb and Debezium")
-6 clickhouse.py remote() bulk + partition follow, opensearch.py follow/users, cassandra.py TTL deep + Scylla CDC, users.py sections, capabilities cells (agent "engine gaps")
-7 partition coverage pg+mysql, drift.py transient names, MySQL tz-shift/narrowing proof, slot-before-snapshot property test (agent "deep checks from memory audit")
-8 DVT/reladiff/datacompy whole-use + tools-used table for verifiers (agent "0f DVT")
-Research agents (8) write to docs/research/*-2026-09-28.md themselves; fold into backlog when present.
-Next waves (not started): SQL Server bulk/staging (bcp; check how existing mssql tests get a server), R5 view actions + signed audit anchor + HMAC masking, R10 MySQL/Oracle LOB pieces, R11 stored code, R12 engines, R16a vectors, R17d writer beside target, R18 zstd spill/Arrow/Kafka client, R19 levers 1,2(binary COPY),4,7,9, DTS gaps, problems "Partly", planner speed rules, 0f for the remaining ~20 tools, stale docs.
+# migkit waves — state (updated 2026-09-28, after the owner approved everything)
+Rules for every agent: /tmp/migkit-rules.txt (also inline in prompts). Concurrency cap: 20 subagents.
+Merge rule (orchestrator): agent reports done -> in main checkout `git merge --squash worktree-agent-<id>` (resolve by ownership), run ONLY that task's tests + tests/test_the_report_does_not_name_its_tools.py (docker via tools/with_docker_lock.py [--vm migkit]), commit ONE squashed commit, one-line message, no trailers; then `git worktree remove --force .claude/worktrees/agent-<id>` + `git branch -D worktree-agent-<id>`. Broken tests -> fix narrowly or send back to the agent (SendMessage to its id). Never full suite (release only). Never push unless the owner says.
 
-## Interrupted 2026-09-28 (owner: 5-hour token window nearly full)
-- Cron 4d2c58af deleted. All 8 implementation agents told to commit WIP on their branch (+ WIP.md at worktree root) and stop; 7 research agents told to write partial reports and stop.
-- NOTE: the agent worktrees were created from 7de74bc (not 0b64ddb): they lack tools/with_docker_lock.py and the docs commit. Merge = `git merge --squash worktree-agent-<id>` onto master (0b64ddb+); expect only doc-side differences.
-- Worktrees: /Users/ashira/develop/devops/devops-tools/migkit/.claude/worktrees/agent-<id> (branches worktree-agent-<id>); mapping id->task: a84f1b9=decision engine, a4d532b=two-way rungs, a21bbd1=tail watermark, a5bea35=write paths, ad4afda=0f pgcopydb+Debezium, aa5d0ed=engine gaps, aae6d11=deep checks, a075608=0f DVT.
-- Research done: mechanisms-aws-azure-google-snowflake, security-throughput-scorecard, mechanisms-cdc-elt-specialists (check completeness marker at top); others partial or missing.
-- Resume: read each worktree's WIP.md, resume the agent by SendMessage to the same agent id (or launch a fresh agent with the same task prompt + "continue from WIP.md"), merge finished ones, then next waves.
+## Running (resumed wave 1, worktrees merged with master df60027)
+a84f1b9 decision engine core (decide.py; route pick/plan/_verify_way/loops_prevented)
+a4d532b two-way mark rungs (marks.py; PG origin/message/table, MySQL tagged GTID, MariaDB skip_replication, comment)
+a21bbd1 tail watermark lever 8 (position-per-range rule, no watermark table)
+a5bea35 write paths (MySQL staged upsert via pinned LOAD DATA LOCAL, psycopg3 pipeline + binary COPY)
+ad4afda 0f pgcopydb + Debezium (+ migkit/tooluse.py registry)
+aa5d0ed engine gaps (ClickHouse remote(), OpenSearch follow/users, Cassandra TTL/WRITETIME, Scylla CDC)
+aae6d11 deep checks (partition coverage, drift.transient, shared narrowing/timeshift, slot-before-snapshot proof)
+a075608 0f verifiers (DVT in .venv-dvt, reladiff rung, datacompy naming)
+## Running (wave 2, from df60027)
+a5ff11d F0 verification false negatives (Mongo $toHashedIndexKey, MySQL digest 64-bit+salt, SQL Server CT snapshot/rowversion/CLR)
+af1a0fe F0 types (G1-G4, G8 collisions, G6-G14, refusals G25-G29, then G15-G24 + new canon classes)
+a2ba2fe F0 cutover bugs + F2 cutover path (fence insert LSN, own-slot fence, rollback source sequences, cutover: hop option)
+ae866ee F0 prove_converted + sqlglot fixes + R11 pipeline
+aa2c527 F0 outward (pt --no-version-check, Atlas Community, Liquibase 4.x, leftovers, mongosync canCommit, Redis ABSTTL/cluster, md5 FIPS, UI token, publication, TLS)
+a3081c8 F6 speed (MySQL decoder child process, PG persistent tail connection + newline bug, renderer per column)
+a8d572b SQL Server bulk (mssql-python staged) + .github/workflows/x86-engines.yml
+a47bffb Oracle full side (python-oracledb, direct path staged, SHA-256 sum digest, LogMiner reader)
+ae351bc MySQL tools whole (mydumper --rows/--checksum-all, MySQL Shell rung)
+ad4909f R19 lever 1 physical rungs (pg_basebackup + fast-forward, CLONE, RDS/Aurora via boto3/moto)
+Research: ac2ac5c leapfrog conversion; a3888957 leapfrog engine reach
+## Queued (launch when a slot frees; research first)
+- RESEARCH leapfrog live tail + raw logs -> docs/research/leapfrog-live-tail-and-raw-logs-2026-09-28.md (prompt: table-set change + DDL in a running tail; reading with/without CDC features: fn_dblog, LogMiner without supplemental, db2ReadLog, physical WAL; rebuilding closed capabilities: mongosync, Kafka offsets, Redis A-A, XStream, RIOT-X; imitating cloud control planes)
+- Fold the 3 leapfrog reports into backlog before building their items.
+- W1 HA + scale-out of the mover (standby takeover, one table across machines with conditional-write checkpoint)
+- W2 estate: discovery, target sizing from perf history, cost, fleet, REST API, Terraform provider, K8s operator, OIDC/SAML/SCIM
+- W4 transforms in flight + FPE/tokenization masking + R5 HMAC masking, view actions, signed audit anchoring
+- W6 commercial types (after types agent + Oracle/SQL Server agents)
+- W7 resharding (split/merge, distribution-aware load)
+- W8 offline signed bundle, container image, Windows
+- W9 compiled apply side (after F6 measurements)
+- F1 verification passes A-D (one-scan leaf tree, key-hash buckets, in-SQL IBLT, self-check, generations) — after decision engine + F0 verification merge
+- F7 lists per report (RedisShake rung, MM2 + source-offset header + group translation, DSBulk, OpenSearch RFS, DynamoDB export/import, changing a running tail's table set, Kafka offset clamp at cutover, self-stopping tail, types sized from data, SingleStore alias, source-commit timestamp in beat, batches end at COMMIT, changed-columns merge, statistics-based chunk edges, exact batches default one-way, schema-as-of-position decode, warehouse exact loads (Storage Write API, Snowpipe channels), 16 security fixes remaining)
+- R2.5-6, R3 many-node, R10 LOB pieces MySQL, R12 Db2/ASE (x86 CI), R13 cells, R16a vectors, R17d writer beside target, R18 zstd spill/Arrow/Kafka client, DTS gaps, problems Partly, planner speed rules, docs refresh (threat-model stale at-rest)
