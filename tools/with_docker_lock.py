@@ -49,6 +49,23 @@ def _wait_for_room(need, most=900):
                          " not starting")
 
 
+def _context():
+    got = subprocess.run(["docker", "context", "show"], capture_output=True,
+                         text=True)
+    return got.stdout.strip() if got.returncode == 0 else None
+
+
+def _restore(context):
+    """Starting or stopping a colima profile switches the machine's
+    current docker context (to the new profile, then to a `default`
+    with no daemon behind it) - which every other session on the
+    machine then talks to. Measured: the other sessions' docker calls
+    failed until it was switched back. Put back what was current."""
+    if context and _context() != context:
+        subprocess.run(["docker", "context", "use", context],
+                       capture_output=True)
+
+
 def _running(profile):
     got = subprocess.run(["colima", "status", "-p", profile],
                          capture_output=True, text=True)
@@ -69,10 +86,19 @@ def main(argv):
         _wait_for_room(ROOM[vm])
         env = dict(os.environ)
         started = False
+        before = _context()
+        if not vm and before != "colima" and before is not None \
+                and "DOCKER_CONTEXT" not in env:
+            # a context another start left behind is not this machine's
+            # default daemon; the tests talk to colima's
+            env["DOCKER_CONTEXT"] = "colima"
         if vm:
             if not _running(vm):
-                subprocess.run(["colima", "start", "-p", vm] + VM[vm],
-                               check=True)
+                try:
+                    subprocess.run(["colima", "start", "-p", vm] + VM[vm],
+                                   check=True)
+                finally:
+                    _restore(before)
                 started = True
             env["DOCKER_CONTEXT"] = f"colima-{vm}"
         try:
@@ -80,6 +106,7 @@ def main(argv):
         finally:
             if started:
                 subprocess.run(["colima", "stop", "-p", vm])
+                _restore(before)
 
 
 if __name__ == "__main__":
