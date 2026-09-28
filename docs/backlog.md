@@ -5202,7 +5202,36 @@ range digest, the fenced re-check, exact batches or the final proof.
     digest of the same range read at the same moment on separate
     connections, sized by the decision engine from both servers' load.
 
-Order: 8 and 9 (the proof nearly free), 1 (pass-through), 10, 11, 4,
+13. **DuckDB as the compiled cross-engine mover (the owner, 2026-09-29:
+    "why does it go through Python at all?"):** DuckDB, already a
+    dependency, attaches MySQL, PostgreSQL, SQLite, Parquet, Iceberg
+    and Delta at once and runs `INSERT INTO target.t SELECT ... FROM
+    source.t` in parallel C++ (its PostgreSQL writer uses binary COPY);
+    the hop's row filter, column mapping and casts become its SQL,
+    canon's rules its expressions. A rung chosen per table where it
+    proves byte-equal by the range digest and measures faster.
+14. **The source renders the target's load format in SQL:** a
+    `SELECT` on the source that emits each row already in the target's
+    bulk-load format (PostgreSQL COPY text, MySQL LOAD DATA fields),
+    piped as bytes into the target's loader - both servers do all the
+    work, nothing is parsed between them. Only for the types whose
+    escaping is proved exhaustively (a property test over every canon
+    class and every byte), the rest refused to the other rungs.
+
+Why rows pass through Python today at all, and what the fast tools do
+instead: the generic range copier reads rows as Python objects because
+it is the one path that works for every pair, applies the hop's row
+filters, column rules and masking, and resumes by key; same-engine
+bulk paths already pipe bytes (pgcopydb, the COPY pipe through the
+relay, mydumper, raw BSON, DUMP/RESTORE) and digests are computed by
+the servers. The fast tools never loop over rows in an interpreted
+language: they pipe bytes server to server (pgcopydb, MySQL Shell,
+mydumper), parse in compiled code in columnar batches (PeerDB, DMS,
+GoldenGate, DuckDB, ConnectorX), or skip the SQL layer (base backups,
+CLONE, storage snapshots, TiDB Lightning's SST ingest). R20 takes all
+three, chosen per table.
+
+Order: 8 and 9 (the proof nearly free), 1 (pass-through), 13, 14, 10, 11, 4,
 5, 2, 3, 6, 7 - each against the tool that leads it (pgcopydb and
 PeerDB for moving, Veridata/DVT/pgCompare for verifying), numbers in
 the docstrings.
