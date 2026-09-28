@@ -5352,6 +5352,75 @@ typical hop needs (target: the two addresses and nothing else), and
 questions the guide asks (target: none beyond the addresses and a
 password).
 
+### R22. Every resource in one model: workers, connections, hops, time and the machine to run on (added 2026-09-29)
+
+The owner: "take everything - the machine migkit runs on, the network
+and connections on both sides, every other factor - compute it all
+together, so migkit knows how many connections and workers give the
+best result for each task, how to remove hops and cut latency; and
+help with the ETA and with choosing the right instance type."
+
+Today (read from the code): `sizing.estimate` starts from the least of
+this host's CPUs and memory, each server's free connections, load and
+CPUs, and the work; `sizing.Pace` then climbs while rows a second rise
+and backs off on a server's strain (BBR-like probing); `tunnel` measures
+the link's round trip and adds legs; `planner.estimate` gives a time
+range from past runs; `watch` shows a live rate and ETA. What is
+missing is one model that knows *which* resource binds and plans to it:
+
+1. **One resource model per task:** source read (cores, I/O rate, free
+   connections, load, replica lag, what the move may take of a primary),
+   target write (cores, I/O, WAL/binlog volume, index maintenance, lag
+   of its own replicas), the migkit host (cores, memory, NIC, disk for
+   spill), the link each way (RTT, per-stream and total bandwidth, loss
+   - the bandwidth-delay product sets the window and the batch), and
+   the path's cost per row for the chosen strategy (bytes a row on the
+   wire, CPU a row where it is converted). Measured by short probes
+   before the move and kept current during it.
+2. **The bottleneck named, and concurrency sized to it:** throughput is
+   the least of the stages' rates (a roofline); workers = what saturates
+   the binding stage and not one more (Little's law: concurrency = rate
+   x latency of one unit), connections per side from that, split so the
+   source's read and the target's write are sized separately. Said in
+   words: "the target's writes bind at ~42 MB/s; more workers would not
+   help; a larger target instance would".
+3. **One controller per resource while it runs:** the source's read
+   pace backs off on its load or replica lag, the target's write pace
+   on its lag or I/O wait, the link's legs on loss and RTT growth -
+   instead of one pace for all (AIMD / gradient concurrency limits as
+   TCP Vegas and Netflix's concurrency-limits do), each probing up now
+   and then.
+4. **Hops removed:** the fewest legs the data can take - a server that
+   pulls straight from the other where the hop allows its footprint
+   (ClickHouse `remote()`, PostgreSQL through a foreign server or a
+   subscription, MySQL CLONE; credentials removed after, said), else the
+   relay beside the source and the writer beside the target so the link
+   is crossed once, compressed, in few round trips; migkit told where
+   it itself should run (which network, which zone) and why.
+5. **ETA with its reasons:** per phase (copy by table, index builds,
+   verify, catch-up, cutover), from the measured rates of this hop, of
+   the rehearsal, or of the same engines elsewhere, with a range (p50 /
+   p90) and the binding resource of each phase; live, from the recent
+   rate (EWMA) and what is left; the catch-up's own sum - changes
+   arriving against changes applied: if apply cannot pass arrival, it
+   says it never catches up and what would change that.
+6. **The machine to run on:** for migkit and its agents - the
+   instance type in the source's or target's cloud that meets a
+   deadline at the least cost, from the model (a bigger machine when
+   migkit's CPU or NIC binds; the same one and a warning when a server
+   binds), knowing that many types' network is a burst over a much
+   lower baseline (a long move runs at the baseline), and EBS/disk
+   throughput limits for spill; for the target database - the class
+   its load needs, from the source's performance history (W2). A
+   catalog shipped with migkit (vCPU, memory, network baseline and
+   burst, disk throughput, price by region) refreshed from the
+   provider's API when credentials are there.
+
+Measured: the model's predicted rate and ETA against the measured ones
+on docker pairs with throttled CPU, I/O and network (tc/toxiproxy),
+the binding resource named correctly in each case, and no run slower
+than today's `Pace`.
+
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 
 Pushed **without the full suite run** (the owner's call, out of tokens):
