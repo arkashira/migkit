@@ -2647,6 +2647,34 @@ the Storage Write API and Snowpipe channels as exact paths
 (aws-azure-google-snowflake); the 16 security fixes (security scorecard).
 Correction carried: AWS ended DMS Fleet Advisor on 2026-05-20.
 
+### Leapfrog: conversion (docs/research/leapfrog-conversion-2026-09-28.md)
+
+The paid converters cannot close the gap with more rules: none has the
+source engine and the data as an oracle, and migkit does. So conversion
+is a search - several candidates per object, the one kept that passes a
+two-sided execution proof. Pieces P1-P21 in the report; the order:
+P2 a counterexample bank (every counterexample re-run on every
+candidate: model repair loops level off after 2-5 rounds and bring old
+failures back), P18 the harness's own mutation score (the proof must be
+shown able to fail), P10 a cross-engine `pt-upgrade` on `workload.py`
+(the real workload - MySQL `QUERY_SAMPLE_TEXT`, Query Store, Oracle bind
+capture - translated, replayed on both engines, agreement weighted by
+frequency; ast-grep + sqlglot for code paths the log missed); then
+emulation as one more candidate proved like any other (orafce,
+IvorySQL, Babelfish, MariaDB Oracle mode; openHalo allowed now that
+migkit is AGPL; the AWS extension packs have no public licence and stay
+out), inputs from the real call history, constants, coverage-guided
+search and z3 for branches never taken, failures shrunk on both sides
+to a minimal repro, constraints proved to accept and reject the same
+rows on both engines, a collation agreement matrix from real values,
+index advice on the translated workload (HypoPG/Dexter), and rules
+learned from accepted fixes adopted only with zero regressions.
+Measures no vendor publishes: share of objects proved, compatibility
+weighted by workload, the harness's mutation score, repro size, objects
+fixed per manual fix, dependence on emulation. In progress with the
+stored-code agent (P2, P18, emulation, shrinking, z3, learned rules);
+P10 queued as its own item.
+
 ## Where migkit would still lose with every item above done (2026-09-28)
 
 Asked by the owner: once the whole backlog is built, where do the

@@ -24,7 +24,7 @@ ae351bc MySQL tools whole (mydumper --rows/--checksum-all, MySQL Shell rung)
 ad4909f R19 lever 1 physical rungs (pg_basebackup + fast-forward, CLONE, RDS/Aurora via boto3/moto)
 Research: ac2ac5c leapfrog conversion; a3888957 leapfrog engine reach
 ## Queued (launch when a slot frees; research first)
-- RESEARCH leapfrog live tail + raw logs -> docs/research/leapfrog-live-tail-and-raw-logs-2026-09-28.md (prompt: table-set change + DDL in a running tail; reading with/without CDC features: fn_dblog, LogMiner without supplemental, db2ReadLog, physical WAL; rebuilding closed capabilities: mongosync, Kafka offsets, Redis A-A, XStream, RIOT-X; imitating cloud control planes)
+- (launched) research leapfrog live tail + raw logs -> ad9432de
 - Fold the 3 leapfrog reports into backlog before building their items.
 - W1 HA + scale-out of the mover (standby takeover, one table across machines with conditional-write checkpoint)
 - W2 estate: discovery, target sizing from perf history, cost, fleet, REST API, Terraform provider, K8s operator, OIDC/SAML/SCIM
@@ -36,3 +36,4 @@ Research: ac2ac5c leapfrog conversion; a3888957 leapfrog engine reach
 - F1 verification passes A-D (one-scan leaf tree, key-hash buckets, in-SQL IBLT, self-check, generations) — after decision engine + F0 verification merge
 - F7 lists per report (RedisShake rung, MM2 + source-offset header + group translation, DSBulk, OpenSearch RFS, DynamoDB export/import, changing a running tail's table set, Kafka offset clamp at cutover, self-stopping tail, types sized from data, SingleStore alias, source-commit timestamp in beat, batches end at COMMIT, changed-columns merge, statistics-based chunk edges, exact batches default one-way, schema-as-of-position decode, warehouse exact loads (Storage Write API, Snowpipe channels), 16 security fixes remaining)
 - R2.5-6, R3 many-node, R10 LOB pieces MySQL, R12 Db2/ASE (x86 CI), R13 cells, R16a vectors, R17d writer beside target, R18 zstd spill/Arrow/Kafka client, DTS gaps, problems Partly, planner speed rules, docs refresh (threat-model stale at-rest)
+- P10 cross-engine workload replay (pt-upgrade style on workload.py) — from leapfrog-conversion
