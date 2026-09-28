@@ -5503,11 +5503,20 @@ application still works and is not slower*; *it runs where my
 databases are*. Most of that is in the items above (verify, R19-R22,
 cutover, R21, types, users, workload). Not yet anywhere:
 
-1. **A sign-off pack per migration:** one human-readable document -
-   what moved, the proof per table (counts and digests both sides), when,
-   how long, the downtime measured, who approved each step, what was
-   left behind and removed - signed with the audit chain, for the
-   owner, the auditor and the application team.
+1. **An evidence export per migration (not a certificate):** migkit is
+   no authority and issues no standard - the owner's point: "who are we
+   to issue one". What the paid tools hand over is reports of what they
+   ran (DMS's premigration assessment and validation results, its Schema
+   Conversion assessment, DTS's consistency-check report, Veridata's
+   comparison reports, Datafold's diff reports) - none is a standard
+   either. What makes migkit's worth referencing is that anyone can
+   check it again: what moved, per table the counts and digests of both
+   sides with the exact method written beside them (so the reader, or
+   `migkit check` run again, recomputes the same numbers), the times,
+   the downtime measured, the approvals, what was left and removed - in
+   the formats audit and change-management processes already take (PDF
+   or HTML for people, CSV/JSON for tools), made tamper-evident by the
+   audit chain. It claims only what was measured.
 2. **Rehearse, then forecast:** a goal that runs the whole path on a
    clone or a sample the operator names, and turns what it measured
    into the forecast for the real run - time per phase, downtime,
@@ -5528,18 +5537,43 @@ cutover, R21, types, users, workload). Not yet anywhere:
    of foreign keys from the rows chosen) with masking, into a staging
    or developer database - the same engine pairs, the same proof of
    what was copied.
-6. **The runbook for this hop:** generated from the plan - the
-   timeline, who does what (DBA, application team, migkit), the go/no-go
-   checks, the rollback triggers and steps - kept current as the plan
-   changes; `advise` today gives one playbook per service.
+6. **Right the first time, not a runbook to recover with** (the
+   owner: "not a document - make it succeed once, no rollback needed,
+   high correctness, high quality"): the rehearsal (2), the preflight
+   and refusals before anything is written, the proofs at every step
+   and the go/no-go gates are run by migkit itself, so the real run
+   repeats a path already proved; the rollback stays armed as a safety,
+   not as a plan. What people must still do by hand (a DBA grant, an
+   application switch) is listed by the plan at the moment it is
+   needed, not in a separate document.
 7. **A major-version upgrade as a goal:** `goal: upgrade` - the same
    engine at a new version with the least downtime, choosing between
    the in-place upgrade and a logical move by measurement, with the
    extensions and their versions checked first.
-8. **Working inside the team's tools:** tasks for GitHub Actions, Argo
-   and Airflow, OpenTelemetry traces beside the Prometheus metrics, and
-   Grafana dashboards shipped with the rules (with W2's API and
-   Terraform provider).
+8. **Working inside the team's tools**, as the others do: Airbyte and
+   Fivetran ship Airflow operators, a Terraform provider and an API;
+   Datafold runs its diff in GitHub CI on pull requests; Liquibase,
+   Flyway and Atlas ship GitHub Actions; Debezium and PeerDB are watched
+   through Prometheus and Grafana; DMS through CloudWatch and
+   EventBridge. migkit: tasks for GitHub Actions, Argo and Airflow,
+   OpenTelemetry traces beside the Prometheus metrics, Grafana
+   dashboards shipped with the rules, with W2's API and Terraform
+   provider (to be confirmed tool by tool before it is claimed).
+10. **Notifications wherever the team is:** today Slack, Discord, Teams,
+   PagerDuty and a JSON webhook. The others: DMS through SNS and
+   EventBridge (so anything behind them), Airbyte Slack and webhooks,
+   Fivetran email and webhooks, Estuary email, Slack and webhooks,
+   GoldenGate and Qlik email/SNMP. migkit takes in the Apprise library
+   (BSD-2, about a hundred services behind one URL scheme) as a
+   dependency so a receiver can be any of them - Microsoft Teams,
+   Google Chat, Lark/Feishu, LINE (Messaging API - LINE Notify closed in
+   2025), Telegram, Discord, email, SNS, Opsgenie, Mattermost,
+   Rocket.Chat, DingTalk, WeCom, ntfy, Pushover, Matrix, Signal, Firebase
+   Cloud Messaging for phones, plain webhooks - with migkit's own
+   message shaped per channel (cards where the channel has them), the
+   same rules as now (no row values, the address never printed, a
+   delivery failure said and the run going on), and a test per channel
+   against a local stub.
 9. **Documentation as part of the product:** a five-minute quickstart
    for each common pair, a page per engine saying what is carried,
    what is refused and why, recipes for the usual moves (a managed
