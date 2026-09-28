@@ -5636,12 +5636,13 @@ parity, freeze and active sessions, CDC positions, lag, standby
 preflight, numeric scale, the final report and its evidence, instance
 class, performance on a clone, the tunnels, the runner beside the
 databases. What is not yet anywhere:
-1. **Driving the managed services when an organisation mandates them:**
-   create, start, watch, stop and tear down an AWS DMS task, a
-   Tencent/Alibaba DTS job, including their reverse legs, from the hop -
-   migkit choosing and verifying around them as rungs (their state read
-   into migkit's plan, their errors in migkit's words), so a team that
-   must use the provider's mover still gets one tool.
+1. **Not pursued (the owner, 2026-09-29): driving the managed services.**
+   migkit does not create, start, stop or tear down DMS or DTS tasks.
+   Where a team uses them, migkit's part is what it already does and
+   must do best: watch the databases while the service moves them,
+   prove what the service carried, and repair what it did not carry or
+   carried wrong (sequences, users and grants, partitions, types,
+   differences found), with the undo kept.
 2. **The cloud side of readiness:** the clusters' network (VPC,
    subnets, security groups, routes), maintenance windows and pending
    maintenance, instance classes on both sides, snapshots and restores
