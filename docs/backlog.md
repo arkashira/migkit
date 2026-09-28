@@ -2994,7 +2994,16 @@ the gaps nothing above covers yet, now items of their own.
   merged into one with DDL coordinated (TiDB DM's shard merge), and a
   load that follows the target's own distribution (Citus, Vitess,
   CockroachDB, Spanner).
-* **W8. Installed where nothing can be downloaded.** An offline bundle
+* **W8. Installed where nothing can be downloaded - the places the
+  clouds' services cannot reach** (the owner, 2026-09-29: DMZs, secure
+  zones and networks with no way out are exactly where DMS and DTS
+  cannot be used at all). Proved, not assumed: a test runs install,
+  `init`, a move with its tail, `check` and a report inside a network
+  namespace that reaches only the two databases - any outbound call
+  (telemetry, a version check, a download, a DNS lookup of an outside
+  name) fails the test; notifications to internal endpoints only
+  (webhook, email relay, Mattermost, Matrix); certificates from an
+  internal CA. An offline bundle
   (every wheel and every wrapped program, checksummed and signed), a
   container image, and Windows; GoldenGate runs on every platform
   including z/OS and AIX.
