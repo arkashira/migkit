@@ -1,5 +1,25 @@
 # Backlog: what is left before migkit finishes the job
 
+**What migkit is to become (the owner, restated 2026-09-28).** A data
+migration platform that finishes the job - taken up, run, and the
+migration is done - and that does more, deeper and better than the paid
+tools, not as much as them. It gets there by wrapping every open-source
+tool and library that adds a capability, the way Debezium and DVT are
+wrapped already, and using each of them whole: every capability and
+feature it has, not one flag. migkit's own logic decides, per task and
+per what the task needs, which tools to use, which of their capabilities
+to use, and how to combine them - and adds its own logic on top of each
+to get more out of it than the tool gives alone. The decision is always
+for the best result and the fastest, never at the cost of correctness or
+idempotence; the complexity lives in migkit, the operator sees one
+platform and migkit's own words. Every tool, paid and open, is researched
+to its mechanism first; the open ones are wrapped, the paid ones are
+matched and passed. The rules that carry this out: "Paused 2026-09-27"
+(how migkit is implemented, and every wrapped tool used whole), 0f (the
+used / unused / topped-up table per tool), P0 "Decided 2026-09-27" (the
+decision engine that composes a strategy per unit of work) and "the bar"
+beneath it.
+
 One list, rebuilt on 2026-09-23 from:
 
 * **Inside the project:**
