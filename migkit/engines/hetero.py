@@ -1996,6 +1996,12 @@ class HeteroEngine(Engine):
         rules = self._carried_rules(db, src_table, back)
         columns, unknown = [], []
         same = self.src_engine.CANON_ENGINE == self.dst_engine.CANON_ENGINE
+        from ..storedcode import sizing
+        if (self.hop.options or {}).get("types_from_data") and not same:
+            # the columns whose declaration leaves the domain open, read
+            # from the data in one pass (`storedcode.sizing`)
+            sizing.wanted(self, db, src_table,
+                          {back[n]: t for n, t in declared})
         for name, typ in sorted(declared):
             cls = canon.type_class(self.src_engine.CANON_ENGINE, typ)
             if same:
@@ -2017,6 +2023,10 @@ class HeteroEngine(Engine):
                                               typ, cls)
             numbers = canon.ddl_numbers(self.src_engine.CANON_ENGINE, typ,
                                         cls)
+            # with the hop's `types_from_data`, the data's size where the
+            # declaration leaves the domain open, recorded with its evidence
+            cls, numbers = sizing.sized(self, db, src_table, back[name], name,
+                                        typ, cls, numbers)
             if cls == "decimal" and not numbers:
                 numbers = self._measured_decimal(db, src_table, back[name])
             columns.append((name, cls, numbers, rules.get(name) or {}))
@@ -2400,9 +2410,12 @@ class HeteroEngine(Engine):
 
     def check_deep(self, db):
         """What the target's own engine set aside for the pair's loads and
-        tail and has not put back."""
+        tail and has not put back; the converted code proved by running
+        it, and - where the hop names a sandbox - the schema's
+        constraints, collations and sized types proved on its fixture."""
+        schema = []
         try:
-            proved = self.prove_converted(db)
+            proved = self.prove_converted(db, schema)
         except Exception:  # noqa: BLE001 - a pair with no SQL on one side
             proved = None
         out = [r for r in (self.dst_engine.set_aside(db),
@@ -2418,7 +2431,8 @@ class HeteroEngine(Engine):
             files = getattr(eng, "deep_files", None)
             if files is not None:
                 out += files(side, db)
-        return (out or super().check_deep(db)) + ([proved] if proved else [])
+        return (out or super().check_deep(db)) + ([proved] if proved else [])\
+            + schema
 
     def _assess_extra(self):
         """How deep migkit reaches each side, where its engine says
@@ -2843,14 +2857,16 @@ class HeteroEngine(Engine):
     PROPOSED = "-- proposed by a model, not by the translator: check holds" \
                " it to the source's answers"
 
-    def prove_converted(self, db):
+    def prove_converted(self, db, schema=None):
         """Every view and routine of the source held to the target's by
         what it does (plan 20, R11): a view by its rows on the hop's own
         servers; every function, procedure, trigger and event by running
         both on the same fixture in the sandbox and comparing everything
-        each did - never `ok` for one nobody ran (`storedcode.prove`)."""
+        each did - never `ok` for one nobody ran (`storedcode.prove`).
+        With `schema` (a list), the schema's own proofs on the sandbox's
+        fixture are appended to it."""
         from ..storedcode import prove
-        return prove.prove_database(self, db)
+        return prove.prove_database(self, db, schema)
 
     def setup_target_plan(self, db):
         """The steps for this pair, rather than for the pair it was written

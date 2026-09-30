@@ -826,6 +826,10 @@ def _convert_schema(hop_name, db, do_apply):
             # the first line says why; a version kept under it, commented
             # out, is in the file for a person to start from
             console.print(f"  [yellow]{s.splitlines()[0][3:]}[/yellow]")
+        from .storedcode import effort
+        cost = effort.said(hop, d)
+        if cost:
+            console.print(f"  effort: {cost}")
         if do_apply:
             have = eng.target_names(d)
             kept, failed, made = [], [], 0

@@ -53,6 +53,119 @@ def pg_tag(major):
     return f"{PG_IMAGE}:{major}-r{PG_RECIPE}"
 
 
+def foreign_key_statements(like, side, db, tables):
+    """The statements making the foreign keys among `tables` of a hop's
+    own server (`like`, `side`) again in its sandbox, as the server keeps
+    them - ON DELETE, ON UPDATE and deferral with them. A key the copy
+    makes without its action cascades nothing a routine's delete or a
+    constraint's probe deletes, and differs where the server would not.
+    MySQL's are in the tables' own statements already (`table_ddl`)."""
+    engine = like.CANON_ENGINE
+    wanted = {str(t).lower() for t in tables}
+    out = []
+    if engine == "postgres":
+        for child, parent, qchild, name, made in like._catalog(side, db, """
+                select n.nspname || '.' || c.relname,
+                       pn.nspname || '.' || pc.relname,
+                       format('%I.%I', n.nspname, c.relname),
+                       quote_ident(con.conname), pg_get_constraintdef(con.oid)
+                  from pg_constraint con
+                  join pg_class c on c.oid = con.conrelid
+                  join pg_namespace n on n.oid = c.relnamespace
+                  join pg_class pc on pc.oid = con.confrelid
+                  join pg_namespace pn on pn.oid = pc.relnamespace
+                 where con.contype = 'f'
+                 order by 1, con.conname"""):
+            if _among(child, wanted) and _among(parent, wanted):
+                out.append(f"alter table {qchild} add constraint {name}"
+                           f" {made}")
+    elif engine == "mssql":
+        keys = {}
+        for name, child, parent, col, pcol, on_delete, on_update in \
+                like._rows(side, db, "select f.name, s.name + '.' +"
+                           " object_name(f.parent_object_id), rs.name + '.'"
+                           " + object_name(f.referenced_object_id), cp.name,"
+                           " cr.name, f.delete_referential_action_desc,"
+                           " f.update_referential_action_desc from"
+                           " sys.foreign_keys f join sys.foreign_key_columns"
+                           " k on k.constraint_object_id = f.object_id join"
+                           " sys.columns cp on cp.object_id ="
+                           " k.parent_object_id and cp.column_id ="
+                           " k.parent_column_id join sys.columns cr on"
+                           " cr.object_id = k.referenced_object_id and"
+                           " cr.column_id = k.referenced_column_id join"
+                           " sys.objects o on o.object_id ="
+                           " f.parent_object_id join sys.schemas s on"
+                           " s.schema_id = o.schema_id join sys.objects ro"
+                           " on ro.object_id = f.referenced_object_id join"
+                           " sys.schemas rs on rs.schema_id = ro.schema_id"
+                           " order by f.name, k.constraint_column_id"):
+            one = keys.setdefault((name, child, parent, on_delete,
+                                   on_update), ([], []))
+            one[0].append(col)
+            one[1].append(pcol)
+        for (name, child, parent, on_delete, on_update), (cols, pcols) in \
+                keys.items():
+            if not (_among(child, wanted) and _among(parent, wanted)):
+                continue
+            out.append(
+                f"alter table {like._qualified(side, db, child)} add"
+                f" constraint {like._q(name)} foreign key"
+                f" ({', '.join(like._q(c) for c in cols)}) references"
+                f" {like._qualified(side, db, parent)}"
+                f" ({', '.join(like._q(c) for c in pcols)})"
+                f" on delete {str(on_delete).replace('_', ' ').lower()}"
+                f" on update {str(on_update).replace('_', ' ').lower()}")
+    elif engine == "oracle":
+        from ..engines.dbapi import MARK
+        owner = like._owner(side, db)
+        keys = {}
+        for name, child, parent, col, pcol, rule, deferrable, deferred in \
+                like._rows(side, db, "select c.constraint_name, c.table_name,"
+                           " p.table_name, cc.column_name, pc.column_name,"
+                           " c.delete_rule, c.deferrable, c.deferred from"
+                           " all_constraints c join all_constraints p on"
+                           " p.owner = c.r_owner and p.constraint_name ="
+                           " c.r_constraint_name join all_cons_columns cc on"
+                           " cc.owner = c.owner and cc.constraint_name ="
+                           " c.constraint_name join all_cons_columns pc on"
+                           " pc.owner = p.owner and pc.constraint_name ="
+                           " p.constraint_name and pc.position ="
+                           " cc.position where c.owner = " + MARK +
+                           " and c.constraint_type = 'R' order by"
+                           " c.constraint_name, cc.position", (owner,)):
+            one = keys.setdefault((name, child, parent, rule, deferrable,
+                                   deferred), ([], []))
+            one[0].append(col)
+            one[1].append(pcol)
+        for (name, child, parent, rule, deferrable, deferred), \
+                (cols, pcols) in keys.items():
+            if not (_among(like._said(child), wanted) and
+                    _among(like._said(parent), wanted)):
+                continue
+            q = '"{}"'.format
+            made = (f'alter table {q(child)} add constraint {q(name)}'
+                    f' foreign key ({", ".join(q(c) for c in cols)})'
+                    f' references {q(parent)}'
+                    f' ({", ".join(q(c) for c in pcols)})')
+            if str(rule).upper() in ("CASCADE", "SET NULL"):
+                made += f" on delete {str(rule).lower()}"
+            if str(deferrable).upper() == "DEFERRABLE":
+                made += " deferrable initially " + (
+                    "deferred" if str(deferred).upper() == "DEFERRED"
+                    else "immediate")
+            out.append(made)
+    return out
+
+
+def _among(table, wanted):
+    """Whether a table a catalogue names is one of `wanted` (the names
+    the engine's own listing gives, schema and all or without it)."""
+    name = str(table).lower()
+    return name in wanted or name.split(".")[-1] in {
+        w.split(".")[-1] for w in wanted}
+
+
 class NoSandbox(Exception):
     """Why nothing could be run: said in the verdict, as the reason."""
 
@@ -533,12 +646,16 @@ class Sandbox:
         self.tables = dict(pairs)
         sample = self._sample(src_tables, src_fks)
         self._carry(src_tables, sample)
-        if pair.dst_engine.CANON_ENGINE == "postgres":
-            self._exec(self.dst, self.tdb, [
-                f"alter table {self._pg_name(c)} add foreign key"
-                f" ({', '.join(self._pg_q(x) for x in cc)}) references"
-                f" {self._pg_name(p)} ({', '.join(self._pg_q(x) for x in pc)})"
-                for c, cc, p, pc in dst_fks])
+        # the foreign keys once the rows are in, as each server keeps them:
+        # with what a delete or a key change does to the rows pointing at
+        # it, and when they are checked
+        for like, side, eng, name, made_here in (
+                (pair.src_engine, "src", self.src, db, src_tables),
+                (pair.dst_engine, "dst", self.dst, self.tdb,
+                 [t for t in dst_tables if t not in made])):
+            stmts = foreign_key_statements(like, side, db, made_here)
+            if stmts:
+                self._exec(eng, name, stmts)
         self.keys = {t: pair.src_engine.neutral_key("src", db, t)
                      for t in src_tables}
 

@@ -13,6 +13,18 @@ itself - on its own, with the tables it writes put back from the fixture.
 A MySQL procedure that fails keeps the writes its earlier statements made
 until its caller rolls back; a PostgreSQL CALL that fails keeps none. The
 rows are read after a failure too, so that difference is seen, not missed.
+
+A routine that reads the clock is compared exactly, not within a
+tolerance, wherever the two sessions can be made to read one instant: a
+MySQL session's clock is set (`SET TIMESTAMP`, which `NOW()`, `CURDATE()`,
+`UTC_TIMESTAMP()` and `UNIX_TIMESTAMP()` answer from - `SYSDATE()` does
+not) and a PostgreSQL call's transaction time (what `now()` and
+`current_timestamp` answer) is read in the call's own transaction, so a
+MySQL side is set to the PostgreSQL side's instant; two PostgreSQL sides
+are compared by each value's distance from its own side's instant. Only a
+clock no session can set or read ahead of the call - `SYSDATE()`,
+`clock_timestamp()`, SQL Server's and Oracle's - is compared within five
+seconds, and said.
 """
 import datetime as _dt
 import re
@@ -25,6 +37,10 @@ from .. import canon
 #: seconds one call may take: a version that loops where the source's
 #: returns is a version that differs, not one to wait on
 CALL_SECONDS = 30
+#: the comment every function call the proof makes carries, so the
+#: source's record of its calls tells the proof's own (on the hop's own
+#: servers, read-only) from the application's (`history`)
+MARK = "/* migkit proof */"
 
 
 class HarnessError(RuntimeError):
@@ -91,6 +107,10 @@ class Outcome:
     counters: dict = field(default_factory=dict)
     #: statements a runner had to leave out of the comparison, and why
     notes: tuple = ()
+    #: the instant the call's clock answered from - set by the runner
+    #: (MySQL) or read in the call's own transaction (PostgreSQL); None
+    #: where neither could be done
+    now: object = None
 
 
 #: SQLSTATE classes that name a failure the routine raised itself; their
@@ -117,14 +137,19 @@ UNKNOWN_CLASSES = ("HY", "?")
 
 def differences(a, b, clock=False):
     """[what differs] between two outcomes, source first; [] when equal.
-    `clock`: time values within five seconds of each other are equal (the
-    routine reads the clock, and the two servers' clocks are not one)."""
+    `clock`: False - every value exactly (no clock, or both sessions read
+    one instant); RELATIVE - a time value equal to the other's at the
+    same distance from its own side's instant (`a.now`, `b.now`), exactly;
+    True - time values within five seconds of each other are equal (the
+    routine reads a clock neither session can set or read)."""
     out = []
 
     def same(x, y):
         if x == y:
             return True
-        if clock and isinstance(x, str) and isinstance(y, str):
+        if clock == RELATIVE and isinstance(x, str) and isinstance(y, str):
+            return _same_distance(x, y, a.now, b.now)
+        if clock is True and isinstance(x, str) and isinstance(y, str):
             return _close_times(x, y)
         if isinstance(x, (list, tuple)) and isinstance(y, (list, tuple)):
             return len(x) == len(y) and all(same(p, q) for p, q in zip(x, y))
@@ -186,13 +211,118 @@ def _close_times(x, y, seconds=5):
     return abs((a - b).total_seconds()) <= seconds
 
 
+def _instant(value):
+    """A call's instant as a naive UTC datetime (the sessions run in UTC),
+    or None."""
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        return value
+    return None
+
+
+def _same_distance(x, y, at_x, at_y):
+    """Whether two rendered time values stand at the same distance from
+    their own side's instant, at the precision they are rendered in: a
+    value cut to the second is measured from its instant cut to the
+    second, so `now()` cut on both sides is one distance, not the
+    fraction of a second the two servers' transactions began apart."""
+    at_x, at_y = _instant(at_x), _instant(at_y)
+    if at_x is None or at_y is None:
+        return False
+    if not (_TIME.match(x) and _TIME.match(y)):
+        return False
+    try:
+        vx = _dt.datetime.fromisoformat(x)
+        vy = _dt.datetime.fromisoformat(y)
+    except ValueError:
+        return False
+    if len(x) == 10 and len(y) == 10:
+        return (vx.date() - at_x.date()) == (vy.date() - at_y.date())
+    digits = max(len(v.partition(".")[2]) for v in (x, y))
+
+    def cut(t):
+        step = 10 ** (6 - digits)
+        return t.replace(microsecond=t.microsecond - t.microsecond % step)
+    return (vx - cut(at_x)) == (vy - cut(at_y))
+
+
+#: the clock mode that compares each time value by its distance from its
+#: own side's instant (`differences`)
+RELATIVE = "relative"
+
+#: per engine, the clock functions its session answers from an instant the
+#: harness sets or reads; anything else in `CLOCKS` reads the wall clock
+#: as the statement runs
+SET_OR_READ = {
+    "mysql": r"now|curdate|curtime|current_date|current_time|"
+             r"current_timestamp|utc_timestamp|utc_date|utc_time|localtime|"
+             r"localtimestamp|unix_timestamp",
+    "postgres": r"now|current_date|current_time|current_timestamp|"
+                r"localtime|localtimestamp|transaction_timestamp",
+}
+CLOCKS = (r"now|sysdate|curdate|curtime|current_date|current_time|"
+          r"current_timestamp|utc_timestamp|utc_date|utc_time|localtime|"
+          r"localtimestamp|unix_timestamp|getdate|getutcdate|sysdatetime|"
+          r"sysutcdatetime|sysdatetimeoffset|systimestamp|clock_timestamp|"
+          r"statement_timestamp|transaction_timestamp|timeofday")
+
+
 def reads_clock(text):
-    return bool(re.search(
-        r"(?i)\b(now|sysdate|curdate|curtime|current_date|current_time|"
-        r"current_timestamp|utc_timestamp|utc_date|utc_time|localtime|"
-        r"localtimestamp|unix_timestamp|getdate|getutcdate|sysdatetime|"
-        r"systimestamp|clock_timestamp|statement_timestamp|"
-        r"transaction_timestamp)\b", text or ""))
+    return bool(re.search(rf"(?i)\b({CLOCKS})\b", text or ""))
+
+
+def wall_clock(text, engine):
+    """Whether a body reads a clock its engine's session cannot be set to
+    or read ahead of the call: every clock it reads that is not one of
+    `SET_OR_READ`'s."""
+    mine = SET_OR_READ.get(engine)
+    if mine is None:
+        return reads_clock(text)
+    for m in re.finditer(rf"(?i)\b({CLOCKS})\b", text or ""):
+        if not re.fullmatch(rf"(?i)(?:{mine})", m.group(1)):
+            return True
+    return False
+
+
+def clock_mode(a, b, source_body, target_body, commits=False):
+    """How a routine's calls on runners `a` (source) and `b` (target) meet
+    the clock: (mode, first, reads). `mode`: "pinned" (both sessions
+    read one instant: exact), RELATIVE, True (within five seconds) or None
+    (exact, nothing set); `first` the side called first, whose instant the
+    other is set to ("a" or "b"), or None; `reads` whether either body
+    reads a clock itself.
+
+    The sessions are set to one instant wherever they can be, whether the
+    body reads a clock or not: a trigger its write fires, or a function
+    it calls, may - and `updated_at = NOW()` in a trigger answered a
+    millisecond apart on the two servers is not a difference."""
+    reads = reads_clock(source_body) or reads_clock(target_body)
+    if reads and (wall_clock(source_body, a.engine) or
+                  wall_clock(target_body, b.engine)):
+        return True, None, True
+    # a PostgreSQL routine that commits for itself starts a transaction
+    # of its own at each commit, and its clock moves with it
+    readable = {r: r.READS_CLOCK and not (commits and r.engine ==
+                                          "postgres") for r in (a, b)}
+    if a.SETS_CLOCK and b.SETS_CLOCK:
+        return "pinned", None, reads
+    if a.SETS_CLOCK and readable[b]:
+        return "pinned", "b", reads
+    if b.SETS_CLOCK and readable[a]:
+        return "pinned", "a", reads
+    if readable[a] and readable[b]:
+        return RELATIVE, None, reads
+    return (True if reads else None), None, reads
+
+
+def epoch(instant):
+    """An instant as MySQL's `SET TIMESTAMP` takes it: seconds since the
+    epoch as an exact decimal literal - a float of today's seconds keeps
+    15 or 16 digits, one short of the microseconds."""
+    at = _instant(instant)
+    whole = at.replace(microsecond=0) - _dt.datetime(1970, 1, 1)
+    return f"{whole.days * 86400 + whole.seconds}.{at.microsecond:06d}"
 
 
 def reads_chance(text):
@@ -268,6 +398,17 @@ class Runner:
     """Calls on one sandbox server of one engine, over one connection."""
 
     engine = None
+    #: whether the session's clock can be set to an instant for a call
+    #: (`at`), and whether the instant a call's clock answers from can be
+    #: read in the call's own transaction (`Outcome.now`)
+    SETS_CLOCK = False
+    READS_CLOCK = False
+    #: the instant the next calls' clock is set to, where it can be
+    at = None
+    #: calls held in one transaction, one after another, each seeing what
+    #: the ones before it did (`hold`, `sequences`); otherwise each call
+    #: starts from the fixture and is rolled back
+    held = False
 
     def __init__(self, eng, db, watched, side="dst", readonly=False):
         self.eng = eng
@@ -337,6 +478,41 @@ class Runner:
     def end(self):
         self.conn.rollback()
 
+    # ---- calls one after another --------------------------------------------
+
+    def hold(self):
+        """Every call from now on in one transaction, none rolled back
+        until `release`: the counters set from the fixture once, here."""
+        self.reset_counters(list(self.watched))
+        self.held = True
+        self._begin(force=True)
+
+    def release(self):
+        """The held calls rolled back, and the session begun afresh: what
+        they left in it (variables, temporary tables, a package's state)
+        must not reach the next call."""
+        self.held = False
+        self.end()
+        self.fresh()
+
+    def fresh(self):
+        self.close()
+        self.open()
+
+    def _from_fixture(self, tables):
+        if not self.held:
+            self.reset_counters(tables)
+
+    def _begin(self, force=False):
+        # MySQL's session is in autocommit's own mode between calls; the
+        # other drivers begin a transaction with the first statement
+        if self.engine == "mysql" and (force or not self.held):
+            self.conn.begin()
+
+    def _done(self):
+        if not self.held:
+            self.end()
+
     # ---- per engine ------------------------------------------------------
 
     def create(self, statements, settings=None):
@@ -382,8 +558,19 @@ class Runner:
         raise NotImplementedError
 
 
+#: MySQL's refusals sent with the class that says only "an error" (HY000)
+#: or a warning's (01000), by error number, as the SQLSTATE PostgreSQL -
+#: and through `MSSQL_STATES` and `ORACLE_STATES` the others - refuses the
+#: same failure with: a CHECK refused (3819), a value no enum or column
+#: of its type holds (1265, 1366), a column with no default left out
+#: (1364). Compared by class, each would otherwise answer alike with no
+#: other engine's
+MYSQL_STATES = {3819: "23514", 1265: "22P02", 1366: "22P02", 1364: "23502"}
+
+
 class MySQLRunner(Runner):
     engine = "mysql"
+    SETS_CLOCK = True
 
     def open(self):
         import pymysql
@@ -438,10 +625,17 @@ class MySQLRunner(Runner):
         """(SQLSTATE, message) of the error `e` just raised, as the server
         sent it with the error itself. Not the diagnostics area's first
         condition: measured, a call that rounded an argument (a warning,
-        01000) and then divided by zero (22012) had the warning first."""
+        01000) and then divided by zero (22012) had the warning first. A
+        refusal MySQL sends with a class that says only "an error" is
+        given the one every other engine refuses the same with
+        (`MYSQL_STATES`)."""
         args = getattr(e, "args", ())
         message = str(args[1] if len(args) > 1 else e)
         state = getattr(e, "sqlstate", None)
+        number = args[0] if args and isinstance(args[0], int) else None
+        if number in MYSQL_STATES and str(state or "?")[:2] in ("HY",
+                                                                "01", "?"):
+            state = MYSQL_STATES[number]
         return (str(state) if state else "?", message)
 
     def columns_made(self, table):
@@ -512,19 +706,20 @@ class MySQLRunner(Runner):
 
     def call(self, routine, args, tables, commits=False):
         out = Outcome()
-        self.reset_counters(tables)
+        self._from_fixture(tables)
         before = self.counters(tables)
         self.conn.autocommit(commits)
         if self.readonly:
             with self.conn.cursor() as cur:
                 cur.execute("start transaction read only")
         elif not commits:
-            self.conn.begin()
+            self._begin()
         name = self.q(routine.name)
+        self._pin(out)
         try:
             with self.conn.cursor() as cur:
                 if routine.kind == "function":
-                    cur.execute(f"select {name}"
+                    cur.execute(f"select {MARK} {name}"
                                 f"({', '.join(['%s'] * len(args))})",
                                 tuple(args))
                     out.value = cur.fetchone()[0]
@@ -557,6 +752,7 @@ class MySQLRunner(Runner):
                                       " seconds")
                 return out
             out.error = self._error(e)
+        self._unpin()
         out.changes = self.changes(tables)
         after = self.counters(tables)
         out.counters = {t: after[t] - before.get(t, 0) for t in after
@@ -564,15 +760,34 @@ class MySQLRunner(Runner):
         if commits:
             self.restore(tables)
         else:
-            self.end()
+            self._done()
         self.conn.autocommit(False)
         return out
 
+    def _pin(self, out):
+        """The session's clock set to `at` for the call - a session's own
+        setting, which writes nothing and outlives no connection."""
+        if self.at is None:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute(f"set timestamp = {epoch(self.at)}")
+        out.now = self.at
+
+    def _unpin(self):
+        if self.at is None:
+            return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("set timestamp = default")
+        except Exception:  # noqa: BLE001 - a connection opened again
+            pass           # after a lost call has its own clock
+
     def run(self, statement, params, tables):
         out = Outcome()
-        self.reset_counters(tables)
+        self._from_fixture(tables)
         before = self.counters(tables)
-        self.conn.begin()
+        self._begin()
+        self._pin(out)
         try:
             with self.conn.cursor() as cur:
                 cur.execute(statement, tuple(params))
@@ -580,11 +795,12 @@ class MySQLRunner(Runner):
             if not _is_server_error(e):
                 raise HarnessError(str(e)) from e
             out.error = self._error(e)
+        self._unpin()
         out.changes = self.changes(tables)
         after = self.counters(tables)
         out.counters = {t: after[t] - before.get(t, 0) for t in after
                         if after[t] != before.get(t, 0)}
-        self.end()
+        self._done()
         return out
 
     def restore(self, tables):
@@ -620,6 +836,7 @@ class MySQLRunner(Runner):
 
 class PostgresRunner(Runner):
     engine = "postgres"
+    READS_CLOCK = True
 
     def open(self):
         self.conn = self.eng._conn(self.side,
@@ -727,7 +944,7 @@ class PostgresRunner(Runner):
     def call(self, routine, args, tables, commits=False):
         import psycopg2
         out = Outcome()
-        self.reset_counters(tables)
+        self._from_fixture(tables)
         before = self.counters(tables)
         if commits:
             # a routine that commits for itself runs outside a transaction
@@ -738,15 +955,19 @@ class PostgresRunner(Runner):
         cur = self.conn.cursor()
         try:
             if not commits:
+                # the instant `now()` answers in this transaction, which
+                # the call runs in
+                cur.execute("select now()")
+                out.now = cur.fetchone()[0]
                 cur.execute("savepoint migkit_call")
             if routine.kind == "function":
                 casts = [f"cast(%s as {p.type})" for p in routine.params]
                 call = f"{name}({', '.join(casts)})"
                 if routine.returns_set:
-                    cur.execute(f"select * from {call}", tuple(args))
+                    cur.execute(f"select {MARK} * from {call}", tuple(args))
                     out.sets = [[list(r) for r in cur.fetchall()]]
                 else:
-                    cur.execute(f"select {call}", tuple(args))
+                    cur.execute(f"select {MARK} {call}", tuple(args))
                     out.value = cur.fetchone()[0]
             else:
                 places, params = [], []
@@ -787,16 +1008,18 @@ class PostgresRunner(Runner):
         if commits:
             self.restore(tables)
         else:
-            self.end()
+            self._done()
         return out
 
     def run(self, statement, params, tables):
         import psycopg2
         out = Outcome()
-        self.reset_counters(tables)
+        self._from_fixture(tables)
         before = self.counters(tables)
         cur = self.conn.cursor()
         try:
+            cur.execute("select now()")
+            out.now = cur.fetchone()[0]
             cur.execute("savepoint migkit_call")
             cur.execute(statement, tuple(params))
         except psycopg2.Error as e:
@@ -810,7 +1033,7 @@ class PostgresRunner(Runner):
         after = self.counters(tables)
         out.counters = {t: after[t] - before.get(t, 0) for t in after
                         if after[t] != before.get(t, 0)}
-        self.end()
+        self._done()
         return out
 
     def restore(self, tables):
@@ -1046,7 +1269,7 @@ class MSSQLRunner(Runner):
 
     def call(self, routine, args, tables, commits=False):
         out = Outcome()
-        self.reset_counters(tables)
+        self._from_fixture(tables)
         before = self.counters(tables)
         self.conn.autocommit(commits)
         name = f"{self._schema_of(routine)}.{self.q(routine.name)}"
@@ -1099,13 +1322,13 @@ class MSSQLRunner(Runner):
         if commits:
             self.restore(tables)
         else:
-            self.end()
+            self._done()
         self.conn.autocommit(False)
         return out
 
     def run(self, statement, params, tables):
         out = Outcome()
-        self.reset_counters(tables)
+        self._from_fixture(tables)
         before = self.counters(tables)
         try:
             with self.conn.cursor() as cur:
@@ -1118,7 +1341,7 @@ class MSSQLRunner(Runner):
         after = self.counters(tables)
         out.counters = {t: after[t] - before.get(t, 0) for t in after
                         if after[t] != before.get(t, 0)}
-        self.end()
+        self._done()
         return out
 
     def restore(self, tables):
@@ -1156,10 +1379,20 @@ ORACLE_STATES = {1: "23505", 1400: "23502", 1407: "23502", 2291: "23503",
 class OracleRunner(Runner):
     """Oracle (Oracle Free in the sandbox). The schema is the database;
     the session works in it, so a routine's own unqualified names are
-    its schema's. No coverage and no counters here yet: the block
-    coverage package needs objects of its own made first, and an
-    identity's sequence reports its cache, not its next value."""
+    its schema's.
+
+    Counters: an identity's sequence reports its cache's high-water mark
+    (`LAST_NUMBER`), not the value it hands out next, so how far a call
+    moved one is read by handing a value out: the sequence is set past
+    its column's rows (`START WITH LIMIT VALUE`, as `sequences_behind`'s
+    repair does), one value handed out and the sequence set back, so the
+    call starts from that value; after the call the next value handed out
+    is how far it went. Coverage: the server's own block coverage, kept in
+    tables it makes itself in the sandbox (a run started before a
+    routine's calls and read back after them)."""
     engine = "oracle"
+    #: why the server's block coverage could not be had here, once asked
+    coverage_off = None
 
     def open(self):
         self.conn = self.eng._connect(self.side, self.db)
@@ -1198,7 +1431,155 @@ class OracleRunner(Runner):
                     " from all_tab_cols where owner = :1 and table_name = :2",
                     (self._owner(), self.table(table)[1:-1]))
         rows = cur.fetchall()
-        return None, [self.eng._said(c) for c, _, v in rows if v == "YES"]
+        counter = next((self.eng._said(c) for c, ident, _ in rows
+                        if ident == "YES"), None)
+        return counter, [self.eng._said(c) for c, _, v in rows if v == "YES"]
+
+    def _identity(self, w):
+        """(sequence, generated always or by default, the column as the
+        server names it) of a watched table's identity column."""
+        cur = self.conn.cursor()
+        cur.execute("select sequence_name, generation_type, column_name from"
+                    " all_tab_identity_cols where owner = :1 and table_name"
+                    " = :2", (self._owner(), self.table(w.name)[1:-1]))
+        return cur.fetchone()
+
+    def _set_past_rows(self, w, ident):
+        seq, how, col = ident
+        how = "always" if str(how).upper() == "ALWAYS" else "by default"
+        self.conn.cursor().execute(
+            f"alter table {self.table(w.name)} modify {self.eng._q(col)}"
+            f" generated {how} as identity (start with limit value)")
+
+    def _next(self, ident):
+        cur = self.conn.cursor()
+        cur.execute(f"select {self.eng._q(ident[0])}.nextval from dual")
+        return int(cur.fetchone()[0])
+
+    def reset_counters(self, tables):
+        """Each identity set past its column's rows, the value it hands
+        out first taken (`_start`) and the identity set back, so the call
+        is handed that value first. A statement altering a table ends the
+        transaction: this runs before the call's own begins."""
+        self._start = {}
+        for t in tables:
+            w = self.watched[t]
+            ident = self._identity(w) if w.counter else None
+            if not ident:
+                continue
+            self._set_past_rows(w, ident)
+            self._start[t] = self._next(ident)
+            self._set_past_rows(w, ident)
+
+    def counters(self, tables):
+        """{table: the value its identity hands out next}, read by handing
+        it out - which moves the sequence one on; the next call sets it
+        back past the rows first."""
+        out = {}
+        for t in tables:
+            w = self.watched[t]
+            ident = self._identity(w) if w.counter else None
+            if ident:
+                out[t] = self._next(ident)
+        return out
+
+    def _moved(self, tables):
+        """{table: how far the call moved its identity}."""
+        before = getattr(self, "_start", {})
+        after = self.counters(tables)
+        return {t: after[t] - before.get(t, after[t]) for t in after
+                if after[t] != before.get(t, after[t])}
+
+    def fresh(self):
+        """A session of the pool's, its packages' state put back as a new
+        session has it: the pool may hand back the same session."""
+        self.close()
+        self.open()
+        try:
+            self.conn.cursor().execute("begin dbms_session.reset_package;"
+                                       " end;")
+        except Exception:  # noqa: BLE001 - a session with no package state
+            pass
+
+    # ---- coverage: the server's own block coverage --------------------------
+
+    def _coverage_tables(self):
+        """The schema holding the coverage tables, made once here; None
+        (and why, in `coverage_off`) where the server cannot keep them."""
+        if getattr(self, "_cov_owner", None) is not None:
+            return self._cov_owner
+        cur = self.conn.cursor()
+        try:
+            cur.execute("begin dbms_plsql_code_coverage"
+                        ".create_coverage_tables(force_it => true); end;")
+            cur.execute("select owner from all_tables where table_name ="
+                        " 'DBMSPCC_BLOCKS' order by case owner when"
+                        " sys_context('userenv', 'current_schema') then 0"
+                        " when user then 1 else 2 end")
+            got = cur.fetchone()
+        except Exception as e:  # noqa: BLE001 - said, as not measured
+            self.coverage_off = ("its server keeps no block coverage here:"
+                                 f" {str(e).splitlines()[0][:100]}")
+            return None
+        if not got:
+            self.coverage_off = "its coverage tables could not be found"
+            return None
+        self._cov_owner = got[0]
+        return self._cov_owner
+
+    def coverage_reset(self):
+        """A coverage run started for the calls to come, any run before it
+        stopped."""
+        if self._coverage_tables() is None:
+            return
+        cur = self.conn.cursor()
+        try:
+            if getattr(self, "_run", None) is not None:
+                cur.execute("begin dbms_plsql_code_coverage.stop_coverage;"
+                            " end;")
+            run = cur.var(int)
+            cur.execute("begin :1 := dbms_plsql_code_coverage.start_coverage("
+                        "run_comment => 'migkit'); end;", [run])
+            self._run = run.getvalue()
+        except Exception as e:  # noqa: BLE001 - said, as not measured
+            self._run = None
+            self.coverage_off = ("its block coverage could not be started:"
+                                 f" {str(e).splitlines()[0][:100]}")
+
+    def coverage(self, routine):
+        """(blocks reached, blocks, [(line, what)] never reached) of the
+        routine's PL/SQL over the calls since `coverage_reset`, as the
+        server counts them - blocks it is told cannot be reached left out;
+        None where coverage could not be had."""
+        run = getattr(self, "_run", None)
+        owner = self._coverage_tables()
+        if run is None or owner is None:
+            return None
+        cur = self.conn.cursor()
+        try:
+            cur.execute("begin dbms_plsql_code_coverage.stop_coverage; end;")
+            self._run = None
+            name = routine.name.upper() if routine.name == \
+                routine.name.lower() else routine.name
+            cur.execute(
+                f"select b.line, b.col, b.covered from {self.eng._q(owner)}"
+                f".dbmspcc_blocks b join {self.eng._q(owner)}.dbmspcc_units"
+                " u on u.run_id = b.run_id and u.object_id = b.object_id"
+                " where b.run_id = :1 and u.owner = :2 and u.name = :3 and"
+                " b.not_feasible = 0 order by b.line, b.col",
+                (run, self._owner(), name))
+            rows = cur.fetchall()
+        except Exception as e:  # noqa: BLE001 - said, as not measured
+            self.coverage_off = ("its block coverage could not be read:"
+                                 f" {str(e).splitlines()[0][:100]}")
+            return None
+        if not rows:
+            self.coverage_off = ("the server counted no block of it: it was"
+                                 " not run while coverage was on")
+            return None
+        missed = [(int(line), f"block at column {int(col)}")
+                  for line, col, covered in rows if not int(covered or 0)]
+        return len(rows) - len(missed), len(rows), missed
 
     def _owner(self):
         return self.eng._owner(self.side, self.db)
@@ -1236,6 +1617,7 @@ class OracleRunner(Runner):
     def call(self, routine, args, tables, commits=False):
         import oracledb
         out = Outcome()
+        self._from_fixture(tables)
         name = self.q(routine.name)
         cur = self.conn.cursor()
         try:
@@ -1275,15 +1657,20 @@ class OracleRunner(Runner):
         except oracledb.DatabaseError as e:
             out.error = self._error(e)
         out.changes = self.changes(tables)
+        # held calls are compared without it: reading one hands a value
+        # out, and the next call would be handed another than the other
+        # side's
+        out.counters = self._moved(tables) if not self.held else {}
         if commits:
             self.restore(tables)
         else:
-            self.end()
+            self._done()
         return out
 
     def run(self, statement, params, tables):
         import oracledb
         out = Outcome()
+        self._from_fixture(tables)
         cur = self.conn.cursor()
         marks = iter(range(1, len(params) + 1))
         sql = re.sub(r"%s", lambda m: f":{next(marks)}", statement)
@@ -1292,7 +1679,11 @@ class OracleRunner(Runner):
         except oracledb.DatabaseError as e:
             out.error = self._error(e)
         out.changes = self.changes(tables)
-        self.end()
+        # held calls are compared without it: reading one hands a value
+        # out, and the next call would be handed another than the other
+        # side's
+        out.counters = self._moved(tables) if not self.held else {}
+        self._done()
         return out
 
     def restore(self, tables):

@@ -6,9 +6,9 @@ Oracle Free runs natively on arm64 from 23.5, capped at 2 GB and 2 CPUs;
 two of them and two PostgreSQL servers run in the machine's second VM
 (`with_docker_lock.py --vm migkit`). migkit's own rules do not convert
 PL/SQL; the converter built by `doctor --install` does, and its version
-is held to Oracle's answers like any candidate's. Coverage is not
-measured on Oracle yet (its block-coverage package needs objects of its
-own made first), and the verdict says so.
+is held to Oracle's answers like any candidate's, and Oracle's own
+block coverage of the source's routine is part of its evidence
+(`test_oracle_code_coverage_and_counters` holds it on its own).
 """
 import json
 import socket
@@ -169,15 +169,14 @@ def test_plsql_converted_by_a_program_and_proved_on_oracle(servers,
     assert conv["sandbox"] == "used", conv["sandbox"]
     record = {r["routine"]: r for r in conv["routines"]}
     # each version the converters made was run against Oracle's own: it
-    # is proved (without coverage, which Oracle does not give here yet)
-    # or it failed by something a call did - never taken on trust
+    # is proved, with the source's coverage counted by Oracle itself, or
+    # it failed by something a call did - never taken on trust
     for name in ("function worth", "procedure bump"):
         got = record[name]
         said = " ".join(got.get("reasons") or [])
-        proved = got["class"] == "proved with caveats" and got["rung"] in (
-            "plsql-converter", "dialect-converter") and \
-            "coverage cannot be measured on oracle" in \
-            got["evidence"]["reason"]
+        proved = got["class"] in ("proved", "proved with caveats") and \
+            got["rung"] in ("plsql-converter", "dialect-converter") and \
+            "source: " in got["evidence"]["coverage"]
         failed_by_running = got["class"] == "not converted" and \
             "the PL/SQL converter: " in said and any(
                 w in said for w in ("called with", "rows changed",

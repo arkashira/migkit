@@ -251,6 +251,18 @@ class Bank:
             if one not in kept:
                 kept.append(one)
 
+    def keep_sequence(self, calls):
+        """A sequence of calls [(routine name, args)] that told the two
+        sides apart (`sequences`)."""
+        one = [[name, [_dump(a) for a in args]] for name, args in calls]
+        kept = self.data.setdefault("sequences", [])
+        if one not in kept:
+            kept.append(one)
+
+    def sequences(self):
+        return [[(name, tuple(_load(a) for a in args)) for name, args in one]
+                for one in self.data.get("sequences", [])]
+
     def save(self):
         if not self.path:
             return

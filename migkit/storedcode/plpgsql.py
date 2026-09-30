@@ -77,6 +77,9 @@ class Converted:
     commits: bool = False
     #: what is left for a person, said once (an event's schedule)
     residue: list = field(default_factory=list)
+    #: (units, {construct: units}): the PL/SQL converter's own estimate of
+    #: the routine's conversion, where it made the version (`effort`)
+    cost: tuple = None
 
     @property
     def sql(self):

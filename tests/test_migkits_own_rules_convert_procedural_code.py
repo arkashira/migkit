@@ -115,12 +115,15 @@ def test_coverage_probes_go_in_a_copy_where_they_change_nothing():
     body = "begin if x > 1 then set @a = 1; end if; end"
     r = Routine("procedure", "p", [Param("x", "int")], body=body,
                 definition=f"CREATE PROCEDURE `p`(x int) {body}")
-    made, probes = mysql_pg.instrument(r)
+    made, probes, twin = mysql_pg.instrument(r)
+    # nothing it reads is changed by a probe: the copy takes its place
+    assert twin is None
     assert made.startswith("CREATE PROCEDURE `p`(x int) begin"), made
     # the block, the THEN, and the ELSE the IF did not have
     assert [w for _, _, w in probes] == ["block", "then", "else (none)"], \
         probes
     assert made.count("insert into migkit_cover") == 3, made
+    # a body whose definition does not hold it is not instrumented
     reads = Routine("procedure", "q", [], body="begin update t set a = 1;"
                     " select row_count(); end", definition="x")
     assert mysql_pg.instrument(reads) is None

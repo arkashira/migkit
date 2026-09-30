@@ -177,9 +177,10 @@ HOP_OPTIONS = {
                           "way", "subnet_group", "security_groups",
                           "subscription", "resource_group", "location",
                           "project", "address")),
-    "proof_sandbox": Key("the two scratch servers stored code is run and"
-                         " compared on, or docker for migkit to start"
-                         " them", "str|dict", ("hetero",),
+    "proof_sandbox": Key("the two scratch servers stored code, the"
+                         " constraints, the collations and the sized types"
+                         " are run and compared on, or docker for migkit"
+                         " to start them", "str|dict", ("hetero",),
                          subs=("source", "target", "docker")),
     "production": Key("host patterns of production servers: a target"
                       " matching one is written only when the hop names"
@@ -261,6 +262,11 @@ HOP_OPTIONS = {
     "two_way": Key("migkit's own tails both ways", "dict|bool",
                    subs=("on_conflict", "column", "source_rank",
                          "target_rank", "delta")),
+    "types_from_data": Key("a column whose declaration leaves its domain"
+                           " open (a bare decimal, a text of no length) is"
+                           " built sized from the data it holds, each"
+                           " narrowing recorded and proved", "bool",
+                           ("hetero",)),
     "verify_batches": Key("compare a bulk copy with the source", "bool"),
 }
 

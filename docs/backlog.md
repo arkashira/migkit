@@ -3265,7 +3265,11 @@ Measures no vendor publishes: share of objects proved, compatibility
 weighted by workload, the harness's mutation score, repro size, objects
 fixed per manual fix, dependence on emulation. In progress with the
 stored-code agent (P2, P18, emulation, shrinking, z3, learned rules);
-P10 queued as its own item.
+P10 queued as its own item. P6 (the application's own calls), P8
+(sequences of calls), P12 (constraints by accept/reject probes and a
+three-valued solver), P13 (the collation matrix on the column's own
+values) and P14 (types sized from the data, `types_from_data`) written
+2026-09-30 with their tests (R11).
 
 ### Leapfrog: engine reach (docs/research/leapfrog-engine-reach-2026-09-28.md)
 
@@ -5287,12 +5291,75 @@ Done (2026-09-28, `migkit/storedcode/`):
   matches it, the proof says so with the one statement that differs,
   and the routine is left for a person.
 
-Still to do: MySQL-side coverage with the diagnostics area or
-`ROW_COUNT()` in the body; the clock pinned under both servers
-(time values are compared within five seconds and said); Oracle coverage
-and counters; the converters' cost units as the effort estimate (item 40);
-PostgreSQL to MySQL procedural rules; statement-level reduction beyond
-MySQL sources.
+Done (2026-09-30, written with their tests; the tests wait for the full
+run):
+* Inputs from the application's own calls (P6, `history.py`): the
+  source's statement digests, `pg_stat_statements`, SQL Server's
+  procedure counts with the arguments each cached plan was compiled for
+  and Query Store, Oracle's shared pool with its captured binds - read
+  once, read-only, into shapes (a value, NULL, a placeholder) and how
+  often each ran. The values go in first after the counterexample bank,
+  the most run first; none under `mask: all`, and none for a parameter
+  compared with a masked column. The proof's own calls carry a mark and
+  are left out. The database's line says the share of the calls on
+  record made to routines that answered the same.
+* Sequences of calls (P8, `sequences.py`): the routines every single call
+  of which answered the same are called one after another in one
+  transaction per side (the runners' held mode), every table compared
+  after each call; each routine twice with the same arguments, every
+  writer before every routine naming its tables, then sequences drawn and
+  shrunk by Hypothesis. A sequence that differs makes the verdict of the
+  routine whose call differed `diff`, naming the calls before it, is kept
+  in the bank and tried first next time; in `convert`, a version that
+  differs in a sequence is not applied.
+* Constraints proved to accept and refuse the same rows (P12,
+  `constraints.py`), collations held to the column's own values (P13,
+  `collations.py`) and columns sized from their data (P14, `sizing.py`,
+  the hop option `types_from_data`): on the sandbox's fixture, before any
+  routine is made there (`bench.py`), each its own line of `check` where
+  the hop names a sandbox. The sandbox now carries every foreign key with
+  its ON DELETE/ON UPDATE and deferral (PostgreSQL, SQL Server and
+  Oracle sides had none or none of their actions).
+* MySQL coverage of a routine reading `ROW_COUNT()`, `FOUND_ROWS()` or the
+  diagnostics area: an instrumented copy beside it under a name of its own
+  keeps what it reads after every statement, the routine's own calls are
+  the answers compared, and the copy's coverage counts only while it
+  answers every call as the routine does (a trigger that reads them is
+  still said not measured: it cannot be called beside a copy).
+* The clock set to one instant: a MySQL session's by `SET TIMESTAMP`,
+  a PostgreSQL call's transaction time read in its own transaction and the
+  MySQL side set to it; two PostgreSQL sides compared by each value's
+  distance from its own instant - for every call, so a trigger's
+  `updated_at = NOW()` compares exactly too. Only `SYSDATE()`,
+  `clock_timestamp()`, SQL Server's and Oracle's clocks stay within five
+  seconds, said. MySQL's clock functions converted to PL/pgSQL are held to
+  that exactness.
+* Oracle's own block coverage and its identity counters in the sandbox.
+* PostgreSQL's procedural code into MySQL's by migkit's rules
+  (`pg_mysql.py`), a candidate like MySQL's and SQL Server's rules: its
+  statement reader held statement by statement to PostgreSQL's own parser,
+  the target's own unique keys and column types read for it, and each
+  version probed for coverage in the MySQL target's sandbox. Found on the
+  way and fixed: a MySQL body holding a `CALL` could not be read at all
+  (its tokenizer keeps what follows CALL as one piece of text); a
+  candidate's version that failed left the other triggers it made firing
+  in every later proof; a version that commits where the source does not
+  was held in the proof's transaction and committed the fixture away.
+* Statement-level reduction for every source: MySQL's and T-SQL's bodies
+  by their parsers, PL/pgSQL's by PostgreSQL's own, PL/SQL's by its
+  blocks, re-converted by the candidate whose version differed.
+* Effort (item 40, `effort.py`): the PL/SQL converter's own score per
+  routine, shown as its figure with its unit, beside migkit's count from
+  the proof - statements left for a person, lines no call reached, the
+  seconds migkit spent - in `code-conversion.json` and on `schema
+  --convert`. No rate is put on a person's time.
+* MySQL's refusals sent as HY000/01000 (a CHECK, an enum value, a column
+  with no default) are compared by the class every other engine refuses
+  them with (`harness.MYSQL_STATES`).
+
+Still to do: a MySQL trigger reading `ROW_COUNT()` or the diagnostics
+area has no coverage; coverage on SQL Server; SQL Server's and Oracle's
+clocks cannot be set for a session.
 
 ### R12. Engines the sandbox can now run (todo)
 

@@ -188,9 +188,13 @@ def _listed(value):
 
 def rules(pair, ctx, r):
     """migkit's own rules: MySQL's and SQL Server's procedural code into
-    PL/pgSQL, and MySQL's meaning kept in a view or an expression."""
+    PL/pgSQL, MySQL's meaning kept in a view or an expression, and
+    PostgreSQL's procedural code into MySQL's."""
     src = pair.src_engine.SQL_DIALECT
     dst = pair.dst_engine.SQL_DIALECT
+    if (src, dst) == ("postgres", "mysql"):
+        from . import pg_mysql
+        return pg_mysql.convert(r, ctx["rules"])
     if dst != "postgres" or src not in ("mysql", "tsql"):
         raise Refused(f"migkit's rules do not convert {src} to {dst}")
     from .learn import apply
@@ -265,17 +269,26 @@ class Conversion:
             if r.name in expr:
                 r.settings.setdefault("expression", expr[r.name])
         cols, tables, table_columns, keys = {}, {}, {}, {}
+        column_types = {}
         try:
             for t in pair.dst_engine.neutral_tables("dst", db):
                 leaf = pair._leaf(t)
                 tables[leaf.lower()] = leaf
-                names = [c for c, _ in pair.dst_engine.neutral_columns(
-                    "dst", db, t)]
+                declared = pair.dst_engine.neutral_columns("dst", db, t)
+                names = [c for c, _ in declared]
                 table_columns[leaf.lower()] = names
+                column_types[leaf.lower()] = {str(c).lower(): str(ty)
+                                              for c, ty in declared}
                 for c in names:
                     cols.setdefault(c.lower(), c)
-            for t, ks in pair.src_engine.unique_keys("src", db).items():
-                keys[pair._leaf(pair._rename(t))] = ks
+            if self.dst == "mysql":
+                # which unique key a MySQL `ON DUPLICATE KEY` hits is the
+                # target table's to say: its own keys, by its own names
+                for t, ks in pair.dst_engine.unique_keys("dst", db).items():
+                    keys[pair._leaf(t)] = ks
+            else:
+                for t, ks in pair.src_engine.unique_keys("src", db).items():
+                    keys[pair._leaf(pair._rename(t))] = ks
         except Exception:  # noqa: BLE001 - converted without them
             pass
         emulations, emulated = set(), set()
@@ -299,6 +312,9 @@ class Conversion:
                         local=self.local, routines=self.routines,
                         columns=cols, keys=keys, tables=tables,
                         table_columns=table_columns)}
+        # the target's declared column types, which PostgreSQL's rules
+        # into MySQL read for a loop over a query and a column's %TYPE
+        self.ctx["rules"].column_types = column_types
         self.records = []
         #: why the sandbox named for the hop could not be used, if it was
         #: named and could not
@@ -310,6 +326,11 @@ class Conversion:
         #: per routine, the rules' version and whether it proved, and the
         #: version chosen - what learning a rule is tried against
         self.rules_tried, self.accepted = {}, {}
+        #: what holding the chosen versions to sequences of calls found
+        self.sequences = None
+        #: per routine, the PL/SQL converter's own estimate, and the
+        #: seconds migkit spent converting and proving it (`effort`)
+        self.costs, self.seconds = {}, {}
 
     # ---- without a sandbox: as it always was --------------------------------
 
@@ -414,15 +435,64 @@ class Conversion:
             proof.begin([])
             self._source_views(proof)
             self.ctx["pg_version"] = _pg_version(proof.b)
+            import time
             for r in self.views + _order(self.routines):
+                began = time.monotonic()
                 out.append(self._climb(proof, r, candidates(
                     self.pair, r, self.ctx), ledger))
+                self.seconds[r.name] = time.monotonic() - began
+            out = self._in_sequences(proof, out)
         finally:
             proof.end()
             ledger.save()
             proof.bank.save()
             self.learned.save()
         return out
+
+    def _in_sequences(self, proof, out):
+        """The versions chosen, held to the source over sequences of calls
+        (`sequences`): one whose call differs in a sequence is not applied
+        - its entry becomes the comment naming the sequence, and its
+        record says so. Nothing unproved is applied."""
+        from . import sequences
+        from .prove import HarnessError
+        pairs = []
+        for r in self.routines:
+            if r.name not in self.accepted or r.kind not in (
+                    "function", "procedure", "event"):
+                continue
+            t = proof.made(r)
+            if t is not None:
+                pairs.append((r, t))
+        if not pairs:
+            return out
+        try:
+            found, runs, left = sequences.prove(proof, pairs)
+        except HarnessError as e:
+            self.sequences = {"not run": str(e)[:160]}
+            return out
+        self.sequences = {"run": runs, "apart": len(found),
+                          "left out": [f"{r.name}: {why}" for r, why in left]}
+        apart = {}
+        for f in found:
+            r = f.calls[f.at][0]
+            apart[r.name] = f.said()
+        if not apart:
+            return out
+        for rec in self.records:
+            name = rec["routine"].split(" ", 1)[1]
+            if name in apart:
+                rec["class"] = "not converted"
+                rec.setdefault("reasons", []).append(
+                    "in a sequence of calls, " + apart[name])
+                self.accepted.pop(name, None)
+        kinds = {r.name: r.kind for r in self.routines}
+        return [(name, f"-- {kinds.get(name, 'routine')} {name} not"
+                       " converted: its version answers every single call"
+                       " as the source does, but not a sequence of calls: "
+                       + apart[name].replace("\n", " "),
+                 apart[name]) if name in apart else (name, sql, why)
+                for name, sql, why in out]
 
     def _source_views(self, proof):
         """The source's views made in the source's sandbox, as the source
@@ -476,6 +546,8 @@ class Conversion:
                     reasons.append(f"{c.said}: it failed"
                                    f" ({type(e).__name__}: {str(e)[:80]})")
                     break
+                if made.cost and r.name not in self.costs:
+                    self.costs[r.name] = made.cost
                 from .plpgsql import unparsed
                 refused = unparsed(made.statements) \
                     if self.dst == "postgres" else None
@@ -587,16 +659,20 @@ class Conversion:
         finally:
             proof.install(r, accepted.statements)
 
+    #: the candidates whose version of a cut copy is made the same way as
+    #: of the whole routine: the operator's file is written for the whole
+    #: one, and a model is asked, not run
+    CUT_BY = ("rules", "emulate", "plsql-converter", "dialect-converter")
+
     def _smallest(self, proof, c, r, verdict):
-        """The few source statements a failing version of migkit's rules
-        still gets wrong on the input that told it apart - what a person
-        or a model needs instead of the whole routine."""
-        if c.name != "rules" or verdict.args is None or self.src != "mysql":
+        """The few source statements a failing candidate's version still
+        gets wrong on the input that told it apart - what a person or a
+        model needs instead of the whole routine."""
+        if c.name not in self.CUT_BY or verdict.args is None:
             return None
         from . import reduce
         try:
-            got = reduce.smallest(proof, r, verdict.args,
-                                  lambda x: rules(self.pair, self.ctx, x))
+            got = reduce.smallest(proof, r, verdict.args, c.make)
         except Exception:  # noqa: BLE001 - said without it
             return None
         if not got:
@@ -679,12 +755,39 @@ class Conversion:
         return Verdict(f"view {r.name}", "ok", "its rows over the fixture"
                        " digest the same", calls=1), made
 
+    def converter_costs(self):
+        """The PL/SQL converter's own estimate for every routine it reads
+        and the climb did not ask it of (a candidate before it proved) -
+        where it is built here, and only as its figure (`effort`)."""
+        from . import programs
+        from .translate import Refused
+        if self.dst != "postgres" or \
+                self.src not in programs.READS["ora2pg"] or \
+                not programs.available("ora2pg"):
+            return
+        for r in self.routines:
+            if r.name in self.costs or r.kind not in programs.ORA2PG_TYPES:
+                continue
+            try:
+                made = programs.ora2pg(r, self.src, self.dst,
+                                       self.ctx.get("pg_version"))
+            except Refused:
+                continue
+            if made.cost:
+                self.costs[r.name] = made.cost
+
     def write(self, out_path):
+        from . import effort
         try:
             out_path.write_text(json.dumps(
-                {"routines": self.records,
+                {"effort": effort.summary(self.records, self.routines,
+                                          self.costs, self.seconds,
+                                          self.src),
+                 "routines": self.records,
                  "sandbox": "used" if self.used else
-                 (self.why_not or "not named")},
+                 (self.why_not or "not named"),
+                 **({"sequences": self.sequences} if self.sequences
+                    else {})},
                 indent=1, default=str))
         except OSError:
             pass
@@ -724,6 +827,7 @@ def converted(pair, db, propose=True, climb=True):
     if out is None:
         out = work.unproved()
     if climb:
+        work.converter_costs()
         work.write(pair.hop.report_dir(db) / "code-conversion.json")
     return out
 

@@ -85,7 +85,9 @@ def candidates(pair, routine, ctx):
                         " function of one expression"),),
                   make=lambda r: translator(pair, ctx, r)),
         Candidate("rules", "migkit's rules",
-                  _all("mysql->postgres", "tsql->postgres"),
+                  _all("mysql->postgres", "tsql->postgres") |
+                  _all("postgres->mysql",
+                       kinds=("function", "procedure", "trigger")),
                   make=lambda r: rules(pair, ctx, r)),
         Candidate("emulate", "the target's emulation of Oracle's functions",
                   _all("oracle->postgres", kinds=("view", "function")),

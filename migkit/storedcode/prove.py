@@ -47,6 +47,11 @@ SEARCH_MOST = 200
 
 ORDER = {"ok": 0, "warn": 1, "not proved": 2, "missing": 3, "diff": 4}
 
+#: what is said of a routine whose time values were compared within a
+#: tolerance: it reads a clock no session could be set to or read ahead
+CLOCK_TOLERATED = ("a time value it reads from a clock no session can be"
+                   " set to was compared within 5 seconds")
+
 
 @dataclass
 class Verdict:
@@ -61,6 +66,9 @@ class Verdict:
     #: the differing call's arguments themselves (not recorded: they may
     #: be the fixture's values)
     args: tuple = field(default=None, compare=False)
+    #: what the source's record of its calls says of it: {"runs",
+    #: "shapes", "tried"} (`history`)
+    history: dict = None
 
     def line(self):
         out = f"{self.said}: {self.status}"
@@ -72,7 +80,8 @@ class Verdict:
         return {"routine": self.said, "status": self.status,
                 "reason": self.reason, "calls": self.calls,
                 "coverage": self.coverage, "first": self.first,
-                "constructs": self.constructs}
+                "constructs": self.constructs,
+                **({"history": self.history} if self.history else {})}
 
 
 def routines_of(eng, side, db, notes=None):
@@ -257,6 +266,16 @@ def said_counts(verdicts):
                      if counts.get(s))
 
 
+def weighted(verdicts):
+    """(runs on record whose routine answered every call the same, runs on
+    record) - the application's calls, weighed by how often it makes
+    them (`history`)."""
+    total = sum((v.history or {}).get("runs", 0) for v in verdicts)
+    same = sum((v.history or {}).get("runs", 0) for v in verdicts
+               if v.status in ("ok", "warn"))
+    return same, total
+
+
 def database_result(db, hop_name, verdicts, notes=(), others=0):
     from ..engines.base import Result
     if not verdicts:
@@ -276,6 +295,11 @@ def database_result(db, hop_name, verdicts, notes=(), others=0):
         if others:
             detail += (f" ({others} of them written by a model or a"
                        " person, not by the translator)")
+    same, total = weighted(verdicts)
+    if total:
+        detail += (f"; of the {total:,} calls on the source's record,"
+                   f" {same / total:.1%} are to routines that answered every"
+                   " call the same")
     if notes:
         detail += "; " + "; ".join(notes)
     status = {"ok": "ok", "warn": "warn", "not proved": "warn",
@@ -323,6 +347,8 @@ class Proof:
         #: whether a proof goes past the fixed inputs to the search and the
         #: solver; the proof's own mutation score asks the fixed ones only
         self.searching = True
+        #: the source's record of its calls, read once when first asked
+        self.history = None
 
     def target_of(self, r):
         return self.dst.get(r.key)
@@ -359,7 +385,10 @@ class Proof:
 
     # ---- entry --------------------------------------------------------------
 
-    def run(self):
+    def run(self, schema=None):
+        """The routines' verdicts; with `schema` (a list), the schema's own
+        proofs on the same sandbox's fixture appended to it - its
+        constraints, collations and sized types (`schema_proofs`)."""
         verdicts = []
         present = [(r, self.target_of(r)) for r in self.src_list]
         for r, t in present:
@@ -371,11 +400,15 @@ class Proof:
         # is, only a function that writes nothing is asked, read-only, on
         # the hop's own servers
         needs = any(not self._on_own(r) for r, _ in runnable)
-        self.open(bool(runnable) and (needs or spec(self.pair.hop)
-                                      is not None))
+        named = spec(self.pair.hop) is not None
+        self.open((bool(runnable) and (needs or named))
+                  or (schema is not None and named))
         try:
             if self.sandbox is not None:
-                verdicts += self._in_sandbox(runnable)
+                if schema is not None:
+                    schema += self.schema_proofs()
+                if runnable:
+                    verdicts += self._in_sandbox(runnable)
             else:
                 for r, t in runnable:
                     if self._on_own(r):
@@ -389,6 +422,40 @@ class Proof:
             self.bank.save()
         return verdicts
 
+    def schema_proofs(self):
+        """[Result]: the schema's own proofs on the sandbox's fixture, made
+        before any routine is made in either server - so a trigger the
+        conversion got wrong is not taken for a constraint that differs."""
+        from ..engines.base import Result
+        from . import bench, collations, constraints, sizing
+        out = []
+        try:
+            b = bench.Bench(self)
+        except Exception as e:  # noqa: BLE001 - said, never ok
+            return [Result("schema", f"{self.db} {what}", "error",
+                           "the sandbox's fixture could not be read: " + (
+                               str(e).strip().splitlines() or [""])[0][:120])
+                    for what in ("constraints", "collations")]
+        try:
+            for what, proved in (("constraints", constraints.prove),
+                                 ("collations", collations.prove),
+                                 ("sized types", sizing.prove)):
+                try:
+                    out += proved(b)
+                except HarnessError as e:
+                    out.append(Result("schema", f"{self.db} {what}", "error",
+                                      f"the sandbox could not run it: {e}"))
+                except Exception as e:  # noqa: BLE001 - said, never ok
+                    b.a.conn.rollback()
+                    b.b.conn.rollback()
+                    out.append(Result(
+                        "schema", f"{self.db} {what}", "error",
+                        "it could not be proved: " + (
+                            str(e).strip().splitlines() or [""])[0][:120]))
+        finally:
+            b.close()
+        return out
+
     # ---- a function asked on the hop's own servers --------------------------
 
     def _on_own(self, r):
@@ -398,6 +465,31 @@ class Proof:
         the sandbox. A procedure, a trigger or an event is there to write,
         and is only run in the sandbox."""
         return r.kind == "function"
+
+    def _recorded(self, r):
+        """(argument tuples as the application calls `r`, the most run
+        first; {parameter: the values it is called with}; what the record
+        says of it, for the verdict) - from the source's record of its
+        calls, where the hop's masking allows (`history`)."""
+        from . import history
+        if self.history is None:
+            self.history = history.read(self.pair, self.db, self.src_list)
+            if self.history.why:
+                self.notes.append("the source's record of its calls was not"
+                                  f" used: {self.history.why}")
+        rec = self.history.of(r)
+        if rec is None or not rec.shapes:
+            return [], {}, None
+        compared = inputs.compared_columns(
+            r.body or r.settings.get("expression"),
+            [p.name for p in r.params])
+        ok = history.allowed(self.pair.hop, r, compared)
+        tuples = rec.tuples(r.params, ok)
+        values = {p.name: rec.values(k, ok) for k, p in enumerate(r.params)
+                  if p.mode != "out"}
+        return tuples, {k: v for k, v in values.items() if v}, {
+            "runs": rec.runs, "shapes": len(rec.shapes),
+            "tried": len(tuples)}
 
     def _args(self, r, t, extra=()):
         pools = []
@@ -456,12 +548,17 @@ class Proof:
                                readonly=True).open()
         except HarnessError as e:
             return Verdict(r.said, "not proved", str(e))
-        calls, seen_error = 0, set()
+        calls, seen_error, masked = 0, set(), False
+        mode = harness.clock_mode(a, b, _text(r), _text(t))
+        recorded, values, said = self._recorded(r)
         try:
-            for args in self._args(r, t):
+            for args in _once(recorded + self._args(r, t, values)):
                 try:
-                    x = self._render(r, a.call(r, list(args), []))
-                    y = self._render(r, b.call(t, list(args), []))
+                    x, y, clock = self._both(
+                        a, b, lambda: self._render(r, a.call(
+                            r, list(args), [])),
+                        lambda: self._render(r, b.call(
+                            t, list(args), [])), mode)
                 except HarnessError as e:
                     return Verdict(r.said, "not proved", f"a call could not"
                                    f" be made: {str(e)[:100]}")
@@ -472,30 +569,39 @@ class Proof:
                     return Verdict(r.said, "not proved",
                                    "it writes, and the hop's own servers are"
                                    " only read: it needs the sandbox", calls)
-                found = differences(x, y, harness.reads_clock(r.body))
+                found = differences(x, y, clock)
+                if clock is True and not found and differences(x, y):
+                    masked = True
                 if found:
                     self.bank.keep(f"{r.kind}:{r.name}", args)
                     return Verdict(r.said, "diff", self._first(r, args,
                                                                found),
                                    calls, first={"args": repr(args),
-                                                 "found": found})
+                                                 "found": found},
+                                   history=said)
                 if x.error:
                     seen_error.add(harness.error_key(x.error)[0])
         finally:
             a.close()
             b.close()
         if r.settings.get("expression") is not None:
-            reason = "" if not (seen_error & set(harness.UNKNOWN_CLASSES)) \
-                else "some calls errored on both sides with no class to" \
-                     " compare"
-            return Verdict(r.said, "warn" if reason else "ok", reason, calls,
-                           coverage="one expression, reached by every call")
+            short = []
+            if seen_error & set(harness.UNKNOWN_CLASSES):
+                short.append("some calls errored on both sides with no class"
+                             " to compare")
+            if masked:
+                short.append(CLOCK_TOLERATED)
+            return Verdict(r.said, "warn" if short else "ok",
+                           "; ".join(short), calls,
+                           coverage="one expression, reached by every call",
+                           history=said)
         return Verdict(r.said, "warn", f"{calls} calls answered the same on"
                        " the hop's own servers, read-only, but which of its"
                        " statements ran was not measured: " + (
                            self.why_not if spec(self.pair.hop) is not None
                            and self.why_not else "no sandbox is named for"
-                           " this hop (proof_sandbox)"), calls)
+                           " this hop (proof_sandbox)"), calls,
+                       history=said)
 
     def _first(self, r, args, found):
         names = [p.name for p in r.params]
@@ -529,10 +635,12 @@ class Proof:
     def _create_all(self, runner, routines):
         """Every routine of a side in its sandbox; (made, {name: why
         not}). A MySQL routine goes in instrumented where probes change
-        nothing it does. Several rounds, for a body the server checks
-        against routines made after it."""
+        nothing it does, and beside an instrumented copy of its own where
+        they would (`runner.twins`, `mysql_pg.instrument`). Several rounds,
+        for a body the server checks against routines made after it."""
         from . import mysql_pg
         probes, failed = {}, {}
+        runner.twins, runner.opaque = {}, {}
         if runner.engine == "mysql":
             with runner.conn.cursor() as cur:
                 cur.execute(f"create table if not exists"
@@ -544,12 +652,17 @@ class Proof:
             left = []
             for r in todo:
                 try:
-                    stmts, got = self._statements(r, runner.engine)
+                    stmts, got, twin = self._statements(r, runner.engine)
                     runner.drop(r)
+                    if twin:
+                        runner.drop(Routine(kind=r.kind, name=twin))
                     runner.create(stmts, r.settings)
+                    name = r.name if r.kind != "event" else \
+                        f"migkit_event_{r.name}"
                     if got:
-                        probes[r.name if r.kind != "event" else
-                               f"migkit_event_{r.name}"] = got
+                        probes[name] = got
+                    if twin:
+                        runner.twins[name] = twin
                     failed.pop(r.name, None)
                 except Exception as e:  # noqa: BLE001 - said per routine
                     runner.conn.rollback()
@@ -573,13 +686,16 @@ class Proof:
                             definition=f"create procedure `{name}`()"
                                        f" {r.body}", settings=r.settings)
             got = mysql_pg.instrument(r)
+            if got and got[2]:
+                # the routine as it is, and its instrumented copy beside
+                return [r.definition, got[0]], got[1], got[2]
             if got:
-                return [got[0]], got[1]
-            return [r.definition], None
+                return [got[0]], got[1], None
+            return [r.definition], None, None
         if engine in ("mssql", "oracle"):
             # a CREATE is a batch of its own; the server keeps it whole
-            return [r.definition], None
-        return [s for s in _pg_statements(r.definition)], None
+            return [r.definition], None, None
+        return [s for s in _pg_statements(r.definition)], None, None
 
     def begin(self, targets):
         """The sandbox's two runners, with the source's routines made in
@@ -611,7 +727,10 @@ class Proof:
             return Verdict(r.said, "diff", "the target's version is refused"
                            f" by its own engine: {self.dst_failed[t.name]}")
         try:
-            return self.prove_one(self.a, self.b, r, t)
+            v = self.prove_one(self.a, self.b, r, t)
+            if v.history is None and r.kind in ("function", "procedure"):
+                v.history = self._recorded(r)[2]
+            return v
         except HarnessError as e:
             return Verdict(r.said, "not proved",
                            f"the sandbox could not run it: {e}")
@@ -630,6 +749,42 @@ class Proof:
                        name=r.name))
         b.clear(statements)
         b.create(statements)
+        t = self.made(r)
+        if t is not None:
+            self._probed(t)
+
+    def _probed(self, t):
+        """A version made in a MySQL target's sandbox made again with the
+        probes its coverage is measured by - in its own place, or beside
+        it where they would change what it reads - as the target's
+        routines made at the start are (`_create_all`)."""
+        b = self.b
+        if b.engine != "mysql" or t.definition is None:
+            return
+        try:
+            stmts, got, twin = self._statements(t, "mysql")
+        except HarnessError:
+            return
+        if not got:
+            return
+        name = t.name if t.kind != "event" else f"migkit_event_{t.name}"
+        try:
+            b.drop(t)
+            if twin:
+                b.drop(Routine(kind=t.kind, name=twin))
+            b.create(stmts, t.settings)
+        except Exception:  # noqa: BLE001 - made again as it was
+            b.conn.rollback()
+            b.create([t.definition], t.settings)
+            return
+        self.dst_probes[name] = got
+        if not hasattr(b, "twins"):
+            b.twins, b.opaque = {}, {}
+        if twin:
+            b.twins[name] = twin
+        else:
+            b.twins.pop(name, None)
+        b.opaque.pop(name, None)
 
     def try_version(self, r, statements):
         """One candidate version of `r`, made in the target's sandbox in
@@ -639,31 +794,40 @@ class Proof:
         b = self.b
         kind = {"event": "procedure"}.get(r.kind, r.kind)
         b.drop(Routine(kind=kind, name=r.name))
+
+        def gone():
+            # whatever the version made, not only the routine of its name:
+            # a trigger made once per event leaves the others to fire in
+            # every later proof
+            b.drop(Routine(kind=kind, name=r.name))
+            b.clear(statements)
         try:
             b.clear(statements)
             b.create(statements)
         except Exception as e:  # noqa: BLE001 - the candidate's failure
             b.conn.rollback()
+            gone()
             return Verdict(r.said, "diff", "the target refuses it:"
                            f" {(str(e).strip().splitlines() or [''])[0][:160]}"
                            ), None
         t = self.made(r)
         if t is None:
-            b.drop(Routine(kind=kind, name=r.name))
+            gone()
             return Verdict(r.said, "diff", f"it makes no {kind} named"
                            f" {r.name}"), None
         self.dst_failed.pop(t.name, None)
         findings = [f for f in (b.check(t) if hasattr(b, "check") else [])
                     if str(f[0]).startswith("error")]
         if findings:
-            b.drop(t)
+            gone()
             level, message, line = findings[0]
             return Verdict(r.said, "diff", "the target's static check finds:"
                            f" {message}" + (f" (line {line})" if line
                                             else "")), None
+        self._probed(t)
         v = self.verdict_for(r, t)
         if v.status not in ("ok", "warn"):
-            b.drop(t)
+            gone()
         return v, t
 
     def _in_sandbox(self, runnable):
@@ -672,32 +836,56 @@ class Proof:
             self.begin(self.dst_list)
             for r, t in runnable:
                 out.append(self.verdict_for(r, t))
+            self.in_sequences(runnable, out)
         finally:
             self.end()
         return out
+
+    def in_sequences(self, runnable, verdicts):
+        """The routines every single call of which answered the same, held
+        to the source over sequences of calls (`sequences`): a sequence
+        that differs makes the verdict of the routine whose call differed
+        `diff`, naming the calls before it. [Found]."""
+        from . import sequences
+        pairs = [(r, t) for (r, t), v in zip(runnable, verdicts)
+                 if v.status in ("ok", "warn") and t is not None and
+                 t.name not in self.dst_failed and
+                 r.name not in self.src_failed]
+        if not self.searching or not pairs:
+            return []
+        try:
+            found, runs, left = sequences.prove(self, pairs)
+        except HarnessError as e:
+            self.notes.append("sequences of calls were not run: the"
+                              f" sandbox could not run them ({e})")
+            return []
+        by = {v.said: v for v in verdicts}
+        for f in found:
+            r = f.calls[f.at][0]
+            v = by.get(r.said)
+            if v is None:
+                continue
+            v.status = "diff"
+            v.reason = "in a sequence of calls, " + f.said()
+            v.first = {"sequence": [[x.name, repr(a)] for x, a in
+                                    f.calls[:f.at + 1]], "found": f.what}
+        self.notes += sequences.said(found, runs, left)
+        return found
 
     # ---- one routine --------------------------------------------------------
 
     def prove_one(self, a, b, r, t):
         """One routine run on both sides; its verdict."""
-        from . import mysql_pg
         tables = list(a.watched)
         if r.kind == "trigger":
             return self._trigger(a, b, r, t, tables)
         writes = sorted(written(r, self.src_known, tables)) \
             if r.kind != "event" else tables
-        commits = False
-        try:
-            if a.engine == "mysql" and r.body:
-                commits = any(n.kind == "tx" for n in
-                              mysql_pg.read(r.body).walk())
-            elif a.engine == "mssql" and r.body:
-                from . import tsql_pg
-                commits = any(n.kind == "tx" and n.what != "begin"
-                              for s in tsql_pg._Parser(r.body).statements(
-                                  until=()) for n in s.walk())
-        except Refused:
-            commits = False
+        # a version that commits where the source does not is still run
+        # as one that commits: held in the proof's transaction, it would
+        # commit the fixture away under every call after it
+        commits = commits_itself(a.engine, r) or \
+            commits_itself(b.engine, t)
         call_r = r if r.kind != "event" else Routine(
             kind="procedure", name=f"migkit_event_{r.name}")
         takes = [p for p in t.params if "refcursor" not in str(p.type)]
@@ -710,10 +898,8 @@ class Proof:
             a.coverage_reset()
         if hasattr(b, "coverage_reset"):
             b.coverage_reset()
-        extra = self._fixture_values(a, r)
-        argsets = list(self.bank.inputs(f"{r.kind}:{r.name}")) + \
-            self._args(r, t, extra)
-        clock = harness.reads_clock(r.body)
+        argsets = self.argsets(a, r, t)
+        mode = harness.clock_mode(a, b, _text(r), _text(t), commits)
         if harness.reads_chance(r.body):
             return Verdict(r.said, "not proved", "it answers from a random"
                            " source, so two runs of the same call need not"
@@ -727,12 +913,15 @@ class Proof:
 
         def once(args):
             nonlocal masked, unknown
-            x = self._render(r, a.call(call_r, list(args), writes, commits))
-            y = self._render(r, b.call(t, list(args), writes, commits))
+            x, y, clock = self._both(
+                a, b, lambda: self._call(a, r, call_r, args, writes,
+                                         commits, mode),
+                lambda: self._call(b, r, t, args, writes, commits, mode),
+                mode)
             if kept is not None and len(kept) < keep.KEEP:
                 kept.append((args, x))
             found = differences(x, y, clock)
-            if clock and not found and differences(x, y, False):
+            if clock is True and not found and differences(x, y):
                 masked = True
             if x.error and y.error and harness.error_key(x.error)[0] in \
                     harness.UNKNOWN_CLASSES:
@@ -768,6 +957,70 @@ class Proof:
                                calls, first={"args": repr(args),
                                              "found": found}, args=args)
         return self._covered(a, b, r, t, calls, findings, masked, unknown)
+
+    def argsets(self, a, r, t):
+        """What `r` is called with, in the order tried: every input that
+        ever told two versions of it apart, the calls the application
+        makes (`history`), then the class pools, the body's constants and
+        the fixture's values."""
+        extra = self._fixture_values(a, r)
+        recorded, values, _ = self._recorded(r) \
+            if r.kind in ("function", "procedure") else ([], {}, None)
+        for p, vs in values.items():
+            extra[p] = vs + [v for v in extra.get(p, []) if v not in vs]
+        return _once(list(self.bank.inputs(f"{r.kind}:{r.name}"))
+                     + recorded + self._args(r, t, extra))
+
+    def _both(self, a, b, on_a, on_b, mode):
+        """(the source's outcome, the target's, how their time values are
+        compared - `differences`' `clock`) of one call made on both
+        sides by `on_a` and `on_b`, the two sessions' clocks set to one
+        instant where `mode` (`harness.clock_mode`) says they can be: both
+        to now where both can be set, else the side that cannot is called
+        first and the other set to the instant it read."""
+        how, first, reads = mode
+        try:
+            if how == "pinned" and first is None:
+                a.at = b.at = _utcnow()
+            if first == "b":
+                y = on_b()
+                a.at = harness._instant(y.now)
+                x = on_a()
+            else:
+                x = on_a()
+                if first == "a":
+                    b.at = harness._instant(x.now)
+                y = on_b()
+        finally:
+            a.at = b.at = None
+        clock = {None: False, "pinned": False}.get(how, how)
+        if how == "pinned" and reads and (x.now is None or y.now is None):
+            # an instant that could not be read ahead (the call failed
+            # before it): this call's times are compared within the
+            # tolerance, and said
+            clock = True
+        return x, y, clock
+
+    def _call(self, runner, r, routine, args, writes, commits, mode):
+        """One call of `routine` on `runner`, rendered in the source's
+        classes - and of the instrumented copy it is measured by, where it
+        has one (`mysql_pg.instrument`): the copy is held to the routine
+        call by call, and the first answer it gives apart is kept
+        (`runner.opaque`), so its coverage is not counted."""
+        got = self._render(r, runner.call(routine, list(args), writes,
+                                          commits))
+        twin = getattr(runner, "twins", {}).get(routine.name)
+        if twin and routine.name not in runner.opaque:
+            copy = Routine(kind=routine.kind, name=twin,
+                           params=routine.params, returns=routine.returns,
+                           returns_set=routine.returns_set)
+            mine = self._render(r, runner.call(copy, list(args), writes,
+                                               commits))
+            apart = differences(got, mine, {None: False, "pinned": False}
+                                .get(mode[0], mode[0]))
+            if apart:
+                runner.opaque[routine.name] = (tuple(args), apart[0])
+        return got
 
     def _solved(self, a, r):
         """Inputs solved for the source's branches no call reached yet."""
@@ -887,8 +1140,7 @@ class Proof:
         cov_said.append(got[0])
         short += got[1]
         if masked:
-            short.append("a time value it reads from the clock was compared"
-                         " within 5 seconds")
+            short.append(CLOCK_TOLERATED)
         if unknown:
             short.append("some calls errored on both sides with no class to"
                          " compare")
@@ -924,12 +1176,29 @@ class Proof:
         if runner.engine == "mysql":
             mine = probes.get(name)
             if not mine:
-                return "", [f"the {side}'s coverage cannot be measured: it"
-                            " reads ROW_COUNT(), FOUND_ROWS() or the"
-                            " diagnostics area, which a probe would change"]
+                return "", [f"the {side}'s coverage cannot be measured: "
+                            + _unprobed(routine)]
+            apart = getattr(runner, "opaque", {}).get(name)
+            if apart:
+                args, what = apart
+                return "", [f"the {side}'s coverage is not counted: the"
+                            " instrumented copy it is measured by answered"
+                            f" {args!r} otherwise than the routine ({what})"]
             hit = runner.probes_hit(Routine(kind=routine.kind, name=name))
             missed = [(ln, what) for n, ln, what in mine if n not in hit]
             said = f"{side}: {len(mine) - len(missed)}/{len(mine)} blocks"
+            if missed:
+                where = ", ".join(f"line {ln} ({w})" for ln, w in missed[:4])
+                return said, [f"on the {side}, never reached: {where}"]
+            return said, []
+        if runner.engine == "oracle":
+            got = runner.coverage(routine)
+            if got is None:
+                return "", [f"the {side}'s coverage was not measured: "
+                            + (runner.coverage_off or "its sandbox keeps"
+                               " no block coverage")]
+            reached, blocks, missed = got
+            said = f"{side}: {reached}/{blocks} blocks"
             if missed:
                 where = ", ".join(f"line {ln} ({w})" for ln, w in missed[:4])
                 return said, [f"on the {side}, never reached: {where}"]
@@ -966,16 +1235,20 @@ class Proof:
         if not statements:
             return Verdict(r.said, "not proved", f"{src_t} has no row in the"
                            " fixture to fire it with")
-        calls = 0
+        calls, masked = 0, False
+        mode = harness.clock_mode(a, b, _text(r), _text(t))
         for what, (sa, pa), (sb_, pb) in statements:
-            x = a.run(sa, pa, tables)
-            y = b.run(sb_, pb, tables)
+            x, y, clock = self._both(
+                a, b, lambda: a.run(sa, pa, tables),
+                lambda: b.run(sb_, pb, tables), mode)
             calls += 1
-            found = differences(x, y)
+            found = differences(x, y, clock)
+            if clock is True and not found and differences(x, y):
+                masked = True
             if found:
                 return Verdict(r.said, "diff", f"{what}: {found[0]}", calls,
                                first={"statement": what, "found": found})
-        return self._covered(a, b, r, t, calls, findings, False, False)
+        return self._covered(a, b, r, t, calls, findings, masked, False)
 
     def _firings(self, a, b, t, events, body=None):
         """[(what, (source statement, params), (target statement,
@@ -1081,6 +1354,88 @@ class Proof:
 _SAME = object()
 
 
+def _unprobed(routine):
+    """Why a MySQL routine carries no probes."""
+    if routine.kind == "trigger" and re.search(
+            r"(?i)\b(row_count|found_rows)\s*\(|\bget\s+(current\s+)?"
+            r"diagnostics\b", routine.body or ""):
+        return ("it is a trigger reading ROW_COUNT(), FOUND_ROWS() or the"
+                " diagnostics area, which a probe would change, and a"
+                " trigger fires by itself: no copy can be called beside it")
+    if re.search(r"(?i)\bget\s+(current\s+)?diagnostics\s+condition\s+"
+                 r"[^\d\s]", routine.body or ""):
+        return ("it reads a condition by a number held in a variable,"
+                " which no copy can keep for it")
+    return "its body could not be read into blocks to probe"
+
+
+def commits_itself(engine, r):
+    """Whether a routine commits or rolls back for itself, as its own
+    body says - so it cannot be run inside a transaction the proof rolls
+    back, or held with others in one."""
+    from . import mysql_pg, tsql_pg
+    if r is None or not r.body:
+        return False
+    try:
+        if engine == "mysql":
+            return any(n.kind == "tx" for n in mysql_pg.read(r.body).walk())
+        if engine == "mssql":
+            return any(n.kind == "tx" and n.what != "begin"
+                       for s in tsql_pg._Parser(r.body).statements(
+                           until=()) for n in s.walk())
+        if engine == "postgres" and r.kind == "procedure" and \
+                r.language == "plpgsql" and r.definition:
+            return _plpgsql_commits(r.definition)
+    except Refused:
+        return False
+    return False
+
+
+def _plpgsql_commits(definition):
+    """Whether a PL/pgSQL procedure's body holds a COMMIT or a ROLLBACK,
+    as PostgreSQL's own parser reads it."""
+    import pglast
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "PLpgSQL_stmt_commit" in node or \
+                    "PLpgSQL_stmt_rollback" in node:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+    try:
+        return walk(pglast.parse_plpgsql(definition))
+    except Exception:  # noqa: BLE001 - read by its words instead
+        return bool(re.search(r"(?im)^\s*(commit|rollback)\s*;",
+                              definition))
+
+
+def _once(argsets):
+    """Argument tuples in their order, each once."""
+    seen, out = set(), []
+    for args in argsets:
+        key = repr(args)
+        if key not in seen:
+            seen.add(key)
+            out.append(args)
+    return out
+
+
+def _text(routine):
+    """What of a routine is read for the clock it reads: its body, or
+    its one expression."""
+    if routine is None:
+        return ""
+    return routine.body or routine.settings.get("expression") or ""
+
+
+def _utcnow():
+    import datetime as dt
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+
 def _plain(value, loose):
     """A decimal without its trailing zeros, where they say nothing."""
     from decimal import Decimal
@@ -1131,15 +1486,16 @@ def _pg_statements(definition):
     return [text.rstrip(";")]
 
 
-def prove_database(pair, db):
+def prove_database(pair, db, schema=None):
     """The `converted code` line of `check`: views by their rows on the
     hop's own servers, everything else by running it (see the module's
-    docstring). None where the source keeps no code."""
+    docstring). None where the source keeps no code. With `schema` (a
+    list), the schema's own proofs on the sandbox are appended to it."""
     from .convert import translatable
     from .views import prove_views
     verdicts = prove_views(pair, db)
     proof = Proof(pair, db)
-    verdicts += proof.run()
+    verdicts += proof.run(schema)
     ok = {v.said.split(" ", 1)[1] for v in verdicts if v.status == "ok"}
     if pair.dst_engine.CANON_ENGINE == "postgres" and proof.kept:
         from . import keep

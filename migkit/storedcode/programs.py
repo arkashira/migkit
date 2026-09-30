@@ -26,7 +26,7 @@ from .plpgsql import Converted
 from .translate import Refused
 
 #: the source dialects each program reads, by migkit's name for them
-READS = {"ora2pg": {"oracle": [], "mysql": ["-m"], "tsql": ["-M"]},
+READS = {"ora2pg": ("oracle", "mysql", "tsql"),
          "sqlines": {"oracle": "oracle", "mysql": "mysql", "tsql": "sql",
                      "postgres": "postgresql"}}
 WRITES = {"ora2pg": {"postgres"},
@@ -113,6 +113,21 @@ def _run(cmd, env, cwd):
     return got
 
 
+def _converter_args(src, pg_version):
+    """(the PL/SQL converter's configuration for one routine, the flags
+    that say which dialect it reads). No server is asked: the definition
+    is converted from its file; the bodies are converted, the target's
+    own names kept, and a NUMBER is numeric - never an integer type or a
+    float the converter would guess from a missing scale: the same
+    values."""
+    conf = (("ORACLE_DSN", "dbi:Oracle:host=localhost;sid=none"),
+            ("PLSQL_PGSQL", "1"), ("EXPORT_SCHEMA", "0"),
+            ("PG_NUMERIC_TYPE", "0"), ("PG_INTEGER_TYPE", "0"),
+            ("DEFAULT_NUMERIC", "numeric"),
+            ("PG_VERSION", str(pg_version or 16)))
+    return conf, {"oracle": [], "mysql": ["-m"], "tsql": ["-M"]}[src]
+
+
 def ora2pg(routine, src, dst, pg_version=None):
     """The PL/SQL converter's PostgreSQL for one routine, or Refused."""
     from .. import tools
@@ -128,26 +143,33 @@ def ora2pg(routine, src, dst, pg_version=None):
     with tempfile.TemporaryDirectory() as work:
         with open(os.path.join(work, "in.sql"), "w") as f:
             f.write(routine.definition.rstrip().rstrip(";") + ";\n")
+        conf, flags = _converter_args(src, pg_version)
         with open(os.path.join(work, "run.conf"), "w") as f:
-            # no server is asked: the definition is converted from the file
-            # NUMBER as numeric, never an integer type or a float the
-            # converter would guess from the missing scale: the same values
-            f.write("ORACLE_DSN\tdbi:Oracle:host=localhost;sid=none\n"
-                    "PLSQL_PGSQL\t1\nEXPORT_SCHEMA\t0\n"
-                    "PG_NUMERIC_TYPE\t0\nPG_INTEGER_TYPE\t0\n"
-                    "DEFAULT_NUMERIC\tnumeric\n"
-                    f"PG_VERSION\t{pg_version or 16}\n")
-        run = _run(cmd + ["-c", "run.conf"] + READS["ora2pg"][src] + [
+            f.write("".join(f"{k}\t{v}\n" for k, v in conf))
+        base = cmd + ["-c", "run.conf"] + flags + [
             "-i", "in.sql", "-t", ORA2PG_TYPES.get(routine.kind, "FUNCTION"),
-            "-o", "out.sql", "-b", work], env, work)
+            "-o", "out.sql", "-b", work]
         path = os.path.join(work, "out.sql")
-        script = open(path).read() if os.path.exists(path) else ""
-    made = statements(script)
+        # with its cost estimate on, which it writes beside the version
+        # as comments the statements are read without (`effort`); a
+        # build that refuses the estimate for a kind is run without it
+        cost = None
+        for extra in (["--estimate_cost"], []):
+            if os.path.exists(path):
+                os.remove(path)
+            run = _run(base + extra, env, work)
+            script = open(path).read() if os.path.exists(path) else ""
+            made = statements(script)
+            if run.returncode == 0 and made:
+                if extra:
+                    from .effort import units
+                    cost = units(script + "\n" + (run.stdout or ""))
+                break
     if run.returncode != 0 or not made:
         why = (run.stderr.strip().splitlines() or ["it wrote nothing"])[-1]
         raise Refused(f"the PL/SQL converter wrote nothing for it: "
                       f"{why[:100]}")
-    return Converted(made)
+    return Converted(made, cost=cost)
 
 
 def sqlines(routine, src, dst):
@@ -179,3 +201,52 @@ def sqlines(routine, src, dst):
     if not made:
         raise Refused("the multi-dialect converter wrote nothing for it")
     return Converted(made)
+
+
+#: the PL/SQL converter's options migkit's code passes, by the token that
+#: turns each on there (`tooluse`: used is read off this file)
+_CONVERTER_TOKENS = {o: o for o in (
+    "-c", "-i", "-t", "-o", "-b", "-m", "-M", "--estimate_cost",
+    "--cost_unit_value", "--human_days_limit", "SHOW_REPORT", "TEST",
+    "PLSQL_PGSQL", "PG_NUMERIC_TYPE", "PG_INTEGER_TYPE", "DEFAULT_NUMERIC",
+    "PG_VERSION", "EXPORT_SCHEMA", "AUTONOMOUS_TRANSACTION")}
+
+
+def _register():
+    """The PL/SQL converter's account: what migkit asks it for is read off
+    this file; what it is not asked for says why - one routine's own
+    statement from a file, converted and scored, never a connection to a
+    server (migkit reads the catalogue itself)."""
+    from .. import tooluse
+    if "ora2pg" in tooluse.REGISTRY:
+        return
+    tooluse.register(
+        "ora2pg", licence="GPL-3.0-or-later", release="v25.0",
+        declared={"": frozenset(_CONVERTER_TOKENS)},
+        reads=(("storedcode/programs.py::ora2pg",
+                "storedcode/programs.py::_converter_args"),
+               {("", o): t for o, t in _CONVERTER_TOKENS.items()}),
+        options={
+            ("", "--cost_unit_value"): (
+                tooluse.UNUSED, "its own five minutes a unit is kept and"
+                                " said with the figure, never changed"),
+            ("", "--human_days_limit"): (
+                tooluse.UNUSED, "the migration level letter it grades by is"
+                                " not shown; migkit's count is per routine"),
+            ("", "SHOW_REPORT"): (
+                tooluse.UNUSED, "its inventory needs a connection to the"
+                                " source; migkit reads the catalogue itself"
+                                " and has each routine scored from its"
+                                " statement"),
+            ("", "TEST"): (
+                tooluse.UNUSED, "it counts objects on both sides; migkit"
+                                " runs every routine on both and compares"
+                                " what each call did"),
+            ("", "AUTONOMOUS_TRANSACTION"): (
+                tooluse.UNUSED, "its wrapper opens a new connection with a"
+                                " password in the body; such a routine is"
+                                " left to the other candidates and to the"
+                                " proof")})
+
+
+_register()

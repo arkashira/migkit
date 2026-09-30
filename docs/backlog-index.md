@@ -219,15 +219,15 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 157 | CV.P3 | Model as hole-filler on the best partial candidate, bounded rounds | IN PROGRESS ae866ee (storedcode/model.py in its worktree; the backlog does not list it) | M | conversion | report L307 |
 | 158 | CV.P4 | Two-sided reduction (Hypothesis shrinking, ddmin) | IN PROGRESS ae866ee (storedcode/reduce.py) | M | conversion | L2820-2821; report L308 |
 | 159 | CV.P5 | Aligned intermediate-state capture | OPEN | M | conversion | report L309 |
-| 160 | CV.P6 | Inputs from the real call history | OPEN | S | conversion | L2819; report L310 |
+| 160 | CV.P6 | Inputs from the real call history | DONE, tests written, full run pending (storedcode/history.py) | S | conversion | L2819; report L310 |
 | 161 | CV.P7 | Concolic solving (z3) for untaken branches | IN PROGRESS ae866ee (storedcode/concolic.py) | M | conversion | L2819-2820; report L311 |
-| 162 | CV.P8 | Stateful call sequences | OPEN | M | conversion | report L312 |
+| 162 | CV.P8 | Stateful call sequences | DONE, tests written, full run pending (storedcode/sequences.py) | M | conversion | report L312 |
 | 163 | CV.P9 | Emulation candidates (orafce, MariaDB Oracle mode, IvorySQL, openGauss, Babelfish, openHalo) | IN PROGRESS ae866ee | M | conversion | L2814-2818; report L313 |
 | 164 | CV.P10 | Workload corpus + cross-engine replay (a cross-engine pt-upgrade on workload.py), frequency-weighted | OPEN (queued as its own item) | M | conversion | L2810-2814, L2827-2828; WAVE queue |
 | 165 | CV.P11 | Static application scan (ast-grep + sqlglot) | OPEN | M | conversion | L2813-2814; report L315 |
-| 166 | CV.P12 | Constraints proved to accept and reject the same rows (z3 CHECK equivalence) | OPEN | M | conversion | L2821-2822; report L316 |
-| 167 | CV.P13 | Collation agreement matrix from real values | OPEN | S | conversion | L2822; report L317 |
-| 168 | CV.P14 | Types sized from data with recorded domain changes | OPEN | S | conversion | report L318 |
+| 166 | CV.P12 | Constraints proved to accept and reject the same rows (z3 CHECK equivalence) | DONE, tests written, full run pending (storedcode/constraints.py) | M | conversion | L2821-2822; report L316 |
+| 167 | CV.P13 | Collation agreement matrix from real values | DONE, tests written, full run pending (storedcode/collations.py) | S | conversion | L2822; report L317 |
+| 168 | CV.P14 | Types sized from data with recorded domain changes | DONE, tests written, full run pending (storedcode/sizing.py, hop option types_from_data) | S | conversion | report L318 |
 | 169 | CV.P15 | Index/partition advice on the translated workload (HypoPG, Dexter) | OPEN | M | conversion | L2822-2823; report L319 |
 | 170 | CV.P16 | Rules learned from accepted fixes, adopted only with zero regressions | IN PROGRESS ae866ee (storedcode/learn.py) | L | conversion | L2823; report L320 |
 | 171 | CV.P17 | Built-in semantics mined from the engines' own test suites | OPEN | M | conversion | report L321 |
@@ -236,7 +236,7 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 174 | CV.P20 | Scalar routines: bounded verification of a model of both bodies | OPEN (research) | L | conversion | report L324 |
 | 175 | CV.P21 | Schema restructuring with a proof | OPEN (research) | L | conversion | report L325 |
 | 176 | W3 | Code conversion at enterprise breadth: PL/SQL packages with emulation, T-SQL at depth, application-embedded SQL found and converted | OPEN (pieces in CV.P9-P11) | L | conversion | L2972-2976 |
-| 177 | 40.conv | Effort estimates for conversion (Ora2Pg cost units) | OPEN | S | conversion | L3959-3960, L4614-4615 |
+| 177 | 40.conv | Effort estimates for conversion (Ora2Pg cost units) | DONE, tests written, full run pending (storedcode/effort.py) | S | conversion | L3959-3960, L4614-4615 |
 | 178 | ER1 | Exact warehouse loads + one SHA-256 row digest in each engine's SQL (BigQuery committed streams, Snowpipe Streaming channels, Redshift COPY, Delta txn, Iceberg snapshot properties; staged Parquet) | IN PROGRESS a7120bc (warehouse exact loads + SQL digest; paused) | L | engines | L2797-2798, L2832-2842, L3657-3659 |
 | 179 | ER1.acct | Warehouses run against real accounts; their other cells (stream, fence, confirm, users, settings, snapshot, deep, sequences) | BLOCKED (needs accounts; emulators have gaps) | M | engines | L3645-3659, L4543-4544, L4756-4757 |
 | 180 | ER2 | Copybook engine (EBCDIC, packed and zoned decimals) and IBM i with DISPLAY_JOURNAL follow and HASH_ROW | IN PROGRESS a8c4cd1 (copybook + IBM i; paused) | L | engines | L2843-2851 |

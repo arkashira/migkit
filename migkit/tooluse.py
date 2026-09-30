@@ -46,7 +46,8 @@ READ_OFF = "read off the code that drives it"
 #: all of migkit
 CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.engines.oracle_redo", "migkit.engines.db2i",
-                "migkit.engines.warehouse", "migkit.engines.lake"]
+                "migkit.engines.warehouse", "migkit.engines.lake",
+                "migkit.storedcode.programs"]
 
 _HERE = Path(__file__).parent
 

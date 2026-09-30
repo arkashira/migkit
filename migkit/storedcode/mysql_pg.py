@@ -489,6 +489,18 @@ class _Parser:
 
     def _call(self, start, line):
         self.i += 1
+        if self.is_(TokenType.STRING):
+            # the tokenizer keeps what follows CALL as one piece of text,
+            # as it does FETCH's; it is read again, as its own tokens
+            rest = _Parser(self.tok().text)
+            self.i += 1
+            node = rest._call_rest(start, line)
+            if not rest.at_end():
+                raise Refused(f"a CALL at line {line} could not be read")
+            return node
+        return self._call_rest(start, line)
+
+    def _call_rest(self, start, line):
         name = self.name()
         while self.eat("."):
             name = self.name()
@@ -1450,7 +1462,11 @@ def fix(tree, ctx, line, code):
     Children first: a rule that rebuilds a node copies children already
     carried."""
     for node in reversed(list(tree.walk())):
-        if isinstance(node, exp.Length) and node.args.get("binary"):
+        clock = _clock(node, line)
+        if clock is not None:
+            code("mysql.clock", line)
+            node.replace(clock)
+        elif isinstance(node, exp.Length) and node.args.get("binary"):
             code("mysql.length-bytes", line)
             node.replace(exp.Anonymous(this="octet_length",
                                        expressions=[node.this.copy()]))
@@ -1493,6 +1509,70 @@ def fix(tree, ctx, line, code):
                 node.args.get("limit") is not None:
             _limited(node, line, code)
     return tree
+
+
+#: MySQL's clock functions, by the instant each answers from in
+#: PL/pgSQL: the transaction's (as MySQL's statement time is, and as the
+#: proof sets both sessions to one), the wall clock's, or UTC's
+_CLOCK_AT = {"now": "localtimestamp", "localtime": "localtimestamp",
+             "localtimestamp": "localtimestamp",
+             "current_timestamp": "localtimestamp",
+             "sysdate": "cast(clock_timestamp() as timestamp)",
+             "utc_timestamp": "(now() at time zone 'UTC')"}
+_CLOCK_NODES = {exp.CurrentTimestamp: "current_timestamp",
+                exp.Localtime: "localtime",
+                exp.Localtimestamp: "localtimestamp",
+                exp.UtcTimestamp: "utc_timestamp",
+                exp.CurrentTime: "curtime", exp.UtcTime: "utc_time",
+                exp.UtcDate: "utc_date"}
+#: the fractional digits a clock is cut to, as PostgreSQL's `date_trunc`
+#: names them
+_CUT = {0: "second", 3: "milliseconds", 6: None}
+
+
+def _clock(node, line):
+    """A MySQL clock function as PL/pgSQL answering the same value from
+    the same instant, or None where `node` is none. MySQL's `NOW()` is
+    the statement's time cut (not rounded) to its digits, none by
+    default; PostgreSQL's `now()` keeps every microsecond and
+    `localtimestamp(0)` rounds - so each is cut as MySQL cuts it.
+    `UNIX_TIMESTAMP()` is whole seconds. A clock read to a number of
+    digits `date_trunc` has no unit for is refused."""
+    from .translate import parse
+    name = _CLOCK_NODES.get(type(node))
+    args = []
+    if name is None and isinstance(node, exp.Anonymous):
+        name = str(node.name).lower()
+        args = list(node.expressions)
+    elif name is not None and node.args.get("this") is not None:
+        args = [node.args["this"]]
+    if name not in _CLOCK_AT and name not in ("curtime", "utc_time",
+                                              "utc_date", "unix_timestamp"):
+        return None
+    if name == "unix_timestamp":
+        if args:
+            return None
+        return parse("cast(floor(extract(epoch from now())) as bigint)",
+                     "postgres")
+    if name == "utc_date":
+        return parse("cast((now() at time zone 'UTC') as date)", "postgres")
+    digits = 0
+    if args:
+        if not (isinstance(args[0], exp.Literal) and
+                str(args[0].this).isdigit()):
+            raise Refused(f"line {line} reads the clock to a number of"
+                          " digits that is not written in it")
+        digits = int(args[0].this)
+    if digits not in _CUT:
+        raise Refused(f"line {line} reads the clock to {digits} digits,"
+                      " which migkit's rules cut only to 0, 3 or 6")
+    at = _CLOCK_AT.get(name) or (
+        "(now() at time zone 'UTC')" if name == "utc_time"
+        else "localtimestamp")
+    cut = f"date_trunc('{_CUT[digits]}', {at})" if _CUT[digits] else at
+    if name in ("curtime", "utc_time"):
+        cut = f"cast({cut} as time)"
+    return parse(cut, "postgres")
 
 
 def _on_duplicate(node, ctx, line, code):
@@ -1616,15 +1696,111 @@ def _schedule_said(r):
 COVER_TABLE = "migkit_cover"
 
 
+#: what a routine can read of the statement before it, which a probe's
+#: insert would change: {what it reads: (the variable it is kept in,
+#: its type)}
+_KEPT = {"row_count": ("_migkit_rc", "bigint"),
+         "found_rows": ("_migkit_fr", "bigint"),
+         "number": ("_migkit_dn", "int")}
+#: a condition's items, typed as the variable each is kept in
+_ITEM_TYPES = {"MYSQL_ERRNO": "int"}
+#: the statements after which what the routine reads is kept: every one
+#: that runs and goes on to the next
+_LEAVES = ("set", "open", "close", "fetch", "call", "diagnostics", "tx",
+           "result", "select_into", "sql", "unsupported")
+
+
+def _reads(body, tree):
+    """(what `body` reads of the statement before it - "row_count",
+    "found_rows", "number", ("condition", k, item) -, the spans of its
+    `ROW_COUNT()` and `FOUND_ROWS()` calls, the diagnostics statements
+    reading the current area), or None where it reads something no
+    variable can keep: a condition by a number held in a variable, or an
+    item of the area itself other than its count and its number."""
+    toks = _Parser(body).t
+    what, calls = set(), []
+    for k, t in enumerate(toks):
+        word = t.text.lower() if t.token_type not in _QUOTED else ""
+        if word in ("row_count", "found_rows") and k + 2 < len(toks) and \
+                toks[k + 1].token_type == TokenType.L_PAREN and \
+                toks[k + 2].token_type == TokenType.R_PAREN:
+            what.add(word)
+            calls.append((t.start, toks[k + 2].end + 1, word))
+    current = []
+    for node in tree.walk():
+        if node.kind != "diagnostics" or node.stacked:
+            # the stacked area is the copy made as its handler was
+            # entered, which no statement inside the handler changes
+            continue
+        if node.condition is not None:
+            if not str(node.condition).isdigit():
+                return None
+            for _, item in node.items:
+                what.add(("condition", int(node.condition), item))
+        else:
+            for _, item in node.items:
+                if item not in ("ROW_COUNT", "NUMBER"):
+                    return None
+                what.add(item.lower())
+        current.append(node)
+    return what, calls, current
+
+
+def _kept_name(item):
+    if isinstance(item, tuple):
+        return f"_migkit_c{item[1]}_{item[2].lower()}"
+    return _KEPT[item][0]
+
+
+def _from_area(what):
+    """Whether the count is kept from the diagnostics area rather than
+    from `ROW_COUNT()`: where the routine reads the area at all, one
+    reading keeps both, so keeping one cannot move the other."""
+    return any(isinstance(x, tuple) or x == "number" for x in what)
+
+
+def _keep(what):
+    """The statements keeping what the routine reads of the statement just
+    run: the diagnostics area read first (reading it clears nothing),
+    then the conditions it holds, then `ROW_COUNT()` and `FOUND_ROWS()`
+    in one SET, so no keeping moves another."""
+    out = []
+    conds = sorted(x for x in what if isinstance(x, tuple))
+    if _from_area(what):
+        items = ["_migkit_dn = NUMBER"]
+        if "row_count" in what:
+            items.append("_migkit_rc = ROW_COUNT")
+        out.append("get diagnostics " + ", ".join(items))
+        for k in sorted({c[1] for c in conds}):
+            items = ", ".join(f"{_kept_name(c)} = {c[2]}" for c in conds
+                              if c[1] == k)
+            out.append(f"if _migkit_dn >= {k} then get diagnostics"
+                       f" condition {k} {items}; end if")
+    plain = [x for x in ("row_count", "found_rows") if x in what
+             and not (x == "row_count" and _from_area(what))]
+    if plain:
+        out.append("set " + ", ".join(f"{_KEPT[x][0]} = {x}()"
+                                      for x in plain))
+    return "; ".join(out)
+
+
 def instrument(routine):
     """(the statement making an instrumented copy of `routine`, [(probe,
-    line, what)]), or None where probes would change what it does: a
-    routine reading ROW_COUNT(), FOUND_ROWS() or the diagnostics area
-    would read a probe's insert instead of its own statement's."""
+    line, what)], the name the copy is made under - None where it takes
+    the routine's own place), or None where no copy is made.
+
+    A probe is an insert, and an insert changes what `ROW_COUNT()`,
+    `FOUND_ROWS()` and the diagnostics area say of the statement before
+    it. So a routine reading them gets a copy under another name, beside
+    itself: every statement the copy runs is followed by one keeping what
+    it reads in variables of its own, and it reads those - a probe between
+    the statement and the read changes nothing read. The routine itself
+    stays as it is and its calls are the answers compared; each call is
+    made of the copy too, and the copy's coverage counts only while it
+    answers every call as the routine does (`prove`). A trigger fires by
+    itself and cannot be called beside a copy: one that reads them is not
+    instrumented, and its coverage is said not measured."""
     body = routine.body or ""
-    if re.search(r"(?i)\b(row_count|found_rows)\s*\(|\bget\s+"
-                 r"(current\s+|stacked\s+)?diagnostics\b", body):
-        return None
     definition = routine.definition or ""
     at = definition.rfind(body) if body else -1
     if at < 0:
@@ -1633,26 +1809,44 @@ def instrument(routine):
         tree = read(body)
     except Refused:
         return None
+    got = _reads(body, tree)
+    if got is None:
+        return None
+    what, calls, current = got
+    twin = None
+    if what:
+        if routine.kind == "trigger":
+            return None
+        twin = f"migkit_cover_{routine.name}"[:64]
     probes, edits = [], []
     who = routine.name.replace("'", "''")
+    keep = _keep(what) if what else ""
 
     def insert(n):
         return f" insert into {COVER_TABLE} values ('{who}', {n}); "
 
-    def probe(pos, line, what):
-        probes.append((len(probes) + 1, line, what))
-        edits.append((pos, insert(len(probes))))
+    def edit(lo, hi, text, order):
+        # at one place, the lower `order` ends up first
+        edits.append((lo, hi, text, order))
 
-    def at_list(stmts, fallback, line, what):
-        probe(stmts[0].start if stmts else fallback, line, what)
+    def probe(pos, line, what_):
+        probes.append((len(probes) + 1, line, what_))
+        edit(pos, pos, insert(len(probes)), 1)
+
+    def at_list(stmts, fallback, line, what_):
+        probe(stmts[0].start if stmts else fallback, line, what_)
 
     for node in tree.walk():
         if node.kind == "block":
             at_list(node.body, node.end_at, node.line, "block")
             for _, _, hbody, hline in node.handlers:
                 probes.append((len(probes) + 1, hline, "handler"))
-                edits.append((hbody.start, f" begin{insert(len(probes))}"))
-                edits.append((hbody.end, "; end "))
+                # a condition read in the handler is kept as the handler
+                # is entered, before its probe clears the area
+                entry = f" {keep};" if keep else ""
+                edit(hbody.start, hbody.start,
+                     f" begin{entry}{insert(len(probes))}", 1)
+                edit(hbody.end, hbody.end, "; end ", 2)
         elif node.kind == "if":
             for _, stmts, pos, line in node.branches:
                 at_list(stmts, pos, line, "then")
@@ -1660,7 +1854,8 @@ def instrument(routine):
                 at_list(node.otherwise, node.else_at, node.line, "else")
             else:
                 probes.append((len(probes) + 1, node.line, "else (none)"))
-                edits.append((node.end_at, f" else{insert(len(probes))}"))
+                edit(node.end_at, node.end_at,
+                     f" else{insert(len(probes))}", 1)
         elif node.kind == "case":
             for _, stmts, pos, line in node.whens:
                 at_list(stmts, pos, line, "when")
@@ -1668,11 +1863,53 @@ def instrument(routine):
                 at_list(node.otherwise, node.else_at, node.line, "else")
         elif node.kind in ("while", "repeat", "loop"):
             at_list(node.body, node.body_at, node.line, node.kind)
+        if keep and node.kind in _LEAVES:
+            edit(node.end, node.end, f"; {keep}", 0)
+    declared = ""
+    if keep:
+        for lo, hi, word in calls:
+            edit(lo, hi, _KEPT[word][0], 9)
+        for node in current:
+            sets = ", ".join(
+                f"{_target_text(t)} = " + _kept_name(
+                    ("condition", int(node.condition), item)
+                    if node.condition is not None else item.lower())
+                for t, item in node.items)
+            edit(node.start, node.end, f"set {sets}", 9)
+        names = {_kept_name(x): (_KEPT[x][1] if not isinstance(x, tuple)
+                                 else _ITEM_TYPES.get(x[2],
+                                                      "varchar(512)"))
+                 for x in what}
+        if _from_area(what):
+            names.setdefault("_migkit_dn", "int")
+        declared = " ".join(f"declare {n} {t};"
+                            for n, t in sorted(names.items()))
+        if tree.kind == "block":
+            if body[tree.start:tree.start + 5].lower() != "begin":
+                return None
+            # the variables first in the outermost block, as MySQL wants
+            # them before its cursors and handlers; what the routine would
+            # read before its first statement kept before its first probe
+            edit(tree.start + 5, tree.start + 5, f" {declared}", 5)
+            first = tree.body[0].start if tree.body else tree.end_at
+            edit(first, first, f" {keep};", 0)
     text = body
-    for pos, what in sorted(edits, key=lambda x: -x[0]):
-        text = text[:pos] + what + text[pos:]
+    for lo, hi, what_, _ in sorted(edits, key=lambda x: (-x[0], -x[3])):
+        text = text[:lo] + what_ + text[hi:]
     if tree.kind != "block":
         # one statement for a body: a block around it, entered each call
         probes.insert(0, (0, tree.line, "body"))
-        text = f"begin{insert(0)}{text}; end"
-    return definition[:at] + text + definition[at + len(body):], probes
+        first = f" {declared} {keep};" if keep else ""
+        text = f"begin{first}{insert(0)}{text}; end"
+    made = definition[:at] + text + definition[at + len(body):]
+    if twin is not None:
+        made = re.sub(r"(?is)^(\s*create\s+(?:definer\s*=\s*\S+\s+)?"
+                      r"(?:function|procedure)\s+)(`(?:[^`]|``)+`|[\w$]+)",
+                      lambda m: m.group(1) + "`" + twin.replace("`", "``")
+                      + "`", made, count=1)
+    return made, probes, twin
+
+
+def _target_text(target):
+    """A GET DIAGNOSTICS target as a SET writes it."""
+    return target if str(target).startswith("@") else f"`{target}`"
