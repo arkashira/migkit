@@ -105,6 +105,10 @@ HOP_OPTIONS = {
     "code_model_rounds": Key("rounds the model gets on one routine", "int",
                              ("hetero",), knob="size"),
     "create_streams": Key("create a missing stream", "bool", ("kinesis",)),
+    "cutover": Key("the cutover as one timed path that freezes the source"
+                   " and undoes itself (`migkit.cutover`)", "dict|bool",
+                   subs=("budget", "start_below", "freeze", "pooler",
+                         "flip", "flip_undo", "keys", "jobs")),
     "deep": Key("compare every key's value, not a sample", "bool",
                 ("redis",)),
     "exclude_schema": Key("schemas left out of the schema dump", "str",
@@ -165,6 +169,8 @@ HOP_OPTIONS = {
     "settle": Key("seconds a re-check waits for a stream to settle",
                   "int"),
     "share_tables": Key("machines share one move's tables", "bool"),
+    "slot": Key("the slot a pipeline migkit did not set up reads, which"
+                " the fence waits for", "str|list", ("postgres",)),
     "shards": Key("a created stream's shards", "int", ("kinesis",)),
     "snapshot_limit": Key("how old a snapshot may get", "number",
                           ("postgres",)),
@@ -324,7 +330,7 @@ GOALS = {
 }
 
 #: options that write, which a hop whose goal writes nothing contradicts
-WRITING = ("reverse", "topology", "two_way", "protect_target")
+WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover")
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
 

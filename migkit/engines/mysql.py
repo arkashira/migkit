@@ -4930,9 +4930,13 @@ class MySQLEngine(Engine):
             src = dict(self._q("src", q, (db,), fresh=True))
             dst = dict(self._q("dst", q, (ddb,), fresh=True))
             stmts, undo, refuse = [], [], []
+            # head-room above the source's counter where it is asked for
+            # (the cutover's `keys: apart`), read as PostgreSQL's is
+            from .postgres import _seq_buffer
+            buf = _seq_buffer()
             for tbl, sv in sorted(src.items()):
                 dv = dst.get(tbl)
-                if dv == sv:
+                if dv == sv + buf:
                     continue
                 if dv is None:
                     refuse.append(f"{tbl}: not on target")
@@ -4943,8 +4947,9 @@ class MySQLEngine(Engine):
                 if dv > sv:
                     refuse.append(f"{tbl}: target {dv} > source {sv}")
                     continue
-                stmts.append(f"alter table `{ddb}`.`{tbl}` auto_increment = {sv};"
-                             f"  -- dst now {dv}")
+                stmts.append(f"alter table `{ddb}`.`{tbl}` auto_increment ="
+                             f" {sv + buf};  -- dst now {dv}"
+                             + (f" +buffer {buf}" if buf else ""))
                 undo.append(f"alter table `{ddb}`.`{tbl}` auto_increment = {dv};")
             same = sum(1 for tbl, v in src.items() if dst.get(tbl) == v)
             note = f"{len(stmts)} counters raised, {same} already equal"
@@ -6826,7 +6831,10 @@ class MySQLEngine(Engine):
                else "select wait_for_executed_gtid_set(%s, %s)")
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
-            got = self._q("dst", ask, (gtids, 5))
+            # no turn outlasts what is left: a cutover's clock runs while
+            # this waits, and a whole turn past its budget is outage
+            turn = max(0.1, min(5.0, timeout - (time.monotonic() - t0)))
+            got = self._q("dst", ask, (gtids, turn))
             if got and got[0][0] is not None and int(got[0][0]) == 0:
                 return True
         return False

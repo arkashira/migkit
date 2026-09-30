@@ -457,7 +457,17 @@ def doctor(install):
                               f" be asked - {why[:160]}")
         # read from what the freeze recorded, so it is said even when the
         # target cannot be reached right now
-        from . import freeze
+        from . import cutover, freeze
+        for line in cutover.said_by_doctor(hop):
+            console.print(f"{name} [yellow]cutover[/yellow]: {line}")
+        if hop.source.configured() and hop.target.configured():
+            try:
+                e = get_engine(hop)
+                _, what = cutover.summary(hop, e,
+                                          hop.databases or e.databases())
+                console.print(f"{name}: {what}")
+            except Exception:  # noqa: BLE001 - a probe never fails doctor
+                pass
         for d in (hop.databases or []):
             held = freeze.state(hop, d)
             if held and held.get("roles"):
@@ -667,6 +677,14 @@ def assess(hop_name):
     _require_configured(hop)
     eng = get_engine(hop)
     items = eng.assess()
+    from . import cutover
+    try:
+        level, what = cutover.summary(hop, eng, hop.databases
+                                      or eng.databases())
+    except Exception as e:  # noqa: BLE001 - said, the rest stands
+        level, what = "warn", f"cutover: could not be worked out ({e})"
+    items.append({"level": level, "scope": "cutover", "item": what,
+                  "detail": ""})
     color = {"pass": "green", "warn": "yellow", "fail": "red"}
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for it in items:
@@ -2047,7 +2065,10 @@ def _replicate_released(hop, eng, db, copy_data, do_drop, go):
         _protect_target(hop, eng, db, release=True)
 
 
-def _replicate_one(hop, eng, db, copy_data, do_drop, go):
+def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None):
+    """`left`, where given, collects the source's half of a teardown that
+    a read-only source refused - the cutover tears the stream down while
+    the source is frozen, and runs those once it is written again."""
     import secrets
     if eng.maps_columns() and not do_drop:
         # a subscription or a replica applies whole rows by the source's
@@ -2106,8 +2127,16 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go):
             shown = without_secret(stmt, hop.source.password)
             shown = without_secret(shown, secret)
             console.print(f"  {side}: {shown}")
-            if go:
+            if not go:
+                continue
+            try:
                 eng.apply_replication_stmt(side, d, stmt)
+            except Exception as e:  # noqa: BLE001 - only a frozen source's
+                if left is None or side != "src" or not _read_only(e):
+                    raise
+                left.append(stmt)
+                console.print("    left for when the source is written"
+                              " again: it is frozen")
         if go and not do_drop:
             console.print("  " + eng.replication_status(d, sql["status"]))
             _changelog(hop, {"op": "replicate", "db": d})
@@ -2118,6 +2147,14 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go):
     if not go:
         console.print("\ndry-run, add --go to execute"
                       " (monitor lag with: migkit watch)")
+
+
+def _read_only(e):
+    """Whether a server refused a statement for being read-only: MySQL's
+    1290 and 1836, PostgreSQL's 25006."""
+    said = " ".join(str(x) for x in getattr(e, "args", ()) or [e]).lower()
+    return any(w in said for w in ("read-only", "read only", "read_only",
+                                   "1290", "1836", "25006"))
 
 
 def _follow(hop, eng, db, do_drop, go):
@@ -2451,13 +2488,21 @@ def _protect_target(hop, eng, db, release=False):
 
 
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
-    from . import hopkeys, movers
+    from . import cutover, hopkeys, movers
     hop = get_hop(hop_name)
     _require_configured(hop)
     if go:
         hopkeys.refuse_writes(hop, "a move")
     eng = get_engine(hop)
-    back_at_cutover, _ = _topology(hop)
+    back_at_cutover, two_way = _topology(hop)
+    from . import twoway
+    two_way = two_way or twoway.settings(hop) is not None
+    if mode == "cdc" and do_drop and (cutover.settings(hop) or not two_way):
+        # tearing the stream down is the cutover (`migkit.cutover`); a hop
+        # streaming both ways has no side to move from, and tears down as
+        # it always has
+        from .engines import ALIASES
+        return _cutover(hop, eng, db, go, ALIASES.get(hop.engine, hop.engine))
     if go and do_drop:
         # tearing the stream down is the cutover
         from . import approvals
@@ -2537,32 +2582,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     if mode == "cdc" and do_drop and twoway.settings(hop) is not None \
             and (has_tail or _tail_pair(eng) is not None):
         return _two_way_teardown(hop, eng, db, go)
-    if mode == "cdc" and eng.maps_columns():
-        # the servers' own replication carries whole rows; the pair's tail
-        # applies the mapping to every change (`_replicate` says the same)
-        tailer = _tail_pair(eng)
-        if tailer is None:
-            capabilities.require(hop.engine, "stream")
-        return _tail(hop, tailer, db, go)
     if mode == "cdc":
-        if engine == "postgres" and has_repl:
-            if movers.follow_selected() == "follow":
-                return _follow(hop, eng, db, do_drop, go)
-            return _replicate_released(hop, eng, db, False, do_drop, go)
-        if has_tail and _tail_ready(eng):
-            return _tail(hop, eng, db, go)
-        if has_repl:
-            return _replicate_released(hop, eng, db, False, do_drop, go)
-        if movers.stream_supported(engine):
-            if has_tail:
-                console.print("[yellow]native change tail needs a driver this"
-                              " machine does not have - using migkit's"
-                              " streaming pipeline instead[/yellow]")
-            return _stream(hop, eng, db, do_drop, go, engine)
-        capabilities.require(hop.engine, "stream")
-        raise SystemExit(f"no way to follow a {hop.engine} source is set up"
-                         " on this machine; migkit doctor says what is"
-                         " missing")
+        return _cdc(hop, eng, db, do_drop, go, engine)
     # full+cdc
     if has_repl and getattr(eng, "REPLICA_COPIES", False) \
             and not eng.maps_columns():
@@ -2591,6 +2612,131 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     raise SystemExit(f"moving and then following a {hop.engine} source is"
                      " not set up on this machine; migkit doctor says what"
                      " is missing")
+
+
+def _cdc(hop, eng, db, do_drop, go, engine):
+    """The hop's change stream set up, or torn down: the database's own
+    replication where it has one, migkit's tail otherwise."""
+    from . import movers
+    has_repl = hasattr(eng, "replicate_sql")
+    has_tail = hasattr(eng, "tail_apply")
+    if eng.maps_columns():
+        # the servers' own replication carries whole rows; the pair's tail
+        # applies the mapping to every change (`_replicate` says the same)
+        tailer = _tail_pair(eng)
+        if tailer is None:
+            capabilities.require(hop.engine, "stream")
+        return _tail(hop, tailer, db, go)
+    if engine == "postgres" and has_repl:
+        if movers.follow_selected() == "follow":
+            return _follow(hop, eng, db, do_drop, go)
+        return _replicate_released(hop, eng, db, False, do_drop, go)
+    if has_tail and _tail_ready(eng):
+        return _tail(hop, eng, db, go)
+    if has_repl:
+        return _replicate_released(hop, eng, db, False, do_drop, go)
+    if movers.stream_supported(engine):
+        if has_tail:
+            console.print("[yellow]native change tail needs a driver this"
+                          " machine does not have - using migkit's"
+                          " streaming pipeline instead[/yellow]")
+        return _stream(hop, eng, db, do_drop, go, engine)
+    capabilities.require(hop.engine, "stream")
+    raise SystemExit(f"no way to follow a {hop.engine} source is set up"
+                     " on this machine; migkit doctor says what is"
+                     " missing")
+
+
+def _cutover(hop, eng, db, go, engine):
+    """`move --mode cdc --drop`: the cutover, as `migkit.cutover` runs it."""
+    from . import approvals, cutover
+    dbs = [db] if db else eng.databases()
+
+    def approve(detail):
+        return approvals.require(hop, "cutover", db,
+                                 lambda m: console.print(f"  {m}"),
+                                 detail=detail)
+    leg = _stream_leg(hop, eng, db, dbs, engine)
+    return cutover.run(hop, eng, dbs, go, leg, console.print, approve)
+
+
+def _stream_leg(hop, eng, db, dbs, engine):
+    """What carries this hop's changes now, as the cutover tears it down
+    and puts it back (`cutover.Leg`); `manual` is the teardown a hop
+    without `cutover:` has always had."""
+    from . import cutover, movers, tailctl
+    back_at_cutover, _ = _topology(hop)
+    has_repl = hasattr(eng, "replicate_sql")
+    tailer = eng if hasattr(eng, "tail_apply") else _tail_pair(eng)
+    once = getattr(eng, "REPLICATES_THE_SERVER", False)
+
+    def manual(go):
+        if go and not back_at_cutover:
+            _protect_target(hop, eng, db, release=True)
+        return _cdc(hop, eng, db, True, go, engine)
+
+    def ours(d):
+        """Whether a stream of migkit's already writes into the target."""
+        try:
+            return any(own for _, own in eng.stream_writers(d))
+        except Exception:  # noqa: BLE001 - asked again by setting it up
+            return False
+
+    def native_down(d):
+        if once and d != dbs[0]:
+            return []
+        left = []
+        _replicate_one(hop, eng, d, False, True, True, left=left)
+        return left
+
+    def native_up(d):
+        if (once and d != dbs[0]) or ours(d):
+            return
+        _replicate_one(hop, eng, d, False, False, True)
+
+    def tail_down(d):
+        if not tailctl.pause(hop.report_dir(d), 60):
+            raise SystemExit(f"{d}: the change tail did not pause")
+        return []
+
+    def tail_up(d):
+        tailctl.resume(hop.report_dir(d))
+
+    alive = [d for d in dbs if tailctl.alive(hop.report_dir(d))]
+    follow = engine == "postgres" and movers.follow_selected() == "follow"
+    if alive and tailer is not None:
+        leg = cutover.Leg("tail", fence=tailer, down=tail_down, up=tail_up)
+    elif has_repl and not follow and not eng.maps_columns():
+        leg = cutover.Leg("native", fence=eng, down=native_down,
+                          up=native_up, after_thaw=engine == "mysql")
+    elif follow:
+        leg = cutover.Leg(
+            "follow", why="the CDC leg driven from here (MIGKIT_CDC=follow)"
+                          " runs to a position and ends: nothing streams to"
+                          " tear down at a moment the cutover chooses")
+    else:
+        leg = cutover.Leg(
+            "none", why="no stream of migkit's or the servers' own carries"
+                        " this hop's changes now")
+    if back_at_cutover and has_repl and leg.kind in ("native", "tail"):
+        back, rev = _the_other_way(hop, eng)
+
+        def back_up(d):
+            if once and d != dbs[0]:
+                return
+            console.print("\n[bold]the other way[/bold] - from the new"
+                          " primary back to the old source, as the hop says"
+                          " (reverse: at_cutover)")
+            _replicate_one(back, rev, hop.target_db(d), False, False, True)
+            _changelog(hop, {"op": "reverse", "db": d, "drop": False})
+
+        def back_down(d):
+            if once and d != dbs[0]:
+                return
+            _replicate_one(back, rev, hop.target_db(d), False, True, True)
+        leg.back_up, leg.back_down, leg.back_fence = back_up, back_down, rev
+    leg.manual = manual
+    return leg
 
 
 def _delta_loop(hop_name, db, interval, cycles, teardown):
@@ -2893,15 +3039,20 @@ def history(hop_name, db, show_ts):
               help="state timestamp or tag, default latest")
 @click.option("--apply", "do_apply", is_flag=True)
 def rollback(hop_name, db, state_ts, do_apply):
-    """Restore target sequences from a saved state, show row-level undo steps."""
-    from .state import get_store
+    """Restore target sequences from a saved state, show row-level undo
+    steps; where the hop streamed back or cut over, the old source's
+    counters raised past the new primary's."""
     hop = get_hop(hop_name)
     eng = get_engine(hop)
-    from . import approvals, freeze, hopkeys
+    from . import approvals, cutover, freeze, hopkeys
     if do_apply:
         hopkeys.refuse_writes(hop, "a rollback")
         approvals.require(hop, "rollback", db,
                           lambda m: console.print(f"  {m}"))
+    # read before the target's own counters are put back: the new
+    # primary's as they stand clear every key it handed out, even one
+    # whose row it deleted since
+    back = cutover.back_plan(hop, eng, db, console.print)
     if freeze.state(hop, db):
         # what migkit took from the application's roles comes back with
         # everything else it changed on the target
@@ -2911,8 +3062,35 @@ def rollback(hop_name, db, state_ts, do_apply):
             console.print("  the application's roles are still kept from"
                           " writing to the target; --apply gives their"
                           " writes back")
+    _restore_target(hop, eng, db, state_ts, do_apply, back is None)
+    if back is not None:
+        lk = _lock(hop) if do_apply else None
+        try:
+            cutover.back_apply(hop, eng, db, back, do_apply, console.print)
+        finally:
+            if lk:
+                lk.unlink()
+    manifest = None
+    if hasattr(eng, "_report"):
+        manifest = eng._report(db) / "undo" / "manifest.txt"
+    if manifest and manifest.exists():
+        console.print("\nrow-level undo (run per manifest line):")
+        console.print(manifest.read_text().strip())
+    if not do_apply:
+        console.print("\ndry-run, add --apply to restore sequences")
+
+
+def _restore_target(hop, eng, db, state_ts, do_apply, required):
+    """The target's counters put back to a saved state. Without one, an
+    error where that was all there was to do; said, where going back also
+    raises the old source's."""
+    from .state import get_store
     store = get_store(hop)
     states = sorted(m.get("ts", "") for m in store.list(db))
+    if not states and not required:
+        console.print("  no saved state of the target's counters: they are"
+                      " left as they are")
+        return
     if not states:
         raise SystemExit("no saved states, run migkit sync --go first")
     matches = [x for x in states if state_ts in x] if state_ts else states
@@ -2974,14 +3152,6 @@ def rollback(hop_name, db, state_ts, do_apply):
         _changelog(hop, {"op": "rollback", "db": db, "state": ts,
                          "n": len(stmts)})
         console.print("[green]values restored to snapshot[/green]")
-    manifest = None
-    if hasattr(eng, "_report"):
-        manifest = eng._report(db) / "undo" / "manifest.txt"
-    if manifest and manifest.exists():
-        console.print("\nrow-level undo (run per manifest line):")
-        console.print(manifest.read_text().strip())
-    if not do_apply:
-        console.print("\ndry-run, add --apply to restore sequences")
 
 
 # --- legacy command names, kept as hidden aliases ---

@@ -2257,10 +2257,17 @@ class PostgresEngine(Engine):
         has what carries one left out by the server before it is decoded
         (`only-local`) - and where another origin applies into the same
         server too, its changes would go with them, so the tail stops and
-        says so."""
+        says so.
+
+        The *flushed* end: decoding reads no further than that, so a bound
+        past it (the written end, `pg_current_wal_lsn()`) was handed back
+        as read when the stretch between the two had not been, and the
+        next call advanced the slot over it. Measured on 16 under async
+        commits: the written end stood past the flushed one in 199 of 200
+        samples, by up to 42,688 bytes."""
         if not two_way:
-            return ask("select pg_current_wal_lsn()").strip(), False
-        got = ask("select pg_current_wal_lsn()::text || chr(31) ||"
+            return ask("select pg_current_wal_flush_lsn()").strip(), False
+        got = ask("select pg_current_wal_flush_lsn()::text || chr(31) ||"
                   " coalesce((select string_agg(roname, chr(30)) from"
                   " pg_replication_origin), '')")
         upto, _, names = got.strip().partition("\x1f")
@@ -2428,8 +2435,46 @@ class PostgresEngine(Engine):
     def log_position(self, side, db):
         if self._in_recovery(side, db):
             return None
-        return self._psql(side, self._d(side, db),
-                          "select pg_current_wal_lsn()").strip() or None
+        return self.wal_position(side, self._d(side, db))
+
+    #: The position a fence waits for: every commit the server has
+    #: acknowledged, which is the WAL *insert* position, not the written
+    #: one. With `synchronous_commit = off` a commit is acknowledged once
+    #: its record is inserted, and `pg_current_wal_lsn()` - what has been
+    #: written out - trails it until the WAL writer's next round. Measured
+    #: on PostgreSQL 16, one async insert at a time, each read right after
+    #: its commit: at the default `wal_writer_delay` (200ms) 50 of 50
+    #: commits sat past the written position, by up to 288 bytes, for a
+    #: median 0.14s and at most 0.20s; at `wal_writer_delay = 10s`, 20 of
+    #: 20, by up to 2,264 bytes, the last one for 4.7s. A fence at the
+    #: written position passed with that commit still to come, and a
+    #: stream torn down there never carried it.
+    #:
+    #: At the start of a page the insert position points past the page's
+    #: header (24 bytes, 40 at the start of a segment), where no record
+    #: ends and no consumer's flushed position ever stands: on a quiet
+    #: server - a frozen source is one - a fence there waits until
+    #: something else writes. The header is taken off again.
+    POSITION_SQL = ("select pg_current_wal_insert_lsn()::text||' '||"
+                    "current_setting('wal_block_size')||' '||"
+                    "(select setting from pg_settings"
+                    " where name = 'wal_segment_size')")
+
+    def wal_position(self, side, db):
+        """The insert position as a fence wants it (`POSITION_SQL`)."""
+        got = self._psql(side, db, self.POSITION_SQL).strip()
+        return self._past_page_header(got) if got else None
+
+    @staticmethod
+    def _past_page_header(got):
+        lsn, block, segment = got.split()
+        hi, _, lo = lsn.partition("/")
+        at = (int(hi, 16) << 32) | int(lo, 16)
+        if at % int(segment) == 40:
+            at -= 40
+        elif at % int(block) == 24:
+            at -= 24
+        return f"{at >> 32:X}/{at & 0xFFFFFFFF:X}"
 
     @staticmethod
     def position_reached(have, want):
@@ -7814,7 +7859,7 @@ class PostgresEngine(Engine):
                 lines.append(
                     "select 'LSN|'||case when pg_is_in_recovery() then"
                     " 'standby (read replica, no fence)' else"
-                    " pg_current_wal_lsn()::text end;")
+                    " pg_current_wal_insert_lsn()::text end;")
             for t in bucket:
                 h = self._row_hash_expr("src", db, t)
                 lines.append(
@@ -7847,7 +7892,7 @@ class PostgresEngine(Engine):
                      f"set local max_parallel_workers_per_gather = {w};",
                      "select 'LSN|'||case when pg_is_in_recovery() then"
                      " 'standby (read replica, no fence)' else"
-                     " pg_current_wal_lsn()::text end;"]
+                     " pg_current_wal_insert_lsn()::text end;"]
             for t in both:
                 # named from the source for both sides, so the two scripts
                 # hash the same columns in the same order whatever order the
@@ -7967,7 +8012,7 @@ class PostgresEngine(Engine):
         # WAL funcs are unavailable during recovery; no source LSN, no fence
         if self._in_recovery("src", db):
             return None
-        return self._psql("src", db, "select pg_current_wal_lsn()")
+        return self.wal_position("src", db)
 
     def follow_origin(self, db):
         """The replication origin migkit gives a locally-driven CDC leg.
@@ -8067,10 +8112,62 @@ class PostgresEngine(Engine):
         # the slot, which does carry a position for that subscription.
         return None if not got or got == "0/0" else got
 
+    def own_slots(self, db):
+        """The names of the slots on the source that carry this hop's own
+        stream: its subscription's (named after the subscription, which
+        the server folds to lower case), the one its CDC leg driven from
+        here reads, the slot of any subscription on the target itself -
+        whoever made it, it is what writes into this target - and any the
+        hop names (`slot:`) for a pipeline migkit did not set up."""
+        named = (self.hop.options or {}).get("slot") or []
+        if isinstance(named, str):
+            named = [named]
+        return sorted({self._repl_name().lower(), self.follow_slot(db),
+                       *[str(n) for n in named], *self._target_feeds(db)})
+
+    def _target_feeds(self, db):
+        """The slots the target's own subscriptions read, asked once with
+        a short wait and no retry: a fence runs inside a cutover's clock,
+        and a target that does not answer - measured, a paused one held
+        the retried connection 60s - is no reason to wait longer than the
+        stream would have."""
+        import psycopg2
+        ep = self.hop.target
+        try:
+            conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+                                    password=ep.password,
+                                    dbname=self._d("dst", db),
+                                    connect_timeout=3,
+                                    options="-c statement_timeout=3000",
+                                    **ep.libpq_tls())
+        except psycopg2.Error:
+            return []
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select subslotname from pg_subscription where"
+                            " subdbid = (select oid from pg_database where"
+                            " datname = current_database())"
+                            " and subslotname is not null")
+                return [r[0] for r in cur.fetchall()]
+        except psycopg2.Error:
+            return []
+        finally:
+            conn.close()
+
     def fence_wait(self, db, lsn, timeout=300):
-        """Block until every active replication consumer of this db has
-        confirmed flushing past `lsn`. True = fence passed, False = timed
-        out, None = no slot visible / no source LSN (cannot fence).
+        """Block until this hop's own slots on the source - by name, active
+        or not - have confirmed flushing past `lsn`. True = fence passed,
+        False = timed out, None = no slot of the hop's / no source LSN
+        (cannot fence).
+
+        By name, because the slot that says anything about this target is
+        the one its stream reads. This took the smallest position of every
+        *active* slot in the database, and measured on PostgreSQL 16 that
+        passed while the hop's subscription was disabled and its slot 1 row
+        behind: another consumer's slot, active and caught up, was the only
+        one it looked at. A slot that is inactive for the moment - a tail
+        reconnecting, a subscription disabled - still holds the hop's
+        position, and passing without it is a fence that says nothing.
 
         This reads the *source's* slot and not `applied_lsn`, and that is
         deliberate rather than an oversight. `applied_lsn` is the better
@@ -8093,18 +8190,21 @@ class PostgresEngine(Engine):
         """
         if lsn is None:
             return None
-        if self._psql("src", db,
-                      "select count(*) from pg_replication_slots"
-                      f" where database = '{db}' and active") == "0":
+        names = ", ".join("'" + n.replace("'", "''") + "'"
+                          for n in self.own_slots(db))
+        mine = (f" from pg_replication_slots where database = '{db}'"
+                f" and slot_type = 'logical' and slot_name in ({names})")
+        if self._psql("src", db, "select count(*)" + mine) == "0":
             return None
         q = ("select coalesce(min(confirmed_flush_lsn), '0/0'::pg_lsn)"
-             f" >= '{lsn}'::pg_lsn from pg_replication_slots"
-             f" where database = '{db}' and active")
+             f" >= '{lsn}'::pg_lsn" + mine)
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
             if self._psql("src", db, q) == "t":
                 return True
-            time.sleep(2)
+            # a cutover's clock runs while this waits: asked often, since
+            # each round costs one catalogue read
+            time.sleep(0.25)
         return False
 
     def _column_fingerprint(self, db, table):

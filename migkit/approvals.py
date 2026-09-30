@@ -39,19 +39,24 @@ def _requester():
         return ""
 
 
-def _request(hop, step, db, where, rule):
-    """The standing request for this step, made where there is none or
-    the one there has expired."""
+def _request(hop, step, db, where, rule, detail=None):
+    """The standing request for this step, made where there is none, the
+    one there has expired, or what it asks approval of has changed since:
+    a signature is for the plan it was shown, not for whatever runs under
+    the same step's name."""
     path = where / f"{step}-{db or 'all'}.request.json"
     try:
         req = json.loads(path.read_text())
-        if req.get("expires", 0) > time.time():
+        if req.get("expires", 0) > time.time() \
+                and req.get("detail") == detail:
             return path, req
     except (OSError, ValueError):
         pass
     req = {"hop": hop.name, "step": step, "db": db,
            "asked_by": _requester(), "nonce": secrets.token_hex(8),
            "expires": int(time.time()) + int(rule.get("expires", 3600))}
+    if detail is not None:
+        req["detail"] = detail
     where.mkdir(parents=True, exist_ok=True)
     for old in where.glob(f"{step}-{db or 'all'}.*.sig"):
         old.unlink()
@@ -74,10 +79,11 @@ def _signer(sig, signers, data):
     return None
 
 
-def require(hop, step, db, log=None):
+def require(hop, step, db, log=None, detail=None):
     """Returns the approvers where the step may go ahead; raises SystemExit
     saying what to do where the hop asks for approval and it is not all
-    there yet. A hop that asks for none goes ahead at once."""
+    there yet. A hop that asks for none goes ahead at once. `detail` is
+    what the step will do (the cutover's plan), signed with the rest."""
     rule = rules(hop)
     if step not in (rule.get("steps") or []):
         return []
@@ -88,7 +94,7 @@ def require(hop, step, db, log=None):
                          " approve - is not there")
     signers = os.path.expanduser(str(signers))
     where = hop.report_dir(db) / "approvals"
-    path, req = _request(hop, step, db, where, rule)
+    path, req = _request(hop, step, db, where, rule, detail)
     data = path.read_bytes()
     need = int(rule.get("count", 1))
     who = set()
