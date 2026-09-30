@@ -501,17 +501,17 @@ declared not applicable with the reason):
 | comparing the data itself | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | yes |
 | the deep checks | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | - | yes | yes | - | - | - | n/a | n/a | yes | yes |
 | carrying sequences and auto-increment values | yes | yes | n/a | yes | n/a | n/a | yes | n/a | n/a | n/a | - | - | - | n/a | n/a | - | - | - | n/a | n/a | yes | - |
-| comparing server settings | yes | yes | yes | yes | yes | yes | yes | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
-| moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| comparing server settings | yes | yes | yes | yes | yes | yes | yes | n/a | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
+| moving a whole database in bulk | yes | yes | yes | - | - | - | - | - | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
 | copying table by table, resumably | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | - |
-| keeping the target following the source | yes | yes | yes | yes | yes | yes | n/a | - | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
-| proving the target has caught up before cutover | yes | yes | yes | yes | yes | yes | n/a | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
-| telling a difference still arriving from one that is wrong | yes | yes | yes | - | yes | - | n/a | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
-| verifying only what changed | yes | yes | yes | yes | - | yes | n/a | n/a | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
-| carrying users and their grants | yes | yes | yes | - | yes | - | n/a | n/a | - | n/a | - | - | - | - | - | - | - | - | n/a | n/a | - | - |
+| keeping the target following the source | yes | yes | yes | yes | yes | yes | n/a | - | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
+| proving the target has caught up before cutover | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
+| telling a difference still arriving from one that is wrong | yes | yes | yes | - | yes | - | n/a | n/a | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
+| verifying only what changed | yes | yes | yes | yes | - | yes | n/a | n/a | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
+| carrying users and their grants | yes | yes | yes | - | yes | - | n/a | n/a | yes | n/a | - | - | - | yes | yes | - | - | - | n/a | n/a | - | - |
 | noticing a move that moved nothing | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | n/a | n/a | yes | - |
 | refreshing the target's statistics after a load | yes | yes | n/a | yes | n/a | n/a | yes | n/a | n/a | n/a | yes | - | - | n/a | n/a | - | - | - | n/a | n/a | yes | - |
-| snapshotting the target so a cutover can be rolled back | yes | yes | yes | yes | yes | - | yes | - | - | - | - | - | - | - | - | - | - | - | n/a | n/a | yes | - |
+| snapshotting the target so a cutover can be rolled back | yes | yes | yes | yes | yes | - | yes | - | yes | - | - | - | - | yes | yes | - | - | - | n/a | n/a | yes | - |
 
 The first hand-made version of this table said MongoDB's change stream was
 "tail only". It is wired into `move --mode cdc`; the probe read it right.
@@ -4839,9 +4839,40 @@ Done (2026-09-27):
   either side; settings both sides; roles, users (password as its hash
   where the server shows it, else from the passwords file) and grants;
   the snapshot freezes every target table
-  (`test_clickhouse_to_clickhouse_is_compared_on_the_servers.py`). Still
-  to: the bulk path as the target pulling from the source (`remote()`,
-  no row through migkit), a follow by changed partitions.
+  (`test_clickhouse_to_clickhouse_is_compared_on_the_servers.py`).
+  Done 2026-09-28: the move's own path is the target pulling each of the
+  source's partitions itself (`INSERT ... SELECT` from `remote()`, no row
+  through migkit), in the partition key's order, one partition a
+  statement - split by the target's own partitions where one would pass
+  `max_partitions_per_insert_block` (measured: the 101st stops the
+  insert); a partition the target already holds as the source does is
+  left, one it holds otherwise cleared and copied again, and every
+  partition held to the source's by the two servers' fingerprints after
+  it lands (never `system.parts` hashes, which hash files a logical copy
+  writes anew); each copy under its own numbered
+  `insert_deduplication_token`; blocks land unmerged
+  (`optimize_on_insert = 0`: a replacing table kept one of two versions of
+  a row the source holds); threads and block size from the move's sizing.
+  Chosen where the target reaches the source - asked of the target, and
+  held to the source's server id, so an address that leads back to the
+  target is refused - and the table copier as before where it does not.
+  Measured on 24.8: `_partition_id` is seen through `remote()` and
+  filters on the source; the source's password shows as `[HIDDEN]` in the
+  target's query log and errors; 500,000 rows pulled in 0.6 s, where
+  the table copier on the same rows stopped on `HTTP status 400` - a
+  delete naming a whole batch's 50,000 keys in the request's address -
+  and now names them 1,000 a statement, and only where the target holds
+  one (its time after the fix not measured yet). A write under a token
+  seen before is dropped in part (624 of 696 rows came back into a
+  target partitioned by day), and with no token whole. A follow by the
+  partitions whose parts changed, each fingerprinted on both servers and
+  copied again
+  where it differs, a partition dropped on the source dropped on the
+  target; the fence on the source's own clock at the last look that
+  settled every changed partition, and the confirm through it
+  (`test_clickhouse_target_pulls_partitions_from_the_source.py`;
+  written, its first two tests run and passed, the duplicate-token one
+  corrected to what was measured - the full run to come).
 * SQLite and DuckDB: a bulk path of the engine's own (`native_bulk`, the
   move's `native` path, chosen where the engine has one): the source
   attached read-only and each table put in by one `INSERT ... SELECT`
@@ -4899,9 +4930,32 @@ Done (2026-09-27):
   its `path.repo` (said where it has none); a verify of only the documents
   written since, by each primary shard's sequence numbers, a delete found
   by the deleted count moving and the ids compared
-  (`test_opensearch_to_opensearch_keeps_documents_as_they_are.py`). Still
-  to: the follow (the cross-cluster replication plugin, or the same
-  sequence numbers), security roles (a secured cluster in the sandbox).
+  (`test_opensearch_to_opensearch_keeps_documents_as_they_are.py`).
+  Done 2026-09-28: the follow by each primary shard's sequence numbers -
+  the writes up to its global checkpoint, read once every copy of the
+  shard has made them searchable (refreshed twice since, or searched where
+  it had gone idle; a source index that refreshes only when asked is
+  refused), each document written with the source's own version of it
+  (primary term above sequence number, `version_type=external`: a change
+  carried twice or after a newer one is left by the target, which the
+  test holds against a write without it; not `external_gte`, which takes
+  an equal
+  version, nor `if_seq_no`, which is the target's own numbering); deletes
+  found by the counts and the ids compared. The fence on the shards'
+  highest sequence numbers, the confirm through it. The copy writes the
+  same versions and no longer empties the target first: emptied, each
+  document's delete keeps a version for a minute (`index.gc_deletes`)
+  that the copy's write at the source's version does not pass, as the
+  test shows by hand - where the target deleted one itself, the copy
+  says so and stops. Writes through opensearch-py's streaming bulk with retries on a
+  busy cluster. Roles, users and who holds which role carried through the
+  security plugin's REST API, index names as the target calls them, a
+  replaced definition put back by the rollback; the API shows no password,
+  so a user takes the passwords file's or is skipped and said; a cluster
+  without the plugin said as such (`test_opensearch_follows_the_source.py`,
+  `test_opensearch_security_roles_are_carried.py`; written, and run once
+  before the fixes of 2026-09-30 - the follow's late write and the
+  secured pair's start failed then - the full run to come).
 * Cassandra: roles carried with their salted hashes (`HASHED PASSWORD`,
   4.1), memberships and permissions, the keyspace renamed as the target
   calls it, and taken back; the server's settings, the keyspace's
@@ -4915,8 +4969,40 @@ Done (2026-09-27):
   written back `USING TTL ... AND TIMESTAMP ...` as `TTL()` and
   `WRITETIME()` read it (a collection, which has no single one, as now),
   into a table made by the source's own definition; a counter table is
-  refused by name. Still to: a deep check that samples rows with a time to
-  live on both sides, the follow through ScyllaDB's CDC tables.
+  refused by name. Done 2026-09-28: the deep check holds every cell's
+  write time and time to live to the source's - every row of a table up to
+  5,000, the first 5,000 in token order of a larger - within a second and
+  a minute (the tolerances ScyllaDB's own migration validator uses), a
+  time to live as the moment it ends; counters by value, which no copy
+  writes; the table copier's rows are named by it, every cell off
+  (`test_cassandra_cell_times_are_checked.py`; run once, three of four
+  passed, the fourth stopped on the text-typed table below, since
+  fixed - the full run to come). ScyllaDB followed through
+  its CDC log tables, read by migkit itself (there is no Python reader):
+  the generations and their streams from `system_distributed`, each
+  stream on its own, up to the source's clock less a confidence window;
+  a row, partition, range or column deleted at the write time the log
+  gives, a collection written whole emptied just before it, and every row
+  the log touched read again and written with each cell's own write time
+  and time to live, so the deep check holds followed rows too. The fence
+  and the confirm on the source's clock, a verify of only what changed
+  through the same reading. A table with its log off is refused with the
+  statement that turns it on (migkit does not run it), a keyspace of
+  tablets refused, a counter table refused by name, and a Cassandra
+  source refused with the reason: its change files are read only by a
+  program on every node. The target's table is made without the
+  source's log - measured on 6.2, a table whose log is on refuses a
+  write dated before its log's generation (`cdc: attempted to get a
+  stream "from the past"`), and the copy dates every cell at the
+  source's write time - and the settings check names a log on one side
+  only as behaviour until it is turned on after the copy
+  (`test_scylla_follows_through_its_change_log.py`). Found on the way:
+  a Cassandra table copied row by row between two clusters was built
+  with every column text and stopped on its first number - the
+  source's own type is now written as it is. The ScyllaDB tests were run
+  once before the fixes of 2026-09-30 (a table's log is now read by its
+  log table's presence, the copy dated at the source's write times into
+  a target made without a log); the full run to come.
 
 What each still-missing cell can be built on, where a local image exists:
 * ClickHouse: caught up when its replication, mutation and distribution

@@ -94,6 +94,9 @@ HOP_OPTIONS = {
     "atlas": Key("the structural schema reading, on or off", "bool",
                  ("postgres", "mysql"), knob="way",
                  named_for_a_program=True),
+    "cdc_confidence_seconds": Key("seconds the follow of a change log"
+                                  " stays behind the source's clock",
+                                  "number", ("cassandra",)),
     "checksum": Key("text or jsonb row rendering", "str", ("postgres",)),
     "checksum_workers": Key("tables checksummed at once", "int",
                             ("postgres",), knob="size"),
@@ -263,6 +266,9 @@ ENDPOINT_OPTIONS = {
     "url": Key("the whole connection address", "str",
                ("generic", "opensearch", "parquet")),
     "secure": Key("TLS", "bool", ("clickhouse",)),
+    "address_from_target": Key("host:port the target reaches the source"
+                               " at, where it knows it by another name",
+                               "str", ("clickhouse",)),
     "service": Key("the service to connect to", "str", ("oracle",)),
     "service_name": Key("the service to connect to", "str", ("oracle",)),
     "database": Key("the database to connect to", "str",

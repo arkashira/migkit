@@ -78,11 +78,16 @@ class CassandraEngine(NeutralCopier, Engine):
             f" replication = {how}")
         return f"created keyspace {self._ks('dst', db)}"
 
+    #: the name ScyllaDB gives a table's change log, beside the table: the
+    #: server's, not the application's
+    CDC_LOG = "_scylla_cdc_log"
+
     def neutral_tables(self, side, db):
         return sorted(r.table_name for r in self._session(side).execute(
             "select table_name from system_schema.tables where"
             " keyspace_name = %s", (self._ks(side, db),))
-            if not self.hop.excluded(db, r.table_name))
+            if not self.hop.excluded(db, r.table_name)
+            and not r.table_name.endswith(self.CDC_LOG))
 
     def _columns(self, side, db, table):
         return list(self._session(side).execute(
@@ -271,6 +276,143 @@ class CassandraEngine(NeutralCopier, Engine):
         return self._as_pair().check_data(db, table, stream)
 
     def check_deep(self, db):
+        """How many copies the target's keyspace keeps (`_copies_kept`),
+        and every table's cells' write times and times to live, held to
+        the source's (`_times`)."""
+        out = self._copies_kept(db)
+        if out[0].status == "diff" and "not on the target" in out[0].detail:
+            return out
+        for t in self.neutral_tables("src", db):
+            try:
+                out.append(self._times(db, t))
+            except Exception as e:  # noqa: BLE001 - said, as the error
+                out.append(Result("deep", f"{db}.{t} cell times", "error",
+                                  "could not read the cells' times:"
+                                  f" {str(e).splitlines()[0][:90]}"))
+        return out
+
+    #: rows of a table whose cells' times are compared: every row of a
+    #: smaller one, of a larger the first this many in token order, which
+    #: spreads them over its keys
+    TIMES_SAMPLE = 5000
+    #: how far a cell's write time and its time to live may differ and
+    #: still be the same: a second and a minute, the tolerances ScyllaDB's
+    #: own migration validator checks with (`writetimeToleranceMillis`,
+    #: `ttlToleranceMillis`)
+    WRITETIME_SLACK_US, TTL_SLACK_S = 1_000_000, 60
+
+    def _times(self, db, table):
+        """One table's cells held to the source's by when they were written
+        and when they expire - which the data check, comparing values,
+        cannot see: a row copied without its time to live lives on for good
+        on the target, and one copied with a later write time wins over a
+        change the source made after it. Read for a sample of the source's
+        rows (`TIMES_SAMPLE`) and the same rows by key on the target; a
+        time to live compared as the moment it ends, so the seconds between
+        the two reads do not count against it. Counters are compared by
+        their value: a counter is only ever added to, and no copy writes
+        one - added again, it would double."""
+        import time
+
+        from cassandra.concurrent import execute_concurrent_with_args
+        from cassandra.query import SimpleStatement
+        cols = self._columns("src", db, table)
+        key = self.neutral_key("src", db, table)
+        counters = [c.column_name for c in cols if str(c.type) == "counter"]
+        plain = [c.column_name for c in cols
+                 if c.kind in ("regular", "static")]
+        timed = [c.column_name for c in cols
+                 if c.kind in ("regular", "static")
+                 and c.column_name not in counters
+                 and self._one_cell(c.type)]
+        loose = [n for n in plain if n not in timed and n not in counters]
+        q = self._q
+        sel = (", ".join(q(n) for n in key + plain)
+               + "".join(f", writetime({q(n)}), ttl({q(n)})" for n in timed))
+        began = time.time()
+        rows = list(self._session("src").execute(SimpleStatement(
+            f"select {sel} from {self._qualified('src', db, table)} limit"
+            f" {self.TIMES_SAMPLE + 1}", fetch_size=1000)))
+        whole = len(rows) <= self.TIMES_SAMPLE
+        rows = rows[:self.TIMES_SAMPLE]
+        dst = self._session("dst")
+        stmt = dst.prepare(f"select {sel} from"
+                           f" {self._qualified('dst', db, table)} where "
+                           + " and ".join(f"{q(k)} = ?" for k in key))
+        asked = time.time()
+        got = execute_concurrent_with_args(
+            dst, stmt, [tuple(r[:len(key)]) for r in rows], concurrency=64)
+        at = {n: i for i, n in enumerate(key + plain)}
+        base = len(key) + len(plain)
+        missing, cells, when, expiry, counted = 0, 0, [], [], []
+        for row, (ok, result) in zip(rows, got):
+            if not ok:
+                raise result
+            there = list(result)
+            if not there:
+                missing += 1
+                continue
+            other = there[0]
+            ident = tuple(row[:len(key)])
+            for i, n in enumerate(timed):
+                a_wt, a_ttl = row[base + 2 * i], row[base + 2 * i + 1]
+                b_wt, b_ttl = other[base + 2 * i], other[base + 2 * i + 1]
+                if a_wt is None or b_wt is None:
+                    # a cell on one side only: a value that differs, which
+                    # the data check names
+                    continue
+                cells += 1
+                if abs(int(a_wt) - int(b_wt)) > self.WRITETIME_SLACK_US:
+                    when.append((ident, n))
+                if (a_ttl is None) != (b_ttl is None) or (
+                        a_ttl is not None and abs(
+                            (began + a_ttl) - (asked + b_ttl))
+                        > self.TTL_SLACK_S):
+                    expiry.append((ident, n))
+            for n in counters:
+                if row[at[n]] != other[at[n]]:
+                    counted.append((ident, n))
+        how = ("every row" if whole
+               else "a sample, the first in token order")
+        read = f"{len(rows):,} rows ({how}) read on both sides"
+        said = []
+        if counters:
+            said.append(f"{len(counters)} counter column(s) compared by"
+                        " value - a counter is only ever added to, and no"
+                        " copy writes one")
+        if loose:
+            said.append(f"{', '.join(loose[:4])} hold(s) a collection or"
+                        " user type with no single write time, compared by"
+                        " value only")
+        if missing:
+            said.append(f"{missing:,} of them not on the target (the data"
+                        " check names them)")
+        if not (when or expiry or counted):
+            return Result("deep", f"{db}.{table} cell times", "ok",
+                          f"{read}: {cells:,} cells' write times within 1 s"
+                          " and times to live within 60 s of the source's"
+                          + "".join(f"; {s}" for s in said))
+
+        def few(found):
+            return ", ".join(f"{k if len(k) > 1 else k[0]}.{n}"
+                             for k, n in found[:4])
+        bad = []
+        if when:
+            bad.append(f"write time off by more than 1 s on {len(when):,}"
+                       f" cells ({few(when)})")
+        if expiry:
+            bad.append(f"time to live off by more than 60 s, or on one side"
+                       f" only, on {len(expiry):,} cells ({few(expiry)})")
+        if counted:
+            bad.append(f"counter value differs on {len(counted):,}"
+                       f" ({few(counted)})")
+        return Result("deep", f"{db}.{table} cell times", "diff",
+                      f"{read}: " + "; ".join(bad + said), "",
+                      "copy the table again by the move's own path, which"
+                      " writes each cell with its time to live and write"
+                      " time; a counter only by adding to it")
+
+    def _copies_kept(self, db):
         """How many copies the target's keyspace keeps: with one, a node
         lost is the data lost, and a cutover onto it has less than the
         source had."""
@@ -305,9 +447,11 @@ class CassandraEngine(NeutralCopier, Engine):
     #: what changes where a row lives or how long it stays: another
     #: partitioner places every key elsewhere, a table's default time to
     #: live expires rows the source keeps, a shorter gc grace lets a
-    #: deleted row come back from a node that missed the delete
+    #: deleted row come back from a node that missed the delete; and what
+    #: reads a table's changes - a target table with no change log feeds
+    #: nothing that read the source's
     CRITICAL_PARAMS = ("partitioner", "default_time_to_live",
-                       "gc_grace_seconds")
+                       "gc_grace_seconds", "change_log")
 
     def _settings(self, side, db):
         s, out = self._session(side), {}
@@ -324,11 +468,16 @@ class CassandraEngine(NeutralCopier, Engine):
             out["keyspace.replication"] = json.dumps(dict(r.replication),
                                                      sort_keys=True)
             out["keyspace.durable_writes"] = str(r.durable_writes)
-        for r in s.execute("select * from system_schema.tables where"
-                           " keyspace_name = %s", (ks,)):
-            row = r._asdict()
+        rows = [r._asdict() for r in s.execute(
+            "select * from system_schema.tables where keyspace_name = %s",
+            (ks,))]
+        # a ScyllaDB table's change log is a table beside it, there exactly
+        # while the log is on
+        logged = {r["table_name"][:-len(self.CDC_LOG)] for r in rows
+                  if r["table_name"].endswith(self.CDC_LOG)}
+        for row in rows:
             t = row.pop("table_name")
-            if self.hop.excluded(db, t):
+            if self.hop.excluded(db, t) or t.endswith(self.CDC_LOG):
                 continue
             for k, v in row.items():
                 if k in ("keyspace_name", "id"):
@@ -336,6 +485,8 @@ class CassandraEngine(NeutralCopier, Engine):
                 out[f"{t}.{k}"] = json.dumps(
                     dict(v) if hasattr(v, "items") else v, sort_keys=True,
                     default=str)
+            if self._scylla(side):
+                out[f"{t}.change_log"] = "on" if t in logged else "off"
         return {k: v for k, v in out.items()
                 if not any(w in k.lower() for w in ("password", "keystore",
                                                     "secret"))}
@@ -355,7 +506,10 @@ class CassandraEngine(NeutralCopier, Engine):
         return self._param_result(
             db, src, dst, crit,
             "give the target's tables the source's time to live and gc"
-            " grace, and the same partitioner, before cutover")
+            " grace, and the same partitioner, before cutover; a change log"
+            " the source keeps is turned on for the target's table once its"
+            " copy is done - a table whose log is on refuses the copy's"
+            " writes dated at the source's write times")
 
     def snapshot_state(self, db, state_dir, kind="all"):
         """What the target holds before a repair: each table's definition
@@ -383,10 +537,20 @@ class CassandraEngine(NeutralCopier, Engine):
     def _made_like(self, db, table):
         """The target table made by the source's own definition - its
         clustering order, collections, types and indexes - under the
-        target's keyspace name."""
+        target's keyspace name. Not with the source's change log on: a
+        ScyllaDB table whose log is on refuses a write dated before the
+        log's current generation began (measured on 6.2: `cdc: attempted to
+        get a stream "from the past"`), and every cell the copy writes is
+        dated at the source's own write time. Where the target should keep
+        a log, it is turned on there after the cutover; the settings check
+        names the difference until then."""
         import re
         ks = self._ks("src", db)
         cluster = self._session("src").cluster
+        if ks not in cluster.metadata.keyspaces:
+            # a keyspace made since this session connected: the table's
+            # refresh has nothing to hang it on until the keyspace is read
+            cluster.refresh_keyspace_metadata(ks)
         cluster.refresh_table_metadata(ks, table)
         text = cluster.metadata.keyspaces[ks].tables[table] \
             .export_as_string()
@@ -398,7 +562,81 @@ class CassandraEngine(NeutralCopier, Engine):
             stmt = re.sub(r"\bON\s+\S+?\.", f"ON {into}.", stmt, count=1) \
                 if stmt.upper().startswith(("CREATE INDEX",
                                             "CREATE CUSTOM INDEX")) else stmt
+            stmt = re.sub(r"\s+AND\s+cdc\s*=\s*\{[^}]*\}", "", stmt,
+                          flags=re.I)
             self._session("dst").execute(stmt.rstrip(";"))
+
+    #: the types whose value is one cell, with one time to live and one
+    #: write time; a collection or a user type that is not frozen is a
+    #: cell a member, and has none of its own
+    ONE_CELL = ("ascii", "bigint", "blob", "boolean", "counter", "date",
+                "decimal", "double", "duration", "float", "inet", "int",
+                "smallint", "text", "time", "timestamp", "timeuuid",
+                "tinyint", "uuid", "varchar", "varint")
+
+    @classmethod
+    def _one_cell(cls, declared):
+        text = str(declared).strip()
+        return text in cls.ONE_CELL or text.startswith(("frozen<", "tuple<",
+                                                         "vector<"))
+
+    def _row_writer(self, db, table):
+        """(the key's columns, the select list that reads a row with each
+        cell's time to live and write time after its values, and
+        `writes(row, stamp)`: the statements that write a row read by it
+        back to the target, each cell with the time to live left to it and
+        its own write time - the cells that share both in one statement).
+        What has no single time - a collection or a user type not frozen -
+        is written as now, or at `stamp` where one is given."""
+        cols = self._columns("src", db, table)
+        key = self.neutral_key("src", db, table)
+        plain = [c.column_name for c in cols
+                 if c.kind in ("regular", "static")]
+        timed = [c.column_name for c in cols
+                 if c.kind in ("regular", "static")
+                 and self._one_cell(c.type)]
+        q = self._q
+        select = (", ".join(q(n) for n in key + plain)
+                  + "".join(f", ttl({q(n)}), writetime({q(n)})"
+                            for n in timed))
+        dst = self._session("dst")
+        target = self._qualified("dst", db, table)
+        prepared = {}
+
+        def statement(names, using):
+            if (names, using) not in prepared:
+                prepared[(names, using)] = dst.prepare(
+                    f"insert into {target} ("
+                    + ", ".join(q(n) for n in key + list(names))
+                    + ") values (" + ", ".join("?" for _ in key + list(
+                        names)) + ")" + using)
+            return prepared[(names, using)]
+
+        def writes(row, stamp=None):
+            k = list(row[:len(key)])
+            vals = dict(zip(plain, row[len(key):len(key) + len(plain)]))
+            meta = row[len(key) + len(plain):]
+            groups = {}
+            for i, name in enumerate(timed):
+                ttl, wt = meta[2 * i], meta[2 * i + 1]
+                if vals.get(name) is None or wt is None:
+                    continue
+                groups.setdefault((ttl or 0, wt), []).append(name)
+            untimed = tuple(nm for nm in plain if nm not in timed
+                            and vals.get(nm) is not None)
+            out = []
+            if untimed or not groups:
+                args = k + [vals[nm] for nm in untimed]
+                out.append((statement(untimed, "") if stamp is None else
+                            statement(untimed, " using timestamp ?"),
+                            args if stamp is None else args + [int(stamp)]))
+            for (ttl, wt), names in groups.items():
+                out.append((statement(tuple(names),
+                                      " using ttl ? and timestamp ?"),
+                            k + [vals[nm] for nm in names]
+                            + [int(ttl), int(wt)]))
+            return out
+        return key, select, writes
 
     def native_bulk(self, db, tables, go, log, shape_only=()):
         """Each table's rows copied as the source holds them, by ranges of
@@ -428,45 +666,15 @@ class CassandraEngine(NeutralCopier, Engine):
             part = [c.column_name for c in sorted(
                 (c for c in cols if c.kind == "partition_key"),
                 key=lambda c: c.position)]
-            key = self.neutral_key("src", db, t)
-            plain = [c.column_name for c in cols
-                     if c.kind in ("regular", "static")]
-            # a collection that is not frozen has no single time to live
-            timed = [c.column_name for c in cols
-                     if c.kind in ("regular", "static")
-                     and not str(c.type).startswith(("list<", "set<",
-                                                     "map<"))]
             q = self._q
+            _, select, writes = self._row_writer(db, t)
             read = self._session("src").prepare(
-                "select " + ", ".join(q(n) for n in key + plain)
-                + "".join(f", ttl({q(n)}), writetime({q(n)})" for n in timed)
-                + f" from {self._qualified('src', db, t)} where token("
-                + ", ".join(q(n) for n in part) + ") >= ? and token("
-                + ", ".join(q(n) for n in part) + ") <= ?")
+                f"select {select} from {self._qualified('src', db, t)}"
+                " where token(" + ", ".join(q(n) for n in part)
+                + ") >= ? and token(" + ", ".join(q(n) for n in part)
+                + ") <= ?")
             dst = self._session("dst")
             target = self._qualified("dst", db, t)
-            writes = {}
-
-            def statement(names):
-                if names not in writes:
-                    writes[names] = dst.prepare(
-                        f"insert into {target} ("
-                        + ", ".join(q(n) for n in key + list(names))
-                        + ") values (" + ", ".join("?" for _ in key + list(
-                            names)) + ") using ttl ? and timestamp ?")
-                return writes[names]
-            untimed_writes = {}
-
-            def untimed_statement(names):
-                # a collection's own write time is not asked for; it is
-                # written as now, beside the columns that keep theirs
-                if names not in untimed_writes:
-                    untimed_writes[names] = dst.prepare(
-                        f"insert into {target} ("
-                        + ", ".join(q(n) for n in key + list(names))
-                        + ") values (" + ", ".join(
-                            "?" for _ in key + list(names)) + ")")
-                return untimed_writes[names]
             dst.execute(f"truncate {target}")
             n = workers * self.RANGES_PER_WORKER
             step = (self.HIGH - self.LOW) // n
@@ -474,29 +682,11 @@ class CassandraEngine(NeutralCopier, Engine):
                        self.HIGH if i == n - 1 else self.LOW + (i + 1) * step
                        - 1) for i in range(n)]
 
-            def one(rng):
+            def one(rng, read=read, writes=writes):
                 from cassandra.concurrent import execute_concurrent
                 moved, batch = 0, []
                 for row in self._session("src").execute(read, rng):
-                    k = list(row[:len(key)])
-                    vals = dict(zip(plain, row[len(key):len(key)
-                                                 + len(plain)]))
-                    meta = row[len(key) + len(plain):]
-                    groups = {}
-                    for i, name in enumerate(timed):
-                        ttl, wt = meta[2 * i], meta[2 * i + 1]
-                        if vals.get(name) is None or wt is None:
-                            continue
-                        groups.setdefault((ttl or 0, wt), []).append(name)
-                    untimed = tuple(nm for nm in plain if nm not in timed
-                                    and vals.get(nm) is not None)
-                    if untimed or not groups:
-                        batch.append((untimed_statement(untimed),
-                                      k + [vals[nm] for nm in untimed]))
-                    for (ttl, wt), names in groups.items():
-                        batch.append((statement(tuple(names)),
-                                      k + [vals[nm] for nm in names]
-                                      + [int(ttl), int(wt)]))
+                    batch += writes(row)
                     moved += 1
                     if len(batch) >= 500:
                         self._sent(execute_concurrent(dst, batch,
@@ -518,3 +708,451 @@ class CassandraEngine(NeutralCopier, Engine):
         if failed:
             raise SystemExit(f"{table}: the target refused {len(failed)}"
                              f" rows: {str(failed[0])[:150]}")
+
+    # ---- following ScyllaDB's change log -------------------------------------
+
+    #: seconds the follow stays behind the source's clock (the hop's
+    #: `cdc_confidence_seconds`): a write stamped by its client a moment
+    #: before it reaches a replica is still arriving until then
+    CDC_CONFIDENCE = 10
+    #: what a row of a change log records (`cdc$operation`)
+    UPDATE, INSERT, ROW_DELETE, PARTITION_DELETE = 1, 2, 3, 4
+    RANGE_FROM = (5, 6)     # a range's start, taken in / left out
+    RANGE_TO = (7, 8)       # its end, the same
+    CHANGE_POINT_READS_ONLY = True
+
+    def _scylla(self, side):
+        """Whether the server is ScyllaDB: it keeps its own schema tables
+        beside Cassandra's."""
+        got = self.__dict__.setdefault("_is_scylla", {})
+        if side not in got:
+            try:
+                self._session(side).execute(
+                    "select keyspace_name from system_schema.scylla_tables"
+                    " limit 1")
+                got[side] = True
+            except Exception:  # noqa: BLE001 - no such table: Cassandra
+                got[side] = False
+        return got[side]
+
+    def _logged(self, db):
+        """The source's tables, each with its change log on - or the reason
+        it cannot be followed. Cassandra writes its changes where only a
+        program on every node reads them (the commit log's change files,
+        which the node also stops writing once they fill), so a Cassandra
+        source is refused, not polled: a poll cannot see a row written and
+        deleted between two looks. On ScyllaDB a table's log is its own
+        setting, which migkit does not change."""
+        s = self._session("src")
+        if not self._scylla("src"):
+            raise SystemExit(
+                f"{db}: Cassandra keeps its changes in the commit log's"
+                " change files on each node, which only a program running"
+                " on every node reads - there is nothing a client can"
+                " follow. Stop writes on the source and move it, then prove"
+                " it with migkit check")
+        try:
+            kept = list(s.execute("select * from"
+                                  " system_schema.scylla_keyspaces where"
+                                  " keyspace_name = %s", (db,)))
+        except Exception:  # noqa: BLE001 - a release before tablets
+            kept = []
+        for r in kept:
+            if getattr(r, "initial_tablets", None) is not None:
+                # a tablets keyspace's log streams split and merge with its
+                # tablets, listed per table where a release keeps one; no
+                # reader of them is trusted until one is proved against a
+                # server that keeps them, and 6.2 keeps none
+                raise SystemExit(
+                    f"{db} keeps its data in tablets, whose change log"
+                    " streams split and merge with them, and migkit follows"
+                    " only a log it has proved it reads whole. Stop writes"
+                    " on the source and move it")
+        # a table's log is there exactly while its log is on: the server
+        # makes it with the setting and drops it without
+        logs = {r.table_name for r in s.execute(
+            "select table_name from system_schema.tables where"
+            " keyspace_name = %s", (db,))
+            if r.table_name.endswith(self.CDC_LOG)}
+        out = []
+        for t in self.neutral_tables("src", db):
+            if any(str(c.type) == "counter"
+                   for c in self._columns("src", db, t)):
+                raise SystemExit(
+                    f"{db}.{t} holds counters, which are only ever added to:"
+                    " a change carried twice would count twice, and no copy"
+                    " writes one. Stop writes on the source, then compare it"
+                    " with migkit check, which holds counters to their"
+                    " values")
+            if t + self.CDC_LOG not in logs:
+                raise SystemExit(
+                    f"{db}.{t} has no change log on, and turning it on is a"
+                    " change to the source's table, which migkit does not"
+                    f" make: ALTER TABLE {db}.{t} WITH cdc = {{'enabled':"
+                    " true}, then move again with --mode full+cdc")
+            out.append(t)
+        return out
+
+    def _now_ms(self, side):
+        return int(self._session(side).execute(
+            "select toUnixTimestamp(now()) from system.local").one()[0])
+
+    def _confidence(self):
+        return float((self.hop.options or {}).get(
+            "cdc_confidence_seconds", self.CDC_CONFIDENCE))
+
+    def change_point(self, side, db):
+        """Now less the confidence window, on the source's own clock: a
+        follow started here reads again what was written just before, which
+        carrying twice leaves as it is."""
+        self._logged(db)
+        return {"at": self._now_ms(side) - int(self._confidence() * 1000)}
+
+    def log_position(self, side, db):
+        return {"at": self._now_ms(side)}
+
+    @staticmethod
+    def position_reached(have, want):
+        if not have or not want:
+            return None
+        return int(have.get("at", 0)) >= int(want.get("at", 0))
+
+    def stream_identity(self, side, db):
+        """The cluster a saved position belongs to, by its name: a position
+        is a time on the source's clock, which a node added or replaced
+        leaves where it was."""
+        r = self._session(side).execute("select cluster_name from"
+                                        " system.local").one()
+        return {"cluster": str(r[0])}
+
+    def server_identity(self, side, db):
+        """What the cluster says it is, for the interlock on the target:
+        its name and its nodes' own ids - two clusters left at the name
+        their image starts with (`Test Cluster`) are told apart by their
+        nodes - its release, and whether the keyspace is there yet."""
+        s = self._session(side)
+        me = s.execute("select cluster_name, host_id, release_version from"
+                       " system.local").one()
+        nodes = sorted([str(me.host_id)] + [
+            str(r.host_id) for r in s.execute("select host_id from"
+                                              " system.peers")])
+        out = {"id": {"cluster": str(me.cluster_name),
+                      "nodes": ",".join(nodes)},
+               "name": str(me.cluster_name),
+               "version": str(me.release_version)}
+        if not list(s.execute("select keyspace_name from"
+                              " system_schema.keyspaces where"
+                              " keyspace_name = %s", (self._ks(side, db),))):
+            out["absent"] = True
+        return out
+
+    def position_lost(self, side, db, token):
+        """The log keeps a change for as long as the table's `cdc` `ttl`
+        says (a day unless set): a position older than that has lost what
+        was written after it."""
+        if not token or not self._scylla(side):
+            return None
+        keep = None
+        for t in self.neutral_tables(side, db):
+            try:
+                got = list(self._session(side).execute(
+                    "select cdc from system_schema.scylla_tables where"
+                    " keyspace_name = %s and table_name = %s", (db, t)))
+            except Exception:  # noqa: BLE001 - kept elsewhere: not said
+                return None
+            for r in got:
+                ttl = int(dict(r.cdc or {}).get("ttl", 86400) or 0)
+                if ttl:
+                    keep = ttl if keep is None else min(keep, ttl)
+        if keep and self._now_ms(side) - int(token.get("at", 0)) \
+                > keep * 1000:
+            return (f"the change log keeps {keep:,} seconds of changes, and"
+                    " the saved position is older")
+        return None
+
+    def _generations(self):
+        """[(start in ms, [stream ids])] of the source's change log, oldest
+        first: each generation's streams carry what was written from its
+        start to the next one's."""
+        import calendar
+        s = self._session("src")
+        out = []
+        for r in sorted(s.execute(
+                "select time from system_distributed"
+                ".cdc_generation_timestamps where key = 'timestamps'"),
+                key=lambda r: r.time):
+            streams = []
+            for d in s.execute("select streams from system_distributed"
+                               ".cdc_streams_descriptions_v2 where time ="
+                               " %s", (r.time,)):
+                streams += list(d.streams or [])
+            start = calendar.timegm(r.time.utctimetuple()) * 1000 \
+                + r.time.microsecond // 1000
+            out.append((start, streams))
+        return out
+
+    def _log_rows(self, db, table, lo, hi):
+        """The rows one table's log holds for writes in (lo, hi] ms, as
+        dicts, each stream read on its own (the order holds within one)."""
+        import datetime
+
+        from cassandra.concurrent import execute_concurrent_with_args
+        s = self._session("src")
+        stmt = s.prepare(
+            f"select * from {self._qualified('src', db, table + self.CDC_LOG)}"
+            ' where "cdc$stream_id" = ? and "cdc$time" > maxTimeuuid(?) and'
+            ' "cdc$time" <= maxTimeuuid(?)')
+        since = datetime.datetime.fromtimestamp(lo / 1000,
+                                                datetime.timezone.utc)
+        until = datetime.datetime.fromtimestamp(hi / 1000,
+                                                datetime.timezone.utc)
+        gens = self._generations()
+        found = []
+        for i, (start, streams) in enumerate(gens):
+            end = gens[i + 1][0] if i + 1 < len(gens) else None
+            if (end is not None and end <= lo) or start > hi:
+                continue
+            for ok, got in execute_concurrent_with_args(
+                    s, stmt, [(sid, since, until) for sid in streams],
+                    concurrency=64):
+                if not ok:
+                    raise got
+                names = got.column_names
+                found += [dict(zip(names, r)) for r in got]
+        return found
+
+    @staticmethod
+    def _micros(timeuuid):
+        """A log row's `cdc$time` as the write time it holds, in
+        microseconds since the epoch."""
+        return (timeuuid.time - 0x01B21DD213814000) // 10
+
+    def _changes(self, db, table, rows):
+        """What one table's log rows ask of the target, in the log's
+        terms: ([(delete statement, its values)], {full key: the latest
+        write time that touched it}). A row, a partition, a range of rows
+        and a column set to nothing are each deleted at the write time the
+        log gives them; a collection written whole is emptied just before
+        it, as the server itself does."""
+        key = self.neutral_key("src", db, table)
+        cols = self._columns("src", db, table)
+        part = [c.column_name for c in sorted(
+            (c for c in cols if c.kind == "partition_key"),
+            key=lambda c: c.position)]
+        clus = [k for k in key if k not in part]
+        whole = {c.column_name for c in cols
+                 if c.kind in ("regular", "static")
+                 and not self._one_cell(c.type)}
+        plain = [c.column_name for c in cols
+                 if c.kind in ("regular", "static")]
+        q, target = self._q, self._qualified("dst", db, table)
+        deletes, touched, opened = [], {}, {}
+        rows = sorted(rows, key=lambda r: (r["cdc$stream_id"],
+                                           r["cdc$time"].time,
+                                           r["cdc$batch_seq_no"]))
+        for r in rows:
+            op, at = int(r["cdc$operation"]), self._micros(r["cdc$time"])
+            pk = [r[n] for n in part]
+            if op in (self.UPDATE, self.INSERT):
+                full = tuple(r[n] for n in key)
+                touched[full] = max(at, touched.get(full, 0))
+                for n in plain:
+                    if r.get(f"cdc$deleted_{n}"):
+                        deletes.append((
+                            f"delete {q(n)} from {target} using timestamp"
+                            " ? where " + " and ".join(
+                                f"{q(k)} = ?" for k in key),
+                            [at - 1 if n in whole else at] + list(full)))
+            elif op == self.ROW_DELETE:
+                deletes.append((f"delete from {target} using timestamp ?"
+                                " where " + " and ".join(
+                                    f"{q(k)} = ?" for k in key),
+                                [at] + [r[n] for n in key]))
+            elif op == self.PARTITION_DELETE:
+                deletes.append((f"delete from {target} using timestamp ?"
+                                " where " + " and ".join(
+                                    f"{q(k)} = ?" for k in part),
+                                [at] + pk))
+            elif op in self.RANGE_FROM:
+                opened[r["cdc$stream_id"]] = r
+            elif op in self.RANGE_TO:
+                start = opened.pop(r["cdc$stream_id"], None)
+                conds, args = [f"{q(k)} = ?" for k in part], list(pk)
+                for bound, sign in ((start, (">=", ">")), (r, ("<=", "<"))):
+                    if bound is None:
+                        continue
+                    have = [k for k in clus if bound.get(k) is not None]
+                    if not have:
+                        continue
+                    op_ = sign[0 if int(bound["cdc$operation"]) in (5, 7)
+                               else 1]
+                    conds.append(f"{q(have[0])} {op_} ?" if len(have) == 1
+                                 else "(" + ", ".join(q(k) for k in have)
+                                 + f") {op_} ("
+                                 + ", ".join("?" for _ in have) + ")")
+                    args += [bound[k] for k in have]
+                deletes.append((f"delete from {target} using timestamp ?"
+                                f" where {' and '.join(conds)}",
+                                [at] + args))
+        return deletes, touched
+
+    def _follow_table(self, db, table, rows):
+        """How many changes of one table's log were carried: the deletes
+        as the log gives them, then every row it touched read again from
+        the source and written as `native_bulk` writes one - each cell with
+        its own write time and the time to live left to it, what has no
+        single time at the latest write time that touched the row. The
+        target's own last-write-wins then orders what arrives, so reading
+        a row after a later change, or carrying a change twice, lands the
+        same; and the target's cells keep the source's write times, which
+        the deep check holds them to."""
+        from cassandra.concurrent import (execute_concurrent,
+                                          execute_concurrent_with_args)
+        if not rows:
+            return 0
+        if table not in self.neutral_tables("dst", db):
+            self._made_like(db, table)
+        dst = self._session("dst")
+        deletes, touched = self._changes(db, table, rows)
+        prepared = {}
+        batch = []
+        for text, args in deletes:
+            if text not in prepared:
+                prepared[text] = dst.prepare(text)
+            batch.append((prepared[text], args))
+        self._sent(execute_concurrent(dst, batch, concurrency=64), table)
+        key, select, writes = self._row_writer(db, table)
+        src = self._session("src")
+        read = src.prepare(f"select {select} from"
+                           f" {self._qualified('src', db, table)} where "
+                           + " and ".join(f"{self._q(k)} = ?" for k in key))
+        keys = list(touched)
+        batch = []
+        for full, (ok, got) in zip(keys, execute_concurrent_with_args(
+                src, read, keys, concurrency=64)):
+            if not ok:
+                raise got
+            for row in got:
+                batch += writes(row, touched[full])
+        self._sent(execute_concurrent(dst, batch, concurrency=64), table)
+        return len(rows)
+
+    def _look(self, db, token):
+        """(position after, log rows carried): every table's log from the
+        position up to the confidence window's edge."""
+        tables = self._logged(db)
+        hi = self._now_ms("src") - int(self._confidence() * 1000)
+        lo = int((token or {}).get("at", hi))
+        if hi <= lo:
+            return {"at": lo}, 0
+        went = 0
+        for t in tables:
+            went += self._follow_table(db, t, self._log_rows(db, t, lo, hi))
+        return {"at": hi}, went
+
+    def tail_start(self, db, token_path):
+        """The position the follow begins at, taken before the copy it
+        follows (`change_point`)."""
+        from .. import tailctl
+        if token_path.exists():
+            self._logged(db)
+            return False
+        tailctl.begin(self, db, token_path, self.change_point("src", db))
+        return True
+
+    def tail_seed(self, db, token_path, point):
+        from .. import tailctl
+        tailctl.begin(self, db, token_path, point)
+
+    def tail_apply(self, db, go, token_path, log):
+        """Keep the target following a ScyllaDB source through each table's
+        change log (`<table>_scylla_cdc_log`): each look reads what every
+        stream of the generations in play recorded since the position, up
+        to the source's clock less the confidence window, and carries it
+        (`_follow_table`). A Cassandra source, a table with its log off, or
+        a keyspace of tablets is refused with the reason (`_logged`)."""
+        from .. import tailctl
+
+        def look(token):
+            after, went = self._look(db, token)
+            return after, went, True
+
+        def behind(token):
+            if not token:
+                return "no position saved yet"
+            lag = self._now_ms("src") - int(token.get("at", 0))
+            return f"the saved position is {lag / 1000:,.0f} s behind the" \
+                   " source's clock"
+        tailctl.follow(self, db, go, token_path, log, "changes", look,
+                       behind, 1.0)
+
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """The source's changes after `token` as the records any pair
+        applies: every row the log touched as the source holds it now, or
+        its delete where the source no longer holds it; a partition deleted
+        as a delete by its partition key. A range of rows deleted has no
+        key to give, and is refused rather than dropped."""
+        from .. import canon
+        if token is None:
+            return [], self.change_point(side, db)
+        tables = self._logged(db)
+        hi = self._now_ms(side) - int(self._confidence() * 1000)
+        lo = int(token.get("at", hi))
+        if hi <= lo:
+            return [], {"at": lo}
+        out = []
+        for t in tables:
+            rows = self._log_rows(db, t, lo, hi)
+            if any(int(r["cdc$operation"]) in self.RANGE_FROM for r in rows):
+                raise SystemExit(
+                    f"{db}.{t}: a range of rows was deleted on the source,"
+                    " which a change carried to another engine cannot name"
+                    " by key. Move the table again")
+            # by class, as every engine's rows are found by key: a key is
+            # rendered by its class, and a declared type has none
+            cols = [(n, canon.type_class("cassandra", typ) or canon.OWN)
+                    for n, typ in self.neutral_columns(side, db, t)]
+            key = self.neutral_key(side, db, t)
+            part = [c.column_name for c in self._columns(side, db, t)
+                    if c.kind == "partition_key"]
+            cls = dict(cols)
+            full = {}
+            for r in rows:
+                op = int(r["cdc$operation"])
+                if op == self.PARTITION_DELETE:
+                    out.append(canon.change("delete", t, {
+                        k: self._value(r[k]) for k in part}))
+                elif op in (self.UPDATE, self.INSERT, self.ROW_DELETE):
+                    k = {n: self._value(r[n]) for n in key}
+                    full[tuple(canon.render_value(cls[n], k[n])
+                               for n in key)] = k
+            now = self.neutral_rows_by_key(
+                side, db, t, cols, key,
+                [tuple(k[n] for n in key) for k in full.values()]) \
+                if full else {}
+            names = [n for n, _ in cols]
+            for ident, k in full.items():
+                row = now.get(ident)
+                out.append(canon.change("delete", t, k) if row is None else
+                           canon.change("update", t, k,
+                                        dict(zip(names, row))))
+        return out, {"at": hi}
+
+    # the fence, the confirm and the verify of only what changed are the
+    # pair's, through the position above
+
+    def src_lsn(self, db):
+        return self._as_pair().src_lsn(db)
+
+    def fence_wait(self, db, lsn, timeout=300):
+        return self._as_pair().fence_wait(db, lsn, timeout)
+
+    def _compare_pks(self, db, table, keys):
+        return self._as_pair()._compare_pks(db, table, keys)
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        return self._as_pair()._write_pk_files(db, table, missing, extra,
+                                                changed)
+
+    def delta_verify(self, db, limit=20000, log=None):
+        return self._as_pair().delta_verify(db, limit, log)

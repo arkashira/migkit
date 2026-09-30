@@ -1546,7 +1546,11 @@ DDL = {
         "bson": ("JSON", "JSON"),
     },
     "cassandra": {
-        OWN: ("text", "text"),
+        # the source's own type between two Cassandra clusters: as text,
+        # a table copied row by row was built with every column text and
+        # stopped on its first number (`'int' object has no attribute
+        # 'encode'`, measured on 4.1)
+        OWN: ("text", "{0}"),
         "integer": ("bigint", "bigint"),
         "decimal": ("decimal", "decimal"),
         "float": ("double", "double"),

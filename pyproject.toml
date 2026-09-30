@@ -37,6 +37,7 @@ dependencies = [
     "ibm_db>=3.2",
     "pyodbc>=5.1",
     "cassandra-driver>=3.29",
+    "opensearch-py>=3.0",
     "snowflake-connector-python>=3.6",
     "google-cloud-bigquery>=3.11",
     "zstandard>=0.22",

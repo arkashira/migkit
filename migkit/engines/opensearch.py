@@ -59,12 +59,16 @@ class OpenSearchEngine(NeutralCopier, Engine):
 
     # ---- the wire ---------------------------------------------------------
 
+    def _base(self, side):
+        ep = self.hop.source if side == "src" else self.hop.target
+        return str(ep.options.get("url") or
+                   f"{'https' if ep.options.get('tls') else 'http'}://"
+                   f"{ep.host}:{ep.port or 9200}").rstrip("/")
+
     def _call(self, side, method, path, body=None, ndjson=False,
               missing_ok=False):
         ep = self.hop.source if side == "src" else self.hop.target
-        base = str(ep.options.get("url") or
-                   f"{'https' if ep.options.get('tls') else 'http'}://"
-                   f"{ep.host}:{ep.port or 9200}").rstrip("/")
+        base = self._base(side)
         data = None
         if body is not None:
             data = (body if ndjson else json.dumps(body)).encode()
@@ -88,6 +92,85 @@ class OpenSearchEngine(NeutralCopier, Engine):
             raise RuntimeError(f"{method} {path.split('?')[0]}: {e.code}"
                                f" {e.read()[:300].decode(errors='replace')}")
         return json.loads(raw) if raw else {}
+
+    #: documents and bytes one bulk request carries at most
+    BULK_DOCS, BULK_BYTES = 1000, 32 * 2 ** 20
+    #: times a document the cluster pushed back (429) is sent again, the
+    #: wait doubling from one second up to a minute
+    BULK_RETRIES = 8
+
+    def _os(self, side):
+        """The cluster's client, one a side, shared by the threads of a
+        copy. OpenSearch's own: Elasticsearch's refuses any server that is
+        not Elasticsearch."""
+        clients = self.__dict__.setdefault("_clients", {})
+        if side not in clients:
+            from opensearchpy import OpenSearch
+            ep = self.hop.source if side == "src" else self.hop.target
+            checked = ep.options.get("verify") is not False
+            clients[side] = OpenSearch(
+                hosts=[self._base(side)],
+                http_auth=(ep.user, ep.password) if ep.user else None,
+                verify_certs=checked, ssl_assert_hostname=checked,
+                ssl_show_warn=False, timeout=120,
+                pool_maxsize=max(10, int(self.hop.workers or 1) * 2))
+        return clients[side]
+
+    def _bulk(self, side, actions):
+        """(written, left because the target holds that version or a newer
+        one) for a stream of bulk actions, sent in requests of
+        `BULK_DOCS` documents or `BULK_BYTES`, one after another - a
+        document the cluster pushes back for being busy is sent again
+        after a wait (`BULK_RETRIES`), which parallel sending does not do.
+        A delete of a document that is not there is what was wanted; any
+        other refusal stops the copy, naming the first."""
+        from opensearchpy.helpers import streaming_bulk
+        written, kept, refused = 0, 0, []
+        for ok, item in streaming_bulk(
+                self._os(side), actions, chunk_size=self.BULK_DOCS,
+                max_chunk_bytes=self.BULK_BYTES, raise_on_error=False,
+                raise_on_exception=True, max_retries=self.BULK_RETRIES,
+                initial_backoff=1, max_backoff=60, yield_ok=True):
+            op, got = next(iter(item.items()))
+            status = int(got.get("status") or 0)
+            if ok:
+                written += 1
+            elif status == 409:
+                kept += 1
+            elif not (op == "delete" and status == 404):
+                refused.append(got)
+        if refused:
+            first = refused[0].get("error") or {}
+            raise SystemExit(f"{refused[0].get('_index')}: the target refused"
+                             f" {len(refused)} documents:"
+                             f" {first.get('type')}:"
+                             f" {str(first.get('reason'))[:120]}")
+        return written, kept
+
+    @staticmethod
+    def _versioned(hit, index):
+        """A document read from the source, as the bulk action that writes
+        it to `index` with the source's own place in its shard's history
+        as its version: its primary term above its sequence number, so a
+        later change always carries a larger one.
+
+        `external`: the target keeps a write only when its version is
+        larger than the one it holds, so a change carried twice, or an
+        older one carried after a newer, is left (a conflict, counted, not
+        an error). Not `external_gte`, which also takes an equal version -
+        the documentation's own warning is that it can lose data - and not
+        `if_seq_no`/`if_primary_term`, which hold a write to the target's
+        own sequence numbers, which the copy neither knows nor shares with
+        the source."""
+        action = {"_op_type": "index", "_index": index, "_id": hit["_id"],
+                  "_source": hit.get("_source") or {}}
+        if hit.get("_routing") is not None:
+            action["routing"] = hit["_routing"]
+        term, seq = hit.get("_primary_term"), hit.get("_seq_no")
+        if term is not None and seq is not None and int(term) < 2 ** 20:
+            action["version"] = (int(term) << 43) | int(seq)
+            action["version_type"] = "external"
+        return action
 
     def _prefix(self, side, db):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -352,22 +435,12 @@ class OpenSearchEngine(NeutralCopier, Engine):
         key = self.neutral_key(side, db, table)
         names = [n for n, _ in columns]
         index = self._index(side, db, table)
-        lines = []
-        for r in rows:
-            doc = {n: self._to_source(declared.get(n, "text"), v)
-                   for n, v in zip(names, r) if n != "_id"}
-            lines.append(json.dumps({"index": {
-                "_index": index, "_id": self._doc_id(columns, key, r)}}))
-            lines.append(json.dumps(doc))
-        got = self._call(side, "POST", "/_bulk", "\n".join(lines) + "\n",
-                         ndjson=True)
-        if got.get("errors"):
-            bad = [i for i in got.get("items", [])
-                   if i.get("index", {}).get("error")]
-            first = bad[0]["index"]["error"] if bad else {}
-            raise SystemExit(f"{index}: the target refused {len(bad)}"
-                             f" documents: {first.get('type')}:"
-                             f" {str(first.get('reason'))[:120]}")
+        self._bulk(side, ({
+            "_op_type": "index", "_index": index,
+            "_id": self._doc_id(columns, key, r),
+            "_source": {n: self._to_source(declared.get(n, "text"), v)
+                        for n, v in zip(names, r) if n != "_id"}}
+            for r in rows))
         return len(rows)
 
     def neutral_empty(self, side, db, table, where=None):
@@ -537,22 +610,13 @@ class OpenSearchEngine(NeutralCopier, Engine):
             was = int((before.get(shard) or [-1])[0])
             if top <= was:
                 continue
-            got = self._call(
-                "src", "POST", f"/{index}/_search?preference=_shards:{shard}"
-                               "&scroll=1m",
-                {"size": 1000, "_source": False, "sort": ["_doc"],
-                 "query": {"range": {"_seq_no": {"gt": was}}}})
-            scroll = got.get("_scroll_id")
-            try:
-                while got["hits"]["hits"]:
-                    ids.update(h["_id"] for h in got["hits"]["hits"])
-                    got = self._call("src", "POST", "/_search/scroll",
-                                     {"scroll": "1m", "scroll_id": scroll})
-                    scroll = got.get("_scroll_id", scroll)
-            finally:
-                if scroll:
-                    self._call("src", "DELETE", "/_search/scroll",
-                               {"scroll_id": scroll}, missing_ok=True)
+            for hits in self._scroll(
+                    "src", index, {"size": 1000, "_source": False,
+                                   "sort": ["_doc"],
+                                   "query": {"range": {"_seq_no": {
+                                       "gt": was}}}},
+                    f"preference=_shards:{shard}"):
+                ids.update(h["_id"] for h in hits)
         return ids
 
     def _sources(self, side, db, table, ids):
@@ -569,20 +633,11 @@ class OpenSearchEngine(NeutralCopier, Engine):
         return out
 
     def _ids(self, side, db, table):
-        index = self._index(side, db, table)
-        got = self._call(side, "POST", f"/{index}/_search?scroll=1m",
-                         {"size": 5000, "_source": False, "sort": ["_doc"]})
-        scroll, ids = got.get("_scroll_id"), set()
-        try:
-            while got["hits"]["hits"]:
-                ids.update(h["_id"] for h in got["hits"]["hits"])
-                got = self._call(side, "POST", "/_search/scroll",
-                                 {"scroll": "1m", "scroll_id": scroll})
-                scroll = got.get("_scroll_id", scroll)
-        finally:
-            if scroll:
-                self._call(side, "DELETE", "/_search/scroll",
-                           {"scroll_id": scroll}, missing_ok=True)
+        ids = set()
+        for hits in self._scroll(side, self._index(side, db, table),
+                                 {"size": 5000, "_source": False,
+                                  "sort": ["_doc"]}):
+            ids.update(h["_id"] for h in hits)
         return ids
 
     def delta_verify(self, db, limit=20000, log=None):
@@ -634,13 +689,40 @@ class OpenSearchEngine(NeutralCopier, Engine):
 
     # ---- documents copied as they are -------------------------------------
 
+    def _scroll(self, side, index, body, where=""):
+        """Pages of hits of one search, read through to the end with a
+        scroll that is let go of however the reading stops. `where` is
+        more of the request's query string (`preference=_shards:0`)."""
+        got = self._call(side, "POST", f"/{index}/_search?scroll=2m"
+                                       + (f"&{where}" if where else ""), body)
+        scroll = got.get("_scroll_id")
+        try:
+            while got["hits"]["hits"]:
+                yield got["hits"]["hits"]
+                got = self._call(side, "POST", "/_search/scroll",
+                                 {"scroll": "2m", "scroll_id": scroll})
+                scroll = got.get("_scroll_id", scroll)
+        finally:
+            if scroll:
+                self._call(side, "DELETE", "/_search/scroll",
+                           {"scroll_id": scroll}, missing_ok=True)
+
     def native_bulk(self, db, tables, go, log, shape_only=()):
         """Each index's documents copied as the source holds them - the
-        `_source` and the `_id` unchanged - by a sliced scroll, a slice per
-        worker, each written back through `_bulk`. An index the target
+        `_source`, the `_id` and the routing unchanged - by a sliced
+        scroll, a slice per worker, each written back through `_bulk` with
+        the source's own version of it (`_versioned`). An index the target
         lacks is made with the source's mappings and analysis; while it
-        loads it keeps no replica and does not refresh, and gets both
-        back after."""
+        loads it keeps no replica and does not refresh, and gets both back
+        after.
+
+        What the target already holds is not emptied first: a document it
+        holds at the source's version or a newer one is left, an older one
+        replaced, and - where the index held documents before the copy -
+        one the source does not hold is taken away after. Emptied, each
+        deleted document's version stays behind for a minute
+        (`index.gc_deletes`), and the copy's own write of it, at the same
+        version, would be refused and the document lost."""
         steps = [f"{t}: documents copied as they are, by a sliced scroll"
                  for t in tables]
         if not go:
@@ -652,8 +734,10 @@ class OpenSearchEngine(NeutralCopier, Engine):
             if t.lower() not in self.neutral_tables("dst", db):
                 self._made_like(db, t)
         for t in tables:
-            self.neutral_empty("dst", db, t)
             src, dst = self._index("src", db, t), self._index("dst", db, t)
+            self._refresh("dst", db, t)
+            held = int(self._call("dst", "GET", f"/{dst}/_count")
+                       .get("count", 0))
             kept = self._call("dst", "GET", f"/{dst}/_settings")
             index_settings = ((kept.get(dst) or {}).get("settings") or {}
                               ).get("index", {})
@@ -666,40 +750,15 @@ class OpenSearchEngine(NeutralCopier, Engine):
                                   "refresh_interval": "-1"}})
 
             def one(i, src=src, dst=dst):
-                body = {"size": 1000, "sort": ["_doc"]}
+                body = {"size": 1000, "sort": ["_doc"],
+                        "seq_no_primary_term": True}
                 if slices > 1:
                     body["slice"] = {"id": i, "max": slices}
-                got = self._call("src", "POST", f"/{src}/_search?scroll=2m",
-                                 body)
-                scroll, moved = got.get("_scroll_id"), 0
-                try:
-                    while got["hits"]["hits"]:
-                        lines = []
-                        for h in got["hits"]["hits"]:
-                            lines.append(json.dumps({"index": {
-                                "_index": dst, "_id": h["_id"]}}))
-                            lines.append(json.dumps(h["_source"]))
-                        wrote = self._call("dst", "POST", "/_bulk",
-                                           "\n".join(lines) + "\n",
-                                           ndjson=True)
-                        if wrote.get("errors"):
-                            first = next(
-                                (x["index"]["error"] for x in
-                                 wrote.get("items", [])
-                                 if x.get("index", {}).get("error")), {})
-                            raise SystemExit(
-                                f"{dst}: the target refused a document:"
-                                f" {first.get('type')}:"
-                                f" {str(first.get('reason'))[:120]}")
-                        moved += len(got["hits"]["hits"])
-                        got = self._call("src", "POST", "/_search/scroll",
-                                         {"scroll": "2m",
-                                          "scroll_id": scroll})
-                        scroll = got.get("_scroll_id", scroll)
-                finally:
-                    if scroll:
-                        self._call("src", "DELETE", "/_search/scroll",
-                                   {"scroll_id": scroll}, missing_ok=True)
+                moved = 0
+                for hits in self._scroll("src", src, body):
+                    self._bulk("dst", (self._versioned(h, dst)
+                                       for h in hits))
+                    moved += len(hits)
                 return moved
             try:
                 with ThreadPoolExecutor(max_workers=slices) as pool:
@@ -708,9 +767,49 @@ class OpenSearchEngine(NeutralCopier, Engine):
                 self._call("dst", "PUT", f"/{dst}/_settings",
                            {"index": restore})
                 self._call("dst", "POST", f"/{dst}/_refresh")
+            gone, refused = self._strays(db, t) if held else (0, 0)
+            if refused:
+                raise SystemExit(
+                    f"{t}: {refused:,} documents deleted on the target in"
+                    " the last minute refuse the source's version of them"
+                    " for a minute more - move again after it")
             if log:
-                log(f"{t}: {moved:,} documents copied in {slices} slices")
+                log(f"{t}: {moved:,} documents copied in {slices} slices"
+                    + (f", {gone:,} the source does not hold taken from"
+                       " the target" if gone else ""))
         return steps
+
+    def _strays(self, db, table):
+        """(deleted, refused): the target's documents of one index the
+        source does not hold, deleted; the source's the target lacks,
+        written with their versions - and how many of those the target
+        still refused. A document deleted on the target keeps its delete's
+        version for a minute (`index.gc_deletes`), and until then refuses
+        the source's version of it. Both are found by a search of their ids
+        rather than asked by id: a document written with a routing of its
+        own lives in the shard its routing names, where a lookup by id
+        alone does not look."""
+        self._refresh("dst", db, table)
+        there = self._ids("dst", db, table)
+        held = self._ids("src", db, table)
+        gone = sorted(there - held)
+        dst = self._index("dst", db, table)
+        for at in range(0, len(gone), 500):
+            self._call("dst", "POST", f"/{dst}/_delete_by_query"
+                                      "?refresh=true&conflicts=proceed",
+                       {"query": {"ids": {"values": gone[at:at + 500]}}})
+        lacking = sorted(held - there)
+        src = self._index("src", db, table)
+        refused = 0
+        for at in range(0, len(lacking), 500):
+            got = self._call("src", "POST", f"/{src}/_search",
+                             {"size": 500, "seq_no_primary_term": True,
+                              "query": {"ids": {
+                                  "values": lacking[at:at + 500]}}})
+            refused += self._bulk("dst", (
+                self._versioned(h, dst)
+                for h in (got.get("hits") or {}).get("hits", [])))[1]
+        return len(gone), refused
 
     def _made_like(self, db, table):
         """The target index made with the source's mappings and analysis,
@@ -725,3 +824,247 @@ class OpenSearchEngine(NeutralCopier, Engine):
         self._call("dst", "PUT", f"/{self._index('dst', db, table)}",
                    {"settings": {"index": keep},
                     "mappings": got.get("mappings") or {}})
+
+    # ---- following the source by its shards' sequence numbers --------------
+
+    #: seconds between two looks at the source once caught up
+    FOLLOW_EVERY = 1
+    CHANGE_POINT_READS_ONLY = True
+
+    def _copies(self, side, index):
+        """(the index's id, {primary shard: [global checkpoint, highest
+        sequence number]}, {copy of a shard: times it has made writes
+        visible to a search}). Every write to a shard takes its next
+        sequence number, a delete too; up to the global checkpoint every
+        copy of the shard holds it."""
+        got = self._call(side, "GET", f"/{index}/_stats/refresh"
+                                      "?level=shards")
+        mine = (got.get("indices") or {}).get(index) or {}
+        marks, seen = {}, {}
+        for n, copies in (mine.get("shards") or {}).items():
+            for c in copies:
+                routing = c.get("routing") or {}
+                refresh = c.get("refresh") or {}
+                seen[f"{n}/{routing.get('node')}/{routing.get('primary')}"] \
+                    = int(refresh.get("external_total",
+                                      refresh.get("total", 0)))
+                if routing.get("primary"):
+                    seq = c.get("seq_no") or {}
+                    marks[str(n)] = [int(seq.get("global_checkpoint", -1)),
+                                     int(seq.get("max_seq_no", -1))]
+        return str(mine.get("uuid") or ""), marks, seen
+
+    def _refresh_every(self, side, index):
+        """Seconds between the index's refreshes, None where it refreshes
+        only when asked (`-1`)."""
+        got = self._call(side, "GET", f"/{index}/_settings?include_defaults"
+                                      "=true&flat_settings=true")
+        mine = got.get(index) or {}
+        text = str((mine.get("settings") or {}).get("index.refresh_interval")
+                   or (mine.get("defaults") or {}).get(
+                       "index.refresh_interval") or "1s")
+        if text.startswith("-"):
+            return None
+        for unit, scale in (("ms", 0.001), ("s", 1), ("m", 60), ("h", 3600)):
+            if text.endswith(unit) and text[:-len(unit)].replace(
+                    ".", "", 1).isdigit():
+                return float(text[:-len(unit)]) * scale
+        return 1.0
+
+    def _visible(self, side, waits):
+        """Wait until every write up to the checkpoints read with each
+        index's `before` is within a search's reach - {index: (before,
+        seconds between its refreshes)}, all waited on together. A copy of
+        a shard that has made writes visible twice since - the second time
+        begun after the first ended, so after `before` was read - has them.
+        One that has not by twice its interval either has nothing left to
+        make visible (a copy refreshes on its interval whenever it has), or
+        has gone unsearched a while and makes writes visible only when
+        searched - and a search waits for it to (measured on 2.19: after
+        35 s without a search, a shard had not made a new write visible 3 s
+        later; a count on it made it visible at once). So the index is
+        searched then, and its wait is over."""
+        import time
+        began, left = time.monotonic(), dict(waits)
+        while left:
+            for index, (before, every) in list(left.items()):
+                _, _, now = self._copies(side, index)
+                if all(now.get(c, 0) >= n + 2 for c, n in before.items()):
+                    del left[index]
+                elif time.monotonic() - began > 2 * every:
+                    self._call(side, "POST", f"/{index}/_count",
+                               {"query": {"match_all": {}}})
+                    del left[index]
+            if left:
+                time.sleep(0.2)
+
+    @staticmethod
+    def _never_refreshes(index):
+        return (f"{index} on the source refreshes only when asked, so what"
+                " it takes is seen by no search until then - a copy and a"
+                " follow cannot see it either. Give it a refresh interval,"
+                " or stop writes and move it")
+
+    def stream_identity(self, side, db):
+        return {"cluster": str(self._call(side, "GET", "/")
+                               .get("cluster_uuid") or "")}
+
+    def change_point(self, side, db):
+        """Now, in each index's shards: the global checkpoint of each,
+        taken once every copy has made the writes up to it visible - so a
+        copy read after it holds everything up to it, and a follow begun
+        from it misses nothing between. It reads only, and waits."""
+        out, waits = {}, {}
+        for t in self.neutral_tables(side, db):
+            index = self._index(side, db, t)
+            uuid, marks, seen = self._copies(side, index)
+            every = self._refresh_every(side, index)
+            if every is None:
+                raise SystemExit(self._never_refreshes(index))
+            waits[index] = (seen, every)
+            out[t] = {"uuid": uuid,
+                      "shards": {s: m[0] for s, m in marks.items()}}
+        self._visible(side, waits)
+        return {"indexes": out}
+
+    def log_position(self, side, db):
+        """Each index's shards' highest sequence numbers now: every write
+        acknowledged so far is at or under them."""
+        out = {}
+        for t in self.neutral_tables(side, db):
+            uuid, marks, _ = self._copies(side, self._index(side, db, t))
+            out[t] = {"uuid": uuid,
+                      "shards": {s: m[1] for s, m in marks.items()}}
+        return {"indexes": out}
+
+    @staticmethod
+    def position_reached(have, want):
+        """Whether the follow at `have` has carried, and checked for
+        deletes, every write each shard of `want` holds."""
+        if not have or not want:
+            return None
+        for t, w in (want.get("indexes") or {}).items():
+            h = (have.get("indexes") or {}).get(t)
+            if not h or h.get("uuid") != w.get("uuid"):
+                return False
+            if any(int((h.get("shards") or {}).get(s, -1)) < int(n)
+                   for s, n in (w.get("shards") or {}).items()):
+                return False
+        return True
+
+    def tail_start(self, db, token_path):
+        """The position the follow begins at, taken before the copy it
+        follows (`change_point`)."""
+        from .. import tailctl
+        if token_path.exists():
+            return False
+        tailctl.begin(self, db, token_path, self.change_point("src", db))
+        return True
+
+    def tail_seed(self, db, token_path, point):
+        from .. import tailctl
+        tailctl.begin(self, db, token_path, point)
+
+    def _follow_index(self, db, table, was, log):
+        """(the index's position after one look, documents carried, whether
+        it settled) - every write each shard took since the position, read
+        as the documents it left and written with their versions; then,
+        since a delete leaves nothing to find by its number, the two sides
+        counted, and where they differ, their ids compared and the
+        target's extra taken away (`_strays`).
+
+        The counts are of both sides as they stand: a delete in this look
+        and a document written just after the checkpoint was read can
+        cancel out in them for one look, and the next look, whose counts
+        differ, takes the document away. Once writes stop, the counts are
+        exact - which is when a fence decides a cutover."""
+        src, dst = self._index("src", db, table), self._index("dst", db,
+                                                              table)
+        uuid, marks, seen = self._copies("src", src)
+        if was and was.get("uuid") != uuid:
+            raise SystemExit(
+                f"{src} on the source was made again since the saved"
+                " position (another index id): what the position counted is"
+                " not in it. Move it again with --mode full+cdc")
+        done = {s: int((was or {}).get("shards", {}).get(s, -1))
+                for s in marks}
+        upto = {s: m[0] for s, m in marks.items()}
+        if was and all(upto[s] <= done[s] for s in upto):
+            return was, 0, True
+        every = self._refresh_every("src", src)
+        if every is None:
+            raise SystemExit(self._never_refreshes(src))
+        self._visible("src", {src: (seen, every)})
+        if table.lower() not in self.neutral_tables("dst", db):
+            self._made_like(db, table)
+        wrote = 0
+        for s, top in sorted(upto.items()):
+            if top <= done[s]:
+                continue
+            for hits in self._scroll(
+                    "src", src, {"size": 1000, "sort": ["_doc"],
+                                 "seq_no_primary_term": True,
+                                 "query": {"range": {"_seq_no": {
+                                     "gt": done[s], "lte": top}}}},
+                    f"preference=_shards:{s}"):
+                wrote += self._bulk("dst", (self._versioned(h, dst)
+                                            for h in hits))[0]
+        self._refresh("dst", db, table)
+        count = [int(self._call(side, "GET", f"/{index}/_count")
+                     .get("count", 0)) for side, index in (("src", src),
+                                                           ("dst", dst))]
+        gone, refused = (self._strays(db, table) if count[0] != count[1]
+                         else (0, 0))
+        if refused:
+            # looked at again from the same position, once the target
+            # takes the source's version of them
+            return was, wrote + gone, False
+        return {"uuid": uuid, "shards": upto}, wrote + gone, True
+
+    def tail_apply(self, db, go, token_path, log):
+        """Keep the target following the source by each primary shard's
+        sequence numbers: each look, the documents written since the saved
+        position are read from the shard that took them and written with
+        the source's version (`_versioned`), so a look repeated, or a
+        change carried after a newer one, is left by the target; deletes
+        are found by the counts (`_follow_index`). The position is saved
+        after each look; the fence waits on it (`position_reached`)."""
+        from .. import tailctl
+
+        def look(token):
+            indexes = dict((token or {}).get("indexes") or {})
+            went, settled = 0, True
+            for t in self.neutral_tables("src", db):
+                indexes[t], n, ok = self._follow_index(db, t,
+                                                       indexes.get(t), log)
+                went += n
+                settled = settled and ok
+            return {"indexes": indexes}, went, settled
+
+        def behind(token):
+            now = self.log_position("src", db)["indexes"]
+            have = (token or {}).get("indexes") or {}
+            ahead = {t: sum(max(0, int(n) - int((have.get(t) or {}).get(
+                "shards", {}).get(s, -1))) for s, n in w["shards"].items())
+                for t, w in now.items()}
+            return (f"{sum(ahead.values()):,} writes on the source past the"
+                    " saved position" + "".join(
+                        f"; {t} {n:,}" for t, n in sorted(ahead.items())
+                        if n))
+        tailctl.follow(self, db, go, token_path, log, "documents", look,
+                       behind, self.FOLLOW_EVERY)
+
+    # the fence and the confirm are the pair's, through the position above
+
+    def src_lsn(self, db):
+        return self._as_pair().src_lsn(db)
+
+    def fence_wait(self, db, lsn, timeout=300):
+        return self._as_pair().fence_wait(db, lsn, timeout)
+
+    def _compare_pks(self, db, table, keys):
+        return self._as_pair()._compare_pks(db, table, keys)
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        return self._as_pair()._write_pk_files(db, table, missing, extra,
+                                                changed)

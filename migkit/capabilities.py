@@ -110,10 +110,6 @@ GAPS = {
     "clickhouse": {
         "sequences": (NOT_APPLICABLE, "ClickHouse has no sequences or"
                                       " auto-increment to carry"),
-        "bulk-move": (NOT_YET, "33"),
-        "stream": (NOT_YET, "33"),
-        "fence": (NOT_YET, "33"),
-        "confirm": (NOT_YET, "33"),
         "statistics": (NOT_APPLICABLE, "a MergeTree reads by its sorting"
                                        " key and keeps no optimiser"
                                        " statistics to refresh"),
@@ -164,19 +160,11 @@ GAPS = {
     "opensearch": {
         "sequences": (NOT_APPLICABLE, "an index has no sequences or"
                                       " auto-increment to carry"),
-        "stream": (NOT_YET, "34"),
-        "fence": (NOT_YET, "34"),
-        "confirm": (NOT_YET, "34"),
-        "users": (NOT_YET, "34"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "cassandra": {
         "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
                                       " auto-increment to carry"),
-        "stream": (NOT_YET, "34"),
-        "fence": (NOT_YET, "34"),
-        "confirm": (NOT_YET, "34"),
-        "delta": (NOT_YET, "34"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     **{name: {

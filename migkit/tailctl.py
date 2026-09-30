@@ -211,3 +211,93 @@ def same_source(eng, db, token_path, token):
 
 def _who(identity):
     return ", ".join(f"{k} {v}" for k, v in sorted(identity.items()))
+
+
+def begin(eng, db, token_path, point):
+    """Save `point` as where a follow begins, and the source it belongs to
+    beside it."""
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(json.dumps({"token": point}, default=str))
+    (token_path.parent / SOURCE).unlink(missing_ok=True)
+    same_source(eng, db, token_path, None)
+
+
+def saved(token_path):
+    """The position a follow saved, None where there is none."""
+    if not token_path.exists():
+        return None
+    try:
+        return json.loads(token_path.read_text())["token"]
+    except (ValueError, KeyError, TypeError):
+        # starting from now instead would skip everything between the
+        # point this file held and now, and say nothing
+        raise SystemExit(
+            f"the saved position in {token_path} cannot be read, and a"
+            " follow started from anywhere else either skips changes or"
+            " cannot say it did not. Remove the file and move again with"
+            " --mode full+cdc")
+
+
+def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
+    """The loop of an engine that follows its source by looking at it
+    again and again, the same for each: the saved position - taken now
+    with `eng.tail_start` where there is none - held to the source it was
+    taken on (`same_source`), then one `look(token)` after another until
+    stopped, the position saved after each. `look` returns the position
+    after it, how many `noun` it carried, and whether it settled all it
+    found - the time the follow last caught up, for `/metrics`. `behind`
+    says, for a run without --go, what the source holds past the
+    position. A connection lost is looked at again from the saved
+    position, which carrying twice converges on; anything else stops the
+    follow and says why."""
+    from .util import is_transient, without_secret
+    token = saved(token_path)
+    if token is None and go:
+        eng.tail_start(db, token_path)
+        token = saved(token_path)
+    elif token is not None:
+        same_source(eng, db, token_path, token)
+    log(f"following the source's {noun}, ctrl-c to stop"
+        + ("" if go else " (count-only, add --go to copy)"))
+    if not go:
+        log(behind(token))
+        return
+
+    def save():
+        tmp = token_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"token": token}, default=str))
+        tmp.replace(token_path)
+    seen, caught_up, lost = 0, time.time(), 0
+    try:
+        with Running(token_path.parent):
+            while True:
+                hold_if_asked(token_path.parent, log)
+                try:
+                    after, went, settled = look(token)
+                except Exception as e:  # noqa: BLE001 - classified here
+                    if not is_transient(e):
+                        raise
+                    lost += 1
+                    wait = min(60, 2 ** min(lost, 6))
+                    said = (str(e).strip().splitlines() or [""])[0]
+                    for secret in (eng.hop.source.password,
+                                   eng.hop.target.password):
+                        said = without_secret(said, secret)
+                    log(f"lost a connection ({said[:100]}); looking again"
+                        f" in {wait}s from the last saved position")
+                    beat(token_path.parent, caught_up, seen)
+                    time.sleep(wait)
+                    continue
+                lost = 0
+                token = after
+                save()
+                if settled:
+                    caught_up = time.time()
+                if went:
+                    seen += went
+                    log(f"{seen:,} {noun} carried")
+                beat(token_path.parent, caught_up, seen)
+                if not went:
+                    time.sleep(every)
+    except KeyboardInterrupt:
+        log(f"stopped after {seen:,} {noun}; rerun to resume")

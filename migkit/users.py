@@ -153,6 +153,11 @@ def compare(hop, say=print):
         t = _ch_access(hop, "dst")
         skeys, tkeys = set(s), set(t)
         pw = []
+    elif eng in ("opensearch", "elasticsearch"):
+        s = _os_security(hop, "src")
+        t = _os_security(hop, "dst")
+        skeys, tkeys = set(s or {}), set(t or {})
+        pw = []
     elif eng == "cassandra":
         s = _cs_roles(hop, "src")
         t = _cs_roles(hop, "dst")
@@ -199,6 +204,8 @@ def compare(hop, say=print):
         say(f"  password differs ({len(pw)}): {pw}")
     elif eng == "kafka":
         _kafka_compared(out, s, t, missing, say)
+    elif eng in ("opensearch", "elasticsearch"):
+        _os_compared(hop, out, s, t, say)
     elif eng == "mssql":
         gd = sorted(k for k in s if k in t and (
             set(s[k]["roles"]) - set(t[k]["roles"])
@@ -946,6 +953,219 @@ def _ch_rollback(hop, apply, say):
         rec.rename(str(rec) + ".rolled-back")
 
 
+# --- opensearch --------------------------------------------------------------
+#: where the security plugin answers, and what it keeps of each kind
+OS_API = "/_plugins/_security/api"
+OS_KINDS = (("role", "roles", ("cluster_permissions", "index_permissions",
+                               "tenant_permissions", "description")),
+            ("user", "internalusers", ("backend_roles", "attributes",
+                                       "opendistro_security_roles",
+                                       "description")),
+            ("mapping", "rolesmapping", ("backend_roles", "hosts", "users",
+                                         "and_backend_roles",
+                                         "description")))
+
+
+def _os_engine(hop):
+    from .engines.opensearch import OpenSearchEngine
+    return OpenSearchEngine(hop)
+
+
+def _os_patterns(hop, rule):
+    """A role's index permissions with the source's index names as the
+    target calls them, where the hop gives a database another name there."""
+    eng = _os_engine(hop)
+    moved = [(eng._prefix("src", d), eng._prefix("dst", d))
+             for d in (hop.databases or [])]
+    out = json.loads(json.dumps(rule))
+    for perm in out.get("index_permissions") or []:
+        pats = []
+        for p in perm.get("index_patterns") or []:
+            for a, b in moved:
+                if a != b and str(p).startswith(a):
+                    p = b + str(p)[len(a):]
+                    break
+            pats.append(p)
+        perm["index_patterns"] = pats
+    return out
+
+
+def _os_security(hop, side):
+    """{"role:<name>" | "user:<name>" | "mapping:<role>": definition} from
+    the security plugin's own REST API, what the cluster keeps for itself
+    (reserved, static, hidden) left out; None where the cluster answers no
+    security API - the plugin absent or turned off. The API shows no
+    password, not even as its hash, so none is compared or carried but the
+    one the passwords file gives."""
+    eng = _os_engine(hop)
+    out = {}
+    for kind, path, keep in OS_KINDS:
+        try:
+            got = eng._call(side, "GET", f"{OS_API}/{path}")
+        except RuntimeError as e:
+            code = str(e).split(":", 2)[1].strip()[:3] if ":" in str(e) \
+                else ""
+            if code in ("400", "404", "405"):
+                return None
+            where = "source" if side == "src" else "target"
+            raise SystemExit(f"users: the {where}'s security configuration"
+                             f" cannot be read ({str(e)[:120]}): the account"
+                             " needs the security plugin's REST API")
+        for name, d in (got or {}).items():
+            if d.get("reserved") or d.get("static") or d.get("hidden"):
+                continue
+            entry = {k: d[k] for k in keep if d.get(k) not in (None, "",
+                                                                [], {})}
+            for k, v in list(entry.items()):
+                if isinstance(v, list) and all(isinstance(x, str)
+                                               for x in v):
+                    entry[k] = sorted(v)
+            out[f"{kind}:{name}"] = entry
+    return out
+
+
+def _os_compared(hop, out, s, t, say):
+    """What differs besides what is missing, and whether each side runs the
+    plugin at all."""
+    out["plugin"] = {"source": "absent" if s is None else "present",
+                     "target": "absent" if t is None else "present"}
+    s, t = s or {}, t or {}
+    want = {k: (_os_patterns(hop, v) if k.startswith("role:") else v)
+            for k, v in s.items()}
+    dd = sorted(k for k in want if k in t and want[k] != t[k])
+    out["definitions_differ"] = dd
+    gap = out["missing_on_target"] or dd or (
+        out["plugin"]["target"] == "absent" and s)
+    out["result"] = "gap" if gap else "pass"
+    if out["plugin"]["source"] == "absent":
+        say("  the source answers no security API (the plugin is absent or"
+            " off): nothing to carry")
+    if out["plugin"]["target"] == "absent" and s:
+        say("  the target answers no security API: turn its security plugin"
+            " on before these can be carried")
+    say(f"  definitions differ ({len(dd)}): {dd}")
+    say("  note: the security API shows no password, not even as its hash;"
+        " create sets the one given in the passwords file")
+
+
+def _os_create(hop, apply, passwords, say):
+    """Roles first, then users, then who holds which role - each as the
+    source defines it, the index names as the target calls them. A user is
+    made with the password the passwords file gives it, or skipped and
+    said. A definition the target already had is replaced, and kept in the
+    record so a rollback puts it back."""
+    out, s = compare(hop, say)
+    if out["plugin"]["target"] == "absent":
+        if s:
+            raise SystemExit("users: the target answers no security API, so"
+                             " nothing can be carried to it")
+        say("  nothing to create")
+        return
+    t = _os_security(hop, "dst") or {}
+    passwords = passwords or {}
+    todo, skipped = [], []
+    order = {"role": 0, "user": 1, "mapping": 2}
+    for key in sorted(set(out["missing_on_target"])
+                      | set(out["definitions_differ"]),
+                      key=lambda k: (order[k.split(":", 1)[0]], k)):
+        kind, name = key.split(":", 1)
+        body = (_os_patterns(hop, s[key]) if kind == "role"
+                else dict(s[key]))
+        if kind == "user":
+            if not passwords.get(name):
+                skipped.append(name)
+                continue
+            body["password"] = passwords[name]
+        todo.append((key, body))
+    if not todo:
+        say("  nothing to create" + (f"; skipped {skipped}: no password"
+                                     " given" if skipped else ""))
+        return
+    say(f">> opensearch: {len(todo)} definition(s) to create or replace"
+        + ("" if apply else "  (nothing done; add --apply)"))
+    for key, _ in todo:
+        say(f"   {key}: {'replace' if key in t else 'create'}")
+    for name in skipped:
+        say(f"   skipped user {name}: the security API shows no password"
+            " and none is in the passwords file")
+    if not apply:
+        return
+    eng = _os_engine(hop)
+    paths = {kind: path for kind, path, _ in OS_KINDS}
+    made, replaced, failed = [], {}, []
+    for key, body in todo:
+        kind, name = key.split(":", 1)
+        try:
+            eng._call("dst", "PUT", f"{OS_API}/{paths[kind]}/{name}", body)
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            failed.append(f"{key}: {str(e).splitlines()[0][:120]}")
+            continue
+        if key in t:
+            replaced[key] = t[key]
+        else:
+            made.append(key)
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = json.loads(rec.read_text()) if rec.exists() else []
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": "opensearch", "created": made,
+                 "replaced": replaced, "failed": failed,
+                 "skipped": skipped})
+    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+    for f in failed:
+        say(f"   FAILED {f}")
+    say(f"  created {len(made)}, replaced {len(replaced)}; recorded at {rec}"
+        f" (undo with users {hop.name} rollback)")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} could not be created")
+
+
+def _os_rollback(hop, apply, say):
+    rec = hop.report_dir() / "user-sync-created.json"
+    runs = [e for e in (json.loads(rec.read_text()) if rec.exists() else [])
+            if e.get("engine") == "opensearch"]
+    made = [k for e in runs for k in e.get("created", [])]
+    # the earliest record of a definition is what the target had first
+    replaced = {}
+    for e in runs:
+        for k, v in (e.get("replaced") or {}).items():
+            replaced.setdefault(k, v)
+    if not made and not replaced:
+        say("  no opensearch definitions were created by us, nothing to"
+            " undo")
+        return
+    eng = _os_engine(hop)
+    paths = {kind: path for kind, path, _ in OS_KINDS}
+    order = {"mapping": 0, "user": 1, "role": 2}
+    # who holds a role before the users, users before the roles
+    for key in sorted(made, key=lambda k: (order[k.split(":", 1)[0]], k)):
+        kind, name = key.split(":", 1)
+        if not apply:
+            say(f"   would delete {kind} {name}")
+            continue
+        eng._call("dst", "DELETE", f"{OS_API}/{paths[kind]}/{name}",
+                  missing_ok=True)
+        say(f"   deleted {kind} {name}")
+    for key, body in sorted(replaced.items()):
+        kind, name = key.split(":", 1)
+        if kind == "user":
+            say(f"   {key} was replaced and keeps the password it was given:"
+                " the one it had is not shown by the security API")
+            body = {k: v for k, v in body.items()}
+            if not apply:
+                continue
+            ops = [{"op": "add", "path": f"/{name}/{k}", "value": v}
+                   for k, v in body.items()]
+            eng._call("dst", "PATCH", f"{OS_API}/{paths[kind]}", ops)
+            continue
+        if not apply:
+            say(f"   would put back {kind} {name}")
+            continue
+        eng._call("dst", "PUT", f"{OS_API}/{paths[kind]}/{name}", body)
+        say(f"   put back {kind} {name}")
+    if apply:
+        rec.rename(str(rec) + ".rolled-back")
+
+
 # --- redis -----------------------------------------------------------------
 #: the account every Redis has, which the provider owns on a managed one
 REDIS_SYS = ("default",)
@@ -1235,6 +1455,8 @@ def create(hop, apply=False, passwords=None, say=print):
         return _ch_create(hop, apply, passwords, say)
     if hop.engine == "cassandra":
         return _cs_create(hop, apply, say)
+    if hop.engine in ("opensearch", "elasticsearch"):
+        return _os_create(hop, apply, passwords, say)
     if hop.engine == "mssql":
         return _ms_create(hop, apply, passwords, say)
     if hop.engine in ("mongodb", "mongo"):
@@ -1378,6 +1600,8 @@ def rollback(hop, apply=False, say=print):
         return _ch_rollback(hop, apply, say)
     if hop.engine == "cassandra":
         return _cs_rollback(hop, apply, say)
+    if hop.engine in ("opensearch", "elasticsearch"):
+        return _os_rollback(hop, apply, say)
     if hop.engine == "mssql":
         return _ms_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
