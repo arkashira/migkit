@@ -1560,7 +1560,7 @@ def movers_pick_and_run(hop, eng, db, go):
             _changelog(hop, {"op": f"move-{via}", "db": d})
 
 
-def _table_plan(hop, eng, d, via):
+def _table_plan(hop, eng, d, via, go=False):
     """Where each table goes and why, before anything is copied.
 
     Read from the source's catalogue. A catalogue that cannot be read
@@ -1599,10 +1599,15 @@ def _table_plan(hop, eng, d, via):
                              getattr(eng, "dst_name", engine),
                              (hop.options or {}).get("transfer_price_per_gb"),
                              free, kept)
+    carried = [d_.table for d_ in decisions if d_.path != planner.LEFT]
     return (["  by table:"] + planner.lines(decisions)
             + [f"  time: {planner.estimate(hop, via, rows)}"]
             + ([f"  size: {size}"] if size else [])
-            + _where_and_machine(hop, eng, d, via))
+            + _where_and_machine(hop, eng, d, via)
+            + _resource_plan(hop, eng, d, via, facts,
+                             [t for t in facts if t in carried
+                              or any(str(t).endswith("." + c)
+                                     for c in carried)], go))
 
 
 def _where_and_machine(hop, eng, d, via):
@@ -1639,6 +1644,48 @@ def _record_run(hop, eng, d, via, rows, began, spent):
                         machine.size_of(eng, d, hop),
                         spent.seconds() if here else None,
                         sizing.host().get("cpus") if here else None)
+
+
+
+def _resource_plan(hop, eng, d, via, facts=None, tables=None, go=False):
+    """The move's resources in the plan's words - which one binds, how many
+    at once carry it, what the widest rows take of this machine's memory -
+    and each phase's time with its reason (`model`, `planner.phases`).
+    Measured once a run: the copy that follows goes by the same model. A
+    plan alone writes nothing to the target, not even the write probe's
+    rolled-back rows: the interlock has not held the target to the plan
+    yet (`interlock.before_write`)."""
+    from . import model as resource_model
+    from . import planner, sizing
+    try:
+        m = resource_model.for_move(hop, eng, d, facts, tables, write=go)
+        facts = facts if facts is not None else eng.table_facts("src", d)
+        n = sizing.estimate(hop, eng, d, _units(eng, d), model=m).start
+    except Exception as e:  # noqa: BLE001 - the plan says what it knows
+        from .movers import DRIVEN
+        from .wording import without_programs
+        why = (str(e).strip().splitlines()[-1][:100] if str(e).strip()
+               else type(e).__name__)
+        return [f"  (the resources could not be measured:"
+                f" {without_programs(why, DRIVEN)})"]
+    out = [f"  {line}" for line in m.lines(n)]
+    short = m.too_wide(sizing._memory())
+    if short:
+        out.append(f"  memory: NOT ENOUGH - {short}")
+    return out + planner.phase_lines(_planned(hop, m, facts, tables, n,
+                                              via, d))
+
+
+def _planned(hop, m, facts, tables, n, via, d):
+    """The phases of the move from its model, kept with it for `watch` and
+    the metrics."""
+    from . import planner
+    m.planned = planner.phases(hop, m, facts, tables, n, via)
+    try:
+        m.save(hop.report_dir(d))
+    except OSError:
+        pass
+    return m.planned
 
 
 def _source_rows(eng, d):
@@ -1733,19 +1780,39 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     is under load. A target that takes one writer at a time (a file) is
     written one table after another. A table that fails lets the others
     in flight finish, starts no more, and is said."""
-    from . import ranges, sizing
+    from . import model as resource_model
+    from . import planner, ranges, sizing
 
     def log(m):
         console.print(f"  {m}")
     target = getattr(eng, "dst_engine", eng)
-    # how many at once is worked out, not asked for: every factor read at
-    # the start, then kept where the rows go fastest (`sizing`)
-    plan = sizing.fit(hop, eng, d, log, units=_units(eng, d, tables))
+    # how many at once is worked out, not asked for: every resource
+    # measured at the start (`model`), then kept where the rows go fastest,
+    # each resource backing off on its own signal (`sizing`)
+    names = _catalogue_names(eng, d, tables)
+    m = resource_model.for_move(hop, eng, d, tables=names, log=log)
+    short = m.too_wide(sizing._memory())
+    if short:
+        raise SystemExit(f"{d}: not started - {short}")
+    plan = sizing.fit(hop, eng, d, log, units=_units(eng, d, tables),
+                      model=m)
+    if not m.planned:
+        try:
+            _planned(hop, m, eng.table_facts("src", d), names, plan.start,
+                     "builtin", d)
+        except Exception:  # noqa: BLE001 - the move goes on without it
+            pass
     most = plan.most
     if not getattr(target, "WRITES_IN_PARALLEL", True):
         most = 1
-    pace = sizing.Pace(min(plan.start, most), most,
-                       stress=lambda: _stress(eng, d))
+    total = _source_rows(eng, d)
+    where = hop.report_dir(d)
+    ways = getattr(eng, "measured_ways", None) or (lambda: [])
+    pace = sizing.Pace(
+        min(plan.start, most), most,
+        resources=sizing.resources(eng, d, hop, _side_health, m),
+        memory=sizing.Memory(m.worker_memory),
+        report=lambda p: planner.progress(where, p, total, m, ways=ways()))
     before = ranges.active
     # the ranges every table in flight copies share the move's workers
     ranges.active = ranges.Slots(most, pace=pace)
@@ -1760,11 +1827,22 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
             with movers.builds_beside(log):
                 _copy_tables_in(hop, eng, d, tables, chunk, ck,
                                 min(most, len(tables)))
+        # what the copy measured of itself, which the next plan stands on
+        m.observe(ways(), pace.total, pace.took(), pace.limit)
+        try:
+            m.save(where)
+        except OSError:
+            pass
     finally:
         ranges.active = before
         said = pace.line()
         if said:
             log(said)
+        # the whole copy's rate, for whoever holds the model to it
+        try:
+            planner.progress(where, pace, total, m, done=True, ways=ways())
+        except OSError:
+            pass
 
 
 def _units(eng, d, tables=None):
@@ -1784,16 +1862,11 @@ def _units(eng, d, tables=None):
     return n or None
 
 
-def _stress(eng, d):
-    """Why the move should do less at once, or "": either side under
-    strain, as the gate reads it."""
-    from . import sizing
-    for side in ("src", "dst"):
-        h = _side_health(eng, side, d)
-        why = h.stressed() if h is not None else ""
-        if why:
-            return f"{'source' if side == 'src' else 'target'}: {why}"
-    return sizing.strain(eng, d)
+def _catalogue_names(eng, d, tables):
+    """[(schema, table)] as the source's catalogue names them
+    (`table_facts`' keys): `schema.table`, or the table alone where the
+    engine has no schema."""
+    return [f"{sch}.{t}" if sch else t for sch, t in tables]
 
 
 def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
@@ -1952,7 +2025,9 @@ def _move_full(hop, eng, db, table, chunk, go):
             from . import planner
             console.print("  time: " + planner.estimate(
                 hop, "builtin", _source_rows(eng, d)))
-            for line in _where_and_machine(hop, eng, d, "builtin"):
+            for line in (_where_and_machine(hop, eng, d, "builtin")
+                         + _resource_plan(hop, eng, d, "builtin", None,
+                                          _catalogue_names(eng, d, tables))):
                 console.print(line)
             continue
         # a value the target would round, cut or refuse stops the move
@@ -2663,6 +2738,7 @@ def _carried_physically(hop, eng, db, mode, go):
 
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from . import cutover, hopkeys, movers
+    from . import model as resource_model
     hop = get_hop(hop_name)
     _require_configured(hop)
     if go:
@@ -2675,6 +2751,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
             " carry their real values into the target: a hop that masks is"
             " copied (--mode full), not followed. Nothing has been started")
     eng = get_engine(hop)
+    # measured once for this run, and afresh for the next
+    resource_model.forget()
     back_at_cutover, two_way = _topology(hop)
     from . import twoway
     two_way = two_way or twoway.settings(hop) is not None
@@ -2732,7 +2810,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     console.print(f"[bold]{d}[/bold] bulk copy:")
                     from . import drift
                     before = drift.shape(eng, "src", d) if go else None
-                    for line in _table_plan(hop, eng, d, v):
+                    for line in _table_plan(hop, eng, d, v, go):
                         console.print(line)
                     began, rows = time.time(), _source_rows(eng, d) if go else 0
                     from . import machine
@@ -2741,8 +2819,11 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     if go:
                         _mark_move(hop, eng, d)
                     from . import sizing
+                    # the model the plan above measured; the dump's and the
+                    # load's jobs each sized to their own side
                     sizing.fit(hop, eng, d, lambda m: chat(f"  {m}"),
-                               units=_units(eng, d))
+                               units=_units(eng, d),
+                               model=resource_model.for_move(hop, eng, d))
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     if go:
@@ -3055,6 +3136,62 @@ def _cutover_verdict(prev, cur, stable_cycles):
     return None
 
 
+def _move_said(hop, d):
+    """What a move running now says of itself (`progress.json`: the recent
+    rate, the time left of the copy, how many at a time and what holds them
+    down) and what its plan said of the phases after the copy
+    (`model.json`), for `watch`."""
+    from . import model as resource_model
+    from . import planner
+    where = hop.report_dir(d)
+    out = []
+    p = planner.read_progress(where)
+    if p and time.time() - float(p.get("at") or 0) < 600:
+        out.append(
+            f"move: {p.get('workers')} at a time"
+            + (f", ~{human_secs(p['eta_copy'])} of the copy left at the"
+               f" recent {human_int(int(p['rate']))} rows/s"
+               if p.get("eta_copy") is not None and p.get("rate") else "")
+            + (f", {p['binding']} binding" if p.get("binding") else "")
+            + (f"; held down by {p['held_by']}" if p.get("held_by")
+               else ""))
+    m = resource_model.load(where)
+    for ph in (m.planned if m is not None else ()):
+        if ph.name != "copy":
+            out.append(f"then {ph.line()}")
+    return out
+
+
+def _catch_up(hop, eng, d):
+    """The catch-up's sum for `watch` while a tail runs here: the source's
+    own count of changes against the tail's heartbeat (`planner.CatchUp`)."""
+    from . import planner, tailctl
+    where = hop.report_dir(d)
+
+    def tail():
+        st = tailctl.state(where)
+        return st if st and st.get("beat_age") is not None else None
+
+    def arrived():
+        if tail() is None:
+            return None
+        got = eng.changes_made("src", d)
+        return got[0] if got else None
+
+    def applied():
+        st = tail()
+        return st["changes"] if st else None
+
+    def held():
+        st = tail()
+        return ((st.get("room") or {}).get("held_bytes") if st else None)
+
+    def behind():
+        st = tail()
+        return st["behind"] if st else None
+    return planner.CatchUp(arrived, applied, held, behind)
+
+
 @main.command()
 @click.argument("hop_name")
 @click.option("--db", default="")
@@ -3090,6 +3227,11 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
     dbs = [db] if db else eng.databases()
     last = {}
     stable = {}
+    from . import planner
+    # the time left from the recent rate, not the last sample's alone: one
+    # sample's rows swing with the ranges that happened to commit in it
+    recent = {d: planner.Ewma() for d in dbs}
+    ahead = {d: _catch_up(hop, eng, d) for d in dbs}
     n = 0
     # the hop's streaming pipeline, where it runs one
     piped = hop.report_dir() / "stream"
@@ -3110,8 +3252,15 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
             if prev and s["ts"] > prev["ts"]:
                 rate = (dst - prev["dst_rows"]) / (s["ts"] - prev["ts"])
                 if rate > 0:
+                    avg = recent[d].add(rate)
                     line += (f" rate {human_int(int(rate))}/s"
-                             f" eta {human_secs((src - dst) / rate)}")
+                             f" (recent {human_int(int(avg))}/s)"
+                             f" eta {human_secs(max(src - dst, 0) / avg)}")
+            for more in _move_said(hop, d):
+                line += f"\n    {more}"
+            said = ahead[d].line()
+            if said:
+                line += f"\n    {said}"
             # source hot = it grew (aggregate or any table) since last cycle
             grew = bool(prev) and (
                 src > prev.get("src_rows", 0)

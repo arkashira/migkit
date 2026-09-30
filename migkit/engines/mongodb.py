@@ -907,6 +907,15 @@ class MongoEngine(Engine):
             db, pull("src"), pull("dst"), ("featureCompatibilityVersion",),
             "align server parameters / feature compatibility version on target")
 
+    def changes_made(self, side, db):
+        """Inserts, updates and deletes the server has run since it started
+        (`serverStatus` opcounters, every database), and its uptime."""
+        st = self._client(side).admin.command("serverStatus")
+        ops = st.get("opcounters") or {}
+        return (sum(int(ops.get(k) or 0) for k in ("insert", "update",
+                                                    "delete")),
+                float(st.get("uptime") or 0))
+
     def _health(self, side):
         """What this deployment says about its own load, for the throttle.
 

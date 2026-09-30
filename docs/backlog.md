@@ -6146,6 +6146,38 @@ than today's `Pace`.
   the busiest kept (95th percentile past 20), with RDS's default
   connection limit checked against it.
 
+*Built (2026-09-30), items 1, 2, 3 and 5, and memory as a resource (the
+owner's addition):* `migkit/model.py` - each stage's rate one stream
+gets and all streams get, and where it came from (measured now, on an
+earlier run of this hop or of the same engines, catalogued, assumed);
+probes bounded in bytes and seconds and read-only on the source
+(`Engine.probe_read`, `probe_link`, `pressure`, `io_wait`,
+`changes_made`, `row_sizes`), the target's writes into a table rolled back
+or a temporary one (`probe_write`, only once the interlock has held the
+target to the plan - a plan alone writes nothing); the path the copier
+takes per table (server to server or through migkit,
+`Engine.passes_through`) and what a move measured of itself
+(`Engine.measured_ways`, kept for the next plan); a server measured at its
+link's speed or at this process's one core told apart from a saturated
+one. The binding stage named, the workers by Little's law capped by each
+side's connections and by the memory the widest row takes (`sizing`),
+reads and writes sized apart for a dump and a load (`sizing.split`); one
+limit per resource while it runs (`sizing.Limit`: each side's load, lag
+and I/O wait, each link's round trip and this machine's retransmits,
+this machine's memory as a watchdog that holds a unit until it fits),
+never slower than the one pace on the same synthetic runs; the phases
+with p50/p90 and their reasons (`planner.phases`: the copy by table, index
+builds beside the copy, the check, the catch-up's sum, the cutover from
+the hop's last one or its budget) in the dry-run plan, `init`, `watch`
+(EWMA, the catch-up live) and `/metrics`; a move that one worker's widest
+row cannot fit refused before it starts. The tally hashes a row in pieces
+(64 MB row: 16.5s and 0.11s; a 100 MB value: 646 MB held and 10 MB).
+Still to: the copier's memory per engine and the docker
+tests' stated errors from a full run (written, the owner's run at the
+end); a server's own memory for digesting wide values (a PostgreSQL
+source digesting 160 MB values beside a 2 GB migkit on a 4 GB docker
+machine was killed by the kernel).
+
 ### R23. What people who migrate actually want, and what is still missing (added 2026-09-29)
 
 Asked by the owner: what does a migration tool people really want look

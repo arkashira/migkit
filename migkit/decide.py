@@ -298,6 +298,18 @@ class Trials:
             self._timing.discard(name)
 
 
+def from_model(model):
+    """(costs, facts) of a move's resources (`model.Model`, backlog R22):
+    the seconds one stream spends on a megabyte at each resource measured -
+    keyed by the resource's name ("source", "target", "link:src",
+    "link:dst", "cpu") - and what a rung's needs may ask of them: which one
+    binds, what it allows, how many at once carry it, what a worker holds
+    of memory and the widest row. A choice between ways that load different
+    resources is costed from what was measured here instead of each way
+    being tried first."""
+    return model.costs(), Facts(model.facts())
+
+
 def _tied(a, b):
     return abs(a - b) <= TIE * max(abs(a), abs(b))
 

@@ -2927,6 +2927,27 @@ class HeteroEngine(Engine):
         return (self.src_engine if side == "src"
                 else self.dst_engine).capacity(side, db)
 
+    def probe_read(self, side, db, table, part=0, parts=1,
+                   budget=16 * 2 ** 20, seconds=1.5, keep=0):
+        """The shared copier reads through the source's neutral reader, so
+        that is what is timed - not the source engine's own copier."""
+        if side != "src":
+            return None
+        return Engine.probe_read(self.src_engine, side, db, table, part,
+                                 parts, budget, seconds, keep)
+
+    def io_wait(self, side, db):
+        return (self.src_engine if side == "src"
+                else self.dst_engine).io_wait(side, db)
+
+    def changes_made(self, side, db):
+        return (self.src_engine if side == "src"
+                else self.dst_engine).changes_made(side, db)
+
+    def row_sizes(self, side, db, tables=None):
+        return (self.src_engine if side == "src"
+                else self.dst_engine).row_sizes(side, db, tables)
+
     def link_probe(self, side, db, wait=5.0):
         return (self.src_engine if side == "src"
                 else self.dst_engine).link_probe(side, db, wait)

@@ -6098,6 +6098,263 @@ class MySQLEngine(Engine):
                 pass
         return {k: v for k, v in out.items() if v is not None}
 
+    # --- what the resource model measures (`migkit.model`) ----------------
+
+    #: a worker of the table copier: a process of its own, and the rows it
+    #: holds - the batch being read, two queued behind it and the one being
+    #: written (`_range_checked`), each `COPY_BYTES` or one row where a row
+    #: is larger, a wide value held again by the driver as it arrives and
+    #: as its statement is escaped and encoded. Counted from the code, not
+    #: yet measured: `CAP_CALIBRATE=1` on
+    #: `tests/test_wide_rows_never_run_out_of_memory.py` measures it
+    COPY_MEMORY = {"own": 96 * 2 ** 20, "per_row": 9.0}
+
+    #: server to server (`my_pass`): the source's own client renders and
+    #: holds a row as the load's line - bytes as hex, twice their size -
+    #: and this process relays 64 KB pieces of it into the load. Counted
+    #: from the code, not measured
+    PASS_MEMORY = {"own": 64 * 2 ** 20, "per_row": 2.0,
+                   "batch": 64 * 2 ** 10}
+
+    def passes_through(self, db, table):
+        """The first of `TABLE_WAYS` holds: the source's own client
+        installed, a target that takes the pinned bulk load, and columns
+        the load reads back as they were."""
+        try:
+            return bool(which("mysql")) and self._loads_here() \
+                and not self._pass_unfit(db, table)
+        except Exception:  # noqa: BLE001 - not known: the rows' way
+            return False
+
+    def _int_key(self, db, table):
+        pks = self._pk_cols(db, table)
+        if len(pks) != 1:
+            return None
+        r = self._q("src", "select data_type from information_schema.columns"
+                    " where table_schema=%s and table_name=%s and"
+                    " column_name=%s", (db, table, pks[0]))
+        return pks[0] if r and r[0][0] in (
+            "tinyint", "smallint", "mediumint", "int", "bigint") else None
+
+    def probe_read(self, side, db, table, part=0, parts=1,
+                   budget=16 * 2 ** 20, seconds=1.5, keep=0):
+        """The copier's read of one slice of the table - a span of its
+        integer key, or the first rows where it has none - streamed from
+        the server and counted, stopped after `seconds`."""
+        import time
+
+        import pymysql
+
+        from .base import _row_bytes
+        q = self._my_ident
+        d = self._d(side, db)
+        cols = self._cols(db, table)
+        avg = self._q(side, "select avg_row_length from"
+                            " information_schema.tables where table_schema"
+                            " = %s and table_name = %s", (d, table))
+        each = max(int((avg[0][0] if avg else 0) or 0), 64)
+        rows_wanted = max(1, int(budget // each))
+        where = ""
+        key = self._int_key(db, table)
+        if key is not None:
+            lo, hi = self._q(side, f"select coalesce(min({q(key)}), 0),"
+                                   f" coalesce(max({q(key)}), 0) from"
+                                   f" {q(d)}.{q(table)}")[0]
+            span = max(1, (int(hi) - int(lo) + 1) // max(parts, 1))
+            after = int(lo) - 1 + span * part
+            where = (f" where {q(key)} > {after} and {q(key)} <="
+                     f" {after + span}")
+        elif part:
+            return None
+        conn = self._conn(side)
+        try:
+            conn._read_timeout = max(5, int(seconds * 4))
+            cur = conn.cursor(pymysql.cursors.SSCursor)
+            began = time.monotonic()
+            cur.execute(f"select {', '.join(q(c) for c in cols)} from"
+                        f" {q(d)}.{q(table)}{where} limit {rows_wanted}")
+            n = size = 0
+            kept, held = [], 0
+            while time.monotonic() - began < seconds and size < budget:
+                got = cur.fetchmany(1000)
+                if not got:
+                    break
+                for r in got:
+                    b = _row_bytes(r)
+                    size += b
+                    if held < keep:
+                        kept.append(r)
+                        held += b
+                n += len(got)
+            took = time.monotonic() - began
+        finally:
+            conn.close()
+        return {"rows": n, "bytes": size, "seconds": took, "sample": kept,
+                "columns": cols}
+
+    def probe_write(self, db, table, sample, seconds=1.5, stream=0,
+                    apply=True):
+        """The sample written the way the copier writes it - the server's
+        own bulk load where it takes one - into a temporary table of the
+        source table's columns and key, read back, and taken again as
+        upserts; the table is gone with the connection. A temporary table
+        writes neither the redo log nor the binlog, so the target's log is
+        not in what this measures, and it is said."""
+        import os
+        import time
+
+        import pymysql
+        if not sample or not isinstance(sample, list):
+            return None
+        q = self._my_ident
+        ddb = self._d("dst", db)
+        cols = self._q("src", "select column_name, column_type, data_type"
+                              " from information_schema.columns where"
+                              " table_schema = %s and table_name = %s and"
+                              " extra not like '%%GENERATED%%'"
+                              " order by ordinal_position", (db, table))
+        key = self._pk_cols(db, table)
+        if not cols or len(cols) != len(sample[0]):
+            return None
+        name = f"migkit_probe_{os.getpid()}_{int(stream)}"
+        names = [str(c[0]) for c in cols]
+        body = ", ".join(f"{q(n)} {t}" for n, t, _ in cols)
+        if key:
+            body += f", primary key ({', '.join(q(k) for k in key)})"
+        self.__dict__.setdefault("_types_loaded", {})[(ddb, name)] = {
+            str(n): str(t).lower() for n, _, t in cols}
+        conn = self._conn("dst")
+        try:
+            cur = conn.cursor()
+            cur.execute(f"create temporary table {q(ddb)}.{q(name)} ({body})")
+            collist = ", ".join(q(n) for n in names)
+            insert = (f"insert into {q(ddb)}.{q(name)} ({collist}) values"
+                      f" ({', '.join(['%s'] * len(names))})")
+            began = time.monotonic()
+            self._put_rows(cur, ddb, name, names, sample, insert)
+            wrote = time.monotonic() - began
+            began = time.monotonic()
+            with conn.cursor(pymysql.cursors.SSCursor) as rd:
+                rd.execute(f"select {collist} from {q(ddb)}.{q(name)}")
+                while rd.fetchmany(1000):
+                    pass
+            read = time.monotonic() - began
+            applied, took = 0, None
+            rest = [n for n in names if n not in key]
+            if apply and key and rest:
+                # a temporary table cannot be read twice in one statement
+                cur.execute(f"create temporary table {q(ddb)}.{q(name + 'b')}"
+                            f" like {q(ddb)}.{q(name)}")
+                cur.execute(f"insert into {q(ddb)}.{q(name + 'b')} select *"
+                            f" from {q(ddb)}.{q(name)}")
+                began = time.monotonic()
+                cur.execute(f"insert into {q(ddb)}.{q(name)} ({collist})"
+                            f" select {collist} from {q(ddb)}.{q(name + 'b')}"
+                            " as n on duplicate key update " + ", ".join(
+                                f"{q(c)} = n.{q(c)}" for c in rest))
+                took = time.monotonic() - began
+                applied = len(sample)
+            from .base import _row_bytes
+            return {"rows": len(sample),
+                    "bytes": sum(_row_bytes(r) for r in sample),
+                    "seconds": wrote, "read_seconds": read,
+                    "applied": applied, "apply_seconds": took,
+                    "how": "a temporary table, which the target writes no"
+                           " redo log or binlog for"}
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
+    #: InnoDB's queue of reads, writes and flushes waiting on storage
+    IO_PENDING = ("Innodb_data_pending_reads", "Innodb_data_pending_writes",
+                  "Innodb_data_pending_fsyncs", "Innodb_os_log_pending_fsyncs",
+                  "Innodb_os_log_pending_writes")
+
+    def io_wait(self, side, db):
+        got = dict(self._q(side, "show global status where variable_name in"
+                                 " (" + ", ".join(f"'{n}'" for n in
+                                                  self.IO_PENDING) + ")"))
+        return {"io_pending": sum(int(v or 0) for v in got.values())}
+
+    def changes_made(self, side, db):
+        """Rows inserted, updated and deleted in `db`'s tables as the
+        performance schema counts them since the server started; the
+        server's own counters, for every database, where it does not."""
+        d = self._d(side, db)
+        up = float(dict(self._q(side, "show global status like"
+                                      " 'Uptime'")).get("Uptime", 0) or 0)
+        try:
+            got = self._q(side, "select coalesce(sum(count_insert +"
+                                " count_update + count_delete), 0) from"
+                                " performance_schema"
+                                ".table_io_waits_summary_by_table where"
+                                " object_schema = %s", (d,))
+            return int(got[0][0]), up
+        except Exception:  # noqa: BLE001 - no performance schema here
+            got = dict(self._q(side, "show global status where"
+                                     " variable_name in"
+                                     " ('Innodb_rows_inserted',"
+                                     " 'Innodb_rows_updated',"
+                                     " 'Innodb_rows_deleted')"))
+            return sum(int(v or 0) for v in got.values()), up
+
+    #: rows of a table read to size its wide rows, and the bytes of values
+    #: such a read may take from the source at most
+    SIZE_SAMPLE = 20000
+    SIZE_BYTES = 1 << 30
+
+    def row_sizes(self, side, db, tables=None):
+        """A table with a large column (a blob, a text, JSON) sized row by
+        row on a sample - every row where the table has no more than the
+        sample - and bounded to `SIZE_BYTES` read; a table without one from
+        its declared widths (the widest a row can be) and InnoDB's
+        average."""
+        from .base import sizes_of
+        d = self._d(side, db)
+        cols = self._q(side, "select c.table_name, c.column_name,"
+                             " c.data_type, coalesce(c.character_octet_length,"
+                             " 8), coalesce(t.table_rows, 0),"
+                             " coalesce(t.avg_row_length, 0) from"
+                             " information_schema.columns c join"
+                             " information_schema.tables t on t.table_schema"
+                             " = c.table_schema and t.table_name ="
+                             " c.table_name where c.table_schema = %s and"
+                             " t.table_type = 'BASE TABLE'", (d,))
+        by = {}
+        for t, c, kind, width, rows, avg in cols:
+            by.setdefault(str(t), {"cols": [], "rows": int(rows),
+                                   "avg": int(avg)})["cols"].append(
+                (str(c), str(kind).lower(), int(width)))
+        wide = ("blob", "mediumblob", "longblob", "text", "mediumtext",
+                "longtext", "json", "tinyblob", "tinytext")
+        out = {}
+        q = self._my_ident
+        for t, f in by.items():
+            if tables is not None and t not in tables:
+                continue
+            if not any(k in wide for _, k, _ in f["cols"]):
+                most = sum(w for _, _, w in f["cols"]) + len(f["cols"])
+                out[t] = {"largest": most, "p99": most,
+                          "mean": float(f["avg"] or most), "rows": f["rows"],
+                          "exact": False}
+                continue
+            n = max(10, min(self.SIZE_SAMPLE,
+                            self.SIZE_BYTES // max(f["avg"], 1)))
+            expr = " + ".join(f"coalesce(length({q(c)}), 0) + 1"
+                              for c, _, _ in f["cols"])
+            try:
+                got = self._q(side, f"select {expr} from {q(d)}.{q(t)}"
+                                    f" limit {int(n)}")
+            except Exception:  # noqa: BLE001 - that table is not sized
+                continue
+            sized = sizes_of([r[0] for r in got],
+                             exact=len(got) < n, rows=f["rows"])
+            if sized:
+                out[t] = sized
+        return out
+
     def table_index_window(self, db, table, log):
         from .. import movers
         workers = int(getattr(self.hop, "workers", 1) or 1)

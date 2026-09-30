@@ -297,7 +297,83 @@ def prometheus(hops):
                          f' {int(time.time() - summary.stat().st_mtime)}')
         lines += _tail_metrics(REPORTS / name, lbl)
         lines += _follow_metrics(hop, REPORTS / name, lbl)
-    return "\n".join(TAIL_HELP + lines) + "\n"
+        lines += _move_metrics(REPORTS / name, lbl)
+    return "\n".join(TAIL_HELP + MOVE_HELP + lines) + "\n"
+
+
+MOVE_HELP = [
+    "# HELP migkit_move_rate_rows_per_second A running move's recent rate"
+    " (a moving average of its last windows)",
+    "# TYPE migkit_move_rate_rows_per_second gauge",
+    "# HELP migkit_move_workers How many a running move carries at once",
+    "# TYPE migkit_move_workers gauge",
+    "# HELP migkit_move_rows_done Rows a running move has copied",
+    "# TYPE migkit_move_rows_done gauge",
+    "# HELP migkit_move_eta_seconds Time left of each phase of a move:"
+    " quantile 0.5 and 0.9 as planned, live from the recent rate",
+    "# TYPE migkit_move_eta_seconds gauge",
+    "# HELP migkit_move_phase_never A phase that cannot finish at the rates"
+    " measured (a catch-up slower than the changes arriving)",
+    "# TYPE migkit_move_phase_never gauge",
+    "# HELP migkit_resource_bytes_per_second What each resource of a move"
+    " allows, by where the number came from",
+    "# TYPE migkit_resource_bytes_per_second gauge",
+    "# HELP migkit_resource_binding The resource that sets a move's rate",
+    "# TYPE migkit_resource_binding gauge",
+    "# HELP migkit_worker_memory_bytes What one worker of a move holds for"
+    " its widest rows",
+    "# TYPE migkit_worker_memory_bytes gauge",
+]
+
+#: seconds after which a move's progress is no longer a running move's
+LIVE = 600
+
+
+def _move_metrics(where, lbl):
+    """A move's resources and phases (`model.json`) and, while it runs, its
+    rate and time left (`progress.json`), per database."""
+    from . import model as resource_model
+    from . import planner
+    out = []
+    if not where.is_dir():
+        return out
+    for d in sorted(p for p in where.iterdir() if p.is_dir()):
+        ml = f'{lbl},db="{d.name}"'
+        m = resource_model.load(d)
+        if m is not None:
+            for s in m.stages.values():
+                if s.bound():
+                    out.append(f'migkit_resource_bytes_per_second{{{ml},'
+                               f'resource="{s.said}",truth="{s.truth}"}}'
+                               f' {s.bound():.0f}')
+            b = m.binding() if m.measured else None
+            if b is not None:
+                out.append(f'migkit_resource_binding{{{ml},'
+                           f'resource="{b.said}"}} 1')
+            if m.worker_memory:
+                out.append(f"migkit_worker_memory_bytes{{{ml}}}"
+                           f" {int(m.worker_memory)}")
+            for ph in m.planned:
+                pl = f'{ml},phase="{ph.name}"'
+                if ph.never:
+                    out.append(f"migkit_move_phase_never{{{pl}}} 1")
+                    continue
+                for q, v in (("0.5", ph.p50), ("0.9", ph.p90)):
+                    if v is not None:
+                        out.append(f'migkit_move_eta_seconds{{{pl},'
+                                   f'quantile="{q}"}} {v:.0f}')
+        p = planner.read_progress(d)
+        if p and time.time() - float(p.get("at") or 0) < LIVE:
+            if p.get("rate") is not None:
+                out.append(f"migkit_move_rate_rows_per_second{{{ml}}}"
+                           f" {float(p['rate']):.1f}")
+            out.append(f"migkit_move_workers{{{ml}}} {int(p['workers'])}")
+            out.append(f"migkit_move_rows_done{{{ml}}}"
+                       f" {int(p['rows_done'])}")
+            if p.get("eta_copy") is not None:
+                out.append(f'migkit_move_eta_seconds{{{ml},phase="copy",'
+                           f'quantile="live"}} {float(p["eta_copy"]):.0f}')
+    return out
 
 
 TAIL_HELP = [

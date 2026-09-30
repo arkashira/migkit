@@ -204,6 +204,198 @@ def test_slots_follow_the_pace():
     assert 3 <= most[0] <= 5, most[0]
 
 
+# --- one limit per resource ---------------------------------------------------
+
+def test_each_resource_cuts_only_its_own_limit_and_says_so():
+    strained = {"on": False}
+    clock = _Clock()
+    pace = sizing.Pace(8, 16, clock=clock, resources={
+        "the source's reads": lambda: "",
+        "the target's writes": lambda: ("replication 45s behind"
+                                        if strained["on"] else "")})
+    for _ in range(20):
+        clock.t += 1
+        pace.done(1000, 1)
+    before = pace.limit
+    strained["on"] = True
+    for _ in range(8):
+        clock.t += 1
+        pace.done(1000, 1)
+    src, dst = (pace.limits["the source's reads"],
+                pace.limits["the target's writes"])
+    assert pace.limit <= int(before * 0.7), pace.history
+    assert dst.cuts >= 1 and src.cuts == 0 and src.value == 16
+    assert any(why.startswith("the target's writes: replication 45s")
+               for _, _, why in pace.history), pace.history
+    assert "held back by the target's writes" in pace.line()
+    assert "the target's writes: replication" in pace.held_by()
+    # the strain gone, its limit comes back one a window
+    strained["on"] = False
+    was = dst.value
+    for _ in range(3 * sizing.Pace.LEAST_DONE):
+        clock.t += 1
+        pace.done(1000, 1)
+    assert dst.value == min(16, was + 3), (was, dst.value)
+
+
+def test_a_resource_that_strains_past_a_number_holds_the_pace_near_it():
+    # the target's replica falls behind past six at once, whatever the rows
+    # a second would say: the pace settles at or under it
+    clock = _Clock()
+    holder = {}
+
+    def lag():
+        return "replica 40s behind" if holder["p"].limit > 6 else ""
+    pace = sizing.Pace(2, 32, clock=clock,
+                       resources={"the target's writes": lag})
+    holder["p"] = pace
+    seen = []
+    for _ in range(1500):
+        n = pace.limit
+        rate = 1000 * min(n, 12)
+        clock.t += 1000 / rate
+        pace.done(1000, n * 1000 / rate)
+        seen.append(pace.limit)
+    tail = seen[-500:]
+    assert 4 <= sum(tail) / len(tail) <= 7, pace.history[-12:]
+    assert max(tail) <= 7
+
+
+def test_a_links_round_trip_grown_cuts_by_its_gradient():
+    got = iter([0.010, 0.012, 0.050, 0.0002])
+    rt = sizing.RoundTrip("10.0.0.1", 5432, measure=lambda: next(got))
+    assert rt() is None and rt() is None
+    s = rt()
+    # five times its least: cut by the gradient, no more than half at once
+    assert s.factor == 0.5 and "50 ms, 5.0x its least" in s.why
+    # a round trip shorter than the least is the new least, never a strain
+    assert rt() is None and rt.least == 0.0002
+    # a local link's jitter - four times, but under 20 ms more - is none
+    got = iter([0.0005, 0.002])
+    rt = sizing.RoundTrip("10.0.0.1", 5432, measure=lambda: next(got))
+    assert rt() is None and rt() is None
+    lim = sizing.Limit("the link to the target", lambda: sizing.Strain(
+        "round trip grew", factor=0.5), 16)
+    assert lim.update(10, 0.7).startswith("the link to the target:")
+    assert lim.value == 5
+
+
+def test_each_side_is_strained_by_its_own_signals():
+    class Eng:
+        def __init__(self, cap, io):
+            self.cap, self.io = cap, io
+
+        def capacity(self, side, db):
+            return self.cap.get(side, {})
+
+        def io_wait(self, side, db):
+            return self.io.get(side, {})
+
+    class Health:
+        def __init__(self, why):
+            self.why = why
+
+        def stressed(self):
+            return self.why
+    quiet = Eng({"src": {"cpus": 4, "running": 1}}, {})
+    assert sizing.side_strain(quiet, "src", "app") == ""
+    # a replica behind, as the throttle reads it
+    assert sizing.side_strain(quiet, "src", "app", lambda e, s, d: Health(
+        "replication 45s behind")) == "replication 45s behind"
+    busy = Eng({"dst": {"cpus": 2, "running": 4}}, {})
+    assert sizing.side_strain(busy, "dst", "app") == \
+        "4 sessions running on 2 CPUs"
+    waiting = Eng({"dst": {"cpus": 8, "running": 3}},
+                  {"dst": {"io_wait": 3, "active": 4}})
+    assert sizing.side_strain(waiting, "dst", "app") == \
+        "3 of 4 sessions waiting on storage"
+    # one session waiting is not the storage binding
+    assert sizing.side_strain(Eng({"dst": {"cpus": 8}},
+                                  {"dst": {"io_wait": 1, "active": 1}}),
+                              "dst", "app") == ""
+    queued = Eng({"dst": {"cpus": 2}}, {"dst": {"io_pending": 5}})
+    assert sizing.side_strain(queued, "dst", "app") == \
+        "5 reads, writes and flushes queued on storage"
+
+
+def test_a_link_is_asked_only_where_the_model_measured_it():
+    from migkit.config import Endpoint, Hop
+    from migkit.model import Model
+    hop = Hop(name="l", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=5432),
+              target=Endpoint(host="127.0.0.1", port=5433))
+    got = sizing.resources(None, "app", hop, model=Model(sides={
+        "src": {"rtt": 0.01}, "dst": {}}))
+    # the local target has no link to watch; the source's was measured
+    assert set(got) == {"the source's reads", "the target's writes",
+                        "the link to the source",
+                        "this machine's connections"}
+    got = sizing.resources(None, "app", hop, model=Model(sides={
+        "src": {}, "dst": {}}))
+    assert "the link to the source" not in got
+
+
+def test_packets_sent_again_are_the_links_loss():
+    seen = iter([(10_000, 10), (15_000, 200), (15_500, 300)])
+    loss = sizing.Loss(read=lambda: next(seen))
+    assert loss() is None
+    assert loss() == "3.8% of packets sent again"
+    # too few sent in the window to say
+    assert loss() is None
+
+
+#: the runs the controller is held to: rows a second at n at once, and
+#: when (seconds into the run) a resource says it is under strain
+RUNS = {
+    "plateau": (lambda n: 1000 * min(n, 6), None),
+    "cliff": (lambda n: 1000 * max(0.5, n if n <= 6 else 6 - 0.8 * (n - 6)),
+              None),
+    "strain for a while": (lambda n: 1000 * min(n, 10),
+                           lambda t, n: "lag" if 60 <= t < 90 else ""),
+    "strain past six": (lambda n: 1000 * min(n, 12),
+                        lambda t, n: "lag" if n > 6 else ""),
+}
+
+
+def _seconds(new, curve, signal, rounds=2000, seed=None):
+    import random
+
+    from tests.one_pace import OnePace
+    rng = random.Random(seed)
+    clock = _Clock()
+    box = {}
+
+    def said():
+        return signal(clock.t, box["p"].limit) if signal else ""
+    if new:
+        pace = sizing.Pace(2, 32, clock=clock, resources={
+            "the target's writes": said} if signal else None)
+    else:
+        pace = OnePace(2, 32, stress=said if signal else None, clock=clock)
+    box["p"] = pace
+    for _ in range(rounds):
+        n = pace.limit
+        rate = curve(n) * (rng.uniform(0.9, 1.1) if seed else 1)
+        clock.t += 1000 / rate
+        pace.done(1000, n * 1000 / rate)
+    return clock.t
+
+
+def test_never_slower_than_the_one_pace_it_replaced():
+    """Seconds for the same 2,000 units of work, the single pace of before
+    against one limit a resource, measured without noise: plateau 342.5
+    and 342.5, cliff 350.1 and 350.1, a strain for a while 250.3 and 246.4,
+    a strain past six at once 415.5 and 394.5 (and with 10% noise, seeds 7
+    and 11, the same order: 420.7 and 398.4, 419.7 and 397.4) - the same
+    where no resource complains, and faster where one does, the number
+    coming back a window at a time once it no longer does."""
+    for name, (curve, signal) in RUNS.items():
+        for seed in (None, 7, 11):
+            old = _seconds(False, curve, signal, seed=seed)
+            new = _seconds(True, curve, signal, seed=seed)
+            assert new <= old * 1.02, (name, seed, old, new)
+
+
 @pytest.mark.docker
 def test_postgres_says_what_it_can_give(pg_pair):
     from migkit.engines.postgres import PostgresEngine

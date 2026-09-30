@@ -73,15 +73,15 @@ AIM_MB_S = 100
 WINDOW_MB = 2.0
 
 
-def _round_trip(host, port, tries=3):
+def _round_trip(host, port, tries=3, wait=5.0):
     """Seconds a TCP connection to (host, port) takes to open, the least of
     a few: one round trip on the path the tunnel will take. None where it
-    does not open."""
+    does not open within `wait`."""
     best = None
     for _ in range(tries):
         began = time.monotonic()
         try:
-            with socket.create_connection((host, int(port)), timeout=5):
+            with socket.create_connection((host, int(port)), timeout=wait):
                 took = time.monotonic() - began
         except OSError:
             continue

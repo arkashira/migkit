@@ -10,7 +10,8 @@ from pathlib import Path
 from ..config import REPORTS
 from ..decide import Need, Rung
 from ..util import run, tool_env, which
-from .base import Engine, RepairAction, Result
+from .base import Counted as _Counted
+from .base import Engine, Enough as _Enough, RepairAction, Result
 
 PGDC_ROOT = REPORTS / "pgdc"
 
@@ -9098,21 +9099,24 @@ class PostgresEngine(Engine):
         " where n.nspname = '{sch}' and c.relname = '{tbl}'"
         " and a.attnum > 0 and not a.attisdropped")
 
+    def _binary_columns(self, side, db, sch, tbl):
+        """{column: (its type, whether it has a binary form)} on one side."""
+        out = {}
+        sql = self.BINARY_SQL.format(sch=sch.replace("'", "''"),
+                                     tbl=tbl.replace("'", "''"))
+        for line in self._psql(side, db, sql).splitlines():
+            name, typ, ok = line.split("\x1f")
+            out[name] = (typ, ok == "1")
+        return out
+
     def _binary_unfit(self, db, sch, tbl, cols):
         """Why the columns a copy carries cannot pass in COPY's binary
         encoding, or "": it names no type, so each value is read on the
         target as the target's column type - both sides must hold each
         column as the same type, one with a binary form."""
-        def read(side):
-            out = {}
-            sql = self.BINARY_SQL.format(sch=sch.replace("'", "''"),
-                                         tbl=tbl.replace("'", "''"))
-            for line in self._psql(side, db, sql).splitlines():
-                name, typ, ok = line.split("\x1f")
-                out[name] = (typ, ok == "1")
-            return out
         try:
-            src, dst = read("src"), read("dst")
+            src = self._binary_columns("src", db, sch, tbl)
+            dst = self._binary_columns("dst", db, sch, tbl)
         except Exception as e:  # noqa: BLE001 - said as the reason
             return ("the columns' types could not be read: "
                     + str(e).strip().splitlines()[-1][:100])
@@ -9227,6 +9231,28 @@ class PostgresEngine(Engine):
         ck.save()
         log(f"{key}: copied whole by {way.said}")
         return True
+
+    def passes_through(self, db, table):
+        """Whether the table copier's ranges of `table` pass server to
+        server (`COPY_WAYS`' first rungs, `pg_pass`) - the same columns of
+        the same types with a binary form on both sides - for the resource
+        model (`migkit.model`): no row is tallied here then, and each
+        server digests every range. Where the target has no such table
+        yet, the source's own columns say: the move makes it with them."""
+        sch, tbl = self._split(table)
+        cols = self._copy_cols(db, sch, tbl) or []
+        why = self._binary_unfit(db, sch, tbl, cols)
+        if not why:
+            return True
+        if not why.startswith("the target has no column"):
+            return False
+        try:
+            there = self._binary_columns("dst", db, sch, tbl)
+            src = self._binary_columns("src", db, sch, tbl)
+        except Exception:  # noqa: BLE001 - not known: the pipe, then
+            return False
+        return not there and all(ok for c, (_, ok) in src.items()
+                                 if c in cols)
 
     def _truncatable(self, db, qt):
         """Whether the target lets `qt` be emptied by TRUNCATE: no foreign
@@ -9392,6 +9418,263 @@ class PostgresEngine(Engine):
             cpus = int(workers) // 2
         if cpus:
             out["cpus"] = cpus
+        return out
+
+    # --- what the resource model measures (`migkit.model`) ----------------
+
+    #: a worker of the table copier: two client programs of about 10 MB
+    #: each and this process's relay of 64 KB pieces; the program reading
+    #: holds a row whole as the server sends it - twice over, the message
+    #: as it arrives and the row it hands on - and the row as carried is
+    #: its text, a byte value twice its size in hex (`row_sizes` counts it
+    #: so). Counted from the code, not yet measured: `CAP_CALIBRATE=1` on
+    #: `tests/test_wide_rows_never_run_out_of_memory.py` measures it
+    COPY_MEMORY = {"own": 48 * 2 ** 20, "per_row": 2.0,
+                   "batch": 64 * 2 ** 10}
+    #: server to server (`pg_pass`): the source's client holds a row in
+    #: COPY's binary encoding - its bytes, half its text in hex - as it
+    #: arrives and as it hands it on, and this process relays 64 KB pieces.
+    #: Counted from the code, not yet measured (as `COPY_MEMORY`)
+    PASS_MEMORY = {"own": 48 * 2 ** 20, "per_row": 1.0,
+                   "batch": 64 * 2 ** 10}
+    #: both servers' digests of a range run beside the next range's load
+    CHECKS_BESIDE = True
+    #: the ranges of a table are threads of this process, each relaying and
+    #: tallying its rows here: one CPU's worth for all of them - the rows
+    #: themselves read and written by the server's own client programs
+    COPIES_IN_PROCESSES = False
+    READS_HERE = False
+
+    def _probe_conn(self, side, db, seconds=None):
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+        options = SESSION + (f" -c statement_timeout={int(seconds * 1000)}"
+                             if seconds else "")
+        return psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
+                                password=ep.password,
+                                dbname=self._d(side, db), connect_timeout=15,
+                                options=options, **ep.libpq_tls())
+
+    def probe_read(self, side, db, table, part=0, parts=1,
+                   budget=16 * 2 ** 20, seconds=1.5, keep=0):
+        """COPY of one slice of the table's pages - the statement the table
+        copier pipes - into a counter, in a read-only transaction that the
+        server stops after `seconds`. A slice is pages by their row
+        address, so streams side by side read different pages without a
+        key; before 14, which cannot scan by address, the first rows only."""
+        import psycopg2
+        sch, tbl = self._split(table)
+        qt = self._qualified(side, db, table)
+        cols = self._copy_cols(db, sch, tbl) if side == "src" else None
+        conn = self._probe_conn(side, db, seconds * 2 + 5)
+        try:
+            conn.set_session(readonly=True)
+            cur = conn.cursor()
+            cur.execute("select current_setting('server_version_num')::int,"
+                        " c.relpages, pg_table_size(c.oid) from pg_class c"
+                        " where c.oid = %s::regclass", (qt,))
+            version, pages, size = cur.fetchone()
+            pages = max(int(pages or 0), 1)
+            per_page = max(int(size or 0) / pages, 8192)
+            want = max(1, min(int(budget / per_page), pages // max(parts, 1)))
+            if version >= 140000:
+                lo = pages * part // max(parts, 1)
+                where = (f"ctid >= '({lo},0)'::tid and ctid <"
+                         f" '({lo + want},0)'::tid")
+                select = self._copy_select(qt, cols, where)
+            elif part:
+                return None
+            else:
+                select = (self._copy_select(qt, cols)
+                          + f" limit {max(1, int(budget // 64))}")
+            sink = _Counted(budget, seconds, keep)
+            try:
+                cur.copy_expert(f"copy ({select}) to stdout", sink,
+                                size=1 << 16)
+            except (_Enough, psycopg2.extensions.QueryCanceledError):
+                pass
+            return sink.said(cols)
+        finally:
+            conn.close()
+
+    def _probe_shape(self, db, table):
+        """(column definitions, key columns) of a source table, for a table
+        to write the probe into."""
+        qt = self._qualified("src", db, table)
+        rows = self.run_rule("src", db,
+                             "select a.attname, format_type(a.atttypid,"
+                             " a.atttypmod) from pg_attribute a"
+                             f" where a.attrelid = '{qt}'::regclass"
+                             " and a.attnum > 0 and not a.attisdropped"
+                             " and a.attgenerated = '' order by a.attnum")
+        key = self._pk_cols_of(db, ".".join(self._split(table)))
+        return [(str(n), str(t)) for n, t in rows], key
+
+    def probe_write(self, db, table, sample, seconds=1.5, stream=0,
+                    apply=True):
+        """The sample COPYed into a table made for it in one transaction on
+        the target, read back, taken again as upserts, and the transaction
+        rolled back: the table never existed for anyone else, and what was
+        written went through the target's log as a copy's rows do. Where
+        the user may not make a table, a temporary one - which writes no
+        log, and is said to be one."""
+        import io
+        import time
+        if not isinstance(sample, (bytes, bytearray)) or not sample:
+            return None
+        defs, key = self._probe_shape(db, table)
+        if not defs:
+            return None
+        sch, _ = self._split(table)
+        q = self._quote_ident
+        name = f"migkit_probe_{os.getpid()}_{int(stream)}"
+        cols = ", ".join(q(n) for n, _ in defs)
+        conn = self._probe_conn("dst", db, seconds * 4 + 10)
+        how = "a table made and rolled back in one transaction"
+        try:
+            cur = conn.cursor()
+            made = None
+            for schema, typed in ((sch, True), ("public", True),
+                                  (sch, False), ("public", False),
+                                  (None, True), (None, False)):
+                body = ", ".join(f"{q(n)} {t if typed else 'text'}"
+                                 for n, t in defs)
+                if key:
+                    body += f", primary key ({', '.join(q(k) for k in key)})"
+                where = (f"{q(schema)}.{q(name)}" if schema
+                         else f"pg_temp.{q(name)}")
+                cur.execute("savepoint migkit_probe")
+                try:
+                    cur.execute(f"create {'temp ' if not schema else ''}"
+                                f"table {where} ({body})")
+                    made = where
+                    if not schema:
+                        how = ("a temporary table, which the target writes"
+                               " no log for")
+                    break
+                except Exception:  # noqa: BLE001 - the next way
+                    cur.execute("rollback to savepoint migkit_probe")
+            if made is None:
+                return None
+            began = time.monotonic()
+            cur.copy_expert(f"copy {made} ({cols}) from stdin",
+                            io.BytesIO(bytes(sample)), size=1 << 16)
+            wrote = time.monotonic() - began
+            sink = _Counted(len(sample) * 2, seconds * 4, 0)
+            began = time.monotonic()
+            cur.copy_expert(f"copy (select {cols} from {made}) to stdout",
+                            sink, size=1 << 16)
+            read = time.monotonic() - began
+            applied, took = 0, None
+            rest = [n for n, _ in defs if n not in key]
+            if apply and key and rest:
+                began = time.monotonic()
+                cur.execute(f"insert into {made} ({cols}) select {cols} from"
+                            f" {made} on conflict ({', '.join(map(q, key))})"
+                            " do update set " + ", ".join(
+                                f"{q(n)} = excluded.{q(n)}" for n in rest))
+                applied, took = cur.rowcount, time.monotonic() - began
+            return {"rows": sample.count(b"\n"), "bytes": len(sample),
+                    "seconds": wrote, "read_seconds": read,
+                    "applied": applied, "apply_seconds": took, "how": how}
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
+    #: the server's own processes that write what its sessions load: a
+    #: session that commits without waiting for the disk leaves the wait
+    #: to these
+    WRITERS = ("walwriter", "checkpointer", "background writer")
+
+    def io_wait(self, side, db):
+        """Sessions and the server's own writers waiting on storage
+        (`wait_event_type` IO), and those working - the sessions active and
+        the writers waiting - other than this one."""
+        writers = ", ".join(f"'{w}'" for w in self.WRITERS)
+        got = self.run_rule(side, db,
+                            "select count(*) filter (where wait_event_type ="
+                            " 'IO'), count(*) filter (where (backend_type ="
+                            " 'client backend' and state = 'active') or"
+                            " wait_event_type = 'IO') from pg_stat_activity"
+                            " where (backend_type = 'client backend' or"
+                            f" backend_type in ({writers})) and pid <>"
+                            " pg_backend_pid()")
+        return {"io_wait": int(got[0][0]), "active": int(got[0][1])}
+
+    def changes_made(self, side, db):
+        """Rows inserted, updated and deleted in the database since its
+        statistics began, and how long ago that was."""
+        got = self.run_rule(side, db,
+                            "select tup_inserted + tup_updated + tup_deleted,"
+                            " extract(epoch from now() - coalesce(stats_reset,"
+                            " pg_postmaster_start_time())) from"
+                            " pg_stat_database where datname ="
+                            " current_database()")
+        if not got:
+            return None
+        return int(got[0][0]), float(got[0][1])
+
+    #: a table whose heap is at most this big is sized row by row; a larger
+    #: one from a sample of its pages. A value stored out of line is sized
+    #: from its pointer (`octet_length` reads the length there), so the
+    #: heap is what is scanned, not the values
+    SIZE_EXACT_UP_TO = 256 * 2 ** 20
+
+    def row_sizes(self, side, db, tables=None):
+        """Each row's size as COPY carries it - text as its bytes, a byte
+        value twice over in hex, anything else as stored - measured without
+        reading a value stored out of line."""
+        cat = self.run_rule(side, db, """
+            select n.nspname || '.' || c.relname, c.relpages::bigint * 8192,
+                   greatest(c.reltuples, 0)::bigint,
+                   string_agg(case
+                       when a.atttypid = 'bytea'::regtype
+                         then '2 * coalesce(octet_length(' ||
+                              quote_ident(a.attname) || '), 0) + 3'
+                       when a.atttypid in ('text'::regtype,
+                         'varchar'::regtype, 'bpchar'::regtype)
+                         then 'coalesce(octet_length(' ||
+                              quote_ident(a.attname) || '), 0) + 1'
+                       else 'coalesce(pg_column_size(' ||
+                            quote_ident(a.attname) || '), 0) + 1' end,
+                       ' + ' order by a.attnum)
+              from pg_class c
+              join pg_namespace n on n.oid = c.relnamespace
+              join pg_attribute a on a.attrelid = c.oid and a.attnum > 0
+                                  and not a.attisdropped
+             where c.relkind in ('r', 'p') and n.nspname not in
+                   ('pg_catalog', 'information_schema')
+               and n.nspname not like 'pg\\_%'
+             group by 1, 2, 3""")
+        want = None if tables is None else {
+            ".".join(self._split(t)) for t in tables}
+        out = {}
+        for name, heap, rows, expr in cat:
+            if want is not None and name not in want:
+                continue
+            exact = int(heap) <= self.SIZE_EXACT_UP_TO
+            pct = (100.0 if exact else
+                   max(0.01, min(100.0, 100.0 * self.SIZE_EXACT_UP_TO
+                                 / max(int(heap), 1))))
+            qt = self._qualified(side, db, name)
+            sample = "" if exact else f" tablesample system ({pct:.4f})"
+            try:
+                got = self.run_rule(
+                    side, db,
+                    f"select max(s), percentile_disc(0.99) within group"
+                    f" (order by s), avg(s), count(*) from (select {expr} as"
+                    f" s from {qt}{sample}) x")
+            except Exception:  # noqa: BLE001 - that table is not sized
+                continue
+            most, p99, mean, n = got[0]
+            if not n:
+                continue
+            out[name] = {"largest": int(most), "p99": int(p99),
+                         "mean": float(mean),
+                         "rows": int(n) if exact else int(rows),
+                         "exact": exact}
         return out
 
     def table_index_window(self, db, table, log):

@@ -31,9 +31,14 @@ class Slots:
         self._busy = 0
 
     def _take(self):
+        # and only where this machine's memory holds one more worker
+        # (`sizing.Memory`): one of the widest rows waits for room, where it
+        # was started beside the others and the move was killed for it
         with self._cv:
             while self._busy >= (min(self.workers, self.pace.limit)
-                                 if self.pace else self.workers):
+                                 if self.pace else self.workers) or (
+                    self.pace is not None
+                    and not self.pace.admit(self._busy)):
                 self._cv.wait(0.5)
             self._busy += 1
 

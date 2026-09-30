@@ -541,8 +541,12 @@ def plan(hop, found, goal, say):
                f" ({human_bytes(carried['index_bytes'])}) are built on"
                " the target" if size is not None else ""))
         rate = found.get("link")
-        measured = _measured(hop, rows)
-        if measured:
+        eta = _eta(hop, found)
+        measured = None if eta else _measured(hop, rows)
+        if eta:
+            for line in eta:
+                say(line)
+        elif measured:
             say(f"  time: {measured}")
         elif rate and size:
             secs = size / (rate * 2 ** 20)
@@ -578,6 +582,34 @@ def plan(hop, found, goal, say):
     if not lack and not unknown:
         say("  nothing for the DBA to do first")
     return written
+
+
+def _eta(hop, found):
+    """The move's resources and each phase's time (`model`,
+    `planner.phases`), a database at a time: which resource binds, how
+    many at once carry it, and how long the copy, the index builds, the
+    check, the catch-up and the cutover take. The probes read only here -
+    nothing is written before the hop is even saved - so the target's
+    writes are an earlier run's or are said not measured. [] where nothing
+    was measured, now or before."""
+    from . import model as resource_model
+    from . import planner, sizing
+    eng = found.get("eng")
+    out = []
+    for d in (found.get("dbs") or [])[:3]:
+        try:
+            facts = eng.table_facts("src", d)
+            m = resource_model.build(hop, eng, d, facts, write=False)
+            n = sizing.estimate(hop, eng, d, None, model=m).start
+        except Exception:  # noqa: BLE001 - that database is not said
+            continue
+        if not m.measured:
+            continue
+        head = f"  {d}: " if len(found.get("dbs") or []) > 1 else "  "
+        out += [head + line for line in m.lines(n)]
+        out += [head + line.strip() for line in planner.phase_lines(
+            planner.phases(hop, m, facts, None, n))]
+    return out
 
 
 def _measured(hop, rows):

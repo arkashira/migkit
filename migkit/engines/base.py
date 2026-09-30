@@ -3746,6 +3746,154 @@ class Engine:
         "idle"."""
         return {}
 
+    # --- what the resource model measures (`migkit.model`, backlog R22) --
+
+    #: what one worker of this engine's table copier holds in memory:
+    #: `own` bytes, and `per_row` times the larger of the widest row it
+    #: carries (as `row_sizes` counts it) and the batch it reads at once -
+    #: `batch` bytes, or the copier's own count of rows at a time
+    #: (`COPY_BATCH`, `READ_ROWS`) up to its bytes (`COPY_BYTES`,
+    #: `READ_BYTES`) where it has them (`model.worker_memory`). The shared
+    #: copier's: a read held while it is converted and written - assumed
+    #: twice over, no copier of this engine measured
+    COPY_MEMORY = {"own": 64 * 2 ** 20, "per_row": 2.0,
+                   "batch": 64 * 2 ** 20}
+    #: whether the table copier's workers are processes of their own - so
+    #: each has a CPU here - or threads of this one sharing one
+    COPIES_IN_PROCESSES = True
+    #: whether the table copier reads the rows in migkit's own processes -
+    #: its driver's work a CPU here - or a program of the server's does
+    READS_HERE = True
+
+    #: what one worker holds where the rows pass server to server
+    #: (`passes_through`), as `COPY_MEMORY` says it; None: as that
+    PASS_MEMORY = None
+    #: whether a range's check - both servers' digests - runs beside the
+    #: next range's load (True), or before its commit (False)
+    CHECKS_BESIDE = False
+
+    def passes_through(self, db, table):
+        """Whether the table copier's ranges of `table` pass server to
+        server, each server digesting every range, with no row tallied
+        here; False: the rows pass through migkit and are read back."""
+        return False
+
+    def probe_read(self, side, db, table, part=0, parts=1,
+                   budget=16 * 2 ** 20, seconds=1.5, keep=0):
+        """One short read of `table` the way the table copier reads it:
+        {"rows", "bytes", "seconds", "sample"} - the bytes as carried, and
+        the first `keep` of them kept for `probe_write`. `part` of `parts`
+        is which slice, so streams read side by side read apart; a slice
+        this engine cannot find is None. Read-only, and bounded by `budget`
+        bytes and `seconds`. Here: the neutral reader from the start, the
+        first slice only."""
+        import time
+        if part:
+            return None
+        cols = self.neutral_columns(side, db, table)
+        began, rows, size, after, kept = time.monotonic(), 0, 0, None, []
+        while size < budget and time.monotonic() - began < seconds:
+            got, after = self.neutral_read(side, db, table, cols, after,
+                                           1000)
+            for r in got:
+                n = _row_bytes(r)
+                size += n
+                if keep and sum(map(_row_bytes, kept)) < keep:
+                    kept.append(r)
+            rows += len(got)
+            if not got or after is None:
+                break
+        return {"rows": rows, "bytes": size,
+                "seconds": time.monotonic() - began,
+                "sample": kept, "columns": cols}
+
+    def probe_write(self, db, table, sample, seconds=1.5, stream=0,
+                    apply=True):
+        """`sample` (what `probe_read` kept) written into the target the way
+        the table copier writes, into a table nobody else can see and that
+        is gone after, read back, and - with `apply` - taken again as
+        upserts, as the change tail writes: {"rows", "bytes", "seconds",
+        "read_seconds", "applied", "apply_seconds", "how"}. None where this
+        engine has no such table to write into."""
+        return None
+
+    def probe_link(self, side, db, nbytes):
+        """Seconds a reply of `nbytes` takes over the link to one side, less
+        a reply of nothing - the server's work for it next to none
+        (`PAYLOAD_SQL`). None where the engine has no such statement."""
+        import time
+        if not self.PAYLOAD_SQL:
+            return None
+        began = time.monotonic()
+        self.run_rule(side, db, "select 1")
+        empty = time.monotonic() - began
+        began = time.monotonic()
+        self.run_rule(side, db, self.PAYLOAD_SQL.format(n=nbytes // 32 + 1))
+        return max(time.monotonic() - began - empty, 1e-6)
+
+    def io_wait(self, side, db):
+        """How much of the server's work waits on storage now: any of
+        `io_wait` (sessions waiting on it), `active` (sessions working) and
+        `io_pending` (reads, writes and flushes queued). {} where it does
+        not say."""
+        return {}
+
+    def pressure(self, side, db):
+        """How hard one side's server is working now, for the model and for
+        each resource's limit while a move runs: `capacity`'s answer, the
+        load it says it is under (`busy_ratio`, `lag_seconds` - its replay
+        lag as a replica, or its replicas' behind it), and `io_wait`'s. A
+        key it cannot answer is left out."""
+        import inspect
+        out = {}
+        for fn in (lambda: self.capacity(side, db),
+                   lambda: self.io_wait(side, db)):
+            try:
+                out.update(fn() or {})
+            except Exception:  # noqa: BLE001 - a question never stops a move
+                pass
+        probe = getattr(self, "_health", None)
+        if probe is not None:
+            try:
+                takes_db = len(inspect.signature(probe).parameters) > 1
+                h = probe(side, db) if takes_db else probe(side)
+            except Exception:  # noqa: BLE001
+                h = None
+            if h is not None:
+                for k in ("busy_ratio", "lag_seconds"):
+                    if getattr(h, k, None) is not None:
+                        out[k] = getattr(h, k)
+        return out
+
+    def changes_made(self, side, db):
+        """(changes, seconds): rows the server has inserted, updated and
+        deleted in `db`, counted over `seconds` - what the catch-up is
+        measured against. None where the engine keeps no such count."""
+        return None
+
+    #: rows of a table read to size its rows (`row_sizes`)
+    SIZE_SAMPLE = 2000
+
+    def row_sizes(self, side, db, tables=None):
+        """{table: {"largest", "p99", "mean", "rows", "exact"}}: bytes a row
+        takes as carried - its largest, its 99th percentile and its mean -
+        what one worker holds depends on the widest row, not the table's
+        average. `exact` where every row was measured. Here: the first
+        `SIZE_SAMPLE` rows of each table through the neutral reader."""
+        out = {}
+        for t in (tables if tables is not None
+                  else self.neutral_tables(side, db)):
+            try:
+                cols = self.neutral_columns(side, db, t)
+                rows, after = self.neutral_read(side, db, t, cols, None,
+                                                self.SIZE_SAMPLE)
+            except Exception:  # noqa: BLE001 - that table is not sized
+                continue
+            out[t] = sizes_of([_row_bytes(r) for r in rows],
+                              exact=after is None
+                              or len(rows) < self.SIZE_SAMPLE)
+        return out
+
     #: rows from which a table copied from its start is written with its
     #: secondary indexes set aside (`table_index_window`)
     INDEX_WINDOW_FROM = 100_000
@@ -4864,6 +5012,75 @@ class Engine:
         rendering had to be pinned down first.
         """
         raise self._no_canon("digest a table")
+
+
+class Enough(Exception):
+    """A probe's read has read what it was allowed: stopped on purpose."""
+
+
+class Counted:
+    """Where a probe's COPY-like read is written: bytes and lines counted,
+    the first `keep` bytes kept whole-line, and `Enough` raised once
+    `budget` bytes or `seconds` have gone."""
+
+    def __init__(self, budget, seconds, keep=0):
+        import time
+        self.budget, self.seconds, self.keep = budget, seconds, keep
+        self.bytes = self.rows = 0
+        self.kept = bytearray()
+        self.began = time.monotonic()
+        self.took = None
+
+    def write(self, data):
+        import time
+        data = bytes(data)
+        self.bytes += len(data)
+        self.rows += data.count(b"\n")
+        if len(self.kept) < self.keep:
+            self.kept += data[:self.keep - len(self.kept)]
+        self.took = time.monotonic() - self.began
+        if self.bytes >= self.budget or self.took >= self.seconds:
+            raise Enough()
+        return len(data)
+
+    def said(self, columns=None):
+        import time
+        took = self.took if self.took is not None else (
+            time.monotonic() - self.began)
+        kept = bytes(self.kept)
+        if kept and not kept.endswith(b"\n"):
+            kept = kept[:kept.rfind(b"\n") + 1]
+        return {"rows": self.rows, "bytes": self.bytes, "seconds": took,
+                "sample": kept, "columns": columns}
+
+
+def _row_bytes(row):
+    """Bytes one row of values takes as carried: its strings and bytes by
+    length, anything else as eight."""
+    n = 0
+    for v in row:
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            n += len(v)
+        elif isinstance(v, str):
+            n += len(v.encode("utf-8", "surrogatepass"))
+        elif v is None:
+            n += 1
+        else:
+            n += 8
+    return n + 1
+
+
+def sizes_of(lengths, exact=False, rows=None):
+    """{"largest", "p99", "mean", "rows", "exact"} of row lengths measured
+    (`Engine.row_sizes`); {} for none."""
+    got = sorted(int(x) for x in lengths)
+    if not got:
+        return {}
+    at = min(len(got) - 1, int(0.99 * (len(got) - 1) + 0.5))
+    return {"largest": got[-1], "p99": got[at],
+            "mean": sum(got) / len(got),
+            "rows": rows if rows is not None else len(got),
+            "exact": bool(exact)}
 
 
 class NeutralCopier:

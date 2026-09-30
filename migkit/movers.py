@@ -1167,20 +1167,23 @@ def pgdump_move(hop, db, workers, go, log):
         except Exception as e:
             unresolved = str(e).splitlines()[-1][:70] if str(e) \
                 else type(e).__name__
+    from .sizing import split
     from .wording import Step, phase
     left_out = skip + routed
+    # each side as many jobs as carry it (`sizing.fit`)
+    reads, writes = split(hop, workers)
     dump = Step(
-        phase("dump", workers=workers, left_out=len(skip),
+        phase("dump", workers=reads, left_out=len(skip),
               routed=len(routed)),
         ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
-         "-Fd", "-j", workers, "--data-only", "-v", "-f", outdir,
+         "-Fd", "-j", reads, "--data-only", "-v", "-f", outdir,
          *[a for name in left_out for a in ("-T", name)],
          *leftovers.pg_dump_args()])
     load = Step(
-        phase("load", workers=workers),
+        phase("load", workers=writes),
         ["pg_restore", "-h", t.host, "-p", t.port, "-U", t.user,
          "-d", hop.target_db(db), "--data-only", "--disable-triggers",
-         "-v", "-j", workers, outdir])
+         "-v", "-j", writes, outdir])
     steps = [dump, _truncate_step(hop, db), load]
     note = _create_note(lambda: _pg_missing_tables(hop, db)[0])
     if note:
@@ -2456,11 +2459,14 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None,
     (`_my_target_logs`), asked once by the caller.
     """
     from .engines.mysql import MySQLEngine
+    from .sizing import split
     s, t = hop.source, hop.target
+    # each side as many threads as carry it (`sizing.fit`)
+    reads, writes = split(hop, workers)
     dump = (["mydumper", "-h", s.host, "-P", str(s.port), "-u", s.user]
             + _my_tls(s, "mydumper")
-            + ["-B", db, "-o", str(outdir), "--threads", str(workers),
-               "--max-threads-per-table", str(workers), "--checksum-all"])
+            + ["-B", db, "-o", str(outdir), "--threads", str(reads),
+               "--max-threads-per-table", str(reads), "--checksum-all"])
     if compress:
         dump += [tool_flag("mydumper", "--compress"), "zstd"]
     dump += ["--no-schemas",
@@ -2472,8 +2478,8 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None,
     load = (["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user]
             + _my_tls(t, "myloader")
             + ["-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
-               "--threads", str(workers), "--max-threads-per-table",
-               str(workers), "--checksum-all",
+               "--threads", str(writes), "--max-threads-per-table",
+               str(writes), "--checksum-all",
                tool_flag("myloader", "--checksum"), "warn"])
     if (hop.options or {}).get("target_has_replicas", True) is not False \
             and (_my_target_logs(hop) if logs is None else logs):
@@ -3870,11 +3876,14 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         hop, db, workers, outdir, cnf,
         omit if skip or routed or shell_tables else None, logs=bool(logs),
         compress=compress)
-    dump = Step(phase("dump", workers=workers, left_out=len(skip),
+    # each side as many threads as carry it (`sizing.fit`)
+    from .sizing import split
+    reads, writes = split(hop, workers)
+    dump = Step(phase("dump", workers=reads, left_out=len(skip),
                       routed=len(routed),
                       row_filters=len(_filtered_here(hop, db))
                       if mydumper_defaults(hop, db) else 0), dump)
-    load = Step(phase("load", workers=workers), load)
+    load = Step(phase("load", workers=writes), load)
     # through a dump on disk, its load's progress kept for a stopped move
     # to go on from - measured faster than reading and writing at once too
     # (MY_BENCH); at once only where this machine cannot hold the dump
