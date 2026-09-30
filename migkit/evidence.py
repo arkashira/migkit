@@ -7,15 +7,16 @@ encrypted where the hop asks (backlog R17b):
           - ssh-ed25519 AAAA... ann@example.com
           - age1...
 
-A drilldown's keys (`data-*`), a repair's undo statements (`undo*`) and a
-two-way tail's conflicts (`conflicts.jsonl`) are written through the hop's
-report directory as age files to those recipients, and read back with the
-operator's own key (`MIGKIT_IDENTITY`: a private SSH key or an age identity
-file, `~/.ssh/id_ed25519` by default). Nothing else changes: every place
-that reads or writes one goes on reading and writing a path; the path
-itself encrypts (`EvidencePath`). A file written before the hop asked
-reads as it was. What a program migkit drives writes on its own (a dump's
-files) is not covered: keep those on an encrypted disk.
+A drilldown's keys (`data-*`), a repair's undo statements (`undo*`), a
+two-way tail's conflicts (`conflicts.jsonl`) and the evidence export
+(`export.FILES`: a finding's words can quote a key) are written through
+the hop's report directory as age files to those recipients, and read
+back with the operator's own key (`MIGKIT_IDENTITY`: a private SSH key or
+an age identity file, `~/.ssh/id_ed25519` by default). Nothing else
+changes: every place that reads or writes one goes on reading and writing
+a path; the path itself encrypts (`EvidencePath`). A file written before
+the hop asked reads as it was. What a program migkit drives writes on its
+own (a dump's files) is not covered: keep those on an encrypted disk.
 """
 import base64
 import fnmatch
@@ -23,7 +24,9 @@ import os
 import pathlib
 
 #: the names of the files that hold values
-HOLDS_VALUES = ("data-*", "undo*", "*.undo.sql", "conflicts.jsonl")
+HOLDS_VALUES = ("data-*", "undo*", "*.undo.sql", "conflicts.jsonl",
+                "evidence.json", "evidence.html", "evidence.md",
+                "tables.csv")
 
 AGE = b"age-encryption.org/v1"
 #: one line of a file written a line at a time, encrypted on its own

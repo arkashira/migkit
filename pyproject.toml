@@ -99,6 +99,12 @@ dependencies = [
     "google-api-python-client",
     # the passwords `migkit init` keeps, in the OS keychain
     "keyring>=25",
+    # the team told wherever it is: one scheme for each of about a
+    # hundred services, behind migkit's own `notify`
+    "apprise>=2.0",
+    # a run as spans, sent where the operator's OTEL_* variables say
+    "opentelemetry-sdk>=1.40",
+    "opentelemetry-exporter-otlp-proto-http>=1.40",
 ]
 
 [project.urls]

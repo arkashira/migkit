@@ -1,0 +1,91 @@
+# migkit as a step of a GitHub Actions job: a command on a hop, the job
+# gated on its answer, and the run's evidence kept as the job's artefact
+# and shown as its summary (backlog R23.8). A thin wrapper: the step is
+# `migkit.integrations.step`, which runs the same command a person types.
+#
+#   - uses: arkashira/migkit@v1
+#     with:
+#       hop: orders
+#       config: conf/hops.yaml        # addresses; passwords as env: refs
+#     env:
+#       SRC_PASSWORD: ${{ secrets.SRC_PASSWORD }}
+#       DST_PASSWORD: ${{ secrets.DST_PASSWORD }}
+name: migkit
+description: >-
+  Prove a migration where the team reviews it: run a migkit command on a
+  hop, gate the job on its verdict, and keep the run's evidence - what
+  moved, both sides' counts and digests and how to take them again - as
+  the job's artefact and summary.
+branding:
+  icon: database
+  color: blue
+inputs:
+  hop:
+    description: The hop, as the hops file names it
+    required: true
+  command:
+    description: The migkit command - check, move, sync, watch, users ...
+    default: check
+  args:
+    description: The command's own options, as they would be typed
+    default: ""
+  config:
+    description: The hops file
+    default: conf/hops.yaml
+  reports:
+    description: Where migkit writes its reports and evidence
+    default: migkit-reports
+  fail-on-difference:
+    description: false - a difference found is said, and the job goes on
+    default: "true"
+  python-version:
+    description: The Python migkit runs on
+    default: "3.12"
+  version:
+    description: migkit from the package index at this version; empty for
+      the action's own
+    default: ""
+outputs:
+  status:
+    description: The verdict this run wrote - same, different, error,
+      incomplete - or empty where it wrote none
+    value: ${{ steps.migkit.outputs.status }}
+  exit:
+    description: The command's exit code
+    value: ${{ steps.migkit.outputs.exit }}
+  evidence:
+    description: The directory of the run's evidence
+    value: ${{ steps.migkit.outputs.evidence }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: install migkit
+      shell: bash
+      env:
+        MIGKIT_VERSION: ${{ inputs.version }}
+      run: |
+        if [ -n "$MIGKIT_VERSION" ]; then
+          python -m pip install "migkit==$MIGKIT_VERSION"
+        else
+          python -m pip install "$GITHUB_ACTION_PATH"
+        fi
+    - name: migkit ${{ inputs.command }} ${{ inputs.hop }}
+      id: migkit
+      shell: bash
+      env:
+        MIGKIT_COMMAND: ${{ inputs.command }}
+        MIGKIT_HOP: ${{ inputs.hop }}
+        MIGKIT_ARGS: ${{ inputs.args }}
+        MIGKIT_CONF: ${{ inputs.config }}
+        MIGKIT_REPORTS: ${{ inputs.reports }}
+        MIGKIT_FAIL_ON_DIFFERENCE: ${{ inputs.fail-on-difference }}
+      run: python -c "import sys; from migkit.integrations import step; sys.exit(step())"
+    - uses: actions/upload-artifact@v4
+      if: always() && steps.migkit.outputs.evidence != ''
+      with:
+        name: migkit-evidence-${{ inputs.hop }}
+        path: ${{ steps.migkit.outputs.evidence }}
+        if-no-files-found: ignore

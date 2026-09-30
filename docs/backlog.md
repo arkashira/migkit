@@ -6512,6 +6512,33 @@ cutover, R21, types, users, workload). Not yet anywhere:
    run report (phases, rates, the binding resource, the downtime
    measured) - one family of reports, the same look, HTML/PDF for people
    and JSON/CSV for tools, each saying how to recompute it.
+   *Done 2026-10-01 (`export`, `digests`, `session`); its tests wait for
+   the one run of the suite at the end:* every command on a hop is a run
+   with an id (`session`) stamped on the record's entries, the verdict,
+   the ways chosen (`decide.LISTENERS`, kept in the operator's words in
+   `decisions.jsonl`) and the digests each check takes (`digests.jsonl`:
+   rows, digest, key digest, the statement the server ran, the salt, the
+   columns and their classes, the filter - recorded by PostgreSQL's and
+   MySQL's own passes, every pair through `hetero._digests`, and SQLite).
+   At the end of a run that left anything, its bundle is written to
+   `evidence/<run>/`; `migkit report` writes the hop's whole history to
+   `evidence/`: `evidence.json`, `evidence.html` (the check report's
+   look), `evidence.md`, `tables.csv` - what moved (per table, the copy's
+   rates by way), the verdict and every check, both sides' counts and
+   digests with the statement that takes each again (built for a neutral
+   digest from the recorded columns by `canon` itself) and the method and
+   rendering rules, the stored code's proof per routine with its
+   counterexample, the assessment, positions, decisions with every way
+   passed over and why, approvals with their signatures' digests,
+   repairs with the digest and count of the statements applied (now kept
+   beside their undo, `*.applied.sql`), cutovers with phases and the
+   outage, what was dropped, and the record's chain state. Anchored: the
+   files' SHA-256 go into the record (and the run-state bucket where the
+   hop has one); signed with `evidence: {sign: key}` or
+   `MIGKIT_EVIDENCE_KEY` (`ssh-keygen -Y`, namespace `migkit-evidence`);
+   encrypted to `at_rest` recipients. The guard test reads every file of
+   an export built from inputs planted with program names. Not done: PDF
+   (the HTML prints to one).
 2. **Rehearse, then forecast:** a goal that runs the whole path on a
    clone or a sample the operator names, and turns what it measured
    into the forecast for the real run - time per phase, downtime,
@@ -6576,6 +6603,26 @@ cutover, R21, types, users, workload). Not yet anywhere:
    bulk programs' progress, DVT's results and the verifiers' timings
    become migkit's Prometheus metrics, OpenTelemetry spans and report
    entries, so a team watches one thing whatever ran underneath.
+   *Done 2026-10-01 (`ui`, `traces`, `integrations`, `action.yml`,
+   `deploy/argo/`, `deploy/grafana/`); its tests wait for the one run of
+   the suite at the end:* `/metrics` carries the copy's rows per table and
+   tables done (its checkpoint, never the key it stands at), the last
+   copy's rows a second by way (in the ladder's words), each check's
+   seconds, the verify's ranges and rows proved, every table's rows per
+   side and whether they agree, the last cutover's outage and phases, and
+   the change stream's parts (its API) and its reader's own JMX readings
+   through the Jolokia agent the pipeline now starts on 127.0.0.1:8778
+   (behind the source, changes read, queue room, connected, snapshot
+   tables left); new rules for a table that differs and the stream behind
+   or down, and a Grafana dashboard whose every metric the test holds to
+   the export. With the standard `OTEL_*` variables each command is a
+   trace (checks, tables copied, cutover phases timed as they ran,
+   decisions as events). `integrations.run` is the one runner - Airflow's
+   `MigkitOperator`, Dagster's `migkit_op`, the GitHub Action and the Argo
+   template (`integrations.step`) stand on it. Not done: W2's API and a
+   Terraform provider (W2 is not built); the connector's own spans
+   (its image has `ENABLE_OTEL`, but the tracing transform it needs was not
+   run here).
 10. **Notifications wherever the team is:** today Slack, Discord, Teams,
    PagerDuty and a JSON webhook. The others: DMS through SNS and
    EventBridge (so anything behind them), Airbyte Slack and webhooks,
@@ -6592,6 +6639,21 @@ cutover, R21, types, users, workload). Not yet anywhere:
    delivery failure said and the run going on), and a test per channel
    against a local stub. Approved by the owner in full (2026-09-29):
    every channel Apprise reaches, wrapped as migkit's own receivers.
+   *Done 2026-10-01 (`notify`); its tests wait for the one run of the
+   suite at the end:* any address Apprise instantiates (native webhook
+   URLs included) goes through it under migkit's name (measured over
+   twenty channels with every request caught: none carried the library's
+   name once its asset was set); PagerDuty's trigger/resolve and the plain
+   JSON webhook stay migkit's own. `notify: {to, events, lag}` - addresses
+   as references (`env:`, `keyring:`, `pagerduty:env:`...), a plain one
+   warned about by `hopkeys`. Events: verdict, drift (a DDL under a check
+   or a move, a watching check's verdict), lag (the tail's heartbeat past
+   `lag` seconds, and back), cutover (each step, the outage, the undo),
+   approval (asked once per request, given), failure (a command that
+   stops; a tail), fallback (a way given up for another, seen by the
+   decision listener), done (a writing command). Masked hops send an
+   error's kind only; passwords and program names are taken out. Tests: 21
+   channels against one local stub, email against a local SMTP stub.
 9. **Documentation as part of the product:** a five-minute quickstart
    for each common pair, a page per engine saying what is carried,
    what is refused and why, recipes for the usual moves (a managed

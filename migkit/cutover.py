@@ -198,10 +198,19 @@ def _save(hop, rec):
 
 
 def _audit(hop, rec, entry):
-    from . import audit
+    """A step written down - and, as it is, a span of the run's trace for
+    a phase, and the hop's receivers told (`notify.cutover`)."""
+    from . import audit, notify, traces
     audit.append(hop.report_dir() / "changelog.jsonl",
                  {"op": "cutover", "run": rec.get("id"),
                   "approved_by": rec.get("approvers") or [], **entry})
+    phase = entry.get("phase")
+    if phase:
+        at = (rec.get("phases") or {}).get(phase) or {}
+        traces.past(f"cutover {phase}", at.get("began"), at.get("ended"),
+                    phase=phase, seconds=entry.get("seconds"),
+                    run=rec.get("id"))
+    notify.cutover(hop, rec, entry)
 
 
 def _runs_path(hop):
@@ -1216,10 +1225,14 @@ def _undone(hop, eng, rec, leg, conf, say, why):
     say(f"[red]the cutover goes back: {why}[/red]")
     rec["why"] = why
     _undo(hop, eng, rec, leg, conf, say, why)
-    raise SystemExit(f"the cutover was undone ({why}); the source is"
-                     " writable and has what it had"
-                     + (f" - {rec['outage']:.2f}s of write outage"
-                        if rec.get("outage") is not None else ""))
+    stop = (f"the cutover was undone ({why}); the source is writable and"
+            " has what it had"
+            + (f" - {rec['outage']:.2f}s of write outage"
+               if rec.get("outage") is not None else ""))
+    # the receivers were told of the undo as it was recorded
+    from . import notify
+    notify.already(stop)
+    raise SystemExit(stop)
 
 
 def _undo(hop, eng, rec, leg, conf, say, why):

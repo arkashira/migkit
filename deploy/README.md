@@ -34,18 +34,43 @@ up and supervises its own streaming pipeline behind the same command.
 
 `/metrics` on the dashboard (`migkit report --serve`) carries each hop's last
 verdict and, for a running change tail, how far behind it is, whether it is
-still going round its loop, and whether it stopped on an error.
+still going round its loop, and whether it stopped on an error - and what
+works inside migkit, under migkit's names: the copy's rows per table and
+rows a second, each check's seconds, the verify's progress, every table's
+rows on each side and whether they agree, the last cutover's outage and
+phases, the change stream's parts and its reader's own readings.
 `prometheus-alerts.yml` here has rules over those metrics; load it with
-`rule_files:` and change the thresholds to fit.
+`rule_files:` and change the thresholds to fit. `grafana/migkit.json` is a
+dashboard over the same metrics (import it and pick the Prometheus source).
 
-To be told without Prometheus, give the hop receivers:
+With `OTEL_EXPORTER_OTLP_ENDPOINT` set (the standard OpenTelemetry
+variables), every command is a trace: a span per command, per check of each
+database, per table copied and per cutover phase, with the ways the engine
+chose as events.
+
+To be told without Prometheus, give the hop receivers, kept where its
+passwords are kept:
 
     options:
       notify:
-        - https://hooks.slack.com/services/...    # or Discord, a Teams workflow, any JSON URL
-        - pagerduty:<routing key>                 # one incident per hop, resolved when it clears
+        to:
+          - env:SLACK_HOOK          # Slack, Teams, Google Chat, Discord, LINE,
+          - keyring:migkit-lark     # Lark/Feishu, Telegram, email, SNS, ...
+          - pagerduty:env:PD_KEY    # one incident per hop, resolved when it clears
+        events: [verdict, drift, lag, cutover, approval, failure, fallback, done]
+        lag: 300                    # seconds a change tail may be behind
 
-or set `MIGKIT_NOTIFY` (addresses separated by commas) for every hop. A check
-sends when its verdict moves between same, different and error, and a tail
-sends when it stops on an error and when it runs again. What is sent names
-each finding's check and table, never the rows' values.
+or set `MIGKIT_NOTIFY` (addresses separated by commas) for every hop. What
+is sent names each finding's check and table, never the rows' values.
+
+## In the team's pipelines
+
+- GitHub Actions: `uses: arkashira/migkit@v1` with `hop:` (and `command:`,
+  `args:`, `config:`); the job is gated on the verdict, and the run's
+  evidence is its artefact and summary (`action.yml`).
+- Argo Workflows: `argo/migkit-workflowtemplate.yaml`, the image above, the
+  verdict an output parameter and the evidence an output artefact.
+- Airflow: `from migkit.integrations import MigkitOperator`; Dagster:
+  `migkit.integrations.migkit_op(name, command, hop)`.
+
+Each runs the command a person would type, and nothing else.

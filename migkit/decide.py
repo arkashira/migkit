@@ -550,6 +550,35 @@ def prune(rungs, facts, need=()):
     return kept, out
 
 
+#: told of every way chosen, as it is chosen: the run's evidence keeps
+#: them with their reasons (`session.Decisions`)
+LISTENERS = []
+
+
+def _told(fn):
+    """`fn` - `climb`, `compose` - telling `LISTENERS` what it chose. A
+    climb asked in passing (`prove=False`: what a way would be, not the
+    way taken) tells nobody, and a listener that fails is not the
+    choice's problem."""
+    import functools
+    import inspect
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def choosing(*args, **kw):
+        got = fn(*args, **kw)
+        if LISTENERS and signature.bind(*args, **kw).arguments.get(
+                "prove", True) is not False:
+            for listen in list(LISTENERS):
+                try:
+                    listen(got)
+                except Exception:  # noqa: BLE001 - the choice stands
+                    pass
+        return got
+    return choosing
+
+
+@_told
 def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
           prove=True):
     """The `Choice` for one unit of work from its `rungs`.
@@ -1004,6 +1033,7 @@ def _unfit(chosen):
     return None
 
 
+@_told
 def compose(work, parts, facts=None, need=(), costs=None, keep=None):
     """The `Strategy` for `work`: one rung per part, the parts fitting each
     other, every rung proved.

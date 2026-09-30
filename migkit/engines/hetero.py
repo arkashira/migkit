@@ -589,8 +589,17 @@ class HeteroEngine(Engine):
 
         def one(eng, side, table, cols, where):
             ask = eng.same_engine_digest if own else eng.neutral_digest
-            return ask(side, db, table, cols,
-                       **({"where": where} if where else {}), **salt)
+            got = ask(side, db, table, cols,
+                      **({"where": where} if where else {}), **salt)
+            # kept for the evidence, with what takes it again: the columns
+            # and their classes, the engine, the filter (`digests`)
+            from .. import digests
+            digests.record(self.hop, db, table, side, got[0], got[1],
+                           method=digests.OWN if own else digests.NEUTRAL,
+                           salt=salt.get("salt"),
+                           engine=getattr(eng, "CANON_ENGINE", None),
+                           columns=cols, where=where)
+            return got
         return (one(src, "src", src_t, src_cols, wheres[0]),
                 one(dst, "dst", dst_t, dst_cols, wheres[1]))
 

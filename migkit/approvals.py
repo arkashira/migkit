@@ -105,6 +105,7 @@ def require(hop, step, db, log=None, detail=None):
         principal = _signer(sig, signers, data)
         if principal and principal != req.get("asked_by"):
             who.add(principal)
+    from . import notify
     if len(who) >= need:
         from . import audit
         audit.append(hop.report_dir() / "changelog.jsonl",
@@ -112,8 +113,9 @@ def require(hop, step, db, log=None, detail=None):
                       "approvers": sorted(who), "request": req["nonce"]})
         if log:
             log(f"{step} approved by {', '.join(sorted(who))}")
+        notify.approved(hop, step, db, sorted(who), log)
         return sorted(who)
-    raise SystemExit(
+    stop = (
         f"{step} needs {need} approval{'s' if need > 1 else ''} and has"
         f" {len(who)}"
         + (f" ({', '.join(sorted(who))})" if who else "")
@@ -123,3 +125,7 @@ def require(hop, step, db, log=None, detail=None):
         f" < {path} > {path.parent / (path.name[:-len('.request.json')])}"
         ".$(whoami).sig\n"
         "then this is run again.")
+    # the approvers are told where the team is, once for this request
+    notify.approval_asked(hop, step, db, need, len(who), req["expires"],
+                          req["nonce"], log, stop=stop)
+    raise SystemExit(stop)

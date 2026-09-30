@@ -84,21 +84,20 @@ FINDING = {"status": "diff", "check": "data", "scope": "main.people",
 
 
 def test_each_receiver_gets_the_shape_it_takes():
+    """Slack, Discord and a Teams workflow are the channel library's now,
+    each shaped as the channel takes it (a card where it has cards;
+    `test_the_team_is_told_wherever_it_is` sends to each); PagerDuty and
+    a plain JSON webhook stay migkit's own shapes."""
     from migkit import notify
     facts = {"event": "verdict", "hop": "h"}
-    url, body = notify.body("https://hooks.slack.com/services/T/B/C",
-                            "msg", facts, True, "d")
-    assert body == {"text": "msg"}, body
-    url, body = notify.body("https://discord.com/api/webhooks/1/x", "msg",
-                            facts, True, "d")
-    assert body == {"content": "msg"}, body
-    url, body = notify.body(
-        "https://prod-01.westus.logic.azure.com:443/workflows/x", "msg",
-        facts, True, "d")
-    card = body["attachments"][0]
-    assert card["contentType"] == \
-        "application/vnd.microsoft.card.adaptive", body
-    assert card["content"]["body"][0]["text"] == "msg", body
+    for address, service in (
+            ("https://hooks.slack.com/services/T/B/C", "Slack"),
+            ("https://discord.com/api/webhooks/1/x", "Discord"),
+            ("https://prod-01.westus.logic.azure.com:443/workflows/abc/"
+             "triggers/manual/paths/invoke?api-version=1&sp=x&sv=1.0"
+             "&sig=y", "Workflows")):
+        assert notify.body(address, "msg", facts, True, "d") is None
+        assert service in notify._channel(address).service_name, address
     url, body = notify.body("https://example.com/hook", "msg", facts, True,
                             "d")
     assert body == {"event": "verdict", "hop": "h", "text": "msg"}, body
@@ -277,9 +276,6 @@ def test_the_shipped_rules_name_only_metrics_that_exist(tmp_path,
     """A rule over a metric nobody exports never fires, and says nothing
     about that."""
     import yaml
-
-    import migkit.config as cfg
-    from migkit import tailctl, ui
     rules = yaml.safe_load(
         (Path(__file__).parent.parent / "deploy" / "prometheus-alerts.yml")
         .read_text())
@@ -287,26 +283,10 @@ def test_the_shipped_rules_name_only_metrics_that_exist(tmp_path,
     for group in rules["groups"]:
         for rule in group["rules"]:
             named |= set(re.findall(r"migkit_[a-z_]+", rule["expr"]))
-    monkeypatch.setattr(cfg, "REPORTS", tmp_path)
-    monkeypatch.setattr(ui, "REPORTS", tmp_path)
-    hop = Hop(name="h", engine="postgres",
-              source=Endpoint(host="x", port=0, user="", password=""),
-              target=Endpoint(host="x", port=0, user="", password=""))
-    (tmp_path / "h").mkdir()
-    (tmp_path / "h" / "summary.json").write_text("[]")
-    where = tmp_path / "h" / "appdb"
-    where.mkdir()
-    with pytest.raises(RuntimeError):
-        with tailctl.Running(where):
-            raise RuntimeError("x")
-    stopped = ui.prometheus({"h": hop})
-    with tailctl.Running(where):
-        # every reading an engine gives, though no one engine gives all
-        tailctl.beat(where, time.time(), 1,
-                     {"seconds": 1, "bytes": 1, "held_bytes": 1})
-        running = ui.prometheus({"h": hop})
-    exported = set(re.findall(r"^(migkit_[a-z_]+)\{", stopped + running,
-                              re.M))
+    # every reading there is, the tools' inside migkit's with them
+    from tests.test_migkit_works_inside_the_teams_tools import every_reading
+    exported = set(re.findall(r"^(migkit_[a-z_]+)\{",
+                              every_reading(tmp_path, monkeypatch), re.M))
     assert named and named <= exported, named - exported
 
 

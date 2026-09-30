@@ -246,7 +246,23 @@ def _require_configured(hop):
             f"fill host/user/password in conf/hops.yaml, then: migkit doctor")
 
 
-@click.group()
+class _Step(click.Command):
+    """Every command as one run (`session.step`): its trace, the ways
+    chosen in it kept with its evidence, and the hop's receivers told of
+    a failure, a fallback or a writing run done."""
+
+    def invoke(self, ctx):
+        from . import session
+        with session.step(ctx.info_name, ctx.params,
+                          lambda m: console.print(f"[yellow]{m}[/yellow]")):
+            return super().invoke(ctx)
+
+
+class _Commands(click.Group):
+    command_class = _Step
+
+
+@click.group(cls=_Commands)
 @click.version_option(__version__, "-V", "--version", prog_name="migkit")
 @click.option("-q", "--quiet", is_flag=True,
               help="suppress per-table chatter and progress lines,"
@@ -1063,8 +1079,11 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             console.print(f"  [{d}] {line}")
         return s
 
-    from . import drift
+    from . import drift, traces
     from . import verdict as _verdict
+    #: {db: {check: seconds}} this run's checks took, for `/metrics` and
+    #: the evidence
+    timings = {}
 
     def run_db(d):
         out = []
@@ -1105,18 +1124,24 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                                       f" database; compared under {dbs[0]}"})
                 continue
             fn = getattr(eng, f"check_{c}")
-            try:
-                if c == "data":
-                    kw = {"stream": _stream(d)}
-                    if merge and "counts" not in local_map[d]:
-                        kw["with_counts"] = True
-                    if consistent and hasattr(eng, "_fast_consistent"):
-                        kw["consistent"] = True
-                    rs = [r.__dict__ for r in fn(d, table or None, **kw)]
-                else:
-                    rs = [r.__dict__ for r in fn(d)]
-            except Exception as e:
-                rs = [{"check": c, "scope": d, "status": "error", "detail": str(e)}]
+            began = time.monotonic()
+            with traces.span(f"check {c}", db=d, check=c) as span:
+                try:
+                    if c == "data":
+                        kw = {"stream": _stream(d)}
+                        if merge and "counts" not in local_map[d]:
+                            kw["with_counts"] = True
+                        if consistent and hasattr(eng, "_fast_consistent"):
+                            kw["consistent"] = True
+                        rs = [r.__dict__ for r in fn(d, table or None, **kw)]
+                    else:
+                        rs = [r.__dict__ for r in fn(d)]
+                except Exception as e:
+                    rs = [{"check": c, "scope": d, "status": "error",
+                           "detail": str(e)}]
+                traces.answered(span, rs)
+            timings.setdefault(d, {})[c] = round(time.monotonic() - began,
+                                                  3)
             out.extend(rs)
         if before is not None:
             after = drift.shape(watch, "src", d)
@@ -1125,6 +1150,9 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                 said = drift.changes(before, after)
                 _verdict.mark_stale(out, d, moved, "; ".join(said[:3])
                                     + ("; ..." if len(said) > 3 else ""))
+                from . import notify
+                notify.drift(hop, d, said, lambda m: console.print(
+                    f"[yellow]{m}[/yellow]"))
             if after is not None:
                 shape_file.parent.mkdir(parents=True, exist_ok=True)
                 shape_file.write_text(json.dumps(after))
@@ -1163,6 +1191,10 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
         results = [r for r in prev_all if keep(r)] + results
     was_same = _verdict.unchanged_since(hop, results)
     summary_path.write_text(json.dumps(results, indent=1, default=str))
+    from . import session
+    (hop.report_dir() / "check-timings.json").write_text(json.dumps(
+        {"session": session.current(), "at": time.strftime("%F %T"),
+         "databases": timings}, indent=1))
     # What this run did *not* look at, for the file a CI job reads. Only
     # what genuinely narrows it: `--db` on a single-database hop narrows
     # nothing, and no `--only` means the full battery ran. The hop's own
@@ -1358,19 +1390,30 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
             console.print(f"  {said}")
         if not usable:
             raise SystemExit(f"{db}: {said}")
+        ts = time.strftime("%Y%m%d-%H%M%S")
         if a.undo:
-            ts = time.strftime("%Y%m%d-%H%M%S")
             undo_file = undo_dir / f"{ts}-{a.kind}-{i}.sql"
             undo_file.write_text("\n".join(a.undo) + "\n")
             console.print(f"  undo saved: {undo_file}")
+        # the statements themselves, kept beside their undo (encrypted
+        # with it where the hop asks), their digest in the record: the
+        # repair's statement-level evidence
+        applied = undo_dir / f"{ts}-{a.kind}-{i}.applied.sql"
+        applied.write_text("\n".join(a.statements) + "\n")
         lk = _lock(hop)
         try:
             eng.apply(db, a)
         finally:
             lk.unlink()
+        import hashlib
         _changelog(hop, {"op": "repair", "db": db, "kind": a.kind,
                          "detail": a.note,
-                         "undo_ref": str(undo_file) if a.undo else None},
+                         "undo_ref": str(undo_file) if a.undo else None,
+                         "applied_ref": str(applied),
+                         "statements": len(a.statements),
+                         "applied_sha256": hashlib.sha256(
+                             ("\n".join(a.statements) + "\n").encode()
+                         ).hexdigest()},
                    eng)
         console.print("  [green]applied[/green]")
     if not do_apply:
@@ -1767,7 +1810,22 @@ def _copy_table(eng, d, sch, t, chunk, ck, log):
     where the hop maps its columns and the own copier would carry the whole
     row. The pair's writes go through its own target driver, so it opens
     the target's load window for itself; nested inside the engine's, it
-    finds nothing left to set aside."""
+    finds nothing left to set aside. A span of the run's trace, with the
+    rows the checkpoint says it carried."""
+    from . import traces
+    with traces.span("copy table", db=d,
+                     table=f"{sch}.{t}" if sch else t) as span:
+        try:
+            return _copy_table_by(eng, d, sch, t, chunk, ck, log)
+        finally:
+            got = ck.get(eng.move_key(d, sch, t)) if isinstance(
+                ck, dict) else None
+            if isinstance(got, dict):
+                traces.attributes(span, rows=got.get("moved"),
+                                  done=bool(got.get("done")))
+
+
+def _copy_table_by(eng, d, sch, t, chunk, ck, log):
     if not eng.through_pair(d, f"{sch}.{t}" if sch else t):
         return eng.move_table(d, sch, t, chunk, ck, log)
     pair = eng.columns_pair()
@@ -2019,12 +2077,15 @@ def _stop_if_the_schema_moved(hop, eng, d, before):
     if not changed:
         return
     _changelog(hop, {"op": "move-ddl-seen", "db": d, "changes": changed})
-    raise SystemExit(
-        f"{d}: the source's schema changed while it was being moved - "
-        + "; ".join(changed[:6]) + (" ..." if len(changed) > 6 else "")
-        + ". The rows moved before and after it may not line up. Bring the"
-        " target's schema level with the source's, then move again and run"
-        " migkit check.")
+    stop = (f"{d}: the source's schema changed while it was being moved - "
+            + "; ".join(changed[:6]) + (" ..." if len(changed) > 6 else "")
+            + ". The rows moved before and after it may not line up. Bring"
+            " the target's schema level with the source's, then move again"
+            " and run migkit check.")
+    from . import notify
+    notify.drift(hop, d, changed, lambda m: console.print(
+        f"[yellow]{m}[/yellow]"), stop=stop)
+    raise SystemExit(stop)
 
 
 def _move_full(hop, eng, db, table, chunk, go):
@@ -3253,9 +3314,25 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
             all_results.extend(r.__dict__ for r in rs)
         (hop.report_dir() / "delta-summary.json").write_text(
             json.dumps(all_results, indent=1, default=str))
+        _watched(hop, dbs, all_results)
         if cycles and n >= cycles:
             break
         time.sleep(interval)
+
+
+def _watched(hop, dbs, results=None):
+    """What a watching loop tells the hop's receivers each cycle: a
+    difference the continuous check finds, or its going (`drift`), and a
+    change tail behind by more than the hop allows (`lag`)."""
+    from . import notify
+    from . import verdict as _verdict
+
+    def say(m):
+        console.print(f"[yellow]{m}[/yellow]")
+    if results is not None:
+        notify.verdict(hop, _verdict.summarize(hop, results), say,
+                       key="watch")
+    notify.lags(hop, dbs, say)
 
 
 def _monitor(hop_name, db, interval, only, cycles):
@@ -3291,6 +3368,7 @@ def _monitor(hop_name, db, interval, only, cycles):
             write_report(hop, all_results)
         except Exception:
             pass
+        _watched(hop, dbs, all_results)
         if cycles and n >= cycles:
             break
         time.sleep(interval)
@@ -3466,6 +3544,7 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
                                               held)
             for one in said:
                 console.print(f"  {one}")
+        _watched(hop, dbs)
         if count and n >= count:
             break
         time.sleep(interval)
@@ -3503,8 +3582,11 @@ def _watch_stream(hop, eng, dbs, out, seen, held):
                    " (the dashboard also exposes them at /metrics)")
 @click.option("--port", default=8899, help="with --serve: listen port")
 def report(hop_name, do_open, refresh, serve, metrics, port):
-    """Render the HTML report from the last check run, or --serve the
-    live localhost dashboard (with a Prometheus /metrics endpoint)."""
+    """Render the HTML report from the last check run and export the
+    hop's evidence (what moved, every verdict with both sides' counts and
+    digests and how to take them again, decisions, approvals, repairs,
+    outages - HTML, Markdown, JSON, CSV), or --serve the live localhost
+    dashboard (with a Prometheus /metrics endpoint)."""
     import subprocess
 
     if metrics:
@@ -3532,11 +3614,21 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
         still = sum(1 for r in results if r["status"] not in ("ok", "skip"))
         console.print(f"refreshed from disk: {still} real problems remain"
                       f" (settled flickers cleared)")
+    from . import export
     from .report import from_summary
-    path, generated = from_summary(hop)
-    console.print(f"report ({generated}): {path}")
+    path = None
+    if summary_path.exists():
+        path, generated = from_summary(hop)
+        console.print(f"report ({generated}): {path}")
+    else:
+        console.print("no check yet, so no check report: `migkit check"
+                      f" {hop.name}` writes one")
+    out = export.write(hop, log=lambda m: console.print(
+        f"[yellow]{m}[/yellow]"))
+    console.print(f"evidence: {out / 'evidence.html'} (and evidence.md,"
+                  " evidence.json, tables.csv beside it)")
     if do_open:
-        subprocess.run(["open", str(path)])
+        subprocess.run(["open", str(path or out / "evidence.html")])
 
 
 @main.command()

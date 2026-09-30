@@ -1,0 +1,88 @@
+# migkit as a step of an Argo workflow (backlog R23.8): a command on a hop
+# in the image `deploy/Dockerfile` builds, its verdict an output parameter
+# a later step can branch on, and the run's evidence an output artefact.
+# A thin wrapper: the step is `migkit.integrations.step`, which runs the
+# same command a person types.
+#
+# The hops file comes from a Secret (`migkit-hops`, key `hops.yaml`) and
+# holds addresses and references only; the passwords it refers to as
+# `env:NAME` come from the Secret `migkit-passwords`. The reports, the run
+# state and the evidence stay on the volume `migkit-state`.
+#
+#   argo submit --from workflowtemplate/migkit -p hop=orders -p command=check
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: migkit
+spec:
+  entrypoint: migkit
+  arguments:
+    parameters:
+      - name: hop
+      - name: command
+        value: check
+      - name: args
+        value: ""
+      - name: fail-on-difference
+        value: "true"
+      - name: image
+        value: migkit:latest
+  volumes:
+    - name: hops
+      secret:
+        secretName: migkit-hops
+    - name: state
+      persistentVolumeClaim:
+        claimName: migkit-state
+  templates:
+    - name: migkit
+      inputs:
+        parameters:
+          - name: hop
+            value: "{{workflow.parameters.hop}}"
+          - name: command
+            value: "{{workflow.parameters.command}}"
+          - name: args
+            value: "{{workflow.parameters.args}}"
+      container:
+        image: "{{workflow.parameters.image}}"
+        command: [python, -c]
+        args:
+          - "import sys; from migkit.integrations import step; sys.exit(step())"
+        env:
+          - name: MIGKIT_COMMAND
+            value: "{{inputs.parameters.command}}"
+          - name: MIGKIT_HOP
+            value: "{{inputs.parameters.hop}}"
+          - name: MIGKIT_ARGS
+            value: "{{inputs.parameters.args}}"
+          - name: MIGKIT_FAIL_ON_DIFFERENCE
+            value: "{{workflow.parameters.fail-on-difference}}"
+          - name: MIGKIT_CONF
+            value: /conf/hops.yaml
+          - name: MIGKIT_REPORTS
+            value: /state/reports
+          - name: MIGKIT_OUTPUTS
+            value: /tmp/migkit
+        envFrom:
+          - secretRef:
+              name: migkit-passwords
+        volumeMounts:
+          - name: hops
+            mountPath: /conf
+            readOnly: true
+          - name: state
+            mountPath: /state
+      outputs:
+        parameters:
+          - name: status
+            valueFrom:
+              path: /tmp/migkit/status
+              default: ""
+          - name: exit
+            valueFrom:
+              path: /tmp/migkit/exit
+        artifacts:
+          - name: evidence
+            path: /tmp/migkit/evidence
+            optional: true

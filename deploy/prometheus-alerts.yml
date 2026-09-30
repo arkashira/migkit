@@ -84,3 +84,32 @@ groups:
           summary: >-
             {{ $labels.hop }} {{ $labels.db }}: the tail's slot loses WAL
             after {{ $value | humanize1024 }}B more is written
+
+      - alert: MigkitTableDifferent
+        expr: migkit_table_same == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ $labels.hop }} {{ $labels.db }}.{{ $labels.table }}: its
+            rows or digest differ between the two sides at its last check
+
+      - alert: MigkitStreamBehind
+        expr: migkit_stream_behind_source_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ $labels.hop }}: the change stream is
+            {{ $value | humanizeDuration }} behind the source
+
+      - alert: MigkitStreamPartDown
+        expr: migkit_stream_running == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ $labels.hop }}: the change stream's {{ $labels.part }} is
+            not running

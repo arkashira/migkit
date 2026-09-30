@@ -394,6 +394,7 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         status = "incomplete"
     else:
         status = "same"
+    from . import session
     return {
         **({"coverage": coverage} if coverage else {}),
         **({"stale": stale} if stale else {}),
@@ -401,6 +402,8 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         "tool": "migkit",
         "tool_version": __version__,
         "hop": hop.name,
+        # the run that took it, for its evidence (`export`)
+        "session": session.current(),
         "engine": engine or hop.engine,
         "generated": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "status": status,

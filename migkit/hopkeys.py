@@ -162,7 +162,13 @@ HOP_OPTIONS = {
     "newer_wins": Key("the column that keeps the newer row", "str"),
     "noise_prefix": Key("object names a schema check leaves out", "str",
                         ("postgres",)),
-    "notify": Key("who is told a verdict", "str|list"),
+    "notify": Key("who is told what the migration is doing - an address,"
+                  " a list of them, or {to, events, lag}: the events told"
+                  " (verdict, drift, lag, cutover, approval, failure,"
+                  " fallback, done) and the seconds a change tail may be"
+                  " behind", "str|list|dict", subs=("to", "events", "lag")),
+    "evidence": Key("the evidence export: {sign: a private SSH key} it is"
+                    " signed with", "dict", subs=("sign",)),
     "on_conflict": Key("source-wins or keep-target", "str"),
     "partition_by": Key("the column a stream partitions by", "str",
                         STREAMS),
@@ -865,6 +871,8 @@ def check_hop(name, raw):
                            + _near(goal, {g: Key("") for g in GOALS})))
     opts = raw.get("options") or {}
     _keys(out, f"{where}.options", opts, HOP_OPTIONS)
+    if isinstance(opts, dict):
+        out += _notify(f"{where}.options.notify", opts.get("notify"))
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
         if got is None:
@@ -911,6 +919,42 @@ def _check_endpoint(where, engine, raw):
             out.append(Problem("warn", f"{where}.{k}",
                                "written in plain text - write a reference"
                                " (env:NAME, file:/path, ...)"))
+    return out
+
+
+def _notify(where, got):
+    """A receiver written out in the file, which is its own password (a
+    webhook's address is enough to post to it); an event nobody tells; a
+    lag that is not a number of seconds."""
+    from . import addresses
+    from .notify import EVENTS
+    out = []
+    if got is None:
+        return out
+    to = got.get("to") if isinstance(got, dict) else got
+    if isinstance(got, dict):
+        for e in got.get("events") or []:
+            if str(e) not in EVENTS:
+                out.append(Problem("error", f"{where}.events",
+                                   f"{e!r} - one of {', '.join(EVENTS)}"
+                                   + _near(e, {x: Key("") for x in EVENTS})))
+        lag = got.get("lag")
+        if lag is not None and not _fits("number", lag):
+            out.append(Problem("error", f"{where}.lag",
+                               f"{lag!r} - the seconds a change tail may be"
+                               " behind before it is said"))
+    plain = 0
+    for r in [to] if isinstance(to, str) else list(to or []):
+        r = str(r)
+        key = r.split(":", 1)[1] if r.startswith("pagerduty:") else r
+        plain += not addresses.is_reference(key)
+    if plain:
+        out.append(Problem(
+            "warn", where,
+            f"{plain} receiver{'s are' if plain > 1 else ' is'} written out"
+            " in the file, and an address is its own password - keep it in"
+            " this machine's keychain or write a reference: env:NAME,"
+            " keyring:name, file:/path, vault:path#key"))
     return out
 
 

@@ -46,7 +46,7 @@ TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "mirrormaker", "pgcompare", "ora2pg", "sqlines", "plpgsql_check",
          "sqlglot", "pglast", "mysqlsh", "mysql shell", "pg_basebackup",
          "pg_verifybackup", "openlogreplicator", "cobrix", "stingray",
-         "jt400")
+         "jt400", "apprise")
 
 
 def _engine(tmp_path):
@@ -287,3 +287,85 @@ def test_doctor_names_no_program(tmp_path, monkeypatch):
     said = CliRunner().invoke(cli.main, ["doctor"]).output
     assert "migkit doctor --install" in said, said
     assert not [t for t in TOOLS if t in said.lower()], said
+
+
+def test_the_evidence_export_names_no_program(tmp_path):
+    """The evidence is handed to auditors and change boards: every file
+    of it is read here, with a program's name planted in everything it is
+    built from - the record's entries, the rates, the ways chosen, the
+    digests' statements, the stored code, the assessment, the findings,
+    a cutover's reason, a position - and none may come out."""
+    import json
+
+    from migkit import audit, export, session
+    hop = Hop(name="x", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=5432, user="app"),
+              target=Endpoint(host="10.0.0.2", port=5432, user="app"),
+              databases=["appdb"])
+    hop.report_dir = lambda db=None, _p=tmp_path: _p / db if db else _p
+    (tmp_path / "appdb").mkdir()
+    run = session.current()
+    log = tmp_path / "changelog.jsonl"
+    audit.append(log, {"op": "move-pgcopydb", "db": "appdb",
+                       "table": "public.t"})
+    audit.append(log, {"op": "move-mydumper", "db": "appdb"})
+    audit.append(log, {"op": "repair", "db": "appdb", "kind": "rows",
+                       "detail": "rows written back by mydumper"})
+    (tmp_path / "throughput.json").write_text(json.dumps({
+        "pgcopydb": [{"rows": 1000, "seconds": 2.0, "at": "2026-09-30T10:00"
+                      ":00"}],
+        "cdc/follow": [{"rows": 10, "seconds": 1.0,
+                        "at": "2026-09-30T10:00:01"}],
+        "reladiff": [{"rows": 10, "seconds": 1.0,
+                      "at": "2026-09-30T10:00:02"}]}))
+    (tmp_path / session.DECISIONS).write_text(json.dumps({
+        "session": run, "at": "2026-09-30 10:00:00", "work": "appdb",
+        "way": "the streaming copy",
+        "reason": "the version-matched pgcopydb build is here",
+        "passed": [{"way": "the dump and restore in parallel",
+                    "why": "pg_dump is not installed"}]}) + "\n")
+    (tmp_path / "digests.jsonl").write_text("".join(json.dumps({
+        "session": run, "at": "2026-09-30 10:00:00", "db": "appdb",
+        "table": "public.t", "side": side, "rows": 3, "digest": "42",
+        "method": "own", "engine": "postgres", "salt": "ab",
+        "sql": "select count(*) from public.t -- read like reladiff"})
+        + "\n" for side in ("src", "dst")))
+    (tmp_path / "appdb" / "code-conversion.json").write_text(json.dumps(
+        {"routines": [{"routine": "function f", "class": "plpgsql",
+                       "rung": "ora2pg"}]}))
+    (tmp_path / "appdb" / "code-proof.json").write_text(json.dumps(
+        {"verdicts": [{"routine": "function f", "status": "proved",
+                       "reason": "converted by sqlines, run on both",
+                       "first": None}]}))
+    (tmp_path / "assess.json").write_text(json.dumps([
+        {"level": "warn", "scope": "appdb", "item": "programs",
+         "detail": "pgloader is not installed"}]))
+    (tmp_path / "summary.json").write_text(json.dumps([
+        {"check": "data", "scope": "appdb", "status": "diff",
+         "category": "data", "detail": "debezium left 2 rows behind",
+         "fix_hint": "run liquibase"}]))
+    (tmp_path / "verdict.json").write_text(json.dumps(
+        {"status": "different", "session": run}))
+    (tmp_path / "cutover-runs.jsonl").write_text(json.dumps(
+        {"id": "c1", "state": "undone", "why": "pgcopydb exited 1",
+         "took": {"freeze": 0.5}, "settings": {"budget": 30}}) + "\n")
+    (tmp_path / "appdb" / "tail-token.json").write_text(json.dumps(
+        {"lsn": "0/16B3748", "reader": "pgcopydb follow"}))
+    out = export.write(hop)
+    said = {name: (out / name).read_text() for name in export.FILES}
+    for name, text in said.items():
+        leaks = [t for t in TOOLS if t in text.lower()]
+        assert not leaks, (name, leaks)
+    doc = json.loads(said["evidence.json"])
+    # what was planted was read, in migkit's words - the scan reaches
+    assert "move by the streaming copy" in [s["op"] for s in doc["steps"]]
+    assert next(r for r in doc["moved"]["runs"] if r["rows"] == 1000)[
+        "way"] == "the streaming copy", doc["moved"]["runs"]
+    assert doc["code"][-1]["converted by"] == "the copy", doc["code"]
+    assert doc["decisions"][0]["passed"][0]["why"] == \
+        "the copy is not installed", doc["decisions"]
+    assert doc["assessment"][0]["detail"] == "the copy is not installed"
+    assert doc["positions"]["appdb"]["tail-token.json"]["lsn"] == \
+        "0/16B3748", doc["positions"]
+    assert doc["tables"][0]["src"]["statement"].startswith(
+        "select count(*) from public.t"), doc["tables"]

@@ -43,8 +43,12 @@ def _last_hash(path):
 
 
 def append(path, entry):
-    """`entry` added to the record at `path`, chained to the one before."""
+    """`entry` added to the record at `path`, chained to the one before,
+    and stamped with the run that wrote it (`session`), so one run's
+    entries can be told from the hop's whole record."""
     import fcntl
+
+    from . import session
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK, open(path, "a+b") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -54,7 +58,8 @@ def append(path, entry):
             except Exception:  # noqa: BLE001 - no name to give
                 who = ""
             body = {"at": time.strftime("%F %T"), "who": who,
-                    "host": socket.gethostname(), **entry,
+                    "host": socket.gethostname(),
+                    "session": session.current(), **entry,
                     "prev": _last_hash(path)}
             body["hash"] = hashlib.sha256(
                 _canonical(body).encode()).hexdigest()

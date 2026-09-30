@@ -2558,7 +2558,14 @@ class MySQLEngine(Engine):
             cols.append(self._summed(key_expr, salt))
         q = (f"select {', '.join(cols)}"
              f" from {self._scope(side, db, t)} {where}")
-        return tuple(self._q(side, q)[0])
+        got = tuple(self._q(side, q)[0])
+        from .. import digests
+        digests.record(self.hop, db, t, side, got[0], got[1],
+                       method=digests.OWN,
+                       keys=got[2] if len(got) > 2 else None, sql=q,
+                       salt=salt, engine="mysql",
+                       where=str(where).strip() or None)
+        return got
 
     def _reladiff_url(self, side, db):
         from urllib.parse import quote

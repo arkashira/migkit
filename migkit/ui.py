@@ -298,7 +298,245 @@ def prometheus(hops):
         lines += _tail_metrics(REPORTS / name, lbl)
         lines += _follow_metrics(hop, REPORTS / name, lbl)
         lines += _move_metrics(REPORTS / name, lbl)
-    return "\n".join(TAIL_HELP + MOVE_HELP + lines) + "\n"
+        for inside in (_tables_moved_metrics, _copy_metrics, _check_metrics,
+                       _verify_metrics, _table_metrics, _cutover_metrics,
+                       _stream_metrics):
+            try:
+                lines += inside(REPORTS / name, lbl)
+            except Exception:  # noqa: BLE001 - a scrape never fails on one
+                pass
+    return "\n".join(TAIL_HELP + MOVE_HELP + INSIDE_HELP + lines) + "\n"
+
+
+def _lv(value):
+    """A label's value as the text format writes one."""
+    return (str(value).replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n"))
+
+
+def _json_at(path, default=None):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def _db_dirs(where):
+    try:
+        return sorted(p for p in where.iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+#: what the tools inside migkit measure, carried out under migkit's names
+#: (backlog R23.8): the copy's progress and rates, each check's time, the
+#: verify's progress, every table's rows on each side, the cutover's
+#: outage, and the change stream's own readings
+INSIDE_HELP = [
+    "# HELP migkit_move_rows Rows the copy has carried into a table",
+    "# TYPE migkit_move_rows gauge",
+    "# HELP migkit_move_tables Tables the copy of a database holds a place"
+    " for",
+    "# TYPE migkit_move_tables gauge",
+    "# HELP migkit_move_tables_done Tables the copy of a database finished",
+    "# TYPE migkit_move_tables_done gauge",
+    "# HELP migkit_copy_rows_per_second Rows a second the last copy by a way"
+    " went at",
+    "# TYPE migkit_copy_rows_per_second gauge",
+    "# HELP migkit_copy_seconds Seconds the last copy by a way took",
+    "# TYPE migkit_copy_seconds gauge",
+    "# HELP migkit_check_seconds Seconds a check of a database took in the"
+    " last run",
+    "# TYPE migkit_check_seconds gauge",
+    "# HELP migkit_verify_ranges_done Ranges of a table the verify in"
+    " progress has proved equal",
+    "# TYPE migkit_verify_ranges_done gauge",
+    "# HELP migkit_verify_rows_done Rows in those ranges",
+    "# TYPE migkit_verify_rows_done gauge",
+    "# HELP migkit_table_rows Rows a table held on a side at its last"
+    " digest",
+    "# TYPE migkit_table_rows gauge",
+    "# HELP migkit_table_same A table's rows and digest equal on both sides"
+    " at its last digest (1) or not (0)",
+    "# TYPE migkit_table_same gauge",
+    "# HELP migkit_cutover_outage_seconds Write outage the last cutover"
+    " measured",
+    "# TYPE migkit_cutover_outage_seconds gauge",
+    "# HELP migkit_cutover_phase_seconds Seconds a phase of the last cutover"
+    " took",
+    "# TYPE migkit_cutover_phase_seconds gauge",
+    "# HELP migkit_cutover_running A cutover is under way (1)",
+    "# TYPE migkit_cutover_running gauge",
+    "# HELP migkit_stream_behind_source_seconds How far the change stream's"
+    " reader is behind the source, by its own account",
+    "# TYPE migkit_stream_behind_source_seconds gauge",
+    "# HELP migkit_stream_events_seen Changes the stream's reader has read"
+    " since it started",
+    "# TYPE migkit_stream_events_seen gauge",
+    "# HELP migkit_stream_queue_remaining Room left in the stream reader's"
+    " queue",
+    "# TYPE migkit_stream_queue_remaining gauge",
+    "# HELP migkit_stream_connected The stream's reader is connected to the"
+    " source (1)",
+    "# TYPE migkit_stream_connected gauge",
+    "# HELP migkit_stream_snapshot_tables_remaining Tables the stream's"
+    " first read has still to read",
+    "# TYPE migkit_stream_snapshot_tables_remaining gauge",
+    "# HELP migkit_stream_running A part of the change stream is running"
+    " (1) or not (0)",
+    "# TYPE migkit_stream_running gauge",
+]
+
+
+def _tables_moved_metrics(where, lbl):
+    """The copy's own checkpoint: rows per table, tables finished. Never
+    where it stands in a table - that is a key, which is data."""
+    out = []
+    for d in _db_dirs(where):
+        ck = _json_at(d / "move.json", {}) or {}
+        tables = {k: v for k, v in ck.items() if isinstance(v, dict)
+                  and ("moved" in v or "done" in v)}
+        if not tables:
+            continue
+        dl = f'{lbl},db="{_lv(d.name)}"'
+        out.append(f"migkit_move_tables{{{dl}}} {len(tables)}")
+        out.append(f"migkit_move_tables_done{{{dl}}}"
+                   f" {sum(1 for v in tables.values() if v.get('done'))}")
+        for t, v in sorted(tables.items()):
+            out.append(f'migkit_move_rows{{{dl},table="{_lv(t)}"}}'
+                       f" {int(v.get('moved') or 0)}")
+    return out
+
+
+def _copy_metrics(where, lbl):
+    """The last copy by each way the hop took, as its rates keep it - the
+    way in the engine's words (`export.way`), never a program's name."""
+    from .export import way
+    out = []
+    for label, runs in sorted((_json_at(where / "throughput.json", {})
+                               or {}).items()):
+        if not isinstance(runs, list) or not runs:
+            continue
+        last = runs[-1]
+        rows, secs = last.get("rows"), last.get("seconds")
+        if not rows or not secs:
+            continue
+        wl = f'{lbl},way="{_lv(way(label))}"'
+        out.append(f"migkit_copy_rows_per_second{{{wl}}}"
+                   f" {round(rows / secs, 1)}")
+        out.append(f"migkit_copy_seconds{{{wl}}} {secs}")
+    return out
+
+
+def _check_metrics(where, lbl):
+    got = _json_at(where / "check-timings.json", {}) or {}
+    out = []
+    for d, checks in sorted((got.get("databases") or {}).items()):
+        for c, secs in sorted(checks.items()):
+            out.append(f'migkit_check_seconds{{{lbl},db="{_lv(d)}",'
+                       f'check="{_lv(c)}"}} {secs}')
+    return out
+
+
+def _verify_metrics(where, lbl):
+    """The verify in progress, from the ranges it has proved and kept
+    (`checkpoint`); a table finished is cleared from it."""
+    out = []
+    for d in _db_dirs(where):
+        got = _json_at(d / "checkpoint.json", {}) or {}
+        for t, entry in sorted((got.get("tables") or {}).items()):
+            done = (entry or {}).get("done") or {}
+            if not done:
+                continue
+            tl = f'{lbl},db="{_lv(d.name)}",table="{_lv(t)}"'
+            out.append(f"migkit_verify_ranges_done{{{tl}}} {len(done)}")
+            out.append(f"migkit_verify_rows_done{{{tl}}}"
+                       f" {sum(int(v[0]) for v in done.values())}")
+    return out
+
+
+def _table_metrics(where, lbl):
+    """Every table's rows on each side and whether the two agree, at its
+    last whole-table digest (`digests`)."""
+    from . import digests
+    out = []
+    for (db, table, scope), sides in sorted(digests.read_in(where).items()):
+        if scope:
+            continue
+        tl = f'{lbl},db="{_lv(db)}",table="{_lv(table)}"'
+        for side, line in sorted(sides.items()):
+            if line.get("rows") is not None:
+                out.append(f'migkit_table_rows{{{tl},side="{side}"}}'
+                           f" {int(line['rows'])}")
+        src, dst = sides.get("src"), sides.get("dst")
+        if src and dst:
+            same = (src.get("rows") == dst.get("rows")
+                    and str(src.get("digest")) == str(dst.get("digest")))
+            out.append(f"migkit_table_same{{{tl}}} {int(same)}")
+    return out
+
+
+def _cutover_metrics(where, lbl):
+    out = []
+    running = _json_at(where / "cutover.json")
+    if isinstance(running, dict) and running.get("state") == "running":
+        out.append(f"migkit_cutover_running{{{lbl}}} 1")
+    last = None
+    try:
+        lines = (where / "cutover-runs.jsonl").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        try:
+            last = json.loads(line)
+            break
+        except ValueError:
+            continue
+    if isinstance(last, dict):
+        if last.get("outage") is not None:
+            out.append(f"migkit_cutover_outage_seconds{{{lbl}}}"
+                       f" {last['outage']}")
+        for phase, secs in sorted((last.get("took") or {}).items()):
+            out.append(f'migkit_cutover_phase_seconds{{{lbl},'
+                       f'phase="{_lv(phase)}"}} {secs}')
+    return out
+
+
+#: where the change stream's pipeline answers for its parts, where its
+#: reader answers its own readings, and the readings carried out: {its
+#: attribute: migkit's metric}
+STREAM_API = 8083
+STREAM_READINGS = 8778
+STREAM_METRICS = {
+    "MilliSecondsBehindSource": "migkit_stream_behind_source_seconds",
+    "TotalNumberOfEventsSeen": "migkit_stream_events_seen",
+    "QueueRemainingCapacity": "migkit_stream_queue_remaining",
+    "Connected": "migkit_stream_connected",
+    "RemainingTableCount": "migkit_stream_snapshot_tables_remaining",
+}
+
+
+def _stream_metrics(where, lbl):
+    """The hop's change stream, where it runs one: each part running or
+    not (its connectors and their tasks, as the pipeline's own API says),
+    and the reader's own readings - how far behind the source, how many
+    changes read, the room in its queue, whether it is connected, the
+    tables its first read has left - through the reader's metrics over
+    HTTP (`movers.stream_readings`)."""
+    from . import movers
+    if not (where / "stream" / "docker-compose.yml").exists():
+        return []
+    out = []
+    for part, running in movers.stream_parts(where.name, STREAM_API):
+        out.append(f'migkit_stream_running{{{lbl},part="{_lv(part)}"}}'
+                   f" {int(running)}")
+    for attr, value in movers.stream_readings(
+            tuple(STREAM_METRICS), STREAM_READINGS).items():
+        metric = STREAM_METRICS[attr]
+        if attr == "MilliSecondsBehindSource":
+            value = value / 1000.0
+        out.append(f"{metric}{{{lbl}}} {float(value):g}")
+    return out
 
 
 MOVE_HELP = [

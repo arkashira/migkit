@@ -3523,10 +3523,25 @@ class PostgresEngine(Engine):
             h = self._row_hash_expr("src", db, t)
             if t not in keyexpr:
                 keyexpr[t] = self._key_hash_expr("src", db, t)
-            return self._psql(side, db,
-                f"set max_parallel_workers_per_gather ="
-                f" {self._digest_workers(db, t, w)};"
-                f" select {_agg(h, keyexpr[t])} from {self._scope(db, t)}")
+            sql = f"select {_agg(h, keyexpr[t])} from {self._scope(db, t)}"
+            got = self._psql(side, db,
+                             f"set max_parallel_workers_per_gather ="
+                             f" {self._digest_workers(db, t, w)}; {sql}")
+            _kept(side, t, got, sql)
+            return got
+
+        def _kept(side, t, got, sql, salt=None, where=None):
+            """One side's `rows|sum[|keys]` kept with the statement that
+            summed it, for the evidence (`digests`)."""
+            parts = str(got).strip().split("|")
+            if len(parts) < 2:
+                return
+            from .. import digests
+            digests.record(self.hop, db, t, side, parts[0], parts[1],
+                           method=digests.OWN,
+                           keys=parts[2] if len(parts) > 2 else None,
+                           sql=sql, salt=salt or self.digest_salt(),
+                           engine="postgres", where=where)
 
         # A checksum is only a SELECT, which is why nothing used to stop this
         # loop from saturating a small instance that was serving traffic.
@@ -3644,12 +3659,25 @@ class PostgresEngine(Engine):
                     # says; the counts are the table's, which is what
                     # anybody reading `src=` means by it.
                     rows_a, rows_b = both(table_rows, t)
+                    ranged = (f"select count(*)||'|'||"
+                              f"{self._summed(expr, salt)}"
+                              f" from {self._scope(db, t)}"
+                              + (f" where {pred}" if pred != "whole table"
+                                 else ""))
+                    _kept("src", t, a, ranged, salt, pred)
+                    _kept("dst", t, b, ranged, salt, pred)
                     return (f"{t}: DIFF src={rows_a}|{a.split('|', 1)[1]}"
                             f" dst={rows_b}|{b.split('|', 1)[1]}"
                             f" where {pred}")
                 cp.record(t, rlo, rhi, *a.split("|", 1))
             rows, total = cp.total(t)
             cp.clear(t)
+            # the ranges' sums add up to the whole table's, so the one
+            # statement over the whole table answers the same two numbers
+            whole = (f"select count(*)||'|'||{self._summed(expr, salt)}"
+                     f" from {self._scope(db, t)}")
+            for side in ("src", "dst"):
+                _kept(side, t, f"{rows}|{total}", whole, salt)
             resumed = (f" resumed={done_before}/{len(ranges)}"
                        if done_before else "")
             return (f"{t}: OK rows={rows} checksum={total}"

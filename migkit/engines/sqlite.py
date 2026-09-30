@@ -914,6 +914,11 @@ class SQLiteEngine(NeutralCopier, Engine):
                 continue
             ha, na, ea = self._hash("src", t)
             hb, nb, eb = self._hash("dst", t)
+            from .. import digests
+            for side, h, n, err in (("src", ha, na, ea), ("dst", hb, nb, eb)):
+                if not err:
+                    digests.record(self.hop, db, t, side, n, h,
+                                   method=digests.READ, engine="sqlite")
             if ea or eb:
                 why = "; ".join(f"{name}: {err}" for name, err in
                                 (("source", ea), ("target", eb)) if err)
