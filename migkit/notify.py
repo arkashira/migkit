@@ -268,14 +268,15 @@ def _clean(hop, text):
     program migkit drives, and only its kind where the hop masks values
     (the words of an error can quote the row it was writing)."""
     from . import masking
-    from .util import without_secret
+    from .redact import Redactor
     text = str(text or "")
     if masking.active(hop):
         kind = text.split(":", 1)[0].strip() if ":" in text else "an error"
         return (f"{kind}; the hop masks values, so what it said is only in"
                 " migkit's own output")
-    for secret in (hop.source.password, hop.target.password):
-        text = without_secret(text, secret)
+    # every secret the hop holds, in every form: a password URL-encoded
+    # into an address went out to the channel as it was
+    text = Redactor(hop, mask="****")(text)
     from .export import words
     return words(text)
 

@@ -256,8 +256,7 @@ UNDEFINED_OBJECT, OBJECT_IN_USE = "42704", "55006"
 def _tls_query(ep):
     """An endpoint's TLS as a connection URL's query: its own settings, or
     TLS where the server offers it, as libpq does by default."""
-    from urllib.parse import urlencode
-    return urlencode(ep.libpq_tls() or {"sslmode": "prefer"})
+    return ep.tls_forms("postgres")["query"]
 
 class PostgresEngine(Engine):
     ENGINE_FAMILY = "postgres"
@@ -2892,10 +2891,11 @@ class PostgresEngine(Engine):
         of failing. An exception here is reported as an error, which is the
         behaviour we want from a thing whose job is to notice problems.
         """
-        s, t = self.hop.source, self.hop.target
-        surl = f"postgresql://{s.user}:{s.password}@{s.host}:{s.port}/{db}"
-        turl = (f"postgresql://{t.user}:{t.password}"
-                f"@{t.host}:{t.port}/{self._d('dst', db)}")
+        # escaped whole, with the side's TLS: built by hand, an `@`, `:`
+        # or `/` in the password moved the host, and the hop's TLS was
+        # dropped (audit 2026-10-01, SC17)
+        surl = self.hop.source.url("postgresql", db)
+        turl = self.hop.target.url("postgresql", self._d("dst", db))
         d = self._report(db)
         d.mkdir(parents=True, exist_ok=True)
         try:
@@ -2991,12 +2991,8 @@ class PostgresEngine(Engine):
 
     def _schema_urls(self, db):
         """(source, target) as the schema comparison's URLs."""
-        from urllib.parse import quote
-        s, t = self.hop.source, self.hop.target
-        return (f"postgres://{s.user}:{quote(s.password, safe='')}"
-                f"@{s.host}:{s.port}/{db}?{_tls_query(s)}",
-                f"postgres://{t.user}:{quote(t.password, safe='')}"
-                f"@{t.host}:{t.port}/{self._d('dst', db)}?{_tls_query(t)}")
+        return (self.hop.source.url("postgres", db),
+                self.hop.target.url("postgres", self._d("dst", db)))
 
     def _schema_excludes(self, db):
         """What the schema comparison leaves out: migkit's own objects, and

@@ -16,31 +16,19 @@ never reaches the file cannot be left in it.
 """
 import json
 import platform
-import re
 import time
 import zipfile
 
-#: keys whose values are secrets, whatever the engine calls them
-SECRET_KEY = re.compile(r"pass|pwd|secret|token|key|credential|notify|auth",
-                        re.I)
-#: credentials inside an address: `scheme://user:password@host`
-IN_ADDRESS = re.compile(r"(://)[^/@\s]+@")
 HIDDEN = "<removed>"
 
 
 def scrub(value, key=""):
-    """The configuration with its secrets taken out, at any depth."""
-    if isinstance(value, dict):
-        return {k: scrub(v, str(k)) for k, v in value.items()}
-    if isinstance(value, list):
-        if SECRET_KEY.search(key):
-            return [HIDDEN for _ in value]
-        return [scrub(v, key) for v in value]
-    if SECRET_KEY.search(key) and value not in (None, ""):
-        return HIDDEN
-    if isinstance(value, str):
-        return IN_ADDRESS.sub(r"\1" + HIDDEN + "@", value)
-    return value
+    """The configuration with its secrets taken out, at any depth: the
+    one redactor's (`redact.scrub`), which also finds a password holding
+    `/` or `@` in an address - `mysql://app:pa/ss@db` was left whole and
+    `postgres://u:p@ss@h` came out `<removed>@ss@h`."""
+    from . import redact
+    return redact.scrub(value, HIDDEN, key)
 
 
 def _verdict(path):

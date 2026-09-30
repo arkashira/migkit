@@ -25,8 +25,6 @@ them.
 """
 import hashlib
 import json
-import os
-import tempfile
 import threading
 
 FORMAT_VERSION = 1
@@ -62,22 +60,24 @@ def fingerprint(expr, ranges):
 class Checkpoint:
     """Per-database record of completed ranges, safe to reopen and resume.
 
-    Written atomically: a crash during a save leaves the previous file intact
-    rather than a truncated one, because a corrupt checkpoint is worse than no
-    checkpoint - it would silently drop ranges from the total.
+    Written durably (`durable.write_atomic`): a crash or a power loss during
+    a save leaves the previous file intact rather than a truncated one,
+    because a corrupt checkpoint is worse than no checkpoint - it would
+    silently drop ranges from the total. Read as a cache: one that cannot
+    be read is started over, which re-checks what it held and loses
+    nothing.
     """
 
     def __init__(self, path):
         self.path = path
         self._lock = threading.Lock()
         self._data = {"format_version": FORMAT_VERSION, "tables": {}}
-        if path and os.path.exists(path):
-            try:
-                loaded = json.loads(open(path).read())
-                if loaded.get("format_version") == FORMAT_VERSION:
-                    self._data = loaded
-            except (ValueError, OSError):
-                pass   # unreadable checkpoint = start over, never crash
+        if path:
+            from .durable import read_state
+            loaded = read_state(path, "cache")
+            if isinstance(loaded, dict) and \
+                    loaded.get("format_version") == FORMAT_VERSION:
+                self._data = loaded
 
     # ---- resume decisions ----
 
@@ -164,18 +164,8 @@ class Checkpoint:
     def _flush(self):
         if not self.path:
             return
-        d = os.path.dirname(self.path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=d or ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(self._data, f, separators=(",", ":"))
-            os.replace(tmp, self.path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        from .durable import write_atomic
+        write_atomic(self.path, json.dumps(self._data, separators=(",", ":")))
 
 
 # What one chunk should take. Long enough that per-query overhead is noise,

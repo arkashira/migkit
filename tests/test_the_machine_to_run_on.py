@@ -121,7 +121,7 @@ def test_a_server_that_binds_says_no_bigger_machine_helps():
     got = machine.advise(st, 1000 * GB, 3600, types, "us-east-1")
     assert got.server_bound and got.machine is None
     assert "a bigger machine would not help" in got.words
-    assert "the source's reads bind at ~50 MB/s" in got.words, got.words
+    assert "the source's reads bind at ~50 MiB/s" in got.words, got.words
     assert "A larger source instance" in got.words
     # the same servers with time enough: a machine, the smallest that keeps
     # up, and the reason nothing bigger would be faster
@@ -409,7 +409,7 @@ def test_the_stages_come_from_the_hops_own_runs(tmp_path, monkeypatch):
     assert machine.stages_for(hop, "builtin") is None
     assert machine.plan_line(hop, "builtin", 0) == ""
     said = machine.plan_line(hop, "builtin", 100 * GB)
-    assert "needs ~26 MB/s end to end" in said, said
+    assert "needs ~26 MiB/s end to end" in said, said
     # a run whose CPUs were a quarter busy: what lay beyond this machine
     # held it, and migkit's own work a core is its bytes over its CPU time
     run = 50 * 2 ** 20 * 100
@@ -420,7 +420,7 @@ def test_the_stages_come_from_the_hops_own_runs(tmp_path, monkeypatch):
     assert st.per_core == pytest.approx(50 * 2 ** 20)
     said = machine.plan_line(hop, "builtin", 500 * GB)
     assert "no machine for migkit meets the deadline of 1.0 hours" in said
-    assert "the servers and the link together bind at ~50 MB/s" in said
+    assert "the servers and the link together bind at ~50 MiB/s" in said
     # its CPUs all busy: this machine held it, and a bigger one is named
     planner.record_rate(hop, "builtin", 1_000_000, 100, size=run,
                         cpu_seconds=390, cpus=4)
@@ -430,7 +430,7 @@ def test_the_stages_come_from_the_hops_own_runs(tmp_path, monkeypatch):
     assert "no machine for migkit meets" not in said
     assert "its CPUs bind there" in said or "its network binds" in said, said
     # faster than the servers were ever seen to go is said as unproven
-    assert "if the servers and the link give it: they gave ~50 MB/s" in said
+    assert "if the servers and the link give it: they gave ~50 MiB/s" in said
     # a dump path writes the local copy and reads it back
     assert machine.stages_for(hop, "pgdump") is None
     planner.record_rate(hop, "pgdump", 10, 10, size=10 * 2 ** 20,
@@ -460,7 +460,7 @@ def test_assess_says_the_class_and_the_machine(tmp_path, monkeypatch):
         hop, Quiet(), "app")}
     assert got["the target's class"].startswith(
         "the source's engine does not say its load")
-    assert "the deadline of 2.0 hours needs ~5.3 MB/s" in \
+    assert "the deadline of 2.0 hours needs ~5.3 MiB/s" in \
         got["the machine to run migkit on"]
 
     class Loaded(Quiet):
@@ -490,7 +490,7 @@ def test_a_hop_in_no_named_cloud_is_told_only_what_binds(tmp_path,
     assert machine.plan_line(hop, "builtin", 500 * GB) == ""
     hop.options = {"deadline": "1h"}
     said = machine.plan_line(hop, "builtin", 500 * GB)
-    assert "the servers and the link together bind at ~50 MB/s" in said
+    assert "the servers and the link together bind at ~50 MiB/s" in said
     assert "the hop does not say which cloud it runs in" in said
     # a deadline the servers meet: no machine to name, nothing to say
     hop.options = {"deadline": "4h"}

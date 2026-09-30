@@ -120,7 +120,7 @@ def test_the_plan_counts_it_against_the_room(servers):
                              kept=lambda grows: _pg().log_kept("postgres",
                                                                grows))
     assert "NOT ENOUGH" not in fits, fits
-    assert "plus the 80.0 MB of its WAL it holds at once" in fits, fits
+    assert "plus the 80.0 MiB of its WAL it holds at once" in fits, fits
     _sh("docker", "exec", PG, "psql", "-U", "postgres", "-c",
         "select pg_create_logical_replication_slot('held', 'pgoutput')")
     try:
@@ -130,5 +130,5 @@ def test_the_plan_counts_it_against_the_room(servers):
     finally:
         _sh("docker", "exec", PG, "psql", "-U", "postgres", "-c",
             "select pg_drop_replication_slot('held')")
-    assert "NOT ENOUGH" in short and "plus the 8.0 GB of its WAL" in short, \
+    assert "NOT ENOUGH" in short and "plus the 8.0 GiB of its WAL" in short, \
         short
