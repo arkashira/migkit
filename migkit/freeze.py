@@ -165,7 +165,9 @@ def side_engine(hop, eng, side):
     own = getattr(eng, "src_engine" if side == "src" else "dst_engine", None)
     e = own if own is not None else eng
     from .engines import ALIASES
-    kind = getattr(e, "CANON_ENGINE", "") or _engine(hop)
+    # a service on another's API is held as itself (`Engine.PAIR_ENGINE`)
+    kind = (getattr(e, "PAIR_ENGINE", "") or getattr(e, "CANON_ENGINE", "")
+            or _engine(hop))
     return ALIASES.get(kind, kind), e
 
 
@@ -2675,7 +2677,12 @@ class OpenSearchHold(Hold):
 #: their operator, and `decide.WAYS["writes held"]` says why
 HOLDS = {"postgres": PostgresHold, "mysql": MySQLHold, "mongodb": MongoHold,
          "redis": RedisHold, "mssql": MSSQLHold, "cassandra": CassandraHold,
-         "kafka": KafkaHold, "opensearch": OpenSearchHold}
+         "kafka": KafkaHold, "opensearch": OpenSearchHold,
+         # services held as the API they speak is (P0-CLOUDS): GaussDB's
+         # roles as PostgreSQL's, GeminiDB's APIs as their engines'; each
+         # way's needs are read off the service before it is taken
+         "gaussdb": PostgresHold, "geminidb-cassandra": CassandraHold,
+         "geminidb-redis": RedisHold, "geminidb-mongo": MongoHold}
 #: the sources the cutover freezes itself; any other is frozen by its
 #: operator (`freeze: operator`) and proved by migkit
 FREEZES = tuple(HOLDS)

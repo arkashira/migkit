@@ -3776,6 +3776,168 @@ TYPES["cockroachdb"] = {
 }
 
 
+# ---- cloud-native services (backlog P0-CLOUDS, part 2) ---------------------
+#
+# Each service's declared types as its own catalogue - or, for a store
+# with no catalogue, its own engine - writes them. The services on
+# another's wire (`engines.WIRE`: GaussDB PostgreSQL's, OceanBase,
+# PolarDB-X and TDSQL MySQL's, Keyspaces and GeminiDB their APIs') take
+# that dialect's tables by `_speak_as`; only what they add is here.
+
+#: Spanner, both dialects in one table - their names do not collide.
+#: GoogleSQL's as `SPANNER_TYPE` writes them (`STRING(MAX)`, `INT64`), an
+#: array as `T[]` (the engine writes `ARRAY<T>` so, as every other array
+#: is read), a PROTO column as the message's bytes and an ENUM as its
+#: number; the PostgreSQL dialect's as its `spanner_type` writes them. A
+#: TIMESTAMP is an instant of nine digits; a NUMERIC holds 38 digits, 9 of
+#: them after the point, and writes a value without trailing zeros, so
+#: it is compared by value (`decimal_class`)
+TYPES["spanner"] = {
+    "int64": "integer", "float64": "float", "float32": "float",
+    "numeric": "decimal", "string": "text", "bytes": "bytes",
+    "bool": "boolean", "date": "date", "timestamp": "timestamp",
+    "json": "json", "interval": INTERVAL, "uuid": "uuid",
+    "proto": "bytes", "enum": "integer",
+    "bigint": "integer", "int8": "integer", "double precision": "float",
+    "float8": "float", "real": "float", "float4": "float",
+    "decimal": "decimal", "character varying": "text", "varchar": "text",
+    "text": "text", "bytea": "bytes", "boolean": "boolean",
+    "timestamp with time zone": "timestamp", "timestamptz": "timestamp",
+    "spanner.commit_timestamp": "timestamp", "jsonb": "json",
+    "oid": "integer",
+}
+#: Bigtable: a row's key is bytes, and each column family one JSON value
+#: of its cells - every qualifier's versions with their timestamps
+#: (`engines.bigtable`); a table migkit made from another engine's keeps
+#: each column's class, as its description on this machine says
+TYPES["bigtable"] = {"bytes": "bytes", "cells": "json",
+                     **{c: c for c in ("integer", "decimal", "float",
+                                       "boolean", "text", "date",
+                                       "timestamp", "time", "json",
+                                       "uuid")}}
+#: Firestore (native) and Datastore: what a field holds, each value's
+#: kind as the SDK hands it over, a field of several kinds `a|b`. A
+#: timestamp keeps microseconds; a reference or a key is its path's text;
+#: a map, an array or an entity is JSON
+TYPES["firestore"] = {
+    "integer": "integer", "double": "float", "boolean": "boolean",
+    "string": "text", "bytes": "bytes", "timestamp": "timestamp",
+    "map": "json", "array": "json", "reference": "text", "geopoint": "json",
+    "vector": VECTOR, "decimal": "decimal", "date": "date", "time": "time",
+    "json": "json", "uuid": "uuid", "text": "text", "float": "float",
+}
+TYPES["datastore"] = {**TYPES["firestore"], "key": "text", "entity": "json",
+                      "blob": "bytes"}
+#: GaussDB (openGauss): PostgreSQL's, and the A-compatibility types of its
+#: own - a `DATE` there is `timestamp(0)`, which `format_type` says
+TYPES["gaussdb"] = {
+    **TYPES["postgres"],
+    "tinyint": "integer", "int1": "integer", "number": "decimal",
+    "varchar2": "text", "nvarchar2": "text", "nvarchar": "text",
+    "clob": "text", "raw": "bytes", "blob": "bytes",
+    "smalldatetime": "timestamp", "binary_double": "float",
+    "binary_integer": "integer",
+}
+#: Neptune: an element's id, label and ends as text, its properties one
+#: JSON object of typed values; an RDF term as its N-Triples text
+TYPES["neptune"] = {"string": "text", "properties": "json", "term": "text"}
+#: Timestream: its query's column types
+TYPES["timestream"] = {
+    "varchar": "text", "bigint": "integer", "integer": "integer",
+    "double": "float", "boolean": "boolean", "timestamp": "timestamp",
+    "date": "date", "time": "time",
+}
+#: Lindorm's wide tables through its SQL: MySQL's names and its own
+TYPES["lindorm"] = {
+    **TYPES["mysql"], "boolean": "boolean", "integer": "integer",
+    "binary": "bytes", "varbinary": "bytes", "string": "text",
+}
+
+DDL["spanner"] = {
+    OWN: ("STRING(MAX)", "{0}"),
+    "integer": ("INT64", "INT64"),
+    "decimal": ("NUMERIC", "NUMERIC"),
+    "float": ("FLOAT64", "FLOAT64"),
+    "boolean": ("BOOL", "BOOL"),
+    "text": ("STRING(MAX)", "STRING({0})"),
+    "uuid": ("STRING(36)", "STRING(36)"),
+    "inet": ("STRING(49)", "STRING(49)"),
+    "bytes": ("BYTES(MAX)", "BYTES({0})"),
+    "date": ("DATE", "DATE"),
+    "timestamp": ("TIMESTAMP", "TIMESTAMP"),
+    "json": ("JSON", "JSON"),
+    "bson": ("JSON", "JSON"),
+}
+#: a Spanner database of the PostgreSQL dialect builds in its own words
+DDL["spanner_pg"] = {
+    OWN: ("character varying", "{0}"),
+    "integer": ("bigint", "bigint"),
+    "decimal": ("numeric", "numeric"),
+    "float": ("double precision", "double precision"),
+    "boolean": ("boolean", "boolean"),
+    "text": ("character varying", "character varying({0})"),
+    "uuid": ("character varying(36)", "character varying(36)"),
+    "inet": ("character varying(49)", "character varying(49)"),
+    "bytes": ("bytea", "bytea"),
+    "date": ("date", "date"),
+    "timestamp": ("timestamp with time zone", "timestamp with time zone"),
+    "json": ("jsonb", "jsonb"),
+    "bson": ("jsonb", "jsonb"),
+}
+DDL["lindorm"] = {
+    OWN: ("VARCHAR", "{0}"),
+    "integer": ("BIGINT", "BIGINT"),
+    "decimal": ("DECIMAL(38,10)", "DECIMAL({0},{1})"),
+    "float": ("DOUBLE", "DOUBLE"),
+    "boolean": ("BOOLEAN", "BOOLEAN"),
+    "text": ("VARCHAR", "VARCHAR"),
+    "uuid": ("VARCHAR", "VARCHAR"),
+    "bytes": ("VARBINARY", "VARBINARY"),
+    "date": ("DATE", "DATE"),
+    "timestamp": ("TIMESTAMP", "TIMESTAMP"),
+    "time": ("TIME", "TIME"),
+    "json": ("JSON", "JSON"),
+}
+FLOAT4.update({"spanner": ("float32", "real", "float4"),
+               "timestream": (), "lindorm": ("float",)})
+FLOAT4_DDL.update({"spanner": "FLOAT32", "spanner_pg": "real",
+                   "lindorm": "FLOAT"})
+ARRAY_DDL.update({"spanner": "ARRAY<{0}>", "spanner_pg": "{0}[]"})
+ARRAY_HOLDS.update({"spanner": ("integer", "float", "boolean", "text"),
+                    "spanner_pg": ("integer", "float", "boolean", "text")})
+JSON_UNKEYED.update({"spanner": "a JSON column",
+                     "spanner_pg": "a jsonb column"})
+INT_RANGES.update({
+    "spanner": {"int64": _I64, "bigint": _I64, "int8": _I64},
+    "timestream": {"bigint": _I64},
+    "gaussdb": {**INT_RANGES["postgres"], "tinyint": (0, 255),
+                "int1": (0, 255)},
+    "lindorm": {"tinyint": (-128, 127), "smallint": _I16,
+                "integer": _I32, "int": _I32, "bigint": _I64},
+})
+CHAR_TYPES.update({"spanner": ("string", "character varying", "varchar")})
+TIME_MEANING.update({
+    "spanner": {"timestamp": INSTANT, "timestamp with time zone": INSTANT,
+                "timestamptz": INSTANT, "date": WALL},
+    "gaussdb": {**TIME_MEANING["postgres"], "smalldatetime": WALL},
+    "timestream": {"timestamp": INSTANT, "date": WALL, "time": WALL},
+    "firestore": {"timestamp": INSTANT},
+    "datastore": {"timestamp": INSTANT},
+})
+MOST_DIGITS.update({"spanner": 9, "timestream": 9, "firestore": 6,
+                    "datastore": 6})
+DECIMAL_MOST.update({"spanner": (38, 9), "spanner_pg": (38, 9),
+                     "lindorm": (38, 38)})
+#: where each renders a value's canonical text: in this process, unless
+#: its own SQL is proved to render it as migkit does on the table's first
+#: rows (`engines.provedsql`, and Spanner's GoogleSQL through
+#: `engines.warehouse_sql`)
+IN_PROCESS.update({"spanner", "bigtable", "firestore", "datastore",
+                   "gaussdb", "oceanbase", "oceanbase-oracle", "polardbx",
+                   "dcdb", "keyspaces", "neptune", "timestream", "lindorm",
+                   "geminidb-cassandra", "geminidb-redis", "geminidb-mongo"})
+
+
 def _speak_as():
     """Each engine-keyed table holds a wire engine's dialect's entry under
     the engine's own name too, where the engine has none of its own - so

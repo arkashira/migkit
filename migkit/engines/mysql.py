@@ -185,6 +185,10 @@ class MySQLEngine(Engine):
 
     CANON_ENGINE = "mysql"
     OWN_PATHS_READ_COLUMN_MAPPING = False
+    #: the settings the binlog is read with FULL, each asked of the server
+    #: first (`neutral_changes`); a binlog another component writes - a
+    #: distributed server's binlog service - names its own
+    BINLOG_FULL = ("binlog_row_metadata", "binlog_row_image")
     #: a binlog position only says where to read from: the tail may read
     #: the next batch before the one before it is applied
     READS_AHEAD = True
@@ -1459,6 +1463,8 @@ class MySQLEngine(Engine):
                  "without it an UPDATE's before image carries only the key,"
                  " so a column that was not part of the change arrives as"
                  " missing rather than unchanged")):
+            if name not in self.BINLOG_FULL:
+                continue
             got = self._q(side, f"select @@{name}")
             value = str(got[0][0]) if got else "?"
             if value.upper() != "FULL":

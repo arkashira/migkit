@@ -272,6 +272,9 @@ HOP_OPTIONS = {
     "state": Key("where run state is kept", "dict",
                  subs=("backend", "bucket", "prefix", "region",
                        "endpoint_url", "mirror")),
+    "stream_lag": Key("seconds a change stream is taken to trail a write,"
+                      " which the follow's fence waits past", "number",
+                      ("keyspaces",), knob="size"),
     "subset": Key("goal subset: the rows a copy for testing starts from -"
                   " start: {table: a condition, a share like 10% or a"
                   " number of rows} - whether the rows that refer to them"
@@ -326,13 +329,17 @@ ENDPOINT_KEYS = {
 }
 
 PG_FAMILY = ("postgres", "redshift")
+#: the engines a MySQL client's TLS is read for: MySQL's wire, and the
+#: sides that reach theirs through a MySQL client without being on it
+#: in their values (OceanBase's Oracle mode, Lindorm's SQL)
+MYSQL_TLS = ("mysql", "oceanbase-oracle", "lindorm")
 #: the engines whose TLS migkit names itself (`Endpoint.mongo_tls`,
 #: `redis_tls`, `cassandra_tls`)
 TLS_OWN = ("mongodb", "redis", "cassandra")
 #: the keys of a side's own options (under it, or under its `options`)
 ENDPOINT_OPTIONS = {
     "auth": Key("password, or aws_iam for a token the cloud signs", "str",
-                ("postgres", "mysql", "dsql")),
+                ("postgres", "mysql", "dsql", "neptune", "keyspaces")),
     "changes": Key("where the source publishes its changes, where a"
                    " client cannot read its log: a Kafka topic (servers,"
                    " topic or topics, format, and how to sign in), a"
@@ -350,8 +357,49 @@ ENDPOINT_OPTIONS = {
                        " no all-versions-and-deletes feed", "str",
                        ("cosmosdb",)),
     "priority": Key("low: reads yield to the application where the"
-                    " account runs priority-based execution", "str",
-                    ("cosmosdb",)),
+                    " account runs priority-based execution (Cosmos DB), or"
+                    " as a low-priority request (Spanner)", "str",
+                    ("cosmosdb", "spanner")),
+    "instance": Key("the Spanner instance its databases are in", "str",
+                    ("spanner",)),
+    "emulator": Key("the host:port of the service's emulator, which is"
+                    " reached without signing in", "str",
+                    ("spanner", "bigtable", "firestore", "datastore")),
+    "data_boost": Key("read a table's partitions for its digest on the"
+                      " service's own separate compute, leaving the"
+                      " instance's load alone", "bool", ("spanner",)),
+    "change_stream": Key("the change stream the follow reads, where not one"
+                         " that watches every table in scope", "str",
+                         ("spanner",)),
+    "dialect": Key("postgresql: a database migkit makes speaks the"
+                   " PostgreSQL dialect, where the source is not Spanner",
+                   "str", ("spanner",)),
+    "collection_groups": Key("the collection ids beyond the top-level ones,"
+                             " each read as one table across every parent",
+                             "str|list", ("firestore",)),
+    "namespace": Key("the namespace its kinds are read in", "str",
+                     ("datastore",)),
+    "decoding": Key("the logical decoding plugin the follow's slot is made"
+                    " with: mppdb_decoding or test_decoding", "str",
+                    ("gaussdb",)),
+    "sets": Key("each set's primary (host:port), whose own binlog the"
+                " follow reads", "str|list", ("dcdb",)),
+    "shardkey": Key("the column a table made on the target is sharded by,"
+                    " or none - one for every table, or {table: column}",
+                    "str|dict", ("dcdb",)),
+    "graph_api": Key("gremlin or opencypher: how the property graph is"
+                     " read", "str", ("neptune",)),
+    "sparql": Key("the SPARQL query endpoint's URL, where not the"
+                  " cluster's /sparql", "str", ("neptune",)),
+    "sparql_update": Key("the SPARQL update endpoint's URL, where not the"
+                         " query endpoint", "str", ("neptune",)),
+    "rdf_default": Key("union or separate: whether the store's default"
+                       " graph is the union of its named graphs", "str",
+                       ("neptune",)),
+    "retention": Key("a table made on the target: how long its memory"
+                     " store keeps a record (memory_hours) and its"
+                     " magnetic store (magnetic_days)", "dict",
+                     ("timestream",), subs=("memory_hours", "magnetic_days")),
     "network": Key("external: reach the cluster's nodes at their"
                    " alternate addresses", "str", ("couchbase",)),
     "mgmt_port": Key("the cluster manager's port, where not 8091 (18091"
@@ -366,12 +414,12 @@ ENDPOINT_OPTIONS = {
     "sslcert": Key("a client certificate file", "str", PG_FAMILY),
     "sslkey": Key("a client key file", "str", PG_FAMILY),
     "sslcrl": Key("a revocation list file", "str", PG_FAMILY),
-    "ssl": Key("TLS, nothing checked", "bool", ("mysql",)),
-    "ssl_ca": Key("the authority's certificate file", "str", ("mysql",)),
-    "ssl_cert": Key("a client certificate file", "str", ("mysql",)),
-    "ssl_key": Key("a client key file", "str", ("mysql",)),
+    "ssl": Key("TLS, nothing checked", "bool", MYSQL_TLS),
+    "ssl_ca": Key("the authority's certificate file", "str", MYSQL_TLS),
+    "ssl_cert": Key("a client certificate file", "str", MYSQL_TLS),
+    "ssl_key": Key("a client key file", "str", MYSQL_TLS),
     "ssl_verify_identity": Key("check the name on the certificate",
-                               "bool", ("mysql",)),
+                               "bool", MYSQL_TLS),
     "hosts": Key("more than one server", "str|list",
                  ("mongodb", "kafka")),
     "uri_options": Key("the driver's own options", "str", ("mongodb",)),
@@ -440,7 +488,8 @@ ENDPOINT_OPTIONS = {
                                   ("snowflake",)),
     "location": Key("the datasets' region", "str", ("bigquery",)),
     "credentials_file": Key("a service account's key file", "str",
-                            ("bigquery", "pubsub")),
+                            ("bigquery", "pubsub", "spanner", "bigtable",
+                             "firestore", "datastore")),
     "anonymous": Key("sign in as nobody, which only an emulator takes",
                      "bool", ("bigquery",)),
     "api_endpoint": Key("the API's address, a private one or an"
@@ -471,19 +520,25 @@ ENDPOINT_OPTIONS = {
                         "str", ("iceberg",)),
     "catalog_properties": Key("anything else the catalog takes", "dict",
                               ("iceberg",)),
-    "project": Key("the project", "str", ("pubsub",)),
+    "project": Key("the project", "str", ("pubsub", "spanner", "bigtable",
+                                          "firestore", "datastore")),
     "region": Key("the region", "str", ("dynamodb", "kinesis", "parquet",
-                                        "redshift", "delta", "dsql")),
+                                        "redshift", "delta", "dsql",
+                                        "keyspaces", "neptune",
+                                        "timestream")),
     "endpoint_url": Key("an endpoint of its own (a local one, a"
                         " compatible store)", "str",
-                        ("dynamodb", "kinesis", "parquet", "delta")),
+                        ("dynamodb", "kinesis", "parquet", "delta",
+                         "keyspaces", "timestream")),
     "table_prefix": Key("the table names' template", "str",
                         ("dynamodb",)),
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
-               " authorities (https on OpenSearch and Cosmos DB)", "bool",
-               ("opensearch", "db2i", "couchbase", "cosmosdb") + TLS_OWN),
+               " authorities (https on OpenSearch and Cosmos DB; false"
+               " reaches a Gremlin server without it)", "bool",
+               ("opensearch", "db2i", "couchbase", "cosmosdb", "neptune")
+               + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
                        ("db2i", "couchbase") + TLS_OWN),
     "tls_cert_file": Key("a client certificate file", "str", TLS_OWN),

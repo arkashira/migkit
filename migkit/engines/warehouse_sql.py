@@ -35,7 +35,7 @@ on a real account.
 from .. import canon, rowtext
 from ..decide import Need, Rung
 
-DIALECTS = ("bigquery", "snowflake", "redshift", "duckdb")
+DIALECTS = ("bigquery", "snowflake", "redshift", "duckdb", "spanner")
 
 #: the classes each dialect renders as migkit does, before the declared
 #: type is looked at (`column_text`)
@@ -48,6 +48,10 @@ RENDERED = {
                  "bytes", "date", "timestamp", "time"},
     "duckdb": {"integer", "decimal", canon.NUMBER, "float", "boolean",
                "text", "bytes", "date", "timestamp", "time", "uuid"},
+    # Spanner's GoogleSQL: BigQuery's, without a BIGNUMERIC to write a
+    # float's fixed places in, and without DATETIME or TIME
+    "spanner": {"integer", canon.NUMBER, "boolean", "text", "bytes", "date",
+                "timestamp"},
 }
 
 #: the scale a float's fixed rendering carries, and where it gives way to
@@ -232,8 +236,33 @@ def _duckdb(c, cls, declared):
     return None
 
 
+def _spanner(c, cls, declared):
+    base, _ = _base(declared)
+    if cls == "integer":
+        # an ENUM's text is its name, not its number
+        return f"CAST({c} AS STRING)" if base == "INT64" else None
+    if cls == canon.NUMBER:
+        # a NUMERIC printed with its own digits and no more
+        return f"CAST({c} AS STRING)" if base == "NUMERIC" else None
+    if cls == "boolean":
+        return f"CASE WHEN {c} IS NULL THEN NULL WHEN {c} THEN '1' ELSE '0' END"
+    if cls == "text":
+        return c if base == "STRING" else None
+    if cls == "bytes":
+        return f"UPPER(TO_HEX({c}))" if base == "BYTES" else None
+    if cls == "date":
+        return f"FORMAT_DATE('%Y-%m-%d', {c})"
+    if cls == "timestamp":
+        # nine digits, the last three only where they are not all zeros
+        # (`canon.FRACTION`): at six, a copy that lost them compared equal
+        text = f"FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E9S', {c}, 'UTC')"
+        return (f"CASE WHEN ENDS_WITH({text}, '000') THEN SUBSTR({text}, 1,"
+                f" LENGTH({text}) - 3) ELSE {text} END")
+    return None
+
+
 _COLUMN = {"bigquery": _bigquery, "snowflake": _snowflake,
-           "redshift": _redshift, "duckdb": _duckdb}
+           "redshift": _redshift, "duckdb": _duckdb, "spanner": _spanner}
 
 
 def _padded(dialect, text, scale):
@@ -347,7 +376,7 @@ def row_text(dialect, parts):
     """`rowtext.encode` in SQL: each value's length (or `N` for NULL), a
     colon, the value; joined by the separator."""
     null, sep = rowtext.NULL_LEN, rowtext.SEP
-    if dialect == "bigquery":
+    if dialect in ("bigquery", "spanner"):
         frags = [f"COALESCE(CAST(LENGTH({e}) AS STRING), '{null}'), ':',"
                  f" COALESCE({e}, '')" for e in parts]
         return "CONCAT(" + f", '{sep}', ".join(frags) + ")"
@@ -366,7 +395,7 @@ def row_text(dialect, parts):
 
 
 def _hash_hex(dialect, text, name):
-    if dialect == "bigquery":
+    if dialect in ("bigquery", "spanner"):
         return f"TO_HEX({'MD5' if name == 'md5' else 'SHA256'}({text}))"
     if dialect == "snowflake":
         return f"MD5({text})" if name == "md5" else f"SHA2({text}, 256)"
@@ -379,7 +408,7 @@ def _hash_hex(dialect, text, name):
 
 def _prefix_int(dialect, hexed):
     n = canon.DIGEST_HEX
-    if dialect == "bigquery":
+    if dialect in ("bigquery", "spanner"):
         return f"CAST(CONCAT('0x', SUBSTR({hexed}, 1, {n})) AS INT64)"
     if dialect == "snowflake":
         return f"TO_NUMBER(UPPER(SUBSTR({hexed}, 1, {n})), '{'X' * n}')"
@@ -393,6 +422,10 @@ def _prefix_int(dialect, hexed):
 def _summed(dialect, value):
     if dialect == "bigquery":
         return f"CAST(COALESCE(SUM(CAST({value} AS BIGNUMERIC)), 0) AS STRING)"
+    if dialect == "spanner":
+        # a NUMERIC holds 29 digits before its point: 2**60 a row over
+        # 10**10 rows stays below that
+        return f"CAST(COALESCE(SUM(CAST({value} AS NUMERIC)), 0) AS STRING)"
     if dialect == "snowflake":
         return f"TO_VARCHAR(COALESCE(SUM({value}), 0))"
     if dialect == "redshift":
@@ -447,7 +480,7 @@ def salted_hash(dialect, text, salt):
     """SQL for `leaves.text_hash`: the first `canon.DIGEST_HEX` hex digits
     of md5(salt || text), as an integer."""
     lit = "'" + str(salt).replace("'", "''") + "'"
-    if dialect == "bigquery":
+    if dialect in ("bigquery", "spanner"):
         joined = f"CONCAT({lit}, {text})"
     else:
         joined = f"{lit} || {text}"
@@ -459,6 +492,8 @@ def exact_sum(dialect, value):
     Redshift's BIGINT sum would."""
     if dialect == "bigquery":
         return f"SUM(CAST({value} AS BIGNUMERIC))"
+    if dialect == "spanner":
+        return f"SUM(CAST({value} AS NUMERIC))"
     if dialect == "redshift":
         return f"SUM(CAST({value} AS DECIMAL(38,0)))"
     return f"SUM({value})"
@@ -473,7 +508,7 @@ def shifted(dialect, value, bits):
 
 def divided(dialect, value, by):
     """A non-negative integer divided by another, the fraction dropped."""
-    if dialect == "bigquery":
+    if dialect in ("bigquery", "spanner"):
         return f"DIV({value}, {by})"
     if dialect == "snowflake":
         return f"TRUNC(({value}) / ({by}))"

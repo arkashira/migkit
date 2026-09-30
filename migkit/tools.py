@@ -1429,17 +1429,22 @@ def package_licences(requirements):
     return out
 
 
+def _expression(expr):
+    """The licences an SPDX expression names: `A OR B` is either, at the
+    user's choice; `A AND B` is both."""
+    import re
+    alts = [a.strip("() ") for a in re.split(r"\s+OR\s+", expr)]
+    if len(alts) > 1:
+        return [next((a for a in alts if a in AGPL_COMPATIBLE), alts[0])]
+    return [p.strip("() ") for p in re.split(r"\s+AND\s+", expr)]
+
+
 def _licences_of(dist):
     import re
     meta = dist.metadata
     expr = meta.get("License-Expression")
     if expr:
-        # `A OR B` is either, at the user's choice; `A AND B` is both
-        alts = [a.strip("() ") for a in re.split(r"\s+OR\s+", expr)]
-        if len(alts) > 1:
-            return [next((a for a in alts if a in AGPL_COMPATIBLE),
-                         alts[0])]
-        return [p.strip("() ") for p in re.split(r"\s+AND\s+", expr)]
+        return _expression(expr)
     found = [spdx_of(c.split(" :: ")[-1])
              for c in meta.get_all("Classifier") or []
              if c.startswith("License ::") and "OSI Approved" != c.split(
@@ -1448,7 +1453,12 @@ def _licences_of(dist):
     # it, the field is often an author's line (`Copyright (c) ...`) or
     # `Dual License`, which names no licence
     field = spdx_of((meta.get("License") or "").strip())
-    if field and len(field) < 80 and "\n" not in field and (
+    if re.fullmatch(r"[A-Za-z0-9.+-]+(\s+(AND|OR)\s+[A-Za-z0-9.+-]+)+",
+                    field):
+        # an SPDX expression written in the free-text field (aiohttp's
+        # `Apache-2.0 AND MIT`), read as the expression it is
+        found += _expression(field)
+    elif field and len(field) < 80 and "\n" not in field and (
             not found or field in OPEN_LICENCES):
         found.append(field)
     if not found:

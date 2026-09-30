@@ -9,14 +9,30 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "db2z": "db2zos", "delta-lake": "delta",
            "cockroach": "cockroachdb", "crdb": "cockroachdb",
            "aurora-dsql": "dsql", "cosmos": "cosmosdb",
-           "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb"}
+           "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb",
+           # the cloud-native services (P0-CLOUDS part 2)
+           "cloud-spanner": "spanner", "spanner-pg": "spanner",
+           "cloud-bigtable": "bigtable", "firestore-native": "firestore",
+           "firestore-datastore": "datastore",
+           "cloud-datastore": "datastore", "opengauss": "gaussdb",
+           "gaussdb-opengauss": "gaussdb", "oceanbase-mysql": "oceanbase",
+           "polardb-x": "polardbx", "drds": "polardbx",
+           "tdsql-distributed": "dcdb", "tdsql-shard": "dcdb",
+           "tdsql-c": "mysql", "amazon-keyspaces": "keyspaces",
+           "aws-keyspaces": "keyspaces", "amazon-neptune": "neptune",
+           "amazon-timestream": "timestream",
+           "geminidb": "geminidb-cassandra"}
 
 #: engines reached over another's wire protocol, whose values a driver
 #: hands over, a table is built and a value written as that one's are
 #: (`canon.dialect`): TiDB over MySQL's, CockroachDB and Aurora DSQL over
 #: PostgreSQL's. Everything else - the catalogue, the change feed, what a
 #: transaction may hold - is the engine's own
-WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres"}
+WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres",
+        "gaussdb": "postgres", "oceanbase": "mysql",
+        "oceanbase-oracle": "oracle", "polardbx": "mysql", "dcdb": "mysql",
+        "keyspaces": "cassandra", "geminidb-cassandra": "cassandra",
+        "geminidb-redis": "redis", "geminidb-mongo": "mongodb"}
 
 #: an address's scheme and the engine it names - `source:
 #: postgres://app@db1/shop` in a hop (`migkit.addresses`). The one place a
@@ -57,6 +73,15 @@ SCHEMES = {
     "dsql": "dsql",
     "couchbase": "couchbase", "couchbases": "couchbase",
     "cosmosdb": "cosmosdb", "cosmos": "cosmosdb",
+    "spanner": "spanner", "bigtable": "bigtable",
+    "firestore": "firestore", "datastore": "datastore",
+    "gaussdb": "gaussdb", "opengauss": "gaussdb",
+    "oceanbase": "oceanbase", "oceanbase-oracle": "oceanbase-oracle",
+    "polardbx": "polardbx", "dcdb": "dcdb",
+    "keyspaces": "keyspaces", "neptune": "neptune",
+    "timestream": "timestream", "lindorm": "lindorm",
+    "geminidb-cassandra": "geminidb-cassandra",
+    "geminidb-redis": "geminidb-redis", "geminidb-mongo": "geminidb-mongo",
 }
 
 
@@ -161,7 +186,49 @@ def _class_for(name):
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
-    return None
+    return _cloud_class(name)
+
+
+#: the cloud-native services' engines (P0-CLOUDS part 2): module, class
+CLOUD = {"spanner": ("spanner", "SpannerEngine"),
+         "bigtable": ("bigtable", "BigtableEngine"),
+         "firestore": ("firestore", "FirestoreEngine"),
+         "datastore": ("firestore", "DatastoreEngine"),
+         "gaussdb": ("gaussdb", "GaussEngine"),
+         "oceanbase": ("oceanbase", "OceanBaseEngine"),
+         "oceanbase-oracle": ("oceanbase", "OceanBaseOracleEngine"),
+         "polardbx": ("distmysql", "PolarDBXEngine"),
+         "dcdb": ("distmysql", "TdsqlEngine"),
+         "keyspaces": ("keyspaces", "KeyspacesEngine"),
+         "neptune": ("neptune", "NeptuneEngine"),
+         "timestream": ("timestream", "TimestreamEngine"),
+         "lindorm": ("lindorm", "LindormEngine"),
+         "geminidb-cassandra": ("geminidb", "GeminiCassandraEngine"),
+         "geminidb-redis": ("geminidb", "GeminiRedisEngine"),
+         "geminidb-mongo": ("geminidb", "GeminiMongoEngine")}
+
+
+def _cloud_class(name):
+    import importlib
+    got = CLOUD.get(name)
+    if got is None:
+        return None
+    return getattr(importlib.import_module(f"{__name__}.{got[0]}"), got[1])
+
+
+def same_engine(eng):
+    """Whether `eng`'s hop moves between two sides of its own engine - as
+    the hop names it, or as the pair a same-engine hop is carried by
+    names both of its sides (`Engine._as_pair`)."""
+    name = getattr(eng, "PAIR_ENGINE", "") or getattr(eng, "CANON_ENGINE",
+                                                      "")
+    hop = eng.hop
+    own = ALIASES.get(hop.engine, hop.engine)
+    if own != "hetero":
+        return own == name
+    opts = hop.options or {}
+    return all(ALIASES.get(opts.get(k), opts.get(k)) == name
+               for k in ("source_engine", "target_engine"))
 
 
 #: every canonical engine name, in the order a report lists them
@@ -171,6 +238,10 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
          "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
          "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
+         "spanner", "bigtable", "firestore", "datastore", "gaussdb",
+         "oceanbase", "oceanbase-oracle", "polardbx", "dcdb", "keyspaces",
+         "neptune", "timestream", "lindorm", "geminidb-cassandra",
+         "geminidb-redis", "geminidb-mongo",
          "hetero", "generic")
 
 

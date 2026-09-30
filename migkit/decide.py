@@ -2071,6 +2071,24 @@ WAYS = {
         "couchbase": (NOT_APPLICABLE, "every document is kept by its key"),
         "cosmosdb": (NOT_APPLICABLE, "every item carries an id within its"
                                      " partition key"),
+        # the cloud-native services (P0-CLOUDS part 2): the SQL ones read a
+        # keyless table in one pass through their DB-API or MySQL reader;
+        # the rest keep every row by a key of their own
+        **{n: ("yes", "@neutral_batches")
+           for n in ("gaussdb", "oceanbase", "oceanbase-oracle", "polardbx",
+                     "dcdb", "keyspaces", "geminidb-cassandra")},
+        "spanner": (NOT_APPLICABLE, "every Spanner table has a primary key"),
+        "bigtable": (NOT_APPLICABLE, "every row is filed under its row key"),
+        "firestore": (NOT_APPLICABLE, "every document is kept by its name"),
+        "datastore": (NOT_APPLICABLE, "every entity is kept by its key"),
+        "neptune": (NOT_APPLICABLE, "every vertex and edge is kept by its id,"
+                                    " and every quad is its own key"),
+        "timestream": (NOT_APPLICABLE, "every record is kept by its"
+                                       " dimensions, measure name and time"),
+        "lindorm": (NOT_APPLICABLE, "every wide table keeps its rows by a"
+                                    " primary key"),
+        "geminidb-redis": (NOT_APPLICABLE, "every value is under its key"),
+        "geminidb-mongo": (NOT_APPLICABLE, "every document carries an _id"),
         "copybook": ("yes", "@position_spans"),
         "redis": (NOT_APPLICABLE, "every value is under its key"),
         "kafka": (NOT_APPLICABLE, "a message is addressed by its partition"
@@ -2088,6 +2106,23 @@ WAYS = {
             "the key-value range scan")),
         "cosmosdb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("feed ranges")),
         "cassandra": (NOT_APPLICABLE, _BY_KEY_ORDER.format("token ranges")),
+        **{n: ("yes", "@neutral_read")
+           for n in ("spanner", "gaussdb", "oceanbase", "oceanbase-oracle",
+                     "polardbx", "dcdb", "lindorm")},
+        "geminidb-mongo": ("yes", "@move_table"),
+        **{n: (NOT_APPLICABLE, _BY_KEY_ORDER.format("token ranges"))
+           for n in ("keyspaces", "geminidb-cassandra")},
+        "bigtable": (NOT_APPLICABLE, "a row key is one string of bytes, read"
+                                     " in its own order"),
+        "firestore": (NOT_APPLICABLE, "a document's name is one path, read"
+                                      " in its own order"),
+        "datastore": (NOT_APPLICABLE, "an entity's key is one path, read in"
+                                      " its own order"),
+        "neptune": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "one pass of the graph")),
+        "timestream": (NOT_APPLICABLE, _BY_KEY_ORDER.format("time")),
+        "geminidb-redis": (NOT_APPLICABLE, "a key is one string, read by the"
+                                           " scan's cursor"),
         "dynamodb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scan segments")),
         "opensearch": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scroll slices")),
         "parquet": (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time")),
@@ -2136,6 +2171,23 @@ WAYS = {
         "cosmosdb": (NOT_APPLICABLE, "a container's physical partitions are"
                                      " its own layout; it is read feed range"
                                      " by feed range"),
+        "spanner": (NOT_APPLICABLE, "Spanner splits a table by its key"
+                                    " itself; there are no partitions to"
+                                    " carry"),
+        "bigtable": (NOT_APPLICABLE, "Bigtable splits a table into tablets"
+                                     " by its row keys itself"),
+        **{n: (NOT_APPLICABLE, "a collection is spread by the service"
+                               " itself; there are no partitions to carry")
+           for n in ("firestore", "datastore")},
+        **{n: (NOT_APPLICABLE, "every table is partitioned by its key; the"
+                               " copy goes by token ranges")
+           for n in ("keyspaces", "geminidb-cassandra")},
+        "geminidb-mongo": (NOT_APPLICABLE, "collections are sharded, not"
+                                           " partitioned; read as one"),
+        "neptune": (NOT_APPLICABLE, "a graph is not partitioned; it is read"
+                                    " whole"),
+        "timestream": (NOT_APPLICABLE, "a table is partitioned by the service"
+                                       " by its dimensions; it is read whole"),
         "sqlite": (NOT_APPLICABLE, "SQLite has no partitioned tables"),
         "duckdb": (NOT_APPLICABLE, "DuckDB has no partitioned tables"),
         "copybook": (NOT_APPLICABLE, "a file is not partitioned; one file"
@@ -2188,6 +2240,18 @@ WAYS = {
                                      " account's access policies, outside"
                                      " the database, which migkit does not"
                                      " change"),
+        # the cloud-native services held by the hold of the API they speak;
+        # those whose writes are allowed by the cloud's access policies
+        # are held by their operator
+        "gaussdb": ("yes", "freeze.PostgresHold"),
+        "geminidb-cassandra": ("yes", "freeze.CassandraHold"),
+        "geminidb-redis": ("yes", "freeze.RedisHold"),
+        "geminidb-mongo": ("yes", "freeze.MongoHold"),
+        **{n: (NOT_APPLICABLE, "its writes are allowed by the cloud's access"
+                               " policies, outside the database, which"
+                               " migkit does not change")
+           for n in ("spanner", "bigtable", "firestore", "datastore",
+                     "keyspaces", "neptune", "timestream")},
         "*": (NOT_YET, "F2"),
     },
 }

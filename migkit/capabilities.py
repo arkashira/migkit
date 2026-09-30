@@ -59,6 +59,11 @@ _EXTRACT = ("a file described by a copybook is an extract at rest, with no"
             " server, settings or change log; what changed since the last"
             " extract is found by comparing the two, which check does")
 
+_GIVEN_KEYS = ("a {} is kept by the key the application gives it, not one"
+               " a sequence hands out: there is no sequence to carry")
+_IAM = ("who may read {} is the cloud's access policies', outside the"
+        " database")
+
 #: every gap, by engine: (NOT_APPLICABLE, why) or (NOT_YET, backlog item)
 GAPS = {
     "postgres": {},
@@ -279,6 +284,141 @@ GAPS = {
                                   " container's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
         "snapshot": (NOT_YET, "ER5"),
+    },
+    # the cloud-native services (P0-CLOUDS part 2): their own bulk paths
+    # (CN1), accounts (CN2), restore points (CN3), follows not built (CN4)
+    # and deep checks and settings (CN5) are not yet migkit's
+    "spanner": {
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_YET, "CN2"),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "bigtable": {
+        "deep": (NOT_YET, "CN5"),
+        "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_APPLICABLE, _IAM.format("a table")),
+        "statistics": (NOT_APPLICABLE, "a Bigtable table is read by its row"
+                                       " keys and keeps no optimiser"
+                                       " statistics"),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "firestore": {
+        "deep": (NOT_YET, "CN5"),
+        "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("document")),
+        "params": (NOT_YET, "CN5"),
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_APPLICABLE, "who may read a database is IAM's and its"
+                                  " security rules', not the collection's"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "datastore": {
+        "deep": (NOT_YET, "CN5"),
+        "sequences": (NOT_APPLICABLE, "an entity's numeric id is allocated by"
+                                      " the service and carried as it is:"
+                                      " there is no sequence to carry"),
+        "params": (NOT_YET, "CN5"),
+        "bulk-move": (NOT_YET, "CN1"),
+        **{cap: (NOT_APPLICABLE, "Datastore mode has no change feed and no"
+                                 " listener: nothing a client can follow")
+           for cap in ("stream", "fence", "confirm", "delta")},
+        "users": (NOT_APPLICABLE, _IAM.format("a kind")),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "gaussdb": {
+        "deep": (NOT_YET, "CN5"),
+        "params": (NOT_YET, "CN5"),
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_YET, "CN2"),
+        "statistics": (NOT_YET, "CN5"),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    **{name: {
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_YET, "CN2"),
+        "snapshot": (NOT_YET, "CN3"),
+    } for name in ("oceanbase", "polardbx", "dcdb")},
+    "oceanbase-oracle": {
+        "deep": (NOT_YET, "CN5"),
+        "sequences": (NOT_YET, "CN5"),
+        "params": (NOT_YET, "CN5"),
+        "bulk-move": (NOT_YET, "CN1"),
+        **{cap: (NOT_YET, "CN4")
+           for cap in ("stream", "fence", "confirm", "delta")},
+        "users": (NOT_YET, "CN2"),
+        "statistics": (NOT_YET, "CN5"),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "keyspaces": {
+        "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
+                                      " auto-increment to carry"),
+        "users": (NOT_APPLICABLE, _IAM.format("a table")),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+    },
+    "neptune": {
+        "deep": (NOT_YET, "CN5"),
+        "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("vertex or edge")),
+        "params": (NOT_YET, "CN5"),
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_APPLICABLE, _IAM.format("the graph")),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "timestream": {
+        "deep": (NOT_APPLICABLE, "a record is its dimensions, time and"
+                                 " measures, which the data check compares"
+                                 " whole; there are no indexes or"
+                                 " constraints to hold"),
+        "sequences": (NOT_APPLICABLE, "a record is kept by its dimensions"
+                                      " and its time: there is no sequence"
+                                      " to carry"),
+        "bulk-move": (NOT_YET, "CN1"),
+        **{cap: (NOT_APPLICABLE, "Timestream keeps no change log, and a"
+                                 " record written late or at a higher"
+                                 " version lands in the past, where no"
+                                 " watermark finds it")
+           for cap in ("stream", "fence", "confirm", "delta")},
+        "users": (NOT_APPLICABLE, _IAM.format("a table")),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "lindorm": {
+        "deep": (NOT_YET, "CN5"),
+        "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
+        "params": (NOT_YET, "CN5"),
+        "bulk-move": (NOT_YET, "CN1"),
+        **{cap: (NOT_YET, "CN4")
+           for cap in ("stream", "fence", "confirm", "delta")},
+        "users": (NOT_YET, "CN2"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+        "snapshot": (NOT_YET, "CN3"),
+    },
+    "geminidb-cassandra": {
+        "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
+                                      " auto-increment to carry"),
+        **{cap: (NOT_APPLICABLE, "GeminiDB's Cassandra API keeps no change"
+                                 " log a client can read")
+           for cap in ("stream", "fence", "confirm", "delta")},
+        "users": (NOT_YET, "CN2"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+    },
+    "geminidb-redis": {
+        "sequences": (NOT_APPLICABLE, "keys have no sequences"),
+        "bulk-move": (NOT_YET, "CN1"),
+        **{cap: (NOT_APPLICABLE, "a GeminiDB instance neither is nor serves"
+                                 " a replica, and keeps no change stream a"
+                                 " client can read")
+           for cap in ("stream", "fence", "confirm")},
+        "users": (NOT_YET, "CN2"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+    },
+    "geminidb-mongo": {
+        "sequences": (NOT_APPLICABLE,
+                      "collections have no sequences or auto-increment"),
+        "bulk-move": (NOT_YET, "CN1"),
+        "users": (NOT_YET, "CN2"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "kinesis": {cap: (NOT_APPLICABLE, _STREAM_ONLY.format("Kinesis",
                                                           "kinesis"))

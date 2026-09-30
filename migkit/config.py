@@ -530,6 +530,13 @@ DEFAULT_PORTS = {
     "postgres": 5432, "mysql": 3306, "mssql": 1433,
     "mongodb": 27017, "redis": 6379, "kafka": 9092,
     "tidb": 4000, "cockroachdb": 26257, "dsql": 5432, "cosmosdb": 443,
+    # the cloud-native services, each at its managed service's own port:
+    # GaussDB's 8000, OceanBase through OBProxy, TDSQL's proxy, Keyspaces'
+    # TLS port, Lindorm's MySQL-protocol port, GeminiDB's APIs
+    "gaussdb": 8000, "oceanbase": 2883, "oceanbase-oracle": 2883,
+    "polardbx": 3306, "dcdb": 3306, "keyspaces": 9142, "neptune": 8182,
+    "lindorm": 33060, "geminidb-cassandra": 8635, "geminidb-redis": 6379,
+    "geminidb-mongo": 8635,
 }
 
 

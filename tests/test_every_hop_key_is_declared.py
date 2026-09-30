@@ -38,7 +38,18 @@ FILE_ENGINE = {"postgres.py": ("postgres",), "mysql.py": ("mysql",),
                "lake.py": ("iceberg", "delta"), "tidb.py": ("tidb",),
                "pgwire.py": ("cockroachdb", "dsql"),
                "cockroachdb.py": ("cockroachdb",), "dsql.py": ("dsql",),
-               "couchbase.py": ("couchbase",), "cosmosdb.py": ("cosmosdb",)}
+               "couchbase.py": ("couchbase",), "cosmosdb.py": ("cosmosdb",),
+               "spanner.py": ("spanner",), "bigtable.py": ("bigtable",),
+               "firestore.py": ("firestore", "datastore"),
+               "gaussdb.py": ("gaussdb", "postgres"),
+               "oceanbase.py": ("oceanbase", "oceanbase-oracle", "mysql"),
+               "distmysql.py": ("polardbx", "dcdb", "mysql"),
+               "keyspaces.py": ("keyspaces", "cassandra"),
+               "geminidb.py": ("geminidb-cassandra", "geminidb-redis",
+                               "geminidb-mongo", "cassandra", "redis",
+                               "mongodb"),
+               "neptune.py": ("neptune",), "timestream.py": ("timestream",),
+               "lindorm.py": ("lindorm", "mysql")}
 
 #: reads by a key held in a variable, where it comes from, and the keys
 #: it stands for - a new one is a read this test cannot follow, and fails

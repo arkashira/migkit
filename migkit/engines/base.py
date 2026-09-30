@@ -4450,6 +4450,13 @@ class Engine:
         """
         raise self._no_canon("read a change log")
 
+    #: the engine name the pair a same-engine hop is carried by is built
+    #: from (`_as_pair`), where it is not `CANON_ENGINE`: a service on
+    #: another's API whose values are that one's in every way `canon`
+    #: reads them (Amazon Keyspaces, GeminiDB's APIs) keeps that one's
+    #: canonical name, and its pair is still made of its own sides
+    PAIR_ENGINE = ""
+
     #: whether this engine's own copier, hash and replication read
     #: `mapping.columns`. Where they copy and hash whole rows, a table whose
     #: columns the hop maps goes through the pair machinery instead - the
@@ -4479,7 +4486,7 @@ class Engine:
         import dataclasses
 
         from .hetero import HeteroEngine
-        name = self.CANON_ENGINE
+        name = self.PAIR_ENGINE or self.CANON_ENGINE
         hop = dataclasses.replace(
             self.hop, engine="hetero",
             options={**self.hop.options, "source_engine": name,

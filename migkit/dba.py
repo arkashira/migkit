@@ -84,7 +84,10 @@ def _side_engine(eng, side):
 
 
 def _canon(e):
-    return getattr(e, "CANON_ENGINE", "") or ""
+    """The engine a side's needs are asked by: its own, where it speaks
+    another's API (`Engine.PAIR_ENGINE`)."""
+    return getattr(e, "PAIR_ENGINE", "") or getattr(e, "CANON_ENGINE",
+                                                    "") or ""
 
 
 def needs(hop, eng, goal=None, wheres=None, streaming=None):
@@ -1127,11 +1130,188 @@ def _cosmos(hop, e, key, side, dbs, where, read, write, follow, native):
     return out
 
 
+# ---- the cloud-native services (P0-CLOUDS part 2) --------------------------
+
+def _granted(side, what, have, want, fix):
+    """A Need per permission `want` holds of the ones a cloud's IAM says
+    the caller has (`have`, None where it could not be asked)."""
+    lack = None if have is None else [p for p in want if p not in have]
+    return Need(side, what, None if lack is None else not lack,
+                "could not be asked" if lack is None else
+                (f"lacks {', '.join(lack)}" if lack else "may"), [],
+                fix if lack or lack is None else [])
+
+
+def _spanner(hop, e, key, side, dbs, where, read, write, follow, native):
+    """The database's IAM, asked of the service (`TestIamPermissions`),
+    and a change stream the follow reads."""
+    out = []
+    ep = hop.source if key == "src" else hop.target
+    for db in dbs:
+        name = e._d(key, db)
+        want = ((["spanner.databases.select", "spanner.databases.read"]
+                 if read else [])
+                + (["spanner.databases.write", "spanner.databases.updateDdl"]
+                   if key == "dst" and write else [])
+                + (["spanner.databases.select"] if follow else []))
+        try:
+            api = e._client(key).database_admin_api
+            got = set(api.test_iam_permissions(request={
+                "resource": e._database(key, db).name,
+                "permissions": sorted(set(want))}).permissions)
+        except Exception:  # noqa: BLE001 - said as unknown
+            got = None
+        out.append(_granted(
+            side, f"read{' and write' if key == 'dst' and write else ''}"
+                  f" {name}", got, sorted(set(want)),
+            [f"gcloud spanner databases add-iam-policy-binding {name}"
+             f" --instance={ep.options.get('instance')} --member=<migkit's"
+             " principal> --role=roles/spanner.databaseUser"]))
+        if follow and key == "src":
+            try:
+                stream = e._stream(db)
+                out += _following([Need(side, "a change stream over every"
+                                        " table in scope", True, stream)])
+            except SystemExit as err:
+                out += _following([_change(
+                    side, "a change stream over every table in scope", False,
+                    _last(err), "spanner_change_stream",
+                    sc.Ctx(name=f"migkit_{hop.name}".replace("-", "_"),
+                           db=name))])
+    return out
+
+
+def _bigtable(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = []
+    for db in dbs:
+        want = ((["bigtable.tables.readRows", "bigtable.tables.sampleRowKeys"]
+                 if read else [])
+                + (["bigtable.tables.mutateRows", "bigtable.tables.create"]
+                   if key == "dst" and write else [])
+                + (["bigtable.tables.readChangeStream"] if follow else []))
+        try:
+            got = set(e._instance(key, db).test_iam_permissions(
+                sorted(set(want))))
+        except Exception:  # noqa: BLE001 - said as unknown
+            got = None
+        out.append(_granted(side, f"what the move needs of {e._d(key, db)}",
+                            got, sorted(set(want)),
+                            [f"gcloud bigtable instances add-iam-policy-binding"
+                             f" {e._d(key, db)} --member=<migkit's principal>"
+                             " --role=roles/bigtable.user"]))
+        if follow and key == "src":
+            off = [t for t in e.neutral_tables(key, db)
+                   if e._retention_s(db, t) is None]
+            out += _following([_change(
+                side, "a change stream on every table in scope", not off,
+                f"off on {len(off)} tables" if off else "on",
+                "bigtable_change_stream", sc.Ctx(db=db, tables=off))])
+    return out
+
+
+def _documents(hop, e, key, side, dbs, where, read, write, follow, native):
+    """Firestore and Datastore: what reading them answers, and what
+    writing needs - which only writing would prove, so it is said as
+    unknown."""
+    out = []
+    for db in dbs:
+        try:
+            got = e.neutral_tables(key, db)
+            out.append(Need(side, f"read {e._d(key, db)}", True,
+                            f"{len(got)} collections"))
+        except Exception as err:  # noqa: BLE001 - the answer
+            out.append(Need(side, f"read {e._d(key, db)}", False, _last(err),
+                            [], ["grant migkit's principal"
+                                 " roles/datastore.viewer on the project"]))
+        if key == "dst" and write:
+            out.append(Need(side, f"write {e._d(key, db)}", None,
+                            "only a write would say", [],
+                            ["grant migkit's principal roles/datastore.user"
+                             " on the project"]))
+    return out
+
+
+def _gauss(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = _pgwire(hop, e, key, side, dbs, read, write)
+    if not follow:
+        return out
+    db = dbs[0] if dbs else "postgres"
+    me = _pgwire_rows(e, key, db, "select current_user")[0][0]
+    ctx = sc.Ctx(who=_pgi(me), me=me, where=where)
+    level = str(_pgwire_rows(e, key, db, "show wal_level")[0][0])
+    repl = bool(_pgwire_rows(e, key, db, "select rolreplication from"
+                                         " pg_roles where rolname ="
+                                         " current_user")[0][0])
+    return out + _following([
+        _change(side, "a log that carries rows", level == "logical",
+                f"wal_level is {level}", "gauss_wal_level", ctx),
+        _change(side, "the right to read the change log", repl,
+                "may" if repl else "may not", "gauss_replication", ctx)])
+
+
+def _on_mysql_wire(hop, e, key, side, dbs, where, read, write, follow,
+                   native):
+    """OceanBase, PolarDB-X and TDSQL: MySQL's grants, as the MySQL engine
+    asks them, and a binlog to follow where the follow reads one."""
+    out = _my(hop, e, key, side, dbs, where, read, write, False, False)
+    if not follow or key != "src":
+        return out
+    db = dbs[0] if dbs else ""
+    try:
+        e.change_point(key, db)
+        out += _following([Need(side, "a binlog the follow reads", True,
+                                "there")])
+    except SystemExit as err:
+        out += _following([Need(side, "a binlog the follow reads", False,
+                                _last(err))])
+    return out
+
+
+def _keyspaces(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = []
+    for db in dbs:
+        try:
+            tables = e.neutral_tables(key, db)
+            out.append(Need(side, f"read {e._ks(key, db)}", True,
+                            f"{len(tables)} tables"))
+        except Exception as err:  # noqa: BLE001 - the answer
+            out.append(Need(side, f"read {e._ks(key, db)}", False,
+                            _last(err), [],
+                            ["attach AmazonKeyspacesReadOnlyAccess to"
+                             " migkit's role"]))
+            continue
+        if follow and key == "src":
+            off = [t for t in tables if e._stream_arn(db, t) is None]
+            out += _following([_change(
+                side, "a CDC stream on every table in scope", not off,
+                f"off on {len(off)} tables" if off else "on", "keyspaces_cdc",
+                sc.Ctx(db=db, tables=off))])
+    return out
+
+
+def _neptune(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = []
+    if not follow or key != "src":
+        return out
+    try:
+        e._follower(dbs[0] if dbs else "graph").lanes.latest()
+        out += _following([Need(side, "Neptune Streams on", True, "on")])
+    except (Exception, SystemExit) as err:  # noqa: BLE001 - the answer
+        out += _following([_change(side, "Neptune Streams on", False,
+                                   _last(err), "neptune_streams", sc.Ctx())])
+    return out
+
+
 #: the engines whose servers can be asked, by canonical name
 ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
        "redshift": _redshift, "db2i": _db2i, "oracle": _oracle,
        "tidb": _tidb, "cockroachdb": _crdb, "dsql": _dsql,
-       "couchbase": _couchbase, "cosmosdb": _cosmos}
+       "couchbase": _couchbase, "cosmosdb": _cosmos,
+       "spanner": _spanner, "bigtable": _bigtable,
+       "firestore": _documents, "datastore": _documents, "gaussdb": _gauss,
+       "oceanbase": _on_mysql_wire, "polardbx": _on_mysql_wire,
+       "dcdb": _on_mysql_wire, "keyspaces": _keyspaces,
+       "neptune": _neptune, "geminidb-mongo": _mongo}
 
 #: how each writes a comment, and its script's file suffix
 SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
@@ -1139,7 +1319,13 @@ SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
           "redshift": ("--", "sql"), "db2i": ("--", "sql"),
           "oracle": ("--", "sql"), "tidb": ("--", "sql"),
           "cockroachdb": ("--", "sql"), "dsql": ("--", "sql"),
-          "couchbase": ("#", "sh"), "cosmosdb": ("#", "sh")}
+          "couchbase": ("#", "sh"), "cosmosdb": ("#", "sh"),
+          "spanner": ("--", "sql"), "bigtable": ("#", "sh"),
+          "firestore": ("#", "sh"), "datastore": ("#", "sh"),
+          "gaussdb": ("--", "sql"), "oceanbase": ("--", "sql"),
+          "polardbx": ("--", "sql"), "dcdb": ("--", "sql"),
+          "keyspaces": ("--", "cql"), "neptune": ("#", "sh"),
+          "geminidb-mongo": ("//", "js")}
 
 
 def script(hop, eng, side, found, where=None):

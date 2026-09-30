@@ -715,13 +715,15 @@ _register()
 COLUMNS_KEPT = 60
 
 
-def document_columns(eng, at, docs):
+def document_columns(eng, at, docs, kind=None):
     """[(field, kind)] of every top-level field the documents `docs()`
     hold, all of them read - a field holding several kinds is JSON, a
     number that is sometimes whole a number. Kept a minute for `at` on
     `eng`, and forgotten when `eng` writes (`forget_columns`): a change
-    tail asks for each change."""
+    tail asks for each change. `kind(value)` names a value's kind where
+    the store's are not JSON's (Firestore's, Datastore's)."""
     import time
+    kind = kind or _kind
     known = eng.__dict__.setdefault("_columns_of", {})
     got = known.get(at)
     if got is None or time.monotonic() - got[0] > COLUMNS_KEPT:
@@ -730,7 +732,7 @@ def document_columns(eng, at, docs):
             if not isinstance(body, dict):
                 continue
             for name, value in body.items():
-                seen.setdefault(name, set()).add(_kind(value))
+                seen.setdefault(name, set()).add(kind(value))
         cols = []
         for name, kinds in sorted(seen.items()):
             kinds.discard("null")
