@@ -18,7 +18,6 @@ import socket
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from . import leftovers, tooluse
@@ -72,9 +71,9 @@ def _ladder():
                      " are built after the rows land"),
         Rung("pgdump", "the dump and restore in parallel",
              needs=(_moves("pgdump"), _installed("pg_dump", "pg_restore"))),
-        # the MySQL bulk copy: each table by the rung chosen for it
-        # (`my_bulk_choice`), the straight copy alone where the dump and
-        # load programs are not here
+        # the MySQL bulk copy: each table by the rung the engine's table
+        # ladder gives it (`tableway.choose`), the straight copy alone where
+        # the dump and load programs are not here
         Rung("mydumper", "the parallel dump and load",
              needs=(_moves("mydumper"),
                     _installed("mydumper", "myloader"))),
@@ -130,13 +129,18 @@ def choice(engine, table="", hop=None, go=False):
     that need its leave and ask its servers are weighed too; a way that
     proves itself only by acting on a server is proved when the move goes
     (`go`), and a dry run names it on its needs alone."""
-    from . import legs
+    from . import legs, sourcechange
     from .decide import Facts, climb
     facts = Facts({"engine": engine, "hop": hop, "go": go,
                    "db": legs._first_db(hop) if hop is not None else None},
                   legs=lambda: legs.facts(hop),
                   rtt=lambda: legs.round_trips(hop))
-    return climb(table or engine, _ladder(), facts,
+    ladder = _ladder()
+    if hop is not None:
+        # a way that needs a change on the source takes the hop's answer
+        # to it (`sourcechange`): offered, never assumed
+        sourcechange.put_answers(hop, facts, ladder)
+    return climb(table or engine, ladder, facts,
                  ("resume by chunk",) if table else ())
 
 
@@ -332,8 +336,8 @@ def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None,
     this used to refuse the whole database. One answer for the dump, the
     plan and the move, so none of them can disagree about which tables took
     which path. Nothing is routed for a path that applies the filter itself.
-    `choice` is the MySQL bulk copy's per-table choice where the caller made
-    it already (`my_bulk_choice`).
+    `choice` is the table ladder's per-table choice where the caller made
+    it already (`tableway.choose`).
     """
     from . import planner
     if facts is None and via in NEEDS_KEYS:
@@ -2586,114 +2590,21 @@ def _my_target_says(hop, db):
             "missing": _my_missing_tables(hop, db)[0]}
 
 
-# --- the MySQL bulk copy's rungs, chosen per table ------------------------
+# --- the MySQL bulk copy -------------------------------------------------------
 #
-# Three ways to carry a MySQL table, each used whole: the parallel dump and
-# load (chunked by rows inside a table, checksummed on both sides, masked
-# on the way where the hop asks), the straight copy (read and written at
-# once in chunks by bytes, checksummed), and migkit's own table copier
-# (each range read back and held to the source as it lands). Which carries
-# a table is decided from its facts and from rates measured on each rung -
-# the benchmark's until the hop has its own.
+# Three programs' ways to carry a MySQL table, each used whole: the parallel
+# dump and load (chunked by rows inside a table, checksummed on both sides,
+# masked on the way where the hop asks), the straight copy (read and written
+# at once in chunks by bytes, checksummed), and migkit's own table copier.
+# Which carries a table is the engine's one table ladder's to say
+# (`MySQLEngine.TABLE_WAYS`, climbed by `tableway.choose`), from rates
+# measured on each rung - the benchmark's (`MY_BENCH`) until the hop has its
+# own; this is the batch that runs the programs over the tables it gives
+# them.
 
-DUMP_LOAD, STREAM_COPY, TABLE_COPIER = "dump-load", "stream-copy", "copier"
-#: the vias that are the MySQL bulk copy: every rung, and the straight copy
-#: alone (where the dump and load programs are not here, or `MIGKIT_MOVER`
-#: asks for it)
-MY_BULK = ("mydumper", "mysqlsh")
-#: a table's shape as the rates are kept: with a binary column (the
-#: straight copy writes those as base64) or without
-PLAIN, BINARY = "plain", "binary"
-#: the straight copy's rates where it reads and writes at once, with no
-#: dump on disk between (where the disk cannot hold one): `PLAIN + DIRECT`
-DIRECT = " direct"
-MY_BINARY_TYPES = ("binary", "varbinary", "tinyblob", "blob", "mediumblob",
-                   "longblob")
+#: the ladder's rungs the move's programs carry (`MySQLEngine.TABLE_WAYS`)
+DUMP_LOAD, STREAM_COPY = "dump-load", "stream-copy"
 
-
-@dataclass(frozen=True)
-class BulkRung:
-    """One way the MySQL bulk copy can carry a table, as data a decision
-    engine climbs: what it is called where an operator reads it, the
-    programs it runs, what it gives (in `decide.WORDS`' vocabulary), the
-    seconds a run of it costs before its first row, and bytes a second by
-    the shape of a table, measured.
-
-    The numbers are the benchmark's (`MY_BENCH`), kept until a move of the
-    hop measures its own (`my_rates`)."""
-    name: str
-    said: str
-    programs: tuple
-    gives: frozenset
-    fixed: float
-    rates: dict
-
-
-#: How the rungs were measured, 2026-09-28: two MySQL 8.4.11 servers in
-#: docker (colima, 2 CPUs and 4 GB for both), the programs on the host
-#: (Apple M-series, 10 cores), the docker lock held so nothing else ran;
-#: `appdb.narrow` 500,000 rows of int key, int, varchar(40), datetime and
-#: decimal with two secondary indexes (41.5 MB of data), `appdb.wide`
-#: 500,000 rows of bigint key, a 320-byte varbinary and a text with a
-#: prefix index (222 MB), `appdb.tiny` one row; four workers; the target's
-#: tables made beforehand, as the move makes them, their secondary indexes
-#: dropped for the load and added after (the index window). Seconds, the
-#: median of three runs (the runs of one configuration spread by up to a
-#: second on both tables):
-#:
-#:                                       both   narrow  wide   tiny
-#:   dump and load, as before              4.58   2.05   3.39   0.14
-#:   + rows per table                      5.60   2.05   3.73   0.15
-#:   + checksums on both sides (as run)    5.40   2.35   3.80   0.15
-#:   + zstd                                6.07   2.43   3.52   0.17
-#:   load makes the tables, keys after     4.13   1.85   2.81   0.15
-#:   straight copy, dump and load (run)    6.19   3.01   4.64   1.22
-#:   straight copy, read and written at    11.41  2.98   9.59   1.35
-#:     once (run where the disk is short)
-#:   straight copy making the tables,
-#:     indexes deferred / not             5.40 / 5.67  2.88 / 3.29
-#:                                                    3.99 / 3.95
-#:   table by table (the command, whole)   9.33   4.28   6.48   0.45
-#:   migkit's digest after a bulk copy     -      1.44   1.45   0.06
-#:
-#: The rates below are the "as run" rows: bytes over the time less the
-#: one-row table's (the start-up, `fixed`). The digest is paid after every
-#: bulk way alike (`_held_to_the_source` compares every table, the ones the
-#: copier carried too), so it does not change which way is faster. The
-#: straight copy's chunk: 16 MB against its default 64 MB, both tables
-#: 7.25 s against 9.89 s (read and written at once, no checksums) - so a
-#: chunk is sized for four a worker (`_shell_chunk`). Its binary columns
-#: cost it where it reads and writes at once (base64, 9.59 s on `wide`);
-#: through its own dump they do not (4.64 s). The dump read both tables in
-#: 0.94 s, 280 MB/s over four workers - `read`, which sizes the chunks.
-MY_BENCH = "docker pair, 2026-09-28"
-
-#: the rungs, in the order a tie goes: the one that has carried MySQL
-#: tables here longest first. `fixed` and `rates` are `MY_BENCH`'s
-MY_RUNGS = (
-    BulkRung(DUMP_LOAD, "dumped in parallel chunks and loaded",
-             ("mydumper", "myloader"),
-             frozenset({"row filter", "consistent as of", "keyless",
-                        "large values", "masked on the way"}),
-             fixed=0.15, rates={PLAIN: 18.9e6, BINARY: 60.8e6,
-                                "read": 280e6}),
-    BulkRung(STREAM_COPY, "copied straight from source to target in"
-             " parallel chunks", ("mysqlsh",),
-             frozenset({"row filter", "consistent as of", "keyless",
-                        "large values", "resume by chunk"}),
-             fixed=1.22, rates={PLAIN: 23.2e6, BINARY: 64.9e6,
-                                PLAIN + DIRECT: 25.4e6,
-                                BINARY + DIRECT: 26.9e6, "read": 280e6}),
-    BulkRung(TABLE_COPIER, "copied table by table, each range held to the"
-             " source as it lands", (),
-             frozenset({"row filter", "column mapping", "resume by key",
-                        "keyless", "large values"}),
-             fixed=0.45, rates={PLAIN: 10.8e6, BINARY: 36.8e6}),
-)
-_RUNG = {r.name: r for r in MY_RUNGS}
-#: each rung in a few words, where a reason sets it beside another
-MY_SHORT = {DUMP_LOAD: "the parallel dump and load",
-            STREAM_COPY: "the straight copy", TABLE_COPIER: "table by table"}
 
 #: What migkit asks of each MySQL bulk program, feature by feature, in the
 #: tool-use registry of backlog 0f (`tooluse`): used, topped up (used, and
@@ -2846,41 +2757,6 @@ tooluse.register("mysqlsh", options=_features({
 }))
 
 
-@dataclass(frozen=True)
-class BulkChoice:
-    """How one table goes, and why: the rung, the sentence an operator
-    reads, and the seconds each rung that could carry it was estimated at
-    (None where the table's size is not known)."""
-    table: str
-    rung: str
-    reason: str
-    seconds: dict = field(default_factory=dict)
-
-
-MY_SHAPE_SQL = f"""
-    select table_name,
-           sum(data_type in ({', '.join(repr(t) for t in MY_BINARY_TYPES)}))
-      from information_schema.columns
-     where table_schema = %s
-     group by table_name"""
-
-
-def my_table_facts(hop, db, quick=False):
-    """`table_facts` of the source's tables, each with whether it holds a
-    binary column (`binary`) - the shape the rates are kept by. None when
-    a plan (`quick`) could not ask in time; a run asks directly, and a
-    failure is the run's."""
-    from .engines.mysql import MySQLEngine
-
-    def ask():
-        facts = MySQLEngine(hop).table_facts("src", db)
-        for name, n in _my_ask(hop, "src", MY_SHAPE_SQL, (db,)):
-            if name in facts:
-                facts[name]["binary"] = bool(int(n or 0))
-        return facts
-    return _within(ask) if quick else ask()
-
-
 def _my_target_loads_files(hop, quick=False):
     """Whether the target takes `LOAD DATA LOCAL` (`local_infile`), which
     the straight copy loads by - asked, never set: turning it on is a
@@ -2910,43 +2786,11 @@ def _write_json(path, value):
     os.replace(tmp, path)
 
 
-def my_rates(hop, db=None):
-    """{rung: {shape: bytes/s}, "fixed": {rung: seconds}}: the benchmark's
-    numbers, with the hop's own over them.
-
-    A move's rates count only once the move they were measured in has
-    finished and been held to the source (`copy-position.json` is written
-    last): until then they wait beside it. So the move that measured them
-    and the table copier that follows it choose from the same numbers - a
-    table the move left to the copier is the copier's when it asks - and
-    a move that failed teaches nothing."""
-    rates = {r.name: dict(r.rates) for r in MY_RUNGS}
-    kept_path = hop.report_dir() / "bulk-rates.json"
-    kept = _read_json(kept_path) or {}
-    if db:
-        pending = hop.report_dir(db) / "bulk-rates.pending.json"
-        done = hop.report_dir(db) / "copy-position.json"
-        try:
-            ripe = (pending.exists() and done.exists()
-                    and done.stat().st_mtime_ns >= pending.stat().st_mtime_ns)
-        except OSError:
-            ripe = False
-        if ripe:
-            for rung, shapes in (_read_json(pending) or {}).items():
-                kept.setdefault(rung, {}).update(shapes)
-            _write_json(kept_path, kept)
-            pending.unlink(missing_ok=True)
-    for rung, shapes in kept.items():
-        if rung in rates:
-            rates[rung].update({k: float(v) for k, v in shapes.items()
-                                if v})
-    return rates
-
-
 def _my_record_rates(hop, db, rung, spans, facts, wall=None, suffix=""):
-    """Keep what this move measured on `rung`, per shape, to count once
-    the move is done (`my_rates`): `spans` is {table: seconds}, the bytes
-    are the catalogue's.
+    """Keep what this move measured on `rung`, table by table, to count once
+    the move is done (`tableway.pending`): `spans` is {table: seconds}, the
+    rows and bytes are the catalogue's; `suffix` names the way it ran
+    (`tableway.DIRECT`: read and written at once).
 
     `wall` is the rung's whole time, start-up and checksums in it, as the
     benchmark's rates are: the spans only share it out. Tables carried side
@@ -2957,36 +2801,15 @@ def _my_record_rates(hop, db, rung, spans, facts, wall=None, suffix=""):
     if wall and total:
         spans = {t: wall * s / total for t, s in spans.items()
                  if s and s > 0}
-    got = {}
-    for table, seconds in spans.items():
+    units = []
+    for table, seconds in sorted(spans.items()):
         fact = (facts or {}).get(table) or {}
         size = int(fact.get("bytes") or 0)
         if not size or not seconds or seconds <= 0:
             continue
-        shape = (BINARY if fact.get("binary") else PLAIN) + suffix
-        b, s = got.get(shape, (0, 0.0))
-        got[shape] = (b + size, s + seconds)
-    if not got:
-        return
-    path = hop.report_dir(db) / "bulk-rates.pending.json"
-    pending = _read_json(path) or {}
-    pending.setdefault(rung, {}).update(
-        {shape: round(b / s, 1) for shape, (b, s) in got.items()})
-    _write_json(path, pending)
-
-
-def _my_estimate(fact, rung, rates, direct=False):
-    """Seconds `rung` would take over one table, from its size and the
-    rung's rate for its shape; None where the size is not known. `direct`:
-    the straight copy reads and writes at once (`_shell_direct`)."""
-    size = (fact or {}).get("bytes")
-    if not size:
-        return None
-    shape = BINARY if (fact or {}).get("binary") else PLAIN
-    got = rates.get(rung, {})
-    rate = (got.get(shape + DIRECT) if direct and rung == STREAM_COPY
-            else None) or got.get(shape)
-    return int(size) / float(rate) if rate else None
+        units.append((int(fact.get("rows") or 0), size, seconds))
+    from . import tableway
+    tableway.pending(hop, db, rung + suffix, units)
 
 
 def _disk_free(path):
@@ -3008,228 +2831,9 @@ def _shell_direct(hop, db, facts):
     return bool(size and free is not None and size > free)
 
 
-def _choice_record(hop, db):
-    return hop.report_dir(db) / "bulk-choice.json"
-
-
-def _persisted_choice(hop, db):
-    """The choice the move in progress made, while it is in progress: the
-    move writes it after it began (`move-began.json`) and nothing has
-    finished a move since (`copy-position.json`). None otherwise."""
-    got = _read_json(_choice_record(hop, db))
-    began = _read_json(hop.report_dir(db) / "move-began.json") or {}
-    if not got or not began.get("epoch"):
-        return None
-    if float(got.get("at") or 0) < float(began["epoch"]):
-        return None
-    done = hop.report_dir(db) / "copy-position.json"
-    try:
-        if done.exists() and done.stat().st_mtime >= float(got["at"]):
-            return None
-    except OSError:
-        return None
-    return {t: BulkChoice(t, *v) for t, v in got["tables"].items()}
-
-
-def _seconds(s):
-    return "under a second" if s < 1 else f"about {_took(s)}"
-
-
 def _took(s):
     from .wording import _duration
     return _duration(s)
-
-
-def my_decide_rungs(available):
-    """`MY_RUNGS` as the decision engine's rungs (`decide.Rung`): what each
-    gives, and the one need - that it can run here, with the reason in
-    migkit's words where it cannot. Ranked by `decide.rank` from each
-    table's estimated seconds (`my_bulk_choice`)."""
-    from .decide import Need, Rung
-    return tuple(
-        Rung(r.name, r.said, gives=r.gives,
-             needs=(Need("to run here",
-                         lambda f, n=r.name: f["available"].get(n) is None,
-                         lambda f, n=r.name: f["available"][n]),))
-        for r in MY_RUNGS)
-
-
-def my_bulk_choice(hop, db, via, tables=None, facts=None, quick=False,
-                   fresh=False, available=None):
-    """{table: BulkChoice} for the tables of `db` the bulk copy carries.
-
-    Correctness first: a table masked on the way needs what only the dump
-    and load gives; a table whose columns the hop maps is left to
-    `planner.plan`, which sends it to the table copier. Then speed: each
-    table is climbed (`decide.climb`) over `my_decide_rungs`, ranked by the
-    seconds each would take over it - its size over the rung's measured
-    rate for its shape (`my_rates`) - so the rung measured fastest for it
-    is taken where it can run. Each rung in use then costs its start-up
-    (`BulkRung.fixed`) once, and a rung's tables go to another - one in
-    use, or one with a shorter start-up - wherever that is cheaper in all:
-    two programs started for one small table is slower than one. Where no
-    size is known, the first rung that can run carries it, as the engine
-    climbs a rung never timed.
-
-    The move decides afresh (`fresh`) and keeps its choice for the table
-    copier that follows it (`_persisted_choice`), so the two cannot
-    disagree about which tables the copier fills; a plan reads the kept
-    choice while a move is in progress, and decides afresh otherwise.
-
-    `available` is {rung: why not, or None}; worked out here when not
-    given - the dump and load where its programs are here and the via
-    allows it, the straight copy where its program is here and the target
-    takes local loads.
-    """
-    from .decide import TIE, Costs, climb
-    if not fresh:
-        kept = _persisted_choice(hop, db)
-        if kept is not None:
-            return kept
-    if facts is None or any("binary" not in f for f in facts.values()
-                            if isinstance(f, dict)):
-        facts = my_table_facts(hop, db, quick=quick) or facts or {}
-    names = sorted({str(t).rsplit(".", 1)[-1] for t in (tables or facts)})
-    if available is None:
-        available = my_rungs_available(hop, via, quick=quick)
-    rungs = my_decide_rungs(available)
-    order = [r.name for r in MY_RUNGS]
-    rates = my_rates(hop, db)
-    direct = _shell_direct(hop, db, facts)
-    fixed = {r.name: r.fixed for r in MY_RUNGS}
-    masked = set(mask_rules(hop, db))
-    words = {r.name: r.said for r in MY_RUNGS}
-    out, est = {}, {}
-    by = {}
-    for t in names:
-        if hop.excluded(db, t) or hop.column_rules(db, t):
-            continue
-        secs = {r: _my_estimate(facts.get(t), r, rates, direct)
-                for r in order}
-        costs = Costs({r: s for r, s in secs.items() if s is not None})
-        got = climb(t, rungs, {"available": available},
-                    need=("masked on the way",) if t in masked else (),
-                    costs=costs, prove=False)
-        if got.rung is None:
-            out[t] = BulkChoice(t, "", got.reason)
-            continue
-        est[t] = {r: s for r, s in secs.items()
-                  if available.get(r) is None}
-        by.setdefault(got.path, []).append(t)
-    # each rung in use costs its start-up once: the tables of one go to
-    # others - in use, or one not started yet - wherever the seconds they
-    # add are fewer than the start-ups saved. Measured why: two 2,000-row
-    # tables each a few milliseconds faster straight across went that way,
-    # and the move paid the straight copy's 1.22 s start against the dump's
-    # 0.15 s. A masked table stays where it must go
-    runnable = [r for r in order if available.get(r) is None]
-    changed = True
-    while changed:
-        changed = False
-        weight = {r: sum(est[t].get(r) or 0 for t in ts)
-                  for r, ts in by.items()}
-        best = None
-        for r in sorted(by, key=lambda r: weight[r]):
-            if any(t in masked for t in by[r]):
-                continue
-            for o in runnable:
-                if o == r or any(est[t].get(o) is None
-                                 and est[t].get(r) is not None
-                                 for t in by[r]):
-                    continue
-                if o in by:
-                    dest = {t: min((x for x in by if x != r),
-                                   key=lambda x: (est[t].get(x) or 0,
-                                                  order.index(x)))
-                            for t in by[r]}
-                else:
-                    dest = {t: o for t in by[r]}
-                delta = sum((est[t].get(dest[t]) or 0)
-                            - (est[t].get(r) or 0) for t in by[r]) \
-                    + sum(fixed.get(x, 0) for x in set(dest.values())
-                          if x not in by) - fixed.get(r, 0)
-                if delta < 0 and (best is None or delta < best[0]):
-                    best = (delta, r, dest)
-        if best:
-            _, r, dest = best
-            for t, o in dest.items():
-                by.setdefault(o, []).append(t)
-            del by[r]
-            changed = True
-    for rung, ts in by.items():
-        for t in ts:
-            known = {r: s for r, s in est[t].items() if s is not None}
-            if t in masked:
-                reason = (f"{words[rung]}: masked on the way as the hop"
-                          " asks, which only the parallel dump does")
-            elif not known:
-                reason = (f"{words[rung]} - its size is not known, so the"
-                          " first way that can run here")
-            else:
-                shape = ("with binary columns"
-                         if (facts.get(t) or {}).get("binary")
-                         else "without binary columns")
-                others = [f"{MY_SHORT[r]} {_seconds(s)}"
-                          for r, s in sorted(known.items(),
-                                             key=lambda x: x[1])
-                          if r != rung]
-                reason = (f"{words[rung]}: {_seconds(known.get(rung, 0))}"
-                          f" at the rate measured for a table {shape}"
-                          + (f", against {', '.join(others)}" if others
-                             else ""))
-                fastest = min(known, key=known.get)
-                if fastest != rung and rung in known and known[rung] - \
-                        known[fastest] <= TIE * known[rung]:
-                    reason += (" - within the measurements' spread of each"
-                               " other, a tie, which the order of the ways"
-                               " decides")
-                elif fastest != rung:
-                    reason += (" - rather than starting another program"
-                               " for it: the start-up costs more than it"
-                               " saves")
-            out[t] = BulkChoice(t, rung, reason,
-                                {r: (None if s is None else round(s, 3))
-                                 for r, s in est[t].items()})
-    return out
-
-
-def _persist_choice(hop, db, choice):
-    _write_json(_choice_record(hop, db), {
-        "at": time.time(),
-        "tables": {t: [c.rung, c.reason, c.seconds]
-                   for t, c in choice.items()}})
-
-
-def my_rungs_available(hop, via, quick=False, loads=...):
-    """{rung: None where it can carry a table here, else why not} - in
-    migkit's words, no program named. `loads` is whether the target takes
-    local loads, where the caller has asked already."""
-    out = {TABLE_COPIER: None}
-    if via == "mysqlsh":
-        out[DUMP_LOAD] = "the move is asked to copy straight across"
-    elif not (which("mydumper") and which("myloader")):
-        out[DUMP_LOAD] = ("the parallel dump is not installed here -"
-                          " migkit doctor --install puts it in place")
-    else:
-        out[DUMP_LOAD] = None
-    if not which("mysqlsh"):
-        out[STREAM_COPY] = ("the straight copy is not installed here -"
-                            " migkit doctor --install puts it in place")
-    else:
-        if loads is ...:
-            loads = _my_target_loads_files(hop, quick=quick)
-        out[STREAM_COPY] = (
-            None if loads else
-            "the target does not take local loads (local_infile is off),"
-            " which the straight copy loads by; migkit does not change the"
-            " target's settings" if loads is False else
-            "whether the target takes local loads could not be asked yet")
-    if via == "mysqlsh" and out[STREAM_COPY] is None:
-        # the straight copy alone: the table copier still carries what only
-        # it can (`planner.plan`), and a table where the straight copy
-        # cannot run, and nothing for its speed
-        out[TABLE_COPIER] = "the move is asked to copy straight across"
-    return out
 
 
 #: how long one chunk of the dump should take to read: the dump doubles a
@@ -3804,9 +3408,16 @@ def _shell_resumable(hop, db, tables, folder):
 
 
 def mydumper_move(hop, db, workers, go, log, only=None):
-    """The MySQL bulk copy: each table by the rung chosen for it
-    (`my_bulk_choice`), the parallel dump and load and the straight copy
-    one after the other, the table copier after both (`routed_to_copier`).
+    """The MySQL bulk copy: each table by the rung the engine's one table
+    ladder gives it (`tableway.choose`), the parallel dump and load and the
+    straight copy one after the other, the table copier after both
+    (`routed_to_copier`). The choice is kept for the copier that follows
+    (`tableway.keep`), which takes each table the way chosen for it.
+
+    A program that fails as it runs hands its tables to the copier after
+    the move, each on the way its own climb gives without it, said
+    (`tableway.batch_or_copier`); a checksum that differs is a verdict and
+    stops the move as it always did.
 
     Dump, then empty the target, then load - in that order. The target is
     emptied only once a complete dump is on disk, and once the straight
@@ -3831,12 +3442,15 @@ def mydumper_move(hop, db, workers, go, log, only=None):
     # that directory and has no reason to meet a file it does not read
     cnf = root / "mydumper-filters.cnf"
     omit = root / "omit-tables.txt"
+    from . import tableway
+    from .engines.mysql import PLAIN, MySQLEngine
+    eng = MySQLEngine(hop)  # the table ladder's own
     via = "mysqlsh" if only == STREAM_COPY else "mydumper"
     unresolved = ""
     # a plan asks each server once, and not for long; the run asks directly
     if go:
         try:
-            facts = my_table_facts(hop, db)
+            facts = eng.table_sizes(db)
         except Exception as e:
             why = (str(e).strip().splitlines()[0][:100] if str(e).strip()
                    else type(e).__name__)
@@ -3846,22 +3460,24 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                                f" {why}. Nothing has been changed on the"
                                " target")
         logs = _my_target_logs(hop, quick=False)
-        available = my_rungs_available(hop, via)
+        known = {}
         missing = lambda: _my_missing_tables(hop, db)[0]  # noqa: E731
     else:
-        facts = my_table_facts(hop, db, quick=True)
+        facts = eng.table_sizes(db, quick=True)
         said = _within(lambda: _my_target_says(hop, db)) or {}
         logs = said.get("logs")
-        available = my_rungs_available(hop, via, loads=said.get("loads"))
+        known = {"local_infile": said.get("loads")}
         missing = lambda: said.get("missing")  # noqa: E731
     every = sorted(facts) if facts is not None else None
     skip, routed, choice = [], [], {}
     if every is not None:
         skip = excluded_tables(hop, db, every, qualifier=db)
-        choice = my_bulk_choice(hop, db, via, every, facts, fresh=True,
-                                available=available)
+        choice = tableway.choose(eng, db, via, every, facts, quick=not go,
+                                 fresh=True, known=known)
         if go:
-            _persist_choice(hop, db, choice)
+            tableway.keep(hop, db, choice)
+        for t, p in sorted(choice.items()):
+            tableway.said(eng, p, log, f"{db}.{t}")
         # the table copier carries these after the load: mapped columns,
         # and the tables it is measured faster on (the dump applies row
         # filters itself)
@@ -3877,7 +3493,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
     dump_tables = (None if every is None else
                    [t for t in every if t not in elsewhere
                     and t not in shell_tables])
-    rates = my_rates(hop, db)
+    rates = {w.name: w.rates for w in eng.TABLE_WAYS}
     # masking on the way: exact rules on columns outside every key, on a
     # hop that sends nothing back; anything else stops the move before it
     # writes, rather than copy the values the hop asked to hide
@@ -3984,9 +3600,17 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                                 skip + routed
                                 + [f"{db}.{t}" for t in shell_tables]))
     import contextlib
-    from .engines.mysql import MySQLEngine
     sums, spans, took = {}, {}, {}
     shell_reader, resumed = None, None
+    fallen = []
+
+    def or_copier(rung, tables, run):
+        """`run()`, or its tables handed to the copier after the move."""
+        fell = tableway.batch_or_copier(eng, db, rung, tables, run, log,
+                                        masked=rules, picks=choice,
+                                        facts=facts)
+        fallen.extend(fell)
+        return not fell
     with contextlib.ExitStack() as stack:
         dumped = {}
         if dump_tables:
@@ -3995,11 +3619,14 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 log(dump)
             reading = _MyDumpLog()
             began = time.monotonic()
-            _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
-                progress=reading)
-            took[DUMP_LOAD] = time.monotonic() - began
-            spans[DUMP_LOAD] = reading.spans.seconds()
-            dumped = _my_dumped(outdir)
+            if or_copier(DUMP_LOAD, dump_tables, lambda: _sh(
+                    dump.argv, {"MYSQL_PWD": hop.source.password}, log,
+                    progress=reading)):
+                took[DUMP_LOAD] = time.monotonic() - began
+                spans[DUMP_LOAD] = reading.spans.seconds()
+                dumped = _my_dumped(outdir)
+            else:
+                dump_tables = []
         if shell_tables:
             script.write_text(SHELL_RUN)
             script.chmod(0o600)
@@ -4017,13 +3644,17 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                         log(phase("dump", workers=workers,
                                   tables=len(shell_tables)))
                     began = time.monotonic()
-                    _shell_run(hop, db, _shell_spec(
-                        hop, db, "dump", shell_tables, workers, chunk,
-                        where, folder=shell_dir), script, log)
-                    took[STREAM_COPY] = time.monotonic() - began
-                    _write_json(_shell_resume_record(hop, db), {
-                        "tables": sorted(shell_tables),
-                        "position": _shell_dumped_at(shell_dir)})
+                    if or_copier(STREAM_COPY, shell_tables,
+                                 lambda: _shell_run(hop, db, _shell_spec(
+                                     hop, db, "dump", shell_tables, workers,
+                                     chunk, where, folder=shell_dir), script,
+                                     log)):
+                        took[STREAM_COPY] = time.monotonic() - began
+                        _write_json(_shell_resume_record(hop, db), {
+                            "tables": sorted(shell_tables),
+                            "position": _shell_dumped_at(shell_dir)})
+                    else:
+                        shell_tables = []
                 elif log:
                     log(f"{len(shell_tables)} tables go on loading from the"
                         " copy an earlier move made and did not finish:"
@@ -4034,7 +3665,10 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 spec = _shell_spec(hop, db, "copy", shell_tables, workers,
                                    chunk, where)
                 spec["options"]["dryRun"] = True
-                _shell_run(hop, db, spec, script, None)
+                if not or_copier(STREAM_COPY, shell_tables,
+                                 lambda: _shell_run(hop, db, spec, script,
+                                                    None)):
+                    shell_tables = []
         _my_create_missing(hop, db, log)
         _my_truncate_target(hop, db, log,
                             spare=shell_tables if resumed else ())
@@ -4045,15 +3679,19 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 if log:
                     log(load)
                 began = time.monotonic()
-                _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
-                    progress=loading)
-                took[DUMP_LOAD] = took.get(DUMP_LOAD, 0) + (
-                    time.monotonic() - began)
-                load_spans = loading.spans.seconds()
-                spans[DUMP_LOAD] = {
-                    t: spans[DUMP_LOAD].get(t, 0) + load_spans.get(t, 0)
-                    for t in set(spans[DUMP_LOAD]) | set(load_spans)}
-                sums = loading.sums
+                if or_copier(DUMP_LOAD, dump_tables, lambda: _sh(
+                        load.argv, {"MYSQL_PWD": hop.target.password}, log,
+                        progress=loading)):
+                    took[DUMP_LOAD] = took.get(DUMP_LOAD, 0) + (
+                        time.monotonic() - began)
+                    load_spans = loading.spans.seconds()
+                    spans[DUMP_LOAD] = {
+                        t: spans[DUMP_LOAD].get(t, 0) + load_spans.get(t, 0)
+                        for t in set(spans[DUMP_LOAD]) | set(load_spans)}
+                    sums = loading.sums
+                else:
+                    dump_tables, dumped = [], {}
+                    loading = _MyLoadLog()
             if shell_tables:
                 if log:
                     log(shell)
@@ -4066,10 +3704,15 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 else:
                     spec = _shell_spec(hop, db, "copy", shell_tables,
                                        workers, chunk, where)
-                shell_reader = _shell_run(hop, db, spec, script, log)
+                got = []
+                if or_copier(STREAM_COPY, shell_tables, lambda: got.append(
+                        _shell_run(hop, db, spec, script, log))):
+                    shell_reader = got[0]
+                else:
+                    shell_tables = []
                 took[STREAM_COPY] = took.get(STREAM_COPY, 0) + (
                     time.monotonic() - began)
-                if resumable:
+                if resumable and shell_reader is not None:
                     # the dump's own count, per table and exact
                     counted = ((_read_json(shell_dir / "@.done.json") or {})
                                .get("tableRows") or {}).get(db) or {}
@@ -4116,9 +3759,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         # the position the copy is a snapshot at, for a replica that follows
         # it - only where one rung carried every table: two rungs are two
         # snapshots, and neither position is the other's
-        if dump_tables and not shell_tables:
+        if dump_tables and not shell_tables and not fallen:
             _my_dump_position(hop, db, outdir)
-        elif shell_tables and not dump_tables:
+        elif shell_tables and not dump_tables and not fallen:
             at = (_shell_dumped_at(shell_dir) if resumable
                   else _shell_position(shell_reader))
             if at:
@@ -4140,7 +3783,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                     if dumped.get(t) and secs > 0:
                         log(f"{db}.{t}: {dumped[t]:,} rows,"
                             f" {int(dumped[t] / secs):,} rows/s")
-        if shell_tables and took.get(STREAM_COPY):
+        if shell_tables and took.get(STREAM_COPY) and shell_reader:
             if log and shell_reader and shell_reader.rows is not None:
                 log(f"copied {shell_reader.rows:,} rows"
                     f" {'through a dump' if resumable else 'straight across'}"
@@ -4155,7 +3798,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                 _my_record_rates(hop, db, STREAM_COPY, {
                     t: float((facts.get(t) or {}).get("bytes") or 0)
                     for t in shell_tables}, facts, wall=took[STREAM_COPY],
-                    suffix="" if resumable else DIRECT)
+                    suffix="" if resumable else tableway.DIRECT)
     return steps
 
 

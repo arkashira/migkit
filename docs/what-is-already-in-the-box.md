@@ -233,8 +233,11 @@ builders, in the tool-use registry every wrapped tool's account is in
 (`tooluse`, registered from `movers`), with the MySQL Shell's (dump and load
 through its own Python, the load resumable, its checksums; the straight
 copy where the disk cannot hold a dump) - and the dump and load, the Shell
-and migkit's table copier are rungs chosen per table from measured rates
-(`movers.my_bulk_choice`, numbers in `movers.MY_BENCH`).
+and the table copier's own ways (rows passed server to server, its rows)
+are rungs of one table ladder, each table climbed once from measured rates
+(`tableway.choose` over `MySQLEngine.TABLE_WAYS`, numbers in
+`engines/mysql.py`'s `MY_BENCH` and `PASS_BENCH`); the copier after the move
+takes the way the move chose for each table.
 `test_the_mysql_bulk_tools_used_whole.py`,
 `test_the_mysql_bulk_rungs_run.py`.
 

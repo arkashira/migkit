@@ -708,7 +708,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                            {"scroll_id": scroll}, missing_ok=True)
 
     def _table_ways(self):
-        """How an index goes (`tableways`): out of the source's own
+        """How an index goes (`tableway.each`): out of the source's own
         snapshot where the hop names one and the reader can carry it
         (`fromsnapshot`), by migkit's sliced scroll always."""
         from .. import fromsnapshot
@@ -752,7 +752,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                  for t in tables]
         if not go:
             return steps
-        from .. import fromsnapshot, tableways
+        from .. import fromsnapshot, tableway
         from ..decide import Facts
         slices = max(1, int(getattr(self.hop, "workers_most", 0)
                             or self.hop.workers or 1))
@@ -783,11 +783,11 @@ class OpenSearchEngine(NeutralCopier, Engine):
                     + (f", {gone:,} the source does not hold taken from"
                        " the target" if gone else ""))
             return moved
-        tableways.each(self, db, tables, self._table_ways(),
-                       lambda t: Facts(
-                           reader=lambda: fromsnapshot.program() is not None,
-                           unfit=lambda: fromsnapshot.unfit(self, db, t)),
-                       run, log)
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(
+                          reader=lambda: fromsnapshot.program() is not None,
+                          unfit=lambda: fromsnapshot.unfit(self, db, t)),
+                      run, log)
         return steps
 
     def _loading(self, index):

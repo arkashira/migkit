@@ -24,7 +24,7 @@ GOOD = {"target": {"available": True, "installed": False, "may_pull": True,
                    "logs_ddl": False},
         "source": {"large_objects": False, "version": 160002,
                    "wal_level": "logical", "replication": True,
-                   "free_slots": 3, "free_senders": 3}}
+                   "free_slots": 3, "free_senders": 3, "may_publish": True}}
 
 
 #: this machine across a wide network from both sides, as measured
@@ -32,8 +32,13 @@ FAR = {"src": 45.2, "dst": 38.0}
 
 
 def _climb(hop, known=GOOD, go=False, rtt=FAR):
+    from migkit import sourcechange
     facts = decide.Facts({"engine": "postgres", "hop": hop, "go": go,
-                          "db": "app", "legs": known, "rtt": rtt})
+                          "db": "app", "legs": known, "rtt": rtt,
+                          "published": ['"public"."t"']})
+    # the hop's answers to a change on the source, as `movers.choice` puts
+    # them
+    sourcechange.put_answers(hop, facts, movers._ladder())
     return decide.climb("app", movers._ladder(), facts)
 
 
@@ -271,3 +276,59 @@ def test_the_doctor_line_goes_through_the_same_placement():
     from migkit.cli import _placement_said
     assert _placement_said({"src": 0.4, "dst": 45.2}).startswith(
         "[yellow]placement[/yellow]: this machine is beside the source")
+
+
+# --- the subscription's change on the source ---------------------------------
+
+def _only_the_subscription(**changes):
+    known = _with("source", **changes)
+    known["target"]["available"] = False
+    return known
+
+
+def test_the_subscriptions_publication_is_a_change_on_the_source(tmp_path,
+                                                                 monkeypatch):
+    """The temporary subscription makes a publication and a slot on the
+    source: a change `sourcechange` offers, never assumes. The hop's
+    `server_to_server` is its answer given ahead - the leave for what the
+    servers' own copy makes on them - so a hop that set it moves as it
+    did; `source_changes` says otherwise, and a source whose user may not
+    make it is the DBA's, with the statements."""
+    from migkit import config
+    monkeypatch.setattr(config, "REPORTS", tmp_path)
+    rung = [r for r in movers._ladder() if r.name == "pgsubscribe"][0]
+    assert [c.name for c in rung.changes] == ["temporary_publication"]
+    known = _only_the_subscription()
+    got = _climb(_hop(server_to_server=True), known)
+    assert got.path == "pgsubscribe", got.reason
+    no = _climb(_hop(server_to_server=True,
+                     source_changes={"temporary_publication": "no"}), known)
+    assert no.path != "pgsubscribe"
+    why = dict((r.name, w) for r, w in no.passed)["pgsubscribe"]
+    assert "the answer is no" in why, why
+    dba = _climb(_hop(server_to_server=True),
+                 _only_the_subscription(may_publish=False))
+    assert dba.path != "pgsubscribe"
+    why = dict((r.name, w) for r, w in dba.passed)["pgsubscribe"]
+    assert "only a DBA can make here" in why, why
+    assert "create publication" in why and '"public"."t"' in why, why
+
+
+def test_the_publication_is_made_and_taken_off_as_a_change(tmp_path,
+                                                          monkeypatch):
+    """Made through `sourcechange.making`: recorded before it is made,
+    its statements the definition's, taken off again after."""
+    from migkit import config, sourcechange
+    monkeypatch.setattr(config, "REPORTS", tmp_path)
+    hop = _hop(server_to_server=True)
+    ran = []
+    facts = {"hop": hop, "db": "app", "published": ['"public"."t"']}
+    with sourcechange.making(hop, legs.PUBLICATION, facts, ran.append,
+                             "app", lambda m: None):
+        assert any(s.startswith("create publication") and '"public"."t"'
+                   in s for s in ran), ran
+        made = list(ran)
+    taken = ran[len(made):]
+    assert any(s.startswith("drop publication") for s in taken), taken
+    assert any("pg_drop_replication_slot" in s for s in taken), taken
+    assert sourcechange.left_on_source(hop) == []

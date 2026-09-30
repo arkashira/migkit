@@ -6,9 +6,10 @@ machine log - nothing else they have. Now each table is cut into chunks
 sized from its facts, both sides checksum every table and migkit holds the
 move to each pair beside its own digest, the columns a hop masks on the
 way are masked by the dump where the rule is exact, and the straight copy
-and migkit's own table copier are rungs beside it, chosen per table from
-measured rates. These are the parts that need no server; the ones that do
-are in `test_the_mysql_bulk_rungs_run.py`.
+and migkit's own table copier are rungs beside it, one table ladder each
+table climbs from measured rates (`test_one_table_ladder.py`). These are
+the parts that need no server; the ones that do are in
+`test_the_mysql_bulk_rungs_run.py`.
 """
 import io
 import json
@@ -21,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from migkit import movers, planner
+from migkit import movers
 from migkit.config import Endpoint, Hop
 
 
@@ -135,16 +136,27 @@ def test_the_straight_copys_chunk_is_four_a_worker_of_the_largest():
 
 def test_the_straight_copy_reads_and_writes_at_once_only_where_the_disk_is_short(
         tmp_path, monkeypatch):
+    from migkit import tableway
+    from migkit.engines.mysql import MySQLEngine
     hop = _hop(tmp_path)
+    facts = {"wide": {"rows": 500_000, "bytes": 220_000_000,
+                      "binary": True}}
     monkeypatch.setattr(movers, "_disk_free", lambda path: 10 ** 12)
-    assert not movers._shell_direct(hop, "appdb", FACTS)
+    assert not movers._shell_direct(hop, "appdb", facts)
     monkeypatch.setattr(movers, "_disk_free", lambda path: 10 ** 6)
-    assert movers._shell_direct(hop, "appdb", FACTS)
-    # and the estimate then uses the rates measured that way
-    rates = movers.my_rates(hop, "appdb")
-    wide = FACTS["wide"]
-    assert movers._my_estimate(wide, movers.STREAM_COPY, rates, True) > \
-        2 * movers._my_estimate(wide, movers.STREAM_COPY, rates, False)
+    assert movers._shell_direct(hop, "appdb", facts)
+    # and the table ladder's cost model then costs the straight copy as
+    # measured that way: base64 of the binary columns, 9.59 s against
+    # 4.64 s on `wide` (MY_BENCH)
+    monkeypatch.setenv("MIGKIT_KNOWLEDGE", str(tmp_path / "knowledge.json"))
+    m = tableway.model(MySQLEngine(hop), "appdb")
+    wide = {"bytes": 222e6, "rows": 500_000}
+    at_once = tableway._On(m, wide, (movers.STREAM_COPY,))
+    through = tableway._On(m, wide)
+    assert at_once.get(movers.STREAM_COPY) > \
+        2 * through.get(movers.STREAM_COPY)
+    # a way with no rate measured that way reads its own
+    assert at_once.get(movers.DUMP_LOAD) == through.get(movers.DUMP_LOAD)
 
 
 def test_a_small_table_is_one_chunk():
@@ -310,261 +322,6 @@ def test_a_table_is_left_out_of_the_comparison_only_once_it_was_masked(
     (hop.report_dir("appdb") / "move-began.json").write_text(
         json.dumps({"epoch": time.time() + 10}))
     assert movers.masked_tables(hop, "appdb") == set()
-
-
-# ---- the choice, per table ------------------------------------------------
-
-FACTS = {"narrow": {"rows": 500_000, "bytes": 40_000_000, "key": True,
-                    "binary": False},
-         "wide": {"rows": 500_000, "bytes": 220_000_000, "key": True,
-                  "binary": True},
-         "tiny": {"rows": 1, "bytes": 16_384, "key": True, "binary": False}}
-ALL = {movers.DUMP_LOAD: None, movers.STREAM_COPY: None,
-       movers.TABLE_COPIER: None}
-
-
-def _rates(monkeypatch, dl, sc, tc):
-    monkeypatch.setattr(movers, "my_rates", lambda hop, db=None: {
-        movers.DUMP_LOAD: dict(dl), movers.STREAM_COPY: dict(sc),
-        movers.TABLE_COPIER: dict(tc)})
-
-
-def test_each_table_goes_by_the_rung_measured_fastest_for_its_shape(
-        tmp_path, monkeypatch):
-    P, B = movers.PLAIN, movers.BINARY
-    _rates(monkeypatch, {P: 1e6, B: 100e6}, {P: 1000e6, B: 1e6},
-           {P: 0.5e6, B: 0.5e6})
-    got = movers.my_bulk_choice(_hop(tmp_path), "appdb", "mydumper",
-                                list(FACTS), FACTS, fresh=True,
-                                available=ALL)
-    assert got["narrow"].rung == movers.STREAM_COPY, got["narrow"]
-    assert got["wide"].rung == movers.DUMP_LOAD, got["wide"]
-    assert "without binary columns" in got["narrow"].reason
-    assert "with binary columns" in got["wide"].reason
-    # the numbers behind it are kept with it, for the decision engine
-    assert got["narrow"].seconds[movers.STREAM_COPY] == \
-        pytest.approx(0.04, abs=0.01)
-    assert got["narrow"].seconds[movers.DUMP_LOAD] == pytest.approx(40)
-
-
-def test_a_rung_that_saves_less_than_it_costs_to_start_is_not_started(
-        tmp_path, monkeypatch):
-    """Two programs started for one small table is slower than one."""
-    P, B = movers.PLAIN, movers.BINARY
-    start = movers._RUNG[movers.STREAM_COPY].fixed
-    # narrow straight across saves half what the straight copy costs to
-    # start: 10 s by the dump, 10 - start/2 straight - past the engine's
-    # tie, so the climb takes it, and the start-up hands it back
-    _rates(monkeypatch, {P: 4e6, B: 100e6},
-           {P: 40e6 / (10 - start / 2), B: 1e6}, {P: 0.5e6, B: 0.5e6})
-    got = movers.my_bulk_choice(_hop(tmp_path), "appdb", "mydumper",
-                                list(FACTS), FACTS, fresh=True,
-                                available=ALL)
-    assert {c.rung for c in got.values()} == {movers.DUMP_LOAD}, got
-    assert "rather than starting another program" in got["narrow"].reason
-    # saving more than the start, it is started
-    _rates(monkeypatch, {P: 4e6, B: 100e6},
-           {P: 40e6 / (10 - start * 1.5), B: 1e6}, {P: 0.5e6, B: 0.5e6})
-    got = movers.my_bulk_choice(_hop(tmp_path), "appdb", "mydumper",
-                                list(FACTS), FACTS, fresh=True,
-                                available=ALL)
-    assert got["narrow"].rung == movers.STREAM_COPY, got
-
-
-def test_the_straight_copy_alone_falls_back_only_where_it_cannot_run(
-        tmp_path, monkeypatch):
-    """Asked to copy straight across, the table copier carries nothing for
-    its speed - measured in the docker run, small tables went to it for
-    its shorter start-up and the straight copy carried none - and every
-    table where the straight copy cannot run."""
-    monkeypatch.setattr(movers, "which", lambda name: "/bin/" + name)
-    hop = _hop(tmp_path)
-    got = movers.my_rungs_available(hop, "mysqlsh", loads=True)
-    assert got[movers.STREAM_COPY] is None
-    assert got[movers.TABLE_COPIER] and got[movers.DUMP_LOAD], got
-    got = movers.my_rungs_available(hop, "mysqlsh", loads=False)
-    assert "local_infile is off" in got[movers.STREAM_COPY]
-    assert got[movers.TABLE_COPIER] is None, got
-    got = movers.my_rungs_available(hop, "mydumper", loads=True)
-    assert set(got.values()) == {None}, got
-
-
-def test_small_tables_do_not_start_the_slower_starting_program(
-        tmp_path, monkeypatch):
-    """Measured in the docker run: two 2,000-row tables each a few
-    milliseconds faster straight across all went that way, and the move
-    paid the straight copy's start-up, eight times the dump's, where the
-    rule only moved tables between programs already in use."""
-    P, B = movers.PLAIN, movers.BINARY
-    small = {"orders": {"rows": 2000, "bytes": 98_304, "binary": False},
-             "people": {"rows": 2000, "bytes": 212_992, "binary": True}}
-    _rates(monkeypatch, {P: 18.9e6, B: 60.8e6}, {P: 23.2e6, B: 64.9e6},
-           {P: 10.8e6, B: 36.8e6})
-    got = movers.my_bulk_choice(_hop(tmp_path), "appdb", "mydumper",
-                                list(small), small, fresh=True,
-                                available=ALL)
-    assert {c.rung for c in got.values()} == {movers.DUMP_LOAD}, got
-    assert "start-up costs more than it saves" in got["orders"].reason
-    # large enough, the faster rate pays for the start-up
-    large = {t: {**f, "bytes": f["bytes"] * 10_000}
-             for t, f in small.items()}
-    got = movers.my_bulk_choice(_hop(tmp_path), "appdb", "mydumper",
-                                list(large), large, fresh=True,
-                                available=ALL)
-    assert {c.rung for c in got.values()} == {movers.STREAM_COPY}, got
-
-
-def test_a_difference_within_the_engines_tie_goes_by_the_list(
-        tmp_path, monkeypatch):
-    """Two estimates closer than `decide.TIE` are a tie, as for every
-    choice the engine makes: the list's order takes it, and says so."""
-    from migkit import decide
-    P, B = movers.PLAIN, movers.BINARY
-    _rates(monkeypatch, {P: 4e6, B: 100e6},
-           {P: 40e6 / (10 * (1 - decide.TIE / 2)), B: 1e6},
-           {P: 0.5e6, B: 0.5e6})
-    got = movers.my_bulk_choice(_hop(tmp_path), "appdb", "mydumper",
-                                list(FACTS), FACTS, fresh=True,
-                                available=ALL)
-    assert got["narrow"].rung == movers.DUMP_LOAD, got
-    assert "a tie" in got["narrow"].reason, got["narrow"].reason
-
-
-def test_a_rung_that_cannot_run_here_is_never_chosen(tmp_path, monkeypatch):
-    P, B = movers.PLAIN, movers.BINARY
-    _rates(monkeypatch, {P: 1e6, B: 1e6}, {P: 100e6, B: 100e6},
-           {P: 2e6, B: 2e6})
-    got = movers.my_bulk_choice(
-        _hop(tmp_path), "appdb", "mydumper", list(FACTS), FACTS, fresh=True,
-        available={**ALL, movers.STREAM_COPY: "local loads are off"})
-    assert movers.STREAM_COPY not in {c.rung for c in got.values()}, got
-
-
-def test_a_masked_table_goes_by_the_dump_whatever_is_faster(tmp_path,
-                                                            monkeypatch):
-    P, B = movers.PLAIN, movers.BINARY
-    _rates(monkeypatch, {P: 1e6, B: 1e6}, {P: 100e6, B: 100e6},
-           {P: 100e6, B: 100e6})
-    hop = _hop(tmp_path, {"mask_on_write": {"narrow.b": "null"}})
-    got = movers.my_bulk_choice(hop, "appdb", "mydumper", list(FACTS),
-                                FACTS, fresh=True, available=ALL)
-    assert got["narrow"].rung == movers.DUMP_LOAD
-    none = movers.my_bulk_choice(
-        hop, "appdb", "mydumper", list(FACTS), FACTS, fresh=True,
-        available={**ALL, movers.DUMP_LOAD: "not installed"})
-    assert none["narrow"].rung == "" and "not installed" in \
-        none["narrow"].reason
-
-
-def test_the_plan_sends_a_table_measured_faster_table_by_table_there(
-        tmp_path, monkeypatch):
-    P, B = movers.PLAIN, movers.BINARY
-    _rates(monkeypatch, {P: 1e6, B: 1e6}, {P: 1e6, B: 1e6},
-           {P: 100e6, B: 100e6})
-    hop = _hop(tmp_path, exclude=["tiny"])
-    choice = movers.my_bulk_choice(hop, "appdb", "mydumper", list(FACTS),
-                                   FACTS, fresh=True, available=ALL)
-    got = {d.table: d for d in planner.plan(hop, "appdb", "mydumper",
-                                            list(FACTS), None, FACTS,
-                                            choice=choice)}
-    assert got["narrow"].path == planner.COPIER, got
-    assert "table by table" in got["narrow"].reason
-    assert got["tiny"].path == planner.LEFT
-    assert movers.routed_to_copier(hop, "appdb", "mydumper", list(FACTS),
-                                   "appdb", choice=choice) == \
-        ["appdb.narrow", "appdb.wide"]
-
-
-def test_the_copier_after_the_move_reads_the_moves_choice(tmp_path,
-                                                          monkeypatch):
-    """The move decides once and keeps it: the rates it measures count
-    only once it is done, so the table copier that follows it cannot
-    decide otherwise and leave a table it emptied empty."""
-    P, B = movers.PLAIN, movers.BINARY
-    _rates(monkeypatch, {P: 1e6, B: 1e6}, {P: 1e6, B: 1e6},
-           {P: 100e6, B: 100e6})
-    hop = _hop(tmp_path)
-    (hop.report_dir("appdb") / "move-began.json").write_text(
-        json.dumps({"epoch": time.time() - 1}))
-    choice = movers.my_bulk_choice(hop, "appdb", "mydumper", list(FACTS),
-                                   FACTS, fresh=True, available=ALL)
-    movers._persist_choice(hop, "appdb", choice)
-    # the numbers change under it; the move in progress keeps its choice
-    _rates(monkeypatch, {P: 100e6, B: 100e6}, {P: 1e6, B: 1e6},
-           {P: 1e6, B: 1e6})
-    kept = movers.my_bulk_choice(hop, "appdb", "mydumper", list(FACTS),
-                                 FACTS, available=ALL)
-    assert {t: c.rung for t, c in kept.items()} == \
-        {t: c.rung for t, c in choice.items()}
-    # the move finished: the next plan decides afresh
-    time.sleep(0.01)
-    (hop.report_dir("appdb") / "copy-position.json").write_text("{}")
-    fresh = movers.my_bulk_choice(hop, "appdb", "mydumper", list(FACTS),
-                                  FACTS, available=ALL)
-    assert fresh["narrow"].rung == movers.DUMP_LOAD
-
-
-def test_a_moves_rates_count_once_it_is_done(tmp_path):
-    hop = _hop(tmp_path)
-    bench = movers.my_rates(hop, "appdb")[movers.DUMP_LOAD][movers.PLAIN]
-    assert bench != pytest.approx(10e6), "the test would measure nothing"
-    movers._my_record_rates(hop, "appdb", movers.DUMP_LOAD,
-                            {"narrow": 4.0}, FACTS)
-    assert movers.my_rates(hop, "appdb")[movers.DUMP_LOAD][movers.PLAIN] \
-        == bench, "a move still running taught the choice"
-    time.sleep(0.01)
-    (hop.report_dir("appdb") / "copy-position.json").write_text("{}")
-    got = movers.my_rates(hop, "appdb")[movers.DUMP_LOAD][movers.PLAIN]
-    assert got == pytest.approx(40_000_000 / 4.0)
-    # kept for the hop, the waiting file gone
-    assert not (hop.report_dir("appdb") / "bulk-rates.pending.json").exists()
-    assert movers.my_rates(hop)[movers.DUMP_LOAD][movers.PLAIN] == \
-        pytest.approx(10e6)
-
-
-def test_overlapping_spans_share_the_rungs_whole_time(tmp_path):
-    """Two tables carried side by side for 2 s, one busy 3 s of thread
-    time and the other 1: their rates come from the 2 s, shared 3 to 1,
-    not from 4 s of spans that overlap."""
-    hop = _hop(tmp_path)
-    movers._my_record_rates(hop, "appdb", movers.DUMP_LOAD,
-                            {"narrow": 3.0, "wide": 1.0}, FACTS, wall=2.0)
-    got = json.loads((hop.report_dir("appdb")
-                      / "bulk-rates.pending.json").read_text())
-    assert got[movers.DUMP_LOAD][movers.PLAIN] == pytest.approx(40e6 / 1.5)
-    assert got[movers.DUMP_LOAD][movers.BINARY] == pytest.approx(220e6 / 0.5)
-
-
-def test_the_rungs_are_data_a_decision_engine_can_climb():
-    names = [r.name for r in movers.MY_RUNGS]
-    assert names == [movers.DUMP_LOAD, movers.STREAM_COPY,
-                     movers.TABLE_COPIER]
-    for r in movers.MY_RUNGS:
-        assert r.fixed > 0 and r.rates[movers.PLAIN] > 0 \
-            and r.rates[movers.BINARY] > 0, r
-        assert "masked on the way" in r.gives or r.name != movers.DUMP_LOAD
-    from tests.test_the_report_does_not_name_its_tools import TOOLS
-    said = " ".join(r.said for r in movers.MY_RUNGS).lower()
-    assert not [t for t in TOOLS + ("mysqlsh", "shell") if t in said], said
-    # the decision engine's own rungs, ranked by the measured seconds
-    from migkit import decide
-    rungs = movers.my_decide_rungs(ALL)
-    assert all(isinstance(r, decide.Rung) for r in rungs)
-    order = decide.rank(rungs, decide.Costs({movers.DUMP_LOAD: 9.0,
-                                             movers.STREAM_COPY: 3.0,
-                                             movers.TABLE_COPIER: 6.0}))
-    assert [r.name for r in order] == [movers.STREAM_COPY,
-                                       movers.TABLE_COPIER,
-                                       movers.DUMP_LOAD]
-    # a rung that cannot run here says why, in the engine's climb
-    got = decide.climb("t", movers.my_decide_rungs(
-        {**ALL, movers.STREAM_COPY: "local loads are off"}),
-        {"available": {**ALL, movers.STREAM_COPY: "local loads are off"}},
-        costs=decide.Costs({movers.DUMP_LOAD: 9.0, movers.STREAM_COPY: 3.0,
-                            movers.TABLE_COPIER: 6.0}), prove=False)
-    assert got.path == movers.TABLE_COPIER
-    assert "local loads are off" in dict(
-        (r.name, w) for r, w in got.passed)[movers.STREAM_COPY]
 
 
 def test_every_feature_has_a_state_and_a_reason():

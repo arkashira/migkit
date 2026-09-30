@@ -23,8 +23,8 @@ PREDICTED) and never taken for a measurement:
   spread widened;
 * from the resource model (`model.Model`, backlog R22) where the rung
   says which resources a byte of it passes (`Rung.loads`);
-* from migkit's own benchmarks (`seeds`: `movers.MY_RUNGS`' numbers of
-  `MY_BENCH`, `physical.MEASURED`), its spread wide.
+* from migkit's own benchmarks (`seeds`: the MySQL table ladder's numbers
+  of `MY_BENCH` and `PASS_BENCH`, `physical.MEASURED`), its spread wide.
 Shape is carried by the features rather than by a bucket a shape: one
 fit of seven numbers learns from every unit of a rung, where a bucket
 per shape starts every new shape from nothing.
@@ -329,12 +329,13 @@ class Fit:
 
 # --- migkit's own benchmarks, the first priors ------------------------------
 
-#: The shapes of `movers.MY_BENCH`'s two tables (the comment above
-#: `movers.MY_BENCH`): bytes of data and rows. Each MySQL bulk rung's two
-#: measured rates solve for its seconds a MB and a thousand rows: the
-#: dump and load, 18.9 MB/s on the narrow table and 60.8 on the wide,
-#: is ~0.0080 s a MB and ~3.7 ms a thousand rows - one rate a byte could
-#: not say both.
+#: The shapes of `MY_BENCH`'s two tables (the comment above it in
+#: `engines/mysql.py`): bytes of data and rows. Each rung of the MySQL
+#: table ladder's two measured rates solve for its seconds a MB and a
+#: thousand rows: the dump and load, 18.9 MB/s on the narrow table and
+#: 60.8 on the wide, is ~0.0080 s a MB and ~3.7 ms a thousand rows - one
+#: rate a byte could not say both. A rung measured read and written at
+#: once as well (`tableway.DIRECT`) is seeded as a way of its own.
 MY_BENCH_SHAPES = {"plain": (41.5e6, 500_000), "binary": (222e6, 500_000)}
 _SEEDS = {}
 _SEEDS_LOCK = threading.Lock()
@@ -348,21 +349,24 @@ def seeds():
             return _SEEDS
         np = _np()
         try:
-            from . import movers
+            from .engines.mysql import BINARY, MY_BENCH, PLAIN, MySQLEngine
+            from .tableway import DIRECT
             (pb, pr), (bb, br) = (MY_BENCH_SHAPES["plain"],
                                   MY_BENCH_SHAPES["binary"])
-            for r in movers.MY_RUNGS:
-                plain = r.rates.get(movers.PLAIN)
-                binary = r.rates.get(movers.BINARY)
-                if not plain or not binary:
-                    continue
-                tp, tb = pb / plain, bb / binary
-                a = (tb - tp) / ((bb - pb) / MIB)
-                c = (tp - a * pb / MIB) / (pr / 1000.0)
-                mu = np.zeros(D)
-                mu[0], mu[1], mu[2] = r.fixed, max(a, 0.0), max(c, 0.0)
-                _SEEDS[(r.name, "mysql->mysql")] = (mu, "migkit's benchmark"
-                                                    f" ({movers.MY_BENCH})")
+            for r in MySQLEngine.TABLE_WAYS:
+                for suffix in ("", DIRECT):
+                    plain = r.rates.get(PLAIN + suffix)
+                    binary = r.rates.get(BINARY + suffix)
+                    if not plain or not binary:
+                        continue
+                    tp, tb = pb / plain, bb / binary
+                    a = (tb - tp) / ((bb - pb) / MIB)
+                    c = (tp - a * pb / MIB) / (pr / 1000.0)
+                    mu = np.zeros(D)
+                    mu[0], mu[1], mu[2] = (r.startup, max(a, 0.0),
+                                           max(c, 0.0))
+                    _SEEDS[(r.name + suffix, "mysql->mysql")] = (
+                        mu, f"migkit's benchmark ({MY_BENCH})")
         except Exception:  # noqa: BLE001 - a seed is a help, never a need
             pass
         try:

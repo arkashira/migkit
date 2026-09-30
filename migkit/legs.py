@@ -194,7 +194,16 @@ select exists(select 1 from pg_largeobject_metadata),
        current_setting('max_replication_slots')::int
          - (select count(*) from pg_replication_slots),
        current_setting('max_wal_senders')::int
-         - (select count(*) from pg_stat_replication)
+         - (select count(*) from pg_stat_replication),
+       (select rolsuper from pg_roles where rolname = current_user)
+         or (has_database_privilege(current_database(), 'CREATE')
+             and not exists(
+               select 1 from pg_class c
+                 join pg_namespace n on n.oid = c.relnamespace
+                where c.relkind in ('r', 'p')
+                  and n.nspname not in ('pg_catalog', 'information_schema')
+                  and n.nspname not like 'pg\\_%'
+                  and not pg_has_role(c.relowner, 'USAGE')))
 """
 
 
@@ -221,13 +230,14 @@ def facts(hop, db=None):
     try:
         conn = _connect(hop.source, db)
         try:
-            lobs, version, wal, repl, slots, senders = _one(
+            lobs, version, wal, repl, slots, senders, publish = _one(
                 conn, SOURCE_FACTS_SQL)
         finally:
             conn.close()
         out["source"] = {"large_objects": lobs, "version": version,
                          "wal_level": wal, "replication": bool(repl),
-                         "free_slots": slots, "free_senders": senders}
+                         "free_slots": slots, "free_senders": senders,
+                         "may_publish": bool(publish)}
     except Exception as e:  # noqa: BLE001
         out["source"] = {"error": _words(e)}
     return out
@@ -329,8 +339,61 @@ def rungs():
                          if f.get("go") else None),
         because="the rows cross the network once, in the servers' own"
                 " binary form",
-        footprint=2)
+        footprint=2, changes=(PUBLICATION,))
     return (pull, subscribe)
+
+
+def _publication_stand(f):
+    """Where the temporary subscription's change on the source stands, as
+    the source answered: migkit's user may make a publication of every
+    table and drop it again - the slot the subscription makes with the
+    replication right its own need asks for - or only a DBA can."""
+    from .decide import BY_DBA, POSSIBLE, Stand
+    why = _unasked(f)
+    if why:
+        return Stand(BY_DBA, why)
+    if not _s(f, "may_publish"):
+        return Stand(BY_DBA, f"{f['hop'].source.user} on the source may not"
+                             " make a publication of the tables (CREATE on"
+                             " the database, and every table its own)")
+    return Stand(POSSIBLE, "migkit's user may make it and drop it again")
+
+
+def _copy_name(hop):
+    return _names(hop).replace("pull", "copy")
+
+
+def _publication_ctx(f):
+    """What the publication's statements are written with: the database,
+    its name, and the tables the copy carries - listed from the source
+    where the facts do not hold them."""
+    from .sourcechange import Ctx
+    hop = f["hop"]
+    db = f.get("db") or _first_db(hop)
+    tables = f.get("published")
+    if tables is None:
+        why = _unasked(f) if "legs" in f else None
+        try:
+            if why:
+                raise RuntimeError(why)
+            tables = _published(_carried(hop, db)[1])
+        except Exception as e:  # noqa: BLE001 - said in the statement
+            tables = [f"<the tables the copy carries, which could not be"
+                      f" listed: {_words(e)}>"]
+    return Ctx(db=db, name=_copy_name(hop), tables=tables)
+
+
+def _published(carried):
+    return [".".join(_q(p) for p in t.split(".", 1)) for t in carried]
+
+
+#: the temporary subscription's one change on the source: a publication of
+#: the tables it copies, and the slot the subscription makes, dropped once
+#: every table is copied (`sourcechange`). The hop's `server_to_server` is
+#: its answer given ahead: the objects the copy makes on the servers
+from . import sourcechange as _sourcechange  # noqa: E402
+PUBLICATION = _sourcechange.change("temporary_publication",
+                                   _publication_stand, _publication_ctx)
 
 
 def _near(f):
@@ -807,20 +870,29 @@ def _run_ranges(hop, db, work, workers, quiet, log):
 
 # --- a temporary subscription ------------------------------------------------
 
-def subscribe_move(hop, db, workers, go, log, poll=0.5):
-    """The plan's tables copied by a subscription made for the copy and
-    dropped once each is copied: a publication of them on the source, the
-    subscription on the target, in the servers' binary form."""
-    from . import movers, planner, stall
+def _carried(hop, db):
+    """(engine, the tables the temporary subscription copies, the ones the
+    table copier carries): one reading of the plan, for the copy and for
+    the statements its change on the source is said with."""
+    from . import planner
     from .engines.postgres import PostgresEngine
-    from .wording import Step, phase
     eng = PostgresEngine(hop)
     tables = eng._all_tables("src", db)
     decisions = planner.plan(hop, db, "pgsubscribe", tables, "public",
                              eng.table_facts("src", db))
     carried = _leaves(eng, db, [d.table for d in decisions
                                 if d.path == planner.BULK])
-    routed = [d.table for d in decisions if d.path == planner.COPIER]
+    return eng, carried, [d.table for d in decisions
+                          if d.path == planner.COPIER]
+
+
+def subscribe_move(hop, db, workers, go, log, poll=0.5):
+    """The plan's tables copied by a subscription made for the copy and
+    dropped once each is copied: a publication of them on the source, the
+    subscription on the target, in the servers' binary form."""
+    from . import movers, stall
+    from .wording import Step, phase
+    eng, carried, routed = _carried(hop, db)
     unmarked = _without_identity(eng, db, carried)
     if unmarked:
         raise SystemExit(
@@ -854,8 +926,6 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
         log(steps[-1])
     src = _connect(hop.source, db)
     dst = _connect(hop.target, hop.target_db(db))
-    listed = ", ".join(".".join(_q(p) for p in t.split(".", 1))
-                       for t in carried)
     conninfo = " ".join(
         f"{k}={_lit(v)}" for k, v in (
             ("host", host), ("port", port), ("dbname", db),
@@ -866,16 +936,30 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
     # before it only the changes after it would
     binary = _one(dst, "select current_setting('server_version_num')::int"
                   )[0] >= 160000
+    from . import sourcechange
+
+    def on_source(statement):
+        if not statement.lstrip().startswith("--"):
+            with src.cursor() as cur:
+                cur.execute(statement)
     try:
         with movers._IndexWindow(hop, db, workers, log):
             try:
                 _drop_copy(src, dst, name)
-                with src.cursor() as cur:
-                    cur.execute(f"create publication {_q(name)} for table"
-                                f" {listed}")
-                _subscribe(dst, name, conninfo, binary)
-                _wait_copied(dst, name, len(carried), log, poll,
-                             stall.seconds())
+                # the publication made as a change on the source: behind
+                # the hop's approvals, recorded before it is made and taken
+                # off after, or by the next run where this one is killed
+                with sourcechange.making(
+                        hop, PUBLICATION, {"hop": hop, "db": db,
+                                           "published": _published(carried)},
+                        on_source, db, log or (lambda m: None)):
+                    try:
+                        _subscribe(dst, name, conninfo, binary)
+                        _wait_copied(dst, name, len(carried), log, poll,
+                                     stall.seconds())
+                    finally:
+                        # the slot is the subscription's until it goes
+                        _drop_copy(src, dst, name)
             finally:
                 # before the indexes are built again: the subscription
                 # would apply the source's changes into every build

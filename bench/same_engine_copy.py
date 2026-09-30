@@ -436,7 +436,7 @@ def mysql():
             safely("pass", my_run, "pass-through", size, 4,
                    my_only("pass-through"))
             safely("dump", my_run, "dump and load of the table", size, 4,
-                   my_only("dump"))
+                   my_only("dump-load"))
             if not small:
                 continue
             safely("no binlog", my_run, "pass-through, binlog off", size, 4,
