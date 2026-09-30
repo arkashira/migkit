@@ -105,3 +105,5 @@ Then the queue above (live tail L/R/C/P items after tail_apply owners merge; eng
 - Two-way docker re-check on master (395c8e5 tests) running.
 - Next when slots free: a47bffb Oracle, a8d572b SQL Server, ae351bc MySQL tools, ad4909f physical, aa5d0ed engine gaps, ad4afda 0f pgcopydb, ae13c03 R20 cross-engine (staged, 3 flags), a90aadb/a939c23 R22 (a939c23 staged, 2 flags), then a075608 DVT, a7120bc warehouse, a8c4cd1 copybook.
 - Machine: swap 17/18 GB used at resume; one container pair at a time.
+- OWNER RULE 2026-09-30: go through the whole backlog and implement to the end; tests written with each feature but NOT run mid-way (only compileall + the tool-name guard); full suite ONCE when the backlog is done, then fix. Merges no longer run docker checks. All running agents told. Two-way docker re-check stopped under this rule.
+- Cron replaced: 8dc4282b (every 10 min) with the rule above. Running 10: batch 1 (8) + a47bffb Oracle + a8d572b SQL Server.
