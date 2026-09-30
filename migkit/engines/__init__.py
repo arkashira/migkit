@@ -6,7 +6,17 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "sybase": "ase", "sap-ase": "ase", "vsam": "copybook",
            "cobol": "copybook", "ibmi": "db2i", "as400": "db2i",
            "iseries": "db2i", "db2-for-i": "db2i", "db2-zos": "db2zos",
-           "db2z": "db2zos", "delta-lake": "delta"}
+           "db2z": "db2zos", "delta-lake": "delta",
+           "cockroach": "cockroachdb", "crdb": "cockroachdb",
+           "aurora-dsql": "dsql", "cosmos": "cosmosdb",
+           "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb"}
+
+#: engines reached over another's wire protocol, whose values a driver
+#: hands over, a table is built and a value written as that one's are
+#: (`canon.dialect`): TiDB over MySQL's, CockroachDB and Aurora DSQL over
+#: PostgreSQL's. Everything else - the catalogue, the change feed, what a
+#: transaction may hold - is the engine's own
+WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres"}
 
 #: an address's scheme and the engine it names - `source:
 #: postgres://app@db1/shop` in a hop (`migkit.addresses`). The one place a
@@ -42,6 +52,11 @@ SCHEMES = {
     "iceberg+https": "iceberg",
     "delta": "delta", "delta+s3": "delta",
     "trino": "generic", "presto": "generic", "vertica": "generic",
+    "tidb": "tidb",
+    "cockroachdb": "cockroachdb", "cockroach": "cockroachdb",
+    "dsql": "dsql",
+    "couchbase": "couchbase", "couchbases": "couchbase",
+    "cosmosdb": "cosmosdb", "cosmos": "cosmosdb",
 }
 
 
@@ -128,6 +143,21 @@ def _class_for(name):
     if name == "db2zos":
         from .db2zos import Db2ZosEngine
         return Db2ZosEngine
+    if name == "tidb":
+        from .tidb import TiDBEngine
+        return TiDBEngine
+    if name == "cockroachdb":
+        from .cockroachdb import CockroachEngine
+        return CockroachEngine
+    if name == "dsql":
+        from .dsql import DsqlEngine
+        return DsqlEngine
+    if name == "couchbase":
+        from .couchbase import CouchbaseEngine
+        return CouchbaseEngine
+    if name == "cosmosdb":
+        from .cosmosdb import CosmosEngine
+        return CosmosEngine
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
@@ -140,6 +170,7 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "db2zos", "ase",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
          "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
+         "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
          "hetero", "generic")
 
 

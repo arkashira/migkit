@@ -284,8 +284,8 @@ names, `LADDER.table` and `P0-AUDIT` (WAVE queue items).
 | 211 | ER2 | Copybook engine (EBCDIC, packed and zoned decimals) and IBM i with DISPLAY_JOURNAL follow and HASH_ROW | DONE 073c2c1 (proved on no real IBM i or z/OS) | L | engines | L3436-3444 |
 | 212 | ER2.zos | Db2 for z/OS through ibm_db | DONE 073c2c1 (`db2zos`: copy and verify; follow said not applicable; SQL1598N said as the Db2 Connect licence it is; IMS/CICS/VSAM changes said as unreadable; proved on no z/OS) | M | engines | L3441-3444 |
 | 213 | ER3 | Teradata | IN PROGRESS (engine reach agent ER3, ER6, ER7) | M | engines | L3476-3478 |
-| 214 | ER4 | One change-topic reader (TiDB, Couchbase, Aurora DSQL, CockroachDB) | IN PROGRESS (engine reach agent ER4, ER5) | M | engines | L3479-3481 |
-| 215 | ER5 | Cosmos DB NoSQL | IN PROGRESS (engine reach agent ER4, ER5) | M | engines | L3482-3483 |
+| 214 | ER4 | One change-topic reader (TiDB, Couchbase, Aurora DSQL, CockroachDB) | PARTLY (engine reach merge; done: changetopic.py reader, tidb/cockroachdb/dsql/couchbase engines, copy/check/follow; missing: bulk-load paths, users/roles, snapshots, CockroachDB/DSQL sequences, TiCDC open-protocol/Avro outputs) | M | engines | L3479-3481 |
+| 215 | ER5 | Cosmos DB NoSQL | PARTLY (engine reach merge; done: cosmosdb engine, both feed modes, digests by feed range, users; missing: bulk-load path, snapshots) | M | engines | L3482-3483 |
 | 216 | ER6 | SAP application data through ODP over OData | IN PROGRESS (engine reach agent ER3, ER6, ER7) | M | engines | L3484-3487 |
 | 217 | ER7 | SaaS: dlt, Singer taps, Airbyte connectors as programs, Salesforce Pub/Sub | IN PROGRESS (engine reach agent ER3, ER6, ER7) | L | engines | L3488-3491 |
 | 218 | W5 | Other sources: Netezza, SAP HANA, Informix (x86), Progress, Vertica, Exasol, Databricks/Iceberg | PARTLY bd20c46 (done: Iceberg and Delta tables as sides; missing: Netezza, SAP HANA, Informix, Progress, Vertica, Exasol, Databricks) | L | engines | L3223, L3426-3428, L3646-3651 |

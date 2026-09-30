@@ -99,6 +99,11 @@ dependencies = [
     "google-api-python-client",
     # the passwords `migkit init` keeps, in the OS keychain
     "keyring>=25",
+    # Couchbase and Cosmos DB as sides of a pair: the key-value range
+    # scan and multi-document writes, and the change feed by feed range
+    # in all-versions-and-deletes mode (4.9.1b1 and later)
+    "couchbase>=4.3",
+    "azure-cosmos>=4.9.1",
     # the team told wherever it is: one scheme for each of about a
     # hundred services, behind migkit's own `notify`
     "apprise>=2.0",

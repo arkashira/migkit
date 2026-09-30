@@ -641,6 +641,14 @@ CAPABILITIES = [
     ("SAP ASE: verify and copy",
      "compare and copy tables through ASE's own protocol",
      [ASE_DRIVER], []),
+    ("TiDB, CockroachDB, Aurora DSQL: verify, copy and follow",
+     "compare and copy tables over the MySQL or PostgreSQL wire, and follow"
+     " what each publishes of its changes, in commit order",
+     [], []),
+    ("Couchbase, Cosmos DB: verify, copy and follow",
+     "compare and copy documents through each one's own SDK, and follow"
+     " its change feed",
+     [], []),
     ("SQLite: verify, repair and copy",
      "compare rows and schema, repair with undo, copy table by table",
      [], []),

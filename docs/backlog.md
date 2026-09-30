@@ -3507,8 +3507,10 @@ mainframe, IBM i, SAP application data, Cosmos NoSQL or SaaS. In order:
 4. **One change-topic reader** for engines that publish changes as a
    documented stream (TiDB, Couchbase, Aurora DSQL, CockroachDB) - one
    reader in the cross-engine tail covers all four.
+   *Built 2026-10-01* (`migkit/changetopic.py`, ER4 below).
 5. **Cosmos DB NoSQL** (vNext emulator runs on arm64; deletes need
    "all versions and deletes" mode, which needs continuous backup).
+   *Built 2026-10-01* (`migkit/engines/cosmosdb.py`, ER5 below).
 6. **SAP application data** only through ODP over OData (`pyodata`,
    Apache-2.0) with migkit's own delta tokens - ODP over RFC is
    forbidden to non-SAP tools (Note 3255746) and direct database reads
@@ -3520,6 +3522,69 @@ mainframe, IBM i, SAP application data, Cosmos NoSQL or SaaS. In order:
 Licence changes noted: CockroachDB and ScyllaDB are no longer open
 source, Couchbase server is BSL, Greenplum closed (forks Cloudberry,
 WarehousePG), MariaDB Xpand discontinued.
+
+**ER4. One change-topic reader: TiDB, CockroachDB, Aurora DSQL,
+Couchbase.** *Built 2026-10-01.* One reader (`migkit/changetopic.py`)
+for a source whose changes are published elsewhere in a known envelope:
+lanes (a topic's partitions read by offset with no consumer group, a
+Kinesis stream's shards, a changefeed streamed to a query, a container's
+feed ranges), envelopes (TiCDC canal-json with `enable-tidb-extension`
+and TiCDC simple, CockroachDB changefeed JSON, Couchbase's connector
+with its default source handler, DSQL CDC records whole or in CRC-checked
+fragments, Cosmos DB's two feed modes), and one buffer that keeps the
+order each source promises: one clock across lanes (TSO, HLC, DSQL
+commit nanoseconds) released at the lowest lane mark in commit order,
+twice-delivered and already-copied changes dropped by the fence, never
+half a commit; or one order per lane (a vBucket, a feed range) with a
+sub-lane's last version dropping a redelivery and a failed-over vBucket
+read on. The position saved is each lane's first change not handed on,
+so a restart reads it again. TiDB and CockroachDB read each changed row
+back as it stood at the batch's fence (`@@tidb_snapshot`, `AS OF SYSTEM
+TIME`) - exact whatever the envelope made of a value - and a key the
+feed says was written and is not there (or deleted and is) stops the
+tail instead of becoming a delete. DSQL, with no mark in its stream, is
+released by the stream's own lag (`BehindSourceLag`, or the hop's
+`order_window`); its lossy columns (interval, timetz, infinities) are
+read back as they are now. Engines: `tidb` (the MySQL engine's
+connection, catalogue, reads and writes; checks, copy and tail through
+the pair; TiDB's own `SHOW CREATE TABLE`; `SHOW TABLE ... NEXT_ROW_ID`
+for the next id; `ADMIN CHECK TABLE` as a deep check; `ADMIN CHECKSUM
+TABLE` not the verdict - its CRC64 carries the table's id), `cockroachdb`
+and `dsql` over PostgreSQL's wire (`pgwire.py`: format_type declared
+types, intervals read as text; CockroachDB by UPSERT and deleted in
+pieces, DSQL within 3,000 rows and 9 MiB a transaction with OCC retries,
+`CREATE INDEX ASYNC`, IAM tokens), `couchbase` (range scan, multi-writes,
+the fence the server's own high sequence numbers over memcached's
+binary protocol with SCRAM). Each: canon dialect (`canon.dialect`, TiDB
+rendered in SQL, the others folded here), schemes, `changes` options,
+capabilities and coverage cells, interlock identities, the DBA's
+requirements and scripts. Tests written, not run:
+`test_a_change_feed_is_read_in_commit_order.py`,
+`test_tidb_follows_through_its_change_topic.py`,
+`test_cockroachdb_follows_through_its_changefeed.py`,
+`test_dsql_writes_and_follows_within_its_limits.py`,
+`test_couchbase_as_a_side_of_a_pair.py`. Still open: their bulk paths
+(Lightning/BR, `IMPORT INTO`, cbbackupmgr), users and roles, snapshots,
+CockroachDB and DSQL sequences, CockroachDB and Couchbase settings;
+TiCDC's open protocol, Avro and Debezium outputs; a table a CockroachDB
+feed began without joins at the next start.
+
+**ER5. Cosmos DB for NoSQL.** *Built 2026-10-01.* `cosmosdb` through
+`azure-cosmos`: containers read feed range by feed range, digested with
+the ranges side by side (verified by partition key range), a key holding
+`id` kept as Cosmos DB keeps one, other keys made the item's id,
+transactional batches of 100 by partition key and single upserts side by
+side, 429s waited out by the SDK, low priority reads where asked. The
+change feed by feed range: all versions and deletes where the account
+serves it (it loses nothing within the continuous-backup window, and
+cannot start before the tail's own start), latest version only where the
+hop says `change_feed: latest` (it loses every delete and TTL expiry -
+check finds them - and versions between reads). Fence: each range's
+continuation read to its end at or past a "now" read's. Settings
+compared (partition key, TTL, unique keys, indexing), conflicts feed as
+the deep check. Test written, not run:
+`test_cosmosdb_as_a_side_of_a_pair.py` (the vNext emulator, arm64).
+Still open: bulk paths (container copy jobs), point-in-time snapshots.
 
 ### Leapfrog: a live tail's table set, raw logs, closed capabilities rebuilt (docs/research/leapfrog-live-tail-and-raw-logs-2026-09-28.md)
 

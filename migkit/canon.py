@@ -278,6 +278,17 @@ class _Absent:
 
 ABSENT = _Absent()
 
+
+def dialect(engine):
+    """The engine whose values, declared types, DDL and SQL renderings
+    `engine` shares (`engines.WIRE`: TiDB MySQL's, CockroachDB and Aurora
+    DSQL PostgreSQL's) - itself for every other. Each table below keyed by
+    engine holds the dialect's entry under the engine's name too
+    (`_speak_as`), and what branches on an engine's name asks this."""
+    from .engines import WIRE
+    return WIRE.get(engine, engine)
+
+
 # declared type (lower-cased, without length/precision) -> neutral class
 TYPES = {
     "mysql": {
@@ -656,6 +667,18 @@ TYPES = {
         "dbpointer": "bson", "undefined": "bson", "object": "bson",
         "array": "bson",
     },
+    # Couchbase and Cosmos DB hold JSON documents. A collection or
+    # container migkit did not make is described by the JSON kinds its
+    # documents hold (a number that is always whole an `integer`); one it
+    # made keeps each field's class, and is read by the class's own name
+    # (a decimal as its text, a time as ISO text, bytes as base64)
+    **{name: {
+        "string": "text", "integer": "integer", "number": "float",
+        "boolean": "boolean", "object": "json", "array": "json",
+        "json": "json", "text": "text", "float": "float",
+        "decimal": "decimal", "bytes": "bytes", "date": "date",
+        "timestamp": "timestamp", "time": "time", "uuid": "uuid",
+    } for name in ("couchbase", "cosmosdb")},
 }
 
 # MySQL has no boolean: `tinyint(1)` is the convention and holds -128..127.
@@ -983,7 +1006,13 @@ def _sqlite(col, cls):
     return f'migkit_canon("{col}", \'{cls}\')'
 
 
-BUILDERS = {"mysql": _mysql, "postgres": _postgres, "sqlite": _sqlite}
+#: TiDB renders MySQL's SQL as MySQL does (every function above is one
+#: TiDB has). CockroachDB and DSQL are not given PostgreSQL's: CockroachDB
+#: has no `isfinite` and its `to_char` is not PostgreSQL's, and a
+#: rendering no server of theirs has run is folded in this process instead
+#: (`IN_PROCESS`)
+BUILDERS = {"mysql": _mysql, "postgres": _postgres, "sqlite": _sqlite,
+            "tidb": _mysql}
 
 
 #: engines whose decimal keeps the scale each value was written with, where
@@ -1100,6 +1129,7 @@ def read_expr(engine, quoted, cls):
     the value by 16, and nothing stopped it. Read as a double - exact for
     every float, and a no-op for a double - the value arrives whole, and
     is the same number every other reader and both renderings see."""
+    engine = dialect(engine)
     if cls == "float":
         if engine == "mysql":
             return f"({quoted} * 1e0)"
@@ -1883,6 +1913,7 @@ def ddl_type(engine, cls, numbers=(), key=False):
     something plausible: a table created with the wrong column type is harder
     to notice than one that was never created.
     """
+    engine = dialect(engine)
     table = DDL.get(engine)
     if table is None:
         raise ValueError(f"no DDL types for engine {engine!r}")
@@ -2077,6 +2108,7 @@ def write_value(engine, cls, value):
     the same way."""
     if value is None or value is ABSENT:
         return value
+    engine = dialect(engine)
     if isinstance(cls, str) and cls.startswith(bsontype_prefixes()):
         from . import bsontype
         if cls.startswith(bsontype.MONGO):
@@ -2768,6 +2800,7 @@ def _temporal_digits(engine, declared):
 
 
 def _declared_digits(engine, declared):
+    engine = dialect(engine)
     name, nums = _split_declared(declared)
     base = name.split(" ")[0]
     if type_class(engine, declared) == INTERVAL:
@@ -2806,6 +2839,7 @@ def _declared_digits(engine, declared):
 def _fixed_decimal(engine, declared):
     """(precision, scale) a decimal column is held to, or None where it
     keeps what it is given (PostgreSQL's `numeric` with no typmod)."""
+    engine = dialect(engine)
     name, nums = _split_declared(declared)
     if engine == "clickhouse" and name in ("decimal32", "decimal64",
                                            "decimal128", "decimal256"):
@@ -2991,6 +3025,7 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
     Only kinds that can happen for this pair: asking a question whose
     answer is always nothing costs a scan and says nothing."""
     facts = facts or {}
+    src, dst = dialect(src), dialect(dst)
     if dst == "mongodb" and src != "mongodb" and src_declared:
         # into MongoDB a value is written as the type its source column is
         # held as there (`bsontype.column_tag`), whatever the field
@@ -3621,7 +3656,8 @@ def how_compared(src_engine, src_declared, src_cls, dst_engine,
 IN_PROCESS = {"mongodb", "sqlite", "mssql", "parquet", "clickhouse",
               "dynamodb", "oracle", "db2", "opensearch", "cassandra",
               "redshift", "snowflake", "bigquery", "ase", "duckdb",
-              "copybook", "db2i", "db2zos", "iceberg", "delta"}
+              "copybook", "db2i", "db2zos", "iceberg", "delta",
+              "cockroachdb", "dsql", "couchbase", "cosmosdb"}
 
 
 def renders(engine):
@@ -3654,6 +3690,7 @@ DIGEST_BITS = DIGEST_HEX * 4
 def digest_expr(engine, row_expr):
     """Aggregate yielding one number for a whole table, comparable across
     engines. Order-independent, so neither side has to sort."""
+    engine = dialect(engine)
     if engine == "mysql":
         return (f"coalesce(sum(cast(conv(substr(md5({row_expr}),1,"
                 f"{DIGEST_HEX}),16,10) as decimal(65,0))), 0)")
@@ -3683,6 +3720,7 @@ def row_expr(engine, columns):
     """The canonical injective row text for `[(name, class)]`."""
     from . import rowtext
     parts = [expr(engine, name, cls) for name, cls in columns]
+    engine = dialect(engine)
     if engine == "mysql":
         return rowtext.mysql_row_from(parts)
     if engine == "postgres":
@@ -3690,3 +3728,46 @@ def row_expr(engine, columns):
     if engine == "sqlite":
         return rowtext.sqlite_row_from(parts)
     raise ValueError(f"no canonical row text for engine {engine!r}")
+
+
+# ---- engines on another's wire (`dialect`) ---------------------------------
+
+#: CockroachDB's own names for its types, as its catalogue's
+#: `crdb_sql_type` gives them, beside PostgreSQL's, which `format_type`
+#: gives. Its `INT` is 64 bits, and `format_type` says `bigint`
+TYPES["cockroachdb"] = {
+    **TYPES["postgres"],
+    "string": "text", "int": "integer", "int8": "integer",
+    "int4": "integer", "int2": "integer", "int64": "integer",
+    "float": "float", "decimal": "decimal", "bytes": "bytes",
+    "timestamptz": "timestamp", "jsonb": "json", "json": "json",
+}
+
+
+def _speak_as():
+    """Each engine-keyed table holds a wire engine's dialect's entry under
+    the engine's own name too, where the engine has none of its own - so
+    TiDB builds, writes, sizes and refuses a value as MySQL does, and
+    CockroachDB and DSQL as PostgreSQL does. `BUILDERS` and `IN_PROCESS`
+    are not among them: where a rendering runs is each engine's own."""
+    from .engines import WIRE
+    tables = (TYPES, DDL, FLOAT4, FLOAT4_DDL, INT4_DDL, ARRAY_DDL,
+              ARRAY_HOLDS, JSON_UNKEYED, KEY_TEXT, TIME_MEANING, INT_RANGES,
+              CHAR_TYPES, UNLIMITED_CHARS, BYTE_TYPES, NUMERIC_TYPES,
+              MOST_DIGITS, DECIMAL_MOST, SIGNIFICANT, ADDRESS_ONLY,
+              VECTOR_WIDTH, UNFIT_SQL)
+    sets = (KEEPS_SCALE, NO_NONFINITE_FLOAT, NONFINITE_DECIMAL,
+            NO_NONFINITE_VECTOR, NO_SHAPE_WRITER)
+    for engine, speaks in WIRE.items():
+        for table in tables:
+            if speaks in table and engine not in table:
+                table[engine] = table[speaks]
+        for group in sets:
+            if speaks in group:
+                group.add(engine)
+        for owner, typ in list(JSON_SORTS_KEYS):
+            if owner == speaks:
+                JSON_SORTS_KEYS.add((engine, typ))
+
+
+_speak_as()

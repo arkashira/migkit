@@ -529,6 +529,7 @@ class Hop:
 DEFAULT_PORTS = {
     "postgres": 5432, "mysql": 3306, "mssql": 1433,
     "mongodb": 27017, "redis": 6379, "kafka": 9092,
+    "tidb": 4000, "cockroachdb": 26257, "dsql": 5432, "cosmosdb": 443,
 }
 
 

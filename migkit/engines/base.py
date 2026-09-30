@@ -5377,6 +5377,22 @@ def sizes_of(lengths, exact=False, rows=None):
             "exact": bool(exact)}
 
 
+class NotHere:
+    """A way an engine inherits from the engine whose wire it speaks and
+    does not have: TiDB keeps no binlog to replicate from, CockroachDB no
+    publication. Read on the class or on an engine it is not there -
+    `hasattr` answers False and `getattr(cls, name, None)` None - so every
+    caller that asks whether an engine can do a thing, and the capability
+    table that reads it off the code, see that it cannot; a placeholder
+    that raised when called would have read as a way it has."""
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, obj, owner=None):
+        raise AttributeError(self.name)
+
+
 class _LaneFailed(RuntimeError):
     """A lane of a batch that failed, for the batch to go in one
     transaction instead (`Engine.neutral_apply`)."""

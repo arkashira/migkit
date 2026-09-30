@@ -1172,6 +1172,13 @@ WAYS = {
            for n in ("sqlite", "clickhouse", "cassandra", "dynamodb",
                      "opensearch", "parquet") + _DBAPI},
         "mongodb": (NOT_APPLICABLE, "every document carries an _id"),
+        # the engines on another's wire read a keyless table in one pass
+        # through the one DB-API reader (ER4)
+        **{n: ("yes", "@neutral_batches")
+           for n in ("tidb", "cockroachdb", "dsql")},
+        "couchbase": (NOT_APPLICABLE, "every document is kept by its key"),
+        "cosmosdb": (NOT_APPLICABLE, "every item carries an id within its"
+                                     " partition key"),
         "copybook": ("yes", "@position_spans"),
         "redis": (NOT_APPLICABLE, "every value is under its key"),
         "kafka": (NOT_APPLICABLE, "a message is addressed by its partition"
@@ -1184,7 +1191,10 @@ WAYS = {
         "mongodb": ("yes", "@move_table"),
         "hetero": ("yes", "@_neutral_move"),
         **{n: ("yes", "@neutral_read") for n in ("sqlite", "clickhouse")
-           + _DBAPI},
+           + _DBAPI + ("tidb", "cockroachdb", "dsql")},
+        "couchbase": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "the key-value range scan")),
+        "cosmosdb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("feed ranges")),
         "cassandra": (NOT_APPLICABLE, _BY_KEY_ORDER.format("token ranges")),
         "dynamodb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scan segments")),
         "opensearch": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scroll slices")),
@@ -1228,6 +1238,12 @@ WAYS = {
         "mongodb": (NOT_APPLICABLE, "collections are sharded, not"
                                     " partitioned; a sharded source reads"
                                     " as one through its router"),
+        "couchbase": (NOT_APPLICABLE, "a bucket's vBuckets are its own"
+                                      " layout; the range scan reads across"
+                                      " them"),
+        "cosmosdb": (NOT_APPLICABLE, "a container's physical partitions are"
+                                     " its own layout; it is read feed range"
+                                     " by feed range"),
         "sqlite": (NOT_APPLICABLE, "SQLite has no partitioned tables"),
         "duckdb": (NOT_APPLICABLE, "DuckDB has no partitioned tables"),
         "copybook": (NOT_APPLICABLE, "a file is not partitioned; one file"

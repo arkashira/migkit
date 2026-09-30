@@ -229,9 +229,9 @@ def parse(text, side="source"):
             # the account identifier is where a server's name would be
             endpoint["account"] = endpoint.pop("host")
     endpoint.update(_options(engine, params, side))
-    if scheme == "rediss":
-        # Redis's own word for TLS, the certificate checked
-        # (`Endpoint.redis_tls`)
+    if scheme in ("rediss", "couchbases"):
+        # Redis's and Couchbase's own word for TLS, the certificate
+        # checked (`Endpoint.redis_tls`, `CouchbaseEngine._cluster`)
         endpoint["tls"] = True
     return engine, endpoint, [d for d in dbs if d]
 
@@ -258,14 +258,16 @@ def _options(engine, params, side):
     engine reads (`hopkeys.ENDPOINT_OPTIONS`); a word the engine does not
     read is refused here, where it was written, rather than ignored."""
     from . import hopkeys
+    from .engines import WIRE
     if not params:
         return {}
     if engine == "mongodb":
         # the driver's own options, handed to it as they were written
         return {"uri_options": urlencode(params)}
-    if engine == "mysql":
+    wire = WIRE.get(engine, engine)
+    if wire == "mysql":
         params = _mysql_tls(params, side)
-    if engine in ("postgres", "redshift"):
+    if wire in ("postgres", "redshift"):
         mode = params.get("sslmode")
         if mode is not None and mode not in LIBPQ_MODES:
             raise SystemExit(f"sslmode={mode}: one of"
@@ -337,9 +339,9 @@ def render(engine, endpoint, dbs=(), default_port=0):
         return None
     scheme = next((s for s, e in SCHEMES.items() if e == engine
                    and s not in ON_S3 + ICEBERG_REST
-                   + ("mongodb+srv", "rediss")), None)
-    if engine == "redis" and ep.get("tls") is True:
-        scheme = "rediss"
+                   + ("mongodb+srv", "rediss", "couchbases")), None)
+    if engine in ("redis", "couchbase") and ep.get("tls") is True:
+        scheme = "rediss" if engine == "redis" else "couchbases"
         ep.pop("tls")
     if scheme is None or engine == "generic":
         return None

@@ -310,7 +310,30 @@ TLS_OWN = ("mongodb", "redis", "cassandra")
 #: the keys of a side's own options (under it, or under its `options`)
 ENDPOINT_OPTIONS = {
     "auth": Key("password, or aws_iam for a token the cloud signs", "str",
-                ("postgres", "mysql")),
+                ("postgres", "mysql", "dsql")),
+    "changes": Key("where the source publishes its changes, where a"
+                   " client cannot read its log: a Kafka topic (servers,"
+                   " topic or topics, format, and how to sign in), a"
+                   " Kinesis stream (stream, region, cdc_stream,"
+                   " order_window), or a changefeed streamed to migkit"
+                   " (via: changefeed)", "dict",
+                   ("tidb", "cockroachdb", "dsql", "couchbase"),
+                   subs=("via", "servers", "hosts", "topic", "topics",
+                         "format", "security_protocol", "sasl_mechanism",
+                         "user", "password", "ssl_cafile", "stream",
+                         "region", "endpoint_url", "cdc_stream",
+                         "order_window")),
+    "change_feed": Key("latest: follow by the latest-version change feed,"
+                       " which carries no delete - where the account has"
+                       " no all-versions-and-deletes feed", "str",
+                       ("cosmosdb",)),
+    "priority": Key("low: reads yield to the application where the"
+                    " account runs priority-based execution", "str",
+                    ("cosmosdb",)),
+    "network": Key("external: reach the cluster's nodes at their"
+                   " alternate addresses", "str", ("couchbase",)),
+    "mgmt_port": Key("the cluster manager's port, where not 8091 (18091"
+                     " with TLS)", "int", ("couchbase",)),
     "aws_region": Key("the region an aws_iam token is signed for", "str",
                       ("postgres", "mysql")),
     "aws_role_arn": Key("the role an aws_iam token is signed as", "str",
@@ -348,8 +371,10 @@ ENDPOINT_OPTIONS = {
                " DEPENDING ON its count takes the room of its count or"
                " of its most", "str", ("copybook",)),
     "url": Key("the whole connection address (Snowflake's account URL a"
-               " streaming channel signs in at)", "str",
-               ("generic", "opensearch", "parquet", "delta", "snowflake")),
+               " streaming channel signs in at, a Cosmos DB account's"
+               " endpoint, a Couchbase connection string)", "str",
+               ("generic", "opensearch", "parquet", "delta", "snowflake",
+                "couchbase", "cosmosdb")),
     "secure": Key("TLS", "bool", ("clickhouse",)),
     "address_from_target": Key("host:port the target reaches the source"
                                " at, where it knows it by another name",
@@ -426,7 +451,7 @@ ENDPOINT_OPTIONS = {
                               ("iceberg",)),
     "project": Key("the project", "str", ("pubsub",)),
     "region": Key("the region", "str", ("dynamodb", "kinesis", "parquet",
-                                        "redshift", "delta")),
+                                        "redshift", "delta", "dsql")),
     "endpoint_url": Key("an endpoint of its own (a local one, a"
                         " compatible store)", "str",
                         ("dynamodb", "kinesis", "parquet", "delta")),
@@ -435,15 +460,16 @@ ENDPOINT_OPTIONS = {
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
-               " authorities (https on OpenSearch)", "bool",
-               ("opensearch", "db2i") + TLS_OWN),
+               " authorities (https on OpenSearch and Cosmos DB)", "bool",
+               ("opensearch", "db2i", "couchbase", "cosmosdb") + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
-                       ("db2i",) + TLS_OWN),
+                       ("db2i", "couchbase") + TLS_OWN),
     "tls_cert_file": Key("a client certificate file", "str", TLS_OWN),
     "tls_key_file": Key("a client key file", "str", ("redis", "cassandra")),
     "tls_crl_file": Key("a revocation list file", "str", ("mongodb",)),
-    "tls_insecure": Key("TLS with nothing checked", "bool",
-                        ("db2i",) + TLS_OWN),
+    "tls_insecure": Key("TLS with nothing checked (an emulator's own"
+                        " certificate)", "bool",
+                        ("db2i", "couchbase", "cosmosdb") + TLS_OWN),
     "encrypt": Key("require, request or off", "str|bool", ("mssql",)),
     "redis_product": Key("community, cloud or software: the Redis product"
                          " the target is, where its name cannot say",
@@ -800,11 +826,13 @@ def refuse_writes(hop, what):
 
 
 def endpoint_keys_for(engine):
-    """The option keys a side of this engine reads."""
-    from .engines import ALIASES
+    """The option keys a side of this engine reads - an engine on another's
+    wire (`engines.WIRE`) reads that one's connection keys too."""
+    from .engines import ALIASES, WIRE
     e = ALIASES.get(engine, engine)
     return {k for k, key in ENDPOINT_OPTIONS.items()
-            if not key.engines or e in key.engines}
+            if not key.engines or e in key.engines
+            or WIRE.get(e) in key.engines}
 
 
 # ---- checking ------------------------------------------------------------

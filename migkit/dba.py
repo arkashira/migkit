@@ -886,15 +886,260 @@ def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
     return out
 
 
+# ---- the sources that publish their changes elsewhere (ER4, ER5) --------
+#
+# What each needs to be followed is not a grant on the server alone: a
+# changefeed, a connector or a stream the operator makes, which migkit then
+# reads. Asked by reading where the hop says the changes are; what makes
+# them is said as the command that does, outside the server.
+
+def _feed(e, key, side, dbs, what, make):
+    """Whether the hop's change feed can be read: [Need]."""
+    out = []
+    for db in dbs:
+        try:
+            lanes = e._follower(db).lanes.lanes()
+            out.append(Need(side, what, bool(lanes),
+                            f"{len(lanes)} partitions or shards to read"
+                            if lanes else "nothing to read", [], make))
+        except (Exception, SystemExit) as err:  # noqa: BLE001 - the answer
+            out.append(Need(side, what, False, _last(err), [], make))
+    return out
+
+
+def _tidb(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = _my(hop, e, key, side, dbs, where, read, write, False, False)
+    if not follow:
+        return out
+    spec = e._changes_spec(key) or {}
+    topic = spec.get("topic") or "<topic>"
+    servers = spec.get("servers") or "<kafka>:9092"
+    make = [f"cdc cli changefeed create --server=http://<ticdc>:8300"
+            f" --changefeed-id=migkit-{hop.name} --sink-uri=\"kafka://"
+            f"{servers}/{topic}?protocol=canal-json&enable-tidb-extension"
+            "=true\""]
+    found = _feed(e, key, side, dbs, "a TiCDC changefeed to the topic the"
+                  " hop reads", make)
+    got = dict(e._q(key, "show global variables like 'tidb_gc_life_time'"))
+    keep = str(got.get("tidb_gc_life_time") or "")
+    hours = _duration_hours(keep)
+    found.append(Need(side, "rows kept an hour back, to read each change as"
+                      " it stood at its watermark", hours is not None
+                      and hours >= 1, f"tidb_gc_life_time is {keep or '?'}",
+                      ["set global tidb_gc_life_time = '1h';"]))
+    return out + _following(found)
+
+
+def _duration_hours(text):
+    """Hours of a Go duration (`10m0s`, `1h`, `24h0m0s`), or None."""
+    parts = re.findall(r"(\d+(?:\.\d+)?)(h|m|s)", str(text))
+    if not parts:
+        return None
+    scale = {"h": 1, "m": 1 / 60, "s": 1 / 3600}
+    return sum(float(n) * scale[u] for n, u in parts)
+
+
+def _pgwire_rows(e, key, db, sql, args=None):
+    return e._rows(key, db, sql, args)
+
+
+def _pgwire(hop, e, key, side, dbs, read, write):
+    """Reading every table and writing the target, on an engine over
+    PostgreSQL's wire, by the privilege functions both keep."""
+    from .engines.dbapi import MARK
+    out = []
+    me = _pgwire_rows(e, key, dbs[0] if dbs else "postgres",
+                      "select current_user")[0][0]
+    who = _pgi(me)
+    if read:
+        for db in dbs:
+            shown = hop.target_db(db) if key == "dst" else db
+            gaps = []
+            for t in e.neutral_tables(key, db):
+                sch, tbl = e._split(t)
+                ok = _pgwire_rows(e, key, db, "select has_table_privilege("
+                                              f"{MARK}, 'SELECT')",
+                                  (f"{_pgi(sch)}.{_pgi(tbl)}",))[0][0]
+                if not ok:
+                    gaps.append(f"{_pgi(sch)}.{_pgi(tbl)}")
+            out.append(Need(side, f"read every table of {shown}", not gaps,
+                            f"{len(gaps)} tables it may not read" if gaps
+                            else "every one",
+                            [f"grant select on {g} to {who};"
+                             for g in gaps]))
+    if key == "dst" and write:
+        for db in dbs:
+            name = hop.target_db(db)
+            ok = _pgwire_rows(e, key, db, "select has_database_privilege("
+                                          f"{MARK}, 'CREATE')", (name,))[0][0]
+            out.append(Need(side, f"create what the source has in {name}",
+                            bool(ok), "may" if ok else "may not",
+                            [f"grant create on database {_pgi(name)} to"
+                             f" {who};"]))
+    return out
+
+
+def _crdb(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = _pgwire(hop, e, key, side, dbs, read, write)
+    if not follow:
+        return out
+    found = []
+    db = dbs[0] if dbs else "defaultdb"
+    on = e.rangefeeds(key, db)
+    found.append(Need(side, "rangefeeds, which a changefeed reads through",
+                      on, "kv.rangefeed.enabled is"
+                      f" {'on' if on else 'off' if on is False else '?'}",
+                      ["set cluster setting kv.rangefeed.enabled = true;"]))
+    me = _pgwire_rows(e, key, db, "select current_user")[0][0]
+    admin = _pgwire_rows(e, key, db, "select pg_has_role(current_user,"
+                                     " 'admin', 'member')")[0][0]
+    lack = []
+    if not admin:
+        for d in dbs:
+            for t in e.neutral_tables(key, d):
+                got = _pgwire_rows(e, key, d, "select privilege_type from"
+                                              f" [show grants on table {t}"
+                                              f" for {_pgi(me)}]")
+                if not {str(p).upper() for (p,) in got} & {"CHANGEFEED",
+                                                            "ALL"}:
+                    lack.append(f"{d}.{t}")
+    found.append(Need(side, "make a changefeed on every table in scope",
+                      not lack, f"not on {len(lack)} tables" if lack
+                      else "may",
+                      [f"grant changefeed on table {t} to {_pgi(me)};"
+                       for t in lack]))
+    if e._changes_spec(key):
+        found += _feed(e, key, side, dbs, "the changefeed's Kafka topic",
+                       ["create changefeed for <tables> into"
+                        " 'kafka://<servers>' with updated, resolved;"])
+    return out + _following(found)
+
+
+def _dsql(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = _pgwire(hop, e, key, side, dbs, read, write)
+    if not follow:
+        return out
+    spec = e._changes_spec(key) or {}
+    ep = hop.source if key == "src" else hop.target
+    make = ["aws dsql create-stream --cluster-identifier"
+            f" {str(ep.host).split('.')[0]} --target-definition"
+            " kinesis=<stream ARN>,role=<role ARN>",
+            "the reader's role: kinesis:GetRecords, GetShardIterator,"
+            " ListShards, DescribeStreamSummary on the stream, and"
+            " cloudwatch:GetMetricStatistics for the stream's lag"]
+    found = _feed(e, key, side, dbs, "DSQL's CDC stream to the Kinesis"
+                  " stream the hop reads", make)
+    if spec.get("cdc_stream"):
+        try:
+            import boto3
+            got = boto3.client("dsql", region_name=e._region(ep)).get_stream(
+                clusterIdentifier=str(ep.host).split(".")[0],
+                streamIdentifier=str(spec["cdc_stream"]))
+            status = str(got.get("status") or "")
+            found.append(Need(side, "the CDC stream active", status ==
+                              "ACTIVE", f"it is {status or '?'}", [],
+                              ["an IMPAIRED stream says why in GetStream's"
+                               " statusReason; a FAILED one is made again"]))
+        except Exception as err:  # noqa: BLE001 - unknown, not clean
+            found.append(Need(side, "the CDC stream active", None,
+                              _last(err)))
+    return out + _following(found)
+
+
+def _couchbase(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = []
+    try:
+        me = e._rest(key, "/whoami")
+    except Exception as err:  # noqa: BLE001 - said as unknown
+        return [Need(side, "ask the cluster who migkit signs in as", None,
+                     _last(err))]
+    roles = {(r.get("role"), r.get("bucket_name") or "*")
+             for r in me.get("roles", [])}
+    user = me.get("id") or "<user>"
+
+    def has(bucket, *names):
+        return any((n, b) in roles for n in names + ("admin",)
+                   for b in (bucket, "*"))
+    for db in dbs:
+        name = hop.target_db(db) if key == "dst" else db
+        if read:
+            ok = has(name, "data_reader", "bucket_full_access",
+                     "bucket_admin", "ro_admin")
+            out.append(Need(side, f"read every document of {name}", ok,
+                            "may" if ok else "may not", [],
+                            [f"couchbase-cli user-manage --set --rbac-username"
+                             f" {user} --roles data_reader[{name}]"
+                             " --auth-domain local"]))
+        if key == "dst" and write:
+            ok = has(name, "bucket_full_access", "bucket_admin") or (
+                has(name, "data_writer") and has(name, "scope_admin",
+                                                 "bucket_admin"))
+            out.append(Need(side, f"write documents and make collections"
+                            f" in {name}", ok, "may" if ok else "may not",
+                            [], [f"couchbase-cli user-manage --set"
+                                 f" --rbac-username {user} --roles"
+                                 f" data_writer[{name}],scope_admin[{name}]"
+                                 " --auth-domain local"]))
+        if key == "src" and follow:
+            ok = has(name, "data_monitoring", "bucket_admin", "ro_admin",
+                     "cluster_admin")
+            out += _following([Need(
+                side, f"read {name}'s sequence numbers, the follow's"
+                      " fence", ok, "may" if ok else "may not", [],
+                [f"couchbase-cli user-manage --set --rbac-username {user}"
+                 f" --roles data_monitoring[{name}] --auth-domain local"])])
+    if follow and key == "src":
+        out += _following(_feed(e, key, side, dbs, "the Kafka connector's"
+                                " topic the hop reads",
+                                ["the connector with its default source"
+                                 " handler, publishing to the hop's topic"]))
+    return out
+
+
+def _cosmos(hop, e, key, side, dbs, where, read, write, follow, native):
+    out = []
+    for db in dbs:
+        try:
+            tables = e.neutral_tables(key, db)
+            out.append(Need(side, f"read {len(tables)} containers of"
+                            f" {e._d(key, db)}", True, "may"))
+        except Exception as err:  # noqa: BLE001 - the answer
+            out.append(Need(side, f"read the containers of {e._d(key, db)}",
+                            False, _last(err), [],
+                            ["az cosmosdb sql role assignment create"
+                             " --role-definition-name 'Cosmos DB Built-in"
+                             " Data Reader' --principal-id <migkit's"
+                             " principal> --scope /"]))
+            continue
+        if key == "src" and follow and tables:
+            try:
+                e._mode(key, db, e._container(key, db, tables[0]))
+                out += _following([Need(side, "every delete in the change"
+                                        " feed (all versions and deletes)",
+                                        True, "the account serves it")])
+            except SystemExit as err:
+                out += _following([Need(
+                    side, "every delete in the change feed (all versions"
+                          " and deletes)", False, _last(err), [],
+                    ["az cosmosdb update --backup-policy-type Continuous",
+                     "then turn on the all-versions-and-deletes change"
+                     " feed on the account's Features page"])])
+    return out
+
+
 #: the engines whose servers can be asked, by canonical name
 ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
-       "redshift": _redshift, "db2i": _db2i, "oracle": _oracle}
+       "redshift": _redshift, "db2i": _db2i, "oracle": _oracle,
+       "tidb": _tidb, "cockroachdb": _crdb, "dsql": _dsql,
+       "couchbase": _couchbase, "cosmosdb": _cosmos}
 
 #: how each writes a comment, and its script's file suffix
 SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
           "mongodb": ("//", "js"), "mssql": ("--", "sql"),
           "redshift": ("--", "sql"), "db2i": ("--", "sql"),
-          "oracle": ("--", "sql")}
+          "oracle": ("--", "sql"), "tidb": ("--", "sql"),
+          "cockroachdb": ("--", "sql"), "dsql": ("--", "sql"),
+          "couchbase": ("#", "sh"), "cosmosdb": ("#", "sh")}
 
 
 def script(hop, eng, side, found, where=None):

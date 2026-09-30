@@ -35,7 +35,10 @@ FILE_ENGINE = {"postgres.py": ("postgres",), "mysql.py": ("mysql",),
                "copybook.py": ("copybook",), "db2i.py": ("db2i",),
                "db2zos.py": ("db2zos",),
                "warehouse.py": ("redshift", "snowflake", "bigquery"),
-               "lake.py": ("iceberg", "delta")}
+               "lake.py": ("iceberg", "delta"), "tidb.py": ("tidb",),
+               "pgwire.py": ("cockroachdb", "dsql"),
+               "cockroachdb.py": ("cockroachdb",), "dsql.py": ("dsql",),
+               "couchbase.py": ("couchbase",), "cosmosdb.py": ("cosmosdb",)}
 
 #: reads by a key held in a variable, where it comes from, and the keys
 #: it stands for - a new one is a read this test cannot follow, and fails
