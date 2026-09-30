@@ -133,8 +133,13 @@ def test_a_notification_hides_the_password_in_every_form():
                               password="p@ss/w-CHANGE_ME"),
               target=Endpoint(host="10.0.0.6", port=5432, user="app",
                               password=""))
-    got = notify._clean(hop, "could not connect to"
-                             " postgres://app:p%40ss%2Fw-CHANGE_ME@10.0.0.5/db")
+    # the words go only where the hop's notify asks for them, and then
+    # through the gate every send is cleaned at (`egress`)
+    from migkit import egress
+    hop.options = {"notify": {"detail": True}}
+    got = egress.words(hop, notify._clean(
+        hop, "could not connect to"
+             " postgres://app:p%40ss%2Fw-CHANGE_ME@10.0.0.5/db"))
     assert "CHANGE_ME" not in got and "10.0.0.5" in got, got
 
 

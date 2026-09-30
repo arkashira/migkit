@@ -184,10 +184,16 @@ HOP_OPTIONS = {
     "noise_prefix": Key("object names a schema check leaves out", "str",
                         ("postgres",)),
     "notify": Key("who is told what the migration is doing - an address,"
-                  " a list of them, or {to, events, lag}: the events told"
-                  " (verdict, drift, lag, cutover, approval, failure,"
-                  " fallback, done) and the seconds a change tail may be"
-                  " behind", "str|list|dict", subs=("to", "events", "lag")),
+                  " a list of them, or {to, events, lag, detail}: the"
+                  " events told (verdict, drift, lag, cutover, approval,"
+                  " failure, fallback, done), the seconds a change tail may"
+                  " be behind, and whether an error's words are sent and"
+                  " not only its kind", "str|list|dict",
+                  subs=("to", "events", "lag", "detail")),
+    "egress": Key("what may leave the machine for this hop - none, or"
+                  " the kinds that may (notify, traces, assist, evidence),"
+                  " or {allow, to}: the kinds and the hosts they may go"
+                  " to", "str|list|dict|bool", subs=("allow", "to")),
     "evidence": Key("the evidence export: {sign: a private SSH key} it is"
                     " signed with", "dict", subs=("sign",)),
     "offset_header": Key("each message the copy carries keeps its source"
@@ -1277,6 +1283,7 @@ def check_hop(name, raw):
     _keys(out, f"{where}.options", opts, HOP_OPTIONS)
     if isinstance(opts, dict):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
+        out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
@@ -1348,6 +1355,11 @@ def _notify(where, got):
             out.append(Problem("error", f"{where}.lag",
                                f"{lag!r} - the seconds a change tail may be"
                                " behind before it is said"))
+        detail = got.get("detail")
+        if detail is not None and not isinstance(detail, bool):
+            out.append(Problem("error", f"{where}.detail",
+                               f"{detail!r} - true sends an error's words,"
+                               " false (the default) only its kind"))
     plain = 0
     for r in [to] if isinstance(to, str) else list(to or []):
         r = str(r)
@@ -1361,6 +1373,20 @@ def _notify(where, got):
             " this machine's keychain or write a reference: env:NAME,"
             " keyring:name, file:/path, vault:path#key"))
     return out
+
+
+def _egress(where, got):
+    """A kind of send migkit does not have, or a detail that is not
+    true or false."""
+    from . import egress
+    if got is None:
+        return []
+    allow = got.get("allow") if isinstance(got, dict) else got
+    try:
+        egress._listed(allow, where)
+    except SystemExit as e:
+        return [Problem("error", where, str(e).split(": ", 1)[-1])]
+    return []
 
 
 def _two_way(where, got):

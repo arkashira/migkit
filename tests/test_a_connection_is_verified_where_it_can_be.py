@@ -43,7 +43,8 @@ def test_a_server_on_this_machine_is_never_asked(monkeypatch):
         assert ep.redis_tls() == {} and ep.mongo_tls() == {}
         assert tls.posture(ep, "postgres")["state"] == "local"
     tunneled = Endpoint(host="127.0.0.1", port=40001,
-                        options={"tunnel_to": f"{FAR}:5432"})
+                        options={"tunnel_to": f"{FAR}:5432",
+                                 "tunnel_by": "ssh"})
     assert tls.posture(tunneled, "redis")["state"] == "local"
 
 

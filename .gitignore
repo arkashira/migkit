@@ -11,3 +11,4 @@ migrations/
 reports/
 tests/__pycache__/
 deploy/conf/
+deploy/.env

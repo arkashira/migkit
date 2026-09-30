@@ -1317,6 +1317,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * ship: no carrier the hop names can be written here - <...>
 
+* <...>: <...> is not something migkit sends; one of <...>, or none
+
 * the machines' store kept changing under migkit while it wrote <...>; too many machines write one record at once
 
 * <...>: <...>
@@ -1372,3 +1374,5 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: the parts are the bulk load's lines, and the target's table does not take them: <...>
 
 * <...>: every part is in, and the target holds <...> rows digesting <...>, where the parts add up to <...> rows and <...> - something else writes this table, or the target changes what it is given
+
+* MIGKIT_UI_USER_HEADER names the header a signing-in proxy puts who it let in into, and anything that reaches the view can send that header: set MIGKIT_UI_PROXY_SECRET too - the value the proxy sends in <...> - and the view believes only the proxy
