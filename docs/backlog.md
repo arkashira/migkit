@@ -344,6 +344,58 @@ each offers:
   routing, `MaskField`), `pause-snapshot` / `resume-snapshot` /
   `stop-snapshot` signals, `log-signal`, the notification channel
   (snapshot progress as events).
+* *Done for these two (2026-09-28).* `migkit/tooluse.py` is the account:
+  a registry each wrapping module adds its tools to, every option used,
+  unused with its reason, or topped up, with each tool's licence and
+  terms (`allowed(tool, hop)` for the decision layer to gate a path by;
+  a program `doctor --install` puts in place has them read from `tools`,
+  where the operator accepts closed terms - still open: the streaming
+  pipeline's broker image is source-available and pulled without being
+  accepted anywhere, so it wants a place among those terms or an open
+  broker in its stead);
+  `tests/test_every_wrapped_option_is_used_or_explained.py` fails on an
+  option the build has and nobody wrote about, on an entry for one it no
+  longer has, and on a command line or configuration that passes what the
+  account calls unused. `_long_options` asks a subcommand's own help
+  (pgcopydb's top-level help lists no option at all). The streaming copy
+  splits a table only where it outlasts an even share, at half a share
+  (measured: the build cuts `ceil(size / threshold) + 1` parts, the first
+  for NULL keys, the last twice the others), not under ten seconds of one
+  stream; split and whole are two rungs (`decide`) ranked by the rate each
+  reached on the hop or its rehearsal, one rule for the whole database's
+  copy and the table copier's streaming rung (`pgcopydb_table`). A
+  stopped copy goes on cut the way it began (kept by `decide.remember`) -
+  and one that cut a table in parts starts over: measured on 0.18, going
+  on from it left 750,000 of a 1,500,000-row table and exited 0, with the
+  same cut, another or none. On this machine whole tables
+  were faster: two 57 MB tables, four streams, 5 rounds, the copy 1.45 s
+  median whole against 1.63 s in parts. Its own progress reader is
+  broken in 0.18 (`no such column: bytes`), so its catalogue is read for
+  per-table progress lines and the next run's rates. The ways a hop's
+  changes follow its source - the servers' replication, the leg run from
+  here, migkit's tail, the streaming pipeline - are one ladder
+  (`movers.stream_ways`): today's order where nothing is measured, the
+  cheaper where two are, and a way never timed not started only to be
+  timed; the leg run from here records its cost. Found and fixed: the
+  streaming copy left every large object behind (now carried after it),
+  the change leg run from here carried the tables the hop excludes (now
+  filtered) and filtered or renamed ones whole (now refused, as the
+  pipeline refuses them), the pipeline skipped source truncates, and 38
+  message queues left by killed copies made the next one fail on `No
+  space left on device` (now said). The connector: transaction metadata
+  (and migkit's own readers mark each source transaction's last change,
+  `txn_end`, beside its `txn`), truncates carried, buffers from the rows
+  carried and bounded in bytes, every value in its exact form
+  (`value_modes`: microseconds and never `connect`'s milliseconds, exact
+  decimals, bytes, unsigned 64-bit integers whole, intervals as their
+  text, MySQL's years as stored), heartbeats, the notification channel
+  read back as progress, a re-read held while the source is under
+  strain, the configuration validated by the runtime before it
+  registers. Not used, with reasons: `clone` and its options
+  (migkit makes the schema itself; this build's clone into 16 stops on
+  `transaction_timeout`), `copy blobs` (hung 338 s into 16),
+  `snapshot.select.statement.overrides` (a filter at the first read only
+  lets later changes through unseen), masking at the source.
 * The same audit is owed for each of the rest - mydumper/myloader
   (`--rows`, `--chunk-filesize`, `--innodb-optimize-keys`, `--trx-tables`,
   `--omit-from-file`, masking functions, `--checksum-all`, `--where`),

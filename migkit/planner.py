@@ -203,6 +203,52 @@ def _elsewhere(hop, path):
     return runs, names
 
 
+def record_variant(hop, path, way, carried, seconds, stream, tables=None):
+    """Remember one finished copy on `path` done one `way` ("whole",
+    "split"): `carried` bytes in `seconds`, and `stream`, the bytes a
+    second one of its streams carried - with what each table took, as the
+    copy's own catalogue says. What the next run chooses its way and sizes
+    its parts from."""
+    import json
+    import time
+    if not carried or not seconds or seconds <= 0:
+        return
+    f = _rates_path(hop)
+    try:
+        got = json.loads(f.read_text())
+    except (OSError, ValueError):
+        got = {}
+    runs = got.setdefault(f"{path}:{way}", [])
+    runs.append({"bytes": int(carried), "seconds": round(seconds, 3),
+                 "stream": round(stream, 1) if stream else None,
+                 "tables": tables or {},
+                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 "kind": _kind(hop)})
+    del runs[:-10]
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(got, indent=1))
+
+
+def variants(hop, path):
+    """{way: {"rate": bytes a second, "stream": bytes a second one stream
+    carried, "whose": [hop] or None}} from the latest copy each way on
+    `path` - this hop's own, else the latest of the other hops of the same
+    engines (a rehearsal's), named."""
+    out = {}
+    for way in ("whole", "split"):
+        key = f"{path}:{way}"
+        runs, whose = _runs(_rates_path(hop), key), None
+        if not runs:
+            runs, whose = _elsewhere(hop, key)
+        if not runs:
+            continue
+        last = runs[-1]
+        out[way] = {"rate": last["bytes"] / last["seconds"],
+                    "stream": last.get("stream"),
+                    "whose": whose[-1:] if whose else None}
+    return out
+
+
 def _took(secs):
     return (f"{secs / 3600:,.1f}h" if secs >= 3600 else
             f"{secs / 60:,.0f}min" if secs >= 60 else f"{secs:,.0f}s")

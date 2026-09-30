@@ -81,6 +81,7 @@ _FACTS = {
                         " plan says",
     "row_filters": lambda v: f"{_n(v)} tables read through the hop's row"
                              " filter",
+    "split": lambda v: f"{_n(v)} large tables copied in parts",
     "rows": lambda v: f"{_n(v)} rows",
     "size": lambda v: human_bytes(v),
     "table": lambda v: str(v),

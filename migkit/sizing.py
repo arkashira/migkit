@@ -201,6 +201,44 @@ def fit(hop, eng, db, log=None, units=None):
     return plan
 
 
+#: what the change-stream connector holds by default (its own numbers),
+#: kept as the least it is given
+STREAM_BATCH, STREAM_QUEUE, STREAM_POLL_MS = 2048, 8192, 500
+#: the share of a worker's memory one batch of changes may take
+BATCH_SHARE = 16
+
+
+def stream_buffers(row_bytes=None, rows_per_second=None):
+    """What the change-stream connector holds and hands over at once, from
+    the rows it carries rather than its defaults.
+
+    Its defaults count changes and not bytes: 8,192 changes queued,
+    however large each is, so a table of wide rows can hold gigabytes in a
+    queue sized for kilobytes. Here the queue is bounded by the memory a
+    worker may hold (`WORKER_MEMORY`) in bytes as well; a batch is
+    what fits in a sixteenth of that at the source's average row
+    (`row_bytes`, its tables' bytes over their rows), never below the
+    connector's own 2,048; and the queue is four batches, the connector's
+    own ratio. Where a copy of this hop measured how fast rows went
+    (`rows_per_second`), the wait for a batch that is not full is the time
+    one takes to fill at that rate, between 50 and 500 ms: a full batch
+    never waits, and a slow source's changes are not held half a second
+    each."""
+    batch = STREAM_BATCH
+    if row_bytes and row_bytes > 0:
+        batch = max(STREAM_BATCH,
+                    int(WORKER_MEMORY // BATCH_SHARE // row_bytes))
+    out = {"max.batch.size": batch, "max.queue.size": max(STREAM_QUEUE,
+                                                          4 * batch),
+           "max.queue.size.in.bytes": WORKER_MEMORY}
+    poll = STREAM_POLL_MS
+    if rows_per_second and rows_per_second > 0:
+        poll = int(min(STREAM_POLL_MS,
+                       max(50, 1000 * batch / rows_per_second)))
+    out["poll.interval.ms"] = poll
+    return {k: str(v) for k, v in out.items()}
+
+
 class Pace:
     """How many of a move's workers run at once, found while it runs.
 

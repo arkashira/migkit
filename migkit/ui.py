@@ -296,6 +296,7 @@ def prometheus(hops):
             lines.append(f'migkit_last_check_age_seconds{{{lbl}}}'
                          f' {int(time.time() - summary.stat().st_mtime)}')
         lines += _tail_metrics(REPORTS / name, lbl)
+        lines += _follow_metrics(hop, REPORTS / name, lbl)
     return "\n".join(TAIL_HELP + lines) + "\n"
 
 
@@ -325,11 +326,43 @@ TAIL_HELP = [
     "# TYPE migkit_tail_retention_margin_bytes gauge",
     "# HELP migkit_tail_source_held_bytes Log the source holds for the tail",
     "# TYPE migkit_tail_source_held_bytes gauge",
+    "# HELP migkit_follow_applying The change leg run from here is applying"
+    " (0: it waits to be told to)",
+    "# TYPE migkit_follow_applying gauge",
+    "# HELP migkit_follow_behind_bytes Source log the change leg run from"
+    " here has not received yet",
+    "# TYPE migkit_follow_behind_bytes gauge",
+    "# HELP migkit_follow_held_bytes Log the change leg has received and not"
+    " applied, by its own account (the target's origin is the proof)",
+    "# TYPE migkit_follow_held_bytes gauge",
 ]
 
 ROOM = {"seconds": "migkit_tail_retention_margin_seconds",
         "bytes": "migkit_tail_retention_margin_bytes",
         "held_bytes": "migkit_tail_source_held_bytes"}
+
+
+def _follow_metrics(hop, where, lbl):
+    """The change leg run from here, per database, as its own sentinel
+    reads it (`movers.follow_lag`); nothing where none runs."""
+    from . import movers
+    out = []
+    if not where.is_dir():
+        return out
+    for d in sorted(p for p in where.iterdir() if (p / "follow").is_dir()):
+        try:
+            lag = movers.follow_lag(hop, d.name)
+        except Exception:  # noqa: BLE001 - a scrape never fails on one leg
+            lag = None
+        if not lag:
+            continue
+        tl = f'{lbl},db="{d.name}"'
+        out.append(f"migkit_follow_applying{{{tl}}} {int(lag['apply'])}")
+        for key in ("behind", "held"):
+            if lag.get(key) is not None:
+                out.append(f"migkit_follow_{key}_bytes{{{tl}}}"
+                           f" {int(lag[key])}")
+    return out
 
 
 def _tail_metrics(where, lbl):

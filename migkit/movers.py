@@ -12,6 +12,7 @@ only in the generated compose file. See NOTICE for attribution.
 """
 import functools
 import json
+import math
 import re
 import socket
 import subprocess
@@ -20,7 +21,8 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
-from . import leftovers
+from . import leftovers, tooluse
+from .tooluse import TOPPED, UNUSED, USED
 from .util import quiet_argv, run, tool_env, which
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
@@ -2046,14 +2048,20 @@ def mydumper_defaults(hop, db, sections=None):
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
-def _long_options(program):
-    """The long options this installed build of `program` really has.
+def _long_options(program, *sub):
+    """The long options this installed build of `program` really has - of
+    its subcommand `sub` where it has subcommands.
 
     Read from the option column of its own `--help`, not from the whole
     text: mydumper 1.0.5 names `--overwrite-tables` inside the description
     of `--overwrite-unsafe`, and the binary answers `Unknown option
     --overwrite-tables`. Measured, the column holds 136 options for mydumper
     and 99 for myloader, and that one is in neither.
+
+    A program with subcommands keeps its options there: pgcopydb 0.18's own
+    `--help` lists none, and `copy table-data --help` lists 11. Asked
+    without the subcommand, every option the copy was passed looked absent
+    and nothing could be checked.
     """
     import os
     # asked once per build: the build on the path, and the file as it is
@@ -2063,13 +2071,33 @@ def _long_options(program):
         stamp = os.stat(path).st_mtime_ns
     except OSError:
         stamp = None
-    return _options_of(path, stamp)
+    return _options_of(path, stamp, tuple(sub))
+
+
+_SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
+
+
+def _subcommand(argv):
+    """The subcommand words of one command line: the words after the
+    program and before its first option (`copy table-data`), none where
+    the first is an option or an address."""
+    out = []
+    for a in list(argv)[1:4]:
+        if not _SUBCOMMAND.fullmatch(str(a)):
+            break
+        out.append(str(a))
+    return tuple(out)
 
 
 @functools.lru_cache(maxsize=None)
-def _options_of(path, stamp):
-    p = subprocess.run([path, "--help"], env=tool_env(None), text=True,
+def _options_of(path, stamp, sub=()):
+    p = subprocess.run([path, *sub, "--help"], env=tool_env(None), text=True,
                        capture_output=True)
+    return _option_column((p.stdout or "") + (p.stderr or ""))
+
+
+def _option_column(text):
+    """The long options in the option column of a `--help` text."""
     # the option column: the flag, then the column gap, the end of the
     # line, or its `=VALUE`. Measured, the MongoDB tools spell theirs in
     # camelCase with `=<value>` (`--bypassDocumentValidation`), and the old
@@ -2079,12 +2107,16 @@ def _options_of(path, stamp):
     # program's count stayed the same. The MySQL copy program lists an
     # option beside its alias (`--py, --python`, `--nw, --no-wizard`):
     # 81 of its 91 were found until both halves were read, and the others'
-    # counts stayed the same (136, 99, 73, 51, 37, 53, 34)
-    text = (p.stdout or "") + (p.stderr or "")
+    # counts stayed the same (136, 99, 73, 51, 37, 53, 34). pgcopydb's
+    # column is one space short for its longest flag (`--large-objects-jobs
+    # Number of ...`, `--summary List ...`), read as the flag and its
+    # capitalised description; that added those two and nothing to any
+    # other program
     name = r"--[a-zA-Z0-9][a-zA-Z0-9-]*"
     return frozenset(re.findall(
         rf"(?m)^\s+(?:-\w,\s+|{name},\s+)?({name})"
-        r"(?=\s{2,}|$|=|\[=|\s[A-Za-z_<][\w<>.-]*\s{2,})", text)
+        r"(?=\s{2,}|$|=|\[=|\s[A-Za-z_<][\w<>.-]*\s{2,}|\s[A-Z][a-z]+\s)",
+        text)
         + re.findall(rf"(?m)^\s+({name})(?=,\s+--)", text))
 
 
@@ -4670,6 +4702,326 @@ def pgcopydb_runner():
     return how
 
 
+def _pgcopydb_options(*sub):
+    """The long options of the build the streaming copy runs, for its
+    subcommand `sub`: the local build's own help, or the image's, asked
+    once per image."""
+    if pgcopydb_runner() == "local":
+        return _long_options("pgcopydb", *sub)
+    return _image_options(PGCOPYDB_IMAGE, tuple(sub))
+
+
+@functools.lru_cache(maxsize=None)
+def _image_options(image, sub):
+    try:
+        p = run(["docker", "run", "--rm", image, "pgcopydb", *sub, "--help"],
+                check=False, timeout=60)
+    except Exception:  # noqa: BLE001 - an image that cannot be asked
+        return frozenset()
+    return _option_column((p.stdout or "") + (p.stderr or ""))
+
+
+#: a part of a split table is not worth making under this many seconds of
+#: one stream: each part is a query of its own on the source
+PART_SECONDS = 10
+
+
+class _Split:
+    """How the streaming copy cuts its largest tables: `threshold` bytes
+    and `parts` at most per table, or neither; `way` is "split" or "whole"
+    (what the run's rate is recorded under) and `why` says so."""
+
+    def __init__(self, way, why, threshold=None, parts=None, tables=()):
+        self.way, self.why = way, why
+        self.threshold, self.parts, self.tables = threshold, parts, tables
+
+    def argv(self):
+        if self.way != "split":
+            return []
+        return ["--split-tables-larger-than", str(int(self.threshold)),
+                "--split-max-parts", str(int(self.parts))]
+
+    def keep(self, begun):
+        """Kept beside the record that a copy began (`decide.remember`),
+        so a copy stopped part way goes on cut the way it began - or, cut
+        in parts, starts over.
+
+        Measured on 0.18: a copy that cut a 1,500,000-row table in four
+        parts, stopped with two of them done, then run again with
+        `--resume --not-consistent`, exited 0 with 750,000 rows in the
+        table - the same cut, another cut and no cut alike. The parts not
+        done were taken for done and never copied, and nothing said so. A
+        copy stopped before any part of the table was done went on whole
+        (1,500,000). Only the whole database's comparison with the source
+        would have found it, so a split copy is never gone on from."""
+        from .decide import remember
+        remember(begun, "split", {"way": self.way,
+                                  "threshold": self.threshold,
+                                  "parts": self.parts,
+                                  "tables": list(self.tables)})
+
+    @classmethod
+    def resumed(cls, begun):
+        """The way a stopped copy began, or None where it kept none (a
+        copy begun before the split was chosen, which went whole)."""
+        from .decide import remembered
+        got = remembered(begun, "split")
+        if not isinstance(got, dict):
+            return cls("whole", "tables go whole, as the stopped copy"
+                                " began") if begun.exists() else None
+        way = got.get("way", "whole")
+        return cls(way, "tables go " + ("in parts" if way == "split"
+                                        else "whole")
+                   + ", as the stopped copy began", got.get("threshold"),
+                   got.get("parts"), tuple(got.get("tables") or ()))
+
+
+def _copy_split(hop, workers, sizes, have=frozenset()):
+    """Whether, and how, the streaming copy splits a table across streams.
+
+    One table copied by one stream is the copy's floor: at four streams, a
+    table holding half the database keeps one of them busy long after the
+    other three are done. The split (`--split-tables-larger-than`) gives a
+    large table several streams of its own. Nothing decides that on its
+    own: the threshold here comes from what this copy carries, from the
+    source's catalogue (`sizes`), and from how fast one stream went over
+    this link last time.
+
+    * a table is a candidate only where it is more than an even share of
+      the copy (`total / workers`): a copy whose tables are all within one
+      share keeps every stream busy whole
+    * the threshold is half a share. Measured on 0.18, a 54 MB table: over
+      40 MB -> 3 parts, 20 -> 4, 15 -> 5, 10 -> 7, 5 -> 12: `ceil(size /
+      threshold) + 1`, the first part being the rows whose key is NULL and
+      the last range open-ended, twice the others. Half a share puts the
+      largest part within one share
+    * not below `PART_SECONDS` of what one stream carried last time
+      (`planner.variants`): a part shorter than that is mostly its query
+    * and the two ways are rungs of one ladder (`decide`), ranked by the
+      rate each reached on this hop or a rehearsal of it: the split first
+      where neither was timed, the other once where one was, then the
+      faster - a tie within 5% going whole, which asks the source fewer
+      queries. On this machine, both servers sharing two CPUs, whole was
+      faster. Through `pgcopydb_move`, two tables of 57 MB with an index
+      each, four streams, 5 rounds alternated: the copy itself 1.20 to
+      1.71 s whole (median 1.45) against 1.48 to 2.63 s in 5 parts each
+      (median 1.63); the whole move, indexes rebuilt, 3.61 to 4.59 s
+      against 3.47 to 6.24 s. Bare, three tables of 54, 54 and 13 MB at
+      four streams: whole 1.71 to 1.99 s against 1.80 to 3.68 s; one table
+      of 326 MB at two streams: 3.67 to 4.45 s against 4.40 to 6.24 s.
+      Each more stream there is another backend on a CPU already busy;
+      servers with CPUs to spare are where its author credits it with its
+      speed, which this machine cannot measure - hence the measurement per
+      hop and no rule.
+    """
+    from . import planner
+    from .decide import Facts, Need, Rung, climb
+    from .wording import human_bytes
+    total = sum(sizes.values())
+    share = total / workers if workers else 0
+    big = {t: b for t, b in sizes.items() if share and b > share}
+    measured = planner.variants(hop, "pgcopydb")
+    one = [m["stream"] for m in measured.values() if m.get("stream")]
+    threshold = max([share / 2] + [s * PART_SECONDS for s in one])
+    split = Rung("split", "in parts", footprint=1, needs=(
+        Need("streams to split across", lambda f: workers >= 2,
+             "one stream"),
+        Need("the tables' sizes", lambda f: total > 0,
+             "the source's catalogue gave no sizes to cut them by"),
+        Need("the split in the build",
+             lambda f: {"--split-tables-larger-than",
+                        "--split-max-parts"} <= set(have),
+             "the copy installed cannot split one"),
+        Need("a table larger than a share", lambda f: bool(big),
+             f"none is more than an even share of the copy"
+             f" ({human_bytes(share)})"),
+        Need("parts worth their query",
+             lambda f: threshold < max(big.values()),
+             lambda f: f"no part would be longer than {PART_SECONDS}s of"
+                       f" one stream at the {human_bytes(max(one or [0]))}/s"
+                       " one reached here")))
+    whole = Rung("whole", "whole")
+    costs = {w: 1 / m["rate"] for w, m in measured.items() if m.get("rate")}
+    got = climb("the copy's tables", (split, whole), Facts(), costs=costs)
+
+    def rate(way):
+        m = measured[way]
+        return (f"{human_bytes(m['rate'])}/s"
+                + (f" on {', '.join(m['whose'])}" if m.get("whose") else ""))
+    timed = [w for w in ("split", "whole") if w in costs]
+    if got.path == "whole":
+        held = split in got.ranked
+        if not held:
+            return _Split("whole", f"tables go whole: {got.reason}")
+        if timed == ["split"]:
+            return _Split("whole", "tables go whole this time, to measure"
+                                   f" it: in parts went {rate('split')}")
+        if costs["whole"] > costs["split"]:
+            return _Split("whole", "tables go whole: in parts measured"
+                                   f" {rate('split')} against"
+                                   f" {rate('whole')} whole, too close to"
+                                   " call, and whole asks the source fewer"
+                                   " queries")
+        return _Split("whole", "tables go whole: measured faster here -"
+                               f" {rate('whole')} whole against"
+                               f" {rate('split')} in parts")
+    if len(timed) == 2:
+        why = (f"measured faster here - {rate('split')} in parts against"
+               f" {rate('whole')} whole")
+    elif timed:
+        why = (f"to measure it: whole tables went {rate('whole')}, and"
+               f" {len(big)} tables are more than an even share"
+               f" ({human_bytes(share)})")
+    else:
+        why = (f"{len(big)} tables are each more than an even share"
+               f" ({human_bytes(share)}) of the copy")
+    parts = int(math.ceil(max(big.values()) / threshold)) + 1
+    return _Split("split", f"tables over {human_bytes(threshold)} go in up"
+                           f" to {parts} parts: {why}", threshold, parts,
+                  tuple(sorted(t for t, b in big.items() if b > threshold)))
+
+
+def _copy_catalogue(work, sizes=None):
+    """What the copy's own catalogue says it did: {"tables": {table:
+    {"bytes", "seconds", "parts", "done"}}, "streams": [bytes a second]}.
+
+    Its own reader is broken in this build - measured, `list progress
+    --json` stops on `no such column: bytes` in its catalogue query, and
+    `--summary` wants a summary file the table copy never writes - so the
+    same table, `summary`, one row per COPY with its bytes and
+    milliseconds, is read here, read-only. `sizes` turns the bytes COPY
+    sent into bytes on disk, the unit the split threshold is in: measured,
+    a 54 MB table sent 40 MB."""
+    import sqlite3
+    from pathlib import Path
+    path = Path(work) / "schema" / "source.db"
+    if not path.exists():
+        return {"tables": {}, "streams": []}
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return {"tables": {}, "streams": []}
+    try:
+        names = {oid: str(q).replace('"', "") for oid, q in
+                 c.execute("select oid, qname from s_table")}
+        counts = dict(c.execute("select oid, max(partcount)"
+                                " from s_table_part group by oid"))
+        rows = c.execute(
+            "select tableoid, bytes, duration, done_time_epoch from summary"
+            " where tableoid is not null and indexoid is null"
+            " and conoid is null").fetchall()
+    except sqlite3.Error:
+        return {"tables": {}, "streams": []}
+    finally:
+        c.close()
+    tables, sent = {}, {}
+    for oid, carried, ms, done in rows:
+        name = names.get(oid, str(oid))
+        t = tables.setdefault(name, {"bytes": 0, "seconds": 0.0, "done": 0,
+                                     "parts": counts.get(oid) or 1})
+        if done is not None:
+            t["done"] += 1
+            t["bytes"] += int(carried or 0)
+            t["seconds"] += (ms or 0) / 1000
+    for name, t in tables.items():
+        t["done"] = t["done"] >= t["parts"]
+        disk = (sizes or {}).get(name)
+        sent[name] = (disk / t["bytes"]) if disk and t["bytes"] else 1.0
+    streams = []
+    for oid, carried, ms, done in rows:
+        name = names.get(oid, str(oid))
+        if done is not None and carried and ms:
+            streams.append(carried * sent[name] / (ms / 1000))
+    return {"tables": tables, "streams": sorted(streams)}
+
+
+class _CopyProgress:
+    """The streaming copy's progress in migkit's words, table by table as
+    its catalogue marks them done, while it runs. Nothing is said where
+    there is no catalogue to read (the image keeps its own)."""
+
+    EVERY = 2.0
+
+    def __init__(self, work, log):
+        self.work, self.log = work, log
+        self.stop = threading.Event()
+        self.thread = None
+
+    def _look(self, tally):
+        got = _copy_catalogue(self.work)["tables"]
+        for name in sorted(got):
+            if got[name]["done"]:
+                so_far = tally.reached(name)
+                if so_far and self.log:
+                    self.log(f"{name}: copied ({so_far})")
+
+    def __enter__(self):
+        if self.work is None or self.log is None:
+            return self
+        from .wording import Tally
+        self.tally = Tally(_SIZES)
+
+        def loop():
+            while not self.stop.wait(self.EVERY):
+                try:
+                    self._look(self.tally)
+                except Exception:  # noqa: BLE001 - progress never stops a copy
+                    pass
+        self.thread = threading.Thread(target=loop, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, kind, *exc):
+        if self.thread is None:
+            return False
+        self.stop.set()
+        self.thread.join(5)
+        if kind is None:
+            try:
+                self._look(self.tally)
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+
+def _record_copy(hop, work, way, seconds, sizes):
+    """The finished copy's rate, the way it went (`way`), and what one of
+    its streams carried a second - for the next run's `_copy_split`."""
+    from . import planner
+    got = _copy_catalogue(work, sizes)
+    tables = got["tables"]
+    carried = sum((sizes or {}).get(n) or t["bytes"]
+                  for n, t in tables.items())
+    streams = got["streams"]
+    stream = streams[len(streams) // 2] if streams else None
+    planner.record_variant(hop, "pgcopydb", way, carried, seconds, stream,
+                           {n: [t["bytes"], round(t["seconds"], 3),
+                                t["parts"]] for n, t in tables.items()})
+
+
+def _copy_args(workers, split, resume, filters, snapshot=None):
+    """The table copy's options past its subcommand and its two databases:
+    the streams, the split, going on from a stopped copy, the filters, and
+    the snapshot a caller holds open for it to read under. One builder for
+    the whole database's copy and one table's (`pgcopydb_table`)."""
+    out = ["--table-jobs", str(workers)] + split.argv()
+    if resume:
+        out += ["--resume", "--not-consistent"]
+    if filters:
+        out += ["--filters", str(filters)]
+    if snapshot:
+        out += ["--snapshot", str(snapshot)]
+    return out
+
+
+#: what the copy says when this machine has no message queue left for its
+#: workers, and what that means
+QUEUES_GONE = ("this machine has no message queue left for the copy's"
+               " workers: copies stopped by force before this one left"
+               " theirs behind. `ipcs -q` lists them; `ipcrm -q <id>`"
+               " removes one no running process uses. Nothing was copied")
+
+
 def pgcopydb_move(hop, db, workers, go, log):
     """Parallel data-only copy through pgcopydb, source straight to target.
 
@@ -4678,17 +5030,26 @@ def pgcopydb_move(hop, db, workers, go, log):
     - measured, it exits with `clone process has terminated`. migkit prepares
     the target schema in its own step before any data moves, so by the time a
     mover runs the target is never empty, and `clone` can never be the right
-    subcommand here.
+    subcommand here. Measured again with the build installed here (compiled
+    for PostgreSQL 18) into an empty 16: its schema step stopped on
+    `unrecognized configuration parameter "transaction_timeout"`, 1.4 s in,
+    nothing copied.
 
     What that leaves, against `pg_dump -Fd -j | pg_restore`: the tables are
     copied in parallel straight from source to target with no intermediate
-    directory to write out and read back. What it does *not* leave, precisely
-    because the schema is already in place: the indexes exist, so they are
-    maintained during the load rather than built after it - which is the
-    larger of the two wins and belongs to `clone` alone.
+    directory to write out and read back, the largest of them split across
+    streams where that is faster (`_copy_split`). The indexes the target
+    has are set aside for the load and rebuilt after it, as many at a time
+    as the sizing gives (`_IndexWindow`) - what `clone`'s index jobs would
+    do, on a target that already has its schema.
 
-    So this is faster than the dump path, and not by as much as pgcopydb is
-    capable of. Saying which is better than implying the rest.
+    The copy carries rows and no large objects - measured, a source with
+    201 of them left the target with none - so they follow it, carried by
+    migkit under the same numbers and compared first
+    (`carry_database_objects`). The copy's own large-object step is not
+    used: with this build into PostgreSQL 16 its first statement on the
+    target was refused (`transaction_timeout`), its transaction aborted,
+    and it then waited with nothing to do until it was killed, 338 s on.
 
     The network is the host's by default, so the endpoints resolve exactly as
     they do for migkit itself. `MIGKIT_PGCOPYDB_NETWORK` overrides it - an
@@ -4718,6 +5079,10 @@ def pgcopydb_move(hop, db, workers, go, log):
     passfile = hop.report_dir(db) / "streaming.pgpass"
     net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
     how = pgcopydb_runner()
+    # what the copy carries and how many large objects follow it, asked
+    # while the plan asks the rest: a plan waits for none of it for long
+    facts = (None if go else _ask_soon(
+        lambda: (_source_sizes(hop, db), _pg_large_objects(hop, db))))
     # Excluded tables, resolved against what the source actually has.
     # Asking the source is what turns a pattern into the concrete
     # `schema.table` names pgcopydb wants; a source that cannot be reached
@@ -4744,7 +5109,22 @@ def pgcopydb_move(hop, db, workers, go, log):
             if routed:
                 filters_note += "\n" + _routed_note(routed)
     uris = {}
-    resume = False
+    resume = stopped_split = False
+    # the blocking questions first, so the ones asked beside them have had
+    # as long as these took
+    blocked = (_pg_references_into(hop, db, routed) if go else
+               _within(lambda: _pg_references_into(hop, db, routed)) or [])
+    note = _create_note(lambda: _pg_missing_tables(hop, db)[0])
+    if go:
+        sizes = (_SIZES if _SIZES is not None
+                 else _source_sizes(hop, db))
+        objects = None
+    else:
+        sizes, objects = facts(8) or (None, None)
+    carried = {n: b for n, b in (sizes or {}).items() if n not in routed}
+    split = _copy_split(hop, workers, carried,
+                        _pgcopydb_options("copy", "table-data")
+                        if how else frozenset())
     if how == "local":
         # its own directory for the hop's database, kept under its reports
         # while a copy is under way. pgcopydb keeps its state - including
@@ -4759,13 +5139,16 @@ def pgcopydb_move(hop, db, workers, go, log):
         # compares the whole result with the source before it is complete.
         work, begun = _streaming_work(hop, db)
         resume = go and begun.exists()
-        cmd = ["pgcopydb", "copy", "table-data",
-               "--table-jobs", str(workers), "--dir", str(work),
-               "--source", src, "--target", dst]
         if resume:
-            cmd += ["--resume", "--not-consistent"]
-        if filters_path:
-            cmd += ["--filters", str(filters_path)]
+            # a stopped copy goes on cut the way it began - and one that
+            # cut a table in parts does not go on at all (`_Split.keep`)
+            kept = _Split.resumed(begun) or split
+            stopped_split = kept.way == "split"
+            resume = not stopped_split
+            split = kept if resume else split
+        cmd = (["pgcopydb", "copy", "table-data", "--dir", str(work),
+                "--source", src, "--target", dst]
+               + _copy_args(workers, split, resume, filters_path))
     else:
         # the container still takes them in its environment: whether it
         # can read a file mounted from here depends on the user it runs as,
@@ -4783,16 +5166,12 @@ def pgcopydb_move(hop, db, workers, go, log):
                "-e", "PGCOPYDB_SOURCE_PGURI", "-e", "PGCOPYDB_TARGET_PGURI"]
         if filters_path:
             cmd += ["-v", f"{filters_path}:/tmp/migkit-filters.ini:ro"]
-        cmd += [PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data",
-                "--table-jobs", str(workers)]
-        if filters_path:
-            cmd += ["--filters", "/tmp/migkit-filters.ini"]
+        cmd += [PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data"]
+        cmd += _copy_args(workers, split, False, filters_path and
+                          "/tmp/migkit-filters.ini")
     # the plan says what happens; the command stays on the step and goes
     # only to the run's debug log
     from .wording import Step, phase
-    # the run has to know; a plan says what it can find out quickly
-    blocked = (_pg_references_into(hop, db, routed) if go else
-               _within(lambda: _pg_references_into(hop, db, routed)) or [])
     if blocked:
         # measured: the streaming copy empties each table it loads on its
         # own, one at a time, and the target refuses to empty a table
@@ -4804,15 +5183,19 @@ def pgcopydb_move(hop, db, workers, go, log):
                 " streaming copy from emptying the tables it loads, so this"
                 " goes through a local copy instead")
         return pgdump_move(hop, db, workers, go, log)
-    copy = Step(phase("stream-copy", workers=workers), cmd)
+    copy = Step(phase("stream-copy", workers=workers,
+                      split=len(split.tables)), cmd)
     steps = [_truncate_step(hop)]
-    note = _create_note(lambda: _pg_missing_tables(hop, db)[0])
     if note:
         steps.insert(0, note)
     if filters_note:
         steps.append(filters_note)
     steps.append(copy)
+    steps.append(f"# {split.why}")
     steps.append("# set the target's sequences from the source's")
+    if objects:
+        steps.append(f"# carry the source's {objects:,} large objects"
+                     " after the tables, under the same numbers")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -4844,6 +5227,7 @@ def pgcopydb_move(hop, db, workers, go, log):
             log("copying through a local dump instead")
         return pgdump_move(hop, db, workers, go, log)
 
+    took = None
     try:
         _pg_create_missing(hop, db, log)
         if resume:
@@ -4852,34 +5236,285 @@ def pgcopydb_move(hop, db, workers, go, log):
                 log("an earlier streaming copy of this database stopped part"
                     " way; going on from the tables it finished")
         else:
+            if stopped_split and log:
+                log("an earlier streaming copy of this database stopped part"
+                    " way through a table it was copying in parts, and a"
+                    " copy cut that way cannot be gone on from without"
+                    " losing rows; it starts over")
             _pg_truncate_target(hop, db, log)
             if how == "local":
                 import shutil
                 shutil.rmtree(work, ignore_errors=True)
                 work.mkdir(parents=True)
                 begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
+                split.keep(begun)
         with _IndexWindow(hop, db, workers, log):
             if log:
                 log(copy)
-            _sh(copy.argv, env)
+                log(split.why)
+            began = time.monotonic()
+            try:
+                with _CopyProgress(work if how == "local" else None, log):
+                    _sh(copy.argv, env)
+            except RuntimeError as e:
+                if "message queue" in str(e):
+                    raise RuntimeError(QUEUES_GONE) from None
+                raise
+            took = time.monotonic() - began
     finally:
         passfile.unlink(missing_ok=True)
     if how == "local":
+        # a resumed copy's time is not the whole copy's, so only a copy
+        # from the start is a rate
+        if not resume:
+            _record_copy(hop, work, split.way, took, carried)
         # finished: nothing to go on from next time
         import shutil
         shutil.rmtree(work, ignore_errors=True)
+        from .decide import forget
+        forget(begun)
         begun.unlink(missing_ok=True)
     _pg_finish_created(hop, db, log)
     _pg_carry_sequences(hop, db, log)
+    from .engines.postgres import PostgresEngine
+    PostgresEngine(hop).carry_database_objects(db, log)
     return steps
+
+
+def _ask_soon(ask):
+    """`ask()` started now; the answer is had by calling the result with
+    how many seconds more to wait for it (None when it failed or is not in
+    yet). What a plan asks beside its other questions, so the waits
+    overlap instead of adding up."""
+    got = {}
+
+    def go():
+        try:
+            got["answer"] = ask()
+        except Exception:  # noqa: BLE001 - a plan says less, then
+            got["answer"] = None
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+
+    def answer(seconds=8):
+        t.join(seconds)
+        return got.get("answer")
+    return answer
+
+
+def _pg_large_objects(hop, db):
+    """How many large objects the source holds."""
+    from .engines.postgres import PostgresEngine
+    got = PostgresEngine(hop)._psql(
+        "src", db, "select count(*) from pg_largeobject_metadata").strip()
+    return int(got) if got.isdigit() else None
+
+
+#: the subcommands of the streaming copy whose options are accounted for:
+#: the ones migkit runs, and `clone` and `copy blobs`, which hold the rest
+#: of what the program can do
+PGCOPYDB_COMMANDS = ("clone", "copy table-data", "copy blobs", "follow",
+                     "stream sentinel get", "stream sentinel set apply",
+                     "stream sentinel set endpos", "ping", "compare schema",
+                     "compare data", "list progress")
+
+_CLONE = ("only a whole-database clone takes it, and migkit does not clone:"
+          " it creates the tables the target lacks itself before any copy,"
+          " so the target is never empty when the copy starts - and"
+          " measured, this build (compiled for PostgreSQL 18) stopped a"
+          " clone into 16 at its schema step on `transaction_timeout`, 1.4 s"
+          " in, nothing copied")
+_BLOBS = ("the large objects are carried by migkit after the table copy,"
+          " under the same numbers and compared first"
+          " (`carry_database_objects`): measured, this build's own"
+          " large-object copy into PostgreSQL 16 had its first statement"
+          " refused (`transaction_timeout`) and then waited with nothing to"
+          " do until it was killed, 338 s on")
+_SERVER = ("the two databases, without their passwords: those go in a"
+           " password file only this user can read, for the run")
+_DIR = ("its working state under the hop's report directory, so a stopped"
+        " copy goes on from what it finished and never meets another run's"
+        " snapshot (measured, a shared directory died on `Failed to use"
+        " given --snapshot`)")
+_SCHEMA = ("migkit restores the source's schema itself, the pre- and"
+           " post-data sections without owners or grants (`_pg_schema`),"
+           " and compares extensions, collations and settings in its"
+           " checks")
+_ROLES = ("users and their grants are carried by `migkit users`, by"
+          " password hash where the source lets it read one")
+_STREAM = ("the change stream is started on its own (`follow`), so its end"
+           " can be named once the copy is proved")
+_SNAPSHOT = ("the leg starts from its own slot's position, taken before"
+             " the copy it follows, and applies every later change again"
+             " by key; the copy is proved by `check`, not by sharing its"
+             " snapshot")
+_FRESH = ("a fresh copy starts in a directory migkit has emptied itself;"
+          " measured, a leftover directory without this or --resume fails"
+          " on `invalid snapshot identifier`, and this would allow what"
+          " emptying it already does")
+_ONE_FIELD = ("one field of the reading; the whole reading comes at once"
+              " with --json")
+_COORDINATOR = ("the leg is reached through its directory on this machine,"
+                " not over the network")
+
+
+def _pgcopydb_account():
+    o = {}
+
+    def put(commands, option, state, why):
+        for c in commands:
+            o[(c, option)] = (state, why)
+    put(("copy table-data", "follow", "ping", "compare schema",
+         "compare data"), "--source", USED, _SERVER)
+    put(("copy table-data", "follow", "ping", "compare schema",
+         "compare data"), "--target", USED, _SERVER)
+    put(("stream sentinel set endpos", "list progress"), "--source", UNUSED,
+        "the source's address reaches the leg through its environment,"
+        " password and all, and never through a command line")
+    put(("copy table-data", "follow", "compare schema", "compare data"),
+        "--dir", USED, _DIR)
+    put(("copy table-data",), "--table-jobs", USED,
+        "as many streams as migkit's sizing gives the move (`sizing.fit`):"
+        " this machine, both servers' free connections and CPUs, and the"
+        " work there is")
+    put(("copy table-data",), "--split-tables-larger-than", USED,
+        "half an even share of what the copy carries, from the source's"
+        " catalogue, not under ten seconds of one stream as measured here,"
+        " and only where splitting went faster here (`_copy_split`)")
+    put(("copy table-data",), "--split-max-parts", USED,
+        "enough parts for the largest table's parts to fit one share each"
+        " (`_copy_split`)")
+    put(("copy table-data", "follow"), "--filters", USED,
+        "the tables the hop excludes, and on the copy the ones routed to"
+        " the table copier, resolved against what the source has")
+    put(("copy table-data",), "--resume", USED,
+        "a copy that was stopped goes on from the tables it finished,"
+        " matched to migkit's own record that it began - only one that"
+        " copied its tables whole: going on from one that cut a table in"
+        " parts lost half the table's rows and exited 0 (measured)")
+    put(("copy table-data", "follow"), "--not-consistent", USED,
+        "the rest of a stopped copy, and a stream, from a new snapshot:"
+        " the move compares the whole result with the source before it is"
+        " complete")
+    put(("copy table-data", "follow"), "--restart", UNUSED, _FRESH)
+    put(("copy table-data",), "--snapshot", USED,
+        "one table copied whole under the snapshot migkit holds open for"
+        " it, so the digest of the source reads exactly what was copied"
+        " (`pgcopydb_table`)")
+    put(("follow",), "--snapshot", UNUSED, _SNAPSHOT)
+    put(("follow",), "--resume", UNUSED,
+        "not yet: a leg is started once for a catch-up and torn down after"
+        " it, so there is no stopped leg to go on from")
+    put(("follow",), "--slot-name", USED,
+        "a slot named after the hop and the database, so teardown can name"
+        " it and drop it")
+    put(("follow",), "--create-slot", USED,
+        "the leg makes its slot when it starts; teardown drops it, since an"
+        " abandoned slot pins the source's log")
+    put(("follow",), "--origin", USED,
+        "an origin on the target named after the hop, which records how far"
+        " it applied - migkit's reading of the leg's progress")
+    put(("follow",), "--plugin", USED,
+        "pgoutput, which every stock server has (measured: postgres:16"
+        " carries pgoutput and test_decoding only)")
+    put(("follow",), "--wal2json-numeric-as-string", UNUSED,
+        "the plugin is pgoutput, which every stock server has; wal2json is"
+        " not in a stock server")
+    put(("follow",), "--endpos", TOPPED,
+        "the end is set on the running leg once it is ready (`set endpos"
+        " --current`), the source's position at that moment")
+    put(("copy blobs",), "--large-objects-jobs", TOPPED, _BLOBS)
+    for f in ("--source", "--target", "--dir", "--drop-if-exists",
+              "--restart", "--resume", "--not-consistent", "--snapshot"):
+        put(("copy blobs",), f, UNUSED, _BLOBS)
+    put(("stream sentinel get",), "--json", USED,
+        "the leg's positions for the lag `/metrics` shows"
+        " (`follow_lag`); its end position is read from nowhere, measured"
+        " wrong in this build's JSON (the start given as the end)")
+    for f in ("--startpos", "--endpos", "--apply", "--write-lsn",
+              "--flush-lsn", "--transform-lsn", "--replay-lsn"):
+        put(("stream sentinel get",), f, UNUSED, _ONE_FIELD)
+    put(("stream sentinel get", "stream sentinel set apply",
+         "stream sentinel set endpos"), "--host", UNUSED, _COORDINATOR)
+    put(("stream sentinel get", "stream sentinel set apply",
+         "stream sentinel set endpos"), "--port", UNUSED, _COORDINATOR)
+    put(("stream sentinel set endpos",), "--current", USED,
+        "the stop is the source's position when the leg is told, which"
+        " `--endpos` could not know when the leg started")
+    put(("compare schema", "compare data"), "--all-databases",
+        UNUSED, "migkit takes the hop's databases one by one, each with its"
+        " own plan, copy and check")
+    put(("compare data",), "--json", UNUSED,
+        "not yet: the second reading is taken from its table's difference"
+        " marker, which it has always printed")
+    put(("list progress",), "--summary", TOPPED,
+        "measured broken in this build: it wants a summary file the table"
+        " copy never writes; migkit reads the per-table timings from the"
+        " copy's own catalogue instead (`_copy_catalogue`)")
+    put(("list progress",), "--json", TOPPED,
+        "measured broken in this build (`no such column: bytes` in its own"
+        " catalogue query); migkit reads the same catalogue itself, for the"
+        " progress lines and the next run's rates")
+    put(("list progress",), "--dir", TOPPED,
+        "the catalogue is read in the copy's own directory by migkit")
+    # the whole-database clone: what migkit does instead, or why not
+    put(("clone",), "--index-jobs", TOPPED,
+        "migkit sets the target's secondary indexes aside for the load and"
+        " rebuilds them after it, as many at a time as the sizing gives"
+        " (`_IndexWindow`, measured 1.9x on PostgreSQL 16)")
+    put(("clone",), "--restore-jobs", TOPPED,
+        "the schema's sections are restored by migkit's own step and the"
+        " indexes rebuilt by `_IndexWindow`, sized as the move is")
+    put(("clone",), "--large-objects-jobs", TOPPED, _BLOBS)
+    put(("clone",), "--skip-large-objects", TOPPED, _BLOBS)
+    put(("clone",), "--estimate-table-sizes", TOPPED,
+        "the sizes come from migkit's own read of the catalogue"
+        " (`table_facts`), once for the plan, the split and the progress")
+    for f in ("--skip-extensions", "--skip-ext-comments", "--skip-collations",
+              "--skip-db-properties", "--no-owner", "--no-acl",
+              "--no-comments", "--no-tablespaces"):
+        put(("clone",), f, TOPPED, _SCHEMA)
+    put(("clone",), "--roles", TOPPED, _ROLES)
+    put(("clone",), "--no-role-passwords", TOPPED, _ROLES)
+    put(("clone",), "--skip-vacuum", TOPPED,
+        "migkit refreshes the target's statistics itself after every load"
+        " (`settle_target`)")
+    put(("clone",), "--skip-analyze", TOPPED,
+        "migkit refreshes the target's statistics itself after every load"
+        " (`settle_target`)")
+    for f in ("--follow", "--plugin", "--slot-name", "--create-slot",
+              "--origin", "--endpos"):
+        put(("clone",), f, UNUSED, _STREAM)
+    for f in ("--source", "--target", "--dir", "--table-jobs",
+              "--split-tables-larger-than", "--split-max-parts", "--filters",
+              "--restart", "--resume", "--not-consistent", "--snapshot",
+              "--drop-if-exists", "--fail-fast", "--use-copy-binary",
+              "--requirements", "--skip-split-by-ctid", "--all-databases",
+              "--wal2json-numeric-as-string"):
+        o.setdefault(("clone", f), (UNUSED, _CLONE))
+    return o
+
+
+def _pgcopydb_installed():
+    if not which("pgcopydb"):
+        return None
+    return {c: _long_options("pgcopydb", *c.split())
+            for c in PGCOPYDB_COMMANDS}
+
+
+tooluse.register("pgcopydb", options=_pgcopydb_account(),
+                 installed=_pgcopydb_installed)
 
 
 def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
     """One table through the streaming copy, read under `snapshot` - an
     export the caller holds open, so the caller's digest of the source
-    reads exactly what was copied - and split for `workers` jobs where it
-    is larger than a share of `size` bytes. The table is emptied by the
-    copy itself. Raises where the copy fails; the caller proves the rest.
+    reads exactly what was copied - and cut across `workers` streams the
+    way the whole database's copy is (`_copy_split`, with the table's
+    `size` bytes as the whole): in parts where that went faster here, the
+    parts no shorter than ten seconds of one stream. The table is emptied
+    by the copy itself. Raises where the copy fails; the caller proves the
+    rest.
 
     What the table copier's own pass-through is timed against, table by
     table (`PostgresEngine.TABLE_WAYS`)."""
@@ -4897,10 +5532,11 @@ def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
     work.mkdir(parents=True)
     filters = work / "filters.ini"
     filters.write_text(f"[include-only-table]\n{table}\n")
-    part = max(1, int(size or 0) // max(1, int(workers)) // 1024)
-    args = ["copy", "table-data", "--table-jobs", str(workers),
-            "--split-tables-larger-than", f"{part}kB",
-            "--snapshot", snapshot]
+    split = _copy_split(hop, int(workers), {table: int(size or 0)},
+                        _pgcopydb_options("copy", "table-data"))
+    if log:
+        log(f"{table}: {split.why}")
+    args = ["copy", "table-data"]
     passfile = base / "streaming-table.pgpass"
     uris = {}
     if how == "local":
@@ -4909,7 +5545,8 @@ def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
         dst = (f"postgresql://{quote(t.user or '', safe='')}"
                f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
         cmd = ["pgcopydb", *args, "--dir", str(work / "state"),
-               "--filters", str(filters), "--source", src, "--target", dst]
+               "--source", src, "--target", dst,
+               *_copy_args(workers, split, False, filters, snapshot)]
     else:
         def full(ep, name, tail=""):
             return (f"postgresql://{quote(ep.user or '', safe='')}"
@@ -4922,7 +5559,8 @@ def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
                "-e", "PGCOPYDB_SOURCE_PGURI", "-e", "PGCOPYDB_TARGET_PGURI",
                "-v", f"{filters}:/tmp/migkit-filters.ini:ro",
                PGCOPYDB_IMAGE, "pgcopydb", *args,
-               "--filters", "/tmp/migkit-filters.ini"]
+               *_copy_args(workers, split, False, "/tmp/migkit-filters.ini",
+                           snapshot)]
     _pgpass(passfile, hop, db, ddb)
     try:
         _sh(cmd, {"PGPASSFILE": str(passfile), **uris}, log)
@@ -4973,6 +5611,112 @@ def follow_selected():
             " target to dial the source; follow = a leg driven from where"
             " migkit runs, which connects out to both sides instead")
     return want
+
+
+def stream_ways():
+    """The ways a hop's changes follow its source (`move --mode cdc`), as
+    rungs of one ladder (`decide`) - migkit's own change tail and the
+    programs it wraps side by side.
+
+    The list's order is the order the dispatch took before it was a
+    ladder, so a hop that asks for nothing takes the way it always took:
+    PostgreSQL its servers' own replication, unless the network keeps the
+    target from dialling the source (`MIGKIT_CDC=follow`) and the leg run
+    from here connects out to both instead; another engine its change
+    tail, then its servers' replication, then the streaming pipeline.
+
+    A way's measured cost (seconds a change took to reach the target,
+    kept with the hop's rates under `cdc/`) ranks it among the ways that
+    hold, the cheaper first. A way the dispatch placed behind another
+    competes with it only once it has a cost of its own on this hop:
+    `decide` tries a way never timed first, and trying a way of following
+    a source is not free - a slot, a replication set up on the target,
+    a pipeline of containers - so none is started only to be timed. The
+    leg run from here records its cost (`pgcopydb_follow`); the tail and
+    the pipeline do not yet, so until they do they rank as the list does.
+    """
+    from .decide import Need, Rung
+    pg = Need("a PostgreSQL source",
+              lambda f: f["engine"] == "postgres" and f["repl"],
+              "{rung} reads a PostgreSQL source's log only")
+
+    def unless_measured(way, holds, why):
+        # behind the way before it, unless timed here itself
+        return Need(f"{way} measured, or the way before it unable to run",
+                    lambda f: holds(f) or f["costs"].get(way) is not None,
+                    why)
+    return (
+        Rung("follow", "the change leg run from here",
+             needs=(pg, Need("the target unable to dial the source",
+                             lambda f: follow_selected() == "follow",
+                             "the target can dial the source, so its own"
+                             " replication carries the changes")),
+             because="the target cannot dial the source, and the leg"
+                     " connects out to both from here",
+             footprint=1),
+        Rung("subscription", "the servers' own replication",
+             needs=(pg, Need("the target able to dial the source",
+                             lambda f: follow_selected() != "follow",
+                             "the target cannot dial the source"
+                             " (MIGKIT_CDC=follow)")),
+             because="the servers' own replication, nothing running here"),
+        Rung("tail", "migkit's own change tail",
+             needs=(Need("a change tail", lambda f: f["tail"],
+                         "{rung} does not read this engine's log"),
+                    Need("its driver", lambda f: f["ready"],
+                         "the change tail needs a driver this machine does"
+                         " not have"),
+                    unless_measured(
+                        "tail", lambda f: not (f["engine"] == "postgres"
+                                               and f["repl"]),
+                        "a PostgreSQL source's changes go by its servers'"
+                        " replication or the leg run from here")),
+             because="read and applied by migkit, by key, with every batch"
+                     " accounted"),
+        Rung("replica", "the servers' own replication",
+             needs=(Need("replication between the servers",
+                         lambda f: f["repl"] and f["engine"] != "postgres",
+                         "{rung} is not set up for this engine"),
+                    unless_measured(
+                        "replica", lambda f: not f["ready"],
+                        "the change tail runs here, and applies by key"
+                        " where a replica stops on a row the copy already"
+                        " carried"))),
+        Rung("pipeline", "migkit's streaming pipeline",
+             needs=(Need("an engine it streams",
+                         lambda f: stream_supported(f["engine"]),
+                         "{rung} does not stream this engine"),
+                    unless_measured(
+                        "pipeline", lambda f: not f["ready"],
+                        "the change tail runs here")),
+             footprint=2),
+    )
+
+
+def stream_way(hop, engine, repl, tail, ready):
+    """The `decide.Choice` of the way this hop's changes follow its source,
+    from what the engine has (`repl`: its servers' replication, `tail`:
+    migkit's change tail, `ready`: the tail's driver installed) and what
+    each way was measured to cost on this hop."""
+    from .decide import Facts, HopCosts, climb
+    costs = HopCosts(hop, "cdc/")
+    return climb(hop.name, stream_ways(),
+                 Facts({"engine": engine, "repl": bool(repl),
+                        "tail": bool(tail), "ready": bool(ready),
+                        "costs": costs}),
+                 costs=costs)
+
+
+def _target_writes(hop, db):
+    """Rows written into the target's tables since its statistics began:
+    what a change leg applied, taken as the difference across the leg.
+    None where the target cannot be asked."""
+    try:
+        got = _pg_psql(hop, db, "select coalesce(sum(n_tup_ins + n_tup_upd"
+                                " + n_tup_del), 0) from pg_stat_user_tables")
+        return int(got.strip())
+    except Exception:  # noqa: BLE001 - no number, then no cost
+        return None
 
 
 def follow_dir(hop, db):
@@ -5051,6 +5795,30 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
         f"changes from before the slot {slot} existed are not carried;"
         " the bulk copy and migkit check are what cover those",
     ]
+    # the tables the hop excludes are the target's own, and a stream that
+    # carried their source's changes would overwrite what the move left
+    # alone; and a table the hop filters or renames cannot be carried by a
+    # stream that applies whole rows under their own names
+    if _routes_any(hop, db) or hop.table_map():
+        tables = (eng._all_tables("src", db) if go else
+                  _within(lambda: eng._all_tables("src", db)))
+        if tables is None:
+            steps.append("the tables the hop excludes are resolved against"
+                         " the source when the leg starts")
+        else:
+            refused = stream_cannot_carry(hop, db, tables)
+            if refused:
+                raise SystemExit(cannot_carry_words(refused))
+            text = pgcopydb_filters(hop, db, tables)
+            if text:
+                ini = hop.report_dir(db) / "follow-filters.ini"
+                ini.write_text(text)
+                argv += ["--filters", str(ini)]
+                steps.append(f"{text.count(chr(10)) - 1} tables the hop"
+                             " excludes are left out of the stream")
+    from .wording import Step
+    # the command stays on the step, for the debug log and the tests
+    steps[0] = Step(steps[0], argv)
     if not go:
         return steps
     if pgcopydb_runner() != "local":
@@ -5066,10 +5834,14 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     _debug(argv, env)
     if log:
         log(steps[0])
+    # what the target had taken before the leg, for its cost: the rows it
+    # writes over the time from being told to apply to its end
+    written = _target_writes(hop, db)
     with out.open("ab") as fh:
         proc = _sp.Popen(argv, stdout=fh, stderr=fh, env=env)
     try:
         _follow_sentinel(d, env, proc, log)
+        applying = time.monotonic()
         limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
         try:
             proc.wait(timeout=limit)
@@ -5089,6 +5861,14 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     if proc.returncode:
         raise SystemExit(f"the CDC leg exited {proc.returncode} before it"
                          f" finished catching up; its log is {out}")
+    after = _target_writes(hop, db)
+    if written is not None and after is not None and after > written:
+        # seconds a change took to reach the target at a named position,
+        # the wait for the end position included: what this way costs
+        # beside the others (`stream_way`)
+        from .decide import HopCosts
+        HopCosts(hop, "cdc/").saw("follow", after - written,
+                                  time.monotonic() - applying)
     steps.append(f"target applied up to {eng.applied_lsn(db) or 'nothing'}"
                  " - run migkit check to prove the rows, an LSN is not a"
                  " row count")
@@ -5173,12 +5953,257 @@ def _follow_sentinel(d, env, proc, log=None):
             log(f"change stream {why} set")
 
 
+def stream_cannot_carry(hop, db, tables, columns_left_out=False):
+    """[(table, why)] for the tables of `db` a change stream that applies
+    whole rows under their own names would carry wrongly - every one the
+    hop does not exclude and filters, renames, or maps the columns of.
+
+    Such a stream used to carry them anyway, and the check could not see
+    it: `check` applies a row filter to both sides, so every row outside
+    it that the stream wrote onto the target went unread. `columns_left_out`
+    says the stream can leave a table's columns out (`column.exclude.list`
+    on the pipeline), which answers a kept or dropped column and nothing
+    else."""
+    out = []
+    for ident in tables:
+        parts = [p for p in str(ident).split(".") if p]
+        if hop.excluded(db, *parts):
+            continue
+        name = ".".join(parts)
+        cols = hop.column_rules(db, *parts)
+        if hop.row_filter(db, *parts):
+            out.append((name, "its rows are filtered"))
+        elif _renamed(hop, db, parts):
+            out.append((name, "it is renamed on the target"))
+        elif cols.get("rename"):
+            out.append((name, "its columns are renamed"))
+        elif (cols.get("keep") or cols.get("drop")) and not columns_left_out:
+            out.append((name, "its columns are kept or dropped"))
+    return out
+
+
+def _renamed(hop, db, parts):
+    """Whether the hop gives this table another name on the target: what
+    `target_table` answers, held against the same number of trailing parts
+    of its own name (a mapping of `orders` to `orders` renames nothing)."""
+    mapped = str(hop.target_table(db, *parts)).split(".")
+    return mapped != [db, *parts][-len(mapped):]
+
+
+def cannot_carry_words(refused):
+    """The refusal `stream_cannot_carry`'s answer becomes."""
+    said = "; ".join(f"{t} ({why})" for t, why in refused[:5])
+    return ("this change stream applies whole rows under the source's names"
+            f" and cannot carry what the hop asks for {said}"
+            + (f" and {len(refused) - 5} more" if len(refused) > 5 else "")
+            + ". Nothing has been started. Carried anyway, those rows would"
+            " land on the target unchanged, and a check that reads through"
+            " the hop's filters and names would not see them")
+
+
+def _lsn(text):
+    """A PostgreSQL position (`0/350411C0`) as a number of bytes."""
+    hi, _, lo = str(text or "").partition("/")
+    try:
+        return (int(hi, 16) << 32) + int(lo, 16)
+    except ValueError:
+        return None
+
+
+def follow_lag(hop, db):
+    """The CDC leg's reading of itself, for `/metrics`, or None where no
+    leg runs here: {"apply": whether it is applying, "held": bytes it has
+    received and not applied, by its own account, "behind": bytes of the
+    source's log it has not received}.
+
+    Read through the leg's own sentinel with no password anywhere: the
+    reader wants the source's address only to match its catalogue, and
+    measured, it answers with none in the address. Two things about the
+    reading, both measured on 0.18:
+    * its JSON gives the start position as the end position (the text
+      form said 0/0 for an end nobody had set), so the end is not read
+    * its `replay_lsn` is its own claim: it matched `write_lsn` while the
+      target held no row - which is why the target's origin, not this, is
+      what the move is judged by (`pgcopydb_follow`). `held` is that claim,
+      and says so in its metric's help
+    """
+    import os
+    d = follow_dir(hop, db)
+    try:
+        pid = int((d / "pgcopydb.pid").read_text().split()[0])
+        os.kill(pid, 0)
+    except (OSError, ValueError, IndexError):
+        return None
+    s = hop.source
+    src = (f"postgresql://{quote(s.user or '', safe='')}"
+           f"@{s.host}:{s.port}/{db}")
+    try:
+        got = subprocess.run(["pgcopydb", "stream", "sentinel", "get",
+                              "--json", "--dir", str(d)],
+                             capture_output=True, text=True, timeout=15,
+                             env=tool_env({"PGCOPYDB_SOURCE_PGURI": src}))
+        reading = json.loads(got.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    write, replay = _lsn(reading.get("write_lsn")), _lsn(
+        reading.get("replay_lsn"))
+    out = {"apply": bool(reading.get("apply")), "held": None,
+           "behind": None}
+    if write is not None and replay:
+        out["held"] = max(write - replay, 0)
+    try:
+        from .engines.postgres import PostgresEngine
+        now = _lsn(PostgresEngine(hop).log_position("src", db))
+    except Exception:  # noqa: BLE001 - the source's side goes unsaid
+        now = None
+    if now is not None and write is not None:
+        out["behind"] = max(now - write, 0)
+    return out
+
+
+#: the topic the connector puts each transaction's beginning and end on,
+#: under its prefix; the sink reads every table's topic and not this one
+TRANSACTION_TOPIC = "transaction"
+
+
+def _stream_facts(hop, dbs, src_is_mysql):
+    """(tables by database, their average row in bytes, rows a second a
+    copy of this hop went at) for the pipeline's configuration; what
+    cannot be read is None."""
+    from . import planner
+    from .engines.mysql import MySQLEngine
+    from .engines.postgres import PostgresEngine
+    eng = (MySQLEngine if src_is_mysql else PostgresEngine)(hop)
+    tables, rows, size = {}, 0, 0
+    # the names only where the hop has something to match against them;
+    # the sizes only for as long as a plan waits for anything
+    named = bool(getattr(hop, "exclude", None) or hop.mapping)
+    for one in dbs or ["postgres"]:
+        try:
+            tables[one] = eng._all_tables("src", one) if named else []
+        except Exception:  # noqa: BLE001 - a source that cannot be listed
+            tables[one] = None
+        facts = _within(lambda one=one: eng.table_facts("src", one)) or {}
+        for name, f in facts.items():
+            if hop.excluded(one, *str(name).split(".")):
+                continue
+            if f.get("rows") and f.get("bytes"):
+                rows += int(f["rows"])
+                size += int(f["bytes"])
+    rate = None
+    for path in ("pgcopydb", "pgdump", "mydumper", "builtin"):
+        rate = planner.measured_rate(hop, path)
+        if rate:
+            break
+    return tables, (size / rows if rows else None), rate
+
+
+def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
+    """`column.exclude.list` for the columns the hop keeps out, or None:
+    the ones it drops, and the ones outside what it keeps, as the
+    connector matches them - `schema.table.column` on PostgreSQL,
+    `database.table.column` on MySQL, dots escaped."""
+    from .engines.mysql import MySQLEngine
+    from .engines.postgres import PostgresEngine
+    eng = (MySQLEngine if src_is_mysql else PostgresEngine)(hop)
+    out = []
+    for one in dbs or ["postgres"]:
+        catalogue = None
+        for ident in tables.get(one) or ():
+            parts = [p for p in str(ident).split(".") if p]
+            if hop.excluded(one, *parts):
+                continue
+            rules = hop.column_rules(one, *parts)
+            if not (rules.get("keep") or rules.get("drop")):
+                continue
+            qualified = ".".join([one] + parts if src_is_mysql else parts)
+            gone = list(rules.get("drop") or [])
+            if rules.get("keep"):
+                if catalogue is None:
+                    catalogue = eng.column_catalog("src", one)
+                cols = [c for c, _ in catalogue.get(ident) or []]
+                if not cols:
+                    raise SystemExit(
+                        f"{ident}: the columns the hop keeps could not be"
+                        " matched against the source's, so the stream"
+                        " cannot be told which to leave out. Nothing has"
+                        " been started")
+                gone += [c for c in cols if c not in rules["keep"]]
+            out += [f"{qualified}.{c}".replace(".", "\\.") for c in gone]
+    return ",".join(sorted(set(out))) or None
+
+
+def value_modes(mysql):
+    """How the connector hands each kind of value on, chosen so nothing
+    reaches the target other than the source held it - the forms `canon`
+    compares, where every connector has a lossy answer beside the exact
+    one:
+    * times: to the microsecond, as each column holds them (`adaptive`,
+      and on MySQL `adaptive_time_microseconds`, its own default) - never
+      `connect`, which keeps milliseconds and cuts the rest. `canon`
+      renders a time to the microsecond and past it where a value carries
+      more (`FRACTION`)
+    * decimals: `precise`, the exact value - `double` rounds past fifteen
+      digits, and `string` asks the sink to write text into a number.
+      `canon` compares a decimal by its value (`NUMBER`)
+    * bytes: `bytes`, not base64 or hex text for the sink to decode
+    * MySQL's unsigned 64-bit integers: `precise` - the default `long`
+      holds up to 2^63 - 1, and a larger value wraps negative; `canon`
+      holds a `bigint unsigned` to 0..2^64 - 1
+    * MySQL's dates: `enable.time.adjuster` off. On, the connector reads a
+      year below 100 as a two-digit year and moves it into 1970-2069 (its
+      documented rule); MySQL stores a four-digit year, and the value as
+      stored is what `canon` compares
+    * PostgreSQL's intervals: `string`, the ISO 8601 text - the default
+      counts a month as 30 days, and `1 mon` is not `30 days` on the
+      target. `canon` compares an interval by the engine's own text
+      (`OWN`); how the sink writes that text into an interval column is not
+      measured here, and `check` compares what lands
+    Pinned, not left to defaults, so a release that changes one does not
+    change what lands."""
+    out = {"decimal.handling.mode": "precise",
+           "binary.handling.mode": "bytes"}
+    if mysql:
+        out.update({"time.precision.mode": "adaptive_time_microseconds",
+                    "bigint.unsigned.handling.mode": "precise",
+                    "enable.time.adjuster": "false"})
+    else:
+        out.update({"time.precision.mode": "adaptive",
+                    "interval.handling.mode": "string"})
+    return out
+
+
 def stream_codegen(hop, dbs, engine):
     """Write the managed streaming pipeline for this hop: a single-broker
     log plus a connector runtime with a source and an upsert sink, sized for
     one hop and ready to start. migkit reimplements none of it - it wires
     proven components together and owns the lifecycle, so the operator drives
-    everything through migkit."""
+    everything through migkit.
+
+    What the connector is asked beyond its defaults, and why - the full
+    account, option by option, is `DEBEZIUM` below (`tooluse`):
+    * transaction boundaries on every change and a topic of their own, so
+      a reader of the log can keep a source transaction whole; the sink
+      reads every table's topic and not that one
+    * truncates carried: its default leaves a source `TRUNCATE` out, and the
+      target kept every row of a table the source had emptied
+    * its buffers from the rows it carries (`sizing.stream_buffers`),
+      bounded in bytes as well as in changes; the sink writes a batch as
+      large as the one it is handed
+    * a failure stops it (`fail`), pinned: the other answers skip or warn,
+      and a change skipped is a row the target never gets
+    * decimals, times and bytes in the forms `canon` compares - exact
+      decimals, times to the microsecond, bytes as bytes - pinned, so a
+      later default does not change what lands
+    * a heartbeat as often as the runtime keeps its place (60 s), so a slot
+      whose tables are quiet still lets the source's log go
+    * snapshot progress on a notification topic, read back in migkit's
+      words (`stream_progress`)
+    * the columns the hop keeps out left out at the source; a table the
+      hop filters or renames is refused (`stream_cannot_carry`) - the
+      pipeline would carry it whole under its own name
+    """
+    from . import sizing
     out = hop.report_dir() / "stream"
     out.mkdir(parents=True, exist_ok=True)
     s, t = hop.source, hop.target
@@ -5187,6 +6212,19 @@ def stream_codegen(hop, dbs, engine):
                        if src_is_mysql
                        else "io.debezium.connector.postgresql.PostgresConnector")
     name = f"migkit-{hop.name}"
+    tables, row_bytes, rate = _stream_facts(hop, dbs, src_is_mysql)
+    refused = []
+    for one, listed in tables.items():
+        if listed is None and (hop.mapping or {}):
+            raise SystemExit(
+                f"the source's tables in {one} could not be listed, so what"
+                " the hop maps cannot be matched against them. Nothing has"
+                " been started")
+        refused += stream_cannot_carry(hop, one, listed or (),
+                                       columns_left_out=True)
+    if refused:
+        raise SystemExit(cannot_carry_words(refused))
+    buffers = sizing.stream_buffers(row_bytes, rate)
     source = {
         "name": f"{name}-source",
         "config": {
@@ -5207,6 +6245,15 @@ def stream_codegen(hop, dbs, engine):
             "signal.kafka.topic": f"{name}-signal",
             "signal.kafka.bootstrap.servers": "redpanda:9092",
             "signal.kafka.groupId": f"{name}-signal",
+            "notification.enabled.channels": "sink",
+            "notification.sink.topic.name": f"{name}-notifications",
+            "provide.transaction.metadata": "true",
+            "topic.transaction": TRANSACTION_TOPIC,
+            "skipped.operations": "none",
+            "event.processing.failure.handling.mode": "fail",
+            "heartbeat.interval.ms": "60000",
+            **value_modes(src_is_mysql),
+            **buffers,
         },
     }
     if src_is_mysql:
@@ -5216,6 +6263,7 @@ def stream_codegen(hop, dbs, engine):
             "schema.history.internal.kafka.bootstrap.servers":
                 "redpanda:9092",
             "schema.history.internal.kafka.topic": f"{name}-history",
+            "snapshot.locking.mode": "minimal",
         })
         if _gtid_on(hop):
             # re-reading a table then interleaves with the stream instead of
@@ -5236,22 +6284,18 @@ def stream_codegen(hop, dbs, engine):
     # same resolution the bulk movers and `check` use, so a table nobody
     # wants is not carried by the CDC leg either.
     if getattr(hop, "exclude", None):
-        try:
-            from .engines.mysql import MySQLEngine
-            from .engines.postgres import PostgresEngine
-            one = dbs[0] if dbs else "postgres"
-            if src_is_mysql:
-                tables = MySQLEngine(hop)._all_tables("src", one)
-                skip = debezium_exclude(hop, one, tables, one)
-            else:
-                tables = PostgresEngine(hop)._all_tables("src", one)
-                skip = debezium_exclude(hop, one, tables, "public")
-        except Exception:
-            # a source that cannot be listed leaves the stream unfiltered
-            # rather than guessing at names; the README says so
-            skip = None
+        one = dbs[0] if dbs else "postgres"
+        listed = tables.get(one)
+        # a source that cannot be listed leaves the stream unfiltered
+        # rather than guessing at names; the README says so
+        skip = (debezium_exclude(hop, one, listed,
+                                 one if src_is_mysql else "public")
+                if listed is not None else None)
         if skip:
             source["config"]["table.exclude.list"] = skip
+    left_out = _stream_columns_left_out(hop, dbs, tables, src_is_mysql)
+    if left_out:
+        source["config"]["column.exclude.list"] = left_out
 
     dst_is_pg = engine in ("postgres", "hetero")
     jdbc = (f"jdbc:postgresql://{t.host}:{t.port}/" if dst_is_pg
@@ -5260,14 +6304,17 @@ def stream_codegen(hop, dbs, engine):
         "name": f"{name}-sink",
         "config": {
             "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
-            "topics.regex": f"{name}\\..*",
+            # every table's topic, and not the transactions' one beside them
+            "topics.regex": f"{name}\\.(?!{TRANSACTION_TOPIC}$).*",
             "connection.url": jdbc + (dbs[0] if dbs else ""),
             "connection.username": t.user,
             "connection.password": t.password,
             "insert.mode": "upsert",
             "delete.enabled": "true",
+            "truncate.enabled": "true",
             "primary.key.mode": "record_key",
             "schema.evolution": "basic",
+            "batch.size": buffers["max.batch.size"],
         },
     }
     compose = """services:
@@ -5315,6 +6362,398 @@ licences and attribution.
         f.chmod(0o600)
     out.chmod(0o700)
     return out
+
+
+#: the connectors the pipeline runs, as its option account names them
+DEBEZIUM_COMMANDS = ("postgres", "mysql", "jdbc-sink", "signals")
+#: what every connector takes from its runtime as well as its own
+_CONNECT = ("transforms", "predicates")
+#: the signals a connector reads on its channel
+_SIGNALS = ("execute-snapshot", "pause-snapshot", "resume-snapshot",
+            "stop-snapshot", "log")
+
+_RELATIONAL = (
+    "connector.class", "tasks.max", "topic.prefix", "database.hostname",
+    "database.port", "database.user", "database.password",
+    "table.include.list", "table.exclude.list", "column.include.list",
+    "column.exclude.list", "skip.messages.without.change",
+    "column.truncate.to.", "column.mask.with.", "column.mask.hash.",
+    "column.propagate.source.type", "datatype.propagate.source.type",
+    "message.key.columns", "time.precision.mode", "decimal.handling.mode",
+    "binary.handling.mode", "tombstones.on.delete",
+    "schema.name.adjustment.mode", "field.name.adjustment.mode",
+    "converters", "snapshot.mode", "snapshot.include.collection.list",
+    "snapshot.select.statement.overrides", "snapshot.delay.ms",
+    "snapshot.fetch.size", "snapshot.max.threads", "snapshot.lock.timeout.ms",
+    "snapshot.locking.mode", "snapshot.query.mode",
+    "snapshot.tables.order.by.row.count",
+    "event.processing.failure.handling.mode", "max.batch.size",
+    "max.queue.size", "max.queue.size.in.bytes", "poll.interval.ms",
+    "heartbeat.interval.ms", "heartbeat.action.query",
+    "provide.transaction.metadata", "skipped.operations",
+    "signal.data.collection", "signal.enabled.channels", "signal.kafka.",
+    "notification.enabled.channels", "notification.sink.topic.name",
+    "incremental.snapshot.chunk.size",
+    "incremental.snapshot.watermarking.strategy", "topic.naming.strategy",
+    "topic.delimiter", "topic.cache.size", "topic.heartbeat.prefix",
+    "topic.transaction", "custom.metric.tags", "errors.max.retries",
+    "database.query.timeout.ms", "read.only", "post.processors",
+    "retriable.restart.connector.wait.ms", "database.initial.statements")
+_POSTGRES = (
+    "plugin.name", "slot.name", "slot.drop.on.stop", "slot.stream.params",
+    "slot.max.retries", "slot.retry.delay.ms", "publication.name",
+    "publication.autocreate.mode", "replica.identity.autoset.values",
+    "database.dbname", "database.sslmode", "database.sslcert",
+    "database.sslpassword", "database.sslkey", "database.sslrootcert",
+    "database.sslfactory", "database.tcpKeepAlive", "schema.include.list",
+    "schema.exclude.list", "hstore.handling.mode", "interval.handling.mode",
+    "money.fraction.digits", "message.prefix.include.list",
+    "message.prefix.exclude.list", "status.update.interval.ms",
+    "xmin.fetch.interval.ms", "flush.lsn.source",
+    "unavailable.value.placeholder", "include.unknown.datatypes")
+_MYSQL = (
+    "database.server.id", "database.include.list", "database.exclude.list",
+    "database.ssl.mode", "database.ssl.keystore",
+    "database.ssl.keystore.password", "database.ssl.truststore",
+    "database.ssl.truststore.password", "include.schema.changes",
+    "include.schema.comments", "include.query",
+    "bigint.unsigned.handling.mode",
+    "event.deserialization.failure.handling.mode",
+    "inconsistent.schema.handling.mode", "enable.time.adjuster",
+    "gtid.source.includes", "gtid.source.excludes", "connect.timeout.ms",
+    "connect.keep.alive", "connect.keep.alive.interval.ms",
+    "table.ignore.builtin", "binlog.buffer.size",
+    "min.row.count.to.stream.results", "database.jdbc.driver",
+    "use.nongraceful.disconnect", "schema.history.internal.")
+_SINK = (
+    "connector.class", "tasks.max", "topics", "topics.regex",
+    "connection.url", "connection.username", "connection.password",
+    "connection.pool.min_size", "connection.pool.max_size",
+    "connection.pool.acquire_increment", "connection.pool.timeout",
+    "insert.mode", "delete.enabled", "truncate.enabled", "primary.key.mode",
+    "primary.key.fields", "schema.evolution", "quote.identifiers",
+    "collection.name.format", "collection.naming.strategy",
+    "column.naming.strategy", "database.time_zone", "use.time.zone",
+    "batch.size", "use.reduction.buffer", "field.include.list",
+    "field.exclude.list", "flush.max.retries", "flush.retry.delay.ms",
+    "dialect.postgres.postgis.schema", "dialect.sqlserver.identity.insert",
+    "hibernate.")
+_DEBEZIUM_FAMILIES = ("column.truncate.to.", "column.mask.with.",
+                      "column.mask.hash.", "signal.kafka.",
+                      "schema.history.internal.", "hibernate.")
+
+_DEFAULT = "left at its default, which is the right answer here:"
+_MASK = ("the target is to hold the source's values: masking, hashing or"
+         " cutting one short at the source puts a different value in the"
+         " target, which the check then reports. The hop's `mask` is what a"
+         " person reads in a report, not what the target holds")
+
+
+def _debezium_account():
+    o = {}
+
+    def put(commands, option, state, why):
+        for c in commands:
+            o[(c, option)] = (state, why)
+    both, pg, my, sink = ("postgres", "mysql"), ("postgres",), ("mysql",), (
+        "jdbc-sink",)
+    for f in ("connector.class", "database.hostname", "database.port",
+              "database.user", "database.password", "topic.prefix"):
+        put(both, f, USED, "where and as whom the connector reads the source,"
+            " and the prefix the sink and the signals find its topics by")
+    put(both, "tasks.max", UNUSED, _DEFAULT + " a source connector reads one"
+        " change log in one task whatever this says")
+    put(both, "table.exclude.list", USED, "the tables the hop excludes, as"
+        " `hop.excluded` resolves them against the source, dots escaped")
+    put(both, "table.include.list", UNUSED, "the hop names what it leaves"
+        " out, not what it takes; one list is enough, and the connector"
+        " takes one of the two")
+    put(both, "column.exclude.list", USED, "the columns the hop keeps out -"
+        " the ones it drops and the ones outside what it keeps")
+    put(both, "column.include.list", UNUSED, "the columns the hop keeps out"
+        " go on the exclude list, which says the same with one list")
+    put(both, "skip.messages.without.change", UNUSED, "a change to a column"
+        " the hop keeps out still moves nothing on the target, applied or"
+        " not; left at its default")
+    for f in ("column.truncate.to.", "column.mask.with.",
+              "column.mask.hash."):
+        put(both, f, UNUSED, _MASK)
+    for f in ("column.propagate.source.type",
+              "datatype.propagate.source.type"):
+        put(both, f, UNUSED, "the sink builds a table the target lacks from"
+            " the change's own schema; migkit makes the target's tables"
+            " before the stream starts, from the source's definition")
+    put(both, "message.key.columns", UNUSED, "a change is addressed by the"
+        " table's primary key, which is what the sink upserts by; a table"
+        " without one is refused by migkit's own paths too")
+    for f in ("time.precision.mode", "decimal.handling.mode",
+              "binary.handling.mode"):
+        put(both, f, USED, "the exact form of each value, as `canon`"
+            " compares it, never a lossy one (`value_modes`): times to the"
+            " microsecond (never `connect`, which keeps milliseconds),"
+            " decimals exact, bytes as bytes")
+    put(both, "tombstones.on.delete", UNUSED, _DEFAULT + " the sink applies"
+        " a delete from the delete itself, and the tombstone lets the log"
+        " compact what a deleted key held")
+    for f in ("schema.name.adjustment.mode", "field.name.adjustment.mode"):
+        put(both, f, UNUSED, _DEFAULT + " names are kept as the source has"
+            " them")
+    put(both, "converters", UNUSED, "no value is converted on the way; a"
+        " type the connector cannot carry is a difference `check` reports")
+    put(both, "snapshot.mode", USED, "`initial`: the rows first, then every"
+        " change from the position the read began at")
+    put(both, "snapshot.include.collection.list", UNUSED, "every table the"
+        " stream carries is read first; the exclude list already leaves the"
+        " rest out of both")
+    put(both, "snapshot.select.statement.overrides", UNUSED, "a row filter"
+        " at the first read only would let every later change of a row"
+        " outside it through the stream, and a check that reads through the"
+        " filter would never see those rows; a hop that filters rows is"
+        " refused by the pipeline instead (`stream_cannot_carry`)")
+    for f in ("snapshot.delay.ms", "snapshot.fetch.size",
+              "snapshot.max.threads", "snapshot.lock.timeout.ms",
+              "snapshot.query.mode", "snapshot.tables.order.by.row.count"):
+        put(both, f, UNUSED, "not yet: the first read of the pipeline runs"
+            " as the connector reads by default, and migkit's own copy is"
+            " the path sized per table")
+    put(my, "snapshot.locking.mode", USED, "pinned to `minimal`: `none` is"
+        " safe only where no schema change runs during the first read, and"
+        " nothing watches the source's schema while the connector reads it")
+    put(pg, "snapshot.locking.mode", UNUSED, _DEFAULT + " the first read"
+        " takes locks that stop a schema change, never a write")
+    put(both, "event.processing.failure.handling.mode", USED, "pinned to"
+        " `fail`: the other answers warn or skip, and a change skipped is a"
+        " row the target never gets")
+    for f in ("max.batch.size", "max.queue.size", "max.queue.size.in.bytes",
+              "poll.interval.ms"):
+        put(both, f, USED, "from the rows it carries (`sizing.stream_"
+            "buffers`): a batch a sixteenth of a worker's memory at the"
+            " source's average row, the queue four of them and bounded in"
+            " bytes, the wait for a batch what one takes to fill at the rate"
+            " measured")
+    put(both, "heartbeat.interval.ms", USED, "as often as the runtime keeps"
+        " its place (60 s): a slot whose tables are quiet still lets the"
+        " source's log go")
+    put(both, "heartbeat.action.query", UNUSED, "it writes to the source,"
+        " and migkit writes to a source nowhere")
+    put(both, "provide.transaction.metadata", USED, "each change carries its"
+        " transaction and each transaction's end is on a topic of its own,"
+        " so a reader of the log can keep one whole")
+    put(both, "topic.transaction", USED, "named, so the sink's topic pattern"
+        " can leave that topic out")
+    put(both, "skipped.operations", USED, "`none`: its default leaves a"
+        " source `TRUNCATE` out, and the target kept every row the source"
+        " had emptied. The hop has no filter of operations yet (a gap the"
+        " backlog lists); where it has one, what it leaves out goes"
+        " here")
+    put(both, "signal.enabled.channels", USED, "the log's own topic, so a"
+        " table can be read again without a signalling table in the source")
+    put(both, "signal.kafka.", USED, "the signal topic, the broker, and the"
+        " group the connector reads its signals as")
+    put(both, "signal.data.collection", UNUSED, "it names a table in the"
+        " source to write signals into, and migkit writes to a source"
+        " nowhere")
+    put(both, "notification.enabled.channels", USED, "the log's own topic,"
+        " read back as the reads' progress in migkit's words"
+        " (`stream_progress`)")
+    put(both, "notification.sink.topic.name", USED, "a topic the sink's"
+        " pattern does not match")
+    put(both, "incremental.snapshot.chunk.size", UNUSED, "not yet: a re-read"
+        " beside the stream is held while the source is under strain"
+        " (`stream_hold`), and its chunk left at the connector's size")
+    put(both, "incremental.snapshot.watermarking.strategy", UNUSED, "the"
+        " watermarks come from the source's own positions (`read.only`),"
+        " never from rows written into it")
+    put(both, "read.only", USED, "where the source can give a re-read its"
+        " watermarks without a write - GTID on MySQL, `pg_current_snapshot`"
+        " on PostgreSQL 13 and later (measured: not in the PostgreSQL"
+        " connector's advertised options, and it works)")
+    for f in ("topic.naming.strategy", "topic.delimiter", "topic.cache.size",
+              "topic.heartbeat.prefix"):
+        put(both, f, UNUSED, _DEFAULT + " the sink finds a table's topic by"
+            " the prefix and the default dot")
+    put(both, "custom.metric.tags", UNUSED, "the pipeline's progress is read"
+        " by migkit from its notifications and its sink, not scraped")
+    put(both, "errors.max.retries", UNUSED, _DEFAULT + " a connector that"
+        " fails stops, and `stream_status` says so")
+    put(both, "database.query.timeout.ms", UNUSED, _DEFAULT + " the"
+        " connector's own queries are catalogue reads")
+    put(both, "post.processors", UNUSED, "no change is rewritten on its way;"
+        " what the source wrote is what the target gets")
+    put(both, "retriable.restart.connector.wait.ms", UNUSED, _DEFAULT +
+        " the runtime restarts it after a connection it can retry")
+    put(both, "database.initial.statements", UNUSED, "a session setting on"
+        " the source is a change to how the source runs, which migkit does"
+        " not make")
+    put(pg, "plugin.name", USED, "pgoutput, which every stock server has")
+    put(pg, "slot.name", USED, "named after the hop, so teardown can name it"
+        " and drop it")
+    put(pg, "slot.drop.on.stop", UNUSED, "teardown drops the slot when the"
+        " stream is done with; dropped on every stop, a restart would lose"
+        " the changes made while it was down")
+    for f in ("slot.stream.params", "slot.max.retries", "slot.retry.delay.ms",
+              "status.update.interval.ms", "xmin.fetch.interval.ms",
+              "flush.lsn.source"):
+        put(pg, f, UNUSED, _DEFAULT + " the slot is read and confirmed the"
+            " way the connector reads it by default")
+    for f in ("publication.name", "publication.autocreate.mode"):
+        put(pg, f, UNUSED, _DEFAULT + " the connector names and makes its"
+            " publication, which teardown drops with the slot")
+    put(pg, "replica.identity.autoset.values", UNUSED, "it changes a table's"
+        " replica identity on the source, which migkit does not change")
+    put(pg, "database.dbname", USED, "the hop's first database")
+    for f in ("database.sslmode", "database.sslcert", "database.sslpassword",
+              "database.sslkey", "database.sslrootcert", "database.sslfactory",
+              "database.tcpKeepAlive"):
+        put(pg, f, UNUSED, "not yet: the pipeline connects the way the"
+            " connector does by default; the hop's TLS options reach"
+            " migkit's own paths")
+    for f in ("schema.include.list", "schema.exclude.list"):
+        put(pg, f, UNUSED, "the hop's exclusions reach it table by table on"
+            " the table exclude list")
+    put(pg, "hstore.handling.mode", UNUSED, _DEFAULT + " a map, as the sink"
+        " writes one back")
+    put(pg, "interval.handling.mode", USED, "`string`, the ISO 8601 text:"
+        " the default counts a month as 30 days, and a month is not 30 days"
+        " on the target (`value_modes`)")
+    put(pg, "money.fraction.digits", UNUSED, _DEFAULT + " two digits, as"
+        " the money type keeps")
+    for f in ("message.prefix.include.list", "message.prefix.exclude.list"):
+        put(pg, f, UNUSED, "logical decoding messages are not rows; the sink"
+            " has nothing to apply from them")
+    put(pg, "unavailable.value.placeholder", UNUSED, _DEFAULT + " a value"
+        " the change does not carry is marked, and the sink leaves the"
+        " target's value as it is")
+    put(pg, "include.unknown.datatypes", UNUSED, "a type the connector does"
+        " not know stays out, and `check` reports the column as different")
+    put(my, "database.server.id", USED, "one id for the pipeline's reader,"
+        " apart from migkit's own reader's")
+    put(my, "database.include.list", USED, "the databases the hop moves,"
+        " and no other")
+    put(my, "database.exclude.list", UNUSED, "the hop names its databases;"
+        " the include list says the same")
+    for f in ("database.ssl.mode", "database.ssl.keystore",
+              "database.ssl.keystore.password", "database.ssl.truststore",
+              "database.ssl.truststore.password", "database.jdbc.driver",
+              "connect.timeout.ms", "connect.keep.alive",
+              "connect.keep.alive.interval.ms", "use.nongraceful.disconnect"):
+        put(my, f, UNUSED, "not yet: the pipeline connects the way the"
+            " connector does by default; the hop's TLS options reach"
+            " migkit's own paths")
+    for f in ("include.schema.changes", "include.schema.comments",
+              "include.query"):
+        put(my, f, UNUSED, _DEFAULT + " schema changes go on the prefix's"
+            " own topic, which the sink's pattern does not match")
+    put(my, "bigint.unsigned.handling.mode", USED, "`precise`: the default"
+        " holds up to 2^63 - 1, and a larger unsigned value wraps negative"
+        " (`value_modes`)")
+    put(my, "event.deserialization.failure.handling.mode", UNUSED, _DEFAULT
+        + " `fail`: a change that cannot be read stops the stream")
+    put(my, "inconsistent.schema.handling.mode", UNUSED, _DEFAULT + " `fail`:"
+        " a change to a table the history does not know stops the stream")
+    put(my, "enable.time.adjuster", USED, "off: on, a year below 100 is"
+        " read as a two-digit year and moved into 1970-2069, where MySQL"
+        " stores the year as written (`value_modes`)")
+    for f in ("gtid.source.includes", "gtid.source.excludes"):
+        put(my, f, UNUSED, "every source server's transactions are read; the"
+            " hop's databases are what is filtered")
+    put(my, "table.ignore.builtin", UNUSED, _DEFAULT + " the server's own"
+        " tables are left out")
+    put(my, "binlog.buffer.size", UNUSED, "not yet: its read-ahead buffer"
+        " is not measured here")
+    put(my, "min.row.count.to.stream.results", UNUSED, _DEFAULT + " a large"
+        " table is streamed rather than held whole")
+    put(my, "schema.history.internal.", USED, "the history of the source's"
+        " schema, on the pipeline's own broker")
+    put(sink, "connector.class", USED, "the sink that applies each change by"
+        " key")
+    put(sink, "tasks.max", UNUSED, _DEFAULT + " one task applies the changes"
+        " in the order the log holds them")
+    put(sink, "topics.regex", USED, "every table's topic under the prefix,"
+        " and not the transactions' one beside them")
+    put(sink, "topics", UNUSED, "the tables are matched by the pattern, so a"
+        " table added on the source is carried too")
+    for f in ("connection.url", "connection.username", "connection.password"):
+        put(sink, f, USED, "where and as whom the sink writes the target")
+    for f in ("connection.pool.min_size", "connection.pool.max_size",
+              "connection.pool.acquire_increment", "connection.pool.timeout"):
+        put(sink, f, UNUSED, _DEFAULT + " one task writes on one connection")
+    put(sink, "insert.mode", USED, "`upsert`: a change applied twice leaves"
+        " the row once")
+    put(sink, "delete.enabled", USED, "a delete on the source deletes on the"
+        " target")
+    put(sink, "truncate.enabled", USED, "a truncate on the source empties the"
+        " table on the target, now that the source carries it")
+    put(sink, "primary.key.mode", USED, "the change's key, which is the"
+        " table's primary key")
+    put(sink, "primary.key.fields", UNUSED, "the key comes whole from the"
+        " change's own key")
+    put(sink, "schema.evolution", USED, "`basic`: a column added on the"
+        " source is added on the target")
+    put(sink, "quote.identifiers", UNUSED, _DEFAULT + " names are written as"
+        " the target folds them")
+    for f in ("collection.name.format", "collection.naming.strategy",
+              "column.naming.strategy"):
+        put(sink, f, UNUSED, _DEFAULT + " a table is written under the name"
+            " the source gives it; a hop that renames one is refused")
+    for f in ("database.time_zone", "use.time.zone"):
+        put(sink, f, UNUSED, _DEFAULT + " times are written in UTC, as"
+            " `canon` compares them")
+    put(sink, "batch.size", USED, "as large as a batch the source connector"
+        " hands over (`sizing.stream_buffers`); its default is 500")
+    put(sink, "use.reduction.buffer", UNUSED, "not yet: several changes to"
+        " one key in a batch are each applied, in order")
+    for f in ("field.include.list", "field.exclude.list"):
+        put(sink, f, UNUSED, "the columns are left out at the source, where"
+            " they are never read")
+    for f in ("flush.max.retries", "flush.retry.delay.ms"):
+        put(sink, f, UNUSED, _DEFAULT + " a write that keeps failing stops the"
+            " sink, and `stream_status` says so")
+    for f in ("dialect.postgres.postgis.schema",
+              "dialect.sqlserver.identity.insert"):
+        put(sink, f, UNUSED, "not a target this pipeline writes: PostgreSQL"
+            " without PostGIS types, or MySQL")
+    for c in both + sink:
+        put((c,), "transforms", UNUSED, "the sink reads the change envelope"
+            " as it is, deletes included: flattening it or routing it is for"
+            " a sink that cannot, and masking a value on the way puts a"
+            " value in the target the source never held")
+        put((c,), "predicates", UNUSED, "no transform is applied, so there"
+            " is nothing for a predicate to choose for")
+    sig = ("signals",)
+    put(sig, "execute-snapshot", USED, "a table read again through the"
+        " stream, where a repair would otherwise race it (`send_resnapshot`)")
+    put(sig, "pause-snapshot", USED, "a re-read beside the stream held"
+        " while the source is under strain (`stream_hold`)")
+    put(sig, "resume-snapshot", USED, "the held re-read let go once the"
+        " source is no longer under strain (`stream_hold`)")
+    put(sig, "stop-snapshot", UNUSED, "a re-read migkit asks for is the"
+        " repair itself; stopped halfway it leaves the rows it had not read"
+        " as they were, which only another re-read puts right - so migkit"
+        " holds one and lets it go, and never stops one")
+    put(sig, "log", UNUSED, "what the connector would write to its own log"
+        " is read by no one; its notifications are read back instead")
+    put(sink, "hibernate.", UNUSED, "the sink's own persistence settings are"
+        " left as it ships them")
+    return o
+
+
+tooluse.register(
+    "debezium", licence="Apache-2.0", options=_debezium_account(),
+    declared={"postgres": frozenset(_RELATIONAL + _POSTGRES + _CONNECT),
+              "mysql": frozenset(_RELATIONAL + _MYSQL + _CONNECT),
+              "jdbc-sink": frozenset(_SINK + _CONNECT),
+              "signals": frozenset(_SIGNALS)},
+    families=_DEBEZIUM_FAMILIES)
+# the broker the generated pipeline pulls: source-available, and not a
+# program `doctor --install` puts in place, so not among the terms the
+# operator is asked to accept there
+tooluse.register(
+    "redpanda", licence="BUSL-1.1",
+    terms=tooluse.Terms(open=False, allows=(
+        "running it as a component of a product, as the pipeline's own"
+        " log; not offering it to others as a hosted streaming service")),
+    options={}, declared=None)
 
 
 def _connect_api(method, path, body=None, port=8083, timeout=15):
@@ -5388,14 +6827,28 @@ def resnapshot_message(hop_name, tables, kind="blocking"):
     Returns the pieces rather than sending them, so the caller can be
     tested without a broker.
     """
+    return signal_message(hop_name, "execute-snapshot", tables, kind)
+
+
+#: the signals the connector takes on its channel that migkit sends
+SIGNALS = ("execute-snapshot", "pause-snapshot", "resume-snapshot")
+
+
+def signal_message(hop_name, signal, tables=(), kind="blocking"):
+    """The (topic, key, value) of one signal to the hop's connector: a
+    re-read of `tables` (`execute-snapshot`), or holding and letting go of
+    a re-read under way (`pause-snapshot`, `resume-snapshot` - which only
+    a re-read beside the stream obeys: a blocking one holds the stream
+    itself). The key is the connector's `topic.prefix`, which is how it
+    tells its own requests on the shared topic from another's."""
+    if signal not in SIGNALS:
+        raise ValueError(f"{signal!r} is not one of {', '.join(SIGNALS)}")
     prefix = f"migkit-{hop_name}"
-    return (
-        f"{prefix}-signal",
-        prefix,
-        {"type": "execute-snapshot",
-         "data": {"data-collections": list(tables),
-                  "type": kind.upper()}},
-    )
+    value = {"type": signal, "data": {}}
+    if signal == "execute-snapshot":
+        value["data"] = {"data-collections": list(tables),
+                         "type": kind.upper()}
+    return f"{prefix}-signal", prefix, value
 
 
 def _gtid_on(hop):
@@ -5455,19 +6908,126 @@ def send_resnapshot(out, hop_name, tables, kind="blocking", log=None):
     to the host to avoid one exec would widen the pipeline's surface for
     the convenience of the tool, which is the wrong trade.
     """
-    topic, key, value = resnapshot_message(hop_name, tables, kind)
+    if log:
+        log(f"signalling {kind} snapshot of {', '.join(tables)}")
+    return send_signal(out, hop_name, "execute-snapshot", tables, kind)
+
+
+def send_signal(out, hop_name, signal, tables=(), kind="blocking"):
+    """Put one signal on the hop's signal topic, through the compose file
+    (`send_resnapshot` says why not through a port)."""
+    topic, key, value = signal_message(hop_name, signal, tables, kind)
     import json as _json
     line = f"{key}\t{_json.dumps(value)}\n"
     cmd = ["docker", "compose", "-f", str(out / "docker-compose.yml"),
            "exec", "-T", "redpanda",
            "rpk", "topic", "produce", topic, "-f", "%k\\t%v\\n"]
-    if log:
-        log(f"signalling {kind} snapshot of {', '.join(tables)}")
     p = run(cmd, check=False, input=line)
     if p.returncode:
         raise RuntimeError(
             f"could not reach the signal topic: {p.stderr[-200:]}")
     return topic
+
+
+#: what the connector's notifications say, in migkit's words
+_READS = {"Initial Snapshot": "the first read of the source",
+          "Incremental Snapshot": "the re-read beside the stream",
+          "Blocking Snapshot": "the re-read that holds the stream"}
+_HAPPENED = {"STARTED": "started", "COMPLETED": "finished",
+             "ABORTED": "was stopped", "SKIPPED": "was not needed",
+             "PAUSED": "is held", "RESUMED": "goes on"}
+
+
+def snapshot_words(note):
+    """One notification from the connector, as a line in migkit's words,
+    or None for one that says nothing an operator acts on."""
+    what = _READS.get(str(note.get("aggregate_type") or ""))
+    if what is None:
+        return None
+    kind = str(note.get("type") or "")
+    extra = note.get("additional_data") or {}
+    table = (extra.get("data_collection") or extra.get("scanned_collection")
+             or extra.get("current_collection_in_progress") or "")
+    if kind == "TABLE_SCAN_COMPLETED":
+        rows = str(extra.get("total_rows_scanned") or "")
+        status = str(extra.get("status") or "SUCCEEDED").lower()
+        return (f"{what}: {table} read"
+                + (f", {int(rows):,} rows" if rows.isdigit() else "")
+                + ("" if status == "succeeded" else f" ({status})"))
+    if kind == "IN_PROGRESS":
+        return f"{what}: reading {table}" if table else None
+    said = _HAPPENED.get(kind)
+    return f"{what} {said}" if said else None
+
+
+def _notifications(out, hop_name):
+    """The connector's notifications so far, oldest first, read off their
+    topic through the compose file; [] where there are none or the broker
+    cannot be reached."""
+    import json as _json
+    topic = f"migkit-{hop_name}-notifications"
+    cmd = ["docker", "compose", "-f", str(out / "docker-compose.yml"),
+           "exec", "-T", "redpanda", "rpk", "topic", "consume", topic,
+           "--offset", ":end", "--format", "%v\\n"]
+    try:
+        p = run(cmd, check=False, timeout=30)
+    except Exception:  # noqa: BLE001 - progress, never a failure
+        return []
+    got = []
+    for line in (p.stdout or "").splitlines():
+        try:
+            got.append(_json.loads(line))
+        except ValueError:
+            continue
+    return got
+
+
+def stream_progress(out, hop_name, since=0):
+    """([line], how many notifications there were) - what the connector
+    reported of its reads after the first `since`, in migkit's words."""
+    notes = _notifications(out, hop_name)
+    return ([w for w in (snapshot_words(n) for n in notes[since:]) if w],
+            len(notes))
+
+
+def rereading(notes):
+    """Whether a re-read beside the stream is under way, by the last thing
+    the connector said about one."""
+    last = None
+    for n in notes:
+        if n.get("aggregate_type") == "Incremental Snapshot":
+            last = str(n.get("type") or "")
+    return last in ("STARTED", "IN_PROGRESS", "TABLE_SCAN_COMPLETED",
+                    "RESUMED")
+
+
+def stream_hold(out, hop_name, strained, held, log=None):
+    """Hold a re-read beside the stream while the source is under strain,
+    and let it go on once it is not; returns whether it is held now.
+
+    A re-read beside the stream reads a whole table from the source in
+    chunks, on top of the application's load, for as long as it takes, and
+    the connector reads on regardless. migkit asks the source how it is
+    (`sizing.strain`) and holds the re-read (`pause-snapshot`) while the
+    source runs more sessions than its CPUs take - the way gh-ost holds its
+    copy on a replica's lag - and lets it go on (`resume-snapshot`) once
+    it does not. `strained` is that answer ("" when it is not), `held`
+    whether migkit holds it already. Nothing is sent where no re-read is
+    under way."""
+    if strained and not held:
+        if not rereading(_notifications(out, hop_name)):
+            return False
+        send_signal(out, hop_name, "pause-snapshot")
+        if log:
+            log(f"the re-read beside the stream is held: {strained}")
+        return True
+    if held and not strained:
+        send_signal(out, hop_name, "resume-snapshot")
+        if log:
+            log("the re-read beside the stream goes on: the source is no"
+                " longer under strain")
+        return False
+    return held
 
 
 def stream_up(out, log=None):
@@ -5496,12 +7056,40 @@ def stream_wait(port=8083, timeout=180, log=None):
     return False
 
 
+def refused_config(cfg, port=8083):
+    """What the connector runtime refuses in `cfg`, asked before it is
+    registered: [(option, why)], [] where it takes all of it. The runtime
+    validates against the build it runs, which is the build that matters -
+    an option a later release renamed is refused here rather than ignored
+    by a connector that then runs without it."""
+    from .wording import without_programs
+    cls = str(cfg["config"].get("connector.class") or "")
+    if not cls:
+        return []
+    _, got = _connect_api("PUT", f"/connector-plugins/{cls}/config/validate",
+                          cfg["config"], port)
+    out = []
+    for c in (got or {}).get("configs") or []:
+        value = c.get("value") or {}
+        for why in value.get("errors") or []:
+            out.append((value.get("name"),
+                        without_programs(str(why), ("debezium",))))
+    return out
+
+
 def stream_register(out, port=8083, log=None):
     import json as _json
     import urllib.error
     for f in ("source-connector.json", "sink-connector.json"):
         cfg = _json.loads((out / f).read_text())
         name = cfg["name"]
+        refused = refused_config(cfg, port)
+        if refused:
+            raise SystemExit(
+                "the change stream's configuration was refused before it"
+                " started: " + "; ".join(f"{k}: {why}" for k, why in
+                                         refused[:5])
+                + ". Nothing has been registered")
         try:
             _connect_api("POST", "/connectors", cfg, port)
             if log:
@@ -5554,7 +7142,16 @@ ROLES = ("dump program", "load program")
 MEASURED = {"pg_dump": "18.6", "pg_restore": "18.6",
             "mydumper": "1.0.5", "myloader": "1.0.5", "mysqlsh": "26.7.1",
             "mongodump": "100.16.1", "mongorestore": "100.16.1",
-            "mongosync": "1.21.0"}
+            "mongosync": "1.21.0", "pgcopydb": "0.18"}
+
+
+def programs(via):
+    """The programs `via` runs on this machine. The streaming copy runs its
+    local build where there is one and its image otherwise
+    (`pgcopydb_runner`), so which program it is depends on the machine."""
+    if via == "pgcopydb":
+        return ("pgcopydb",) if pgcopydb_runner() == "local" else ("docker",)
+    return PROGRAMS.get(via, ())
 
 
 def program_version(program):
@@ -5576,7 +7173,7 @@ def options_missing(hop, db, via):
     them against the builds installed where the tests run; this holds
     them against the build installed where the move runs."""
     out = {}
-    wrapped = [p for p in PROGRAMS.get(via, ()) if p in MEASURED]
+    wrapped = [p for p in programs(via) if p in MEASURED]
     if not wrapped or not all(which(p) for p in wrapped):
         return out
     wrapped += [p for p in ALSO.get(via, ()) if p in MEASURED and which(p)]
@@ -5599,7 +7196,8 @@ def options_missing(hop, db, via):
                 continue
             flags = {str(a).split("=", 1)[0] for a in part
                      if str(a).startswith("--")}
-            gone = sorted(flags - _long_options(program))
+            gone = sorted(flags - _long_options(program,
+                                                *_subcommand(part)))
             if gone:
                 out.setdefault(program, [])
                 out[program] += [f for f in gone if f not in out[program]]
@@ -5607,9 +7205,10 @@ def options_missing(hop, db, via):
 
 
 def _role(via, program):
-    if program not in PROGRAMS[via]:
+    runs = programs(via)
+    if program not in runs or len(runs) == 1:
         return _program_role(program)
-    return ROLES[min(PROGRAMS[via].index(program), len(ROLES) - 1)]
+    return ROLES[min(runs.index(program), len(ROLES) - 1)]
 
 
 def bulk_path_report(hop, db, via):
@@ -5623,7 +7222,7 @@ def bulk_path_report(hop, db, via):
         # a flag the move chooses between spellings of, and this build has
         # none of them (`tool_flag`)
         missing, refused = {}, str(e)
-    for program in PROGRAMS.get(via, ()) + ALSO.get(via, ()):
+    for program in programs(via) + ALSO.get(via, ()):
         if program not in MEASURED or not which(program):
             continue
         role = _role(via, program)
@@ -5654,7 +7253,7 @@ def run_via(via, hop, db, workers, go, log):
         # a mover nobody has taught this function about must stop here rather
         # than fall through to whatever happens to be first
         raise SystemExit(f"no bulk path named {via!r}")
-    tools = PROGRAMS[via]
+    tools = programs(via)
     missing = [t for t in tools if not which(t)]
     if missing:
         # the names went out through the variables here, where the static

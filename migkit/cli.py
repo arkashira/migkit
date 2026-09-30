@@ -2400,6 +2400,9 @@ def _stream(hop, eng, db, do_drop, go, engine):
     movers.stream_register(out, log=lambda m: console.print(f"  {m}"))
     for c in (f"{name}-source", f"{name}-sink"):
         console.print("  " + movers.stream_status(c))
+    # a pipeline started again says how far its reads have got
+    for line in movers.stream_progress(out, hop.name)[0]:
+        console.print(f"  {line}")
     _changelog(hop, {"op": "stream-up", "db": ",".join(dbs)})
     console.print(f"[green]cdc streaming[/green] - progress: migkit watch"
                   f" {hop.name}   verify: migkit watch {hop.name}"
@@ -2630,8 +2633,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
 
 
 def _cdc(hop, eng, db, do_drop, go, engine):
-    """The hop's change stream set up, or torn down: the database's own
-    replication where it has one, migkit's tail otherwise."""
+    """The hop's change stream set up, or torn down, on the way the
+    ladder of ways gives (`movers.stream_ways`)."""
     from . import movers
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
@@ -2642,15 +2645,15 @@ def _cdc(hop, eng, db, do_drop, go, engine):
         if tailer is None:
             capabilities.require(hop.engine, "stream")
         return _tail(hop, tailer, db, go)
-    if engine == "postgres" and has_repl:
-        if movers.follow_selected() == "follow":
-            return _follow(hop, eng, db, do_drop, go)
+    way = movers.stream_way(hop, engine, has_repl, has_tail,
+                            has_tail and _tail_ready(eng))
+    if way.path == "follow":
+        return _follow(hop, eng, db, do_drop, go)
+    if way.path in ("subscription", "replica"):
         return _replicate_released(hop, eng, db, False, do_drop, go)
-    if has_tail and _tail_ready(eng):
+    if way.path == "tail":
         return _tail(hop, eng, db, go)
-    if has_repl:
-        return _replicate_released(hop, eng, db, False, do_drop, go)
-    if movers.stream_supported(engine):
+    if way.path == "pipeline":
         if has_tail:
             console.print("[yellow]native change tail needs a driver this"
                           " machine does not have - using migkit's"
@@ -2902,6 +2905,10 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
     last = {}
     stable = {}
     n = 0
+    # the hop's streaming pipeline, where it runs one
+    piped = hop.report_dir() / "stream"
+    piped = piped if (piped / "docker-compose.yml").exists() else None
+    notes, held = 0, False
     while True:
         n += 1
         for d in dbs:
@@ -2936,9 +2943,32 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
                 line += f"\n    [{style}]{label}[/{style}]: {detail}"
             console.print(line)
             last[d] = s
+        if piped:
+            said, notes, held = _watch_stream(hop, eng, dbs, piped, notes,
+                                              held)
+            for one in said:
+                console.print(f"  {one}")
         if count and n >= count:
             break
         time.sleep(interval)
+
+
+def _watch_stream(hop, eng, dbs, out, seen, held):
+    """One look at the hop's streaming pipeline for `watch`: its reads as
+    the connector reported them since the last look, and a re-read beside
+    the stream held while the source is under strain (`stream_hold`).
+    ([line], notifications read, held)."""
+    from . import movers, sizing
+    lines, seen = movers.stream_progress(out, hop.name, seen)
+    try:
+        held = movers.stream_hold(out, hop.name,
+                                  sizing.strain(eng, dbs[0]) if dbs else "",
+                                  held, lines.append)
+    except RuntimeError:
+        # what the broker's client said names it; this does not
+        lines.append("the re-read could not be held or let go: the"
+                     " pipeline's signal topic could not be reached")
+    return lines, seen, held
 
 
 @main.command()

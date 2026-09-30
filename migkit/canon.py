@@ -1781,7 +1781,8 @@ def change(op, table, key, values=None, before=None, txn=None):
     `txn` is the transaction the change committed in, as the source names
     it (a PostgreSQL xid, a MySQL GTID), where the log says: what the tail
     holds to the table copier's marks (`Engine.mark_covers`). The tail
-    takes it off before anything is applied.
+    takes it off before anything is applied, with the transaction's end
+    (`ended`).
     """
     if op not in CHANGE_OPS:
         raise ValueError(f"unknown change op {op!r}, expected one of"
@@ -1796,6 +1797,24 @@ def change(op, table, key, values=None, before=None, txn=None):
     if txn is not None:
         out["txn"] = txn
     return out
+
+
+#: what a change record carries from its source's log and no writer
+#: applies: the transaction it was made in, and whether it is that
+#: transaction's last change the reader handed back
+FROM_THE_LOG = ("txn", "txn_end")
+
+
+def ended(out, begun):
+    """At a transaction's commit: mark the last change of it in `out` as
+    its end (`txn_end`), where it handed back any - `begun` is how many
+    changes `out` held when the transaction began. A batch cut after a
+    change so marked holds whole source transactions and never half of
+    one, which is what the connector's transaction metadata gives its
+    readers too. A transaction the reader left all of out - on tables the
+    hop excludes - marks nothing."""
+    if len(out) > begun:
+        out[-1]["txn_end"] = True
 
 
 #: classes whose values reach a writer as numbers or times, never as a

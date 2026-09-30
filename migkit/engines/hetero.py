@@ -3683,9 +3683,12 @@ class _CopiedRanges:
         transaction each names; {table: how many were left out})."""
         from collections import Counter
 
+        from .. import canon
+
         def bare(c):
-            return ({k: v for k, v in c.items() if k != "txn"}
-                    if "txn" in c else c)
+            return ({k: v for k, v in c.items()
+                     if k not in canon.FROM_THE_LOG}
+                    if any(k in c for k in canon.FROM_THE_LOG) else c)
         if self.off or not changes:
             return [bare(c) for c in changes], Counter()
         self._load()

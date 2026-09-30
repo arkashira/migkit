@@ -1401,9 +1401,14 @@ class MySQLEngine(Engine):
             # again: what the tail holds to the copier's marks
             gtid = None
         out, skipped, keep = [], set(), False
+        # where in `out` the transaction being read began: its last change
+        # handed back is marked as its end at its commit (`canon.ended`)
+        begun = 0
         try:
             for ev in events:
                 if ev is COMMITTED:
+                    canon.ended(out, begun)
+                    begun = len(out)
                     boundary = {"log_file": stream.log_file,
                                 "log_pos": stream.log_pos}
                     in_txn, skip, marked, gtid = 0, 0, None, None

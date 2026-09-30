@@ -38,11 +38,18 @@ def _flags(argv):
     ("mydumper_move", "mysql", ("mydumper", "myloader")),
     ("mongodump_move", "mongodb", ("mongodump", "mongorestore")),
     ("pgdump_move", "postgres", ("pg_dump", "pg_restore")),
+    ("pgcopydb_move", "postgres", ("pgcopydb",)),
 ])
 def test_every_flag_on_the_command_line_is_one_the_program_has(
-        tmp_path, mover, engine, programs):
+        tmp_path, monkeypatch, mover, engine, programs):
     if not all(movers.which(p) for p in programs):
         pytest.skip(f"{programs} not installed here")
+    # the streaming copy's plan with a table that outlasts the rest, so
+    # the split's flags are on the line too
+    monkeypatch.setattr(movers, "pgcopydb_runner", lambda: "local")
+    monkeypatch.setattr(movers, "_source_sizes",
+                        lambda hop, db: {"public.big": 900 << 20,
+                                         "public.small": 1 << 20})
     steps = getattr(movers, mover)(_hop(engine, tmp_path), "appdb", 2, False,
                                    None)
     seen = 0
@@ -63,7 +70,9 @@ def test_every_flag_on_the_command_line_is_one_the_program_has(
             program = str(part[0]).rsplit("/", 1)[-1]
             if program not in programs:
                 continue
-            missing = _flags(part) - movers._long_options(program)
+            # a program with subcommands keeps its options there
+            missing = _flags(part) - movers._long_options(
+                program, *movers._subcommand(part))
             assert not missing, (program, sorted(missing))
             seen += 1
     assert seen, "no command line of these programs was looked at"
@@ -84,3 +93,32 @@ def test_prose_inside_a_description_is_still_not_a_flag():
     if not movers.which("mydumper"):
         pytest.skip("mydumper not installed here")
     assert "--overwrite-tables" not in movers._long_options("mydumper")
+
+
+def test_a_program_with_subcommands_is_asked_about_the_one_it_runs():
+    """pgcopydb's own `--help` lists no option at all: asked without the
+    subcommand, every flag the copy was passed looked absent."""
+    if not movers.which("pgcopydb"):
+        pytest.skip("pgcopydb not installed here")
+    assert "--table-jobs" not in movers._long_options("pgcopydb")
+    assert "--table-jobs" in movers._long_options("pgcopydb", "copy",
+                                                  "table-data")
+    assert movers._subcommand(["pgcopydb", "copy", "table-data",
+                               "--dir", "/x"]) == ("copy", "table-data")
+    assert movers._subcommand(["mydumper", "-h", "x"]) == ()
+    assert movers._subcommand(["pgloader", "mysql://u@h/db", "pg"]) == ()
+
+
+def test_a_column_one_space_short_is_still_read():
+    """`--large-objects-jobs Number of ...`: the build's column is one
+    space short for its longest flag, and the reader missed it."""
+    if not movers.which("pgcopydb"):
+        pytest.skip("pgcopydb not installed here")
+    assert "--large-objects-jobs" in movers._long_options(
+        "pgcopydb", "copy", "blobs")
+    assert "--summary" in movers._long_options("pgcopydb", "list",
+                                               "progress")
+    # and prose after a flag inside a description is still not a flag
+    text = ("  --real-one   Does a thing\n"
+            "      use --inside-prose instead of it\n")
+    assert movers._option_column(text) == {"--real-one"}

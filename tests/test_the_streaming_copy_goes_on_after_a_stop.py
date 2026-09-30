@@ -107,8 +107,16 @@ def _counts():
 
 def test_a_stopped_copy_goes_on_from_the_tables_it_finished(pair,
                                                             tmp_path):
-    from migkit import movers
+    from migkit import movers, planner
     stopped = {}
+    # whole tables, measured faster on this hop: the large table then
+    # holds one stream and the small ones load beside it, which is the
+    # moment this stops in. Split, the large table's parts take both
+    # streams first (`_copy_split`)
+    planner.record_variant(_hop(tmp_path), "pgcopydb", "whole", 10 ** 9, 10,
+                           10 ** 6)
+    planner.record_variant(_hop(tmp_path), "pgcopydb", "split", 10 ** 9, 20,
+                           10 ** 6)
 
     def stop_while_the_large_table_loads():
         end = time.time() + 120

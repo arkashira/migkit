@@ -2334,13 +2334,16 @@ class PostgresEngine(Engine):
         mark - a logical message of its prefix, or a row of
         `migkit_origin` - is left out whole, and noted in `_marks_seen`
         with what identifies it."""
-        from .. import pgslot
-        out, keys, marked = [], {}, None
+        from .. import canon, pgslot
+        out, keys, marked, begun = [], {}, None, 0
         seen = self.__dict__.setdefault("_marks_seen", [])
         for lsn, xid, data in rows:
             last = lsn or last
             if data.startswith("BEGIN"):
-                marked = None
+                marked, begun = None, len(out)
+                continue
+            if data.startswith("COMMIT"):
+                canon.ended(out, begun)
                 continue
             if two_way and marked is None:
                 said = pgslot.mark_message(data)
