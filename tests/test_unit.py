@@ -171,7 +171,14 @@ def test_prometheus_metrics_format(tmp_path, monkeypatch):
     (tmp_path / "h" / "summary.json").write_text(_json.dumps([
         {"check": "data", "scope": "db1", "status": "ok"},
         {"check": "data", "scope": "db2", "status": "diff"}]))
+    # the hop's status is its verdict's, not a count of the answers
+    (tmp_path / "h" / "verdict.json").write_text(_json.dumps(
+        {"status": "different"}))
     out = ui.prometheus({"h": hop})
+    assert ('migkit_verdict{hop="h",engine="postgres",status="different"}'
+            ' 1') in out
+    assert 'migkit_verdict{hop="h",engine="postgres",status="same"} 0' \
+        in out
     assert 'migkit_hop_status{hop="h",engine="postgres"} 1' in out
     assert 'migkit_check_pass{hop="h",engine="postgres",check="data"} 1' in out
     assert 'migkit_check_total{hop="h",engine="postgres",check="data"} 2' in out

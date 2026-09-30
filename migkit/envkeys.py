@@ -181,6 +181,21 @@ VARS = {
                            "list"),
     "MIGKIT_UI_USER_HEADER": Var("the header a signing-in proxy names the"
                                  " dashboard's user in", "text"),
+    "MIGKIT_UI_PROXY_SECRET": Var("the secret a signing-in proxy sends in"
+                                  " X-Migkit-Proxy: without it the user"
+                                  " header is not believed", "secret"),
+    "MIGKIT_UI_BIND": Var("the address the dashboard listens on", "text",
+                          "127.0.0.1"),
+    "MIGKIT_METRICS_TOKEN": Var("the bearer a scraper reads the dashboard's"
+                                " /metrics with", "secret"),
+    # ---- what leaves the machine ----------------------------------------
+    "MIGKIT_EGRESS": Var("what may leave the machine, for every hop: none,"
+                         " or the kinds that may (notify, traces, assist,"
+                         " evidence); all that is configured where unset",
+                         "list"),
+    "MIGKIT_EGRESS_TO": Var("the hosts anything that leaves may go to:"
+                            " names, shell patterns, addresses and"
+                            " networks", "list"),
     # ---- the assistant ---------------------------------------------------
     "MIGKIT_AI": Var("the model provider asked, where one is: openai,"
                      " anthropic or google", "text"),

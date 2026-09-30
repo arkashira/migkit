@@ -16,19 +16,20 @@
     "list": [
       {"name": "hop", "label": "hop", "type": "query",
        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-       "query": "label_values(migkit_hop_status, hop)",
+       "query": "label_values(migkit_verdict, hop)",
        "refresh": 2, "multi": true, "includeAll": true}
     ]
   },
   "panels": [
-    {"id": 1, "type": "stat", "title": "Verdict (0 same, 1 different, 2 error, 3 none)",
+    {"id": 1, "type": "table", "title": "Verdict of the last check",
      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 5},
      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-     "targets": [{"refId": "A", "expr": "migkit_hop_status{hop=~\"$hop\"}", "legendFormat": "{{hop}}"}]},
-    {"id": 2, "type": "bargauge", "title": "Databases passing each check",
+     "targets": [{"refId": "A", "expr": "migkit_verdict{hop=~\"$hop\"} == 1", "format": "table", "instant": true}],
+     "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "Value": true, "__name__": true, "engine": true, "instance": true, "job": true}}}]},
+    {"id": 2, "type": "bargauge", "title": "Answers the same, each check",
      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 5},
      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-     "targets": [{"refId": "A", "expr": "migkit_check_pass{hop=~\"$hop\"} / migkit_check_total{hop=~\"$hop\"}", "legendFormat": "{{hop}} {{check}}"}]},
+     "targets": [{"refId": "A", "expr": "sum by (hop, check) (migkit_check_answers{hop=~\"$hop\",status=\"ok\"}) / sum by (hop, check) (migkit_check_answers{hop=~\"$hop\"})", "legendFormat": "{{hop}} {{check}}"}]},
     {"id": 3, "type": "stat", "title": "Since the last check",
      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 5},
      "fieldConfig": {"defaults": {"unit": "s"}},
@@ -53,8 +54,8 @@
      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 7},
      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
      "targets": [
-       {"refId": "A", "expr": "rate(migkit_tail_changes_applied{hop=~\"$hop\"}[5m])", "legendFormat": "tail applied/s {{hop}} {{db}}"},
-       {"refId": "B", "expr": "rate(migkit_stream_events_seen{hop=~\"$hop\"}[5m])", "legendFormat": "stream read/s {{hop}}"}]},
+       {"refId": "A", "expr": "rate(migkit_tail_changes_applied_total{hop=~\"$hop\"}[5m])", "legendFormat": "tail applied/s {{hop}} {{db}}"},
+       {"refId": "B", "expr": "rate(migkit_stream_events_seen_total{hop=~\"$hop\"}[5m])", "legendFormat": "stream read/s {{hop}}"}]},
     {"id": 7, "type": "stat", "title": "Change stream parts running",
      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 7},
      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
@@ -75,8 +76,8 @@
      "gridPos": {"x": 16, "y": 19, "w": 8, "h": 7},
      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
      "targets": [
-       {"refId": "A", "expr": "migkit_copy_rows_per_second{hop=~\"$hop\"}", "legendFormat": "{{hop}} {{way}}"},
-       {"refId": "B", "expr": "migkit_copy_seconds{hop=~\"$hop\"}", "legendFormat": "{{hop}} {{way}} seconds"}]},
+       {"refId": "A", "expr": "migkit_copy_way_rows_per_second{hop=~\"$hop\"} * on (hop, way_id) group_left (way) migkit_way_info{hop=~\"$hop\"}", "legendFormat": "{{hop}} {{way}}"},
+       {"refId": "B", "expr": "migkit_copy_way_seconds{hop=~\"$hop\"} * on (hop, way_id) group_left (way) migkit_way_info{hop=~\"$hop\"}", "legendFormat": "{{hop}} {{way}} seconds"}]},
     {"id": 11, "type": "bargauge", "title": "Seconds each check took",
      "gridPos": {"x": 0, "y": 26, "w": 8, "h": 7},
      "fieldConfig": {"defaults": {"unit": "s"}},

@@ -376,7 +376,8 @@ class Conversion:
             except Exception:  # noqa: BLE001 - no definition, no proposal
                 definition = None
             made = assist.propose(self.pair.src_name, self.pair.dst_name,
-                                  r.kind, r.name, definition)
+                                  r.kind, r.name, definition,
+                                  hop=self.pair.hop)
             if made:
                 self._record(r, "converted, not proved", "model")
                 return (r.name, f"{made.rstrip().rstrip(';')}; {PROPOSED}",

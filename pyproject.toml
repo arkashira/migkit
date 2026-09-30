@@ -141,7 +141,7 @@ s3 = []
 pgschema = []
 dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]",
        # moto's server, the S3-compatible endpoint an appliance stands in as
-       "flask", "flask-cors"]
+       "flask", "flask-cors", "prometheus-client"]
 
 [project.scripts]
 migkit = "migkit.cli:main"

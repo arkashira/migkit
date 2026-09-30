@@ -7035,13 +7035,17 @@ def stream_parts(hop_name, port=8083, timeout=2):
     return out
 
 
-def stream_readings(attributes, port, timeout=2):
+def stream_readings(attributes, port, timeout=2, server=None):
     """{attribute: value} of the stream reader's own metrics - its MBeans
     read over HTTP through the agent its image carries (`ENABLE_JOLOKIA`
     in the pipeline's compose), summed over the reader's contexts where
     it has more than one; {} where nothing answers. The image's 3.0
     entrypoint, read for this, starts that agent on port 8778 when
-    `ENABLE_JOLOKIA` is `true`; no pipeline was run to see it answer."""
+    `ENABLE_JOLOKIA` is `true`; no pipeline was run to see it answer.
+    `server` keeps the readings of one hop's connector only - its topic
+    prefix, `migkit-<hop>`, which each MBean names as `server=`: the
+    agent answers for every connector the machine runs, and a hop given
+    another's readings was told it was behind when that one was."""
     import json as _json
     import urllib.request
     pattern = "debezium.*:type=connector-metrics,*"
@@ -7054,7 +7058,10 @@ def stream_readings(attributes, port, timeout=2):
         return {}
     values = got.get("value") if isinstance(got, dict) else None
     out = {}
-    for bean in (values or {}).values():
+    for name, bean in (values or {}).items():
+        if server is not None and f"server={server}" not in \
+                str(name).partition(":")[2].split(","):
+            continue
         for attr, v in (bean or {}).items():
             if attr not in attributes or v is None:
                 continue

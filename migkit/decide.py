@@ -79,8 +79,8 @@ import os
 import time
 from dataclasses import dataclass, field
 
-NOT_YET = "not yet"
-NOT_APPLICABLE = "not applicable"
+#: the words of a gap are the capability table's
+from .capabilities import NOT_APPLICABLE, NOT_YET, STREAM_ONLY  # noqa: E402
 
 #: two measured costs closer than this share of the larger are a tie, and
 #: the footprint decides: a smaller difference is within what timing a
@@ -2041,8 +2041,6 @@ SHAPES = {
                    " back - the source at cutover",
 }
 
-_STREAM_ONLY = ("a stream of changes is where a pair delivers them, not a"
-                " hop's engine: it holds no table")
 _BY_KEY_ORDER = ("read by {}, never in key order, so the key's shape does"
                  " not arise")
 _NO_PROGRAM = ("no program is driven for this engine; migkit's own reader"
@@ -2052,9 +2050,9 @@ _DBAPI = ("mssql", "oracle", "db2", "db2i", "db2zos", "ase", "redshift",
           "snowflake", "bigquery", "duckdb", "teradata")
 #: sources read through an application's own interface, never written
 _READ_ONLY = ("sapodp", "saas")
-_STREAMS = ("kinesis", "pubsub")
 _FILES = ("sqlite", "duckdb", "parquet", "copybook")
-_NONE = {**{n: (NOT_APPLICABLE, _STREAM_ONLY) for n in _STREAMS},
+_NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
+            for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
          "generic": (NOT_YET, "33")}
 
 #: {shape: {engine or "*": ("yes", where) | (NOT_YET, item) |
@@ -2067,7 +2065,7 @@ WAYS = {
         "hetero": ("yes", "@_copy_in_spans"),
         **{n: ("yes", "@neutral_batches")
            for n in ("sqlite", "clickhouse", "cassandra", "dynamodb",
-                     "opensearch", "parquet") + _DBAPI},
+                     "opensearch", "parquet", "iceberg", "delta") + _DBAPI},
         "mongodb": (NOT_APPLICABLE, "every document carries an _id"),
         # the engines on another's wire read a keyless table in one pass
         # through the one DB-API reader (ER4)
@@ -2097,7 +2095,8 @@ WAYS = {
         "cassandra": (NOT_APPLICABLE, _BY_KEY_ORDER.format("token ranges")),
         "dynamodb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scan segments")),
         "opensearch": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scroll slices")),
-        "parquet": (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time")),
+        **{n: (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time"))
+           for n in ("parquet", "iceberg", "delta")},
         "copybook": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
             "ranges of whole records")),
         "teradata": (NOT_APPLICABLE, _BY_KEY_ORDER.format(

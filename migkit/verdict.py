@@ -620,7 +620,10 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         st = r.get("status", "unknown")
         totals[st] = totals.get(st, 0) + 1
     got = decide(records, hop, coverage)
-    from . import session
+    from . import digests, session
+    # digests the check took and could not keep: the answers stand, and
+    # the evidence lists as many tables fewer - said here, not swallowed
+    unwritten = digests.unwritten(session.current())
     return {
         **({"coverage": coverage} if coverage else {}),
         **({"stale": stale} if stale else {}),
@@ -640,6 +643,7 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         "by_category": _counts(records, "category"),
         "fingerprint": fingerprint(records),
         **({"load": load} if load else {}),
+        **({"digests_unwritten": unwritten} if unwritten else {}),
         "findings": [
             {"category": r.get("category", ""),
              "check": r.get("check", ""),

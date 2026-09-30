@@ -59,7 +59,6 @@ none of them (the owner's rule), which is why a hop option named for one,
 or whose words name one, is left out of the options page, and why the
 program sources are shown without their schemes.
 """
-import ast
 import html
 import re
 import subprocess
@@ -901,17 +900,12 @@ def _usage(name, cmd):
 
 def metrics():
     """[(family, type, help)] of every metric family `/metrics` serves,
-    read off the dashboard's own help lines."""
+    read off the table the scrape is rendered from (`ui.FAMILIES`) - a
+    family renamed says what replaces it."""
     from migkit import ui
-    tree = ast.parse(Path(ui.__file__).read_text())
-    helps, types = {}, {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            for m in re.finditer(r"# HELP (\S+) ([^\n]+)", node.value):
-                helps.setdefault(m.group(1), m.group(2).strip())
-            for m in re.finditer(r"# TYPE (\S+) (\S+)", node.value):
-                types.setdefault(m.group(1), m.group(2))
-    return [(f, types.get(f, ""), h) for f, h in helps.items()]
+    return [(f, kind, said + (f" (deprecated until 1.0: {instead})"
+                              if instead else ""))
+            for f, (kind, said, instead) in ui.FAMILIES.items()]
 
 
 def page_commands():

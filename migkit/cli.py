@@ -1046,13 +1046,11 @@ def _leg_said(eng, side, db, ep):
     """Whether the connection to a side is encrypted, as the database
     itself says of it, and what carries it: nothing is said of a side on
     this machine, where no row crosses a network."""
-    local = str(ep.host or "") in ("127.0.0.1", "localhost", "::1") and \
-        not (ep.options or {}).get("tunnel_to")
-    if local:
+    from . import tls
+    if tls.on_this_machine(ep):
         return ""
     # whether the certificate is checked is migkit's side of the
     # connection, which no server can say: a failure every run until it is
-    from . import tls
     try:
         pos = tls.posture(ep, eng.ENGINE_FAMILY or eng.CANON_ENGINE)
     except Exception:  # noqa: BLE001 - a probe never fails doctor
@@ -1073,10 +1071,15 @@ def _leg_said(eng, side, db, ep):
             ", the certificate verified" if pos
             and pos["state"] == "verified" else "")
     through = (ep.options or {}).get("tunnel_to")
-    if through:
+    if through and tls.tunnel_kind(ep) == "ssh":
         return (f"not encrypted by the database; carried through the"
-                f" hop's tunnel to {through}, which is what protects it on"
-                " the way")
+                f" hop's SSH tunnel to {through}, which is what protects it"
+                " on the way")
+    if through:
+        return (f"[yellow]not encrypted by the database[/yellow]; carried"
+                f" by the tunnel's own command to {through}, which migkit"
+                " cannot vouch for. Ask the server for TLS, or carry it"
+                " through an SSH tunnel")
     return ("[yellow]not encrypted[/yellow]: every row crosses the network"
             " as it is. Ask the server for TLS and verify its certificate"
             " (sslmode verify-full, ssl-mode VERIFY_IDENTITY), or carry the"

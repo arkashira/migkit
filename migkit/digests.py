@@ -15,6 +15,16 @@ new salt and gives the same answer where nothing changed.
 Only numbers are kept - counts, sums of hashes - and the statements,
 which name columns and never hold a value; a row filter is in them as
 the hop wrote it.
+
+The two sides of a table are paired within one run (`read_in`): the salt
+is drawn per run, so a side from one run beside the other side from
+another always reads "different". Measured before: a check killed
+mid-table, a side whose read failed (only the side that worked is
+recorded), a `--table` run - each left the latest line of each side from
+two runs, `migkit_table_same` said 0 and the evidence contradicted its
+own verdict. A side its run has no partner for is one side only. A
+digest that could not be written is counted (`unwritten`), and the
+evidence and the run log say how many.
 """
 import json
 import threading
@@ -22,6 +32,8 @@ import time
 
 FILE = "digests.jsonl"
 _LOCK = threading.Lock()
+#: {run: digests that could not be written}
+_UNWRITTEN = {}
 
 #: the ways a digest is taken, as an engine names the one it used
 OWN = "own"
@@ -80,11 +92,25 @@ def record(hop, db, table, side, rows, digest, *, method, keys=None,
         if v not in (None, "", [], ()):
             line[k] = _plain(v)
     try:
+        from . import durable
         path = hop.report_dir() / FILE
-        with _LOCK, open(path, "a") as f:
-            f.write(json.dumps(line) + "\n")
-    except Exception:  # noqa: BLE001 - the check's answer stands
-        pass
+        with _LOCK:
+            durable.append_line(path, json.dumps(line), sync=False)
+    except Exception as e:  # noqa: BLE001 - the check's answer stands
+        from . import runlog
+        with _LOCK:
+            _UNWRITTEN[line["session"]] = \
+                _UNWRITTEN.get(line["session"], 0) + 1
+        runlog.event("digest-unwritten", f"the digest of {side} could not"
+                     f" be kept ({type(e).__name__}); the evidence lists"
+                     " this table without it", level="warn", db=str(db),
+                     table=str(table))
+
+
+def unwritten(session):
+    """How many digests the run `session` took and could not write."""
+    with _LOCK:
+        return _UNWRITTEN.get(session, 0)
 
 
 def _count(rows):
@@ -95,29 +121,55 @@ def _count(rows):
 
 
 def read(hop, session=None):
-    """{(db, table, where): {"src": line, "dst": line}}: the latest line
-    of each side, of the run `session` or of the hop's whole history."""
+    """{(db, table, where): {"src": line, "dst": line}}: each table's
+    sides as one run took them - the run `session`, or the last run that
+    took the table - the latest line of each side in it. A side with no
+    partner in its run is there alone."""
+    if session:
+        from . import runlog
+        got = runlog.appended(hop, session, FILE)
+        if got is not None:
+            return _paired(got, session)
     return read_in(hop.report_dir(), session)
 
 
 def read_in(where, session=None):
-    """`read` of the hop whose reports are at `where`."""
-    out = {}
-    try:
-        text = (where / FILE).read_text()
-    except OSError:
-        return out
-    for raw in text.splitlines():
+    """`read` of the hop whose reports are at `where`, every part of the
+    file read (`runlog.parts`)."""
+    from . import runlog
+    lines = []
+    for part in runlog.parts(where / FILE):
         try:
-            line = json.loads(raw)
-        except ValueError:
+            text = part.read_text()
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            try:
+                lines.append(json.loads(raw))
+            except ValueError:
+                continue
+    return _paired(lines, session)
+
+
+def _paired(lines, session=None):
+    last, out = {}, {}
+    for line in lines:
+        if not isinstance(line, dict):
             continue
         if session and line.get("session") != session:
             continue
         key = (line.get("db", ""), line.get("table", ""),
                line.get("where", ""))
-        out.setdefault(key, {})[line.get("side")] = line
-    return out
+        last[key] = line.get("session")
+        out.setdefault(key, []).append(line)
+    paired = {}
+    for key, got in out.items():
+        sides = {}
+        for line in got:
+            if line.get("session") == last[key]:
+                sides[line.get("side")] = line
+        paired[key] = sides
+    return paired
 
 
 def statement(line):

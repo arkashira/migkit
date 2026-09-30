@@ -1,6 +1,13 @@
 # incremental sync as a long-lived service: full load once, then verify the
 # CDC stream forever. Mount conf/ (hops.yaml, chmod 600) and state/ (resume
 # checkpoints + reports survive restarts).
+#
+# The dashboard listens inside its container on every address, and is
+# published on this machine's 127.0.0.1 only: reach it through an SSH
+# tunnel, or a proxy that signs people in (MIGKIT_UI_USER_HEADER +
+# MIGKIT_UI_PROXY_SECRET).
+# Prometheus scrapes /metrics with the bearer MIGKIT_METRICS_TOKEN; put it in
+# deploy/.env (not committed) as MIGKIT_METRICS_TOKEN=<a long random value>.
 services:
   migkit-sync:
     build: { context: .., dockerfile: deploy/Dockerfile }
@@ -13,7 +20,13 @@ services:
   migkit-ui:
     build: { context: .., dockerfile: deploy/Dockerfile }
     restart: unless-stopped
-    ports: ["8899:8899"]
-    volumes: [ "migkit-state:/state" ]
+    ports: ["127.0.0.1:8899:8899"]
+    environment:
+      MIGKIT_UI_BIND: "0.0.0.0"
+      MIGKIT_UI_HOSTS: "migkit-ui:8899"
+      MIGKIT_METRICS_TOKEN: "${MIGKIT_METRICS_TOKEN:?set MIGKIT_METRICS_TOKEN in deploy/.env: the bearer Prometheus scrapes /metrics with}"
+    volumes:
+      - ./conf:/conf:ro
+      - migkit-state:/state
     command: ["report", "--serve", "--port", "8899"]
 volumes: { migkit-state: {} }
