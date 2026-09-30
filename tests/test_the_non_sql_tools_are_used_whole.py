@@ -415,14 +415,21 @@ def test_a_forced_mover_is_not_climbed(tmp_path, monkeypatch):
 # ---- the per-table ladder of the native engines --------------------------
 
 class _Eng:
-    """An engine's cost keeping, as `tableways` reads it."""
+    """An engine as the table ladder's climb reads it (`tableway.each`):
+    its hop, and where it keeps what each way took."""
 
     def __init__(self, hop):
         self.hop = hop
 
     from migkit.engines.base import Engine
-    _layered = Engine._layered
     _work_key = staticmethod(Engine._work_key)
+
+
+@pytest.fixture
+def own_knowledge(tmp_path, monkeypatch):
+    """This test's own knowledge base: what another test's ways took is no
+    prior here."""
+    monkeypatch.setenv("MIGKIT_KNOWLEDGE", str(tmp_path / "knowledge.json"))
 
 
 def _rungs():
@@ -432,8 +439,9 @@ def _rungs():
             Rung("own", "migkit's own"))
 
 
-def test_a_tool_that_fails_on_a_table_gives_it_to_the_next_way(tmp_path):
-    from migkit import tableways
+def test_a_tool_that_fails_on_a_table_gives_it_to_the_next_way(
+        tmp_path, own_knowledge):
+    from migkit import tableway
     from migkit.decide import Facts
     said, ran = [], []
 
@@ -443,47 +451,48 @@ def test_a_tool_that_fails_on_a_table_gives_it_to_the_next_way(tmp_path):
             raise RuntimeError("the export ended failed")
         return 10
     # b first, so the tool is the way never timed when b is climbed
-    got = tableways.each(_Eng(_hop("dynamodb", tmp_path)), "db",
-                         ["b", "a"], _rungs(),
-                         lambda t: Facts(here=lambda: True), run,
-                         said.append)
+    got = tableway.each(_Eng(_hop("dynamodb", tmp_path)), "db",
+                        ["b", "a"], _rungs(),
+                        lambda t: Facts(here=lambda: True), run,
+                        said.append)
     assert got["b"] == "own"
     assert ran[:2] == [("tool", "b"), ("own", "b")]
     assert any("the tool could not run (the export ended failed) -"
                " switching to migkit's own" in s for s in said), said
 
 
-def test_a_table_no_way_carried_stops_the_copy(tmp_path):
-    from migkit import tableways
+def test_a_table_no_way_carried_stops_the_copy(tmp_path, own_knowledge):
+    from migkit import tableway
     from migkit.decide import Facts
 
     def run(way, t):
         raise RuntimeError(f"{way} broke")
     # every way's reason, in one stop
     with pytest.raises(SystemExit, match="tool broke.*own broke"):
-        tableways.each(_Eng(_hop("dynamodb", tmp_path)), "db", ["a"],
-                       _rungs(), lambda t: Facts(here=lambda: True), run,
-                       None)
+        tableway.each(_Eng(_hop("dynamodb", tmp_path)), "db", ["a"],
+                      _rungs(), lambda t: Facts(here=lambda: True), run,
+                      None)
 
 
 def test_the_way_measured_cheaper_carries_the_next_table(tmp_path,
-                                                         monkeypatch):
+                                                         monkeypatch,
+                                                         own_knowledge):
     import itertools
 
-    from migkit import tableways
+    from migkit import tableway
     from migkit.decide import Facts
     clock = itertools.count()
     # the tool takes 100 ticks a table, migkit's own 1
     ticks = {"tool": 100, "own": 1}
     now = [0.0]
-    monkeypatch.setattr(tableways.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(tableway.time, "monotonic", lambda: now[0])
 
     def run(way, t):
         next(clock)
         now[0] += ticks[way]
         return 10
-    got = tableways.each(_Eng(_hop("dynamodb", tmp_path)), "db",
-                         ["a", "b", "c", "d"], _rungs(),
-                         lambda t: Facts(here=lambda: True), run, None)
+    got = tableway.each(_Eng(_hop("dynamodb", tmp_path)), "db",
+                        ["a", "b", "c", "d"], _rungs(),
+                        lambda t: Facts(here=lambda: True), run, None)
     # each tried once, in the list's order, then the cheaper
     assert [got[t] for t in "abcd"] == ["tool", "own", "own", "own"]

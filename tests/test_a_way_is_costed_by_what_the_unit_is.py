@@ -117,19 +117,19 @@ def test_a_way_the_resource_model_sees_is_predicted_with_a_wide_spread():
 
 
 def test_migkits_benchmark_seeds_the_mysql_bulk_ways():
-    """The MySQL bulk rungs' two measured rates solve for a second a MB
-    and a second a thousand rows: the dump and load is predicted, never
-    measured, on a MySQL pair."""
-    from migkit import movers
+    """The MySQL table ladder's rungs' two measured rates solve for a
+    second a MB and a second a thousand rows: the dump and load is
+    predicted, never measured, on a MySQL pair."""
+    from migkit.engines.mysql import PLAIN, MySQLEngine
     seeds = cm.seeds()
-    rung = movers.MY_RUNGS[0]
+    rung = MySQLEngine.TABLE_WAYS[0]
     mu, source = seeds[(rung.name, "mysql->mysql")]
     assert "benchmark" in source
     narrow = {"bytes": 41.5e6, "rows": 500_000}
     got = float(cm.features(narrow) @ mu)
-    # the narrow table's measured time, less nothing: fixed + rows + bytes
-    assert got == pytest.approx(rung.fixed + 41.5e6
-                                / rung.rates[movers.PLAIN], rel=0.02)
+    # the narrow table's measured time: its start, its rows and bytes
+    assert got == pytest.approx(rung.startup + 41.5e6
+                                / rung.rates[PLAIN], rel=0.02)
     m = cm.CostModel("t", [R(rung.name, rung.said)], pair="mysql->mysql",
                      knowledge=False)
     e = m.estimate(rung.name, narrow)

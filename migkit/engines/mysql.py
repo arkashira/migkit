@@ -8,10 +8,76 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from ..decide import Need, Rung
+from ..tableway import DIRECT, Way
 from ..util import keepalive as _keepalive, run, which, with_retry
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
+
+#: the two tables the benchmark's rates were measured on (`MY_BENCH`):
+#: narrow rows of plain columns, and wide rows with a binary column (the
+#: straight copy writes those as base64, the pass-through as hex) - from
+#: which `costmodel.seeds` solves each way's seconds a MB and a row
+PLAIN, BINARY = "plain", "binary"
+
+#: How the rungs were measured, 2026-09-28: two MySQL 8.4.11 servers in
+#: docker (colima, 2 CPUs and 4 GB for both), the programs on the host
+#: (Apple M-series, 10 cores), the docker lock held so nothing else ran;
+#: `appdb.narrow` 500,000 rows of int key, int, varchar(40), datetime and
+#: decimal with two secondary indexes (41.5 MB of data), `appdb.wide`
+#: 500,000 rows of bigint key, a 320-byte varbinary and a text with a
+#: prefix index (222 MB), `appdb.tiny` one row; four workers; the target's
+#: tables made beforehand, as the move makes them, their secondary indexes
+#: dropped for the load and added after (the index window). Seconds, the
+#: median of three runs (the runs of one configuration spread by up to a
+#: second on both tables):
+#:
+#:                                       both   narrow  wide   tiny
+#:   dump and load, as before              4.58   2.05   3.39   0.14
+#:   + rows per table                      5.60   2.05   3.73   0.15
+#:   + checksums on both sides (as run)    5.40   2.35   3.80   0.15
+#:   + zstd                                6.07   2.43   3.52   0.17
+#:   load makes the tables, keys after     4.13   1.85   2.81   0.15
+#:   straight copy, dump and load (run)    6.19   3.01   4.64   1.22
+#:   straight copy, read and written at    11.41  2.98   9.59   1.35
+#:     once (run where the disk is short)
+#:   straight copy making the tables,
+#:     indexes deferred / not             5.40 / 5.67  2.88 / 3.29
+#:                                                    3.99 / 3.95
+#:   table by table (the command, whole)   9.33   4.28   6.48   0.45
+#:   migkit's digest after a bulk copy     -      1.44   1.45   0.06
+#:
+#: The rates of `MySQLEngine.TABLE_WAYS` are the "as run" rows: bytes over
+#: the time less the one-row table's (the start-up, `startup`); the table
+#: copier's are its rows' own (`rows`), measured before the pass-through
+#: was there (`PASS_BENCH`). The digest is paid after every
+#: bulk way alike (`_held_to_the_source` compares every table, the ones the
+#: copier carried too), so it does not change which way is faster. The
+#: straight copy's chunk: 16 MB against its default 64 MB, both tables
+#: 7.25 s against 9.89 s (read and written at once, no checksums) - so a
+#: chunk is sized for four a worker (`_shell_chunk`). Its binary columns
+#: cost it where it reads and writes at once (base64, 9.59 s on `wide`);
+#: through its own dump they do not (4.64 s). The dump read both tables in
+#: 0.94 s, 280 MB/s over four workers - `read`, which sizes the chunks.
+MY_BENCH = "docker pair, 2026-09-28"
+
+#: The pass-through, which `MY_BENCH` predates, measured on its tables
+#: 2026-10-01 (`bench/table_ladder.py`): the same pair and machine, the
+#: table copier's `move_table` held to one way, four workers, the median of
+#: three runs alternated with the table copier's rows, seconds:
+#:
+#:                                  narrow   wide   tiny
+#:   the rows passed server to       3.46    6.45   0.26
+#:     server
+#:   the table copier's rows         3.84    6.71   0.13
+#:
+#: Over the time less the one-row table's: 12.7 MB/s on `narrow` (38.6 MB
+#: here) and 35.9 on `wide` (211.8 MB), where the rows measured 10.9 and
+#: 33.7 - within 1% and 8% of `MY_BENCH`'s 10.8 and 36.8. Its rates below
+#: are the ones measured beside the rows, scaled by the rows' to
+#: `MY_BENCH`'s: 12.6 and 39.2 MB/s. It starts 0.13 s later than the rows
+#: a table (its client, its snapshot): the copier's 0.45 s and that.
+PASS_BENCH = {PLAIN: 12.6e6, BINARY: 39.2e6, "startup": 0.58}
 
 #: MariaDB's flag in an event's header for a transaction its session
 #: wrote under `skip_replication` (`marks`)
@@ -6312,12 +6378,15 @@ class MySQLEngine(Engine):
                    "batch": 64 * 2 ** 10}
 
     def passes_through(self, db, table):
-        """The first of `TABLE_WAYS` holds: the source's own client
-        installed, a target that takes the pinned bulk load, and columns
-        the load reads back as they were."""
+        """Whether the table ladder sends `table` server to server: the
+        one climb the copier makes for it (`tableway.choose`) gives the
+        pass-through - it holds for the table and is measured the cheapest
+        way there."""
+        from .. import tableway
         try:
-            return bool(which("mysql")) and self._loads_here() \
-                and not self._pass_unfit(db, table)
+            got = tableway.choose(self, db, "builtin", [table])
+            pick = got.get(self.way_name(table))
+            return bool(pick and pick.rung == "pass-through")
         except Exception:  # noqa: BLE001 - not known: the rows' way
             return False
 
@@ -6562,9 +6631,9 @@ class MySQLEngine(Engine):
             return self._move_table(db, sch, tbl, chunk, ck, log, later)
 
     def _move_table(self, db, sch, tbl, chunk, ck, log, later):
+        from .. import tableway
         t = tbl if tbl else sch
         key = self.move_key(db, sch, tbl)
-        ddb = self._d("dst", db)
         st = ck.setdefault(key, {})
         rf = (self.hop.row_filter(db, t)
               if hasattr(self.hop, "row_filter") else None)
@@ -6575,6 +6644,20 @@ class MySQLEngine(Engine):
         ck.save()
         self.set_aside_indexes(later, self, db, t, st,
                                self._rows_of("src", db, t), log)
+        tableway.carry(self, tableway.job(self, db, t, key, st, ck, log,
+                                          later=later, chunk=chunk, rf=rf))
+
+    def _copy_ranges(self, job, way):
+        """The table by the copier's own ranges (`TABLE_WAYS`' pass-through
+        and rows): each range replaced by key and proved as it lands, the
+        pass-through given up on for the rest of the table where a range
+        of it is not taken as the source read it. `tableway.UNTIMED` where
+        it was, so neither way is costed by the table's time."""
+        from .. import tableway
+        db, t, key, st, ck, log = (job.db, job.name, job.key, job.st,
+                                   job.ck, job.log)
+        chunk, rf = job.chunk, job.rf
+        ddb = self._d("dst", db)
         cols = self._cols(db, t)
         collist = ", ".join(f"`{c}`" for c in cols)
         ph = ", ".join(["%s"] * len(cols))
@@ -6593,33 +6676,22 @@ class MySQLEngine(Engine):
         # doubled where the statement also carries parameters, or a
         # `like 'a%'` filter would be read as a placeholder.
         rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
-        fresh = not (st.get("ranges_done") or st.get("last") is not None)
-        way, tcosts, tfacts = self._table_way(db, t, key, st, rf)
-        if len(way.ranked) > 1 or way.path != self.TABLE_WAYS[0].name:
-            log(f"{key}: {way.said} - {way.reason}")
-        if way.path == "dump" and self._dump_table(db, t, key, st, ck, log,
-                                                   way.rung, tcosts, tfacts):
-            return
         ctx = self._pass_ctx(db, t, log) if way.path == "pass-through" \
             else None
         if ctx is not None:
-            later.callback(ctx.close)
-        began = time.monotonic()
+            job.later.callback(ctx.close)
 
         def timed():
-            # the way's own rate a byte, where the table was large enough
-            # for the ways to be timed against each other
-            if fresh and (tfacts["bytes"] or 0) >= self.STREAM_FROM \
-                    and not getattr(ctx, "given_up", None):
-                tcosts.saw(way.path, tfacts["bytes"],
-                           time.monotonic() - began)
+            # the pass-through given up on for part of the table: its time
+            # is neither way's
+            return tableway.UNTIMED if getattr(ctx, "given_up", None) \
+                else True
         sconn, dconn = self._conn("src"), self._conn("dst")
         try:
             if not intpk and self._copy_in_buckets(
                     sconn, dconn, db, t, collist, ph, rf, st, ck, key, log,
                     ctx):
-                timed()
-                return
+                return timed()
             if not intpk:
                 log(f"{key}: no single int pk, single-shot copy")
                 clear = (f"delete from `{ddb}`.`{t}` where ({rf})" if rf
@@ -6635,8 +6707,7 @@ class MySQLEngine(Engine):
                         log)
                 st["done"] = True
                 ck.save()
-                timed()
-                return
+                return timed()
             mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
                          f" coalesce(max(`{intpk}`), 0),"
                          f" min(`{intpk}`) is not null"
@@ -6756,7 +6827,7 @@ class MySQLEngine(Engine):
             sweep()
             st["done"] = True
             ck.save()
-            timed()
+            return timed()
         finally:
             sconn.close()
             dconn.close()
@@ -6829,90 +6900,205 @@ class MySQLEngine(Engine):
         ck.save()
         return True
 
-    #: bytes from which a table is large enough for its ways to be timed
-    #: against each other. The dump's and the load's starts are paid once a
-    #: table, and on a small table they are most of what it costs; set, not
-    #: measured - `bench/same_engine_copy.py` times every way at 1 and 5 GB
-    STREAM_FROM = 256 * 2 ** 20
-
-    #: how a whole table goes into a MySQL target from a MySQL source,
-    #: climbed per table on the seconds a byte each has measured - this
-    #: run's first, the hop's kept ones after (`_table_way`)
+    #: how a whole table reaches a MySQL target from a MySQL source: one
+    #: ladder for the move's programs and the copier's own ways
+    #: (`tableway`), each costed on the table by the database's cost model -
+    #: this run's, the hop's, other hops', else predicted from the
+    #: benchmark's rates below (`MY_BENCH`, `PASS_BENCH`, `costmodel.seeds`).
+    #: The programs that carry the database's tables at once run in a move
+    #: by them (`TABLE_BATCH`); the parallel dump and load carries one table
+    #: on its own too, where the table repays starting it; the copier's ways
+    #: carry one table each.
+    TABLE_BATCH = ("mydumper", "mysqlsh")
     TABLE_WAYS = (
-        Rung("pass-through",
-             "the rows rendered by the source as the target's bulk load"
-             " reads them and passed straight into it, each range digested"
-             " by both servers",
-             gives=frozenset({"row filter", "resume by chunk"}),
-             needs=(Need("the source's own client installed",
-                         lambda f: f["client"]),
-                    Need("a target that takes a bulk load",
-                         lambda f: f["loads"],
-                         "{rung} needs the target to take a bulk load"
-                         " (local_infile on, and a driver it can be pinned"
-                         " in)"),
-                    Need("columns the load reads back as they were",
-                         lambda f: not f["unfit"],
-                         lambda f: f["unfit"])),
-             because="no row passes through migkit, and a range is proved"
-                     " by two numbers each server computes"),
-        Rung("rows", "the table copier's rows",
-             gives=frozenset({"row filter", "resume by chunk"})),
-        Rung("dump", "the parallel dump and load of the whole table",
-             needs=(Need("the dump and load programs installed",
-                         lambda f: f["dump"]),
-                    Need("a table large enough to repay starting them",
-                         lambda f: (f["bytes"] or 0)
-                         >= MySQLEngine.STREAM_FROM,
-                         "the table is small enough that starting the dump"
-                         " costs more than it could save"))),
+        Way("dump-load", "dumped in parallel chunks and loaded",
+            short="the parallel dump and load",
+            gives=frozenset({"row filter", "consistent as of", "keyless",
+                             "large values", "masked on the way"}),
+            needs=(Need("the dump and load programs installed",
+                        lambda f: f["dump"],
+                        "the parallel dump is not installed here - migkit"
+                        " doctor --install puts it in place"),
+                   Need("a move not asked to copy straight across",
+                        lambda f: f["via"] != "mysqlsh",
+                        "the move is asked to copy straight across"),
+                   Need("the database's move, or a table that repays"
+                        " starting the programs for it alone",
+                        lambda f: f["batch"] or f["large"],
+                        "the table is small enough that starting the dump"
+                        " costs more than it could save"),
+                   Need("the database's move, where the row filter and the"
+                        " masking are applied",
+                        lambda f: f["batch"] or not (f["filtered"]
+                                                     or f["masked"]),
+                        "{rung} started for one table applies neither its"
+                        " row filter nor its masking")),
+            footprint=1, batch=True, run="_dump_table", start="dump-load",
+            startup=0.15, rates={PLAIN: 18.9e6, BINARY: 60.8e6,
+                                 "read": 280e6}),
+        Way("stream-copy", "copied straight from source to target in"
+            " parallel chunks", short="the straight copy",
+            gives=frozenset({"row filter", "consistent as of", "keyless",
+                             "large values", "resume by chunk"}),
+            needs=(Need("its program installed", lambda f: f["shell"],
+                        "the straight copy is not installed here - migkit"
+                        " doctor --install puts it in place"),
+                   Need("a target that takes local loads",
+                        lambda f: f["local_infile"],
+                        lambda f: "the target does not take local loads"
+                        " (local_infile is off), which the straight copy"
+                        " loads by; migkit does not change the target's"
+                        " settings" if f["local_infile"] is False else
+                        "whether the target takes local loads could not be"
+                        " asked yet")),
+            footprint=1, batch=True, start="stream-copy", startup=1.22,
+            rates={PLAIN: 23.2e6, BINARY: 64.9e6, PLAIN + DIRECT: 25.4e6,
+                   BINARY + DIRECT: 26.9e6, "read": 280e6}),
+        Way("pass-through",
+            "the rows rendered by the source as the target's bulk load"
+            " reads them and passed straight into it, each range digested"
+            " by both servers", short="passing the rows server to server",
+            gives=frozenset({"row filter", "resume by chunk", "keyless",
+                             "large values"}),
+            needs=(Need("a move not asked to copy straight across",
+                        lambda f: not f["straight_only"],
+                        "the move is asked to copy straight across"),
+                   Need("the source's own client installed",
+                        lambda f: f["client"]),
+                   Need("a target that takes a bulk load",
+                        lambda f: f["loads"],
+                        lambda f: "whether the target takes local loads could"
+                        " not be asked yet" if f["local_infile"] is None
+                        else "passing the rows server to server needs the"
+                        " target to take a bulk load (local_infile on, and a"
+                        " driver it can be pinned in)"),
+                   Need("columns the load reads back as they were",
+                        lambda f: not f["unfit"], lambda f: f["unfit"])),
+            because="no row passes through migkit, and a range is proved"
+                    " by two numbers each server computes",
+            run="_copy_ranges", start="copier",
+            startup=PASS_BENCH["startup"],
+            rates={PLAIN: PASS_BENCH[PLAIN], BINARY: PASS_BENCH[BINARY]}),
+        Way("rows", "the table copier's rows", short="the table copier's rows",
+            gives=frozenset({"row filter", "resume by chunk", "keyless",
+                             "large values", "resume by key"}),
+            needs=(Need("a move not asked to copy straight across",
+                        lambda f: not f["straight_only"],
+                        "the move is asked to copy straight across"),),
+            run="_copy_ranges", start="copier", through=True,
+            startup=0.45, rates={PLAIN: 10.8e6, BINARY: 36.8e6}),
     )
 
-    def _table_way(self, db, t, key, st, rf):
-        """The `Choice` of how the whole table goes (`TABLE_WAYS`): by
-        ranges where it has to resume by them or apply a row filter, and
-        otherwise the way measured cheaper a byte."""
+    def way_name(self, table):
+        return str(table).rsplit(".", 1)[-1]
+
+    def masked_on_the_way(self, db):
+        from ..movers import mask_rules
+        return set(mask_rules(self.hop, db))
+
+    def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
+        """What `TABLE_WAYS`' needs read, for a move of `db` by `via`: the
+        programs installed, whether the target takes local loads (asked
+        once, and within a plan's time where `quick`), and per table its
+        size, its row filter and masking, and whether its columns pass
+        server to server - in a move by programs from every table's columns
+        read in one question a side, whether the digest reads each of them
+        asked when the copier comes to it (`_pass_unfit`)."""
         from .. import movers
-        from ..decide import Facts, climb
-        need = []
-        if rf:
-            need.append("row filter")
-        if st.get("ranges_done") or st.get("last") is not None:
-            need.append("resume by chunk")
-        facts = Facts(
+        from ..decide import Facts
+        batch = via in self.TABLE_BATCH
+
+        def ask(fn):
+            return movers._within(fn) if quick else fn()
+
+        def columns():
+            got = ask(lambda: self._pass_columns_of(db))
+            return got if got is not None else False
+        shared = Facts(
+            dict(known or {}),
+            dump=lambda: bool(which("mydumper") and which("myloader")),
+            shell=lambda: bool(which("mysqlsh")),
             client=lambda: bool(which("mysql")),
-            loads=lambda: self._loads_here(),
-            unfit=lambda: self._pass_unfit(db, t),
-            dump=lambda: bool(which("mydumper") and which("myloader"))
-            and "dump" not in self.__dict__.get("_ways_failed", {}),
-            bytes=lambda: (self.table_facts("src", db).get(t) or {}
-                           ).get("bytes"))
-        costs = self._layered(self._work_key(self.TABLE_WORK), self.TABLE_WAYS,
-                              facts, "table way/")
-        return climb(key, self.TABLE_WAYS, facts, need, costs), costs, facts
+            pinned=lambda: _loading() is not None,
+            local_infile=lambda: ask(
+                lambda: movers._my_target_loads_files(self.hop)),
+            direct=lambda: batch and movers._shell_direct(self.hop, db,
+                                                          sizes or {}),
+            columns=columns if batch else (lambda: None),
+            masks=lambda: self.masked_on_the_way(db))
+        shared["straight_only"] = lambda: (
+            via == "mysqlsh" and shared["shell"]
+            and shared["local_infile"] is True)
 
-    def _loads_here(self):
-        """Whether the target takes the pinned bulk load."""
-        if _loading() is None:
-            return False
-        conn = self._conn("dst")
-        try:
-            return self._loads(conn)
-        finally:
-            conn.close()
+        unasked = ("whether its columns pass server to server could not be"
+                   " asked yet")
 
-    def _pass_columns(self, db, t):
+        def unfit(t):
+            got = shared["columns"]
+            if got is None:
+                got = ask(lambda: self._pass_unfit(db, t))
+                return unasked if got is None else got
+            if got is False or t not in got[0]:
+                return unasked
+            src, dst = got
+            out = self._pass_columns(db, t, src[t], dst.get(t))
+            return out if isinstance(out, str) else ""
+
+        def facts_for(table, fact):
+            t = self.way_name(table)
+            return Facts(
+                {"batch": batch, "via": via,
+                 "bytes": (fact or {}).get("bytes"),
+                 "large": ((fact or {}).get("bytes") or 0)
+                 >= self.STREAM_FROM,
+                 "filtered": bool(self.hop.row_filter(db, t))},
+                **{k: (lambda k=k: shared[k]) for k in (
+                    "dump", "shell", "client", "local_infile", "direct")},
+                straight_only=lambda: shared["straight_only"](),
+                loads=lambda: bool(shared["pinned"]
+                                   and shared["local_infile"]
+                                   and getattr(self, "_loads_ok", None)
+                                   is not False),
+                masked=lambda: t in shared["masks"],
+                unfit=lambda: unfit(t))
+        return facts_for
+
+    def _pass_columns_of(self, db):
+        """({table: [(column, type, extra)]} of the source, {table: {column:
+        type}} of the target) for every table of `db`: one question a side.
+        A table the target lacks is not in the second: the move makes it
+        from the source's definition before it copies it."""
+        src = {}
+        for t, c, typ, extra in self._q(
+                "src", "select table_name, column_name, data_type, extra from"
+                       " information_schema.columns where table_schema = %s"
+                       " order by table_name, ordinal_position", (db,)):
+            src.setdefault(t, []).append((c, typ, extra))
+        dst = {}
+        for t, c, typ in self._q(
+                "dst", "select table_name, column_name, data_type from"
+                       " information_schema.columns where table_schema = %s",
+                (self._d("dst", db),)):
+            dst.setdefault(t, {})[c] = str(typ).lower()
+        return src, dst
+
+    def _pass_columns(self, db, t, rows=None, there=...):
         """[(name, kind)] of the columns the pass-through carries - every
-        stored column, in the source's order - or a reason it cannot."""
+        stored column, in the source's order - or a reason it cannot.
+        `rows` and `there` are the two sides' columns where the caller read
+        them already (`_pass_columns_of`); `there` None for a table the
+        target does not have yet, which is made from the source's own."""
         from . import my_pass
-        rows = self._q("src", "select column_name, data_type, extra from"
-                              " information_schema.columns where"
-                              " table_schema = %s and table_name = %s"
-                              " order by ordinal_position", (db, t))
-        there = {r[0]: str(r[1]).lower() for r in self._q(
-            "dst", "select column_name, data_type from"
-                   " information_schema.columns where table_schema = %s"
-                   " and table_name = %s", (self._d("dst", db), t))}
+        if rows is None:
+            rows = self._q("src", "select column_name, data_type, extra from"
+                                  " information_schema.columns where"
+                                  " table_schema = %s and table_name = %s"
+                                  " order by ordinal_position", (db, t))
+        if there is ...:
+            there = {r[0]: str(r[1]).lower() for r in self._q(
+                "dst", "select column_name, data_type from"
+                       " information_schema.columns where table_schema = %s"
+                       " and table_name = %s", (self._d("dst", db), t))}
         out = []
         for name, typ, extra in rows:
             if "GENERATED" in str(extra).upper():
@@ -6921,9 +7107,9 @@ class MySQLEngine(Engine):
             k = my_pass.kind(typ)
             if k is None:
                 return f"{name} ({typ}) has no text the load reads back"
-            if name not in there:
+            if there is not None and name not in there:
                 return f"the target has no column {name}"
-            if there[name] != typ:
+            if there is not None and there[name] != typ:
                 return f"{name} is {typ} on the source and {there[name]} on" \
                        " the target"
             out.append((name, k))
@@ -6996,32 +7182,34 @@ class MySQLEngine(Engine):
                 " - copying it as rows")
         return None
 
-    def _dump_table(self, db, t, key, st, ck, log, rung, costs, facts):
+    def _dump_table(self, job, way):
         """The whole table through the parallel dump and load
-        (`movers.mydumper_table`), then both servers' digests of it. True
-        once they agree; False where the programs failed or the source
-        moved on while it was dumped, with why, and the table goes by its
-        ranges, each proved."""
+        (`movers.mydumper_table`), then both servers' digests of it. Where
+        the programs fail they are given up on for the run; where the
+        source moved on while it was dumped, for the table - and the next
+        way carries it (`tableway.carry`), each of its ranges proved."""
         from .. import movers
-        began = time.monotonic()
+        from ..tableway import Failed
+        said = way.rung.short or way.said
         try:
-            movers.mydumper_table(self.hop, db, t,
+            movers.mydumper_table(self.hop, job.db, job.name,
                                   max(1, int(self.hop.workers or 1)),
-                                  self._rows_of("src", db, t), log)
-        except Exception as e:  # noqa: BLE001 - said, and the ranges go
-            self.__dict__.setdefault("_ways_failed", {})["dump"] = e
-            log(f"{key}: {rung.said} did not finish"
-                f" ({str(e).strip().splitlines()[-1][:160] if str(e) else e})"
-                " - copying it by its ranges")
-            return False
-        if not self._range_same(db, t, None):
-            log(f"{key}: {rung.said} left the target holding other rows"
-                " than the source now does - copying it by its ranges")
-            return False
-        costs.saw("dump", facts["bytes"] or 1, time.monotonic() - began)
-        st["done"] = True
-        ck.save()
-        log(f"{key}: copied whole by {rung.said}")
+                                  self._rows_of("src", job.db, job.name),
+                                  job.log)
+        except Exception as e:  # noqa: BLE001 - said, and the next way goes
+            raise Failed(
+                f"{said} did not finish ("
+                f"{str(e).strip().splitlines()[-1][:160] if str(e) else e})",
+                everywhere=True) from e
+        if not self._range_same(job.db, job.name, None):
+            raise Failed(f"{said} left the target holding other rows than"
+                         " the source now does")
+        job.st["done"] = True
+        job.ck.save()
+        from .. import decide
+        decide.record(self.hop, {"work": job.key, "way": said},
+                      say=job.log, work=job.key, way=said,
+                      reason="copied whole")
         return True
 
     #: rows a read of the table copier takes from the source at a time,

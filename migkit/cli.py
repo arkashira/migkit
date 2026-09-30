@@ -1722,6 +1722,11 @@ def _table_plan(hop, eng, d, via, go=False):
     decisions = planner.plan(hop, d, via, tables,
                              "public" if engine == "postgres" else None,
                              facts)
+    # the time each table the copier carries takes; its way and why go to
+    # the decision record (`decide.record`)
+    from . import tableway
+    decisions = tableway.annotate(eng, d, decisions,
+                                  log=lambda m: console.print(f"  {m}"))
     rows = sum(int(f.get("rows") or 0) for f in facts.values()
                if isinstance(f, dict))
     try:
@@ -2277,13 +2282,23 @@ def _move_full(hop, eng, db, table, chunk, go):
                        if ck.get(eng.move_key(d, sch, t), {}).get("done"))
             console.print(f"{d}: {len(tables)} tables, {done} already done"
                           f" in checkpoint, chunk {chunk:,} rows")
+            # each table's time from the one table ladder the copy climbs
+            # when its turn comes; its way and why go to the decision
+            # record (`tableway`)
+            from . import tableway
+            ways = tableway.plan_for(eng, d, tables[:20], ck,
+                                     lambda m: console.print(f"  {m}"))
             for sch, t in tables[:20]:
                 st = ck.get(eng.move_key(d, sch, t), {})
                 last = st.get("last")
                 mark = "done" if st.get("done") else \
                     f"resume at {last:,}" if isinstance(last, int) else \
                     f"resume after {last}" if "last" in st else "todo"
-                console.print(f"  {sch}.{t}: {mark}")
+                way = ways.get((sch, t))
+                console.print(f"  {sch}.{t}: {mark}"
+                              + (f" - {tableway.outcome(way)}"
+                                 if way and way.rung
+                                 and not st.get("done") else ""))
             from . import planner
             console.print("  time: " + planner.estimate(
                 hop, "builtin", _source_rows(eng, d)))

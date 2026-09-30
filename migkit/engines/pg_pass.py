@@ -467,7 +467,10 @@ class Ways:
 
     def _say(self, got):
         """The first way a table takes, with why; and once every way that
-        holds has been timed on the table's own ranges, what each cost."""
+        holds has been timed on the table's own ranges, what each cost -
+        in the run's decision record, the console only where asked
+        (`decide.record`)."""
+        from .. import decide
         with self._lock:
             first = not self._said
             self._said.add(got.path)
@@ -478,14 +481,16 @@ class Ways:
             if settled:
                 self._said.add("settled")
         if first:
-            self.log(f"{self.table}: {got.said} - {got.reason}")
+            decide.record(self.eng.hop, got, say=self.log)
         if settled:
             costs = sorted(timed.items(), key=lambda kv: kv[1])
-            self.log(f"{self.table}: each way timed on its own ranges - "
-                     + ", ".join(f"{n} {c * 1e6:,.1f} us a row"
-                                 for n, c in costs)
-                     + "; each range takes the cheapest from here on"
-                       f" ({costs[0][0]} now)")
+            decide.record(
+                self.eng.hop, {"costs": dict(costs)}, say=self.log,
+                work=self.table, way=got.said,
+                reason="each way timed on its own ranges - "
+                       + ", ".join(f"{n} {c * 1e6:,.1f} us a row"
+                                   for n, c in costs)
+                       + "; each range takes the cheapest from here on")
 
     def give_up_passing(self, why):
         for name in self.passing:

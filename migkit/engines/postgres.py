@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config import REPORTS
 from ..decide import Need, Rung
+from ..tableway import Way
 from ..util import run, tool_env, which
 from .base import Counted as _Counted
 from .base import Engine, Enough as _Enough, RepairAction, Result
@@ -9625,104 +9626,112 @@ class PostgresEngine(Engine):
                 return f"{c} ({ts}) has no binary encoding"
         return ""
 
-    #: bytes from which a table is large enough for the streaming copy to
-    #: be timed against the table copier's ranges. The program's start and
-    #: its reads of the catalogue are paid once a table, and on a small
-    #: table they are most of what it costs; set, not measured -
-    #: `bench/same_engine_copy.py` times both ways at 1 and 5 GB
-    STREAM_FROM = 256 * 2 ** 20
-
-    #: how a whole table goes into a PostgreSQL target from a PostgreSQL
-    #: source, climbed per table on the seconds a byte each has measured -
-    #: this run's first, the hop's kept ones after (`_table_way`)
+    #: how a whole table reaches a PostgreSQL target from a PostgreSQL
+    #: source, where the table copier carries it: one ladder (`tableway`),
+    #: each rung costed on the table by the database's cost model; no
+    #: benchmark predicts them, so each is tried where the trials allow
+    #: (`decide.Trials`) and measured.
+    #: The whole-database programs carry the rest of the database, chosen
+    #: for it by `movers._ladder` - a database is not moved twice to learn
+    #: which is faster - and each range of the copier's climbs its own ways
+    #: (`COPY_WAYS`) on the table's own measurements.
     TABLE_WAYS = (
-        Rung("ranges", "the table copier's ranges",
-             gives=frozenset({"resume by chunk", "row filter"})),
-        Rung("streaming", "the streaming copy of the whole table, read"
-                          " under the table's snapshot and proved by both"
-                          " servers' digests of it",
-             needs=(Need("the streaming copy installed",
-                         lambda f: f["streaming"]),
-                    Need("a table large enough to repay starting it",
-                         lambda f: (f["bytes"] or 0)
-                         >= PostgresEngine.STREAM_FROM,
-                         "the table is small enough that starting the"
-                         " streaming copy costs more than it could save"),
-                    Need("a table no foreign key points at",
-                         lambda f: f["truncatable"],
-                         "{rung} empties the table first, which the target"
-                         " refuses while a foreign key points at it"),
-                    Need("the same columns of the same types on both sides",
-                         lambda f: not f["binary"],
-                         lambda f: f["binary"]))),
+        Way("ranges", "the table copier's ranges",
+            short="the table copier's ranges",
+            gives=frozenset({"resume by chunk", "row filter"}),
+            run="_copy_ranges"),
+        Way("streaming", "the streaming copy of the whole table, read"
+            " under the table's snapshot and proved by both servers'"
+            " digests of it", short="the streaming copy",
+            needs=(Need("the streaming copy installed",
+                        lambda f: f["streaming"]),
+                   Need("a table large enough to repay starting it",
+                        lambda f: f["large"],
+                        "the table is small enough that starting the"
+                        " streaming copy costs more than it could save"),
+                   Need("a table no foreign key points at",
+                        lambda f: f["truncatable"] is True,
+                        lambda f: "whether a foreign key points at the table"
+                        " could not be asked yet" if f["truncatable"] is None
+                        else "the streaming copy empties the table first,"
+                        " which the target refuses while a foreign key points"
+                        " at it"),
+                   Need("the same columns of the same types on both sides",
+                        lambda f: not f["binary"],
+                        lambda f: f["binary"])),
+            footprint=1, run="_stream_table"),
     )
 
-    def _table_way(self, db, key, qt, cols, st, rf):
-        """The `Choice` of how the whole table goes (`TABLE_WAYS`): its
-        ranges where it has to resume by them or apply a row filter, and
-        otherwise the way measured cheaper a byte."""
+    def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
+        """What `TABLE_WAYS`' needs read of one table: its size, whether
+        the streaming copy is installed, whether the target lets it be
+        emptied, whether its columns pass in COPY's binary form."""
         from .. import movers
-        from ..decide import Facts, climb
-        need = []
-        if rf:
-            need.append("row filter")
-        if (st.get("ranges_done") or st.get("spans_done")
-                or st.get("last") is not None):
-            need.append("resume by chunk")
-        sch, tbl = self._split(key)
-        facts = Facts(
-            streaming=lambda: bool(movers.pgcopydb_runner())
-            and "streaming" not in self.__dict__.get("_ways_failed", {}),
-            bytes=lambda: (self.table_facts("src", db).get(key) or {}
-                           ).get("bytes"),
-            truncatable=lambda: self._truncatable(db, qt),
-            binary=lambda: self._binary_unfit(db, sch, tbl, cols or []))
-        costs = self._layered(self._work_key(self.TABLE_WORK), self.TABLE_WAYS,
-                              facts, "table way/")
-        return climb(key, self.TABLE_WAYS, facts, need, costs), costs, facts
+        from ..decide import Facts
 
-    def _stream_table(self, db, key, qt, cols, st, ck, log, way, costs,
-                      facts):
+        def ask(fn, unasked):
+            got = movers._within(fn) if quick else fn()
+            return unasked if got is None else got
+
+        def facts_for(table, fact):
+            sch, tbl = self._split(table)
+            qt = f'"{sch}"."{tbl}"'
+            return Facts(
+                {"batch": via in self.TABLE_BATCH, "via": via,
+                 **(known or {}), "bytes": (fact or {}).get("bytes"),
+                 "large": ((fact or {}).get("bytes") or 0)
+                 >= self.STREAM_FROM},
+                streaming=lambda: bool(movers.pgcopydb_runner()),
+                truncatable=lambda: ask(lambda: self._truncatable(db, qt),
+                                        None),
+                binary=lambda: ask(lambda: self._binary_unfit(
+                    db, sch, tbl, self._copy_cols(db, sch, tbl) or []),
+                    "whether its columns pass in COPY's binary form could"
+                    " not be asked yet"))
+        return facts_for
+
+    def _stream_table(self, job, way):
         """The whole table through the streaming copy
         (`movers.pgcopydb_table`) under a snapshot held here, then both
         servers' digests of the whole table - the source's under that same
-        snapshot. True once they agree; False where the copy failed or the
-        digests differ, with why, and the table goes by its ranges."""
-        import time
-
+        snapshot. Where the copy fails it is given up on for the run; where
+        the digests differ, for the table - and the next way carries it
+        (`tableway.carry`), each of its ranges proved."""
         from .. import movers
+        from ..tableway import Failed
         from . import pg_pass
+        said = way.rung.short or way.said
+        db, key = job.db, job.key
         snap = pg_pass.Snapshot(self, db)
-        began = time.monotonic()
         try:
             export = snap.lease()
-            ctx = pg_pass.TableCopy(self, db, key, qt, cols or [], "", 1)
+            ctx = pg_pass.TableCopy(self, db, key, job.qt, job.cols or [], "",
+                                    1)
             try:
                 movers.pgcopydb_table(
                     self.hop, db, key, export.id,
                     max(1, int(getattr(self.hop, "workers", 1) or 1)),
-                    facts["bytes"], log)
+                    job.fact.get("bytes"), job.log)
                 same = (ctx.same(export, "") if (self.hop.options or {}).get(
                     "verify_batches", True) else True)
             finally:
                 snap.release(export)
                 ctx.close()
-        except Exception as e:  # noqa: BLE001 - said, and the ranges go
-            self.__dict__.setdefault("_ways_failed", {})["streaming"] = e
-            log(f"{key}: {way.said} did not finish"
-                f" ({str(e).strip().splitlines()[-1][:160] if str(e) else e})"
-                " - copying it by its ranges")
-            return False
+        except Exception as e:  # noqa: BLE001 - said, and the next way goes
+            raise Failed(
+                f"{said} did not finish ("
+                f"{str(e).strip().splitlines()[-1][:160] if str(e) else e})",
+                everywhere=True) from e
         finally:
             snap.close()
         if not same:
-            log(f"{key}: {way.said} left the target holding other rows than"
-                " the source's snapshot - copying it by its ranges")
-            return False
-        costs.saw("streaming", facts["bytes"] or 1, time.monotonic() - began)
-        st["done"] = True
-        ck.save()
-        log(f"{key}: copied whole by {way.said}")
+            raise Failed(f"{said} left the target holding other rows than"
+                         " the source's snapshot")
+        job.st["done"] = True
+        job.ck.save()
+        from .. import decide
+        decide.record(self.hop, {"work": key, "way": said}, say=job.log,
+                      work=key, way=said, reason="copied whole")
         return True
 
     def passes_through(self, db, table):
@@ -9760,11 +9769,13 @@ class PostgresEngine(Engine):
         """The table's ways (`pg_pass.Ways`): each range climbs `COPY_WAYS`
         on this table's own measurements, so the pass-through is timed
         against the pipe on the table itself and the cheaper per row taken
-        from then on; said once a table. None where the source's columns
+        from then on; said once a table - the pipe alone where the move's
+        joint plan puts the table's rows through migkit
+        (`tableway.planned_through`). None where the source's columns
         could not be read: the pipe, as it always was."""
         if not cols:
             return None
-        from .. import ranges
+        from .. import ranges, tableway
         from ..decide import Facts
         from . import pg_pass
         sch, tbl = self._split(key)
@@ -9775,7 +9786,10 @@ class PostgresEngine(Engine):
             binary=lambda: self._binary_unfit(db, sch, tbl, cols),
             dst_version=lambda: self._server_version("dst",
                                                      self._d("dst", db)))
-        return pg_pass.Ways(self, db, key, self.COPY_WAYS, facts, ctx, log)
+        ways = self.COPY_WAYS
+        if tableway.planned_through(self.hop, db, key):
+            ways = tuple(r for r in ways if r.name == "pipe") or ways
+        return pg_pass.Ways(self, db, key, ways, facts, ctx, log)
 
     #: how a range the copier wrote is proved (`_copy_checked`)
     VERIFY_WAYS = (Rung("digest", "digesting the range on both servers"),
@@ -10225,30 +10239,22 @@ class PostgresEngine(Engine):
         pk = self._int_pk(db, sch, tbl)
         st["key"] = pk
         cols = self._copy_cols(db, sch, tbl)
-        fresh = not (st.get("ranges_done") or st.get("spans_done")
-                     or st.get("last") is not None)
-        table_way, tcosts, tfacts = self._table_way(db, key, qt, cols, st,
-                                                    rf)
-        if len(table_way.ranked) > 1 \
-                or table_way.path != self.TABLE_WAYS[0].name:
-            log(f"{key}: {table_way.said} - {table_way.reason}")
-        if table_way.path == "streaming" and self._stream_table(
-                db, key, qt, cols, st, ck, log, table_way.rung, tcosts,
-                tfacts):
-            return
-        import time
-        began = time.monotonic()
+        from .. import tableway
+        tableway.carry(self, tableway.job(
+            self, db, key, key, st, ck, log, later=later, chunk=chunk, rf=rf,
+            qt=qt, pk=pk, cols=cols))
 
-        def timed():
-            # the ranges' own rate a byte, where the table was large enough
-            # for the streaming copy to be timed against them
-            if fresh and (tfacts["bytes"] or 0) >= self.STREAM_FROM:
-                tcosts.saw("ranges", tfacts["bytes"],
-                           time.monotonic() - began)
+    def _copy_ranges(self, job, way):
+        """The table by the copier's own ranges, each climbing `COPY_WAYS`
+        on the table's own measurements (`_copy_ways`) and proved as it
+        lands; a table without an integer key by where its rows are stored
+        (`_copy_in_spans`), or in one."""
+        db, key, st, ck, log = job.db, job.key, job.st, job.ck, job.log
+        qt, pk, cols, rf, chunk, later = (job.qt, job.pk, job.cols, job.rf,
+                                          job.chunk, job.later)
         if not pk:
             if self._copy_in_spans(db, key, qt, cols, rf, st, ck, log):
-                timed()
-                return
+                return True
             log(f"{key}: no single int pk, single-shot copy")
             ways = self._copy_ways(db, key, qt, cols, log)
             if ways is not None:
@@ -10261,8 +10267,7 @@ class PostgresEngine(Engine):
             if ways is not None:
                 ways.wait()
             st["done"] = True
-            timed()
-            return
+            return True
         mm = self._psql("src", db,
                         f'select coalesce(min("{pk}"), 0)||\'|\'||'
                         f'coalesce(max("{pk}"), 0)||\'|\'||'
@@ -10354,7 +10359,7 @@ class PostgresEngine(Engine):
         sweep()
         st["done"] = True
         ck.save()
-        timed()
+        return True
 
     def _repl_name(self):
         return "migkit_" + self.hop.name.replace("-", "_")

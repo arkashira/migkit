@@ -917,7 +917,7 @@ class DynamoDBEngine(NeutralCopier, Engine):
     # ---- items copied as the service holds them ----------------------------
 
     def _table_ways(self):
-        """How a table goes (`tableways`): through the service's own export
+        """How a table goes (`tableway.each`): through the service's own export
         and import where the table is large enough to repay their wait,
         its export and migkit's writer where the import cannot make the
         table, and a parallel scan always (`ddbexport`)."""
@@ -963,7 +963,7 @@ class DynamoDBEngine(NeutralCopier, Engine):
                  for t in tables]
         if not go:
             return steps
-        from .. import ddbexport, tableways
+        from .. import ddbexport, tableway
         from ..decide import Facts
         segments = max(1, int(getattr(self.hop, "workers_most", 0)
                               or self.hop.workers or 1))
@@ -989,14 +989,14 @@ class DynamoDBEngine(NeutralCopier, Engine):
             if log:
                 log(f"{t}: {moved:,} items copied {how}")
             return moved
-        tableways.each(self, db, tables, self._table_ways(),
-                       lambda t: Facts(
-                           bytes=lambda: ddbexport.table_bytes(self, db, t),
-                           export=lambda: ddbexport.export_unfit(self, db,
-                                                                 t),
-                           **{"import": lambda: ddbexport.import_unfit(
-                               self, db, t)}),
-                       run, log)
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(
+                          bytes=lambda: ddbexport.table_bytes(self, db, t),
+                          export=lambda: ddbexport.export_unfit(self, db,
+                                                                t),
+                          **{"import": lambda: ddbexport.import_unfit(
+                              self, db, t)}),
+                      run, log)
         return steps
 
     def _copy_by_scan(self, db, t, segments):

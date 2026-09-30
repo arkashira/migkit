@@ -426,8 +426,9 @@ def answer_word(value):
 
 def answers(hop):
     """{change name: (answer, where it was given)} - the hop's own
-    (`source_changes`, and `physical.source_plugin` for the clone plugin)
-    over what an operator answered at a terminal. "*" is an answer given
+    (`source_changes`, `physical.source_plugin` for the clone plugin and
+    `server_to_server` for the temporary subscription's publication) over
+    what an operator answered at a terminal. "*" is an answer given
     for every change."""
     out = {}
     for name, got in (_record(hop).get("answers") or {}).items():
@@ -441,6 +442,10 @@ def answers(hop):
         a = answer_word(phys["source_plugin"])
         if a:
             out["clone_plugin"] = (a, "the hop's physical.source_plugin")
+    if opts.get("server_to_server"):
+        # the hop's leave for what the servers' own copy makes on them for
+        # the copy and drops after (`legs`)
+        out["temporary_publication"] = ("yes", "the hop's server_to_server")
     raw = opts.get("source_changes")
     if isinstance(raw, dict):
         for k, v in raw.items():

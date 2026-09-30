@@ -639,7 +639,7 @@ class CassandraEngine(NeutralCopier, Engine):
         return key, select, writes
 
     def _table_ways(self):
-        """How a table goes (`tableways`): the bulk loader where it can
+        """How a table goes (`tableway.each`): the bulk loader where it can
         keep what migkit's copier keeps, the copier's token ranges
         always."""
         from ..decide import Need, Rung
@@ -673,7 +673,7 @@ class CassandraEngine(NeutralCopier, Engine):
                  " time, by token ranges" for t in tables]
         if not go:
             return steps
-        from .. import dsbulk, tableways
+        from .. import dsbulk, tableway
         from ..decide import Facts
         from ..util import which
         workers = max(1, int(getattr(self.hop, "workers_most", 0)
@@ -696,11 +696,11 @@ class CassandraEngine(NeutralCopier, Engine):
                         " counted on the target")
                 return moved
             return self._copy_by_ranges(db, t, workers, log)
-        tableways.each(self, db, tables, self._table_ways(),
-                       lambda t: Facts(loader=lambda: bool(which(
-                           dsbulk.PROGRAM)), unfit=lambda: dsbulk.unfit(
-                           self, db, t)),
-                       run, log)
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(loader=lambda: bool(which(
+                          dsbulk.PROGRAM)), unfit=lambda: dsbulk.unfit(
+                          self, db, t)),
+                      run, log)
         return steps
 
     def _copy_by_ranges(self, db, t, workers, log):

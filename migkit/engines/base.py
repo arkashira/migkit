@@ -4961,6 +4961,52 @@ class Engine:
     #: table a unit, so tables of every size are held to one another
     TABLE_WORK = "table copy, a byte"
 
+    #: every way a table reaches the target, one ladder climbed once a table
+    #: (`tableway`): none here, where the engine's copier carries every
+    #: table the one way it has
+    TABLE_WAYS = ()
+    #: the moves whose programs carry the database's tables at once, as
+    #: rungs of `TABLE_WAYS` (`tableway.choose`)
+    TABLE_BATCH = ()
+    #: bytes from which a table repays a program started for it alone: its
+    #: start and its reads of the catalogue are paid once a table, and on a
+    #: small table they are most of what it costs; set, not measured -
+    #: `bench/same_engine_copy.py` times every way at 1 and 5 GB
+    STREAM_FROM = 256 * 2 ** 20
+
+    def way_name(self, table):
+        """A table as the table ladder names it: as `table_facts` keys it."""
+        return str(table)
+
+    def table_sizes(self, db, quick=False):
+        """{table: facts} the table ladder costs a table by - its rows and
+        bytes (`costmodel.unit_of`) - or None where a plan (`quick`) could
+        not ask in time. Asked each time: a table made or filled since is
+        what the next choice is for."""
+        if quick:
+            from ..movers import _within
+            return _within(lambda: self._sized(db))
+        return self._sized(db)
+
+    def _sized(self, db):
+        return self.table_facts("src", db)
+
+    def masked_on_the_way(self, db):
+        """The tables the hop masks on the way, which only a way that masks
+        may carry."""
+        return set()
+
+    def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
+        """(table, fact) -> `decide.Facts` the table ladder's needs read,
+        for a move by `via`; asked of the servers once a database where
+        they can be, and within a plan's time where `quick`."""
+        from ..decide import Facts
+
+        def facts_for(table, fact):
+            return Facts({"batch": via in self.TABLE_BATCH, "via": via,
+                          **(known or {})})
+        return facts_for
+
     @staticmethod
     def _work_key(work, table=None, run=None):
         """What a way's cost is kept under: the kind of work, the table,
@@ -5065,17 +5111,6 @@ class Engine:
             kept[key].facts = facts
         self.__dict__.setdefault("_way_facts", {})[key] = kept[key].facts
         return kept[key]
-
-    def _layered(self, key, ways, facts, prefix):
-        """The costs a climb of `ways` for the work `key` names reads: this
-        engine's own for that work (`_cheaper`'s, which `measured_ways`
-        reports) before the hop's kept ones under `prefix` - and a
-        measurement written into both, so the next run starts from it."""
-        from ..decide import Costs, HopCosts, Layered
-        self.__dict__.setdefault("_way_rungs", {})[key] = tuple(ways)
-        self.__dict__.setdefault("_way_facts", {})[key] = facts
-        return Layered(self.__dict__.setdefault("_way_cost", {})
-                       .setdefault(key, Costs()), HopCosts(self.hop, prefix))
 
     def measured_ways(self):
         """What each way of a piece of work cost here, in seconds a row,

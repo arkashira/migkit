@@ -120,6 +120,16 @@ def _digest(name, table):
                       f" from appdb.{table}")
 
 
+def _dump_only(monkeypatch):
+    """The table ladder held to the parallel dump and load: what these
+    tests are of, whichever way the numbers would give a table - one sent
+    to the copier is the copier's after the move, which a direct call of
+    the move does not run."""
+    from migkit.engines.mysql import MySQLEngine
+    monkeypatch.setattr(MySQLEngine, "TABLE_WAYS", tuple(
+        r for r in MySQLEngine.TABLE_WAYS if r.name == movers.DUMP_LOAD))
+
+
 def _no_tool(text):
     from tests.test_the_report_does_not_name_its_tools import TOOLS
     low = str(text).lower()
@@ -130,7 +140,11 @@ def _no_tool(text):
 
 @needs_docker
 @have_dump
-def test_each_table_is_held_to_its_own_checksum_pair(pair, tmp_path):
+def test_each_table_is_held_to_its_own_checksum_pair(pair, tmp_path,
+                                                     monkeypatch):
+    from migkit import tableway
+    _dump_only(monkeypatch)
+    monkeypatch.setenv("MIGKIT_KNOWLEDGE", str(tmp_path / "knowledge.json"))
     _seed()
     hop = _hop(tmp_path)
     said = []
@@ -145,18 +159,28 @@ def test_each_table_is_held_to_its_own_checksum_pair(pair, tmp_path):
         assert f"appdb.{t}: 2,000 rows, " in joined, joined
     assert _no_tool(joined), joined
     # each table's time, kept to count once the move is done
+    # each table's rows, bytes and time, to teach the cost model once the
+    # move is done
     pending = json.loads((hop.report_dir("appdb")
-                          / "bulk-rates.pending.json").read_text())
-    assert pending[movers.DUMP_LOAD][movers.PLAIN] > 0
-    assert pending[movers.DUMP_LOAD][movers.BINARY] > 0
+                          / tableway.PENDING).read_text())
+    got = {rows: secs for rows, _, secs in pending[movers.DUMP_LOAD]}
+    assert set(got) == {2000} and all(s > 0 for s in got.values()), got
+    assert len(pending[movers.DUMP_LOAD]) == 2, pending
+    # each table's way, in the decision record and not on the console
+    from migkit import decide
+    ways = {e["work"]: e["way"] for e in decide.recorded(hop)}
+    assert ways["appdb.orders"] == "dumped in parallel chunks and loaded"
+    assert not any("dumped in parallel chunks" in m for m in said), said
 
 
 @needs_docker
 @have_dump
-def test_the_copys_own_checksum_says_different(pair, tmp_path):
+def test_the_copys_own_checksum_says_different(pair, tmp_path,
+                                                monkeypatch):
     """A target column one decimal place narrower takes every value
     rounded, under a strict sql_mode too (a note, not an error): the load
     says it finished, and the dump's checksum and the load's disagree."""
+    _dump_only(monkeypatch)
     _seed(amount_type="decimal(12,1)")
     with pytest.raises(SystemExit) as e:
         movers.mydumper_move(_hop(tmp_path), "appdb", 2, True, None)
@@ -225,9 +249,14 @@ def test_a_target_without_local_loads_is_asked_never_changed(pair,
     _seed()
     _sql(DST, "set global local_infile = 0")
     try:
+        from migkit import tableway
+        from migkit.engines.mysql import MySQLEngine
         hop = _hop(tmp_path)
-        why = movers.my_rungs_available(hop, "mysqlsh")[movers.STREAM_COPY]
-        assert "local_infile is off" in why, why
+        got = tableway.choose(MySQLEngine(hop), "appdb", "mysqlsh",
+                              fresh=True)
+        assert {p.rung for p in got.values()} == {"rows"}, got
+        assert all("local_infile is off" in p.reason
+                   for p in got.values()), got
         steps = movers.mysqlsh_move(hop, "appdb", 2, False, None)
         assert not any("straight from source" in s for s in steps), steps
         from migkit import planner
@@ -243,7 +272,9 @@ def test_a_target_without_local_loads_is_asked_never_changed(pair,
 
 @needs_docker
 @have_dump
-def test_the_masked_columns_are_masked_and_held_to_the_rule(pair, tmp_path):
+def test_the_masked_columns_are_masked_and_held_to_the_rule(pair, tmp_path,
+                                                          monkeypatch):
+    _dump_only(monkeypatch)
     _seed()
     hop = _hop(tmp_path, {"mask_on_write": {
         "people.email": "null", "people.name": "constant anonymous"}})
@@ -261,9 +292,10 @@ def test_the_masked_columns_are_masked_and_held_to_the_rule(pair, tmp_path):
 
 @needs_docker
 @have_dump
-def test_a_column_left_unmasked_is_said(pair, tmp_path):
+def test_a_column_left_unmasked_is_said(pair, tmp_path, monkeypatch):
     """The hold on masked tables can say they are not what the rule makes
     them: here nothing masked them."""
+    _dump_only(monkeypatch)
     _seed()
     hop = _hop(tmp_path)
     movers.mydumper_move(hop, "appdb", 2, True, None)
@@ -345,17 +377,30 @@ def test_a_stopped_load_goes_on_only_while_the_source_is_unchanged(
 @have_dump
 def test_a_table_measured_faster_table_by_table_goes_that_way(pair,
                                                              tmp_path):
-    """Through the command: the rates the hop measured say the table
-    copier is fastest for tables without binary columns, so `orders` is
-    left out of the dump and carried by the copier after it, and the move
-    is held to the source whole."""
+    """Through the command: what the hop measured says the table copier's
+    rows are fastest for a table like `orders` and the dump for one like
+    `people`, so `orders` is left out of the dump and carried by the
+    copier after it, on the way the move chose for it, and the move is
+    held to the source whole."""
+    from migkit import costmodel, session
     _seed()
     reports = tmp_path / "reports"
     (reports / "bench").mkdir(parents=True)
-    (reports / "bench" / "bulk-rates.json").write_text(json.dumps({
-        movers.TABLE_COPIER: {movers.PLAIN: 1e12, movers.BINARY: 1.0},
-        movers.STREAM_COPY: {movers.PLAIN: 1.0, movers.BINARY: 1.0},
-        movers.DUMP_LOAD: {movers.PLAIN: 1.0, movers.BINARY: 1e12}}))
+    # the hop's fits: each way's time on each table, as a run keeps them
+    orders = {"rows": 2000, "bytes": 98_304}
+    people = {"rows": 2000, "bytes": 212_992}
+    fits = {}
+    for way, (a, b) in {"rows": (0.001, 100.0),
+                        "pass-through": (100.0, 100.0),
+                        movers.STREAM_COPY: (100.0, 100.0),
+                        movers.DUMP_LOAD: (100.0, 0.001)}.items():
+        f = costmodel.Fit()
+        for _ in range(20):
+            f.update(costmodel.features(orders), a)
+            f.update(costmodel.features(people), b)
+        fits[way] = f.to_dict()
+    (reports / "bench" / costmodel.HOP_FILE).write_text(json.dumps({
+        "mysql->mysql table copy": fits}))
     conf = tmp_path / "hops.yaml"
     conf.write_text(f"""hops:
   bench:
@@ -364,8 +409,10 @@ def test_a_table_measured_faster_table_by_table_goes_that_way(pair,
     source: {{host: 127.0.0.1, port: {SRC_PORT}, user: {USER}, password: {SECRET}}}
     target: {{host: 127.0.0.1, port: {DST_PORT}, user: {USER}, password: {SECRET}}}
 """)
+    # its own knowledge base: no other test's ways are a prior here
     env = dict(os.environ, MIGKIT_CONF=str(conf), MIGKIT_REPORTS=str(reports),
-               MIGKIT_MOVER="mydumper")
+               MIGKIT_MOVER="mydumper", MIGKIT_EXPLAIN="",
+               MIGKIT_KNOWLEDGE=str(tmp_path / "knowledge.json"))
     got = subprocess.run([sys.executable, "-c",
                           "from migkit.cli import main; main()", "move",
                           "bench", "--db", "appdb", "--go"],
@@ -376,6 +423,13 @@ def test_a_table_measured_faster_table_by_table_goes_that_way(pair,
     assert "bulk copy complete" in out, out
     omitted = (reports / "bench" / "appdb" / "omit-tables.txt").read_text()
     assert "appdb.orders" in omitted and "people" not in omitted, omitted
+    # decided once: the copier took the way the move chose, and said so in
+    # the decision record, not on the console
+    rec = [json.loads(x) for x in (reports / "bench" / session.DECISIONS)
+           .read_text().splitlines()]
+    ways = [e["way"] for e in rec if e.get("work") == "appdb.orders"]
+    assert len(ways) >= 2 and set(ways) == {"the table copier's rows"}, ways
+    assert "the table copier's rows" not in out, out
     for t in ("orders", "people"):
         assert _digest(SRC, t) == _digest(DST, t), t
     assert _no_tool(out), out

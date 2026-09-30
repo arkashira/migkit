@@ -72,6 +72,13 @@ def _only(monkeypatch, *names):
         r for r in PostgresEngine.COPY_WAYS if r.name in names))
 
 
+def _record(engine):
+    """The run's decision record: each table's way and why, and each range
+    way's, which the console says only where asked."""
+    from migkit import decide
+    return decide.recorded(engine.hop)
+
+
 def _move(engine, tmp_path, said=None):
     from migkit.cli import _Checkpoint
     ck = _Checkpoint(tmp_path / "move.json")
@@ -100,8 +107,9 @@ def test_every_range_passes_with_no_row_through_migkit(
     assert st["done"] and len(st["ranges"]) >= 4, st
     assert sorted(st["ranges_done"]) == sorted(a for a, _ in st["ranges"])
     assert _same(pg_pair)
-    assert any("passed server to server in COPY's binary encoding" in m
-               for m in said), said
+    assert any("passed server to server in COPY's binary encoding"
+               in e["way"] for e in _record(engine)), _record(engine)
+    assert not any("binary encoding" in m for m in said), said
     # every range read under the one snapshot the table shares
     marks = set(st["ranges_seen"].values())
     assert len(marks) == 1 and None not in marks, marks
@@ -207,18 +215,21 @@ def test_a_column_of_another_type_on_the_target_goes_through_the_pipe(
     said = []
     st = _move(engine, tmp_path, said)
     assert st["done"]
-    assert any("n is integer on the source and bigint on the target" in m
-               for m in said), said
+    assert any("n is integer on the source and bigint on the target"
+               in e["reason"] for e in _record(engine)), _record(engine)
     q = "select count(*), sum(n) from public.big"
     assert psql(pg_pair["src"], q).stdout == psql(pg_pair["dst"], q).stdout
 
 
 def test_the_ways_of_a_whole_table_are_timed_against_each_other(
         engine, pg_pair, tmp_path, monkeypatch):
-    """Tables large enough are each copied a way not yet timed, in the
-    list's order - the table copier's ranges, then the streaming copy of
-    the whole table under the table's snapshot - each proved by both
-    servers' digests; then each goes the way cheaper a byte."""
+    """Tables large enough are each copied a way not yet measured - no
+    benchmark predicts them for PostgreSQL - in the ladder's order, where
+    the trials allow (`decide.Trials`: the tables are alike, so each may):
+    the table copier's ranges, then the streaming copy of the whole table
+    under the table's snapshot, each proved by both servers' digests; then
+    each goes the way measured cheaper, the numbers in the decision
+    record."""
     from migkit.cli import _Checkpoint
     from migkit.engines.postgres import PostgresEngine
     monkeypatch.setattr(PostgresEngine, "STREAM_FROM", 1)
@@ -238,12 +249,14 @@ def test_the_ways_of_a_whole_table_are_timed_against_each_other(
         a, b = psql(pg_pair["src"], q).stdout, psql(pg_pair["dst"], q).stdout
         assert a.startswith(f"{ROWS}:") and a == b, (t, a, b)
     # the engine's own chooser's costs, which it reports
-    costs = engine._way_cost[engine._work_key(engine.TABLE_WORK)]
-    assert any(w["work"] == engine.TABLE_WORK
-               for w in engine.measured_ways())
+    from migkit import tableway
+    costs = engine._way_cost[engine._work_key(tableway.WORK, "postgres")]
+    assert any(w["work"] == tableway.WORK for w in engine.measured_ways())
     assert "ranges" in costs, costs
-    # the streaming copy proved itself and was timed, or said why not
+    # the streaming copy proved itself and was timed, or the switch from
+    # it was said
     assert "streaming" in costs or any(
         "did not finish" in m or "other rows" in m for m in said), said
-    last = [m for m in said if m.startswith("public.big3: ")][0]
-    assert "measured the cheapest" in last or "did not" in last, last
+    last = [e for e in _record(engine) if e["work"] == "public.big3"][-1]
+    assert "on this table" in last["reason"] \
+        or "does not" in last["reason"], last

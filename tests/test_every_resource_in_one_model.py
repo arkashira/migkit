@@ -430,22 +430,30 @@ def test_the_copy_from_the_table_copys_own_rate_before(tmp_path,
                                                         monkeypatch):
     import dataclasses
 
-    from migkit import config
+    from migkit import config, tableway
     from migkit.config import Endpoint, Hop
+    from migkit.engines.postgres import PostgresEngine
     monkeypatch.setattr(config, "REPORTS", tmp_path)
+    monkeypatch.setenv("MIGKIT_KNOWLEDGE", str(tmp_path / "knowledge.json"))
     hop = Hop(name="h", engine="postgres", source=Endpoint(host="x"),
               target=Endpoint(host="y"))
-    # the engines keep the table copy's cost a byte by way
-    planner.record_rate(hop, "table way/ranges", 100 * MB, 4.0)
-    planner.record_rate(hop, "table way/streaming", 100 * MB, 2.0)
+    # the table copy's ways as the one table ladder's cost model fitted
+    # them, a table of the move's own rows a byte each
+    eng = PostgresEngine(hop)
+    m = tableway.model(eng, "appdb")
+    unit = {"bytes": 100 * MB, "rows": 1_000_000}
+    m.saw("ranges", 1_000_000, 4.0, unit)
+    m.saw("streaming", 1_000_000, 2.0, unit)
+    m.save()
     got = planner.phases(hop, Model(), _facts())
-    assert got[0].p50 == pytest.approx(500 / 50)
-    assert got[0].p90 == pytest.approx(500 / 25)
+    assert got[0].p50 == pytest.approx(500 / 50, rel=0.02)
+    assert got[0].p90 == pytest.approx(500 / 25, rel=0.02)
     assert "earlier run" in got[0].truth
     # a hop of the same engines that has not run goes by it
     other = dataclasses.replace(hop, name="prod")
     got = planner.phases(other, Model(), _facts())
-    assert got[0].p50 == pytest.approx(10.0) and "of h" in got[0].truth
+    assert got[0].p50 == pytest.approx(10.0, rel=0.02) \
+        and "of h" in got[0].truth
     # and one of other engines does not
     mysql = dataclasses.replace(hop, name="m", engine="mysql")
     assert planner.phases(mysql, Model(), _facts())[0].p50 is None

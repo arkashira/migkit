@@ -7,8 +7,9 @@ counts and the load's silence agree. `unique_checks = 0` only where the
 table is emptied for the load and the source enforces every unique index
 the target has; `sql_log_bin = 0` only where the hop states its target has
 no replicas. And the whole table's ways - these ranges, the rows' own way,
-the parallel dump and load - timed against each other a byte, table by
-table.
+the parallel dump and load - rungs of the one table ladder (`tableway`),
+each table taking the one measured cheapest a byte for its shape, its time
+kept for that way, the way and why in the decision record.
 
 Measured before: every value of every range became a Python object here,
 was hashed here (`Tally`) and rendered again as the load's text
@@ -126,6 +127,20 @@ def _move(engine, tmp_path, said=None, table="big"):
     return _Checkpoint(tmp_path / "move.json")[f"shop.{table}"]
 
 
+def _only(monkeypatch, *names):
+    """The table ladder held to `names`: what the tests of one way are
+    of, whichever way the numbers would give."""
+    from migkit.engines.mysql import MySQLEngine
+    monkeypatch.setattr(MySQLEngine, "TABLE_WAYS", tuple(
+        r for r in MySQLEngine.TABLE_WAYS if r.name in names))
+
+
+def _record(engine, work):
+    """The run's decision record of `work`: each way it took and why."""
+    from migkit import decide
+    return [e for e in decide.recorded(engine.hop) if e["work"] == work]
+
+
 def _statements(monkeypatch):
     import pymysql
     seen = []
@@ -147,6 +162,7 @@ def test_every_range_passes_with_no_row_through_migkit(
         raise AssertionError("a row passed through migkit")
     monkeypatch.setattr(Tally, "row", no)
     monkeypatch.setattr(mysql, "_load_text", no)
+    _only(monkeypatch, "pass-through")
     said = []
     st = _move(engine, tmp_path, said)
     assert st["done"] and len(st["ranges"]) >= 4, st
@@ -157,6 +173,7 @@ def test_every_range_passes_with_no_row_through_migkit(
 
 def test_unique_checks_are_left_to_the_source_only_for_a_table_emptied(
         engine, tmp_path, monkeypatch):
+    _only(monkeypatch, "pass-through")
     seen = _statements(monkeypatch)
     st = _move(engine, tmp_path)
     assert len(st["ranges"]) > 1
@@ -197,6 +214,7 @@ def test_the_binlog_is_left_off_only_where_the_hop_says_no_replicas(
     from migkit.engines.mysql import MySQLEngine
     monkeypatch.setattr(ranges, "LEAST", 10_000)
     monkeypatch.setattr(ranges, "active", ranges.Slots(4))
+    _only(monkeypatch, "pass-through")
     my("flush binary logs")
     before = _logged()
     st = _move(MySQLEngine(_hop(tmp_path)), tmp_path)
@@ -227,15 +245,20 @@ def test_a_column_the_load_cannot_read_back_goes_as_rows(engine, tmp_path):
     said = []
     st = _move(engine, tmp_path, said)
     assert st["done"]
-    assert any("g (geometry) has no text the load reads back" in m
-               for m in said), said
+    # the way and why in the decision record, not on the console
+    last = _record(engine, "shop.big")[-1]
+    assert last["way"] == "the table copier's rows", last
+    assert "g (geometry) has no text the load reads back" in \
+        last["reason"], last
+    assert not any("geometry" in m for m in said), said
     q = "select group_concat(st_astext(g) order by id) from big"
     assert my(q, "shop") == my(q, "shop_copy")
 
 
 def test_a_target_that_changes_rows_is_copied_again_as_rows_and_stopped(
-        engine, tmp_path):
+        engine, tmp_path, monkeypatch):
     from migkit.cli import _Checkpoint
+    _only(monkeypatch, "pass-through")
     my("create trigger shout before insert on big for each row"
        " set new.payload = if(new.id = 25000, upper(new.payload),"
        " new.payload)", "shop_copy")
@@ -249,35 +272,50 @@ def test_a_target_that_changes_rows_is_copied_again_as_rows_and_stopped(
                for m in said), said
 
 
-def test_the_ways_of_a_whole_table_are_timed_against_each_other(
+def test_each_table_goes_the_way_its_ladder_measures_cheapest(
         engine, tmp_path, monkeypatch):
-    """Tables large enough are each copied a way not yet timed, in the
-    list's order - the pass-through, the rows' own way, the parallel dump
-    and load - and each is proved; then the cheapest a byte."""
+    """One ladder, one cost model, one climb a table: every way predicted
+    from the benchmark, a table goes the way costed cheapest on the table
+    itself, proved like any other; what it took is the engine's own
+    report (`measured_ways`), teaches the database's cost model and is
+    kept with the hop; and a way measured far dearer gives way on the next
+    table, which goes another way, proved too."""
+    import json
+
+    from migkit import costmodel, tableway
     from migkit.engines.mysql import MySQLEngine
     monkeypatch.setattr(MySQLEngine, "STREAM_FROM", 1)
-    for t in ("big2", "big3", "big4"):
-        my(f"create table {t} like big; insert into {t} select * from big",
-           "shop")
-        my(f"create table {t} like big", "shop_copy")
+    my("create table big2 like big; insert into big2 select * from big",
+       "shop")
+    my("create table big2 like big", "shop_copy")
     said = []
-    for t in ("big", "big2", "big3", "big4"):
-        st = _move(engine, tmp_path, said, table=t)
-        assert st["done"], (t, st)
-        q = Q.replace(" from big;", f" from {t};")
-        assert my(q, "shop") == my(q, "shop_copy"), t
-    # the engine's own chooser's costs, which it reports
-    costs = engine._way_cost[engine._work_key(engine.TABLE_WORK)]
-    assert any(w["work"] == engine.TABLE_WORK
+    st = _move(engine, tmp_path, said, table="big")
+    assert st["done"] and _same()
+    costs = engine._way_cost[engine._work_key(tableway.WORK, "shop")]
+    assert len(costs) == 1, costs
+    taken = next(iter(costs))
+    assert any(w["work"] == tableway.WORK and taken in w["seconds_a_row"]
                for w in engine.measured_ways())
-    assert {"pass-through", "rows"} <= set(costs), costs
-    # the dump either proved itself and was timed, or said why not
-    assert "dump" in costs or any("did not finish" in m for m in said), said
-    last = [m for m in said if m.startswith("shop.big4: ")][0]
-    assert "measured the cheapest" in last or "did not" in last, last
+    m = tableway.model(engine, "shop")
+    assert m.measured(taken)
+    kept = json.loads((tmp_path / costmodel.HOP_FILE).read_text())
+    assert taken in kept["mysql->mysql table copy"], kept
+    last = _record(engine, "shop.big")[-1]
+    assert "on this table" in last["reason"], last
+    # the way taken measured far dearer: the next table goes another, and
+    # what it took is taught too
+    unit = costmodel.unit_of(engine.table_sizes("shop")["big"])
+    for _ in range(3):
+        m.saw(taken, ROWS, 10_000.0, unit)
+    st = _move(engine, tmp_path, said, table="big2")
+    assert st["done"]
+    q = Q.replace(" from big;", " from big2;")
+    assert my(q, "shop") == my(q, "shop_copy")
+    assert len(set(costs) - {taken}) == 1, costs
 
 
-def test_rows_of_large_values_pass_as_single_lines(engine, tmp_path):
+def test_rows_of_large_values_pass_as_single_lines(engine, tmp_path,
+                                                   monkeypatch):
     """A four-megabyte value is one line of eight megabytes of hex, read by
     the source's client and passed on as it arrives."""
     my("drop table big; create table big (id int primary key, body"
@@ -288,6 +326,7 @@ def test_rows_of_large_values_pass_as_single_lines(engine, tmp_path):
        " recursive g(n) as (select 1 union all select n + 1 from g where"
        " n < 8) select n, repeat(char(65 + n, 0, 10, 92), 1024 * 1024),"
        " repeat(concat('t', char(9), char(10)), 1000000) from g", "shop")
+    _only(monkeypatch, "pass-through")
     said = []
     st = _move(engine, tmp_path, said)
     assert st["done"] and not any("as rows" in m for m in said), said

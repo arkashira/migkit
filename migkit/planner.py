@@ -29,6 +29,8 @@ class Decision:
     table: str
     path: str
     reason: str
+    #: the table ladder's rung, where the reason is its (`tableway`)
+    way: str = ""
 
     def __str__(self):
         return f"{self.table}: {WORDS[self.path]} - {self.reason}"
@@ -80,15 +82,17 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
     What a table asks - to be left alone, its row filter applied, its
     columns mapped - is climbed against `ways(via)`.
 
-    The MySQL bulk copy then chooses among its own ways for a table the
-    bulk copy carries, from measured rates (`movers.my_bulk_choice`, or
-    `choice` where the caller has it): a table measured faster table by
-    table goes that way, and each says which way and the numbers why.
+    Where the engine's table ladder has the bulk path's programs among its
+    rungs (`tableway`), a table the bulk copy carries goes the way that
+    ladder gives it, from measured rates (`tableway.choose`, or `choice`
+    where the caller has it): a table measured faster table by table goes
+    that way. The decision says how long it is expected to take; which
+    way and why is the decision record's (`decide.record`).
     """
-    from . import movers
+    from . import movers, tableway
     from .decide import climb
-    if via in movers.MY_BULK and choice is None:
-        choice = movers.my_bulk_choice(hop, db, via, tables, quick=True)
+    if choice is None:
+        choice = tableway.for_plan(hop, db, via, tables)
     choice = choice or {}
     facts = facts or {}
     filtered = bool(movers._filtered_here(hop, db))
@@ -108,11 +112,14 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
                             if hop.column_rules(db, *parts) else ()) + (
                 ("keyless",) if fact.get("key") is False else ())
         got = climb(name, rungs, need=need)
-        mine = choice.get(parts[-1]) if got.path == BULK else None
+        mine = (choice.get(name) or choice.get(parts[-1])
+                if got.path == BULK else None)
         if mine is not None and mine.rung:
-            out.append(Decision(name, COPIER if mine.rung
-                                == movers.TABLE_COPIER else BULK,
-                                mine.reason + about))
+            # the time it takes on the console; its way and why are the
+            # decision record's (`tableway.said`)
+            out.append(Decision(name, BULK if tableway.by_the_move(
+                hop, mine.rung) else COPIER, tableway.outcome(mine) + about,
+                mine.rung))
             continue
         out.append(Decision(name, got.path,
                             got.reason + ("" if got.path == LEFT else about)))
@@ -516,10 +523,11 @@ def phases(hop, model, facts, tables=None, n=None, via="builtin"):
 def _copy_from_runs(hop, via, disk, rows, out):
     """The copy's time from earlier runs of this hop, or of another of the
     same engines: the table copy's own rate a byte where its ways were
-    timed (`table way/`, kept by the engines' choice of way per table),
-    else the rows a second the whole path made. Appends the phase and
-    returns its seconds, or None."""
-    got = _bytes_rates(hop) if disk and via == "builtin" else None
+    timed (`tableway.measured`, kept by the one table ladder), else the
+    rows a second the whole path made. Appends the phase and returns its
+    seconds, or None."""
+    got = (_bytes_rates(hop, {"bytes": disk, "rows": rows})
+           if disk and via == "builtin" else None)
     if got:
         rates, whose = got
         copy = disk / rates[-1]
@@ -589,39 +597,24 @@ def _check_from_runs(hop, size, rows):
                  f" ~{_size(rates[-1])}/s whole checks were measured at")
 
 
-#: where the engines keep the table copy's cost a byte by way
-#: (`Engine._layered`, `TABLE_WORK`)
-TABLE_WAY = "table way/"
-
-
-def _bytes_rates(hop):
-    """([bytes a second of the table copy, least first], whose): the
-    latest run of each way it was timed on, of this hop or of another of
-    the same engines; None where there is none."""
-    import json
-
-    def rates(path_file, kind=None):
-        try:
-            got = json.loads(path_file.read_text())
-        except (OSError, ValueError):
-            return []
-        out = []
-        for path, runs in got.items():
-            runs = [r for r in runs or () if r.get("seconds")
-                    and (kind is None or r.get("kind") == kind)]
-            if path.startswith(TABLE_WAY) and runs:
-                out.append(runs[-1]["rows"] / runs[-1]["seconds"])
-        return out
-    mine = rates(_rates_path(hop))
+def _bytes_rates(hop, unit):
+    """([bytes a second of the table copy, least first], whose): each way
+    it was measured on, fitted by the one table ladder's cost model and
+    read for `unit` - the move's bytes and rows (`tableway.measured`) - of
+    this hop, its rehearsal, or another hop of the same engines; None where
+    there is none."""
+    from . import config, rehearsal, tableway
+    from .costmodel import HOP_FILE
+    mine = tableway.measured(hop, unit)
     if mine:
         return sorted(mine), None
-    from . import config, rehearsal
     rec = rehearsal.of(hop)
     if rec is not None:
-        got = rates(rec["dir"] / "throughput.json", _kind(hop))
+        got = tableway.measured(hop, unit,
+                                tableway._read(rec["dir"] / HOP_FILE) or {})
         if got:
             return sorted(got), f"the rehearsal {rec['name']}"
-    kind, whose, found = _kind(hop), [], []
+    whose, found = [], []
     try:
         dirs = sorted(p for p in config.REPORTS.iterdir() if p.is_dir())
     except OSError:
@@ -629,7 +622,9 @@ def _bytes_rates(hop):
     for d in dirs:
         if d.name == hop.name:
             continue
-        got = rates(d / "throughput.json", kind)
+        # a hop of other engines keeps its fits under its own pair
+        got = tableway.measured(hop, unit,
+                                tableway._read(d / HOP_FILE) or {})
         if got:
             found += got
             whose.append(d.name)
