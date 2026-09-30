@@ -178,6 +178,14 @@ def compare(hop, say=print):
         # password is compared, and later carried, without being read
         pw = sorted(u for u in s if u in t
                     and s[u]["hashes"] != t[u]["hashes"])
+    elif eng == "oracle":
+        s = _ora_principals(hop, "src")
+        t = _ora_principals(hop, "dst")
+        skeys, tkeys = set(s), set(t)
+        # compared only where both hashes could be read: one unreadable
+        # is not one that differs, and is said below
+        pw = sorted(k for k in s if k in t and s[k].get("hash")
+                    and t[k].get("hash") and s[k]["hash"] != t[k]["hash"])
     else:
         from .capabilities import require
         require(eng, "users")
@@ -214,6 +222,20 @@ def compare(hop, say=print):
         out["result"] = "pass" if not (missing or pw or gd) else "gap"
         say(f"  password differs ({len(pw)}): {pw}")
         say(f"  roles or permissions missing on target ({len(gd)}): {gd}")
+    elif eng == "oracle":
+        gd = _ora_short(s, t)
+        hidden = sorted(k for k in s if k.startswith("user:")
+                        and not s[k].get("hash"))
+        out.update(grants_differ=gd, password_differs=pw,
+                   password_unread=hidden)
+        out["result"] = "pass" if not (missing or pw or gd) else "gap"
+        say(f"  password differs ({len(pw)}): {pw}")
+        say(f"  roles, privileges, grants or quotas missing on target"
+            f" ({len(gd)}): {gd}")
+        if hidden:
+            say(f"  password hash not readable with this account"
+                f" ({len(hidden)}): {hidden[:8]} - create sets the one in"
+                " the passwords file for these")
     elif eng == "cassandra":
         ad = sorted(r for r in s if r in t and any(
             s[r][a] != t[r][a] for a in ("login", "superuser",
@@ -683,6 +705,264 @@ def _ms_rollback(hop, apply, say):
             conn.close()
         say(f"   [{db}] {st}")
     if apply:
+        rec.rename(str(rec) + ".rolled-back")
+
+
+# --- oracle ----------------------------------------------------------------
+#
+# Users and roles are the pluggable database's: every one the database did
+# not make for itself (`oracle_maintained = 'N'`). A user the hop moves as a
+# schema is the same user on both sides under the hop's `db_map`, and so
+# is an object a grant names. A password is carried as the hash the server
+# keeps, where the account may read it; the plain password never passes.
+
+
+def _ora_engine(hop):
+    from .engines.oracle import OracleEngine
+    return OracleEngine(hop)
+
+
+def _ora_rows(hop, side, sql, args=None):
+    eng = _ora_engine(hop)
+    return eng._rows(side, (hop.databases or [""])[0], sql, args)
+
+
+def _ora_said(hop, side, name):
+    """A target's name as the source calls it: the schema the hop maps
+    `app` to is `app` on both sides."""
+    if side != "dst" or not name:
+        return name
+    back = {str(v).upper(): str(k).upper()
+            for k, v in (hop.db_map or {}).items()}
+    return back.get(str(name).upper(), name)
+
+
+def _ora_there(hop, name):
+    """A source's name as the target calls it."""
+    return {str(k).upper(): str(v).upper()
+            for k, v in (hop.db_map or {}).items()}.get(str(name).upper(),
+                                                          name)
+
+
+def _ora_hash(hop, side, name):
+    """The password's hash as the server keeps it (`S:...;T:...`), or ""
+    where this account may not read it. Measured on 23.26: `sys.user$`
+    refuses even SYSTEM unless it was given READ on it (ORA-41900), and a
+    user's DDL holds the hash for SYS alone - an account with the export
+    roles gets it without one."""
+    import re
+    try:
+        got = _ora_rows(hop, side, "select spare4 from sys.user$ where name"
+                                   " = :1", (name,))
+        if got and got[0][0]:
+            return str(got[0][0])
+    except Exception:  # noqa: BLE001 - not this way
+        pass
+    try:
+        got = _ora_rows(hop, side, "select dbms_metadata.get_ddl('USER',"
+                                   " :1) from dual", (name,))
+        m = re.search(r"IDENTIFIED BY VALUES '([^']+)'",
+                      str(got[0][0]) if got else "")
+        return m.group(1) if m else ""
+    except Exception:  # noqa: BLE001 - not readable
+        return ""
+
+
+def _ora_principals(hop, side):
+    """{"user:NAME" | "role:NAME": {...}}: each user with its password's
+    hash, lock, profile, default tablespace and quotas, each role, and what
+    each was granted - roles, system privileges and object privileges, an
+    object by the name the source gives it."""
+    out = {}
+    for name, status, profile, space in _ora_rows(
+            hop, side, "select username, account_status, profile,"
+                       " default_tablespace from dba_users where"
+                       " oracle_maintained = 'N'"):
+        out[f"user:{_ora_said(hop, side, name)}"] = {
+            "kind": "user", "name": name,
+            "locked": "LOCKED" in str(status), "profile": profile,
+            "tablespace": space, "hash": _ora_hash(hop, side, name),
+            "roles": [], "privileges": [], "grants": [], "quotas": []}
+    for (name,) in _ora_rows(hop, side, "select role from dba_roles where"
+                                        " oracle_maintained = 'N'"):
+        out[f"role:{name}"] = {"kind": "role", "name": name, "roles": [],
+                               "privileges": [], "grants": []}
+    by_name = {v["name"]: k for k, v in out.items()}
+    for who, role, admin in _ora_rows(hop, side, "select grantee,"
+                                                 " granted_role, admin_option"
+                                                 " from dba_role_privs"):
+        if who in by_name:
+            out[by_name[who]]["roles"].append(
+                role + (" WITH ADMIN OPTION" if admin == "YES" else ""))
+    for who, priv, admin in _ora_rows(hop, side, "select grantee, privilege,"
+                                                 " admin_option from"
+                                                 " dba_sys_privs"):
+        if who in by_name:
+            out[by_name[who]]["privileges"].append(
+                priv + (" WITH ADMIN OPTION" if admin == "YES" else ""))
+    for who, owner, obj, priv, grantable in _ora_rows(
+            hop, side, "select grantee, owner, table_name, privilege,"
+                       " grantable from dba_tab_privs where grantee in"
+                       " (select username from dba_users where"
+                       " oracle_maintained = 'N' union all select role"
+                       " from dba_roles where oracle_maintained = 'N')"):
+        if who in by_name:
+            out[by_name[who]]["grants"].append(
+                f'{priv} ON "{_ora_said(hop, side, owner)}"."{obj}"'
+                + (" WITH GRANT OPTION" if grantable == "YES" else ""))
+    for who, space, most in _ora_rows(hop, side, "select username,"
+                                                 " tablespace_name, max_bytes"
+                                                 " from dba_ts_quotas"):
+        if who in by_name:
+            out[by_name[who]]["quotas"].append(
+                f"{'UNLIMITED' if int(most) < 0 else int(most)} ON"
+                f' "{space}"')
+    for v in out.values():
+        for part in ("roles", "privileges", "grants", "quotas"):
+            if part in v:
+                v[part].sort()
+    return out
+
+
+def _ora_short(s, t):
+    """Keys on both sides where the target lacks a role, privilege, grant
+    or quota the source has."""
+    return sorted(k for k in s if k in t and any(
+        set(s[k].get(p, [])) - set(t[k].get(p, []))
+        for p in ("roles", "privileges", "grants", "quotas")))
+
+
+def _ora_create(hop, apply, passwords, say):
+    """Each missing role, then each missing user - with the source's
+    password hash (`IDENTIFIED BY VALUES`), or the one in the passwords
+    file where the hash is not readable - its lock, profile and tablespace
+    where the target has them, its quotas; then every role, privilege and
+    grant the target lacks, an object by the target's own schema."""
+    out, s = compare(hop, say)
+    t = _ora_principals(hop, "dst")
+    spaces = {n for (n,) in _ora_rows(hop, "dst", "select tablespace_name"
+                                                  " from dba_tablespaces")}
+    profiles = {n for (n,) in _ora_rows(hop, "dst", "select distinct"
+                                                    " profile from"
+                                                    " dba_profiles")}
+    stmts, skipped = [], []
+    missing = out["missing_on_target"]
+    for key in sorted(k for k in missing if k.startswith("role:")):
+        stmts.append((key, f'CREATE ROLE "{s[key]["name"]}"'))
+    for key in sorted(k for k in missing if k.startswith("user:")):
+        v = s[key]
+        name = _ora_there(hop, v["name"])
+        secret = (passwords or {}).get(v["name"]) or \
+            (passwords or {}).get(v["name"].lower())
+        if v["hash"]:
+            how = f"IDENTIFIED BY VALUES '{v['hash']}'"
+        elif secret:
+            how = 'IDENTIFIED BY "' + str(secret).replace('"', "") + '"'
+        else:
+            skipped.append(key)
+            say(f"   skipped {key}: its password hash is not readable here"
+                " and the passwords file has none for it")
+            continue
+        head = f'CREATE USER "{name}" {how}'
+        if v["tablespace"] in spaces:
+            head += f' DEFAULT TABLESPACE "{v["tablespace"]}"'
+        if v["profile"] in profiles:
+            head += f' PROFILE "{v["profile"]}"'
+        if v["locked"]:
+            head += " ACCOUNT LOCK"
+        stmts.append((key, head))
+    for key in sorted(set(missing) | set(_ora_short(s, t))):
+        if key in skipped or key not in s:
+            continue
+        v = s[key]
+        who = f'"{_ora_there(hop, v["name"])}"'
+        have = t.get(key, {})
+        for q in v.get("quotas", []):
+            if q not in have.get("quotas", []):
+                stmts.append((None, f"ALTER USER {who} QUOTA {q}"))
+        for role in v["roles"]:
+            if role not in have.get("roles", []):
+                bare, _, admin = role.partition(" WITH ")
+                stmts.append((None, f'GRANT "{bare}" TO {who}'
+                              + (f" WITH {admin}" if admin else "")))
+        for priv in v["privileges"]:
+            if priv not in have.get("privileges", []):
+                stmts.append((None, f"GRANT {priv} TO {who}"))
+        for grant in v["grants"]:
+            if grant not in have.get("grants", []):
+                on = grant.split(" ON ", 1)
+                owner, _, rest = on[1].partition(".")
+                there = f'"{_ora_there(hop, owner.strip(chr(34)))}".{rest}'
+                stmts.append((None, f"GRANT {on[0]} ON {there} TO {who}"))
+    if not stmts:
+        say("  nothing to create")
+        return
+    say(f">> oracle: {len(stmts)} statement(s)"
+        + ("" if apply else "  (nothing done; add --apply)"))
+    for _, st in stmts:
+        say("   " + (st.split(" IDENTIFIED BY ")[0]
+                     + " IDENTIFIED BY <hash or password> ..."
+                     if " IDENTIFIED BY " in st else st))
+    if not apply:
+        return
+    eng = _ora_engine(hop)
+    made, failed = [], []
+    for key, st in stmts:
+        try:
+            conn = eng._connect("dst", (hop.databases or [""])[0])
+            try:
+                conn.cursor().execute(st)
+            finally:
+                conn.close()
+            if key:
+                made.append(key)
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            failed.append(f"{st.split(' IDENTIFIED BY ')[0][:80]}:"
+                          f" {str(e).splitlines()[0][:120]}")
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = json.loads(rec.read_text()) if rec.exists() else []
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": "oracle", "created": made, "failed": failed})
+    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+    for f in failed:
+        say(f"   FAILED {f}")
+    say(f"  created {len(made)}; recorded at {rec}"
+        f" (undo with users {hop.name} rollback)")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} statement(s) failed")
+
+
+def _ora_rollback(hop, apply, say):
+    """Drops what `create` made and nothing else: users first, then roles.
+    A user who owns objects by now is not dropped with them - the drop is
+    refused, and said."""
+    rec = hop.report_dir() / "user-sync-created.json"
+    made = [k for e in (json.loads(rec.read_text()) if rec.exists() else [])
+            if e.get("engine") == "oracle" for k in e.get("created", [])]
+    if not made:
+        say("  no oracle users or roles were created by us, nothing to"
+            " undo")
+        return
+    eng = _ora_engine(hop)
+    failed = []
+    for key in sorted(made, key=lambda k: not k.startswith("user:")):
+        kind, name = key.split(":", 1)
+        st = (f'DROP USER "{_ora_there(hop, name)}"' if kind == "user"
+              else f'DROP ROLE "{name}"')
+        if not apply:
+            say(f"   would run {st}")
+            continue
+        try:
+            conn = eng._connect("dst", (hop.databases or [""])[0])
+            try:
+                conn.cursor().execute(st)
+            finally:
+                conn.close()
+            say(f"   {st}")
+        except Exception as e:  # noqa: BLE001 - said
+            failed.append(key)
+            say(f"   FAILED {st}: {str(e).splitlines()[0][:120]}")
+    if apply and not failed:
         rec.rename(str(rec) + ".rolled-back")
 
 
@@ -1459,6 +1739,8 @@ def create(hop, apply=False, passwords=None, say=print):
         return _os_create(hop, apply, passwords, say)
     if hop.engine == "mssql":
         return _ms_create(hop, apply, passwords, say)
+    if hop.engine == "oracle":
+        return _ora_create(hop, apply, passwords, say)
     if hop.engine in ("mongodb", "mongo"):
         out, s = compare(hop, say)
         t = _mongo_users(hop.target)
@@ -1604,6 +1886,8 @@ def rollback(hop, apply=False, say=print):
         return _os_rollback(hop, apply, say)
     if hop.engine == "mssql":
         return _ms_rollback(hop, apply, say)
+    if hop.engine == "oracle":
+        return _ora_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
         return _mongo_rollback(hop, apply, say)
     rf = hop.report_dir() / "user-sync-created.json"

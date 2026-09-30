@@ -660,12 +660,176 @@ def _mssql(hop, e, key, side, dbs, where, read, write, follow, native):
     return out
 
 
+# ---- Oracle ----------------------------------------------------------------
+
+def _ori(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _ora_privs(e, key, db):
+    """(the account's name, the system privileges and roles it holds)."""
+    from .engines import oracle_logminer
+    me = e._rows(key, db, "select user from dual")[0][0]
+    return me, oracle_logminer.granted(e, key, db)
+
+
+#: what migkit's LogMiner reader asks the database for: mining, the
+#: transactions still open, the redo's own views, a table as of an SCN
+ORA_FOLLOW = ("LOGMINING", "SELECT ANY TRANSACTION", "SELECT_CATALOG_ROLE",
+              "FLASHBACK ANY TABLE")
+
+
+#: what the reader reads of SYS on RDS, granted by `rdsadmin`
+ORA_RDS_OBJECTS = ("DBMS_LOGMNR", "DBMS_FLASHBACK", "V_$LOGMNR_CONTENTS",
+                   "V_$TRANSACTION", "V_$DATABASE", "V_$ARCHIVED_LOG",
+                   "V_$LOG", "V_$LOGFILE")
+
+
+#: the dictionary the redo-file reader reads the redo's tables by, as its
+#: own grant list names it (select and flashback on each)
+ORA_DICTIONARY = ("CCOL$", "CDEF$", "COL$", "DEFERRED_STG$", "ECOL$", "LOB$",
+                  "LOBCOMPPART$", "LOBFRAG$", "OBJ$", "TAB$", "TABCOMPART$",
+                  "TABPART$", "TABSUBPART$", "TS$", "USER$")
+#: and the views it finds the redo through
+ORA_REDO_VIEWS = ("V_$ARCHIVED_LOG", "V_$DATABASE", "V_$DATABASE_INCARNATION",
+                  "V_$LOG", "V_$LOGFILE", "V_$PARAMETER", "V_$PDBS",
+                  "V_$STANDBY_LOG", "V_$TRANSPORTABLE_PLATFORM")
+
+
+def _ora_redo_files(e, key, db, who):
+    """What the redo-file reader, run beside the redo, reads of the
+    dictionary: asked of the server one table at a time."""
+    short = []
+    for t in ORA_DICTIONARY:
+        try:
+            e._rows(key, db, f"select count(*) from sys.{_ori(t)} where"
+                             " 1 = 0")
+        except Exception:  # noqa: BLE001 - not granted
+            short.append(t)
+    fix = [f"grant select, flashback on sys.{_ori(t)} to {who};"
+           for t in short]
+    if short:
+        fix += [f"grant select on sys.{v} to {who};" for v in ORA_REDO_VIEWS]
+        fix += [f"grant select, flashback on xdb.xdb$ttset to {who};",
+                "-- and select, flashback on each xdb.x$nm, x$qn and x$pt"
+                " table of xdb.xdb$ttset's suffixes"]
+    return Need("source", "the redo-file reader reads the dictionary",
+                not short, f"{len(short)} tables it may not read" if short
+                else "may", fix)
+
+
+def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
+    from .engines import oracle_logminer
+    out = []
+    aws = getattr(where, "cloud", "") == "aws"
+    for db in dbs:
+        owner = e._owner(key, db)
+        me, have = _ora_privs(e, key, db)
+        who = _ori(me)
+        mine = me == owner
+        if read:
+            if mine or "SELECT ANY TABLE" in have:
+                gaps = []
+            else:
+                seen = {t for (t,) in e._rows(
+                    key, db, "select table_name from all_tables where"
+                             " owner = :1", (owner,))}
+                try:
+                    every = {t for (t,) in e._rows(
+                        key, db, "select table_name from dba_tables where"
+                                 " owner = :1", (owner,))}
+                except Exception:  # noqa: BLE001 - asked another way
+                    every = seen
+                gaps = sorted(t for t in every - seen
+                              if not hop.excluded(db, e._said(t)))
+            out.append(Need(side, f"read every table of {owner}", not gaps,
+                            f"{len(gaps)} tables it may not read" if gaps
+                            else "every one",
+                            [f"grant select on {_ori(owner)}.{_ori(t)} to"
+                             f" {who};" for t in gaps]))
+        if key == "dst" and write:
+            ok = mine or {"CREATE ANY TABLE", "INSERT ANY TABLE",
+                          "UPDATE ANY TABLE", "DELETE ANY TABLE",
+                          "DROP ANY TABLE"} <= have
+            out.append(Need(side, f"create and write tables in {owner}", ok,
+                            "may" if ok else "may not",
+                            [f"grant create any table, alter any table,"
+                             " drop any table, insert any table, update any"
+                             " table, delete any table, select any table,"
+                             f" create any sequence, alter any sequence to"
+                             f" {who};"]))
+        start = len(out)
+        if follow and key == "src":
+            mode = oracle_logminer._mode(e, key, db)
+            archived = mode["log_mode"] == "ARCHIVELOG"
+            out.append(Need(side, "the redo archived", archived,
+                            mode["log_mode"],
+                            [] if aws else
+                            ["shutdown immediate;", "startup mount;",
+                             "alter database archivelog;",
+                             "alter database open;"],
+                            ["the automated backups' retention above 0"
+                             " keeps the redo archived, and"
+                             " `exec rdsadmin.rdsadmin_util.set_configuration"
+                             "('archivelog retention hours', 24);` keeps it"
+                             " for a day"] if aws else [],
+                            restart=not aws))
+            minimal = mode["min"] in ("YES", "IMPLICIT")
+            out.append(Need(side, "minimal supplemental logging", minimal,
+                            str(mode["min"]),
+                            ["exec rdsadmin.rdsadmin_util."
+                             "alter_supplemental_logging(p_action =>"
+                             " 'ADD');"] if aws else
+                            ["alter database add supplemental log data;"]))
+            keys = oracle_logminer.logged_keys(e, key, db)
+            bare = sorted(t for t, k in keys.items() if k is None)
+            out.append(Need(side, f"every table of {owner} logs its key",
+                            not bare, f"{len(bare)} do not" if bare
+                            else "every one",
+                            [f"alter table {_ori(owner)}.{e._q(t)} add"
+                             " supplemental log data (primary key) columns;"
+                             for t in bare]))
+            short = [p for p in ORA_FOLLOW if p not in have]
+            fix = ([f"grant {p.lower()} to {who};" for p in short
+                    if p != "SELECT_CATALOG_ROLE"]
+                   + ([f"grant select_catalog_role to {who};"]
+                      if "SELECT_CATALOG_ROLE" in short else [])
+                   + [f"grant execute on sys.dbms_logmnr to {who};",
+                      f"grant execute on sys.dbms_flashback to {who};"])
+            if aws:
+                # on RDS the SYS objects are granted through its own
+                # procedure, the master user holding no grant option
+                fix = [f"grant {p.lower()} to {who};" for p in short] + [
+                    f"exec rdsadmin.rdsadmin_util.grant_sys_object('{v}',"
+                    f" '{me}');" for v in ORA_RDS_OBJECTS]
+            out.append(Need(side, "read the redo back", not short,
+                            "may" if not short else
+                            f"lacks {', '.join(short)}", fix))
+            from .engines import oracle_redo
+            if oracle_redo.chosen(e, key, db) == oracle_redo.RUNG:
+                out.append(_ora_redo_files(e, key, db, who))
+            if mode["force"] != "YES":
+                loose = [t for (t,) in e._rows(
+                    key, db, "select table_name from all_tables where owner"
+                             " = :1 and logging = 'NO' and temporary = 'N'",
+                    (owner,)) if not hop.excluded(db, e._said(t))]
+                out.append(Need(side, f"no table of {owner} skips the redo",
+                                not loose, f"{len(loose)} NOLOGGING" if loose
+                                else "none", [f"alter table {_ori(owner)}."
+                                              f"{_ori(t)} logging;"
+                                              for t in loose]))
+        _following(out[start:])
+    return out
+
+
 #: the engines whose servers can be asked, by canonical name
-ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql}
+ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
+       "oracle": _oracle}
 
 #: how each writes a comment, and its script's file suffix
 SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
-          "mongodb": ("//", "js"), "mssql": ("--", "sql")}
+          "mongodb": ("//", "js"), "mssql": ("--", "sql"),
+          "oracle": ("--", "sql")}
 
 
 def script(hop, eng, side, found, where=None):

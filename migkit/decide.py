@@ -680,6 +680,7 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "@_large_values"),
         "mysql": ("yes", "@_large_values"),
+        "oracle": ("yes", "@_read_in_pieces"),
         "*": (NOT_YET, "R10"),
     },
     "partitioned": {
@@ -706,6 +707,9 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "movers._pg_quiet_triggers"),
         "mysql": ("yes", "movers._MyTriggerWindow"),
+        # the redo-file reader's grants, named to the DBA; LogMiner
+        # otherwise, which needs none of them
+        "oracle": ("yes", "dba._ora_redo_files"),
         "hetero": (NOT_YET, "0"),
         "mongodb": (NOT_YET, "0"),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),

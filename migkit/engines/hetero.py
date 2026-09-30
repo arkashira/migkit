@@ -444,12 +444,8 @@ class HeteroEngine(Engine):
                 continue
             try:
                 wheres = self._row_scope(db, src_t)
-                a = self.src_engine.neutral_digest(
-                    "src", db, src_t, src_cols,
-                    **({"where": wheres[0]} if wheres[0] else {}))
-                b = self.dst_engine.neutral_digest(
-                    "dst", db, dst_t, dst_cols,
-                    **({"where": wheres[1]} if wheres[1] else {}))
+                a, b = self._digests(db, src_t, src_cols, dst_t, dst_cols,
+                                     wheres)
                 if wheres[1]:
                     # narrowing the comparison to the filter hides nothing:
                     # a target row outside it is one the move never put
@@ -536,6 +532,23 @@ class HeteroEngine(Engine):
     def _reader_where(self, db, src_t):
         return self._row_scope(db, src_t)
 
+    def _digests(self, db, src_t, src_cols, dst_t, dst_cols, wheres):
+        """(the source's, the target's) digest of a table: where both
+        sides are one engine with a salted digest of its own
+        (`same_engine_digest` - Oracle's SHA-256 sum), that, both behind
+        this run's salt; the digest every engine sums otherwise."""
+        src, dst = self.src_engine, self.dst_engine
+        own = (type(src) is type(dst)
+               and callable(getattr(src, "same_engine_digest", None)))
+        salt = {"salt": self.digest_salt()} if own else {}
+
+        def one(eng, side, table, cols, where):
+            ask = eng.same_engine_digest if own else eng.neutral_digest
+            return ask(side, db, table, cols,
+                       **({"where": where} if where else {}), **salt)
+        return (one(src, "src", src_t, src_cols, wheres[0]),
+                one(dst, "dst", dst_t, dst_cols, wheres[1]))
+
     def _neutral_compare(self, db, table=None, stream=None):
         return [Result("data", scope, status, detail)
                 for scope, status, detail, _, _
@@ -555,6 +568,11 @@ class HeteroEngine(Engine):
         for name, engine in ((self.src_name, self.src_engine),
                              (self.dst_name, self.dst_engine)):
             if engine.CANON_ENGINE not in canon.IN_PROCESS:
+                continue
+            # an engine that sums in its server where the table allows it
+            # (Oracle) folded nothing here when every table allowed it
+            if engine.__dict__.get("digested_in_server") and \
+                    not engine.__dict__.get("digested_here"):
                 continue
             (remote if engine.OVER_NETWORK else local).append((name, engine))
         parts = [f"{name} {engine.FOLDED_BECAUSE}, so its rows crossed the"
@@ -2559,6 +2577,8 @@ class HeteroEngine(Engine):
     #: character, or bytes nothing checks
     TEXT_REACH = {"utf8mb4": 3, "utf8": 3, "utf-8": 3, "utf-16": 3,
                   "utf-16le": 3, "utf-16be": 3,
+                  # Oracle's names for the same
+                  "al32utf8": 3, "al16utf16": 3,
                   "utf8mb3": 2, "ucs2": 2,
                   "sql_ascii": 0}
     REACH_WORDS = {3: "every Unicode character",

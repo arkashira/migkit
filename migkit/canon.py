@@ -403,8 +403,9 @@ TYPES = {
         "s": "text", "n": "decimal", "b": "bytes", "bool": "boolean",
         "uuid": "uuid",
     },
-    # Oracle: a DATE holds a time of day too. A time with a zone is left
-    # out, as a text of its own would drop the zone. `NUMBER` with no
+    # Oracle: a DATE holds a time of day too. A time with a zone is the
+    # instant it names, read in UTC by the server (`sys_extract_utc`), as
+    # PostgreSQL's is read in a session pinned to UTC. `NUMBER` with no
     # scale holds integers and decimals alike, and renders the same text
     # either way.
     "oracle": {
@@ -414,6 +415,8 @@ TYPES = {
         "nchar": "text", "clob": "text", "nclob": "text", "long": "text",
         "raw": "bytes", "blob": "bytes", "long raw": "bytes",
         "date": "timestamp", "timestamp": "timestamp",
+        "timestamp with time zone": "timestamp",
+        "timestamp with local time zone": "timestamp",
         # the mappings only (the Oracle engine reads and writes them as
         # its driver hands them over): year-to-month is months alone,
         # day-to-second days and a time of nine digits
@@ -1433,7 +1436,9 @@ DDL = {
         "bson": ("String", "String"),
     },
     "oracle": {
-        OWN: ("CLOB", "CLOB"),
+        # Oracle to Oracle makes a column as the source declares it, as
+        # DuckDB to DuckDB does: through CLOB every column was text
+        OWN: ("CLOB", "{0}"),
         "integer": ("NUMBER(19)", "NUMBER(19)"),
         "decimal": ("NUMBER", "NUMBER({0},{1})"),
         "float": ("BINARY_DOUBLE", "BINARY_DOUBLE"),

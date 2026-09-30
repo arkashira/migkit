@@ -2006,10 +2006,124 @@ rows in the server, including a padded `CHAR`, a `DATE` with a time and
 a `NUMBER(10,2)` that kept no trailing zero. The name folding, the
 driver's `:1` parameters and the PL/SQL carrying are covered too.
 
-Oracle Free could not be run here. Measured, it filled the container
-VM's disk and took 2.5 GB of its 3.8 GB of memory, and was stopped and
-removed. Ora2Pg and DVT are still to wrap, and the change stream
-(LogMiner) is still to come.
+Oracle Free could not be run here then: measured, it filled the
+container VM's disk and took 2.5 GB of its 3.8 GB of memory. In the 6 GB
+`migkit` profile it takes 2.3 GB (measured 2026-09-28).
+
+*Done (2026-09-28, F5): Oracle is a whole side, run against Oracle Free
+23.26 in the sandbox* (`gvenzl/oracle-free:slim-faststart`, the source in
+one pluggable database and the target in another, in the 6 GB `migkit`
+colima profile; the container's own init script archives the redo and
+turns on minimal supplemental logging). Every cell of the capability
+matrix is closed for Oracle (`capabilities.py`), each held by
+`tests/test_oracle_is_a_whole_side.py` against the server and
+`tests/test_oracle_redo_is_read_back_exactly.py` without one:
+* **Digest in the server.** Each row rendered to the text every engine
+  renders it to and hashed and summed by Oracle itself - the same number
+  this process folds and PostgreSQL sums, so Oracle and PostgreSQL are
+  compared without a row crossing the network. A sum, never Oracle's
+  `CHECKSUM`: that folds by exclusive or, so two copies of a row cancel
+  (measured: two copies of one row and two of another checksum alike).
+  Measured on the way: `to_char(0.5)` is `.5`, a BINARY_DOUBLE 0.1 is
+  `1.0000000000000001E-001`, `to_char(1e61)` has an exponent, and
+  `length` counts U+1D11E as two (`lengthc` one) - so a number is written
+  by a format of its scale, a binary float and a number past 38 whole
+  digits are folded here, and lengths are `lengthc`. A table whose rows
+  could be wider than a hash's input (4,000 bytes, or 32,767 where
+  `max_string_size` is EXTENDED) is folded here too. Oracle to Oracle the
+  same rendering is hashed by SHA-256 with a salt both sides share
+  (`same_engine_digest`), 64 bits of each row's hash summed; a time is
+  rendered to nine digits wherever it holds more than six.
+* **Large values in pieces** (R10's Oracle part): past `PIECE` a value is
+  read through its locator a multiple of its chunk at a time, and written
+  empty and filled through the locator the insert returns. A text LOB
+  counts in UTF-16 units: measured, a piece that ended between the halves
+  of U+1D11E was refused by the driver (`UnicodeDecodeError`), so such a
+  piece is read a unit shorter and offsets move by UTF-16 units.
+* **Writes.** A batch past 2,000 rows goes by direct path load into a
+  global temporary table private to the session (the load commits by
+  itself), and from there by one MERGE in migkit's transaction, so a
+  batch is still in whole or not at all; or by array DML. Each table's
+  first two large batches are written one each way and the cheaper by
+  the row kept. Measured, 100,000 rows of four columns into an empty
+  table with a key: array DML 0.38 s; the direct path load 0.16 s and the
+  MERGE 0.20 s. Never straight into the table: a direct path load that met
+  a key already there left 1,001 of 1,001 rows and the key's index
+  UNUSABLE. The change applier writes a run of rows as one MERGE bound to
+  every row.
+* **Times with a zone.** Read as the UTC instant the server computes
+  (`sys_extract_utc`) with the zone beside it: python-oracledb cannot
+  fetch one whose zone is a region (`DPY-3022`). An Oracle target is
+  written in the zone again (`from_tz(...) at time zone ...`), so Oracle
+  to Oracle keeps `EUROPE/PARIS`; every other target gets the instant.
+  The zone is written into the statement as a literal, a statement for
+  each zone a batch holds: `at time zone` refused a bind (ORA-00917) and
+  a column (ORA-00907), measured. **Intervals** go into Oracle as the
+  driver binds each kind: a year-to-month as years and months, a
+  day-to-second as a `timedelta`; a month into a day-to-second, or a
+  digit past the microsecond, is refused rather than written as another
+  length of time.
+* **The interlock on the target** (`server_identity`): the database, its
+  incarnation and its container, the start of the instance answering,
+  its version, host and the schema's bytes, or that the schema is not
+  there yet. The database it names is the service and the schema, since
+  two pluggable databases of one container answer at one address.
+* **Sequences and identity columns** compared by the next value
+  (`last_number` is past the cache, not the last handed out), set with
+  `restart start with` and `start with limit value`, and put back from
+  the snapshot. **Settings**: `v$parameter` as set, with the database's
+  language and character set; NLS and length semantics are the critical
+  ones. **Users and roles** with their grants and quotas, the password
+  carried as its hash: on 23.26 `sys.user$` refuses even SYSTEM unless
+  given READ on it (ORA-41900), and the users' DDL holds the hash for SYS
+  alone. **Restore point**: the target's SCN after letting each table
+  move its rows (enabled after the SCN, the flashback is refused,
+  ORA-01466), its sequences and its code; a guaranteed restore point is
+  refused to a pluggable database's accounts (ORA-01031).
+* **Oracle to Oracle** by the target's Data Pump over a database link, as
+  of one SCN for every table, the rows counted at that SCN on both sides
+  after the job; where Data Pump cannot run (no package, no role on
+  either side - measured, ORA-31631 before a row moves without the
+  source's export role - or no link), the table copier.
+* **Change follow: migkit's own LogMiner reader** (`oracle_logminer`):
+  committed data only, the online catalogue as dictionary, each change
+  read back from LogMiner's own statement (`sql_redo`) - MINE_VALUE fails
+  the whole query on a column it cannot read (measured, ORA-00902) - and
+  what a statement does not give (a large value, a time with a zone, an
+  interval) read from the table as of the commit. In a pluggable
+  database LogMiner finds the logs itself (naming one is refused,
+  ORA-65040); from the root they are named (`mine_service`). The token
+  is SCN-positioned: where to mine from (the oldest open transaction's
+  start, from `v$transaction`), the last commit and its transactions
+  handed back, a transaction handed back in parts, and `through`, which
+  the fence waits on - moved only to what was true four seconds before,
+  since a commit that did not wait for its redo may not be in the files.
+  A table without its key in the redo, or a NOLOGGING table where the
+  database does not force logging, stops the start by name. Mining on a
+  physical standby (`mine_standby`) is gated - a standby of this very
+  database, open read-only and applying, the window ending where it has
+  applied - and not run here: the sandbox has no Data Guard. `assess`
+  measures the reader against the source's redo: the busiest hour's
+  archived redo a second against the redo the reader mines a second on
+  the source's latest log.
+* **The redo-file reader as the rung above it** (`oracle_redo`): the
+  program that parses the redo files itself, run next to them, built by
+  `doctor --install` from source on Linux (x86-64 is what it publishes);
+  migkit writes its configuration, speaks its network protocol (protobuf
+  requests, length-framed JSON back), confirms what it applied, and reads
+  the same token. Chosen where the source names where it listens
+  (`redo_reader`) or where this machine reads the redo files and has the
+  program; LogMiner otherwise.
+* **Each choice a list of rungs the decision engine climbs**
+  (`decide.climb`): how a batch is written (`oracle.WRITE_WAYS`, each way
+  timed once on a table's large batches, then the cheaper by the row),
+  how the redo is read (`oracle_redo.readers`), and how Oracle moves to
+  Oracle (`oracle_pump.ways`, Data Pump or the copier) - each passed-over
+  way said with why.
+
+Still to: Ora2Pg and DVT wrapped (R11, R8); the redo-file reader run end
+to end against the sandbox's Oracle is held in
+`test_the_redo_files_are_read_beside_the_redo`, where it builds.
 
 **12. MongoDB to MongoDB with `mongosync` underneath.**
 
@@ -4802,7 +4916,8 @@ checks (**blocked**, no DocumentDB here). As planned:
   the retention setting, and DDL seen by comparing catalogue snapshots.
 
 ### R10. Large values (sizing, and PostgreSQL's large objects in pieces,
-done 2026-09-27; MySQL's and Oracle's large columns in pieces todo)
+done 2026-09-27; Oracle's large columns in pieces done 2026-09-28, item 11;
+MySQL's todo)
 
 `assess` sizes them: PostgreSQL's large objects and out-of-line values
 against the database's size, MySQL's large columns measured on a sample

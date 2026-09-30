@@ -88,8 +88,8 @@ def test_the_base_class_placeholder_is_not_a_capability(monkeypatch):
 def test_users_is_read_from_its_dispatch():
     got = caps._users_engines()
     assert {"postgres", "mysql", "mongodb", "redis", "kafka",
-            "mssql"} <= got, got
-    assert "oracle" not in got, got
+            "mssql", "oracle"} <= got, got
+    assert "db2" not in got, got
 
 
 def _refused(engine, cap):

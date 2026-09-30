@@ -33,7 +33,8 @@ dependencies = [
     # which the target side of a SQL Server hop writes through
     "mssql-python>=1.15",
     "clickhouse-connect>=0.8",
-    "oracledb>=2",
+    # thin mode; direct path loads from 3.4
+    "oracledb>=3.4",
     "ibm_db>=3.2",
     "pyodbc>=5.1",
     "cassandra-driver>=3.29",

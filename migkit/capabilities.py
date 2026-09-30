@@ -121,17 +121,12 @@ GAPS = {
                                   " table's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
-    "oracle": {
-        "sequences": (NOT_YET, "11"),
-        "params": (NOT_YET, "11"),
-        "bulk-move": (NOT_YET, "11"),
-        "stream": (NOT_YET, "11"),
-        "fence": (NOT_YET, "11"),
-        "confirm": (NOT_YET, "11"),
-        "delta": (NOT_YET, "11"),
-        "users": (NOT_YET, "11"),
-        "snapshot": (NOT_YET, "11"),
-    },
+    # every cell closed (F5): sequences and identity columns, settings,
+    # Data Pump over a link or direct path loads, the redo read by
+    # LogMiner or by the redo-file reader, fence and confirm on the SCN
+    # every commit has been read through, delta from the redo, users and
+    # roles with their password hashes, the target's SCN and sequences
+    "oracle": {},
     "db2": {
         "sequences": (NOT_YET, "34"),
         "params": (NOT_YET, "34"),

@@ -277,6 +277,24 @@ ENDPOINT_OPTIONS = {
                                "str", ("clickhouse",)),
     "service": Key("the service to connect to", "str", ("oracle",)),
     "service_name": Key("the service to connect to", "str", ("oracle",)),
+    "mine_service": Key("the container's root service, where the redo is"
+                        " mined from there (a database before 21c)", "str",
+                        ("oracle",)),
+    "mine_user": Key("the user the redo is mined as, where not the side's"
+                     " own", "str", ("oracle",)),
+    "mine_password": Key("that user's password reference", "str",
+                         ("oracle",)),
+    "mine_standby": Key("a physical standby of the source the redo is"
+                        " mined on instead (host:port/service)", "str",
+                        ("oracle",)),
+    "redo_reader": Key("where a redo-file reader run beside the redo"
+                       " listens (host:port)", "str", ("oracle",)),
+    "redo_reader_dsn": Key("how that reader reaches the database, where"
+                           " not as migkit does", "str", ("oracle",)),
+    "redo_reader_mb": Key("the memory that reader may take, in MB", "int",
+                          ("oracle",), knob="size"),
+    "link_dsn": Key("how the target reaches the source over a database"
+                    " link, where not as migkit does", "str", ("oracle",)),
     "database": Key("the database to connect to", "str",
                     ("db2", "redshift", "snowflake", "bigquery")),
     "account": Key("the account identifier", "str", ("snowflake",)),

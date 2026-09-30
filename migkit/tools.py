@@ -44,6 +44,10 @@ PROGRAMS = {
     "mysqlsh": ("", ""),
     "sqlcmd": ("sqlcmd", ""),
     "docker": ("", ""),
+    # built from source where the redo is (`install_redo_reader`), with
+    # Oracle's client it connects through
+    "OpenLogReplicator": ("", ""),
+    "oracle-instant-client": ("", ""),
     # not a program: FreeTDS's ODBC driver and the ODBC manager it loads
     # through, which SAP ASE is reached by (`ASE_DRIVER`)
     "ase-odbc": ("freetds unixodbc", "tdsodbc unixodbc"),
@@ -68,6 +72,8 @@ PROGRAM_LICENCES = {
     "mysqlsh": "GPL-2.0-only",
     # the image migkit runs its version-matched PostgreSQL copy from
     "pgcopydb": "PostgreSQL",
+    "OpenLogReplicator": "AGPL-3.0-or-later",
+    "oracle-instant-client": "LicenseRef-Oracle-Free-Use-Terms",
     # FreeTDS under the Library GPL 2 "or any later version", taken as
     # 2.1; the ODBC manager under the LGPL 2.1
     "ase-odbc": "LGPL-2.1-or-later",
@@ -140,6 +146,17 @@ TERMS = {
         " or Redis Software",
         "Redis copies take migkit's own keyspace copier, which every other"
         " target takes anyway"),
+    # the redo-file reader is open (AGPL); the client library it is built
+    # against to reach the database is Oracle's own, free to use under
+    # these terms and not open source
+    "oracle-instant-client": Terms(
+        "Oracle's Free Use Terms and Conditions for its Instant Client",
+        "https://www.oracle.com/downloads/licenses/"
+        "oracle-free-license.html",
+        "the redo-file reader's connection to the Oracle database it reads,"
+        " for the dictionary it names the redo's tables by",
+        "the redo-file reader is not built, and migkit's own LogMiner"
+        " reader follows Oracle, which needs nothing installed"),
 }
 
 #: where the operator's answers are kept, one file per machine
@@ -254,6 +271,9 @@ def ase_driver_present():
 def _present(cmd):
     if cmd == SECOND_READER:
         return second_reader_present()
+    if cmd == "OpenLogReplicator":
+        from .engines import oracle_redo
+        return oracle_redo.program()
     if cmd == ASE_DRIVER:
         return ase_driver_present()
     if cmd in SOURCE_BUILDS:
@@ -453,6 +473,29 @@ CAPABILITIES = [
 ]
 
 
+#: the redo-file reader for Oracle: built from source where it runs
+#: (`install_redo_reader`), so a capability only on Linux x86-64 - it runs
+#: beside the redo files, and `doctor --install` on that host puts it there
+REDO_READER = "OpenLogReplicator"
+#: Oracle's client library it is built against: not open source, so
+#: fetched only on the operator's acceptance of its terms
+REDO_READER_CLIENT = "oracle-instant-client"
+
+
+def _redo_reader_here():
+    from .engines import oracle_redo
+    return oracle_redo.platform_runs_it()
+
+
+def _capabilities():
+    if not _redo_reader_here():
+        return CAPABILITIES
+    return CAPABILITIES + [
+        ("Oracle: follow at high change rates",
+         "read the redo files where they are, with no mining in the"
+         " database", [], [REDO_READER])]
+
+
 def capabilities():
     """(name, what, state, missing) per capability.
 
@@ -462,7 +505,7 @@ def capabilities():
       unavailable  a required program is missing
     """
     out = []
-    for name, what, needs, optional in CAPABILITIES:
+    for name, what, needs, optional in _capabilities():
         missing_req = [c for c in needs if not _present(c)]
         missing_opt = [c for c in optional if not _present(c)]
         if missing_req:
@@ -490,6 +533,8 @@ def by_hand(programs):
     for c in programs:
         if c == SECOND_READER:
             continue    # `doctor --install` builds it wherever Python runs
+        if c == REDO_READER:
+            continue    # built from source by `doctor --install`
         if c in VENDOR and vendor_file(c):
             continue    # fetched from its vendor (`install_vendor`)
         if c in SOURCE_BUILDS:
@@ -512,7 +557,7 @@ def install_missing(log=print, ask=None):
     if not mgr:
         log("no supported package manager (brew/apt) here; install by hand")
     wanted = []
-    for _, _, needs, optional in CAPABILITIES:
+    for _, _, needs, optional in _capabilities():
         wanted += needs + optional
     pkgs = []
     for cmd in wanted:
@@ -560,6 +605,11 @@ def install_missing(log=print, ask=None):
                 " to see which capability is still short")
     if not _present(SECOND_READER):
         install_second_reader(log)
+    if REDO_READER in wanted and not _present(REDO_READER):
+        # its client's terms asked for first, as every closed program's
+        if accept_terms([REDO_READER_CLIENT], ask, log).get(
+                REDO_READER_CLIENT):
+            install_redo_reader(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
 
 
@@ -892,6 +942,111 @@ def install_second_reader(log=print):
     return True
 
 
+#: what the redo-file reader is built from, each at the version migkit
+#: speaks to: its source, the JSON headers it compiles against (with the
+#: fix its own build applies), and Oracle's client for its connection
+REDO_READER_BUILD = {
+    "version": "2.0.0",
+    "source": "https://github.com/bersler/OpenLogReplicator/archive/refs/"
+              "tags/v{version}.tar.gz",
+    "rapidjson": "https://github.com/Tencent/rapidjson/archive/refs/tags/"
+                 "v1.1.0.tar.gz",
+    "rapidjson_fix": "https://github.com/Tencent/rapidjson/commit/"
+                     "3b2441b87f99ab65f37b141a7b548ebadb607b96.diff",
+    "client": "https://download.oracle.com/otn_software/linux/instantclient/"
+              "2326000/instantclient-{part}-linux.{arch}-23.26.0.0.0.zip",
+}
+
+#: the build, as the program's own container build does it, into
+#: `tools_home()`: the packages it compiles with from the system's
+#: package manager (Protocol Buffers for its network writer among them),
+#: the rest fetched from each publisher
+REDO_READER_SCRIPT = r"""set -eu
+home="$1"; work="$2"; version="$3"
+mkdir -p "$work"
+sudo=""; [ "$(id -u)" != 0 ] && sudo=sudo
+if command -v apt-get >/dev/null; then
+  $sudo apt-get update -qq
+  $sudo apt-get install -y -qq g++ make cmake unzip curl patch libz-dev \
+    libprotobuf-dev protobuf-compiler libaio1t64 >/dev/null 2>&1 \
+  || $sudo apt-get install -y -qq g++ make cmake unzip curl patch libz-dev \
+    libprotobuf-dev protobuf-compiler libaio1 >/dev/null
+elif command -v dnf >/dev/null; then
+  $sudo dnf install -y -q gcc-c++ make cmake unzip curl patch zlib-devel \
+    protobuf-devel protobuf-compiler libaio
+else
+  echo "no package manager this build knows (apt, dnf)" >&2; exit 2
+fi
+cd "$work"
+curl -fsSL -o rapidjson.tgz "$RAPIDJSON"
+tar xzf rapidjson.tgz && mv rapidjson-1.1.0 rapidjson
+curl -fsSL -o fix.diff "$RAPIDJSON_FIX" && (cd rapidjson && patch -p1 < ../fix.diff)
+case "$(uname -m)" in x86_64|amd64) ic=x64;; aarch64|arm64) ic=arm64;;
+  *) echo "no client for $(uname -m)" >&2; exit 2;; esac
+for part in basic sdk; do
+  curl -fsSL -o "ic-$part.zip" "$(printf "$CLIENT" "$part" "$ic")"
+  unzip -qo "ic-$part.zip"
+done
+client="$(ls -d "$work"/instantclient_* | head -1)"
+curl -fsSL -o source.tgz "$SOURCE"
+tar xzf source.tgz
+cd "OpenLogReplicator-$version/proto"
+protoc OraProtoBuf.proto --cpp_out=.
+mv OraProtoBuf.pb.cc ../src/common/OraProtoBuf.pb.cpp
+mv OraProtoBuf.pb.h ../src/common/OraProtoBuf.pb.h
+cd .. && mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DWITH_RAPIDJSON="$work/rapidjson" \
+  -DWITH_OCI="$client" -DWITH_PROTOBUF=/usr -S .. -B . >/dev/null
+cmake --build . --target OpenLogReplicator -j "$(nproc)" >/dev/null
+mkdir -p "$home/bin" "$home/libexec" "$home/client"
+cp ./OpenLogReplicator "$home/libexec/"
+cp -a "$client"/. "$home/client/"
+cat > "$home/bin/OpenLogReplicator" <<EOF
+#!/bin/sh
+LD_LIBRARY_PATH="$home/client\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" \
+  exec "$home/libexec/OpenLogReplicator" "\$@"
+EOF
+chmod 755 "$home/bin/OpenLogReplicator"
+"$home/bin/OpenLogReplicator" --version
+"""
+
+
+def install_redo_reader(log=print, home=None):
+    """Build the redo-file reader where it runs - Linux on x86-64, beside
+    the redo - under `tools_home()`, and prove the build answers
+    with the version migkit speaks to. Said in migkit's words: which
+    program reads the redo is migkit's business."""
+    import os
+    import tempfile
+    from .engines import oracle_redo
+    if not oracle_redo.platform_runs_it():
+        log("  the redo-file reader runs on Linux x86-64, beside the redo;"
+            " run migkit doctor --install on that host")
+        return False
+    if not terms_accepted(REDO_READER_CLIENT):
+        instead = TERMS[REDO_READER_CLIENT].otherwise
+        log("  the redo-file reader is built with Oracle's client, whose"
+            f" terms were not accepted, so {instead}")
+        return False
+    home = home or oracle_redo.home()
+    version = REDO_READER_BUILD["version"]
+    log("building the redo-file reader from source (once; several"
+        " minutes) ...")
+    env = dict(os.environ,
+               SOURCE=REDO_READER_BUILD["source"].format(version=version),
+               RAPIDJSON=REDO_READER_BUILD["rapidjson"],
+               RAPIDJSON_FIX=REDO_READER_BUILD["rapidjson_fix"],
+               CLIENT=REDO_READER_BUILD["client"].replace(
+                   "{part}", "%s").replace("{arch}", "%s"))
+    with tempfile.TemporaryDirectory() as work:
+        built = subprocess.run(["bash", "-c", REDO_READER_SCRIPT, "build",
+                                home, work, version], env=env,
+                               capture_output=True, text=True)
+    if built.returncode != 0 or version not in built.stdout + built.stderr:
+        log("  the redo-file reader did not build; LogMiner still follows"
+            " the source, and migkit doctor --install tries again")
+        return False
+    return True
 # ---- licences ----------------------------------------------------------------
 
 #: licences whose code may be combined with migkit's own under the AGPL
