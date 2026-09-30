@@ -29,6 +29,10 @@ RUNG_READERS = ("prove",)
 #: facts it stands for
 DYNAMIC = {
     "mysql.py": ("src", "dst"),
+    # a hold's needs made by `_is` and `_at_least` (`freeze.Hold.rungs`)
+    "freeze.py": ("alter system", "read only switch", "version", "acl",
+                  "alter", "alone in its group", "control", "kill",
+                  "authorizer", "authorize"),
 }
 
 

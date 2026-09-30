@@ -331,6 +331,13 @@ def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
         with Running(token_path.parent):
             while True:
                 hold_if_asked(token_path.parent, log)
+                if stop_asked(token_path.parent):
+                    # between looks, the position of the last one saved -
+                    # as `tail.stop` promises (a cutover's point of no
+                    # return ends a tail so)
+                    log(f"stopped as asked after {seen:,} {noun}; the"
+                        " position is saved")
+                    break
                 try:
                     after, went, settled = look(token)
                 except Exception as e:  # noqa: BLE001 - classified here

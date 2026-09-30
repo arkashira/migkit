@@ -2516,11 +2516,18 @@ def _replicate_released(hop, eng, db, copy_data, do_drop, go):
         _protect_target(hop, eng, db, release=True)
 
 
-def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None):
+def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
+                   part=None):
     """`left`, where given, collects the source's half of a teardown that
     a read-only source refused - the cutover tears the stream down while
-    the source is frozen, and runs those once it is written again."""
+    the source is frozen, and runs those once it is written again.
+
+    `part` runs one part of a stream made ahead (`replicate_sql`'s
+    `arm_*`, `fire_*`): "arm" makes it and leaves it idle, "fire" starts
+    it, "unarm" takes it away as `do_drop` does and its slot with it."""
     import secrets
+    if part == "unarm":
+        do_drop = True
     if eng.maps_columns() and not do_drop:
         # a subscription or a replica applies whole rows by the source's
         # column names: the first change to a mapped table stops it on a
@@ -2574,9 +2581,13 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None):
         sql = eng.replicate_sql(d, copy_data=copy_data, secret=secret,
                                 copied=copied)
         console.print(f"[bold]{d}[/bold]")
-        if do_drop:
+        if part in ("arm", "fire"):
+            plan = [("src", x) for x in sql.get(f"{part}_src") or []] + \
+                   [("dst", x) for x in sql.get(f"{part}_dst") or []]
+        elif do_drop:
             plan = [("dst", x) for x in sql["drop_dst"]] + \
-                   [("src", x) for x in sql["drop_src"]]
+                   [("src", x) for x in sql["drop_src"]
+                    + (sql.get("unarm_src") or [] if part else [])]
         else:
             plan = [("src", x) for x in sql["src"]] + \
                    [("dst", x) for x in sql["dst"]]
@@ -2597,12 +2608,18 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None):
                 console.print("    left for when the source is written"
                               " again: it is frozen")
         if go and not do_drop:
-            console.print("  " + eng.replication_status(d, sql["status"]))
-            _changelog(hop, {"op": "replicate", "db": d})
+            if part != "arm":
+                # made ahead, it does not replicate yet: `armed_status`
+                # says whether it stands ready instead
+                console.print("  " + eng.replication_status(d,
+                                                            sql["status"]))
+            _changelog(hop, {"op": "replicate", "db": d,
+                             **({"part": part} if part else {})})
             if copied:
                 _copy_record_used(hop, d)
         if go and do_drop:
-            _changelog(hop, {"op": "replicate-drop", "db": d})
+            _changelog(hop, {"op": "replicate-drop", "db": d,
+                             **({"part": part} if part else {})})
     if not go:
         console.print("\ndry-run, add --go to execute"
                       " (monitor lag with: migkit watch)")
@@ -3370,12 +3387,13 @@ def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
 
 
 def _cutover(hop, eng, db, go, engine):
-    """`move --mode cdc --drop`: the cutover, as `migkit.cutover` runs it."""
+    """`move --mode cdc --drop`: the cutover, as `migkit.cutover` runs it
+    - and once one has flipped, its point of no return."""
     from . import approvals, cutover
     dbs = [db] if db else eng.databases()
 
-    def approve(detail):
-        return approvals.require(hop, "cutover", db,
+    def approve(detail, step="cutover"):
+        return approvals.require(hop, step, db,
                                  lambda m: console.print(f"  {m}"),
                                  detail=detail)
     leg = _stream_leg(hop, eng, db, dbs, engine)
@@ -3393,19 +3411,46 @@ def _cutover(hop, eng, db, go, engine):
 
 
 def _stream_leg(hop, eng, db, dbs, engine):
-    """What carries this hop's changes now, as the cutover tears it down
-    and puts it back (`cutover.Leg`); `manual` is the teardown a hop
-    without `cutover:` has always had."""
-    from . import cutover, movers, tailctl
+    """What carries this hop's changes now, as the cutover drains it,
+    tears it down and puts it back (`cutover.Leg`); `manual` is the
+    teardown a hop without `cutover:` has always had.
+
+    For a hop that turns `cutover:` on, the change leg run from here and
+    migkit's streaming pipeline go through the cutover as well, each
+    drained by its own positions (`_follow_leg`, `_pipeline_leg`); a hop
+    without it finds its stream as it always did."""
+    from . import cutover, hopkeys, movers, tailctl
+    conf = cutover.settings(hop)
     back_at_cutover, _ = _topology(hop)
     has_repl = hasattr(eng, "replicate_sql")
     tailer = eng if hasattr(eng, "tail_apply") else _tail_pair(eng)
     once = getattr(eng, "REPLICATES_THE_SERVER", False)
 
+    def say(m):
+        console.print(f"  {m}")
+
     def manual(go):
         if go and not back_at_cutover:
             _protect_target(hop, eng, db, release=True)
-        return _cdc(hop, eng, db, True, go, engine)
+        got = _cdc(hop, eng, db, True, go, engine)
+        if go and hopkeys.origin_dropped(hop):
+            _origin_away(hop, eng, dbs, say)
+        return got
+
+    def tail_end(d):
+        """The tail ended for good, past the flip: it has nothing left to
+        carry from a frozen source, and ends between batches."""
+        where = hop.report_dir(d)
+        if not tailctl.alive(where):
+            return
+        tailctl.stop(where)
+        tailctl.resume(where)
+        end = time.monotonic() + 60
+        while tailctl.alive(where) and time.monotonic() < end:
+            time.sleep(0.5)
+        if tailctl.alive(where):
+            raise SystemExit(f"{d}: the change tail did not end")
+        say(f"{d}: the change tail ended")
 
     def ours(d):
         """Whether a stream of migkit's already writes into the target."""
@@ -3436,11 +3481,21 @@ def _stream_leg(hop, eng, db, dbs, engine):
 
     alive = [d for d in dbs if tailctl.alive(hop.report_dir(d))]
     follow = engine == "postgres" and movers.follow_selected() == "follow"
-    if alive and tailer is not None:
-        leg = cutover.Leg("tail", fence=tailer, down=tail_down, up=tail_up)
+    # the leg run from here marks itself running where a tail would: its
+    # own process is what tells it apart
+    following = conf is not None and engine == "postgres" and any(
+        movers.follow_lag(hop, d) is not None for d in dbs)
+    if following:
+        leg = _follow_leg(hop, eng, dbs)
+    elif alive and tailer is not None:
+        leg = cutover.Leg("tail", fence=tailer, down=tail_down, up=tail_up,
+                          end=tail_end)
+    elif conf is not None and _pipeline_runs(hop):
+        leg = _pipeline_leg(hop, eng, dbs)
     elif has_repl and not follow and not eng.maps_columns():
         leg = cutover.Leg("native", fence=eng, down=native_down,
-                          up=native_up, after_thaw=engine == "mysql")
+                          up=native_up,
+                          after_thaw=engine == "mysql" and _by_gtid(eng, dbs))
     elif follow:
         leg = cutover.Leg(
             "follow", why="the CDC leg driven from here (MIGKIT_CDC=follow)"
@@ -3465,10 +3520,242 @@ def _stream_leg(hop, eng, db, dbs, engine):
         def back_down(d):
             if once and d != dbs[0]:
                 return
-            _replicate_one(back, rev, hop.target_db(d), False, True, True)
+            # made ahead, its slot is its own: taken away with it
+            _replicate_one(back, rev, hop.target_db(d), False, True, True,
+                           part="unarm")
+
+        def back_arm(d):
+            if once and d != dbs[0]:
+                return
+            console.print("\n[bold]the other way[/bold] - made ahead, idle"
+                          " until the flip (reverse: at_cutover)")
+            _replicate_one(back, rev, hop.target_db(d), False, False, True,
+                           part="arm")
+
+        def back_fire(d):
+            if once and d != dbs[0]:
+                return
+            _replicate_one(back, rev, hop.target_db(d), False, False, True,
+                           part="fire")
+            _changelog(hop, {"op": "reverse", "db": d, "drop": False})
+
+        def back_proof(d):
+            if once and d != dbs[0]:
+                return ""
+            tdb = hop.target_db(d)
+            return rev.armed_status(tdb, rev.replicate_sql(
+                tdb, copy_data=False))
         leg.back_up, leg.back_down, leg.back_fence = back_up, back_down, rev
+        if hasattr(rev, "armed_status"):
+            leg.back_arm, leg.back_fire = back_arm, back_fire
+            leg.back_proof = back_proof
+    if hopkeys.origin_dropped(hop) and tailer is not None:
+        leg.origin = lambda d: _origin_away(hop, eng, [d], say)
     leg.manual = manual
     return leg
+
+
+def _by_gtid(eng, dbs):
+    """Whether a MySQL source's replica goes on by GTID: put back after
+    the source is writable again, it starts from the target's own
+    executed set and misses nothing. Without GTIDs it starts from the
+    source's position of that moment, so it has to be put back before
+    the source takes a write - which a drain by a mark allows, since its
+    freeze leaves migkit's own account writing (`freeze.OURS`). Not
+    readable is taken as by GTID, the way it always was."""
+    try:
+        return eng.src_lsn(dbs[0]) is not None
+    except Exception:  # noqa: BLE001 - as it always was
+        return True
+
+
+def _origin_away(hop, eng, dbs, say):
+    """migkit's batch table taken off a one-way target where the hop asks
+    (`origin_table: drop`), through the pair's own teardown of its marks
+    - never while a tail of the hop runs, which reads its last batch back
+    from it after a stop, and never on a hop streaming both ways, whose
+    other way reads it too."""
+    from . import tailctl, twoway
+    if twoway.settings(hop) is not None or _topology(hop)[1]:
+        say("the table of migkit's batches stays on the target: the hop"
+            " streams both ways, and the other way reads it")
+        return []
+    tailer = eng if hasattr(eng, "two_way_teardown") else _tail_pair(eng)
+    if tailer is None:
+        return []
+    out = []
+    for d in dbs:
+        if tailctl.alive(hop.report_dir(d)):
+            say(f"{d}: the table of migkit's batches stays on the target: a"
+                " tail of the hop still runs, and reads its last batch back"
+                " from it after a stop")
+            continue
+        steps = tailer.two_way_teardown(d, _tail_token(hop, d), True)
+        for s in steps:
+            say(f"{d}: target: {s}")
+        if steps:
+            _changelog(hop, {"op": "origin-drop", "db": d})
+        out += steps
+    return out
+
+
+def _follow_leg(hop, eng, dbs):
+    """The change leg run from here (`movers.pgcopydb_follow`) running
+    until asked (`follow_until: stopped`), as the cutover drains it: the
+    slot it reads is its position - confirmed as it receives, which says
+    how far behind it is - and after the freeze it is asked to end
+    (`tailctl.stop`), naming its end at the source's position of that
+    moment, and waited for until it has ended there (`settle`). Its slot
+    stays until the flip is done, so an undone cutover leaves the leg to
+    be started again from where it stopped; after the flip its slot,
+    publication and origin are taken away (`after_flip`)."""
+    from . import cutover, movers, tailctl
+
+    class Fence:
+        def src_lsn(self, d):
+            return eng.src_lsn(d)
+
+        def fence_wait(self, d, pos, timeout=300):
+            return eng.fence_wait(d, pos, timeout)
+
+    def settle(d, timeout):
+        where = hop.report_dir(d)
+        tailctl.stop(where)
+        end = time.monotonic() + timeout
+        while True:
+            if movers.follow_lag(hop, d) is None \
+                    and not tailctl.alive(where):
+                return True
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.5)
+
+    def up(d):
+        console.print(f"  {d}: the change leg run from here ended at the"
+                      f" drain; `migkit move {hop.name} --mode cdc --go`"
+                      " starts it again from its slot, which kept every"
+                      " change since")
+
+    def after_flip(d):
+        for line in movers.follow_teardown(hop, d, True,
+                                           lambda m: chat(f"  {m}")):
+            console.print(f"  {d}: {line}")
+        return []
+    return cutover.Leg("follow", fence=Fence(), down=lambda d: [], up=up,
+                       settle=settle, after_flip=after_flip)
+
+
+def _pipeline_out(hop):
+    return hop.report_dir() / "stream"
+
+
+def _pipeline_runs(hop):
+    """Whether migkit's streaming pipeline for the hop runs here: its
+    stack written, and its source connector running."""
+    from . import movers
+    out = _pipeline_out(hop)
+    if not (out / "docker-compose.yml").exists():
+        return False
+    return "connector=RUNNING" in movers.stream_status(
+        f"migkit-{hop.name}-source")
+
+
+def _rpk(out, *args, timeout=30):
+    """The pipeline's broker asked through its compose file: it publishes
+    no port but the connector runtime's (`movers.send_resnapshot`)."""
+    from .util import run
+    return run(["docker", "compose", "-f", str(out / "docker-compose.yml"),
+                "exec", "-T", "redpanda", "rpk", *args], check=False,
+               timeout=timeout)
+
+
+def _pipeline_drained(text, topic):
+    """Whether the sink's group, as the broker describes it, has applied
+    every message it reads - every partition's committed offset at the
+    log's end - and has taken in the mark's topic `topic`."""
+    rows, head = [], None
+    for line in (text or "").splitlines():
+        words = line.split()
+        if words and words[0] == "TOPIC" and "LAG" in words:
+            head = words
+            continue
+        if head and len(words) >= len(head) - 3:
+            rows.append(dict(zip(head, words)))
+    if not rows or not any(r.get("TOPIC") == topic for r in rows):
+        return False
+    for r in rows:
+        lag = r.get("LAG", "")
+        if lag.isdigit():
+            if int(lag):
+                return False
+        elif r.get("LOG-END-OFFSET") != r.get("LOG-START-OFFSET"):
+            # nothing committed on a partition that holds messages
+            return False
+    return True
+
+
+def _pipeline_leg(hop, eng, dbs):
+    """migkit's streaming pipeline (`movers.stream_codegen`) as the
+    cutover drains it. It keeps no position migkit can hold it to, so the
+    drain is a mark (`drainmark`): found in its own topic once the
+    connector has read the source past the freeze (`seen`), and then its
+    sink's committed offsets at the end of every topic it reads, the
+    mark's among them (`settle`) - the offsets the runtime commits at an
+    interval of its own, which the drain waits for. Torn down only once
+    the flip is done: before it, the connectors are paused and resumed
+    (`down`, `up`), since a stack taken down reads the whole source again
+    when it is started. Its slot on a PostgreSQL source is left for when
+    the old source is written again (`after_flip`)."""
+    from . import cutover, drainmark, freeze, movers
+    out = _pipeline_out(hop)
+    name = f"migkit-{hop.name}"
+    kind = freeze.side_engine(hop, eng, "src")[0]
+    done = []
+
+    def topic(d):
+        return f"{name}.{d if kind == 'mysql' else 'public'}.{drainmark.TABLE}"
+
+    def seen(d, token):
+        p = _rpk(out, "topic", "consume", topic(d), "--offset", ":end",
+                 "--format", "%v\\n")
+        return p.returncode == 0 and token in (p.stdout or "")
+
+    def settle(d, timeout):
+        end = time.monotonic() + timeout
+        while True:
+            p = _rpk(out, "group", "describe", f"connect-{name}-sink")
+            if p.returncode == 0 and _pipeline_drained(p.stdout, topic(d)):
+                return True
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.5)
+
+    def connectors(verb):
+        for c in (f"{name}-source", f"{name}-sink"):
+            movers._connect_api("PUT", f"/connectors/{c}/{verb}")
+
+    def down(d):
+        if d == dbs[0]:
+            connectors("pause")
+        return []
+
+    def up(d):
+        if d == dbs[0]:
+            connectors("resume")
+
+    def after_flip(d):
+        if not done:
+            movers.stream_down(out, lambda m: chat(f"  {m}"))
+            _changelog(hop, {"op": "stream-down", "db": ",".join(dbs)})
+            done.append(True)
+        if kind != "postgres":
+            return []
+        slot = name.replace("-", "_")
+        return [f"select pg_drop_replication_slot(slot_name) from"
+                f" pg_replication_slots where slot_name = '{slot}' and not"
+                " active"]
+    return cutover.Leg("pipeline", seen=seen, settle=settle, down=down,
+                       up=up, after_flip=after_flip)
 
 
 def _delta_loop(hop_name, db, interval, cycles, teardown):

@@ -120,7 +120,8 @@ HOP_OPTIONS = {
     "cutover": Key("the cutover as one timed path that freezes the source"
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
                    subs=("budget", "start_below", "freeze", "pooler",
-                         "flip", "flip_undo", "keys", "jobs")),
+                         "flip", "flip_undo", "keys", "jobs",
+                         "no_return")),
     "ddl": Key("what a DDL on the source does to a running tail: stop"
                " it, park only the table it touched, or apply what can be"
                " carried at its place in the log", "str"),
@@ -188,6 +189,11 @@ HOP_OPTIONS = {
                          " position is placed on the target exactly", "bool",
                          ("kafka",)),
     "on_conflict": Key("source-wins or keep-target", "str"),
+    "origin_table": Key("keep or drop: the table of migkit's batches on a"
+                        " one-way target (migkit_origin), taken away when"
+                        " the stream is torn down for good - at a --drop,"
+                        " and at the cutover's point of no return - once no"
+                        " tail of the hop runs", "str"),
     "partition_by": Key("the column a stream partitions by", "str",
                         STREAMS),
     "performance": Key("gate: a slower target fails the check", "str"),
@@ -686,7 +692,8 @@ MODES = {
                           " during it is lost",
     ("move", "cdc --drop"): "the cutover: the stream torn down, and what"
                             " else happens on each side is what cutover:"
-                            " says (below)",
+                            " says (below); run again once a cutover of the"
+                            " hop has flipped, its point of no return",
     ("sync", "reconcile"): "the last check's differences shown; --apply"
                            " writes the target to match the source",
     ("sync", "verify"): "read only: every table compared as of one moment",
@@ -705,29 +712,43 @@ CUTOVER = {
         "a timed path: the write outage clocked from the pooler's pause or"
         " the freeze to the flip, against the hop's budget - past it, all"
         " of it is undone",
-        "the freeze: migkit stops the source's writes itself - the whole"
-        " server made read-only where it may, or the application's grants"
-        " revoked and its sessions ended - and reads it back",
+        "the freeze: migkit stops the source's writes itself, the way"
+        " chosen from what the source allows - the whole server made"
+        " read-only where it may, or the application's accounts kept from"
+        " writing and their sessions ended - and reads it back; PostgreSQL,"
+        " MySQL, MongoDB, Redis, SQL Server, Cassandra, Kafka and OpenSearch"
+        " sources alike",
         "the drain: the source's position taken after the freeze, and the"
-        " hop's own stream waited for until it passes it",
+        " hop's own stream waited for until it passes it - or, where the"
+        " stream keeps no position migkit can read, a mark written on the"
+        " source after the freeze and waited for on the target; a"
+        " streaming pipeline and a leg run from here drained by their own"
+        " offsets and positions",
         "the fenced check: the rows changed since the last verified pass"
         " compared inside the outage, and the schema compared with the"
         " preflight's",
         "the counters: the target's sequences and auto-increments raised"
         " past every key the source handed out",
-        "the stream back: started from the new primary to the old source"
-        " (reverse: at_cutover) and proven to reach it",
+        "the stream back: from the new primary to the old source"
+        " (reverse: at_cutover), made and proven before the freeze where"
+        " its engine lets it wait idle, so the flip only starts it, and"
+        " proven to reach the old source",
         "the undo: every step recorded before it acts and put back, the"
         " last first, on any failure, on the budget passing, or on the"
         " next run after one killed half way",
         "the outage measured: each run's outage and each step's time"
         " recorded, and the next cutover refused where the last one's was"
         " past its budget",
+        "the point of no return: a step of its own behind an approval of"
+        " its own - the forward stream ended for good, the old source"
+        " given back its writes, the stream back dropped, what the cutover"
+        " left taken away - after which going back is refused",
     ],
     "on source": "written during the cutover only: its jobs switched off,"
                  " its writes frozen, each step reversible and behind the"
                  " hop's approvals; after the flip it stays frozen until"
-                 " `migkit rollback {hop} --db DB --apply`",
+                 " `migkit rollback {hop} --db DB --apply`, or until the"
+                 " point of no return gives it back",
     "by hand": [
         "switch off on the source the jobs it runs (pg_cron jobs, MySQL"
         " events), so they write in one place",
@@ -743,6 +764,9 @@ CUTOVER = {
         " target's counters past the source's",
         "switch the jobs on on the target",
         "point the application at the target",
+        "once the application is on the target for good, the point of no"
+        " return: drop the stream back, if one runs, and give the old"
+        " source back its writes",
     ],
     "off source": "nothing written at cutover: the operator stops its"
                   " writes and its jobs",
@@ -795,6 +819,16 @@ def cutover_on(hop):
     `cutover:` and nothing else - a goal never does."""
     got = (hop.options or {}).get("cutover")
     return got is not None and got is not False
+
+
+def origin_dropped(hop):
+    """Whether the hop asks for migkit's batch table to be taken off a
+    one-way target when its stream is torn down for good
+    (`origin_table: drop`); kept otherwise, as it always was."""
+    got = str((hop.options or {}).get("origin_table", "keep") or "keep")
+    if got.lower() not in ("keep", "drop"):
+        raise SystemExit(f"origin_table: {got} - keep, or drop")
+    return got.lower() == "drop"
 
 
 def cutover_lines(hop):

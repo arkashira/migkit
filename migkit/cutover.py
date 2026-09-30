@@ -21,28 +21,38 @@ with a clock on it:
         flip_undo: <command>  # run if the path is undone after the flip ran
         keys: exact           # exact | apart:<margin>
         jobs: move            # move | leave
+        no_return: later      # later | at_flip
 
 1. preflight, nothing written: the stream's own position reachable and
-   the stream less than `start_below` behind it; nothing prepared or
-   long open on either side; the schema the same on both; nothing a load
-   set aside left off; who can write through the freeze named; the jobs
-   on each side; the counters; the stream back possible; the outage the
-   last run of this hop measured against the budget; approvals signed
-2. jobs the source runs switched off there (a frozen MySQL server refuses
+   the stream less than `start_below` behind it - or, where the stream
+   keeps none migkit can read, a mark on the source to drain by
+   (`drainmark`); nothing prepared or long open on either side; the
+   schema the same on both; nothing a load set aside left off; who can
+   write through the freeze named; the jobs on each side; the counters;
+   the stream back possible; the outage the last run of this hop
+   measured against the budget; approvals signed
+2. prepared, before the clock: the stream back made and proven where it
+   can wait idle (`reverse: at_cutover`), so the flip only starts it;
+   the mark's table made, and a first mark proven to arrive
+3. jobs the source runs switched off there (a frozen MySQL server refuses
    the statement afterwards)
-3. the pooler paused, where the hop names one: writes wait instead of
+4. the pooler paused, where the hop names one: writes wait instead of
    failing - the clock starts
-4. the source frozen, chosen from what it allows (`freeze.scope`), and
-   read back (`freeze.proof`) - the clock starts here without a pooler
-5. the drain: a position taken *after* the freeze, reached by the hop's
-   own stream
-6. the final check of what changed, fenced, and the source's schema
+5. the source frozen, the way chosen from what it allows (`freeze.choose`,
+   one hold per engine, `freeze.Hold`), and read back (`freeze.proof`) -
+   the clock starts here without a pooler
+6. the drain: a position taken *after* the freeze, reached by the hop's
+   own stream - or a mark written after the freeze and found on the
+   target - and a stream that keeps positions of its own (a pipeline's
+   offsets, a leg run from here that ends at a position) waited for by
+   them (`Leg.settle`)
+7. the final check of what changed, fenced, and the source's schema
    unchanged since the preflight
-7. the target's counters past every key the source handed out
-8. the stream torn down, and where the hop asks (`reverse: at_cutover`)
-   the stream back started and proven to reach the old source
-9. the jobs switched on on the target
-10. the flip: the target given back its writes, the flip command run, the
+8. the target's counters past every key the source handed out
+9. the stream torn down, and where the hop asks the stream back started
+   and proven to reach the old source
+10. the jobs switched on on the target
+11. the flip: the target given back its writes, the flip command run, the
     pooler repointed and resumed - the clock stops
 
 Every step is written down before it acts. A failure anywhere, or the
@@ -52,7 +62,15 @@ to it that it did not have. A run killed half way is undone by the next
 one, which then stops and says so - never left half flipped. After the
 flip the old source stays frozen, so an application still pointed at it
 fails rather than writing where nobody reads; `rollback --apply` gives it
-back.
+back, and so does the point of no return.
+
+The point of no return is a step of its own, behind an approval of its
+own (`approvals.steps: [point-of-no-return]`): the same command run again
+once a cutover has flipped - or at the flip, where the hop says
+`no_return: at_flip`. It ends the forward stream for good, gives the old
+source back its writes, drops the stream back, and takes away what the
+cutover left on either side (`no_return`); after it, going back is
+refused.
 
 A hop without `cutover:` gets the same preflight, the steps in migkit's
 words to do by hand, and the proofs around them: the stream torn down
@@ -71,15 +89,20 @@ import time
 from . import failpoint
 
 #: in the order they run; each is a failpoint `cutover.<phase>`
-PHASES = ("jobs_off", "pause", "freeze", "drain", "verify", "counters",
-          "stream", "reverse", "jobs_on", "flip")
+PHASES = ("prepare", "jobs_off", "pause", "freeze", "drain", "verify",
+          "counters", "stream", "reverse", "jobs_on", "flip")
+#: the point of no return's steps, in order (`no_return`)
+NO_RETURN = ("tail_off", "thaw", "back_off", "left", "origin")
 
 DEFAULTS = {"budget": 30, "start_below": 1, "freeze": "auto",
             "keys": "exact", "jobs": "move", "flip": "", "flip_undo": "",
-            "pooler": None}
+            "pooler": None, "no_return": "later"}
 
 FREEZES = ("auto", "server", "database", "operator")
 POOLERS = ("pgbouncer", "pgcat")
+NO_RETURNS = ("later", "at_flip")
+#: the approval step the point of no return waits for
+NO_RETURN_STEP = "point-of-no-return"
 
 
 def settings(hop):
@@ -112,6 +135,9 @@ def settings(hop):
     margin(got)
     if str(got["jobs"]) not in ("move", "leave"):
         raise SystemExit("cutover: jobs is move or leave")
+    if str(got["no_return"]) not in NO_RETURNS:
+        raise SystemExit("cutover: no_return is later (its own run of the"
+                         " command, once the flip is done) or at_flip")
     pooler = got["pooler"]
     if pooler is not None:
         if not isinstance(pooler, dict) or \
@@ -150,15 +176,37 @@ class Leg:
     it. Built by the command (`cli._stream_leg`), which knows the paths.
 
     kind         "native" (the servers' own replication), "tail" (migkit's
-                 own), or what this path does not tear down ("follow",
-                 "none"), with `why`
-    fence        the engine whose `src_lsn`/`fence_wait` prove the drain
+                 own), "follow" (the change leg run from here), "pipeline"
+                 (migkit's streaming pipeline), or "none", with `why`
+    fence        the engine whose `src_lsn`/`fence_wait` prove the drain,
+                 or None where the stream keeps no position migkit can
+                 hold it to - drained by a mark then (`drainmark`)
+    seen(d, token)
+                 where the stream keeps a mark that is not the target's
+                 own table (a pipeline's topic), or None
+    settle(d, timeout)
+                 the stream's own positions waited for after the drain -
+                 a pipeline's offsets applied, a leg run from here ended
+                 at a position named after the freeze - True, False past
+                 `timeout`, or None
     down(d)      tear the stream down; returns source statements left for
                  when the source is written again
     up(d)        put it back, from where the target stands
+    after_flip(d)
+                 what the stream leaves once the flip is done - a
+                 pipeline's stack, a leg's slot - taken away; returns
+                 source statements left for when the source is written
+                 again
+    end(d)       the stream ended for good, at the point of no return
+    origin(d)    migkit's own batch table taken off the target where the
+                 hop asks (`origin_table: drop`), once no tail needs it
     back_up(d), back_down(d), back_fence
                  the stream back (`reverse: at_cutover`) and the engine
                  that proves it reached the old source, or None
+    back_arm(d), back_fire(d), back_proof(d)
+                 the stream back made ahead and left idle, started, and
+                 read back as ready ("" or why not); None where the
+                 engine starts it only whole
     after_thaw   the stream is put back only once the source is writable
                  (it starts from the target's own position, and setting it
                  up writes to the source)
@@ -167,7 +215,9 @@ class Leg:
 
     def __init__(self, kind, fence=None, down=None, up=None, back_up=None,
                  back_down=None, back_fence=None, after_thaw=False,
-                 manual=None, why=""):
+                 manual=None, why="", seen=None, settle=None,
+                 after_flip=None, end=None, origin=None, back_arm=None,
+                 back_fire=None, back_proof=None):
         self.kind, self.fence = kind, fence
         self.down, self.up = down, up
         self.back_up, self.back_down = back_up, back_down
@@ -175,6 +225,10 @@ class Leg:
         self.after_thaw = after_thaw
         self.manual = manual
         self.why = why
+        self.seen, self.settle = seen, settle
+        self.after_flip, self.end, self.origin = after_flip, end, origin
+        self.back_arm, self.back_fire = back_arm, back_fire
+        self.back_proof = back_proof
 
 
 # --- the record -------------------------------------------------------------
@@ -217,19 +271,43 @@ def _runs_path(hop):
     return hop.report_dir() / "cutover-runs.jsonl"
 
 
-def last_run(hop):
+#: what the runs' log keeps beside the cutovers themselves: what ended
+#: one after its flip
+AFTER = ("no-return", "rolled back")
+
+
+def last_run(hop, after=False):
     """The last cutover of this hop that ended, flipped or undone, with
-    the seconds each phase took - what the next one is predicted from."""
+    the seconds each phase took - what the next one is predicted from;
+    with `after`, what ended one after its flip as well (`AFTER`)."""
     try:
         lines = _runs_path(hop).read_text().splitlines()
     except OSError:
         return None
     for line in reversed(lines):
         try:
-            return json.loads(line)
+            got = json.loads(line)
         except ValueError:
             continue
+        if after or got.get("state") not in AFTER:
+            return got
     return None
+
+
+def past_flip(hop):
+    """The cutover that flipped last, where nothing has ended it since -
+    no point of no return, no going back - or None."""
+    last = last_run(hop, after=True)
+    return last if last and last.get("state") == "flipped" else None
+
+
+def _ended(hop, state, run, **more):
+    """A cutover's flip ended by `state` (`AFTER`), kept in the runs'
+    log."""
+    with _runs_path(hop).open("a") as f:
+        f.write(json.dumps({"state": state, "run": (run or {}).get("id"),
+                            "ended": time.time(), **more}, default=str)
+                + "\n")
 
 
 def _close(hop, rec, how):
@@ -337,10 +415,11 @@ def pooler_ready(conf):
 
 # --- preflight ------------------------------------------------------------------
 
-def preflight(hop, eng, dbs, leg, conf):
+def preflight(hop, eng, dbs, leg, conf, chose=None):
     """[(level, what)] - "fail" stops the cutover before anything is
     written; "warn" is said and does not. Reads only: the lag measure is
-    a wait for the stream to pass a position, nothing more.
+    a wait for the stream to pass a position, nothing more. `chose`, a
+    dict, is given the ways chosen: the drain's and the freeze's.
 
     Without `cutover:` most of these only inform, since the operator runs
     the steps: what stops the stream's teardown there is what would lose
@@ -360,36 +439,53 @@ def preflight(hop, eng, dbs, leg, conf):
                     " cutover freezes one side: there is no one side to"
                     " move from")
         return out
-    if leg.kind not in ("native", "tail"):
-        add(gate, leg.why + (" - the cutover path tears down the servers'"
-                             " own replication and migkit's tail"
+    if leg.kind not in ("native", "tail") and not (
+            conf and (leg.kind in ("pipeline", "none")
+                      or (leg.kind == "follow" and leg.fence is not None))):
+        add(gate, leg.why + (" - the cutover path drains the change leg"
+                             " run from here only where it runs until"
+                             " asked (follow_until: stopped)"
                              if conf else " - nothing holds it to a"
                              " position, so the drain is not proven"))
         return out
-    add("ok", "the stream: " + ("the servers' own replication"
-                                if leg.kind == "native"
-                                else "migkit's change tail"))
-    kind = freeze.side_engine(hop, eng, "src")[0]
+    add("warn" if leg.kind == "none" else "ok", "the stream: " + {
+        "native": "the servers' own replication",
+        "tail": "migkit's change tail",
+        "follow": "the change leg run from here, ended at a position named"
+                  " after the freeze",
+        "pipeline": "migkit's streaming pipeline, drained by a mark and"
+                    " by its own offsets"}.get(
+        leg.kind, leg.why + " - drained by a mark on the source, and left"
+                            " to whoever runs it"))
+    probes = _probes(hop, leg, dbs, conf)
+    drain = drain_way(hop, eng, leg, conf, probes)
+    marked = drain.rung is not None and drain.rung.name == "mark"
     how = conf["freeze"] if conf else "operator"
-    if conf and how != "operator" and kind not in freeze.FREEZES:
-        add("fail", f"a {hop.engine} source is not frozen by migkit:"
-                    " `freeze: operator` has the operator stop its writes"
-                    " and migkit prove they stopped")
     chosen = None
-    if conf and how in ("auto", "server", "database") \
-            and kind in freeze.FREEZES:
-        chosen, why = freeze.scope(hop, eng, dbs)
-        if how == "server" and chosen != "server":
-            add("fail", f"freeze: server - {why}")
-        elif how == "auto":
-            add("ok", "the freeze: " + ("the whole server"
-                                        if chosen == "server"
-                                        else "per database") + f" ({why})")
+    choices = [drain]
+    if conf and how != "operator":
+        got = freeze.choose(hop, eng, dbs, how,
+                            (freeze.OURS,) if marked else ())
+        choices.append(got)
+        if got.rung is None:
+            kind = freeze.side_engine(hop, eng, "src")[0]
+            add("fail", f"the {hop.engine} source is not frozen by migkit"
+                        " here: " + (got.reason if kind in freeze.FREEZES
+                                     else freeze.not_held(kind))
+                + " - `freeze: operator` has the operator stop its writes"
+                  " and migkit prove they stopped")
         else:
-            chosen = how
-            add("ok", f"the freeze: {how}")
+            chosen = got.rung.name
+            add("ok", f"the freeze: {got.rung.said} ({got.reason})")
+    if chose is not None:
+        chose.update(drain=drain.rung.name if drain.rung else None,
+                     freeze=chosen, choices=choices)
     for d in dbs:
-        out += _position_rows(hop, leg, d, conf, gate)
+        if marked:
+            add("ok", f"{d}: the drain: a mark written on the source after"
+                      f" the freeze and found on the target - {probes[d][3]}")
+        else:
+            out += _position_rows(hop, leg, d, conf, gate, probes[d])
         for side, name in (("src", "source"), ("dst", "target")):
             try:
                 left = freeze.open_work(hop, eng, d, side,
@@ -411,9 +507,10 @@ def preflight(hop, eng, dbs, leg, conf):
             for line in freeze.cannot(hop, eng, d):
                 add("fail", f"{d}: {line}")
             try:
-                for line in freeze.bypass(hop, eng, d):
+                for line in freeze.bypass(hop, eng, d, chosen):
                     add("fail" if "per-database" in line
-                        and chosen != "server" else "warn", f"{d}: {line}")
+                        and freeze.SCOPE[chosen] != "server" else "warn",
+                        f"{d}: {line}")
             except Exception as e:  # noqa: BLE001
                 add("warn", f"{d}: who can write through the freeze could"
                             f" not be read ({e})")
@@ -500,25 +597,88 @@ def _pooler_sign_in_rows(hop, eng, dbs):
                    " the source (the same password hashes)")]
 
 
-def _position_rows(hop, leg, d, conf, gate):
-    """Whether the stream can be held to a position at all, and how far
-    behind it is now: the wait for it to pass where the source stands."""
+def _probes(hop, leg, dbs, conf):
+    """{db: (position, reached, seconds, why)}: the source's position as
+    the stream's own fence reads it, and whether the stream passed it
+    within `start_below` - True, False, or None where no stream of the
+    hop's reads it; `why` where there is no position. Reads only: the
+    lag measure is a wait, nothing more."""
     from . import freeze
-    try:
-        pos = leg.fence.src_lsn(d)
-    except Exception as e:  # noqa: BLE001 - said as the reason
-        return [(gate, f"{d}: the source's position could not be read"
-                       f" ({e})")]
-    if pos is None:
-        return [(gate, f"{d}: the source gives no position this stream can"
-                       " be held to, so nothing proves the drain"
-                       + (" (GTID is off)" if freeze.side_engine(
-                           hop, leg.fence, "src")[0] == "mysql"
-                          else ""))]
     wait = conf["start_below"] if conf else 1.0
-    began = time.monotonic()
-    got = leg.fence.fence_wait(d, pos, timeout=max(wait, 0.5))
-    took = time.monotonic() - began
+    out = {}
+    for d in dbs:
+        if leg.fence is None:
+            out[d] = (None, None, 0.0, "the stream keeps no position migkit"
+                                       " can hold it to")
+            continue
+        try:
+            pos = leg.fence.src_lsn(d)
+        except Exception as e:  # noqa: BLE001 - said as the reason
+            out[d] = (None, None, 0.0, "the source's position could not be"
+                                       f" read ({e})")
+            continue
+        if pos is None:
+            out[d] = (None, None, 0.0, "the source gives no position this"
+                      " stream can be held to"
+                      + (" (GTID is off)" if freeze.side_engine(
+                          hop, leg.fence, "src")[0] == "mysql" else ""))
+            continue
+        began = time.monotonic()
+        got = leg.fence.fence_wait(d, pos, timeout=max(wait, 0.5))
+        out[d] = (pos, got, time.monotonic() - began,
+                  "no stream of this hop's reads the source" if got is None
+                  else "")
+    return out
+
+
+def drain_way(hop, eng, leg, conf, probes):
+    """The `decide.Choice` of how the drain is proved: by the stream's own
+    position where every database has one it can be held to, by a mark
+    written on the source otherwise - only in a cutover migkit runs, with
+    a freeze of its own, on a pair a mark can be written and read on
+    (`drainmark`)."""
+    from . import decide, drainmark
+    none = [p[3] for p in probes.values() if p[0] is None or p[1] is None]
+    facts = decide.Facts({"positions": not none, "why none": (none or [""])[0],
+                          "cutover": conf is not None,
+                          "operator": bool(conf)
+                          and conf["freeze"] == "operator"},
+                         mark=lambda: drainmark.able(hop, eng))
+    return decide.climb("the drain", _DRAINS, facts)
+
+
+def _drain_rungs():
+    from .decide import Need, Rung
+    return (
+        Rung("position", "the stream's own position, taken after the freeze"
+             " and waited for", needs=(Need(
+                 "a position the stream can be held to",
+                 lambda f: f["positions"], lambda f: f["why none"]),),
+             because="the stream keeps a position of its own"),
+        Rung("mark", "a mark written on the source after the freeze and"
+             " found on the target",
+             needs=(Need("a cutover migkit runs", lambda f: f["cutover"],
+                         "without cutover: migkit writes nothing to the"
+                         " source"),
+                    Need("a freeze of migkit's own",
+                         lambda f: not f["operator"],
+                         "with freeze: operator migkit writes nothing to the"
+                         " source"),
+                    Need("a pair a mark is written and read on",
+                         lambda f: f["mark"] == "", lambda f: f["mark"])),
+             because="the stream keeps no position migkit can hold it to"))
+
+
+_DRAINS = _drain_rungs()
+
+
+def _position_rows(hop, leg, d, conf, gate, probe):
+    """Whether the stream can be held to a position at all, and how far
+    behind it is now (`_probes`)."""
+    pos, got, took, why = probe
+    wait = conf["start_below"] if conf else 1.0
+    if pos is None:
+        return [(gate, f"{d}: {why}, so nothing proves the drain")]
     if got is None:
         return [(gate, f"{d}: no stream of this hop's reads the source, so"
                        " nothing proves the drain")]
@@ -675,10 +835,11 @@ def _reverse_rows(hop, eng, d, gate):
 
 # --- the plan in words --------------------------------------------------------
 
-def plan(hop, dbs, conf):
+def plan(hop, dbs, conf, drain="position"):
     """What the path does, step by step and side by side, as the dry run
     and the approvers see it; for a hop without `cutover:`, what the
-    operator does by hand and what migkit proves around it."""
+    operator does by hand and what migkit proves around it. `drain` is
+    how the drain is proved (`drain_way`)."""
     from .hopkeys import CUTOVER
     back = _reverse(hop)
     name = hop.name
@@ -696,8 +857,18 @@ def plan(hop, dbs, conf):
                " on any failure - it adds:"]
             + [f"  - {a}" for a in CUTOVER["adds"]])
     how = conf["freeze"]
+    marked = drain == "mark"
     steps = [f"the cutover, within {conf['budget']:g}s of write outage"
              " (undone past it):"]
+    if back or marked:
+        steps.append("  before the clock: "
+                     + "; ".join(w for w in (
+                         "the stream back to the old source made and proven"
+                         " idle where its engine lets it wait, so the flip"
+                         " only starts it" if back else "",
+                         "a table of migkit's made on the source and a"
+                         " first mark proven to reach the target"
+                         if marked else "") if w))
     if conf["jobs"] == "move":
         steps.append("  source: the jobs it runs switched off (recorded)")
     if conf.get("pooler"):
@@ -715,6 +886,9 @@ def plan(hop, dbs, conf):
                        " its sessions ended; read back"
                      + ("" if conf.get("pooler") else " - the clock starts"))
     steps += [
+        "  source: a mark written after the freeze; waited for until the"
+        " target holds it, and the stream's own offsets until they are"
+        " applied" if marked else
         "  source: its position taken after the freeze; the hop's own"
         " stream waited for until it passes it",
         "  both: the rows changed since the last verified pass compared,"
@@ -734,6 +908,14 @@ def plan(hop, dbs, conf):
                     if conf.get("pooler") else "") + " - the clock stops")
     steps.append("  after: the old source stays frozen; `migkit rollback"
                  f" {name} --db DB --apply` gives it back")
+    steps.append("  the point of no return, approved on its own ("
+                 + ("at the flip" if conf.get("no_return") == "at_flip" else
+                    f"`migkit move {name} --mode cdc --drop --go` once the"
+                    " flip is done")
+                 + "): the forward stream ended for good, the old source"
+                   " given back its writes, the stream back dropped, what"
+                   " the cutover left taken away - going back is refused"
+                   " after it")
     return steps
 
 
@@ -749,14 +931,26 @@ class _Undo(Exception):
 
 def run(hop, eng, dbs, go, leg, say, approve):
     """The cutover: the phased path for a hop with `cutover:`, the proved
-    manual one without. `approve(detail)` asks for the hop's approvals of
-    this plan and returns who approved."""
+    manual one without - and, once a cutover of it has flipped, its point
+    of no return (`no_return`). `approve(detail, step)` asks for the hop's
+    approvals of this plan and returns who approved."""
     conf = settings(hop)
     rec = record(hop)
     if rec and rec.get("state") == "flipped":
         # stopped between the flip and its record: it had cut over
         _flipped(hop, rec, say)
         return rec
+    if rec and rec.get("state") == "no-return":
+        # stopped half way through the point of no return: it goes on
+        return no_return(hop, eng, dbs, go, leg, say, approve, rec=rec)
+    if conf and past_flip(hop):
+        return no_return(hop, eng, dbs, go, leg, say, approve)
+    ended = last_run(hop, after=True)
+    if conf and ended and ended.get("state") == "no-return":
+        say(f"{hop.name} is cut over and past its point of no return"
+            f" ({time.strftime('%F %T', time.localtime(ended.get('ended') or 0))}):"
+            " there is nothing left to cut over")
+        return None
     if rec and rec.get("state") in ("running", "undoing"):
         if not go:
             say(f"[yellow]a cutover of {hop.name} stopped at {_where(rec)}"
@@ -773,10 +967,11 @@ def run(hop, eng, dbs, go, leg, say, approve):
                          " --drop --go` again to cut over.")
     from .movers import DRIVEN
     from .wording import without_programs
+    chose = {}
     rows = [(lvl, without_programs(what, DRIVEN))
-            for lvl, what in preflight(hop, eng, dbs, leg, conf)]
+            for lvl, what in preflight(hop, eng, dbs, leg, conf, chose)]
     _say_rows(rows, say)
-    for line in plan(hop, dbs, conf):
+    for line in plan(hop, dbs, conf, chose.get("drain") or "position"):
         say(line)
     failed = [w for lvl, w in rows if lvl == "fail"]
     if not go:
@@ -798,10 +993,30 @@ def run(hop, eng, dbs, go, leg, say, approve):
               "freeze": conf["freeze"] if conf else "by hand",
               "reverse": _reverse(hop), "flip": (conf or {}).get("flip"),
               "dbs": list(dbs)}
+    if conf and chose.get("drain") == "mark":
+        # a mark is written on the source: signed for as part of the plan
+        detail["drain"] = "mark"
+    if conf and conf["no_return"] == "at_flip":
+        detail["no_return"] = "at_flip"
     approvers = approve(detail)
+    if conf and conf["no_return"] == "at_flip":
+        # both signed before the clock starts: a flip that waited for its
+        # point of no return's approval would hold the old source frozen
+        # for as long as nobody signed
+        no_return_by = approve({**detail, "step": NO_RETURN_STEP},
+                               NO_RETURN_STEP)
     if not conf:
         return _manual(hop, eng, dbs, leg, say, approvers, failed, unproven)
-    return _phased(hop, eng, dbs, leg, conf, say, approvers)
+    from . import decide
+    for got in chose.get("choices") or ():
+        # the ways taken, and why, in the run's decision record
+        decide.record(hop, got, say)
+    got = _phased(hop, eng, dbs, leg, conf, say, approvers,
+                  drain=chose.get("drain"), way=chose.get("freeze"))
+    if conf["no_return"] == "at_flip":
+        return no_return(hop, eng, dbs, True, leg, say, approve,
+                         approvers=no_return_by)
+    return got
 
 
 def _say_rows(rows, say):
@@ -811,8 +1026,16 @@ def _say_rows(rows, say):
         say(f"  {mark[lvl]} {what}")
 
 
+def _step(name):
+    """A step of the point of no return as the record and the receivers
+    name it."""
+    return f"point of no return: {name}"
+
+
 def _where(rec):
-    began = [p for p in PHASES if (rec.get("phases") or {}).get(p)]
+    order = (PHASES if rec.get("state") != "no-return"
+             else [_step(n) for n in NO_RETURN])
+    began = [p for p in order if (rec.get("phases") or {}).get(p)]
     return began[-1] if began else "the start"
 
 
@@ -886,20 +1109,34 @@ def _quiet(hop, eng, d, window):
     return "; ".join(seen[:3])
 
 
-def _phased(hop, eng, dbs, leg, conf, say, approvers):
+def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
+            way=None):
+    """The path, phase after phase. `drain` and `way` are the preflight's
+    choices (`drain_way`, `freeze.choose`), made again here where it was
+    not asked."""
     from . import drift, freeze, jobs
     rec = {"id": secrets.token_hex(6), "began": time.time(), "dbs": dbs,
            "settings": conf, "approvers": approvers, "phases": {},
            "state": "running", "clock": {}, "left_on_source": {},
-           "counters": {}, "stream": {}, "flip": {}}
+           "counters": {}, "stream": {"down": [], "back": []}, "flip": {}}
     _save(hop, rec)
     _audit(hop, rec, {"event": "began", "budget": conf["budget"],
                       "dbs": dbs})
     budget = conf["budget"]
+    from . import decide
+    if drain is None:
+        got = drain_way(hop, eng, leg, conf, _probes(hop, leg, dbs, conf))
+        decide.record(hop, got, say)
+        drain = got.rung.name if got.rung else "position"
     how = conf["freeze"]
-    if how == "auto":
-        how = freeze.scope(hop, eng, dbs)[0]
-    rec["freeze"] = how
+    if how != "operator":
+        if way is None:
+            got = freeze.choose(hop, eng, dbs, how,
+                                (freeze.OURS,) if drain == "mark" else ())
+            decide.record(hop, got, say)
+            way = got.rung.name if got.rung else how
+        how = freeze.SCOPE.get(way, how)
+    rec.update(freeze=how, freeze_way=way, drain=drain)
 
     def left():
         clock = rec["clock"]
@@ -927,6 +1164,18 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers):
     before = {d: drift.shape(watch, "src", d) if watch else None
               for d in dbs}
     try:
+        if drain == "mark" or (leg.back_up is not None
+                               and leg.back_arm is not None):
+            # before the clock: what the flip would otherwise make inside
+            # the outage, made and proven now, and undone as any step is
+            phase("prepare")
+            if drain == "mark":
+                _mark_ready(hop, eng, dbs, leg, rec, say)
+            if leg.back_up is not None:
+                rec["back"] = _arm_back(hop, dbs, leg, rec, say)
+            done("prepare", back=rec.get("back"), drain=drain)
+        elif leg.back_up is not None:
+            rec["back"] = "at_flip"
         if conf["jobs"] == "move":
             phase("jobs_off")
             n = 0
@@ -952,9 +1201,9 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers):
             _operator_stop(hop, eng, dbs, left, say)
         else:
             freeze.freeze_source(hop, eng, dbs,
-                                 lambda m: say(f"  {m}"), how)
+                                 lambda m: say(f"  {m}"), way)
             for d in dbs:
-                held = freeze.proof(hop, eng, d, how)
+                held = freeze.proof(hop, eng, d, way)
                 bad = [w for ok, w in held if not ok]
                 if bad:
                     raise _Undo(f"{d}: the freeze did not hold - "
@@ -964,21 +1213,33 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers):
         done("freeze", how=how)
         phase("drain")
         at = {}
-        for d in dbs:
-            pos = _bounded(leg.fence.src_lsn, left(), d)
-            if pos is None or pos is False:
-                raise _Undo(f"{d}: the source gave no position to drain to"
-                            + (" within the budget" if pos is False
-                               else ""))
-            at[d] = pos
-            got = _bounded(leg.fence.fence_wait, left(), d, pos,
-                           timeout=max(0.1, left()))
-            if not got:
-                raise _Undo(f"{d}: the stream did not pass {pos}, where the"
-                            " source stood after the freeze"
-                            + (", within the budget" if got is False
-                               else " - it has no position"))
-            say(f"  {d}: the stream passed {pos}, taken after the freeze")
+        for i, d in enumerate(dbs):
+            if drain == "mark":
+                at[d] = _drain_by_mark(hop, eng, d, i, leg, rec, left, say)
+            else:
+                pos = _bounded(leg.fence.src_lsn, left(), d)
+                if pos is None or pos is False:
+                    raise _Undo(f"{d}: the source gave no position to drain"
+                                " to" + (" within the budget" if pos is False
+                                         else ""))
+                at[d] = pos
+                got = _bounded(leg.fence.fence_wait, left(), d, pos,
+                               timeout=max(0.1, left()))
+                if not got:
+                    raise _Undo(f"{d}: the stream did not pass {pos}, where"
+                                " the source stood after the freeze"
+                                + (", within the budget" if got is False
+                                   else " - it has no position"))
+                say(f"  {d}: the stream passed {pos}, taken after the"
+                    " freeze")
+            if leg.settle is not None:
+                got = _bounded(leg.settle, left(), d, max(0.1, left()))
+                if not got:
+                    raise _Undo(f"{d}: the stream's own positions did not"
+                                " settle after the freeze"
+                                + (" within the budget" if got is False
+                                   else ""))
+                say(f"  {d}: the stream's own positions settled")
         done("drain", positions=at)
         phase("verify")
         for d in dbs:
@@ -989,8 +1250,6 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers):
             _counters(hop, eng, d, conf, rec, say)
         done("counters")
         phase("stream")
-        rec["stream"] = {"down": [], "back": []}
-        _save(hop, rec)
         for d in dbs:
             rec["stream"]["down"].append(d)
             _save(hop, rec)
@@ -1000,6 +1259,10 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers):
                 _save(hop, rec)
         if leg.back_up is not None:
             for d in dbs:
+                if rec.get("back") == "armed":
+                    # made and proven before the clock: only started now
+                    leg.back_fire(d)
+                    continue
                 rec["stream"]["back"].append(d)
                 _save(hop, rec)
                 leg.back_up(d)
@@ -1060,7 +1323,328 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers):
         text = str(e).strip()
         return _undone(hop, eng, rec, leg, conf, say,
                        text.splitlines()[0] if text else type(e).__name__)
+    _after_flip(hop, dbs, leg, rec, say)
     return _flipped(hop, rec, say)
+
+
+def _back_rungs():
+    from .decide import Need, Rung
+    return (
+        Rung("armed", "the stream back made and proven before the freeze,"
+             " started at the flip", needs=(Need(
+                 "a stream back its engine lets wait idle",
+                 lambda f: f["arms"], "this engine starts its stream back"
+                 " only whole"),),
+             because="made outside the outage, the flip only starts it"),
+        Rung("at_flip", "the stream back made at the flip",
+             because="made and started at the flip"))
+
+
+#: how the stream back is made (`reverse: at_cutover`): ahead and idle,
+#: or at the flip - ranked by what the flip measured each to take, where
+#: both were timed on this hop (`decide.HopCosts`, "cutover-back/")
+_BACKS = _back_rungs()
+
+
+def _arm_back(hop, dbs, leg, rec, say):
+    """The stream back made before the clock and left idle, then proven
+    ready (`Leg.back_proof`), so the flip only starts it - or, where its
+    engine starts it only whole, or it is not ready, made at the flip as
+    ever: a way that fails is undone and the next taken (`decide.attempt`).
+    Each database is recorded before it is made, so the undo drops it."""
+    from . import decide
+    made = []
+
+    def run(choice):
+        if choice.rung.name != "armed":
+            return choice.rung.name
+        for d in dbs:
+            rec["stream"]["back"].append(d)
+            _save(hop, rec)
+            made.append(d)
+            leg.back_arm(d)
+            why = leg.back_proof(d)
+            if why:
+                raise decide.Blocked(f"{hop.target_db(d)}: the stream back"
+                                     f" made ahead is not ready - {why}")
+        say("  the stream back to the old source made and proven ready;"
+            " the flip only starts it")
+        return "armed"
+
+    def undo(rung, error):
+        for d in reversed(made):
+            leg.back_down(d)
+            rec["stream"]["back"].remove(d)
+            _save(hop, rec)
+        made.clear()
+    choice, got = decide.attempt(
+        "the stream back", _BACKS, run,
+        decide.Facts({"arms": leg.back_arm is not None}),
+        costs=decide.HopCosts(hop, "cutover-back/"), undo=undo,
+        log=lambda m: say(f"  [yellow]{m}[/yellow]"))
+    decide.record(hop, choice, say)
+    return got
+
+
+def _mark_ready(hop, eng, dbs, leg, rec, say):
+    """The mark's table made on the source (`drainmark`), before the
+    clock, and a first mark proven to reach the target - and the stream's
+    own positions to settle behind it - within the hop's `fence_timeout`:
+    a stream that does not carry a table made now is found here, with
+    nothing frozen yet."""
+    from . import drainmark
+    wait = float((hop.options or {}).get("fence_timeout", 300))
+    for i, d in enumerate(dbs):
+        rec.setdefault("mark", {})[d] = {"made": True}
+        _save(hop, rec)
+        drainmark.make(hop, eng, d)
+        token = f"{rec['id']}-{i}-0"
+        began = time.monotonic()
+        drainmark.put(hop, eng, d, token)
+        if not drainmark.wait(hop, eng, d, token, wait, leg.seen):
+            raise _Undo(f"{d}: a mark written on the source did not reach"
+                        f" the target in {wait:g}s - the stream does not"
+                        " carry a table made now; nothing was frozen")
+        if leg.settle is not None and not leg.settle(d, wait):
+            raise _Undo(f"{d}: the stream's own positions did not settle in"
+                        f" {wait:g}s behind a mark; nothing was frozen")
+        say(f"  {d}: a mark written on the source reached the target in"
+            f" {time.monotonic() - began:.2f}s")
+
+
+def _drain_by_mark(hop, eng, d, i, leg, rec, left, say):
+    """The drain of one database by a mark written after the freeze: the
+    applier that keeps the source's order has applied everything before
+    it once the target holds it."""
+    from . import drainmark
+    token = f"{rec['id']}-{i}-1"
+    if _bounded(drainmark.put, left(), hop, eng, d, token) is False:
+        raise _Undo(f"{d}: the mark could not be written on the source"
+                    " within the budget")
+    got = _bounded(drainmark.wait, left(), hop, eng, d, token,
+                   max(0.1, left()), leg.seen)
+    if not got:
+        raise _Undo(f"{d}: the mark written after the freeze did not reach"
+                    " the target" + (" within the budget" if got is False
+                                     else ""))
+    say(f"  {d}: the mark written after the freeze reached the target")
+    return f"mark {token}"
+
+
+def _after_flip(hop, dbs, leg, rec, say):
+    """Once the clock has stopped: the time the stream back's way took,
+    kept for the next cutover to choose by (`_BACKS`); and what the
+    stream leaves behind taken away (`Leg.after_flip`) - a failure there
+    is said and kept for the point of no return, never undone: the flip
+    stands."""
+    from . import decide
+    took = sum(v["ended"] - v["began"] for p, v in rec["phases"].items()
+               if p in ("stream", "reverse") and v.get("ended"))
+    if rec.get("back") and took:
+        decide.HopCosts(hop, "cutover-back/").saw(rec["back"], 1, took)
+    if leg.after_flip is None:
+        return
+    for d in dbs:
+        try:
+            left = leg.after_flip(d) or []
+        except Exception as e:  # noqa: BLE001 - said, the flip stands
+            say(f"  [yellow]{d}: what the stream left could not be taken"
+                f" away: {str(e).strip()[:200]}[/yellow]")
+            continue
+        if left:
+            rec["left_on_source"].setdefault(d, []).extend(left)
+            _save(hop, rec)
+
+
+# --- the point of no return ---------------------------------------------------
+# After the flip the old source stays frozen and, where the hop asks, the
+# stream back keeps it level with the new primary: going back stays
+# possible (`rollback --apply`). The point of no return ends that, as a
+# step of its own behind an approval of its own, and gives the old source
+# back as it was:
+#   tail_off   the forward stream ended for good - a tail paused at the
+#              flip is stopped (it carries nothing since: the source is
+#              frozen)
+#   thaw       the old source given back its writes, exactly what the
+#              freeze took
+#   back_off   the stream back dropped: from here nothing the target
+#              takes reaches the old source - the point itself
+#   left       what the cutover left on the old source run or taken away
+#              (the statements its frozen source refused, the mark's
+#              table), now that it is written again
+#   origin     migkit's own batch table taken off the target where the
+#              hop asks (`origin_table: drop`), once no tail runs
+# Each is recorded before it acts. Up to the stream back's drop every step
+# is undone on a failure - the old source frozen again - and going back is
+# still possible; a drop that failed half way leaves the old source frozen
+# again and the rest to the next run, which goes on from the record; a
+# failure after it is said and kept, since the step that cannot be undone
+# has run. After it, going back is refused.
+
+def no_return(hop, eng, dbs, go, leg, say, approve, rec=None,
+              approvers=None):
+    """The point of no return of the cutover that flipped last (`rec` is
+    the record of one stopped half way, which this one goes on from).
+    `approvers`, where the flip's own run already asked for them
+    (`no_return: at_flip`)."""
+    from . import freeze
+    flipped = (rec or {}).get("flipped") or past_flip(hop)
+    if not flipped:
+        raise SystemExit(f"{hop.name} has no cutover past its flip to take"
+                         " past the point of no return")
+    back = _reverse(hop) and leg.back_down is not None
+    when = time.strftime("%F %T", time.localtime(flipped.get("began") or 0))
+    say(f"the cutover of {when} flipped"
+        + (f" with {flipped['outage']:.2f}s of write outage"
+           if flipped.get("outage") is not None else "")
+        + "; its point of no return:")
+    for line in _no_return_plan(hop, dbs, leg, flipped, back):
+        say(f"  {line}")
+    if not go:
+        say("\ndry-run, add --go to take the cutover past its point of no"
+            " return")
+        return None
+    if approvers is None and rec is None:
+        approvers = approve({"step": NO_RETURN_STEP,
+                             "run": flipped.get("id"), "dbs": list(dbs),
+                             "stream back": back}, NO_RETURN_STEP)
+    if rec is None:
+        rec = {"id": secrets.token_hex(6), "began": time.time(),
+               "state": "no-return", "dbs": list(dbs), "phases": {},
+               "approvers": approvers or [], "flipped": flipped,
+               "back_off": []}
+        _save(hop, rec)
+    else:
+        say(f"[yellow]the point of no return stopped at {_where(rec)};"
+            " going on from there[/yellow]")
+    way = flipped.get("freeze_way") or flipped.get("freeze")
+
+    def phase(name):
+        rec["phases"].setdefault(_step(name), {"began": time.time()})
+        _save(hop, rec)
+        failpoint.hit(f"no_return.{name}")
+
+    def done(name, **said):
+        at = rec["phases"][_step(name)]
+        at.update({"ended": time.time(), **said})
+        _save(hop, rec)
+        _audit(hop, rec, {"phase": _step(name), "event": "done",
+                          "seconds": round(at["ended"] - at["began"], 3),
+                          **said})
+
+    def s(m):
+        say(f"  {m}")
+    try:
+        phase("tail_off")
+        if leg.end is not None:
+            for d in dbs:
+                leg.end(d)
+        done("tail_off")
+        phase("thaw")
+        if freeze.source_frozen(hop, dbs):
+            freeze.thaw_source(hop, eng, dbs, s)
+        done("thaw")
+        phase("back_off")
+        if back:
+            for d in dbs:
+                if d in rec["back_off"]:
+                    continue
+                leg.back_down(d)
+                rec["back_off"].append(d)
+                _save(hop, rec)
+        done("back_off", dropped=list(rec["back_off"]))
+    except (Exception, SystemExit, KeyboardInterrupt) as e:
+        text = (str(e).strip().splitlines() or [type(e).__name__])[0]
+        _no_return_back(hop, eng, dbs, rec, way, say, text)
+        raise
+    kept = []
+    phase("left")
+    for d, stmts in (flipped.get("left_on_source") or {}).items():
+        for x in stmts:
+            try:
+                eng.apply_replication_stmt("src", d, x)
+            except Exception as e:  # noqa: BLE001 - said, kept
+                kept.append(f"{d}: {x} - {str(e).strip()[:120]}")
+    for d in (flipped.get("mark") or {}):
+        try:
+            from . import drainmark
+            drainmark.drop(hop, eng, d)
+        except Exception as e:  # noqa: BLE001 - said, kept
+            kept.append(f"{d}: the mark's table - {str(e).strip()[:120]}")
+    done("left", kept=kept or None)
+    phase("origin")
+    if leg.origin is not None:
+        for d in dbs:
+            try:
+                leg.origin(d)
+            except Exception as e:  # noqa: BLE001 - said, kept
+                kept.append(f"{d}: migkit's batch table - {e}")
+    done("origin")
+    for k in kept:
+        say(f"  [yellow]not taken away: {k}[/yellow]")
+    _ended(hop, "no-return", flipped, approved_by=rec.get("approvers"),
+           kept=kept or None, at=rec["began"])
+    _path(hop).unlink(missing_ok=True)
+    say("[green]past the point of no return[/green]: the old source is"
+        " given back as it was" + (", the stream back dropped" if back
+                                   else "")
+        + f"; `migkit rollback {hop.name}` is refused from here")
+    return rec
+
+
+def _no_return_plan(hop, dbs, leg, flipped, back):
+    from .hopkeys import origin_dropped
+    out = []
+    if leg.end is not None:
+        out.append("the forward stream: ended for good - it carries nothing"
+                   " since the flip")
+    out.append("old source: its writes given back - exactly what the freeze"
+               " took")
+    out.append("the stream back: dropped - from here nothing the target"
+               " takes reaches the old source, and going back is refused"
+               if back else "no stream back runs: going back after the flip"
+                            " already loses what the target took")
+    left = sum(len(v) for v in (flipped.get("left_on_source") or {})
+               .values())
+    marks = len(flipped.get("mark") or {})
+    if left or marks:
+        out.append("old source: " + ", ".join(w for w in (
+            f"{left} statements its frozen state refused run" if left
+            else "", "the mark's table taken away" if marks else "")
+            if w))
+    if leg.origin is not None and origin_dropped(hop):
+        out.append("target: migkit's own batch table taken away"
+                   " (origin_table: drop)")
+    return out
+
+
+def _no_return_back(hop, eng, dbs, rec, way, say, why):
+    """The point of no return stopped before or at the stream back's drop:
+    the old source frozen again as the cutover had it, so going back stays
+    possible - the whole of it undone where no stream back was dropped
+    yet, the rest left to the next run where one was."""
+    from . import freeze
+    say(f"[red]the point of no return stopped: {why}[/red]")
+    if _step("thaw") in rec["phases"] and way and way != "operator":
+        # a hold taken again grows its records and takes only what is
+        # given back already: safe on a thaw that stopped half way
+        try:
+            freeze.freeze_source(hop, eng, dbs, lambda m: say(f"  {m}"), way)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - said
+            say(f"  [red]the old source could not be frozen again:"
+                f" {str(e).strip()[:200]}[/red]")
+    if rec.get("back_off"):
+        rec["why"] = why
+        _save(hop, rec)
+        raise SystemExit(
+            f"the point of no return stopped at the stream back's drop"
+            f" ({why}): {', '.join(rec['back_off'])} dropped already; the"
+            f" old source is frozen again. `migkit move {hop.name} --mode"
+            " cdc --drop --go` goes on from there")
+    _path(hop).unlink(missing_ok=True)
+    raise SystemExit(f"the point of no return was undone ({why}): the old"
+                     " source is frozen as the cutover left it, and going"
+                     " back is still possible")
 
 
 def _bounded(fn, within, *args, **kw):
@@ -1220,10 +1804,12 @@ def _flipped(hop, rec, say):
            if budget and out > budget else ""))
     for d, stmts in (rec.get("left_on_source") or {}).items():
         say(f"  {d}: left on the old source until it is written again"
-            f" (rollback --apply runs them): {'; '.join(stmts)}")
+            " (going back, or the point of no return, runs them):"
+            f" {'; '.join(stmts)}")
     say("  the old source stays frozen, so nothing is written to it by"
         f" mistake; `migkit rollback {hop.name} --db DB --apply` gives it"
-        " back")
+        " back, and so does the point of no return: `migkit move"
+        f" {hop.name} --mode cdc --drop --go` again, approved on its own")
     return rec
 
 
@@ -1250,7 +1836,7 @@ def _undo(hop, eng, rec, leg, conf, say, why):
     said and the rest still run - the source is given back its writes
     whatever else could not be put back - and what failed is kept for the
     next run to try again."""
-    from . import freeze, jobs
+    from . import drainmark, freeze, jobs
     rec["state"] = "undoing"
     _save(hop, rec)
     ph = rec.get("phases") or {}
@@ -1318,6 +1904,10 @@ def _undo(hop, eng, rec, leg, conf, say, why):
                 raise RuntimeError(said)
             s("pooler: resumed")
         step("the pooler", resume)
+    for d in rec.get("mark") or {}:
+        # made first, before the clock: taken away last, from a source
+        # that takes writes again
+        step(f"{d}: the mark's table", drainmark.drop, hop, eng, d)
     clock = rec.setdefault("clock", {})
     if clock.get("began") and not clock.get("stopped"):
         clock["stopped"] = time.time()
@@ -1344,8 +1934,21 @@ def back_plan(hop, eng, db, say):
     stands - before `rollback` puts the target's own counters back to its
     restore point, which would hide the keys handed out since - and
     applied by `back_apply`. None, and nothing written to the source,
-    where the hop has neither option; that is said."""
+    where the hop has neither option; that is said. Refused past the
+    point of no return (`no_return`): the stream back is gone and the
+    old source has its writes, so nothing carries the target back."""
     from .engines import get_engine
+    rec = record(hop)
+    ended = last_run(hop, after=True)
+    if (rec and rec.get("state") == "no-return") or (
+            ended and ended.get("state") == "no-return"):
+        who = ", ".join((rec or ended or {}).get("approvers")
+                        or (ended or {}).get("approved_by") or []) or "the hop"
+        raise SystemExit(
+            f"{hop.name} is past the point of no return (approved by {who}):"
+            " the stream back is dropped and the old source takes its own"
+            " writes, so nothing the target took since is on it. Nothing"
+            " was done")
     if not (_reverse(hop) or settings(hop)):
         say("  the old source's counters are left as they are: the hop has"
             " neither a stream back (`reverse: at_cutover`) nor `cutover:`,"
@@ -1419,6 +2022,17 @@ def back_apply(hop, eng, db, back, apply, say):
                 eng.apply_replication_stmt("src", d, x)
             except Exception as e:  # noqa: BLE001 - said, not fatal
                 say(f"  [yellow]{d}: {x} - {e}[/yellow]")
+    flipped = past_flip(hop)
+    if flipped:
+        from . import drainmark
+        for d in flipped.get("mark") or {}:
+            try:
+                drainmark.drop(hop, eng, d)
+            except Exception as e:  # noqa: BLE001 - said, not fatal
+                say(f"  [yellow]{d}: the mark's table - {e}[/yellow]")
+        # the flip ended by going back: a later run of the cutover
+        # command is a cutover again, not this one's point of no return
+        _ended(hop, "rolled back", flipped)
     return stmts
 
 
@@ -1445,15 +2059,16 @@ def summary(hop, eng, dbs):
                         f" `migkit move {hop.name} --mode cdc --drop` lists"
                         " the steps")
     how = conf["freeze"]
-    if how in ("auto", "server", "database") and freeze.side_engine(
-            hop, eng, "src")[0] in (
-            freeze.FREEZES):
-        scope, why = freeze.scope(hop, eng, dbs)
-        how = (f"{'the whole server' if scope == 'server' else 'per database'}"
-               f" ({why})")
-    elif how != "operator":
-        return ("fail", f"cutover: a {hop.engine} source is not frozen by"
-                        " migkit - `freeze: operator`")
+    if how != "operator":
+        got = freeze.choose(hop, eng, dbs, how)
+        if got.rung is None:
+            kind = freeze.side_engine(hop, eng, "src")[0]
+            return ("fail", f"cutover: the {hop.engine} source is not frozen"
+                            " by migkit here - "
+                            + (got.reason if kind in freeze.FREEZES
+                               else freeze.not_held(kind))
+                            + "; `freeze: operator`")
+        how = f"{got.rung.said} ({got.reason})"
     return ("pass", f"cutover within {conf['budget']:g}s: the source frozen"
                     f" {how if how != 'operator' else 'by the operator, proved by migkit'};"
                     + (" a stream back to the old source" if back else
@@ -1461,7 +2076,11 @@ def summary(hop, eng, dbs):
                        " what the target took")
                     + "; the flip "
                     + (f"runs `{conf['flip']}`" if conf.get("flip")
-                       else "is the operator's"))
+                       else "is the operator's")
+                    + ("; the point of no return at the flip, approved on"
+                       " its own" if conf["no_return"] == "at_flip" else
+                       "; the point of no return a run of its own, approved"
+                       " on its own"))
 
 
 def said_by_doctor(hop):
@@ -1476,8 +2095,14 @@ def said_by_doctor(hop):
                       if rec.get("undo_error") else "")
                    + f": `migkit move {hop.name} --mode cdc --drop --go`"
                      " undoes it")
+    if rec and rec.get("state") == "no-return":
+        out.append(f"the point of no return stopped at {_where(rec)}"
+                   f": `migkit move {hop.name} --mode cdc --drop --go` goes"
+                   " on from there")
     if freeze.source_frozen(hop, hop.databases or []):
         out.append("the source is kept frozen by the cutover (the old"
                    f" primary): `migkit rollback {hop.name} --db DB"
-                   " --apply` gives it back")
+                   " --apply` gives it back, and so does the point of no"
+                   f" return (`migkit move {hop.name} --mode cdc --drop"
+                   " --go` again)")
     return out

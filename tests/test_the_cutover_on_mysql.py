@@ -294,8 +294,10 @@ def test_going_back_raises_the_old_sources_counter(cut):
     conn.close()
 
 
-PHASES = ("jobs_off", "freeze", "drain", "verify", "counters", "stream",
-          "reverse", "jobs_on", "flip")
+#: "prepare" first: the hop streams back, and the stream back is made
+#: ahead of the clock where it can wait idle
+PHASES = ("prepare", "jobs_off", "freeze", "drain", "verify", "counters",
+          "stream", "reverse", "jobs_on", "flip")
 
 
 def test_a_failure_at_any_step_undoes_every_step(cut, monkeypatch):

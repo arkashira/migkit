@@ -59,9 +59,9 @@ REPORTS = _reports_root()
 
 
 #: tables migkit keeps on a side for itself - a two-way tail's origin
-#: marks (`twoway`) - never copied, compared or repaired as the
-#: application's
-MIGKIT_OWN = ("migkit_origin",)
+#: marks (`twoway`), a cutover's drain marks (`drainmark`) - never copied,
+#: compared or repaired as the application's
+MIGKIT_OWN = ("migkit_origin", "migkit_cutover_mark")
 
 #: engines whose objects are keys or topics an application names as it
 #: likes, not tables and schemas another tool creates for its own state:

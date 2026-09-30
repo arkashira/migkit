@@ -2024,6 +2024,8 @@ SHAPES = {
     "missing grant": "a user without the grant a program needs",
     "read-only target": "a target that must stay read-only",
     "slow link": "a link too slow for one stream",
+    "writes held": "a side whose writes are held and let go again, read"
+                   " back - the source at cutover",
 }
 
 _STREAM_ONLY = ("a stream of changes is where a pair delivers them, not a"
@@ -2159,6 +2161,24 @@ WAYS = {
     "read-only source": {
         **_NONE,
         "*": ("yes", "engines.base.Engine._target_only"),
+    },
+    # one hold per engine (`freeze.Hold`): the cutover's freeze of the
+    # source stands on it, and keeping the target from the application can
+    "writes held": {
+        **_NONE,
+        **{n: ("yes", f"freeze.{c}") for n, c in (
+            ("postgres", "PostgresHold"), ("mysql", "MySQLHold"),
+            ("mongodb", "MongoHold"), ("redis", "RedisHold"),
+            ("mssql", "MSSQLHold"), ("cassandra", "CassandraHold"),
+            ("kafka", "KafkaHold"), ("opensearch", "OpenSearchHold"))},
+        **{n: (NOT_APPLICABLE, "a file is written by whoever opens it, and"
+                               " nothing on it can hold a writer")
+           for n in _FILES},
+        "dynamodb": (NOT_APPLICABLE, "its writes are allowed by the"
+                                     " account's access policies, outside"
+                                     " the database, which migkit does not"
+                                     " change"),
+        "*": (NOT_YET, "F2"),
     },
 }
 # the copier reads a table whose only index is not unique as one with no
