@@ -2791,6 +2791,34 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## P0-SCENARIOS. Every reason a database is migrated (owner, 2026-10-01)
+
+Asked: "old version to a newer one, SQL Server Web edition to Datacenter
+(Enterprise) - does migkit do these? Think through every case a database
+is migrated." The cases, what migkit has (at fb5c988), what is missing:
+
+| Case | Has | Missing |
+|---|---|---|
+| Major version up (same engine) | `goal: upgrade` (pages copied, upgraded on the target, followed; or logical into the new version; removed settings, defaults, extensions, collations checked first) | thin checks on MongoDB and SQL Server |
+| Version DOWN (rollback plan, an older target) | a logical move works | no check of what the newer source uses that the older target lacks (types, collations such as utf8mb4_0900, syntax, features), no physical refusal said up front |
+| **Edition change** (SQL Server Express/Web/Standard/Enterprise/Developer, Oracle SE2/EE, MySQL Community/Enterprise, MongoDB Community/Enterprise, Redis OSS/Enterprise) | nothing edition-aware | read each side's edition; features the source's database uses that the target's edition lacks (SQL Server `sys.dm_db_persisted_sku_features`, Oracle `dba_feature_usage_statistics`, MySQL enterprise plugins, MongoDB enterprise modules) refused up front with the fix; the target edition's caps checked against the source (Express 10 GB a database, Standard/Web memory and core caps); the way chosen (same version up-edition: native backup/restore where the target may take it; down-edition or with features persisted: logical with the features stripped or refused); licence-driven moves said as such |
+| Fork or distribution (MySQL/MariaDB/Percona, PostgreSQL/Aurora/AlloyDB/Citus/Yugabyte, Redis/Valkey/KeyDB/Dragonfly, Elasticsearch/OpenSearch, MongoDB/DocumentDB/Cosmos Mongo API/FerretDB, Kafka/Redpanda/MSK) | MySQL brands read; DocumentDB->MongoDB proved in production; OpenSearch | each fork's differences as facts (GTID flavours, JSON as text in MariaDB, collations, unsupported commands and operators), Elasticsearch as a side, the Mongo-compatible services' gaps named, a fork change explained in the plan |
+| Platform: on-prem<->cloud, cloud<->cloud, region, account | proved AWS<->Tencent; cloud snapshots across accounts; physical seeds | - |
+| Self-managed<->managed, managed<->managed (EC2->RDS, RDS->Aurora, single->flexible server) | physical and logical rungs, cloud clones | the managed service's own blue/green or upgrade path as a rung where it exists |
+| Hardware / OS / architecture (x86->ARM, Windows->Linux SQL Server) | a logical move | said as its own case; byte-order and collation facts where they differ |
+| Character set / collation change (latin1->utf8mb4, ICU version) | collation merges refused, mojibake repair queued | a planned conversion with every value proved in the new charset, indexes rebuilt |
+| Storage engine change (MyISAM->InnoDB, Aria, MEMORY) | - | converted in the schema step, with the behaviours that change (transactions, FK, full-text) said |
+| Consolidation (many databases or tenants into one) and split (one into many, a service extracted) | `db_map`, mappings, row filters | a tenant key added on the way, collisions of keys across sources found first, a split by rule with every row placed exactly once, proved |
+| Resharding / topology (single<->cluster, shard split/merge) | W7 open | W7 |
+| Archive / partial moves (old rows to cheaper storage) | row filters | the source rows removed only after the target is proved and only where the hop allows |
+| Zero-downtime with a way back, active-active during the move | cutover path, stream back, two-way | cutover gaps (running) |
+| Heterogeneous (commercial -> open source, relational <-> NoSQL/search/stream, OLTP -> warehouse/lake, mainframe, SaaS) | 28 engines, canon, stored-code proof | engine reach (running), P0-PARITY |
+| Test copies, DR drills, backup restores checked, replica drift | subsets, check between any two, rehearsal | - |
+| Fleet-wide rolling upgrades | - | W2 estate |
+
+Every case is a `goal:` or a fact the decision engine reads, explained in
+`docs/goals-and-modes.md`; the plan names the case it recognised.
+
 ## P0-DEPTH. migkit's own parts that are still flat (owner, 2026-10-01)
 
 Asked: "our own parts - flat, not smart, or already good?" Read at
