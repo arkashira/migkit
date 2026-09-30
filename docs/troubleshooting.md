@@ -65,7 +65,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * unknown hop <...>, have: <...>
 
-* <...> already has a hop <...> (use --force to write a new file, or MIGKIT_HOP=<another name>)
+* <...> already has a hop <...> going somewhere else (MIGKIT_HOP=<another name> adds this one beside it)
 
 * MIGKIT_GOAL=<...>: one of <...>
 
@@ -111,6 +111,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * share_tables needs the s3 state backend (options.state.backend: s3): the machines sharing a move find each other's tables there
 
+* <...> masks columns on the way, and a repair of rows writes the source's values as they are, unmasked: move those tables again with --mode full, which masks them; --kind sequences or --kind schema repairs the rest. Nothing has been started
+
+* <...> masks columns on the way, and a change stream would carry their real values into the target: a hop that masks is copied (--mode full), not followed. Nothing has been started
+
 * <...>: <...> not configured yet fill host/user/password in conf/hops.yaml, then: migkit doctor
 
 * <...> already exists (use --force to overwrite)
@@ -119,7 +123,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * --convert is for hetero hops, same-engine hops use migkit schema HOP
 
-* <...> could not be created on the target: <...>
+* <...> could not be created on the target; nothing else was either - the schema is created in one transaction, whole or not at all | <...>: <...>
 
 * --migration supports postgres and mysql hops
 
@@ -133,6 +137,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the row-by-row drilldown needs a component that is not installed here: migkit doctor --install puts it in place
 
+* --only <...>: not a check of this hop's engine; its checks are <...>
+
+* on_conflict: <...> - source-wins or keep-target
+
 * run migkit check first, then sync uses its diffs
 
 * <...>: <...> is writing to this target, and a row repair beside it would race it - the row that survives is whichever lands last. Nothing was applied. Stop it, repair, and start it again, or let it catch up and check again.
@@ -140,6 +148,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...> did not pause within <...>s (hop option repair_window), so nothing was applied. It has been told to carry on.
 
 * <...>: <...>
+
+* --kind picks what a repair of the last check's differences puts right; --mode <...> runs a whole flow and repairs whatever it finds
+
+* --tag names the restore point --go takes; without --go nothing is saved to name
+
+* --interval is the time between the cycles of --serve
+
+* --serve keeps verifying a stream: --mode stream or --mode migrate
+
+* --apply repairs; --go repairs with a restore point taken first - one or the other
 
 * <...> is a copy for testing (goal subset): it is taken afresh by migkit move <...> --mode full --go, and proved by migkit check <...>; sync makes a target equal to the whole source. Nothing was written
 
@@ -163,7 +181,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the tail is still running; stop it first, then take its marks away
 
-* the streaming pipeline did not come up (logs: docker compose -f <...>/docker-compose.yml logs)
+* the streaming pipeline did not come up (its stack is written under <...>); migkit doctor says what this machine is missing
+
+* --drop tears the stream down: migkit move <...> --mode cdc --drop
+
+* --table narrows a copy; a stream follows the whole database (--mode full or full+cdc)
+
+* --chunk sizes the ranges of a copy; --mode cdc copies nothing
 
 * <...> <...> | <...>Nothing past the last finished table is marked as moved. The commands that ran are in the run's commands.log.
 
@@ -177,13 +201,23 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * moving and then following a <...> source is not set up on this machine; migkit doctor says what is missing
 
-* <...> masks columns on the way, and a change stream would carry their real values into the target: a hop that masks is copied (--mode full), not followed. Nothing has been started
+* a program an earlier move of <...> started is still running (process <...>) and writing; a move beside it would empty the tables under it
+
+* the programs installed here do not take options the move passes them - migkit doctor --install puts builds that do in place
 
 * no way to follow a <...> source is set up on this machine - <...> | ; migkit doctor says what is missing
 
 * <...>: the change tail did not end
 
 * <...>: the change tail did not pause
+
+* --only names the checks --verify runs each cycle
+
+* --teardown drops what --delta keeps; --verify alone keeps nothing to drop
+
+* --serve and --metrics are for every hop; --refresh, --open and a hop name are for one hop's report
+
+* --port is where --serve listens
 
 * which hop? reports exist for: <...>
 
@@ -193,9 +227,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * state <...> not retrievable from <...>
 
-* replicate not available for <...>, use migkit move --mode cdc or the advise playbook
-
-* this hop follows its source through migkit move --mode cdc
+* the move's checkpoint <...> kept changing while it was written; nothing past the last save is lost, and the next run goes on from it
 
 * the move's checkpoint kept changing under migkit while it saved it
 
@@ -465,6 +497,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## The cutover, and what guards a write
 
+* approvals.steps: a list of steps - <...>
+
+* approvals.steps: <...> - not a step migkit holds; the steps are <...>
+
 * <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there
 
 * cutover: is `true` or the path's settings (<...>), not <...>
@@ -586,6 +622,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * setpw: mongodb only (other engines can copy the hash)
 
 ## Schedules, the run's state and tunnels
+
+* <...>=<...>: one of 1, true, yes, on - or 0, false, no, off
 
 * schedule.timezone: <...> is not a time zone
 

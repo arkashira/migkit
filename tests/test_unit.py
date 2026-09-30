@@ -88,7 +88,8 @@ def test_report_renders_without_findings():
     hop = _fake_hop("postgres")
     html = render(hop, [{"check": "counts", "scope": "db1", "status": "ok",
                          "detail": "rows 5==5"}])
-    assert "PASS" in html
+    # the verdict's own word (`verdict.VERDICTS`), not a second vocabulary
+    assert "SAME" in html
     assert "db1" in html
 
 
@@ -97,7 +98,7 @@ def test_report_flags_diff():
     hop = _fake_hop("postgres")
     html = render(hop, [{"check": "data", "scope": "db1", "status": "diff",
                          "detail": "missing=3"}])
-    assert "FAIL" in html
+    assert "DIFFERENT" in html and "SAME" not in html
     assert "missing=3" in html
 
 

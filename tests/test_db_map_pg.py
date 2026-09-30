@@ -39,7 +39,7 @@ def test_pg_source_and_target_have_different_db_names(pg_pair, tmp_path):
 
         # identical data in differently-named dbs -> clean
         r = _migkit(conf, "check", "t", "--only", "counts,data,autoinc")
-        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout + r.stderr
         assert "DIFF" not in r.stdout
         assert "500" in r.stdout
 
@@ -63,7 +63,7 @@ def test_pg_source_and_target_have_different_db_names(pg_pair, tmp_path):
                  db="appdst").stdout.strip()
         assert n == "500"
         r = _migkit(conf, "check", "t", "--only", "counts,data,autoinc")
-        assert r.returncode == 0, r.stdout
+        assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout
     finally:
         psql(pg_pair["src"], "drop database if exists appsrc")
         psql(pg_pair["dst"], "drop database if exists appdst")

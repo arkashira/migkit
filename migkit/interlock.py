@@ -281,17 +281,33 @@ def _once(hop, what):
     return True
 
 
+def identities(hop, eng, db):
+    """(the source's identity, the target's) for `db`, asked once a run of
+    the engine: a `move --go` asked both servers who they were, and the
+    cloud they run in, three times a database - its guard, its copy's
+    rows, its stream. Kept on the engine, which a run makes afresh."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import session
+    asked = eng.__dict__.setdefault("_interlock_asked", {})
+    key = (hop.name, db, session.current())
+    got = asked.get(key)
+    if got is None:
+        # both at once: a side nothing answers at costs one wait, not two
+        with ThreadPoolExecutor(2) as pool:
+            got = tuple(pool.map(lambda side: identity(hop, eng, side, db),
+                                 ("src", "dst")))
+        asked[key] = got
+    return got
+
+
 def before_write(hop, eng, db, go, log):
     """Every write step starts here: both sides' identities, said once per
     run; the target held to the source, to the hop's production list and
     to what the plan showed. With `go`, a step that must not write stops
     before it does; without, the plan says so and keeps what it showed.
     Returns the target's identity and its fingerprint."""
-    from concurrent.futures import ThreadPoolExecutor
-    # both at once: a side nothing answers at costs one wait, not two
-    with ThreadPoolExecutor(2) as pool:
-        src, dst = pool.map(lambda side: identity(hop, eng, side, db),
-                            ("src", "dst"))
+    src, dst = identities(hop, eng, db)
     where = db or hop.name
     if _once(hop, ("shown", db)):
         log(_line("source", src))
@@ -380,7 +396,7 @@ def refusals(hop, eng, d, tables=None):
     `tables`) rows it did not write that the hop does not say what to do
     with - asked the way `before_write` and `before_copy` ask, and
     nothing kept or said: what `ready` says before anything runs."""
-    src, dst = identity(hop, eng, "src", d), identity(hop, eng, "dst", d)
+    src, dst = identities(hop, eng, d)
     out = []
     same = itself(src, dst)
     if same:

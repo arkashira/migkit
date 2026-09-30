@@ -60,7 +60,7 @@ def test_faker_identical_data_verifies_clean(pg_pair, tmp_path):
         _load(p, rows)
 
     r = _migkit(conf, "check", "t", "--only", "counts,data")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout
     assert "DIFF" not in r.stdout
     assert "2000" in r.stdout
 
@@ -87,7 +87,7 @@ def test_faker_diffs_detected_and_repaired(pg_pair, tmp_path):
     assert "applied" in r.stdout
 
     r = _migkit(conf, "check", "t", "--only", "counts,data")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout
 
 
 def test_faker_move_roundtrips_all_types(pg_pair, tmp_path):
@@ -102,7 +102,7 @@ def test_faker_move_roundtrips_all_types(pg_pair, tmp_path):
     assert "move complete" in r.stdout, r.stdout + r.stderr
 
     r = _migkit(conf, "check", "t", "--only", "counts,data")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout
     # verify a jsonb + bytea row survived byte-for-byte
     a = psql(pg_pair["src"],
              "select md5(payload) from people where id = 100").stdout

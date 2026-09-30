@@ -59,7 +59,7 @@ def test_the_target_is_built_and_filled_under_the_mapping(lite):
 def test_the_check_compares_through_the_mapping(lite):
     _run("move", "lite", "--mode", "full", "--go")
     got, said = _run("check", "lite", "--only", "schema,data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     assert "secret" not in said, said
     assert "DIFF" not in said.upper().replace("DIFFER", ""), said
     # and a changed renamed value is still caught

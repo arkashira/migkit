@@ -83,13 +83,22 @@ def run(command, hop, args=(), conf=None, reports=None, env=None,
 
 
 def passed(result, fail_on_difference=True):
-    """Whether a task that ran `result` succeeds: the command ended
-    well, or it found a difference and the task is told not to fail on
-    one."""
-    if result["exit"] == 0:
-        return True
-    return (not fail_on_difference and result["exit"] == 1
-            and result["status"] == "different")
+    """Whether a task that ran `result` succeeds: the command ended well,
+    or it found a difference and the task is told not to fail on one -
+    read from the one table the command's exit code comes from
+    (`verdict.VERDICTS`), so a task and the command never disagree. A
+    verdict that is not `same` fails even where the command ended 0: a
+    run that wrote one is held to it."""
+    from . import verdict
+    status = result.get("status")
+    if status is not None and status not in verdict.VERDICTS:
+        return False
+    if status in ("error", "incomplete"):
+        return False
+    if status == "different" or \
+            result["exit"] == verdict.VERDICTS["different"].exit:
+        return not fail_on_difference and status == "different"
+    return result["exit"] == verdict.EXIT["done"]
 
 
 def said(result):
@@ -114,6 +123,8 @@ def step(environ=None):
     exit code the step ends with."""
     import shlex
     import shutil
+
+    from . import schedule
     e = os.environ if environ is None else environ
     got = run(e["MIGKIT_COMMAND"] or "check", e["MIGKIT_HOP"],
               shlex.split(e.get("MIGKIT_ARGS") or ""),
@@ -136,8 +147,17 @@ def step(environ=None):
             (out / k).write_text(v)
         if evidence is not None:
             shutil.copytree(evidence, out / "evidence", dirs_exist_ok=True)
-    return 0 if passed(got, e.get("MIGKIT_FAIL_ON_DIFFERENCE", "true")
-                       .lower() != "false") else (got["exit"] or 1)
+    return 0 if passed(got, schedule.flag("MIGKIT_FAIL_ON_DIFFERENCE",
+                                         True, e)) \
+        else (got["exit"] or verdict_exit(got))
+
+
+def verdict_exit(got):
+    """The exit code a step that ended 0 over a verdict that fails it ends
+    with: the verdict's own."""
+    from . import verdict
+    return verdict.VERDICTS.get(got.get("status") or "",
+                                verdict.VERDICTS["error"]).exit
 
 
 def _summary(got, evidence):

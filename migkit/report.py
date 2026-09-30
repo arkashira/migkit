@@ -40,6 +40,7 @@ h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .diff .dot, .dot.diff { background: #fab219; }
 .error .dot, .dot.error { background: #d03b3b; }
 .skip .dot, .dot.skip { background: #c3c2b7; }
+.warn .dot, .dot.warn { background: #e07b00; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eceae6;
   font-size: 13.5px; white-space: nowrap; }
@@ -75,8 +76,8 @@ footer { color: #52514e; font-size: 12px; text-align: center; margin-top: 24px; 
 
 
 def _chip(status):
-    label = {"ok": "OK", "diff": "DIFF", "error": "ERROR",
-             "skip": "SKIP"}.get(status, status.upper())
+    label = {"ok": "OK", "diff": "DIFF", "error": "ERROR", "warn": "WARN",
+             "skip": "SKIP"}.get(status, str(status).upper())
     return (f'<span class="chip {status}"><span class="dot {status}"></span>'
             f'{label}</span>')
 
@@ -139,55 +140,52 @@ def _objects_section(hop, dbs):
             f'</thead><tbody>{"".join(rows)}</tbody></table></div>')
 
 
-def _reclassify(results):
-    """A data row whose drilldown found no differing rows is a settled
-    checksum flicker (in-flight replication), not a real diff."""
-    for r in results:
-        if (r.get("check") == "data" and r.get("status") == "diff"
-                and "missing=0 extra=0 changed=0" in r.get("detail", "")):
-            r["status"] = "ok"
-            r["detail"] = "checksum flicker settled, 0 rows differ"
-    return results
+#: a cell's worst answer, and what it is shown as
+_WORST = ("error", "diff", "warn", "skip", "ok")
 
 
-def render(hop, results, generated=None):
+def render(hop, results, generated=None, decided=None):
+    """The report of a check's answers. It reads them and changes nothing:
+    the verdict is `verdict.decide`'s - the one the check's exit code and
+    `verdict.json` hold - and a cell shows its worst answer, a skip as a
+    skip. It once rewrote a `diff` whose detail said no row differed into
+    an `ok`, in the very rows the check then counted its exit code from:
+    the console said different, then "all green", and exited 0."""
+    from . import verdict
     generated = generated or time.strftime("%Y-%m-%d %H:%M:%S")
-    results = _reclassify(results)
+    results = [dict(r) for r in results]
+    decided = decided or verdict.decide(results, hop)
     dbs = []
     matrix = {}
     for r in results:
-        db = r["scope"].split()[0].split(".")[0].replace("(migra)", "").strip()
+        db = verdict.db_of(r.get("scope", ""))
         if db not in dbs:
             dbs.append(db)
-        cell = matrix.setdefault((db, r["check"]), [])
+        cell = matrix.setdefault((db, r.get("check", "")), [])
         cell.append(r)
 
     def cell_status(db, check):
         rs = matrix.get((db, check))
         if not rs:
             return "skip"
-        worst = "ok"
-        for r in rs:
-            if r["status"] == "error":
-                return "error"
-            if r["status"] == "diff":
-                worst = "diff"
-        return worst
+        seen = {r.get("status") if r.get("status") in _WORST else "error"
+                for r in rs}
+        return next(s for s in _WORST if s in seen)
 
     ran = [c for c in CHECK_ORDER
            if any(matrix.get((d, c)) for d in dbs)]
+    ran += sorted({c for _, c in matrix} - set(ran))
     tiles = []
     for c in ran:
         total = sum(1 for d in dbs if matrix.get((d, c)))
         passed = sum(1 for d in dbs if cell_status(d, c) == "ok"
                      and matrix.get((d, c)))
-        status = "ok" if passed == total and total else "diff"
-        if any(cell_status(d, c) == "error" for d in dbs):
-            status = "error"
+        worst = [cell_status(d, c) for d in dbs if matrix.get((d, c))]
+        status = next((s for s in _WORST if s in worst), "skip")
         tiles.append(
             f'<div class="tile"><div class="n">{passed}/{total}</div>'
             f'<div class="l"><span class="dot {status}"></span>'
-            f'{CHECK_LABEL[c].lower()}</div></div>')
+            f'{html.escape(CHECK_LABEL.get(c, c).lower())}</div></div>')
 
     rows = []
     for d in dbs:
@@ -196,29 +194,34 @@ def render(hop, results, generated=None):
             for c in ran)
         rows.append(f'<tr><td class="db">{html.escape(d)}</td>{cells}</tr>')
 
-    findings = [r for r in results if r["status"] not in ("ok", "skip")]
+    findings = [r for r, sev in zip(results, decided.severity)
+                if sev not in ("same", "not compared") or r.get("stale")]
     cards = []
     for r in findings:
-        sev = "error" if r["status"] == "error" else ""
+        st = str(r.get("status", ""))
+        sev = "error" if st not in ("diff", "warn", "skip") else ""
         fix = r.get("fix_hint", "")
         fix_html = f'<div class="fix">{html.escape(fix)}</div>' if fix else ""
         cards.append(
-            f'<div class="finding {sev}"><div class="head">{_chip(r["status"])}'
-            f'<span>{html.escape(r["check"])} &middot; '
-            f'{html.escape(r["scope"])}</span></div>'
-            f'<div class="what">{html.escape(r.get("detail", ""))}</div>'
-            f'{fix_html}{_excerpt(r.get("detail", ""), r.get("report", ""))}</div>')
+            f'<div class="finding {sev}"><div class="head">{_chip(st)}'
+            f'<span>{html.escape(str(r.get("check", "")))} &middot; '
+            f'{html.escape(str(r.get("scope", "")))}</span></div>'
+            f'<div class="what">{html.escape(str(r.get("detail", "")))}</div>'
+            f'{fix_html}{_excerpt(str(r.get("detail", "")), r.get("report", ""))}</div>')
     if not cards:
         cards = ['<div class="sub">none</div>']
 
-    n_bad = len(findings)
     n_all = len(results)
+    said = verdict.VERDICTS[decided.status].word
+    why = f" &middot; {html.escape(decided.why)}" if decided.why else ""
     banner = (
         f'<div class="banner pass"><span class="dot ok"></span>'
-        f'PASS &mdash; {n_all}/{n_all} checks</div>'
-        if n_bad == 0 else
-        f'<div class="banner fail"><span class="dot error"></span>'
-        f'FAIL &mdash; {n_bad} of {n_all} checks</div>')
+        f'SAME &mdash; {n_all} checks{why}</div>'
+        if decided.status == "same" else
+        f'<div class="banner fail"><span class="dot'
+        f' {"diff" if decided.status != "error" else "error"}"></span>'
+        f'{html.escape(said.upper())} &mdash; {len(findings)} of {n_all}'
+        f' checks{why}</div>')
 
     src = f"{hop.source.user}@{hop.source.host}:{hop.source.port}"
     dst = f"{hop.target.user}@{hop.target.host}:{hop.target.port}" \
@@ -238,24 +241,33 @@ def render(hop, results, generated=None):
 <div class="tiles">{"".join(tiles)}</div>
 <div class="card"><h2>status</h2>
 <table><thead><tr><th>db</th>
-{"".join(f"<th>{CHECK_LABEL[c].lower()}</th>" for c in ran)}
+{"".join(f"<th>{html.escape(CHECK_LABEL.get(c, c).lower())}</th>" for c in ran)}
 </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 {objects_html}
 <div class="card"><h2>issues</h2>{"".join(cards)}</div>
 </div></body></html>"""
 
 
-def write_report(hop, results, out_path=None, generated=None):
+def write_report(hop, results, out_path=None, generated=None, decided=None):
     out = Path(out_path) if out_path else hop.report_dir() / "report.html"
-    out.write_text(render(hop, results, generated))
+    out.write_text(render(hop, results, generated, decided))
     return out
 
 
 def from_summary(hop):
+    """The report of the last check, from what it left on disk - its
+    answers, and what it was narrowed to - never changing them."""
+    from . import verdict
     p = hop.report_dir() / "summary.json"
     if not p.exists():
         raise SystemExit(f"no summary at {p}, run migkit check first")
     generated = time.strftime("%Y-%m-%d %H:%M:%S",
                               time.localtime(p.stat().st_mtime))
-    return write_report(hop, json.loads(p.read_text()),
-                        None, generated), generated
+    results = json.loads(p.read_text())
+    try:
+        coverage = json.loads((hop.report_dir() / "verdict.json")
+                              .read_text()).get("coverage")
+    except (OSError, ValueError):
+        coverage = None
+    return write_report(hop, results, None, generated,
+                        verdict.decide(results, hop, coverage)), generated

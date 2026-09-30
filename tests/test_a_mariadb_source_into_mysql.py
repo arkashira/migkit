@@ -135,7 +135,7 @@ def test_a_versioned_table_is_carried_and_compared(hop):
     assert sql(MY, "mysql", "select concat(id, '=', v) from cx.hist") == \
         "1=new"
     got, said = _run("check", "fk", "--only", "counts,data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     assert "cx.hist: OK rows 1==1" in said, said
     # a table on one side only is a difference, whatever else read clean
     sql(MY, "mysql", "drop table cx.hist")
