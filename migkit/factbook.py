@@ -199,6 +199,14 @@ for _name, _what, _group, _how in (
     ("written", "whether the source was written while a table was read",
      "table", MEASURED),
     ("same_shape", "whether a table has the shape it had", "table", READ),
+    ("lobs", "whether a table holds a large object, JSON or XML, which a"
+     " bulk read carries none of", "table", READ),
+    ("odd", "the columns of a batch whose types a bulk load carries none"
+     " of", "table", READ),
+    ("sessions", "whether migkit's user may read the list of sessions a"
+     " system's parallel sessions need", "side", READ),
+    ("filterable", "whether a service filters every field of a key",
+     "table", READ),
     # --- the changes --------------------------------------------------------
     ("publication_risk", "whether the source's publication would lose a"
      " table's changes", "change", READ),

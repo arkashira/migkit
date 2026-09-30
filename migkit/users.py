@@ -175,6 +175,11 @@ def compare(hop, say=print):
         t = _ibmi_accounts(hop, "dst")
         skeys, tkeys = set(s), set(t)
         pw = []
+    elif eng == "teradata":
+        s = _td_accounts(hop, "src")
+        t = _td_accounts(hop, "dst")
+        skeys, tkeys = set(s), set(t)
+        pw = []
     elif eng == "redis":
         s = _redis_users(hop.source)
         t = _redis_users(hop.target)
@@ -240,6 +245,16 @@ def compare(hop, say=print):
         say(f"  object authorities missing on target ({len(gd)}): {gd}")
         say("  note: IBM i shows no password or its hash; a profile is"
             " created by its security officer with one of their choosing")
+    elif eng == "teradata":
+        gd = sorted(k for k in s if k in t and (
+            set(s[k]["grants"]) - set(t[k]["grants"])
+            or set(s[k]["roles"]) - set(t[k]["roles"])))
+        out.update(grants_differ=gd)
+        out["result"] = "pass" if not (missing or gd) else "gap"
+        say(f"  rights or role memberships missing on target ({len(gd)}):"
+            f" {gd}")
+        say("  note: Teradata shows no password or its hash; a user is"
+            " created with the one the passwords file gives it")
     elif eng == "oracle":
         gd = _ora_short(s, t)
         hidden = sorted(k for k in s if k.startswith("user:")
@@ -861,6 +876,199 @@ def _ibmi_rollback(hop, apply, say):
         finally:
             conn.close()
         say(f"   {undo}")
+    if apply:
+        rec.rename(str(rec) + ".rolled-back")
+
+
+# --- Teradata ----------------------------------------------------------------
+#
+# The users and roles that hold a right on the hop's databases, the roles
+# each is a member of, and each right as the GRANT that gives it - read from
+# DBC's views of every right (`AllRightsV`, `AllRoleRightsV`, `RoleMembersV`).
+# A right on the target is compared under the source's database name
+# (`db_map`). Teradata shows no password or its hash: a user is created with
+# the one the passwords file gives, and one without is listed, not made.
+
+#: DBC's access right codes, as GRANT says each; a right with no code here
+#: is compared, and listed rather than granted
+TD_RIGHTS = {"R": "SELECT", "I": "INSERT", "U": "UPDATE", "D": "DELETE",
+             "E": "EXECUTE", "EF": "EXECUTE FUNCTION",
+             "PE": "EXECUTE PROCEDURE", "CT": "CREATE TABLE",
+             "DT": "DROP TABLE", "CV": "CREATE VIEW", "DV": "DROP VIEW",
+             "CM": "CREATE MACRO", "DM": "DROP MACRO",
+             "PC": "CREATE PROCEDURE", "PD": "DROP PROCEDURE",
+             "CF": "CREATE FUNCTION", "DF": "DROP FUNCTION",
+             "CG": "CREATE TRIGGER", "DG": "DROP TRIGGER", "IX": "INDEX",
+             "RF": "REFERENCES", "ST": "STATISTICS", "SH": "SHOW",
+             "DP": "DUMP", "RS": "RESTORE", "CP": "CHECKPOINT"}
+#: users and roles the system makes for itself
+TD_SYS = {"DBC", "SYSLIB", "SYSUDTLIB", "SYSSPATIAL", "SYSBAR", "SYSJDBC",
+          "SYSXML", "TD_SYSFNLIB", "TD_SYSXML", "TD_SYSGPL", "TD_SERVER_DB",
+          "TDPUSER", "SYSTEMFE", "SYSADMIN", "SYS_CALENDAR", "TDSTATS",
+          "TDQCD", "TDMAPS", "DBCMNGR", "CRASHDUMPS", "SQLJ", "TDWM",
+          "LOCKLOGSHREDDER", "EXTERNAL_AP", "PUBLIC"}
+
+
+def _td_engine(hop):
+    from .engines.teradata import TeradataEngine
+    return TeradataEngine(hop)
+
+
+def _td_rows(hop, side, sql, args=()):
+    eng = _td_engine(hop)
+    return eng._rows(side, (hop.databases or [""])[0], sql, args)
+
+
+def _td_q(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _td_grant(code, db, table, column):
+    """A right as the GRANT that gives it, on the source's database name;
+    None for a code GRANT has no word for here."""
+    word = TD_RIGHTS.get(str(code).strip())
+    if word is None:
+        return None
+    on = _td_q(db) + ("" if str(table).strip() in ("All", "") else
+                      "." + _td_q(str(table).strip()))
+    col = str(column or "").strip()
+    if col and col != "All" and word in ("SELECT", "UPDATE", "REFERENCES"):
+        word += f" ({_td_q(col)})"
+    return f"GRANT {word} ON {on}"
+
+
+def _td_accounts(hop, side):
+    """{"user:<name>" | "role:<name>": {"grants", "roles", "codes"}} of every
+    user and role holding a right on the hop's databases, with the roles
+    each user is a member of."""
+    dbs = {(hop.target_db(d) if side == "dst" else d).upper(): d
+           for d in hop.databases or []}
+    if not dbs:
+        raise SystemExit("users: a Teradata hop names its databases")
+    marks = ", ".join("?" for _ in dbs)
+    out = {}
+
+    def entry(kind, name):
+        return out.setdefault(f"{kind}:{name}", {"grants": [], "roles": [],
+                                                 "unmapped": []})
+    for who, db, table, col, code in _td_rows(
+            hop, side, "select UserName, DatabaseName, TableName, ColumnName,"
+                       " AccessRight from DBC.AllRightsV where"
+                       f" upper(DatabaseName) in ({marks})", tuple(dbs)):
+        who = str(who).strip()
+        if who.upper() in TD_SYS or who.upper() in dbs:
+            continue
+        g = _td_grant(code, dbs[str(db).strip().upper()], table, col)
+        e = entry("user", who)
+        (e["grants"] if g else e["unmapped"]).append(
+            g or f"{str(code).strip()} ON {str(db).strip()}")
+    for role, db, table, col, code in _td_rows(
+            hop, side, "select RoleName, DatabaseName, TableName,"
+                       " ColumnName, AccessRight from DBC.AllRoleRightsV"
+                       f" where upper(DatabaseName) in ({marks})",
+            tuple(dbs)):
+        g = _td_grant(code, dbs[str(db).strip().upper()], table, col)
+        e = entry("role", str(role).strip())
+        (e["grants"] if g else e["unmapped"]).append(
+            g or f"{str(code).strip()} ON {str(db).strip()}")
+    roles = {k[5:] for k in out if k.startswith("role:")}
+    for role, grantee in _td_rows(hop, side, "select RoleName, Grantee from"
+                                             " DBC.RoleMembersV"):
+        role, grantee = str(role).strip(), str(grantee).strip()
+        if role in roles and grantee.upper() not in TD_SYS:
+            entry("user", grantee)["roles"].append(role)
+    for v in out.values():
+        v["grants"] = sorted(set(v["grants"]))
+        v["roles"] = sorted(set(v["roles"]))
+        v["unmapped"] = sorted(set(v["unmapped"]))
+    return out
+
+
+def _td_create(hop, apply, passwords, say):
+    """Each role missing on the target made, each user made with the
+    password the passwords file gives it (Teradata shows none to carry),
+    then each role membership and each right the target lacks granted."""
+    out, s = compare(hop, say)
+    t = _td_accounts(hop, "dst")
+    stmts = []
+    for key in sorted(k for k in out["missing_on_target"]
+                      if k.startswith("role:")):
+        stmts.append((key, f"CREATE ROLE {_td_q(key[5:])}"))
+    for key in sorted(k for k in out["missing_on_target"]
+                      if k.startswith("user:")):
+        name = key[5:]
+        pw = (passwords or {}).get(name)
+        if not pw:
+            say(f"   skipped user {name}: Teradata shows no password, and"
+                " the passwords file gives none")
+            continue
+        stmts.append((key, f"CREATE USER {_td_q(name)} AS PERM = 0,"
+                           f" PASSWORD = {_td_q(pw)}"))
+    for key, v in sorted(s.items()):
+        have = t.get(key, {"grants": [], "roles": []})
+        who = _td_q(key.split(":", 1)[1])
+        for role in sorted(set(v["roles"]) - set(have["roles"])):
+            stmts.append((None, f"GRANT {_td_q(role)} TO {who}"))
+        for g in sorted(set(v["grants"]) - set(have["grants"])):
+            word, _, on = g[len("GRANT "):].partition(" ON ")
+            db, dot, rest = on.partition(".")
+            mapped = _td_q(hop.target_db(db.strip('"'))) + dot + rest
+            stmts.append((None, f"GRANT {word} ON {mapped} TO {who}"))
+        for u in v.get("unmapped", []):
+            say(f"   not granted, no GRANT word for it here: {u} to {who}")
+    if not stmts:
+        say("  nothing to create")
+        return
+    say(f">> teradata: {len(stmts)} statement(s)"
+        + ("" if apply else "  (nothing done; add --apply)"))
+    for _, st in stmts:
+        say("   " + (st.split(", PASSWORD")[0] + ", PASSWORD = <from the"
+                     " passwords file>" if "PASSWORD" in st else st))
+    if not apply:
+        return
+    eng = _td_engine(hop)
+    db0 = (hop.databases or [""])[0]
+    made, failed = [], []
+    for key, st in stmts:
+        try:
+            eng.neutral_create_code("dst", db0, st)
+            if key:
+                made.append(key)
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            failed.append(f"{st.split(', PASSWORD')[0][:80]}:"
+                          f" {str(e).splitlines()[0][:120]}")
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = json.loads(rec.read_text()) if rec.exists() else []
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": "teradata", "created": made, "failed": failed})
+    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+    for f in failed:
+        say(f"   FAILED {f}")
+    say(f"  created {len(made)}; recorded at {rec}"
+        f" (undo with users {hop.name} rollback)")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} statement(s) failed")
+
+
+def _td_rollback(hop, apply, say):
+    """Each user and role `_td_create` made, dropped - the users first."""
+    rec = hop.report_dir() / "user-sync-created.json"
+    made = [k for e in (json.loads(rec.read_text()) if rec.exists() else [])
+            if e.get("engine") == "teradata" for k in e.get("created", [])]
+    if not made:
+        say("  no teradata users or roles were created by us, nothing to"
+            " undo")
+        return
+    eng = _td_engine(hop)
+    db0 = (hop.databases or [""])[0]
+    for key in sorted(made, key=lambda k: not k.startswith("user:")):
+        kind, name = key.split(":", 1)
+        st = f"DROP {'USER' if kind == 'user' else 'ROLE'} {_td_q(name)}"
+        if not apply:
+            say(f"   would run {st}")
+            continue
+        eng.neutral_create_code("dst", db0, st)
+        say(f"   {st}")
     if apply:
         rec.rename(str(rec) + ".rolled-back")
 
@@ -1898,6 +2106,8 @@ def create(hop, apply=False, passwords=None, say=print):
         return _ms_create(hop, apply, passwords, say)
     if hop.engine == "db2i":
         return _ibmi_create(hop, apply, say)
+    if hop.engine == "teradata":
+        return _td_create(hop, apply, passwords, say)
     if hop.engine == "oracle":
         return _ora_create(hop, apply, passwords, say)
     if hop.engine in ("mongodb", "mongo"):
@@ -2047,6 +2257,8 @@ def rollback(hop, apply=False, say=print):
         return _ms_rollback(hop, apply, say)
     if hop.engine == "db2i":
         return _ibmi_rollback(hop, apply, say)
+    if hop.engine == "teradata":
+        return _td_rollback(hop, apply, say)
     if hop.engine == "oracle":
         return _ora_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):

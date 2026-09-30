@@ -711,6 +711,73 @@ def _redshift(hop, e, key, side, dbs, where, read, write, follow, native):
     return out
 
 
+def _tdi(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+#: the rights a Teradata target's database is written with, as DBC codes
+#: and as GRANT says them
+TD_WRITE = (("CT", "CREATE TABLE"), ("DT", "DROP TABLE"), ("R", "SELECT"),
+            ("I", "INSERT"), ("U", "UPDATE"), ("D", "DELETE"),
+            ("ST", "STATISTICS"))
+#: a right the current user holds, directly or through a role
+_TD_HOLDS = ("exists (select 1 from DBC.UserRightsV r where r.DatabaseName ="
+             " {db} and r.TableName in ({t}, 'All') and r.AccessRight ="
+             " {code}) or exists (select 1 from DBC.UserRoleRightsV r where"
+             " r.DatabaseName = {db} and r.TableName in ({t}, 'All') and"
+             " r.AccessRight = {code})")
+
+
+def _teradata(hop, e, key, side, dbs, where, read, write, follow, native):
+    """A Teradata user's rights, asked of DBC's views of its own - held
+    directly or through a role: reading every table of the hop's
+    databases, and on the target making, writing and dropping tables and
+    collecting statistics; and the list of sessions FastLoad and
+    FastExport read, without which large tables go by single statements.
+    Teradata keeps no change log, so a follow asks nothing of it."""
+    from .engines.dbapi import MARK
+    out = []
+    me = str(e._rows(key, dbs[0] if dbs else "", "select user")[0][0]).strip()
+    who = _tdi(me)
+    for db in dbs:
+        name = e._d(key, db)
+        if read:
+            gaps = [str(t).strip() for (t,) in e._rows(
+                key, db, "select t.TableName from DBC.TablesV t where"
+                         f" t.DatabaseName = {MARK} and t.TableKind in ('T',"
+                         " 'O') and not (" + _TD_HOLDS.format(
+                             db="t.DatabaseName", t="t.TableName",
+                             code="'R'") + ")", (name,))
+                    if not hop.excluded(db, str(t).strip())]
+            out.append(Need(side, f"read every table of {name}", not gaps,
+                            f"{len(gaps)} tables it may not read" if gaps
+                            else "every one",
+                            [f"grant select on {_tdi(name)} to {who};"]))
+        if key == "dst" and write:
+            short = [word for code, word in TD_WRITE if not e._rows(
+                key, db, "select 1 from (select 1 as x) d where "
+                         + _TD_HOLDS.format(db=MARK, t="'All'", code=MARK),
+                (name, code, name, code))]
+            out.append(Need(side, f"make and write tables in {name}",
+                            not short, "may" if not short else
+                            f"lacks {', '.join(short)}",
+                            [f"grant {', '.join(w.lower() for w in short)}"
+                             f" on {_tdi(name)} to {who};"] if short else []))
+    try:
+        e._rows(key, dbs[0] if dbs else "", "select top 1 SessionNo from"
+                                            " DBC.SessionInfoV")
+        sessions = True
+    except Exception:  # noqa: BLE001 - not readable: said as missing
+        sessions = False
+    out.append(Need(side, "read the list of sessions (DBC.SessionInfoV)",
+                    sessions, "may" if sessions else "may not",
+                    [f"grant select on DBC.SessionInfoV to {who};"],
+                    without="without it, large tables are read and written"
+                            " by single statements, not in the parallel"
+                            " sessions of a bulk load or read"))
+    return out
+
+
 def _cl(command):
     """A CL command as the SQL statement that runs it on IBM i."""
     return "call qsys2.qcmdexc('" + command.replace("'", "''") + "');"
@@ -1130,6 +1197,7 @@ def _cosmos(hop, e, key, side, dbs, where, read, write, follow, native):
 #: the engines whose servers can be asked, by canonical name
 ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
        "redshift": _redshift, "db2i": _db2i, "oracle": _oracle,
+       "teradata": _teradata,
        "tidb": _tidb, "cockroachdb": _crdb, "dsql": _dsql,
        "couchbase": _couchbase, "cosmosdb": _cosmos}
 
@@ -1137,7 +1205,8 @@ ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
 SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
           "mongodb": ("//", "js"), "mssql": ("--", "sql"),
           "redshift": ("--", "sql"), "db2i": ("--", "sql"),
-          "oracle": ("--", "sql"), "tidb": ("--", "sql"),
+          "oracle": ("--", "sql"), "teradata": ("--", "sql"),
+          "tidb": ("--", "sql"),
           "cockroachdb": ("--", "sql"), "dsql": ("--", "sql"),
           "couchbase": ("#", "sh"), "cosmosdb": ("#", "sh")}
 

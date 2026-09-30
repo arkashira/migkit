@@ -360,9 +360,39 @@ ENDPOINT_OPTIONS = {
                       ("postgres", "mysql")),
     "aws_role_arn": Key("the role an aws_iam token is signed as", "str",
                         ("postgres", "mysql")),
-    "sslmode": Key("TLS: disable ... verify-full", "str", PG_FAMILY),
+    "sslmode": Key("TLS: disable ... verify-full", "str",
+                   PG_FAMILY + ("teradata",)),
     "sslrootcert": Key("the authority's certificate file", "str",
-                       PG_FAMILY),
+                       PG_FAMILY + ("teradata",)),
+    "logmech": Key("how a Teradata side signs in, where not by its own"
+                   " password (LDAP, KRB5)", "str", ("teradata",)),
+    "client": Key("the SAP client the services are read in", "str",
+                  ("sapodp",)),
+    "language": Key("the SAP logon language", "str", ("sapodp",)),
+    "service_path": Key("where the SAP system publishes its OData services,"
+                        " where not /sap/opu/odata/sap", "str",
+                        ("sapodp",)),
+    "kind": Key("how a program source is spoken to: dlt, singer, airbyte"
+                " or salesforce - its address's scheme", "str", ("saas",)),
+    "program": Key("what a program source runs: a tap's command, a"
+                   " connector's image or command, a dlt source's"
+                   " module:function, a Salesforce org's sign-in host",
+                   "str", ("saas",)),
+    "config": Key("the file of a program's own settings, credentials"
+                  " included", "str", ("saas",)),
+    "streams": Key("the streams (or objects) of a program source to read,"
+                   " all of them when left out", "str|list", ("saas",)),
+    "install": Key("what installs a program source's program where it is"
+                   " not on this machine: a pip requirement, installed into"
+                   " an environment of its own", "str", ("saas",)),
+    "container": Key("run a connector as the container its image is, or as"
+                     " a program on this machine", "bool", ("saas",)),
+    "api_version": Key("the Salesforce API version the objects are read"
+                       " through", "str", ("saas",)),
+    "pubsub_endpoint": Key("where Salesforce's change events are read from"
+                           " (host:port)", "str", ("saas",)),
+    "pubsub_tls": Key("TLS to the change events' endpoint: off only for a"
+                      " local stand-in", "bool", ("saas",)),
     "sslcert": Key("a client certificate file", "str", PG_FAMILY),
     "sslkey": Key("a client key file", "str", PG_FAMILY),
     "sslcrl": Key("a revocation list file", "str", PG_FAMILY),
@@ -482,16 +512,18 @@ ENDPOINT_OPTIONS = {
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
-               " authorities (https on OpenSearch and Cosmos DB)", "bool",
-               ("opensearch", "db2i", "couchbase", "cosmosdb") + TLS_OWN),
+               " authorities (https on OpenSearch, Cosmos DB and SAP)", "bool",
+               ("opensearch", "db2i", "couchbase", "cosmosdb", "sapodp")
+               + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
-                       ("db2i", "couchbase") + TLS_OWN),
+                       ("db2i", "couchbase", "sapodp") + TLS_OWN),
     "tls_cert_file": Key("a client certificate file", "str", TLS_OWN),
     "tls_key_file": Key("a client key file", "str", ("redis", "cassandra")),
     "tls_crl_file": Key("a revocation list file", "str", ("mongodb",)),
     "tls_insecure": Key("TLS with nothing checked (an emulator's own"
                         " certificate)", "bool",
-                        ("db2i", "couchbase", "cosmosdb") + TLS_OWN),
+                        ("db2i", "couchbase", "cosmosdb", "sapodp")
+                        + TLS_OWN),
     "encrypt": Key("require, request or off", "str|bool", ("mssql",)),
     "redis_product": Key("community, cloud or software: the Redis product"
                          " the target is, where its name cannot say",

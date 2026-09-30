@@ -507,6 +507,19 @@ class HeteroEngine(Engine):
                 rows.append((scope, "error",
                              str(e).splitlines()[-1][:120], None, None))
                 continue
+            # what the source itself says of the read: its own count held
+            # to the rows read, and what the comparison cannot prove there
+            proof, told = self._source_said(db, src_t)
+            tail += told
+            if a == b and proof == "diff":
+                # both sides agree on rows the read did not wholly get
+                if stream:
+                    stream(f"{scope}: diff")
+                rows.append((scope, "diff",
+                             f"rows {a[0]:,} equal on both sides as read,"
+                             f" and the source's own count says the read"
+                             f" was short{tail}", a[0], b[0]))
+                continue
             if stream:
                 stream(f"{scope}: {'ok' if a == b else 'diff'}")
             if a == b:
@@ -543,6 +556,35 @@ class HeteroEngine(Engine):
             if gate.line() and stream:
                 stream(f"# {side}: {gate.line()}")
         return rows
+
+    def _source_said(self, db, src_t):
+        """(status, words) the source adds about the whole read just made
+        of `src_t`, where it has anything of its own to say: the
+        application's own count held to the rows read (`read_proved` - an
+        SAP service, a SaaS application), and what the comparison cannot
+        prove there (`not_compared`). ("", "") where it says nothing."""
+        src = self.src_engine
+        status, words = "", []
+        ask = getattr(src, "read_proved", None)
+        if ask is not None:
+            try:
+                got = ask("src", db, src_t)
+            except Exception as e:  # noqa: BLE001 - said, not guessed
+                got = ("warn", "the source's own count could not be asked"
+                               f" ({str(e).strip().splitlines()[0][:90]})"
+                       if str(e).strip() else type(e).__name__)
+            if got:
+                status = got[0]
+                words.append(got[1])
+        tell = getattr(src, "not_compared", None)
+        if tell is not None:
+            try:
+                said = tell(db, src_t)
+            except Exception:  # noqa: BLE001 - nothing to add, then
+                said = ""
+            if said:
+                words.append(f"not proved: {said}")
+        return status, "".join(f"; {w}" for w in words)
 
     #: how the rows a differing table holds apart are found (`_drill`)
     DRILLS = (Rung("leaves", "the rows found from the leaves of its digest"

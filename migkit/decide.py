@@ -2046,7 +2046,9 @@ _NO_PROGRAM = ("no program is driven for this engine; migkit's own reader"
                " needs only to read")
 
 _DBAPI = ("mssql", "oracle", "db2", "db2i", "db2zos", "ase", "redshift",
-          "snowflake", "bigquery", "duckdb")
+          "snowflake", "bigquery", "duckdb", "teradata")
+#: sources read through an application's own interface, never written
+_READ_ONLY = ("sapodp", "saas")
 _STREAMS = ("kinesis", "pubsub")
 _FILES = ("sqlite", "duckdb", "parquet", "copybook")
 _NONE = {**{n: (NOT_APPLICABLE, _STREAM_ONLY) for n in _STREAMS},
@@ -2072,6 +2074,8 @@ WAYS = {
         "cosmosdb": (NOT_APPLICABLE, "every item carries an id within its"
                                      " partition key"),
         "copybook": ("yes", "@position_spans"),
+        "teradata": ("yes", "@row_bucket_sql"),
+        **{n: ("yes", "@neutral_batches") for n in _READ_ONLY},
         "redis": (NOT_APPLICABLE, "every value is under its key"),
         "kafka": (NOT_APPLICABLE, "a message is addressed by its partition"
                                   " and offset, never by a key"),
@@ -2093,6 +2097,12 @@ WAYS = {
         "parquet": (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time")),
         "copybook": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
             "ranges of whole records")),
+        "teradata": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "its rows' hash buckets, as they lie on the AMPs")),
+        "sapodp": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "the pages its service hands out")),
+        "saas": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "the records its program hands over")),
         "redis": (NOT_APPLICABLE, "a key is one string, read by the scan's"
                                   " cursor"),
         "kafka": (NOT_APPLICABLE, "a message's key is carried, never"
@@ -2102,6 +2112,8 @@ WAYS = {
         **_NONE,
         **{n: ("yes", "@native_bulk")
            for n in ("cassandra", "dynamodb", "opensearch", "parquet")},
+        # read page by page, a page at a time held
+        **{n: ("yes", "@neutral_batches") for n in _READ_ONLY},
         "*": ("yes", "@move_table"),
     },
     "large values": {
@@ -2111,6 +2123,9 @@ WAYS = {
         "copybook": (NOT_APPLICABLE, "a field is as long as its copybook"
                                      " says, a record 32,760 bytes at most"
                                      " in a variable file"),
+        **{n: (NOT_APPLICABLE, "a value arrives whole in the application's"
+                               " answer: there is no piece of it to read"
+                               " apart") for n in _READ_ONLY},
         "oracle": ("yes", "@_read_in_pieces"),
         "*": (NOT_YET, "R10"),
     },
@@ -2141,6 +2156,9 @@ WAYS = {
         "copybook": (NOT_APPLICABLE, "a file is not partitioned; one file"
                                      " of several record layouts is several"
                                      " tables, by segment"),
+        **{n: (NOT_APPLICABLE, "an application's data is read through its"
+                               " interface, which shows no partitions")
+           for n in _READ_ONLY},
         "*": (NOT_YET, "R13"),
     },
     "missing grant": {
@@ -2150,6 +2168,9 @@ WAYS = {
         # the redo-file reader's grants, named to the DBA; LogMiner
         # otherwise, which needs none of them
         "oracle": ("yes", "dba._ora_redo_files"),
+        # the bulk sessions' one grant, named to the DBA; single statements
+        # otherwise, which need none of it
+        "teradata": ("yes", "dba._teradata"),
         "hetero": (NOT_YET, "0"),
         "mongodb": (NOT_YET, "0"),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),
@@ -2158,6 +2179,8 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "freeze.freeze"),
         "mysql": ("yes", "freeze.freeze"),
+        **{n: (NOT_APPLICABLE, "it is read, never written") for n in
+           _READ_ONLY},
         "*": (NOT_YET, "R13"),
     },
     "slow link": {
