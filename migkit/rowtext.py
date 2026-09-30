@@ -96,9 +96,17 @@ def sqlite_row_from(text_exprs):
 
 
 def mysql_row(columns, quote='`'):
-    """The injective row string for MySQL, given column names."""
-    return mysql_row_from([f"cast({quote}{c}{quote} as char)"
-                           for c in columns])
+    """The injective row string for MySQL, given column names. A value
+    wider than `canon.WIDE` bytes is its length and the md5 of its bytes,
+    hashed where it lies instead of copied into the row's text (backlog
+    R22); every other is its text, as before."""
+    from .canon import WIDE, WIDE_MARK
+
+    def one(c):
+        q = f"{quote}{c}{quote}"
+        return (f"(case when length({q}) > {WIDE} then concat('{WIDE_MARK}',"
+                f" length({q}), ':', md5({q})) else cast({q} as char) end)")
+    return mysql_row_from([one(c) for c in columns])
 
 
 def postgres_row(columns, alias="t"):

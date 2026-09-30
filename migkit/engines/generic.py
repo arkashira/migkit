@@ -915,6 +915,30 @@ class GenericEngine(Engine):
         undo_dir = self.hop.report_dir(db) / "undo"
         undo_dir.mkdir(parents=True, exist_ok=True)
         held = rows_for(dst, dst_t, changed + drop)
+        col = self.newer_wins_column()
+        if col and changed:
+            # the target's row is kept where the column the hop names is
+            # later there (`newer_wins`), as on every other engine
+            if col not in columns:
+                raise SystemExit(
+                    f"{name}: newer_wins names {col}, and it is not on both"
+                    " sides, so which row is newer cannot be told. Nothing"
+                    " was repaired on this table.")
+            at = columns.index(col)
+            theirs = rows_for(src, src_t, changed)
+
+            def read(side, keys):
+                got = theirs if side == "src" else held
+                return {self._key_id(k): got[tuple(k)][at] for k in keys
+                        if got.get(tuple(k)) is not None
+                        and got[tuple(k)][at] is not None}
+            changed, kept = self._keep_the_newer(name, changed, read)
+            if kept:
+                (self.hop.report_dir(db) / f"data-{name}.kept-newer"
+                 ).write_text("".join(json.dumps(list(k)) + "\n"
+                                      for k in kept))
+                keep = {tuple(k) for k in kept}
+                held = {k: r for k, r in held.items() if k not in keep}
         with (undo_dir / f"{name}.rows.jsonl").open("a") as handle:
             for key_text, row in held.items():
                 handle.write(json.dumps({
@@ -928,6 +952,23 @@ class GenericEngine(Engine):
             for column, value in zip(columns, row):
                 self._writable(name, column, value,
                                key_text in set(changed))
+        # every statement written down before any lands (`repairlog`): each
+        # row's columns as text, as the target held it and as it will be.
+        # The writer this engine borrows reads values back only by three
+        # classes (`_value`), so a record here says what was done and is
+        # put back by hand (`repair_io`)
+        from .. import repairlog
+
+        def texts(row):
+            return None if row is None else [self._text(v) for v in row]
+        record = repairlog.Record(undo_dir, name, "text", columns, key)
+        for k in missing + changed:
+            if k in rows:
+                record.planned("write", k, texts(held.get(tuple(k))),
+                               texts(rows[k]))
+        for k in drop:
+            record.planned("delete", k, texts(held.get(tuple(k))), None)
+        record.ready()
         insert = [tuple(rows[k]) for k in missing if k in rows]
         if insert:
             dst.query(dst_t.insert_rows(insert, columns=columns), None)
@@ -954,6 +995,20 @@ class GenericEngine(Engine):
             dst.query(dst_t.delete_rows(where(key_text)), None)
         if not dst.is_autocommit:
             dst.commit()
+        # one transaction: all of it landed at the commit
+        record.applied(record.n)
+        record.close()
+
+    def repair_io(self, db, head):
+        """The rows of a repair record are put back by hand here: the
+        borrowed writer takes a value back from its text only for a number,
+        a string or a truth value (`_value`), and a row put back with any
+        other column guessed would be a row nobody had."""
+        raise SystemExit(
+            f"{head.get('table', '?')}: this engine's repairs are recorded"
+            " statement by statement with each row as it was, and cannot be"
+            " put back by migkit: the record is the undo file named beside"
+            " it, to apply by hand")
 
     #: how many keys go into one `where` - the drilldown can be long and a
     #: query per row would be a round trip per row

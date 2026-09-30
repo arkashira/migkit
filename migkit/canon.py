@@ -166,6 +166,54 @@ def uncomparable(what):
     return f"{UNCOMPARABLE}:{what}"
 
 
+#: A text or byte value longer than this many bytes is carried into a
+#: digest's row text as its length and the md5 of its bytes, not as its
+#: text or hex: the server hashes the value where it lies instead of
+#: writing it out twice over. Measured by the move's model runs (backlog
+#: R22): a PostgreSQL source digesting rows of 160 MB byte values was
+#: killed by the kernel on a 4 GB machine - the hex of each value, the
+#: row's text around it and its UTF-8 copy are held at once, a set a
+#: parallel worker. Only digests take this form (`digest_value`, the SQL
+#: renderings below); a key, a record of a repair and a column-by-column
+#: comparison keep the value whole.
+WIDE = 1 << 20
+#: what a wide value's digest text begins with: 0x1F, which no rendering of
+#: a real value starts with (`uncomparable`)
+WIDE_MARK = "\x1fwide:"
+
+
+def wide_bytes(data):
+    """The digest text of a wide byte value: `WIDE_MARK`, its length, its
+    md5 - what PostgreSQL's `md5(bytea)` and MySQL's `md5(blob)` write."""
+    import hashlib
+    data = bytes(data)
+    return (f"{WIDE_MARK}{len(data)}:"
+            f"{hashlib.md5(data, usedforsecurity=False).hexdigest()}")
+
+
+def wide_text(value):
+    """The digest text of a text value over `WIDE` bytes as UTF-8, or None
+    where it is not that wide. A string of n characters is n to 4n bytes,
+    so only one between WIDE/4 and WIDE characters is encoded to tell."""
+    if len(value) * 4 <= WIDE:
+        return None
+    data = value.encode("utf-8", "surrogatepass")
+    return wide_bytes(data) if len(data) > WIDE else None
+
+
+def digest_value(cls, value):
+    """A value's text in a digest's row: `render_value`'s, except a text or
+    byte value wider than `WIDE`, which is its length and md5."""
+    if cls == "bytes" and isinstance(value, (bytes, bytearray, memoryview)) \
+            and len(value) > WIDE:
+        return wide_bytes(value)
+    if cls == "text" and isinstance(value, str):
+        got = wide_text(value)
+        if got is not None:
+            return got
+    return render_value(cls, value)
+
+
 class Added:
     """A counter's change as what it adds, not what it ends as (a two-way
     hop's `delta` columns): applied where the target's row stands, so what
@@ -806,7 +854,14 @@ def _mysql(col, cls):
                 f" else cast(cast({f} as decimal(65,{FLOAT_SCALE})) as char)"
                 f" end")
     if cls == "bytes":
-        return f"hex({c})"
+        # a wide value as its length and md5, hashed where it lies (`WIDE`)
+        return (f"case when length({c}) > {WIDE} then concat('{WIDE_MARK}',"
+                f" length({c}), ':', md5({c})) else hex({c}) end")
+    if cls == "text":
+        return (f"case when length({c}) > {WIDE} then concat('{WIDE_MARK}',"
+                f" length(convert({c} using utf8mb4)), ':',"
+                f" md5(convert({c} using utf8mb4))) else cast({c} as char)"
+                " end")
     if cls == "timestamp":
         return f"date_format({c}, '%Y-%m-%d %H:%i:%s.%f')"
     if cls == "time":
@@ -875,7 +930,19 @@ def _postgres(col, cls):
     if cls == "boolean":
         return f"{c}::int::text"
     if cls == "bytes":
-        return f"upper(encode({c}, 'hex'))"
+        # a wide value as its length and md5 - `md5(bytea)` reads the bytes
+        # where they lie, the hex of them twice their size is never written
+        # (`WIDE`); `octet_length` reads the stored length, not the value
+        return (f"case when octet_length({c}) > {WIDE} then '{WIDE_MARK}'"
+                f" || octet_length({c}) || ':' || md5({c})"
+                f" else upper(encode({c}, 'hex')) end")
+    if cls == "text":
+        # the UTF-8 bytes, as MySQL and this process hash them; in a UTF-8
+        # database `convert_to` hands the value back as it is
+        u = f"convert_to({c}::text, 'UTF8')"
+        return (f"case when octet_length({c}::text) > {WIDE} then"
+                f" '{WIDE_MARK}' || octet_length({u}) || ':' || md5({u})"
+                f" else {c}::text end")
     if cls == "timestamp":
         # `to_char` of `infinity` is NULL, and of a year before Christ the
         # same digits as the year after: measured on 16, `infinity` and a
@@ -2267,9 +2334,10 @@ def fold_rows(classes, rows, total=0):
     their classes and folded one row at a time as `digest_step` folds -
     the one fold every engine that digests in this process uses, and the
     number the SQL engines' own digests are held to. Each column's
-    rendering is chosen once (`render.renderer`)."""
+    rendering is chosen once (`render.digest_renderer`): a wide value as
+    its length and md5, as every server writes it (`WIDE`)."""
     from . import render, rowtext
-    fns = [render.renderer(c) for c in classes]
+    fns = [render.digest_renderer(c) for c in classes]
     n = 0
     for row in rows:
         total = digest_step(total, rowtext.encode(
@@ -3440,6 +3508,72 @@ def comparable(engine, declared):
     if not renders(engine):
         return (None, f"no canonical rendering for engine {engine!r}")
     return (cls, "")
+
+
+#: How a pair of columns of each class is compared, in the words a verdict
+#: says after "as": what the rendering keeps of a value and what it lets go
+#: (problems D15)
+AS = {
+    "integer": "integers",
+    "decimal": "decimals, digit for digit",
+    NUMBER: "numbers by value (1.5 and 1.50 are one)",
+    "float": "floating-point numbers to twenty places after the point",
+    "boolean": "true or false",
+    "text": "text",
+    "bytes": "bytes",
+    "date": "dates",
+    "timestamp": "timestamps, instants in UTC, to the nanosecond held",
+    "time": "times of day",
+    "json": "JSON documents with their keys in order",
+    JSON_ONE: "the engine's own normal form of JSON (spacing and key order"
+              " not compared)",
+    OWN: "the engine's own text of the value",
+    "xml": "XML documents in canonical form",
+    "uuid": "UUIDs",
+    "inet": "network addresses",
+    INTERVAL: "durations (months, days and nanoseconds apart)",
+    VECTOR: "vectors, float for float",
+    GEOMETRY: "shapes (SRID and binary, longitude first)",
+    BSON: "values with their BSON type",
+}
+
+#: Classes whose rendering is the whole of what a column of one type on
+#: one engine holds: two such columns compared in it are compared exactly.
+#: The others let something go - a float past twenty places, JSON's spacing,
+#: a decimal's trailing zeros - even where the type is the same.
+WHOLE = frozenset({"integer", "decimal", "boolean", "text", "bytes", "date",
+                   "timestamp", "time", OWN, "uuid", INTERVAL, VECTOR,
+                   GEOMETRY, BSON})
+
+
+def as_words(cls):
+    """What a column of `cls` is compared as, in words."""
+    if cls in AS:
+        return AS[cls]
+    if str(cls).startswith(bsontype_prefixes()):
+        return AS[BSON]
+    return str(cls)
+
+
+def how_compared(src_engine, src_declared, src_cls, dst_engine,
+                 dst_declared, dst_cls):
+    """("exactly" | "by value", why) for one compared pair of columns.
+
+    Exactly: one engine, one declared type, and a class whose rendering is
+    the whole of the value (`WHOLE`). By value: anything else, compared as
+    the class both sides were brought to - two types, two engines, or a
+    rendering that lets part of the value go - and the words say as what."""
+    same = (src_engine == dst_engine
+            and str(src_declared).strip().lower()
+            == str(dst_declared).strip().lower())
+    if same and src_cls == dst_cls and src_cls in WHOLE:
+        return "exactly", "one engine, one type"
+    words = as_words(src_cls) if src_cls == dst_cls else (
+        f"{as_words(src_cls)} against {as_words(dst_cls)}")
+    if not same:
+        return "by value", (f"{src_declared} and {dst_declared} compared as"
+                            f" {words}")
+    return "by value", f"compared as {words}"
 
 
 # Engines that produce the canonical text in this process rather than in a

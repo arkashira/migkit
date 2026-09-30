@@ -82,7 +82,9 @@ class SQLiteEngine(NeutralCopier, Engine):
         from .. import canon
 
         def render(value, cls):
-            return canon.render_value(cls, value)
+            # the digest's text of a value: a wide one as its length and
+            # md5, as every engine hashes it (`canon.WIDE`)
+            return canon.digest_value(cls, value)
 
         class _Digest:
             def __init__(self):
@@ -98,6 +100,12 @@ class SQLiteEngine(NeutralCopier, Engine):
 
         conn.create_function("migkit_canon", 2, render, deterministic=True)
         conn.create_aggregate("migkit_digest", 1, _Digest)
+        # a row's hash as the leaves take it, for the buckets a table with
+        # no key is copied and resumed by (`leaves.bucket_where`)
+        from ..leaves import text_hash
+        conn.create_function("migkit_hash60", 1,
+                             lambda text: None if text is None
+                             else text_hash("", text), deterministic=True)
 
     CLIENT_TOOLS = ()
 
@@ -318,6 +326,8 @@ class SQLiteEngine(NeutralCopier, Engine):
         import sqlite3
         self._target_only(side, "empty a table")
         conn = sqlite3.connect(self._path(side))
+        # a bucket of a table with no key is emptied by its rows' hash
+        self._register(conn)
         try:
             gone = conn.execute(
                 f'delete from "{self.local_table(table)}"'

@@ -29,6 +29,14 @@ class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
     PARAMSTYLE = "qmark"
     LIMIT = "limit"
 
+    def row_bucket_sql(self, side, db, table, columns, n):
+        """DuckDB's own hash of the whole row, in [0, n), for a table with
+        no key (`ranges.keyless`)."""
+        if not columns:
+            return None
+        return (f"hash({', '.join(self._q(c) for c, _ in columns)})"
+                f" % {int(n)}")
+
     def _path(self, side):
         ep = self.hop.source if side == "src" else self.hop.target
         path = ep.options.get("path") or ep.host

@@ -264,7 +264,7 @@ class Table:
 
 def _encoded(classes, values):
     from . import render, rowtext
-    return rowtext.encode([render.renderer(c)(v)
+    return rowtext.encode([render.digest_renderer(c)(v)
                            for c, v in zip(classes, values)])
 
 
@@ -706,7 +706,7 @@ def usable(pair, db):
     return st if st.tables() else None
 
 
-def prove(pair, db, log=None, timeout=300, rounds=2):
+def prove(pair, db, log=None, timeout=300, rounds=None):
     """{source table leaf: (status, detail, source rows, target rows)} for
     every kept table, proved from the kept leaves at a position the tail
     has passed and holds at - or None where the kept proof cannot stand
@@ -715,10 +715,15 @@ def prove(pair, db, log=None, timeout=300, rounds=2):
 
     The leaves read again are read with the tail holding, the target's
     exactly at its position and the source's under its marks. A leaf that
-    still differs is asked `rounds` more times, each after the tail has
-    passed where the source is then - a change still on its way is waited
-    for, not reported (pass C); what differs after that is localized from
-    those leaves only."""
+    still differs is asked again, generation by generation, each after the
+    tail has passed where the source is then (pass C, `leaves.
+    generations`): a change still on its way is waited for, not reported.
+    The generations stop once no leaf that differs moved since the one
+    before, or after `rounds` (`leaves.most_generations`); what differs
+    then is localized from those leaves only, and a leaf still moving at
+    the last is said to have never settled."""
+    from . import leaves as _leaves
+    rounds = _leaves.most_generations() if rounds is None else rounds
     from . import tailctl
     st = usable(pair, db)
     if st is None:
@@ -731,6 +736,7 @@ def prove(pair, db, log=None, timeout=300, rounds=2):
     tables = {n: Table(n, d) for n, d in st.tables().items()}
     oldest = _env("MIGKIT_PROOF_OLDEST_SECONDS", 86400)
     bad, why, out = {}, {}, {}
+    last, moving = {}, {}
     for turn in range(rounds + 1):
         if not _fence(pair, db, where, timeout):
             return None
@@ -751,10 +757,21 @@ def prove(pair, db, log=None, timeout=300, rounds=2):
                 bad[name] = sorted(
                     b for b in again
                     if tuple(kept[b][0:3]) != tuple(kept[b][3:6]))
-            if turn == rounds or not any(bad.values()):
+                now = ({b: tuple(kept[b][0:3]) for b in bad[name]},
+                       {b: tuple(kept[b][3:6]) for b in bad[name]})
+                # what moved since the generation before: still arriving,
+                # or still being written
+                moving[name] = (_leaves.settle(*last[name], *now,
+                                               bad[name])[2]
+                                if turn else set(bad[name]))
+                last[name] = now
+            if turn == rounds or not any(bad.values()) or (
+                    turn and not any(moving.values())):
                 for name, t in tables.items():
                     out[name] = _verdict(pair, db, st, t, why[name],
-                                         bad[name])
+                                         bad[name],
+                                         moving[name] if turn else set(),
+                                         turn)
                 next_generation(st)
                 break
         finally:
@@ -799,7 +816,7 @@ def _due(st, t, gen, oldest):
     return why
 
 
-def _verdict(pair, db, st, t, why, bad):
+def _verdict(pair, db, st, t, why, bad, moving=(), rounds=0):
     kept = st.leaves(t.name)
     again = set().union(*why.values())
     n_src = sum(leaf[0] for leaf in kept.values())
@@ -817,15 +834,21 @@ def _verdict(pair, db, st, t, why, bad):
         return ("ok", f"rows {n_src:,} and every compared column equal;"
                       f" {said}", n_src, n_dst)
     a, b = t.sides(pair, db)
-    ta = leaves.Tree({x: tuple(kept[x][0:3]) for x in bad})
-    tb = leaves.Tree({x: tuple(kept[x][3:6]) for x in bad})
+    still = [x for x in bad if x not in moving]
+    ta = leaves.Tree({x: tuple(kept[x][0:3]) for x in still})
+    tb = leaves.Tree({x: tuple(kept[x][3:6]) for x in still})
     found = leaves.localize(a, b, t.spec, ta, tb)
+    unsettled = (f"; {len(moving):,} leaves never settled - still moving"
+                 f" after {rounds} generations past the tail's position, so"
+                 " no verdict is given for their rows" if moving else "")
     clause = pair._drill_clause(
         db, pair._leaf(t.src), found.missing, found.changed, found.extra,
-        [], f"; found from {len(bad):,} kept leaves that differ"
-            + ("; what was found adds up to what those leaves differ by"
-               if found.complete else
-               f"; differs, not fully localized: {found.why}"))
+        [], (f"; found from {len(still):,} kept leaves that differ"
+             + ("; what was found adds up to what those leaves differ by"
+                if found.complete else
+                f"; differs, not fully localized: {found.why}")
+             if still else "; no row named: every leaf that differs was"
+                           " still moving") + unsettled)
     head = (f"rows src={n_src:,} dst={n_dst:,}" if n_src != n_dst else
             f"rows {n_src:,} match but {len(bad):,} leaves do not")
     return ("diff", head + clause + f"; {said}", n_src, n_dst)

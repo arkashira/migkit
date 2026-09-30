@@ -818,7 +818,7 @@ Google's DMS splits errors into recoverable and unrecoverable and says the
 unrecoverable ones mean starting the job again from the beginning. Schema
 tools leave the database "neither the previous nor the next version".
 
-**migkit: Partly.** Chunked, restartable verification with a proof file
+**migkit: Ends it (2026-09-30, below).** Chunked, restartable verification with a proof file
 exists (`test_resume_chunked_pg.py`, `test_resume_chunked_mysql.py`), and a
 second verify of an unchanged table deliberately reads no rows and says so
 rather than pretending to have re-read them.
@@ -852,9 +852,21 @@ every pair shares (PostgreSQL to MySQL tested). Tests:
 `test_the_table_copy_checks_and_resumes_by_range.py`,
 `test_the_mysql_table_copy_checks_by_range.py`.
 
-**Missing:** a table with no key on a source that has no stored position
-to read by (MySQL, SQL Server) still starts over, and a statement-level
-record of what a repair had applied when it stopped.
+A table with no key on a source with no stored position (2026-09-30)
+goes in buckets of its rows' hash - the buckets the check reads it by,
+found by the server on each side - each marked begun before its first row
+and done after its last; one a stop left begun is emptied on the target by
+the same hash and copied again, and a table that does not add up is held
+bucket by bucket, only those that differ copied again. Where the source
+hashes a row only by its own function (SQL Server's), its count places a
+stop as it does for pages. Tests:
+`test_a_keyless_table_resumes_by_its_rows_hash.py`.
+
+And a repair (2026-09-30) writes a record of every statement - the row the
+target held, the one it will hold - before any lands, and marks how far it
+got: what a repair had applied when it stopped is in it, statement by
+statement, and a rollback puts back only the rows still as the repair left
+them. Tests: `test_a_repair_is_recorded_statement_by_statement.py`.
 
 ### C4. The verification kills the source
 
@@ -862,9 +874,9 @@ record of what a repair had applied when it stopped.
 chunks dynamically against a target execution time, pauses on replica lag,
 pauses on `--max-load`, and skips chunks an `EXPLAIN` says are too big.
 
-**migkit: Partly.** A throttle reads each engine's own saturation signal
-and narrows the work in flight - 7 of 9 engines, including the cross-engine
-path and reladiff's connection count. Tests: `test_throttle_*.py`.
+**migkit: Ends it.** A throttle reads each engine's own saturation signal
+and narrows the work in flight - every engine's check, the cross-engine
+path's both sides included, and the second reader's connection count. Tests: `test_throttle_*.py`.
 
 A consistent pass holds a snapshot on the source for as long as it runs,
 and the source cannot clean up after anything newer meanwhile. `assess`
@@ -874,7 +886,11 @@ releases the snapshot, and the pass says it is not a verdict. The source's
 snapshot is let go as soon as its side is read, not after the target's
 (`test_the_snapshot_is_held_for_a_bounded_time.py`).
 
-**Missing:** two engines, and a lag-aware brake for replicas specifically.
+The rest (2026-09-30): SQL Server's check and the cross-engine check -
+every engine checked through the pair - brake too; a replica read by the
+check brakes when its lag rises above the least the run has seen of it;
+and a PostgreSQL standby whose primary is idle no longer reads as behind.
+Tests: `test_verification_brakes_for_a_replica.py`.
 
 ### C5. The index that exists, is useless, and costs you anyway
 
@@ -1950,7 +1966,7 @@ Measured, with a table whose contents are **byte-identical** on both sides:
     source                lo_get(16391) -> 'the actual contents...'
     target                ERROR:  large object 16391 does not exist
 
-**migkit: Partly, and the gap is in the part that pronounces.** `assess`
+**migkit: Ends it (2026-09-30, below); it was Partly, and the gap was in the part that pronounces.** `assess`
 does name them, before anything moves:
 
     large objects (a managed service moving table by table leaves them;
@@ -1996,6 +2012,16 @@ because the type is what makes it findable. `vacuumlo` has the same blind
 spot and a worse consequence - it *deletes* any large object not referenced
 from an `oid` or `lo` column, so a migration that parked its references in
 a `bigint` loses them to the cleanup rather than to the move.
+
+**And now it sees it** (2026-09-30): an integer column is taken for
+references where at least half its values name an object on the source -
+an id counting past the first object's oid names a few of them by chance,
+a column of references nearly all - and what it names and the target does
+not is reported as an `oid` column's is. And the objects themselves are
+compared, every one both sides hold, by the digest of each piece: an
+object present under the same oid holding other bytes was a document that
+did not arrive, reported as nothing. Tests:
+`test_documents_named_by_an_integer_are_checked.py`.
 
 ### D12. The row changed while it was being compared
 
@@ -2382,6 +2408,13 @@ any-target, verifies fewer columns than the leg between two of the same
 engine, and `enum` and `interval` are in the gap. Those are not corners of
 the type system. Closing them is canonical-rendering work, one type at a
 time, and the number in the test moves when it is done.
+
+**And every cross-engine verdict says it** (2026-09-30): the verdict ends
+with the columns it compared exactly (one engine, one type, a rendering
+that is the whole value), those it compared by value and as what - two
+types brought to one class, a float to twenty places, JSON's normal form -
+and those it did not compare at all and why, a column never in none of the
+three. Tests: `test_every_cross_engine_verdict_says_what_it_compared.py`.
 
 ## E. Keeping the two sides in step
 

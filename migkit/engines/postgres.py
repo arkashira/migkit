@@ -3285,13 +3285,23 @@ class PostgresEngine(Engine):
                               f"{len(src)} sequences match source last_value"))
         return res
 
+    #: active sessions against the limit; the lag of the replicas this
+    #: server feeds; and, where it is itself a standby, its own: nothing
+    #: where every byte it received is replayed - `now()` less the last
+    #: replayed commit's time grows by itself on a standby whose primary is
+    #: idle, and read as lag it braked every table of a check for nothing -
+    #: else the time since that commit; and whether it is a standby
     HEALTH_SQL = (
         "select (select count(*) from pg_stat_activity where state='active')"
         "::float / greatest(current_setting('max_connections')::float, 1)"
         " || '|' || coalesce((select max(extract(epoch from replay_lag))"
         " from pg_stat_replication), -1)"
-        " || '|' || coalesce(extract(epoch from"
-        " now() - pg_last_xact_replay_timestamp()), -1)")
+        " || '|' || case when not pg_is_in_recovery() then -1"
+        " when pg_last_wal_receive_lsn() is not null and"
+        " pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() then 0"
+        " else coalesce(extract(epoch from"
+        " now() - pg_last_xact_replay_timestamp()), -1) end"
+        " || '|' || pg_is_in_recovery()::int")
 
     def _health(self, side, db):
         """What this side says about its own load, for the throttle.
@@ -3299,17 +3309,20 @@ class PostgresEngine(Engine):
         Cheap on purpose - two catalog reads, no table access. Anything the
         provider hides comes back as None rather than as "fine": a managed
         database that will not show us its replication state must not be
-        mistaken for one that is idle.
+        mistaken for one that is idle. A standby says so, and its own lag is
+        what the throttle's replica brake holds (`throttle.REPLICA_RISE`).
         """
         from ..throttle import Health
         try:
             raw = self._psql(side, db, self.HEALTH_SQL).strip()
-            busy, send_lag, replay_lag = (float(x) for x in raw.split("|"))
+            busy, send_lag, replay_lag, standby = (
+                float(x) for x in raw.split("|"))
         except Exception:
             return None
         lag = max(send_lag, replay_lag)
         return Health(busy_ratio=busy if busy >= 0 else None,
-                      lag_seconds=lag if lag >= 0 else None)
+                      lag_seconds=lag if lag >= 0 else None,
+                      replica=bool(standby) and replay_lag >= 0)
 
     # A table worth checkpointing. Below this a single aggregate finishes in
     # seconds, and splitting it would cost more in round trips than a restart
@@ -3458,7 +3471,8 @@ class PostgresEngine(Engine):
             if t not in keyexpr:
                 keyexpr[t] = self._key_hash_expr("src", db, t)
             return self._psql(side, db,
-                f"set max_parallel_workers_per_gather = {w};"
+                f"set max_parallel_workers_per_gather ="
+                f" {self._digest_workers(db, t, w)};"
                 f" select {_agg(h, keyexpr[t])} from {self._scope(db, t)}")
 
         # A checksum is only a SELECT, which is why nothing used to stop this
@@ -3490,7 +3504,8 @@ class PostgresEngine(Engine):
             h = self._row_hash_expr("src", db, t)
             pred = _cp.where(f'"{col}"', lo, hi)
             return self._psql(side, db,
-                f"set max_parallel_workers_per_gather = {w};"
+                f"set max_parallel_workers_per_gather ="
+                f" {self._digest_workers(db, t, w)};"
                 f" select count(*)||'|'||{self._summed(h, salt)}"
                 f" from {self._scope(db, t)}"
                 + (f" where {pred}" if pred else ""))
@@ -3720,21 +3735,36 @@ class PostgresEngine(Engine):
 
     LARGE_OBJECT_COUNT = "select count(*) from pg_largeobject_metadata"
 
-    #: Every user column that could hold a large object reference. The type
-    #: is the signal - `vacuumlo` uses the same one, and has the same blind
-    #: spot: a reference parked in a `bigint` is invisible to both.
+    #: Every user column that could hold a large object reference, and how
+    #: it is known for one: by its type - `oid`, or a domain over it such as
+    #: the `lo` extension's, what `vacuumlo` looks at - or, an integer
+    #: column, by its values (`_by_value`): the type is no signal there, and
+    #: `vacuumlo` deletes the objects such a column names (problems D11).
     OID_COLUMNS = (
-        "select n.nspname||'.'||c.relname||chr(9)||a.attname"
+        "select n.nspname||'.'||c.relname||chr(9)||a.attname||chr(9)||"
+        " case when a.atttypid = 'oid'::regtype or t.typbasetype ="
+        " 'oid'::regtype then 'oid' else 'integer' end"
         " from pg_attribute a"
         " join pg_class c on c.oid = a.attrelid"
         " join pg_namespace n on n.oid = c.relnamespace"
-        " where a.atttypid = 'oid'::regtype and a.attnum > 0"
+        " join pg_type t on t.oid = a.atttypid"
+        " where (a.atttypid in ('oid'::regtype, 'int2'::regtype,"
+        " 'int4'::regtype, 'int8'::regtype)"
+        " or t.typbasetype = 'oid'::regtype) and a.attnum > 0"
         " and not a.attisdropped and c.relkind = 'r'"
         " and n.nspname not in ('pg_catalog','information_schema')"
         " and n.nspname not like 'pg\\_%'"
         " and n.nspname not like '\\_\\_%'"
         " and c.relname not like 'migkit\\_%'"
         " order by 1")
+
+    @staticmethod
+    def _as_oid(col):
+        """A column's value as the oid it would name, NULL where it cannot
+        name one: an integer outside an oid's range is no reference, and
+        cast as one it would stop the statement."""
+        return (f"(case when {col}::bigint between 1 and 4294967295 then"
+                f" {col}::bigint end)::oid")
 
     #: a large object is read and written this much at a time: never
     #: held whole, whatever its size (backlog R10)
@@ -3830,8 +3860,21 @@ class PostgresEngine(Engine):
         measured, a column holding `'refs'::regclass::oid` resolved 0 rows
         while a real document column resolved 1, which is the whole
         difference between a finding and a false alarm.
+
+        An integer column is one by its values (problems D11): where at
+        least half of what it holds names an object on the source. An id
+        column counting past the first object's oid names a few of them by
+        chance - one in hundreds - and a column of references names nearly
+        all; half keeps the two apart. What it names and the target does
+        not is counted beside what already named nothing on the source.
+
+        And the objects themselves are compared, every one both sides hold,
+        by the digest of each piece (`_lo_contents`): an object the target
+        holds under the same oid with other bytes is a document that did
+        not arrive.
         """
-        dangling, columns = [], 0
+        dangling, columns, by_value = [], 0, 0
+        contents = None
         try:
             src_total = int(self._psql("src", db,
                                        self.LARGE_OBJECT_COUNT).strip() or 0)
@@ -3839,31 +3882,44 @@ class PostgresEngine(Engine):
                                        self.LARGE_OBJECT_COUNT).strip() or 0)
             for line in self._psql("src", db, self.OID_COLUMNS).splitlines():
                 parts = line.split("\t")
-                if len(parts) != 2:
+                if len(parts) != 3:
                     continue
-                table, col = parts
+                table, col, kind = parts
+                if kind == "integer" and not src_total:
+                    continue          # no object for an integer to name
                 sch, tbl = self._split(table)
-                ref = (f'"{sch}"."{tbl}"', self._quote_ident(col))
-                resolves = (f"select count(*) from {ref[0]} t"
-                            f" where t.{ref[1]} is not null and exists"
-                            " (select 1 from pg_largeobject_metadata m"
-                            f" where m.oid = t.{ref[1]})")
-                on_source = int(self._psql("src", db, resolves).strip() or 0)
+                qt, qc = f'"{sch}"."{tbl}"', self._quote_ident(col)
+                ref = f"t.{qc}" if kind == "oid" else self._as_oid(f"t.{qc}")
+                names = ("exists (select 1 from pg_largeobject_metadata m"
+                         f" where m.oid = {ref})")
+                got = self._psql("src", db, (
+                    f"select count(t.{qc}), count(*) filter (where {names})"
+                    f" from {qt} t")).strip().split("|")
+                filled, on_source = int(got[0] or 0), int(got[1] or 0)
                 if not on_source:
                     continue          # not a large object column at all
+                if kind == "integer" and 2 * on_source < filled:
+                    continue          # an id that names a few by chance
                 columns += 1
-                broken = (f"select count(*) from {ref[0]} t"
-                          f" where t.{ref[1]} is not null and not exists"
-                          " (select 1 from pg_largeobject_metadata m"
-                          f" where m.oid = t.{ref[1]})")
+                by_value += kind == "integer"
+                broken = (f"select count(*) from {qt} t where t.{qc} is not"
+                          f" null and not {names}")
                 try:
                     missing = int(self._psql("dst", self._d("dst", db),
                                              broken).strip() or 0)
                 except Exception:
                     continue          # the table is not on the target; the
                                       # schema check owns that finding
-                if missing:
-                    dangling.append((f"{table}.{col}", missing, on_source))
+                if kind == "integer":
+                    # what named nothing on the source names nothing there
+                    missing -= filled - on_source
+                if missing > 0:
+                    dangling.append((f"{table}.{col}"
+                                     + (" (an integer column)"
+                                        if kind == "integer" else ""),
+                                     missing, on_source))
+            if src_total and dst_total:
+                contents = self._lo_contents(db)
         except Exception as e:
             return Result("deep", f"{db} large objects", "error",
                           "could not compare the large objects:"
@@ -3871,7 +3927,56 @@ class PostgresEngine(Engine):
         return self._large_object_result(
             db, src_total, dst_total, dangling, columns,
             "carry them explicitly - pg_dump skips large objects whenever"
-            " -s, -n or -t is used, and -b puts them back")
+            " -s, -n or -t is used, and -b puts them back",
+            contents=contents, by_value=by_value)
+
+    def _lo_contents(self, db):
+        """(objects compared, [oid whose bytes differ]) over every large
+        object both sides hold: each read a piece at a time on each server
+        (`LO_PIECE`), its digest and length compared - some hundreds of
+        objects a statement, so a database of small documents is asked in
+        a few round trips, and a large one is never held whole."""
+        src = self._conn("src", db)
+        dst = self._conn("dst", self._d("dst", db))
+        try:
+            oids = []
+            with src.cursor() as cur:
+                cur.execute("select oid::bigint from pg_largeobject_metadata"
+                            " order by oid")
+                oids = [int(r[0]) for r in cur.fetchall()]
+            with dst.cursor() as cur:
+                cur.execute("select oid::bigint from pg_largeobject_metadata")
+                there = {int(r[0]) for r in cur.fetchall()}
+            todo = [o for o in oids if o in there]
+            compared, differ, off = len(todo), [], 0
+            while todo:
+                a = self._lo_pieces(src, todo, off)
+                b = self._lo_pieces(dst, todo, off)
+                more = []
+                for o in todo:
+                    if a.get(o) != b.get(o):
+                        differ.append(o)
+                    elif (a.get(o) or (None, 0))[1] >= self.LO_PIECE:
+                        more.append(o)
+                todo, off = more, off + self.LO_PIECE
+            return compared, differ
+        finally:
+            src.close()
+            dst.close()
+
+    def _lo_pieces(self, conn, oids, off):
+        """{oid: (md5, length)} of one piece of each of these objects."""
+        out = {}
+        with conn.cursor() as cur:
+            for i in range(0, len(oids), 500):
+                cur.execute(
+                    "select o, md5(p), length(p) from (select o,"
+                    " lo_get(o::oid, %s, %s) p from unnest(%s::bigint[]) o)"
+                    " x", (off, self.LO_PIECE, oids[i:i + 500]))
+                out.update({int(o): (h, int(n or 0))
+                            for o, h, n in cur.fetchall()})
+        conn.rollback()
+        return out
 
     def _content_fingerprint(self, side, db, relation):
         """`count|checksum` for everything in one relation.
@@ -7011,6 +7116,11 @@ class PostgresEngine(Engine):
         undo = d / "undo"
         undo.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
+        # every statement written down before any lands (`repairlog`), and
+        # the table's repair one transaction: a stop leaves all of it or
+        # none, where the deletes used to land without the copy after them
+        record = self._repair_record(db, t, pks, copy_pks, chg,
+                                     read("extra"), undo)
         try:
             (work / "copy.pks").write_text(copy_pks)
             (work / "del.pks").write_text(del_pks)
@@ -7027,6 +7137,7 @@ class PostgresEngine(Engine):
                     f"delete from {qt} t using _pk p where {cond};\n")
             if (work / "rows.out").exists():
                 body += f"\\copy {qt} from '{work}/rows.out'\n"
+            body = "begin;\n" + body + "commit;\n"
             try:
                 self._psql_run("dst", db,
                                "set session_replication_role = replica;\n" + body)
@@ -7034,11 +7145,39 @@ class PostgresEngine(Engine):
                 if "session_replication_role" not in str(e):
                     raise
                 self._psql_run("dst", db, body)
+            record.applied(record.n)
             with (undo / "manifest.txt").open("a") as m:
                 m.write(f"{ts} {t}: re-copy {undo}/{ts}-{tbl}.rows to undo\n")
         finally:
+            record.close()
             import shutil as _sh
             _sh.rmtree(work, ignore_errors=True)
+
+    def _repair_record(self, db, t, pks, copy_lines, changed_lines,
+                       extra_lines, undo):
+        """The statement-level record of one table's repair (`repairlog`),
+        written out whole: each key the repair copies is a write - or a
+        delete, where the repair removes a changed row the source no longer
+        has - and each extra key a delete, with the row the target held
+        and the one it will hold, by the key files' lines."""
+        from .. import repairlog
+        sc, _, _ = self._comparable_columns(db, self, t, self, t)
+        missing = [k for k in pks if k not in dict(sc)]
+        if missing:
+            raise SystemExit(
+                f"{t}: the key column {', '.join(missing)} has no text both"
+                " sides render, so the repair could not be recorded row by"
+                " row. Nothing was repaired on this table.")
+
+        def keys(lines):
+            return repairlog.canon_keys(sc, pks, [
+                [self._pk_unescape(p) for p in line.split("\t")]
+                for line in lines.splitlines() if line])
+        writes = keys(copy_lines)
+        return repairlog.planned(
+            undo, repairlog.CanonIO(self, "dst", db, t, sc, pks),
+            repairlog.CanonIO(self, "src", db, t, sc, pks).rows(writes),
+            writes, keys(changed_lines), keys(extra_lines))
 
     def _newer_split(self, db, t, sch, tbl, pks, col, lines, d):
         """The changed keys to overwrite under `newer_wins`, as the key
@@ -7883,6 +8022,7 @@ class PostgresEngine(Engine):
         `to_jsonb(t)`, and jsonb sorts its keys, so it is order-independent
         for free.
         """
+        from .. import canon
         jsonb = self.hop.options.get("checksum", "text") == "jsonb"
         cols = self._row_cols(side, db, table)
         if not cols:
@@ -7896,6 +8036,15 @@ class PostgresEngine(Engine):
                 return f'ST_AsEWKT(t."{c}")'
             if kind == "geography":
                 return f'ST_AsEWKT(t."{c}"::geometry)'
+            if kind == "wide":
+                # a value wider than `canon.WIDE` as its length and md5,
+                # hashed where it lies: the row's text around its hex had a
+                # 160 MB value killed on a 4 GB source (backlog R22). Any
+                # other is the text the row renders it as, as before
+                q = f't."{c}"'
+                return (f"(case when octet_length({q}) > {canon.WIDE} then"
+                        f" '{canon.WIDE_MARK}' || octet_length({q}) || ':'"
+                        f" || md5({q}) else {q}::text end)")
             return f't."{c}"'
 
         if jsonb:
@@ -7904,8 +8053,39 @@ class PostgresEngine(Engine):
         return "md5(ROW(" + ", ".join(val(c, kind)
                                       for c, kind in cols) + ")::text)"
 
+    #: the server memory the wide rows of one digest query may take, about:
+    #: each worker of a parallel scan holds the row it hashes, so a table
+    #: of wide rows is digested by fewer of them (`_digest_workers`). Set,
+    #: not measured: an eighth of the 4 GB machine a source died on
+    DIGEST_MEMORY = 512 * 2 ** 20
+
+    def _digest_workers(self, db, t, most):
+        """How many parallel workers a digest of `t` asks for: `most`, or
+        fewer where two copies of its widest row (`row_sizes`, the measure
+        the move's model sizes a worker by) a worker, and the leader's,
+        would pass `DIGEST_MEMORY` - none where one row alone would."""
+        known = self.__dict__.setdefault("_widest_of", {})
+        if (db, t) not in known:
+            try:
+                got = self.row_sizes("src", db, [t]) or {}
+                row = got.get(".".join(self._split(t))) or next(
+                    iter(got.values()), {})
+                known[(db, t)] = int((row or {}).get("largest") or 0)
+            except Exception:  # noqa: BLE001 - not sized: as asked
+                known[(db, t)] = 0
+        widest = known[(db, t)]
+        if not widest:
+            return most
+        return max(0, min(int(most), self.DIGEST_MEMORY // (2 * widest) - 1))
+
+    #: the types whose values a row's digest takes as their length and md5
+    #: where they are wider than `canon.WIDE`: `octet_length` reads their
+    #: stored length without reading them
+    WIDE_TYPES = ("bytea", "text", "varchar", "bpchar")
+
     def _row_cols(self, side, db, table):
-        """[(column, 'geometry'|'geography'|None)] sorted by column name.
+        """[(column, 'geometry'|'geography'|'wide'|None)] sorted by column
+        name.
 
         Sorted by name rather than by attribute number so the expression is
         the same whichever side produced it - the checkpoint keys its stored
@@ -7931,7 +8111,10 @@ class PostgresEngine(Engine):
             "and a.attnum > 0 and not a.attisdropped "
             "order by a.attname").splitlines()
         parsed = [(r.split("|")[0], r.split("|")[1]) for r in rows if r]
-        out = [(c, ty if ty in ("geometry", "geography") else None)
+        # a byte or text column may hold a value too wide to render whole
+        # in a digest (`_row_hash_expr`, `canon.WIDE`)
+        out = [(c, ty if ty in ("geometry", "geography") else
+                "wide" if ty in self.WIDE_TYPES else None)
                for c, ty in parsed]
         cache[key] = out or None
         return cache[key]
@@ -8832,15 +9015,34 @@ class PostgresEngine(Engine):
             proc.stdout, read_across_frames=True)
 
     def _copy_in_spans(self, db, key, qt, cols, rf, st, ck, log):
-        """A table with no integer key copied by where its rows are stored
-        (`position_spans`), a span a transaction, each checkpointed once it
-        has committed - so a stop costs the span it was in, not the table.
-        The whole table is then held to what passed. Returns whether it
-        was copied this way."""
-        from .. import ranges
-        spans = self.position_spans("src", db, key, ranges.LEAST)
-        if not spans or len(spans) < 2:
+        """A table with no integer key copied in parts it can go on from
+        (`ranges.keyless`): by where its rows are stored (`position_spans`)
+        or by buckets of its rows' hash, a part a transaction, each
+        checkpointed once it has committed - so a stop costs the part it
+        was in, not the table. A span's stop is placed by the target's
+        count; a bucket begun and not done is emptied on the target by the
+        same hash and copied again. The whole table is then held to what
+        passed, and where it does not add up, bucket by bucket, only the
+        buckets that differ copied again. Returns whether it was copied
+        this way."""
+        from .. import decide, ranges
+        sc, dc, _ = self._comparable_columns(db, self, key, self, key)
+        began = time.monotonic()
+        way = ranges.keyless(
+            key, st, self, self, db, key, key, sc, dc,
+            int(self._rows_of("src", db, key) or 0),
+            lambda: self.position_spans("src", db, key, ranges.LEAST),
+            self.digest_salt(), decide.HopCosts(self.hop, "keyless/"))
+        if way.restart:
+            self._psql("dst", db, f"delete from {qt} where {rf}" if rf
+                       else f"truncate {qt}")
+            log(f"{key}: the copy that stopped went another way; the target"
+                " table is emptied and copied again")
+        if way.chunk in (None, "one pass"):
             return False
+        if way.chunk != "pages":
+            log(f"{key}: {way.strategy.said} -"
+                f" {way.strategy.reasons.get('chunk', '')}")
 
         def scoped(where):
             return (f"({where}) and ({rf})" if where and rf else
@@ -8855,29 +9057,67 @@ class PostgresEngine(Engine):
             self._psql("dst", db, f"delete from {qt} where {rf}" if rf
                        else f"truncate {qt}")
             ck.save()
-        todo = ranges.spans_to_copy(
-            st, spans, lambda: count("dst", None),
-            lambda where: count("src", where), restart, log, key)
-        for start, where in todo:
-            sent = self._copy_pipe(db, self._copy_select(qt, cols,
-                                                         scoped(where)),
-                                   qt, "", columns=cols)
-            ranges.span_copied(st, start, sent.n, sent.total, ck.save)
-            log(f"{key}: {len(st['spans_done'])} of {len(st['spans'])}"
-                " spans copied (no key: by where the rows are stored)")
-        whole = ranges.spans_total(st)
-        if (self.hop.options or {}).get("verify_batches", True):
+
+        def clear(where_there):
+            return int(self._psql("dst", db, (
+                f"with gone as (delete from {qt} where {scoped(where_there)}"
+                " returning 1) select count(*) from gone")).strip() or 0)
+        if "spans" not in st and way.by_bucket:
+            # a fresh start: what the target holds of the table is not this
+            # copy's (by count, `spans_to_copy` empties it the same way)
+            restart()
+        for attempt in (1, 2):
+            if way.by_bucket:
+                todo = ranges.buckets_to_copy(st, way.spans, clear, log, key)
+            else:
+                todo = [(s_, w, None) for s_, w in ranges.spans_to_copy(
+                    st, [(s_, w) for s_, w, _ in way.spans],
+                    lambda: count("dst", None),
+                    lambda where: count("src", where), restart, log, key)]
+            for start, where, _ in todo:
+                if way.by_bucket:
+                    ranges.bucket_begun(st, start, ck.save)
+                sent = self._copy_pipe(db, self._copy_select(qt, cols,
+                                                             scoped(where)),
+                                       qt, "", columns=cols)
+                ranges.span_copied(st, start, sent.n, sent.total, ck.save)
+                log(f"{key}: {len(st['spans_done'])} of {len(st['spans'])}"
+                    " parts copied (no key: "
+                    + ("by where the rows are stored)" if way.chunk == "pages"
+                       else "by buckets of the rows' hash)"))
+            whole = ranges.spans_total(st)
+            if not (self.hop.options or {}).get("verify_batches", True):
+                break
             back = self._copy_out_tally("dst", db,
                                         self._copy_select(qt, cols, rf or ""))
             held = (whole is not None and (back.n, back.total) == whole) \
                 or self._range_same(db, key, rf)
-            if not held:
+            if held:
+                break
+            if not way.by_bucket or attempt == 2:
                 raise SystemExit(
                     f"{key}: the target holds {back.n:,} rows where"
                     f" {whole[0] if whole else '?'} were copied, or the same"
                     " number holding different values. The target changes"
                     " what it is given, or another writer is writing this"
                     " table")
+            # held bucket by bucket to the source's: only those that differ
+            # are emptied there and copied again
+            bad = [s_ for s_, w, _ in way.spans
+                   if self._range_same(db, key, scoped(w)) is False]
+            log(f"{key}: the target does not hold what was copied;"
+                f" {len(bad)} of {len(way.spans)} buckets differ, and only"
+                " those are copied again")
+            st["spans_done"] = [x for x in st["spans_done"] if x not in bad]
+            for x in bad:
+                st["span_tally"].pop(str(x), None)
+                ranges.bucket_begun(st, x, ck.save)
+            ck.save()
+        costs = decide.HopCosts(self.hop, "keyless/")
+        took = time.monotonic() - began
+        for part, rung in way.strategy.names.items():
+            costs.saw(f"{part}/{rung}", max(int(whole[0]) if whole else 1,
+                                            1), took)
         st["done"] = True
         ck.save()
         return True

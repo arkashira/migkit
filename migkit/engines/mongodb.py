@@ -940,13 +940,22 @@ class MongoEngine(Engine):
                   .get("total") or 0)
         if queued:
             busy = max(busy or 0.0, BUSY_RATIO)
-        lag = None
+        lag, replica = None, False
         try:
             rs = self._client(side).admin.command("replSetGetStatus")
             members = rs.get("members") or []
             primary = next((m for m in members if m.get("stateStr") == "PRIMARY"),
                            None)
-            if primary:
+            me = next((m for m in members if m.get("self")), None)
+            if primary and me and me.get("stateStr") == "SECONDARY" \
+                    and me.get("optimeDate") and primary.get("optimeDate"):
+                # the member read is a secondary: its own distance behind
+                # the primary, which its brake holds the check's rise in
+                # (`throttle.REPLICA_RISE`)
+                replica = True
+                lag = max(0.0, (primary["optimeDate"] - me["optimeDate"])
+                          .total_seconds())
+            elif primary:
                 times = [m.get("optimeDate") for m in members
                          if m.get("optimeDate") and m.get("stateStr")
                          in ("PRIMARY", "SECONDARY")]
@@ -954,7 +963,7 @@ class MongoEngine(Engine):
                     lag = (max(times) - min(times)).total_seconds()
         except Exception:
             pass    # standalone, or the command is not permitted: lag unknown
-        return Health(busy_ratio=busy, lag_seconds=lag)
+        return Health(busy_ratio=busy, lag_seconds=lag, replica=replica)
 
     def _db_hashes(self, db, names=None):
         """(source, target) `dbHash` per collection, or (None, None) where
@@ -1885,19 +1894,75 @@ class MongoEngine(Engine):
             return [loads(l) for l in f.read_text().splitlines()] \
                 if f.exists() else []
 
-        with (undo / f"{name}.docs.jsonl").open("a") as uf:
-            for _id in read("extra"):
-                doc = t.find_one({"_id": _id})
-                if doc is not None:
-                    uf.write(dumps(doc) + "\n")
-                t.delete_one({"_id": _id})
-            for _id in read("missing") + read("changed"):
-                old = t.find_one({"_id": _id})
-                if old is not None:
-                    uf.write(dumps(old) + "\n")
-                doc = s.find_one({"_id": _id})
-                if doc is not None:
-                    t.replace_one({"_id": _id}, doc, upsert=True)
+        from .. import repairlog
+        extra, missing = read("extra"), read("missing")
+        changed = read("changed")
+        if changed and self.newer_wins_column():
+            changed = self._newer_docs(name, s, t, changed, d)
+        # every statement written down before any lands (`repairlog`):
+        # the documents by `_id`, as the target holds them and as the
+        # source's will be
+        io = repairlog.DocumentIO(t, name)
+        keys = [(repairlog.doc_text(i),) for i in missing + changed + extra]
+        before = io.rows(keys)
+        after = repairlog.DocumentIO(s, name).rows(
+            keys[:len(missing) + len(changed)])
+        with repairlog.Record(undo, name, "document", (), ["_id"]) as rec:
+            num = {}
+            for k in keys[len(missing) + len(changed):]:
+                num[k] = rec.planned("delete", k, before.get(k), None)
+            for k in keys[:len(missing) + len(changed)]:
+                if k in after:
+                    num[k] = rec.planned("write", k, before.get(k), after[k])
+            rec.ready()
+            with (undo / f"{name}.docs.jsonl").open("a") as uf:
+                for _id in extra:
+                    doc = t.find_one({"_id": _id})
+                    if doc is not None:
+                        uf.write(dumps(doc) + "\n")
+                    t.delete_one({"_id": _id})
+                    rec.applied(num.get((repairlog.doc_text(_id),)))
+                for _id in missing + changed:
+                    old = t.find_one({"_id": _id})
+                    if old is not None:
+                        uf.write(dumps(old) + "\n")
+                    doc = s.find_one({"_id": _id})
+                    if doc is not None:
+                        t.replace_one({"_id": _id}, doc, upsert=True)
+                        rec.applied(num.get((repairlog.doc_text(_id),)))
+
+    def repair_io(self, db, head):
+        """A repair record's documents on the target, by `_id`."""
+        from .. import repairlog
+        if head.get("form") != "document":
+            return super().repair_io(db, head)
+        return repairlog.DocumentIO(
+            self._client("dst")[self._d("dst", db)][head["table"]],
+            head["table"])
+
+    def _newer_docs(self, name, src, dst, changed, report):
+        """The changed `_id`s to overwrite under `newer_wins`: a document
+        whose field the hop names is later on the target is kept, and its
+        `_id` written to `data-<collection>.kept-newer`."""
+        from bson.json_util import dumps
+        col = self.newer_wins_column()
+        by = {dumps(i): i for i in changed}
+
+        def read(side, keys):
+            coll = src if side == "src" else dst
+            out = {}
+            ids = [by[k] for k in keys]
+            for i in range(0, len(ids), 1000):
+                for doc in coll.find({"_id": {"$in": ids[i:i + 1000]}},
+                                     {col: 1}):
+                    if doc.get(col) is not None:
+                        out[dumps(doc["_id"])] = doc[col]
+            return out
+        overwrite, kept = self._keep_the_newer(name, list(by), read)
+        if kept:
+            (report / f"data-{name}.kept-newer").write_text(
+                "".join(k + "\n" for k in kept))
+        return [by[k] for k in overwrite]
 
     def assess(self):
         items = []

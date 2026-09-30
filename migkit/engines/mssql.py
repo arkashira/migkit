@@ -1,6 +1,6 @@
 import time
 
-from .. import decide
+from .. import canon, decide
 from ..util import run, which
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows
@@ -263,7 +263,52 @@ class MSSQLEngine(DbapiRows, Engine):
                 f.unlink()
         return len(missing), len(extra), len(changed)
 
+    #: the tasks waiting for a CPU against the CPUs the server schedules on -
+    #: SQL Server's saturation, where active sessions against a limit of
+    #: 32,767 connections say nothing - and, where the database read is a
+    #: readable secondary of an availability group, its redo still to do
+    #: over the rate it redoes at: its own distance behind the primary
+    HEALTH_SQL = (
+        "select (select isnull(sum(runnable_tasks_count), 0) from"
+        " sys.dm_os_schedulers where status = 'VISIBLE ONLINE'),"
+        " (select count(*) from sys.dm_os_schedulers"
+        " where status = 'VISIBLE ONLINE'),"
+        " (select max(case when redo_rate > 0 then redo_queue_size * 1.0"
+        " / redo_rate else 0 end) from sys.dm_hadr_database_replica_states"
+        " where is_local = 1 and is_primary_replica = 0"
+        " and database_id = db_id())")
+
+    def row_bucket_sql(self, side, db, table, columns, n):
+        """The server's own checksum of the whole row, in [0, n): a heap -
+        a table with no key, which SQL Server keeps no position of a client
+        can read a span by - is copied in buckets of it
+        (`ranges.keyless`). `binary_checksum(*)` passes over the columns it
+        cannot hash (text, ntext, image, xml): two rows alike in all the
+        others share a bucket, which is all a bucket needs."""
+        return (f"(cast(binary_checksum(*) as bigint) + 2147483648)"
+                f" % {int(n)}")
+
+    def _health(self, side, db=None):
+        """What this side says about its own load, for the throttle
+        (`HEALTH_SQL`). None where the server will not say (no VIEW SERVER
+        STATE): a hidden signal is not an idle server."""
+        from ..throttle import Health
+        try:
+            got = self._rows(side, db or self.databases()[0],
+                             self.HEALTH_SQL)[0]
+        except Exception:  # noqa: BLE001 - no reading, then
+            return None
+        runnable, cpus, lag = got
+        busy = float(runnable or 0) / max(float(cpus or 0), 1.0)
+        return Health(busy_ratio=busy,
+                      lag_seconds=None if lag is None else float(lag),
+                      replica=lag is not None)
+
     def check_data(self, db, table=None, stream=None, with_counts=False):
+        from ..throttle import Throttle
+        # a table's two row-hash sums at a time, the source's load asked
+        # between them (backlog C4)
+        gate = Throttle(1, probe=lambda: self._health("src", db))
         q = ("select s.name+'.'+t.name from sys.tables t"
              " join sys.schemas s on s.schema_id=t.schema_id order by 1")
         st = [r[0] for r in self._cmd("src", db, q)]
@@ -291,8 +336,9 @@ class MSSQLEngine(DbapiRows, Engine):
                   f" N'{salt}' + {row}), 1, 8)) as decimal(38, 0)) h"
                   f" from {t} t) rows_hashed")
             try:
-                a = self._cmd("src", db, cq)[0]
-                b = self._cmd("dst", db, cq)[0]
+                with gate.unit():
+                    a = self._cmd("src", db, cq)[0]
+                    b = self._cmd("dst", db, cq)[0]
             except RuntimeError as e:
                 bad.append(f"{t} error {e}")
                 continue
@@ -341,11 +387,16 @@ class MSSQLEngine(DbapiRows, Engine):
                 f" anew: {', '.join(left[:8])}"
                 + (f" and {len(left) - 8} more" if len(left) > 8 else "")
                 if left else "")
+        self._last_throttle = gate.summary()
+        note = gate.line()
+        if note and stream:
+            stream(f"# {note}")
         if bad:
             res.append(Result("data", db, "diff", "; ".join(bad[:10]) + said,
                               "", "pk-level diffs in data-*.missing/extra/"
-                              "changed; repair via tablediff -f fix.sql,"
-                              " review, then apply"))
+                              f"changed; migkit sync {self.hop.name} --db"
+                              f" {db} --kind rows shows the repair, --apply"
+                              " runs it"))
         else:
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
@@ -356,6 +407,11 @@ class MSSQLEngine(DbapiRows, Engine):
     #: refuses them outright (Msg 13604), which left every table holding
     #: one reported as an error and never compared. A shape as its SRID and
     #: its well-known binary with Z and M; a hierarchy node as its path
+    #: the types a value of which the row hash takes as its length and hash
+    #: where it is wider than `canon.WIDE`; `datalength` reads the length
+    #: the server keeps, and `hashbytes` its bytes
+    WIDE_TYPES = ("varbinary", "varchar", "nvarchar")
+
     CLR_RENDERED = {
         "geography": "cast({c}.STSrid as varchar(11)) + ':'"
                      " + convert(varchar(max), {c}.AsBinaryZM(), 2)",
@@ -394,6 +450,18 @@ class MSSQLEngine(DbapiRows, Engine):
                 c = self.CLR_RENDERED[kind].format(c=c)
             elif assembly:
                 c = f"cast({c} as varbinary(max))"
+            elif kind in self.WIDE_TYPES:
+                # a value wider than `canon.WIDE` as its length and hash,
+                # hashed where it lies instead of written into the row's
+                # JSON a third larger (backlog R22); any other as before
+                wide = (f"concat('{canon.WIDE_MARK}', datalength({c}), ':',"
+                        f" convert(varchar(64), hashbytes('SHA2_256', {c}),"
+                        " 2))")
+                if kind == "varbinary":
+                    # of the column's own type, so a value that is not wide
+                    # is written as it always was
+                    wide = f"cast({wide} as varbinary(max))"
+                c = f"iif(datalength({c}) > {canon.WIDE}, {wide}, {c})"
             parts.append(f"{c} as [c{len(parts)}]")
         if not parts:
             return "N'{}'", left
@@ -579,15 +647,59 @@ class MSSQLEngine(DbapiRows, Engine):
                     db, "sequences", stmts, undo,
                     f"{len(stmts)} identities differ, {same} already equal"))
         if kind in ("rows", "all"):
-            actions.append(RepairAction(
-                db, "rows", ["tablediff -sourceserver ... -destinationserver ..."
-                             " -f fix.sql  # generates repair T-SQL"],
-                [], "use the tablediff utility, it emits repair sql you can review"))
+            actions += self._rows_found_plan(db)
         return actions
 
+    def _found(self, db, t):
+        """{missing, changed, extra: [key as canonical text]} of one table,
+        from the drilldown's files: each line the key's columns as the
+        server writes them as text, tab-joined (`_drilldown`)."""
+        from .. import repairlog
+        d = self.hop.report_dir(db)
+        pks = self._pk_cols(db, t)
+        sc, _, _ = self._comparable_columns(db, self, t, self, t)
+        out = {}
+        for kind in ("missing", "changed", "extra"):
+            f = d / f"data-{t}.{kind}"
+            lines = [x for x in f.read_text().splitlines() if x] \
+                if f.exists() else []
+            out[kind] = [list(k) for k in repairlog.canon_keys(
+                sc, pks, [x.split("\t") for x in lines])]
+        return out
+
+    def _rows_found_plan(self, db):
+        """The rows the last check found, one action a table, repaired
+        through the neutral contract (`_apply_rows`) - the base's plan, over
+        this engine's own drilldown files."""
+        d = self.hop.report_dir(db)
+        tables = sorted({f.name[len("data-"):].rsplit(".", 1)[0]
+                         for k in ("missing", "changed", "extra")
+                         for f in d.glob(f"data-*.{k}")})
+        out = []
+        for t in tables:
+            n = {k: sum(1 for x in (d / f"data-{t}.{k}").read_text()
+                        .splitlines() if x)
+                 if (d / f"data-{t}.{k}").exists() else 0
+                 for k in ("missing", "changed", "extra")}
+            if not any(n.values()):
+                continue
+            out.append(RepairAction(
+                f"{db}.{t}", "rows",
+                [f"copy {n['missing'] + n['changed']} rows from the source,"
+                 f" delete {n['extra']} rows the source does not have"],
+                [], f"{n['missing']} missing, {n['changed']} changed,"
+                    f" {n['extra']} extra; every target row this overwrites"
+                    " or removes is written to the undo file first"))
+        return out
+
     def apply(self, db, action):
+        if action.kind == "rows":
+            t = action.scope.split(".", 1)[1]
+            sc, dc, _ = self._comparable_columns(db, self, t, self, t)
+            return self._apply_rows(db, t, self, t, sc, self, t, dc,
+                                    found=self._found(db, t))
         if action.kind != "sequences":
-            raise SystemExit("mssql row repair is manual, see plan notes")
+            raise SystemExit(f"mssql cannot apply a {action.kind!r} action")
         self._cmd("dst", db,
                 " ".join(s.split("  --")[0] for s in action.statements))
 

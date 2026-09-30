@@ -548,7 +548,7 @@ class Engine:
                       " rows on both sides")
 
     def _large_object_result(self, db, src_total, dst_total, dangling,
-                             columns, hint):
+                             columns, hint, contents=None, by_value=0):
         """Whether the documents a table only points at came across.
 
         A PostgreSQL large object does not live in the table. The table
@@ -567,10 +567,14 @@ class Engine:
         source)]. Requiring the **source** to resolve a column before
         reporting the target is what keeps this off the many `oid` columns
         that hold something else entirely - a `regclass`, say - and would
-        otherwise look broken on both sides.
+        otherwise look broken on both sides. `contents` is (objects both
+        sides hold and were compared, [oid whose bytes differ]) where they
+        were read; `by_value` how many of the `columns` are integer columns
+        found by what they hold (problems D11).
         """
-        unsure = ("; references kept in a plain integer column are not found"
-                  " by this - the type is what makes them findable")
+        unsure = ("; an integer column is taken for references where at"
+                  " least half its values name an object on the source"
+                  f" ({by_value} found that way)")
         if dangling:
             worst = ", ".join(f"{col} {broken} of {ok} rows"
                               for col, broken, ok in dangling[:4])
@@ -588,6 +592,15 @@ class Engine:
                 " holds none - a dump restricted by schema or table drops"
                 " them silently, and the oid columns still compare equal",
                 "", hint)
+        compared, differ = contents if contents is not None else (None, [])
+        if differ:
+            return Result(
+                "deep", f"{db} large objects", "diff",
+                f"{len(differ)} of {compared} large objects both sides hold"
+                " are other bytes on the target (the first: oid "
+                + ", ".join(str(o) for o in differ[:4])
+                + ") - the reference arrived and the document it names is"
+                " not the source's", "", hint)
         if src_total != dst_total:
             return Result(
                 "deep", f"{db} large objects", "diff",
@@ -596,10 +609,12 @@ class Engine:
         if not src_total and not columns:
             return Result("deep", f"{db} large objects", "ok",
                           "no large objects on either side")
+        same = (f", every one the same bytes on both ({compared} compared"
+                " a piece at a time)" if compared is not None else "")
         return Result(
             "deep", f"{db} large objects", "ok",
-            f"{src_total} large objects on both sides, and every oid column"
-            f" that resolves on the source resolves on the target"
+            f"{src_total} large objects on both sides{same}, and every"
+            " column that names one on the source names one on the target"
             f" ({columns} checked){unsure}")
 
     def _trigger_result(self, db, disabled, quieted, hint):
@@ -1659,6 +1674,14 @@ class Engine:
         about `rows_per` rows each - for a table with no key, which has
         nothing else to resume from - or None where the engine has no
         stored position to read by."""
+        return None
+
+    def row_bucket_sql(self, side, db, table, columns, n):
+        """A SQL expression in [0, n) this engine computes for each row of
+        `table` from the whole row with a hash of its own - the buckets a
+        table with no key is copied by where the engine renders canonical
+        text only in this process (`ranges.keyless`) - or None where it
+        has none. The source's alone: the target's count places a stop."""
         return None
 
     def native_replica_unsafe(self):
@@ -2898,7 +2921,7 @@ class Engine:
         return virtual, back
 
     def _comparable_columns(self, db, src_engine, src_table,
-                            dst_engine, dst_table):
+                            dst_engine, dst_table, how=None):
         """What to hash on each side, and everything that is not hashable.
 
         Returns (src_cols, dst_cols, notes). The two column lists are the
@@ -2906,6 +2929,11 @@ class Engine:
         each server happens to report, because the row text is positional and
         two servers agreeing on a set of columns says nothing about the order
         they list them in.
+
+        `how`, a dict where given, is filled with every column of the pair
+        by the target's name: ("exactly" | "by value" | "not at all", why)
+        - what a verdict says about how much of a row it compared
+        (`verdict.compared_clause`, problems D15).
         """
         from .. import canon
 
@@ -2914,8 +2942,8 @@ class Engine:
             for name, typ in engine.neutral_columns(side, db, table):
                 got[name] = engine.canonical_type(side, db, typ)
             return got
-        src_types, back = self._mapped_types(
-            db, src_table, declared(src_engine, "src", src_table))
+        src_declared = declared(src_engine, "src", src_table)
+        src_types, back = self._mapped_types(db, src_table, src_declared)
         dst_types = declared(dst_engine, "dst", dst_table)
         got = self._classify_columns(src_engine, src_types,
                                      dst_engine, dst_types)
@@ -2935,6 +2963,23 @@ class Engine:
                 (n, canon.by_value(s), canon.by_value(d))
                 if accepted(src_table, back.get(n, n)) else (n, s, d)
                 for n, s, d in got["pairs"]]
+        if how is not None:
+            for n, s, d in got["pairs"]:
+                kind, why = got["how"][n]
+                if accepted and accepted(src_table, back.get(n, n)):
+                    kind, why = "by value", (
+                        f"compared as {canon.as_words(s)}, its type let"
+                        " change on the way (accept_changes)")
+                how[n] = (kind, why)
+            for n in got["only_src"]:
+                how[n] = ("not at all", "only on the source")
+            for n in got["only_dst"]:
+                how[n] = ("not at all", "only on the target")
+            for n, why in got["unreadable"]:
+                how[n] = ("not at all", why)
+            for n in sorted(set(src_declared) - set(back.values())):
+                how.setdefault(n, ("not at all", "left out by the hop's"
+                                                 " column mapping"))
         # read by the source's own name, written and compared by the target's
         src_cols = [(back.get(n, n), s) for n, s, _ in got["pairs"]]
         dst_cols = [(n, d) for n, _, d in got["pairs"]]
@@ -3026,6 +3071,12 @@ class Engine:
                     scls = dcls = "bytes"
             out["pairs"].append((name, scls, dcls))
         out["src_types"], out["dst_types"] = src_types, dst_types
+        # how each compared column is compared, exactly or by value, and
+        # as what (problems D15): a verdict says it for every column
+        out["how"] = {name: canon.how_compared(
+            src_engine.CANON_ENGINE, src_types[name], s,
+            dst_engine.CANON_ENGINE, dst_types[name], d)
+            for name, s, d in out["pairs"]}
         return out
 
     # --- the second reading's part in a drilldown (backlog 0f) --------------
@@ -3402,7 +3453,7 @@ class Engine:
                         else str(bsontype.shown(part)) for part in key)
 
     def _apply_rows(self, db, name, src_engine, src_t, src_cols,
-                    dst_engine, dst_t, dst_cols):
+                    dst_engine, dst_t, dst_cols, found=None):
         """Carry the listed rows across, then remove the ones that should
         not exist.
 
@@ -3415,11 +3466,16 @@ class Engine:
         Writes first and deletions last, so a repair cut off in the middle
         leaves rows that should not be there - which the next check names -
         rather than a hole nothing looks for.
+
+        `found` is the rows to repair, {missing, changed, extra: [key as
+        canonical text]}, where the engine's check keeps them in a form of
+        its own; the drilldown's files otherwise.
         """
         import json
 
         from .. import canon
-        found = self._drill_tables(db).get(name, {})
+        if found is None:
+            found = self._drill_tables(db).get(name, {})
         if not found:
             return
         key = list(src_engine.neutral_key("src", db, src_t))
@@ -3486,24 +3542,112 @@ class Engine:
                     " source does not have. Nothing has been written."
                     " `migkit move` can re-copy the table, which carries"
                     " every column whether migkit can compare it or not")
+        changed = list(found.get("changed", []))
+        src_names = [n for n, _ in src_cols]
+        dkey = [dst_cols[src_names.index(k)][0] for k in key]
+        rows = (src_engine.neutral_rows_by_key(
+            "src", db, src_t, src_cols, key, [values(k) for k in send])
+            if send else {})
+        if changed and self.newer_wins_column():
+            # the target's row is kept where the column the hop names is
+            # later there (`newer_wins`), as on PostgreSQL and MySQL
+            there = dst_engine.neutral_rows_by_key(
+                "dst", db, dst_t, dst_cols, dkey,
+                [values(k) for k in changed])
+            changed, kept = self._newer_neutral(db, name, dst_engine, dst_t,
+                                                src_cols, dst_cols, changed,
+                                                rows, there)
+            if kept:
+                path = self.hop.report_dir(db) / f"data-{name}.kept-newer"
+                path.write_text("".join(json.dumps(list(k)) + "\n"
+                                        for k in kept))
+                keep = {tuple(k) for k in kept}
+                send = [k for k in send if tuple(k) not in keep]
+                rows = {k: r for k, r in rows.items() if k not in keep}
         with undo.open("a") as handle:
-            remember(handle, found.get("changed", []))
+            remember(handle, changed)
             remember(handle, drop)
-        if send:
-            rows = src_engine.neutral_rows_by_key(
-                "src", db, src_t, src_cols, key, [values(k) for k in send])
+        # the statement-level record, written whole before anything lands
+        # (`repairlog`): what each statement puts where, and what was there
+        from .. import repairlog
+        # the source's rows in the source's classes: the text the target's
+        # own is held to once they have landed, which is what the check
+        # compares
+        after = dict(zip(rows, repairlog.canon_rows(src_cols,
+                                                    list(rows.values()))))
+        with repairlog.planned(
+                undo_dir, repairlog.CanonIO(dst_engine, "dst", db, dst_t,
+                                            dst_cols, dkey),
+                after, send, (), drop) as record:
+            writes = sum(1 for k in send if tuple(k) in after)
+            first_delete = writes + 1
             if rows:
                 dst_engine.neutral_write("dst", db, dst_t, dst_cols,
                                          list(rows.values()))
-        # a key part of a class with a form of its own on the target (an
-        # ObjectId kept in a `jsonb` key) addresses the row in that form
-        into = {s: d for (s, _), (_, d) in zip(src_cols, dst_cols)
-                if canon.has_own_form(d)}
-        for key_text in drop:
-            dst_engine._apply_delete("dst", db, dst_t, {
-                k: canon.write_value(dst_engine.CANON_ENGINE, into[k], v)
-                if k in into else v
-                for k, v in zip(key, values(key_text))})
+                record.applied(writes)
+            # a key part of a class with a form of its own on the target
+            # (an ObjectId kept in a `jsonb` key) addresses the row in that
+            # form
+            into = {s: d for (s, _), (_, d) in zip(src_cols, dst_cols)
+                    if canon.has_own_form(d)}
+            for i, key_text in enumerate(drop):
+                dst_engine._apply_delete("dst", db, dst_t, {
+                    k: canon.write_value(dst_engine.CANON_ENGINE, into[k], v)
+                    if k in into else v
+                    for k, v in zip(key, values(key_text))})
+                record.applied(first_delete + i)
+
+    def _newer_neutral(self, db, name, dst_engine, dst_t, src_cols, dst_cols,
+                       changed, src_rows, dst_rows):
+        """`_keep_the_newer` over rows read through the neutral contract:
+        (overwrite, keep). The column is found by the target's name, else
+        the source's, among the columns both sides render; each side's
+        value is taken as its class reads it back from canonical text, so
+        an instant on one engine and a wall clock in UTC on another
+        compare as the times they are."""
+        from .. import canon
+        col = self.newer_wins_column()
+        dnames = [n for n, _ in dst_cols]
+        snames = [n for n, _ in src_cols]
+        at = dnames.index(col) if col in dnames else (
+            snames.index(col) if col in snames else None)
+        if at is None:
+            there = {n for n, _ in dst_engine.neutral_columns("dst", db,
+                                                              dst_t)}
+            if col in there:
+                raise SystemExit(
+                    f"{name}: newer_wins names {col}, and its values cannot"
+                    " be read alike on both sides, so which row is newer"
+                    " cannot be told. Nothing was repaired on this table.")
+            raise SystemExit(
+                f"{name}: newer_wins names {col}, and it is not on both"
+                " sides, so which row is newer cannot be told. Nothing was"
+                " repaired on this table.")
+
+        def read(side, keys):
+            got, cls = ((src_rows, src_cols[at][1]) if side == "src"
+                        else (dst_rows, dst_cols[at][1]))
+            out = {}
+            for k in keys:
+                row = got.get(tuple(k))
+                if row is None or row[at] is None:
+                    continue
+                out[self._key_id(k)] = canon.from_text(
+                    cls, canon.render_value(cls, row[at]))
+            return out
+        return self._keep_the_newer(name, changed, read)
+
+    def repair_io(self, db, head):
+        """How a repair record's rows are read and put back on this hop's
+        target (`repairlog`): through the neutral contract of the engine
+        the target is - this one, or the pair's target engine."""
+        from .. import repairlog
+        if head.get("form") != "canon":
+            raise SystemExit(f"a repair record of form {head.get('form')!r}"
+                             f" cannot be put back by {self.CANON_ENGINE}")
+        eng = getattr(self, "dst_engine", None) or self
+        return repairlog.CanonIO(eng, "dst", db, head["table"],
+                                 head["columns"], head["key"])
 
     def _drill_tables(self, db):
         """Tables the last check left a drilldown for, and what it found.

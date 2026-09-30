@@ -13,6 +13,7 @@ The workers are the move's, shared by every table in flight: a table
 copied beside others does not multiply them.
 """
 import threading
+from dataclasses import dataclass, field
 
 #: the least rows a range holds when a table is split for workers
 LEAST = 50_000
@@ -413,6 +414,236 @@ def spans_total(st):
         n += int(rows)
         total += int(fold)
     return n, total
+
+
+# --- a table with no key: where it is copied from, and how it goes on ------
+# Backlog P0-KEYLESS. A table with no key has nothing to resume by but where
+# its source stores its rows (PostgreSQL's pages) - on MySQL, SQL Server and
+# the rest a stop started it over. It goes in buckets of its rows' hash now:
+# the same buckets the check reads it by (`leaves.Spec("row")`, the top bits
+# of each row's canonical hash, a node of the check's tree), found by the
+# server on each side, so a bucket not finished is emptied on the target by
+# the same hash and copied again, and a table that does not add up is held
+# to its buckets one by one and only those that differ are copied again.
+# Where the source hashes a row only by its own function (SQL Server's), the
+# buckets are the source's alone and the target's count places a stop, as it
+# does for pages (`spans_to_copy`).
+
+#: rows a bucket holds on average. Each bucket is one scan of the whole
+#: table on the source, its rows found by their hash - so a table in n
+#: buckets is hashed n times there, and a stop costs one bucket instead of
+#: the table. Set, not measured: the leaves' one-scan tree hashed 1M rows of
+#: five columns in 3.68s on a 2-CPU PostgreSQL (`leaves`), so 2^4 buckets of
+#: a 16M-row table add about a minute a bucket on such a server
+BUCKET_ROWS = 1_000_000
+#: 2^6 buckets at most
+MOST_BUCKET_BITS = 6
+
+
+def bucket_bits(rows):
+    """Bits of the row hash a table's buckets are cut by: about
+    `BUCKET_ROWS` a bucket, at least two buckets."""
+    n = max(2, -(-int(rows or 0) // BUCKET_ROWS))
+    return min(MOST_BUCKET_BITS, (n - 1).bit_length())
+
+
+def _keyless_parts():
+    from . import decide
+    R, N = decide.Rung, decide.Need
+    large = N("a table large enough to repay a scan a bucket",
+              lambda f: (f.get("rows") or 0) >= 2 * BUCKET_ROWS,
+              "the table is small enough that starting it over costs less"
+              " than reading it once a bucket")
+    return (
+        decide.Part("chunk", (
+            R("pages", "spans of where the source stores its rows",
+              gives=frozenset({"keyless", "resume by chunk"}),
+              needs=(N("the source reads a span of its stored rows",
+                       lambda f: len(f.get("pages") or ()) >= 2,
+                       "the source has no stored position to read a span of"
+                       " its rows by, or the table is one span"),),
+              because="a span is read by a scan of just its pages; no row"
+                      " is hashed to find it"),
+            R("buckets", "buckets of each row's hash, found alike on both"
+                         " sides", gives=frozenset({"keyless",
+                                                    "resume by chunk"}),
+              needs=(large,
+                     N("the source hashes its rows where they are",
+                       lambda f: bool(f.get("hashes")),
+                       "the source renders its rows only in this process,"
+                       " so a bucket would be the whole table read here")),
+              because="a bucket is found by the row's own hash, the one the"
+                      " check reads the table by"),
+            R("server buckets", "buckets of the source's own hash of each"
+                                " row", gives=frozenset({"keyless",
+                                                         "resume by chunk"}),
+              needs=(large,
+                     N("the source's own hash of a row",
+                       lambda f: bool(f.get("server hash")),
+                       "the source has no hash of a row of its own")),
+              because="a bucket is found by the source's own hash of the"
+                      " row"),
+            R("one pass", "the whole table in one pass",
+              gives=frozenset({"keyless"}),
+              because="nothing to resume by, and a restart starts over"),
+        )),
+        decide.Part("resume", (
+            R("by bucket", "a bucket a stop left unfinished emptied on the"
+                           " target by the same hash and copied again",
+              needs=(N("the target finds a bucket's rows by the same hash",
+                       lambda f: bool(f.get("target hashes")),
+                       "the target cannot find a bucket's rows by the"
+                       " source's hash"),),
+              fits=lambda ch: ch["chunk"].name == "buckets"
+              or "only a bucket of the row's canonical hash is the same"
+                 " rows on the target",
+              because="a stop costs the bucket it was in, and nothing needs"
+                      " counting"),
+            R("by count", "the target's count places a stop between two"
+                          " spans", fits=lambda ch: ch["chunk"].name
+              in ("pages", "buckets", "server buckets")
+              or "a table in one pass has no span to place a stop between",
+              because="a span commits whole, so the target's count says"
+                      " whether the one in flight landed"),
+            R("over", "started over", fits=lambda ch: ch["chunk"].name
+              == "one pass" or "a table copied in parts goes on from them",
+              because="nothing to go on from"),
+        )),
+    )
+
+
+KEYLESS = None
+
+
+def keyless_parts():
+    """The parts a table with no key is copied by: how it is cut, and how a
+    stop is gone on from."""
+    global KEYLESS
+    if KEYLESS is None:
+        KEYLESS = _keyless_parts()
+    return KEYLESS
+
+
+def bucket_pairs(sc, dc):
+    """(source columns, target columns) a bucket is found by on each side:
+    those of one class on both, rendered alike in SQL (`leaves.
+    bucket_columns`) - so a row's hash is the same number on both."""
+    from . import leaves
+    pairs = [(s, d) for s, d in zip(sc, dc) if s[1] == d[1]
+             and leaves.bucket_columns([s])]
+    return [s for s, _ in pairs], [d for _, d in pairs]
+
+
+@dataclass
+class Keyless:
+    """How one table with no key is copied: the strategy, its spans -
+    [(start, where on the source, where on the target or None)] - and the
+    buckets' spec where it goes by the rows' hash."""
+    strategy: object
+    spans: list = field(default_factory=list)
+    spec: object = None
+    #: the checkpoint's spans were another way's, and are dropped: what
+    #: the target holds of the table is not this way's to go on from
+    restart: bool = False
+
+    @property
+    def chunk(self):
+        return self.strategy.parts["chunk"].name if self.strategy else None
+
+    @property
+    def by_bucket(self):
+        return bool(self.strategy) and \
+            self.strategy.parts["resume"].name == "by bucket"
+
+
+def keyless(work, st, src, dst, db, src_t, dst_t, sc, dc, rows, pages,
+            salt, costs=None):
+    """The `Keyless` way for one table (`keyless_parts`, composed by
+    `decide.compose`), kept in its checkpoint entry `st` so a restart goes
+    on the way it began. `pages()` is the source's `position_spans`, asked
+    only where that way is still in the running; `rows` about how many the
+    table holds; `salt` the hash's, kept with the spans."""
+    from . import decide, leaves
+    sb, db_cols = bucket_pairs(sc, dc)
+    a = leaves.Side(src, "src", db, src_t, sb)
+    b = leaves.Side(dst, "dst", db, dst_t, db_cols)
+    probe = leaves.Spec("row", bits=1, salt=salt)
+    facts = decide.Facts(
+        {"rows": rows}, pages=pages,
+        hashes=lambda: leaves.bucket_where(a, probe, 0) is not None,
+        **{"target hashes": lambda: leaves.bucket_where(b, probe, 0)
+           is not None,
+           "server hash": lambda: src.row_bucket_sql(
+               "src", db, src_t, sc, 2) is not None})
+    need = ("keyless", "resume by chunk") \
+        if (rows or 0) >= 2 * BUCKET_ROWS else ("keyless",)
+    # spans a checkpoint holds from before the way was kept beside them
+    # were a copy by pages
+    kept = st.get("keyless") or ({"chunk": "pages", "resume": "by count"}
+                                 if "spans" in st else None)
+    strat = decide.compose(work, keyless_parts(), facts, need, costs,
+                           keep=kept)
+    out = Keyless(strat)
+    if not strat:
+        return out
+    if "spans" in st and strat.names != kept:
+        for k in ("spans", "spans_done", "span_tally", "spans_begun",
+                  "bucket_spec"):
+            st.pop(k, None)
+        out.restart = True
+    st["keyless"] = strat.names
+    if "spans" in st:
+        # planned once, gone on from as the checkpoint has it
+        spec = st.get("bucket_spec")
+        out.spec = leaves.Spec.of(spec) if spec else None
+        out.spans = [tuple(x) + (None,) * (3 - len(x)) for x in st["spans"]]
+        return out
+    chunk = strat.parts["chunk"].name
+    if chunk == "pages":
+        out.spans = [(s, w, None) for s, w in facts["pages"]]
+    elif chunk in ("buckets", "server buckets"):
+        bits = bucket_bits(rows)
+        if chunk == "buckets":
+            out.spec = leaves.Spec("row", bits=bits, salt=salt)
+            there = out.by_bucket
+            out.spans = [(i, leaves.bucket_where(a, out.spec, i),
+                          leaves.bucket_where(b, out.spec, i) if there
+                          else None) for i in range(1 << bits)]
+            st["bucket_spec"] = out.spec.as_dict()
+        else:
+            expr = src.row_bucket_sql("src", db, src_t, sc, 1 << bits)
+            out.spans = [(i, f"({expr}) = {i}", None)
+                         for i in range(1 << bits)]
+    return out
+
+
+def buckets_to_copy(st, spans, clear, log, label):
+    """[(start, where, where on the target)] of a table's buckets still to
+    copy, planned once and kept in its checkpoint entry `st`. A bucket is
+    marked begun before its first row is written and done once its last
+    has: one begun and not done when a run starts again is emptied on the
+    target (`clear(where on the target)`) - by the same hash the source's
+    rows were found by - before it is copied again. A bucket never begun
+    holds nothing there: the table was emptied when the copy began."""
+    if "spans" not in st:
+        st["spans"] = [list(s) for s in spans]
+        st["spans_done"], st["span_tally"], st["spans_begun"] = [], {}, []
+    done = set(st["spans_done"])
+    todo = [tuple(x) for x in st["spans"] if x[0] not in done]
+    for start, _, there in todo:
+        if start in st.get("spans_begun", []):
+            gone = clear(there)
+            log(f"{label}: bucket {start} was begun and not finished; emptied"
+                f" {gone or 0:,} of its rows on the target to copy it again")
+    return todo
+
+
+def bucket_begun(st, start, save):
+    """A bucket's first rows are about to be written."""
+    begun = st.setdefault("spans_begun", [])
+    if start not in begun:
+        begun.append(start)
+        save()
 
 
 def step(rows, chunk, workers):

@@ -39,6 +39,14 @@ BUSY_RATIO = 0.75
 # Replication lag past this many seconds means the target is already behind
 # and reading harder will not help it catch up.
 LAG_SECONDS = 30.0
+# Where the side read is itself a replica - a reader the check was pointed at
+# to spare the primary - how far its lag may rise above the least this run
+# has seen before the check backs off: a full scan on a standby holds back
+# its replay (PostgreSQL waits for the query, up to max_standby_streaming_
+# delay), and the rise is the check's doing. pt-table-checksum pauses at 1s
+# of replica lag by default; 5s is set, not measured, so an ordinary wobble
+# does not brake every table.
+REPLICA_RISE = 5.0
 # Never sample health more often than this: the probe must not become load.
 PROBE_EVERY = 5.0
 # Backoff bounds per wait.
@@ -54,16 +62,27 @@ class Health:
     """What one side reports about itself. Any field may be None: a managed
     provider that hides a signal must not make the throttle fail closed."""
 
-    def __init__(self, busy_ratio=None, lag_seconds=None, note=""):
+    def __init__(self, busy_ratio=None, lag_seconds=None, note="",
+                 replica=False):
         self.busy_ratio = busy_ratio
         self.lag_seconds = lag_seconds
         self.note = note
+        #: the side is itself a replica, and `lag_seconds` is its own
+        #: distance behind its primary
+        self.replica = bool(replica)
 
-    def stressed(self):
+    def stressed(self, least_lag=None):
+        """Why this side wants the work to back off, or "". `least_lag`
+        is the least lag this run has seen of it, for a replica's brake."""
         if self.busy_ratio is not None and self.busy_ratio >= BUSY_RATIO:
             return f"sessions at {self.busy_ratio:.0%} of the limit"
         if self.lag_seconds is not None and self.lag_seconds >= LAG_SECONDS:
             return f"replication {self.lag_seconds:.0f}s behind"
+        if self.replica and self.lag_seconds is not None \
+                and least_lag is not None \
+                and self.lag_seconds - least_lag >= REPLICA_RISE:
+            return (f"the replica read fell {self.lag_seconds - least_lag:.0f}s"
+                    " further behind its primary while it was read")
         return ""
 
 
@@ -92,6 +111,9 @@ class Throttle:
         self.proceeded_under_stress = 0
         self.narrowed_to = self.max_permits
         self.reasons = {}
+        #: the least lag a replica read has shown this run: where it stood
+        #: before the work's weight, which its brake holds the rise to
+        self.least_lag = None
 
     # ---- the signal ----
 
@@ -131,13 +153,17 @@ class Throttle:
         except Exception:
             # a probe that fails must never stop the check it is protecting
             self._last_health = None
+        h = self._last_health
+        if h is not None and h.replica and h.lag_seconds is not None:
+            self.least_lag = (h.lag_seconds if self.least_lag is None
+                              else min(self.least_lag, h.lag_seconds))
         return self._last_health
 
     def stress(self):
         """Why we should back off, or empty string."""
         h = self._health()
         if h is not None:
-            why = h.stressed()
+            why = h.stressed(self.least_lag)
             if why:
                 return why
         return self._slow()

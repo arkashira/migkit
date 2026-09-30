@@ -96,8 +96,10 @@ def test_only_the_changed_rows_are_asked_and_one_is_not_followed(
               " id = 3", db="cx")
     got = {r.scope: r for r in eng.delta_verify("cx")}
     assert got["cx.t"].status == "diff", got["cx.t"].__dict__
-    assert got["cx.t"].detail == ("of 3 changed rows: missing=0 extra=0"
-                                  " changed=1"), got["cx.t"].detail
+    # and which columns it compared, and how (problems D15)
+    assert got["cx.t"].detail.startswith(
+        "of 3 changed rows: missing=0 extra=0 changed=1; of 3 columns,"
+        " compared "), got["cx.t"].detail
     assert "NOT advanced" in got["cx"].detail, got["cx"].detail
     # asked again, since the position did not move; once followed, clean
     psql(dst, "update t set v = 'B' where id = 2", db="cx")

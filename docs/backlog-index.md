@@ -29,21 +29,21 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 
 ## Summary
 
-345 items.
+346 items.
 
 | Status | S | M | L | Total |
 |---|---|---|---|---|
-| DONE | 45 | 57 | 9 | 111 |
+| DONE | 49 | 61 | 9 | 119 |
 | IN PROGRESS | 16 | 34 | 11 | 61 |
-| OPEN | 64 | 62 | 22 | 148 |
+| OPEN | 60 | 59 | 22 | 141 |
 | BLOCKED | 8 | 5 | 6 | 19 |
 | NOT PURSUED | 6 | 0 | 0 | 6 |
-| **Total** | 139 | 158 | 48 | **345** |
+| **Total** | 139 | 159 | 48 | **346** |
 
 | Area | DONE | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED | Total |
 |---|---|---|---|---|---|---|
-| move | 15 | 8 | 16 | 0 | 2 | 41 |
-| verify | 20 | 4 | 20 | 1 | 1 | 46 |
+| move | 16 | 8 | 15 | 0 | 2 | 41 |
+| verify | 27 | 4 | 14 | 1 | 1 | 47 |
 | change follow | 18 | 2 | 36 | 5 | 0 | 61 |
 | two-way | 2 | 1 | 4 | 0 | 0 | 7 |
 | cutover | 4 | 2 | 7 | 0 | 0 | 13 |
@@ -54,7 +54,7 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | ease of use | 5 | 6 | 5 | 1 | 1 | 18 |
 | operations/scale | 14 | 6 | 12 | 5 | 0 | 37 |
 | tools used whole | 7 | 6 | 8 | 0 | 0 | 21 |
-| **Total** | 111 | 61 | 148 | 19 | 6 | **345** |
+| **Total** | 119 | 61 | 141 | 19 | 6 | **346** |
 
 ## Items
 
@@ -65,7 +65,7 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 3 | P0-DE.2 | `doctor` names the rung each side and leg stands on, and its footprint | OPEN (two-way sides only, in a4d532b's unmerged commit) | S | ease of use | L149-151, L236 |
 | 4 | P0-DE.3 | Two-way mark ladder per side (PostgreSQL origin / logical message / table; MySQL tagged GTID; MariaDB domain and skip_replication; statement comment; table), proved by a probe, ranked by measured cost, kept in the tail's token, named by doctor, `migkit_origin` dropped at teardown | IN PROGRESS a4d532b (two-way mark rungs; agent commit 2ad0c63, not merged) | L | two-way | L237-238, L4280-4287, L4314, L4316-4384, L5509-5521; WAVE a4d532b |
 | 5 | P0-DE.4 | Every shape has a way: close the "not yet" cells of `decide.coverage()` (58 of 230 at 32ed544) | OPEN | L | move | L166-182, L223-229 |
-| 6 | P0-KEYLESS | Keyless tables copied, checked and resumed by whole-row hash buckets (duplicates by count), including sources with no stored row position (MySQL, SQL Server) | OPEN (PostgreSQL resumes by stored position, done 2026-09-27; bucket verify comes with F1) | M | move | L174-182, L228-229, L2023-2029 (C3), L2047-2052 |
+| 6 | P0-KEYLESS | Keyless tables copied, checked and resumed by whole-row hash buckets (duplicates by count), including sources with no stored row position (MySQL, SQL Server) | DONE (verify-depth agent, not merged): `ranges.keyless` - pages, buckets of the rows' canonical hash (the check's `row` leaves) or the source's own hash, one pass; a bucket begun and not done emptied on the target by the same hash; PostgreSQL, MySQL, the pair's copier; SQL Server, DuckDB, ClickHouse by their own hash | M | move | L174-182, L228-229, L2023-2029 (C3), L2047-2052 |
 | 7 | BAR-1 | Neutral "migkit wrote this" mark across any engine pair: first write in the engine's atomic unit (MongoDB txn, Cassandra logged batch, Redis MULTI/EXEC, DynamoDB transact-write, Kafka header) | OPEN (PostgreSQL/MySQL/MariaDB only, via a4d532b) | L | two-way | L246-257 |
 | 8 | BAR-2 | Exactly-once batches on every engine (the batch number carried in the mark where no native progress exists) | OPEN (done for PostgreSQL/MySQL counter hops, R3 in 7de74bc) | L | change follow | L258-266 |
 | 9 | BAR-3 | Target kept read-only, or its writes named, on every engine | OPEN (grep: freeze.py covers PostgreSQL and MySQL only) | M | cutover | L273-275, L5499-5500 (DTS gap "read-only target on more engines") |
@@ -104,7 +104,7 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 42 | 8 | Business-rule checks (SQL, MongoDB pipelines) | DONE (in text) | M | verify | L1624-1661 |
 | 43 | 9 | Column keep/drop/rename honoured on every path | DONE (in text) | M | move | L1663-1819 |
 | 44 | 10 | Newer-row-wins conflict policy (PostgreSQL, MySQL) | DONE (in text) | S | verify | L1821-1837 |
-| 45 | 10.more | Newer-row-wins on more engines | OPEN (grep: newer_wins only in postgres.py, mysql.py, base.py) | S | verify | L5500 |
+| 45 | 10.more | Newer-row-wins on more engines | DONE (verify-depth agent, not merged): every pair (`Engine._apply_rows`), SQL Server (its row repair, no longer by hand), MongoDB, Redis hashes, the generic engine | S | verify | L5500 |
 | 46 | 12 | MongoDB to MongoDB through mongosync | DONE (in text) | M | move | L1882-1947 |
 | 47 | 13 | Kafka group offsets translated by the message they point at | DONE (in text) | M | cutover | L1949-1981 |
 | 48 | plan-7 | What the target does to rows as they land (triggers quieted, identity) | DONE (what-a-migration-actually-costs.md item 7) | S | move | L1985 |
@@ -119,10 +119,10 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 57 | C1.done | Tables side by side, equal-row ranges, the shared copier pipelined and writing PostgreSQL through COPY | DONE 1da6415 | M | move | L2019-2022, L2031-2046 |
 | 58 | C1.managed | Speed compared against a managed service: recipe run on the same instance class, cost stated | OPEN | M | operations/scale | L2019-2022, L3028-3031, L3043-3045 |
 | 59 | C3.done | Each range checked and checkpointed; a finished table asked again; streaming bulk resumes from finished tables | DONE 1da6415, in text 2026-09-27 | M | move | L2023-2029, L2042-2052 |
-| 60 | C3.repair | A statement-level record of a repair | OPEN | S | verify | L2028-2029 |
-| 61 | C4 | Verification load on the source: the two engines still missing and a lag-aware brake for replicas | OPEN (problems C4 still Partly) | M | verify | L2053, L5500 |
-| 62 | D11 | Large-object references parked in plain integer columns (invisible to the check) | OPEN (problems D11 still Partly) | S | verify | L2054 |
-| 63 | D15 | How much of a row a cross-engine comparison compares | OPEN (problems D15: ended for same-engine legs only) | S | verify | L5500 |
+| 60 | C3.repair | A statement-level record of a repair | DONE (verify-depth agent, not merged): `repairlog` - every row repair writes each statement before/after first and marks how far it got; `rollback` puts back only rows still as the repair left them; replayable | S | verify | L2028-2029 |
+| 61 | C4 | Verification load on the source: the two engines still missing and a lag-aware brake for replicas | DONE (verify-depth agent, not merged): SQL Server's check and the cross-engine check braked; a replica's lag rising while read brakes; a PostgreSQL standby with nothing left to replay reads no lag | M | verify | L2053, L5500 |
+| 62 | D11 | Large-object references parked in plain integer columns (invisible to the check) | DONE (verify-depth agent, not merged): integer columns taken for references by their values; every object both sides hold compared by digest a piece at a time | S | verify | L2054 |
+| 63 | D15 | How much of a row a cross-engine comparison compares | DONE (verify-depth agent, not merged): every cross-engine verdict ends with the columns compared exactly, by value and as what, and not at all and why | S | verify | L5500 |
 | 64 | F1.dual | Dual writes drift (problems F1) | OPEN | M | cutover | L2056 |
 | 65 | F4.pool | Poolers named in `assess` | DONE (in text 2026-09-25) | S | ease of use | L2057 |
 | 66 | G2 | `mask` for values the drilldown shows | DONE (in text 2026-09-25) | S | security | L2058 |
@@ -192,7 +192,7 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 130 | F1.a | One scan returns every leaf of the digest tree; buckets by a hash of the key so composite, text and cross-engine keys localise; passes A-D composed | IN PROGRESS a31b892 (proof kept up + one-scan tree + IBLT; uncommitted leaves.py, kept.py) | M | verify | L2677-2685, L5243-5245; WAVE a31b892 |
 | 131 | F1.b | In-SQL IBLT: few differences found over a slow link, no key needed | IN PROGRESS a31b892 | M | verify | L2680-2682, L5244-5245 |
 | 132 | F1.c | Self-check: the differences found add up to the change in count and sum | OPEN | S | verify | L2682-2684 |
-| 133 | F1.d | Generations under writes (migration-verifier style) | OPEN | M | verify | L2684-2685 |
+| 133 | F1.d | Generations under writes (migration-verifier style) | DONE (verify-depth agent, not merged): `leaves.generations` - differing leaves read again until they hold still; settled, still and never-settled said; the kept proof's rounds the same | M | verify | L2684-2685 |
 | 134 | F2 | Cutover as one timed path with automatic undo, driven by a `cutover:` hop option (preflight, reverse armed and verified, freeze per engine, drain, final verify, counters, jobs, flip, budget); writes to the source only under `cutover:` | IN PROGRESS a2ba2fe (cutover path; WIP b477336) | L | cutover | L1988-1992 (plan 13), L2550-2556, L2687-2695; WAVE a2ba2fe |
 | 135 | F3 | Stored code converted per routine by the best proved candidate (operator's file, sqlglot, rules, Ora2Pg, SQLines, model loop), proved by execution on both sides, plpgsql_check gate, residue in three classes; MySQL and SQL Server sources | IN PROGRESS ae866ee (R11 pipeline; storedcode/ in its worktree) | L | conversion | L1841-1846 (11), L2009, L2697-2706, L3891-3899, L4612-4619, L5492 |
 | 136 | F4.a | New canon classes and value rules: uuid, array, inet, xml, 9-place timestamps, value-normal decimals, float4 widened, infinity uncomparable, JSON in-process; refusals before the move (unsigned 64-bit, NUL, 4-byte characters, DynamoDB over 38 digits) | DONE 3b05234 | M | types | L2708-2713 |
@@ -405,3 +405,4 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 343 | R22.4 | Hops removed: a server pulling straight from the other (postgres_fdw, a temporary subscription, CLONE, `remote()`), credentials removed after; where migkit should run and why | IN PROGRESS a939c23 (hops removed + placement advice) | M | move | L5393-5399 |
 | 344 | R22.5 | ETA per phase with its reasons: p50/p90 ranges from measured rates, binding resource per phase, live EWMA, "never catches up" said | IN PROGRESS a90aadb | M | operations/scale | L5400-5406 |
 | 345 | R22.6 | The machine to run on: instance type for migkit and its agents, target class from the source's history, a shipped catalog refreshed from the provider | IN PROGRESS a939c23 (instance catalog/advisor + target class) | M | operations/scale | L5407-5422 |
+| 346 | R22.W | Wide values hashed where they lie: no server-side digest writes a wide value's hex or text (`canon.WIDE`, the row's text takes its length and md5 on every engine and in this process); a table of wide rows digested by fewer parallel workers | DONE (verify-depth agent, not merged) | M | verify | R22 model finding (2026-09-30) |

@@ -213,10 +213,10 @@ class HeteroEngine(Engine):
                 dst_only.append(dv[0])
         return pairs, src_only, dst_only, ambiguous
 
-    def _column_plan(self, src_table, dst_table, db):
+    def _column_plan(self, src_table, dst_table, db, how=None):
         """The base's column plan, over this hop's two engines."""
         return self._comparable_columns(db, self.src_engine, src_table,
-                                        self.dst_engine, dst_table)
+                                        self.dst_engine, dst_table, how)
 
     def check_schema(self, db, only=None):
         """Whether the two sides hold the same columns at all.
@@ -424,19 +424,40 @@ class HeteroEngine(Engine):
                          " means - name the schema", None, None))
         # pass D: where the hop keeps its proof and the tail keeps it up,
         # the kept leaves prove the tables they hold (`kept.prove`)
-        from .. import kept, leaves
+        from .. import kept, leaves, verdict
         proved = (kept.prove(self, db, log=stream) or {}) if pairs and \
             kept.wanted(self.hop) else {}
+        from ..throttle import Throttle
+        # both sides are read in full a table at a time: each side's load is
+        # asked between tables, and a replica read is held to the lag it
+        # had (backlog C4)
+        gates = (Throttle(1, probe=lambda: self._health("src", db)),
+                 Throttle(1, probe=lambda: self._health("dst", db)))
+        # where the source's log stood before any table was read: moved by
+        # the time a table is found to differ, the source was written while
+        # it was read, and what differs is read again by generations
+        # (`leaves.generations`, backlog F1.d)
+        try:
+            began = self.src_engine.log_position("src", db)
+        except Exception:  # noqa: BLE001 - nothing to tell by, then
+            began = None
         for src_t, dst_t in pairs:
             scope = f"{db}.{self._leaf(src_t)}"
+            how = {}
             try:
-                src_cols, dst_cols, notes = self._column_plan(src_t, dst_t, db)
+                src_cols, dst_cols, notes = self._column_plan(src_t, dst_t, db,
+                                                              how)
             except Exception as e:
                 rows.append((scope, "error",
                              f"cannot read the columns: {str(e)[:120]}",
                              None, None))
                 continue
             tail = ("; " + "; ".join(notes)) if notes else ""
+            # how much of a row the verdict compared, column by column
+            # (problems D15)
+            compared = verdict.compared_clause(how)
+            tail += compared
+            self.__dict__.setdefault("_compared", {})[scope] = compared
             if not src_cols:
                 rows.append((scope, "warn",
                              "no column on this table can be compared across"
@@ -452,8 +473,9 @@ class HeteroEngine(Engine):
                 continue
             try:
                 wheres = self._row_scope(db, src_t)
-                a, b = self._digests(db, src_t, src_cols, dst_t, dst_cols,
-                                     wheres)
+                with gates[0].unit(), gates[1].unit():
+                    a, b = self._digests(db, src_t, src_cols, dst_t,
+                                         dst_cols, wheres)
                 if wheres[1]:
                     # narrowing the comparison to the filter hides nothing:
                     # a target row outside it is one the move never put
@@ -491,25 +513,39 @@ class HeteroEngine(Engine):
             # for the second reading of its rows (`check_data`)
             self.__dict__.setdefault("_differing", {})[(db, scope)] = (
                 src_t, dst_t, src_cols, dst_cols, max(a[0], b[0]))
-            rows.append((scope, "diff",
-                         head + self._drill(db, src_t, dst_t, src_cols,
-                                            dst_cols, max(a[0], b[0]),
-                                            (a, b))
-                         + tail, a[0], b[0]))
+            with gates[0].unit(), gates[1].unit():
+                said = self._drill(db, src_t, dst_t, src_cols, dst_cols,
+                                   max(a[0], b[0]), (a, b), began)
+            if getattr(said, "settled", False):
+                # every leaf that differed read equal on both sides within
+                # the generations a live source is given (`leaves.
+                # generations`): the difference was still arriving
+                self.__dict__["_differing"].pop((db, scope), None)
+                rows.append((scope, "ok",
+                             f"every compared column equal across"
+                             f" {self.src_name}/{self.dst_name}, leaf by"
+                             f" leaf{said}{tail}", said.rows_src,
+                             said.rows_dst))
+                continue
+            rows.append((scope, "diff", head + said + tail, a[0], b[0]))
+        for side, gate in zip(("source", "target"), gates):
+            if gate.line() and stream:
+                stream(f"# {side}: {gate.line()}")
         return rows
 
     def _drill(self, db, src_t, dst_t, src_cols, dst_cols, rows=0,
-               digests=None):
+               digests=None, began=None):
         """The base's walk, over this hop's two engines, through the hop's
         row filter on each side - or, for a table the walk would stop
-        short in and a table with no key, the rows found from the leaves
+        short in, a table with no key and a source written while it was
+        read (its log moved since `began`), the rows found from the leaves
         of its digest tree (`leaves.drill`)."""
         from .. import leaves
         scope = self._row_scope(db, src_t)
         note = ""
         try:
             found = leaves.drill(self, db, src_t, dst_t, src_cols, dst_cols,
-                                 scope, rows, digests)
+                                 scope, rows, digests, began)
         except Exception as e:  # noqa: BLE001 - walked instead, and said
             found = None
             note = ("; the leaves could not be read"
@@ -1082,7 +1118,7 @@ class HeteroEngine(Engine):
         hop.report_dir = self.hop.report_dir
         return type(engine)(hop)
 
-    def _health(self, side):
+    def _health(self, side, db=None):
         """The load of whichever server this side actually is.
 
         A cross-engine hop has no server of its own, so a throttle here has
@@ -1094,8 +1130,12 @@ class HeteroEngine(Engine):
                         "_health", None)
         if probe is None:
             return None
+        import inspect
         try:
-            return probe(side)
+            # PostgreSQL's asks in a database: called with the side alone
+            # it raised, and the pair read with no brake from that side
+            takes = len(inspect.signature(probe).parameters)
+            return probe(side, db) if takes > 1 and db else probe(side)
         except Exception:
             return None
 
@@ -1442,7 +1482,7 @@ class HeteroEngine(Engine):
         absent = 0
         from ..throttle import Throttle
         # the read side is the one under load, so that is what the gate asks
-        gate = Throttle(1, probe=lambda: self._health("src"))
+        gate = Throttle(1, probe=lambda: self._health("src", db))
         names = {n for n, _ in src_cols}
         resumable = self.src_engine.neutral_key("src", db, src_t)
         chunk = self._read_rows(db, src_t, chunk)
@@ -1461,12 +1501,30 @@ class HeteroEngine(Engine):
             whole = (self._read_back_plan(db, src_t, dst_t, src_cols, [])
                      if (self.hop.options or {}).get("verify_batches", True)
                      else None)
-            spans = (self.src_engine.position_spans("src", db, src_t, chunk)
-                     if whole else None)
-            if spans and len(spans) >= 2:
+            # in parts where it can go on from them: where the source
+            # stores its rows, or buckets of the rows' hash
+            # (`ranges.keyless`, backlog P0-KEYLESS)
+            from .. import decide, ranges
+            way = ranges.keyless(
+                f"{db}.{leaf}", st, self.src_engine, self.dst_engine, db,
+                src_t, dst_t, whole[0], whole[1], int(rows_there or 0),
+                lambda: self.src_engine.position_spans("src", db, src_t,
+                                                       chunk),
+                self.digest_salt(), decide.HopCosts(self.hop, "keyless/")
+            ) if whole else None
+            if way is not None and way.restart:
+                gone = self.dst_engine.neutral_empty(
+                    "dst", db, dst_t, **({"where": dst_where} if dst_where
+                                         else {}))
+                log(f"{key}: the copy that stopped went another way; emptied"
+                    f" {gone or 0:,} rows it had put on the target")
+            if way is not None and way.chunk not in (None, "one pass"):
+                if way.chunk != "pages":
+                    log(f"{key}: {way.strategy.said} -"
+                        f" {way.strategy.reasons.get('chunk', '')}")
                 self._copy_in_spans(db, key, src_t, dst_t, src_cols,
-                                    dst_cols, spans, whole, st, ck, log,
-                                    src_where, dst_where)
+                                    dst_cols, way, whole, st, ck, log,
+                                    src_where, dst_where, chunk)
                 return
             for attempt in (1, 2):
                 batches = self.src_engine.neutral_batches(
@@ -1560,14 +1618,59 @@ class HeteroEngine(Engine):
         ck.save()
 
     def _copy_in_spans(self, db, key, src_t, dst_t, src_cols, dst_cols,
-                       spans, plan, st, ck, log, src_where, dst_where):
-        """A table with no key, from a source that can read it by where its
-        rows are stored (`position_spans`): a span read whole and written
-        in one statement, so it commits whole or not at all, and
-        checkpointed once it has - a stop costs the span it was in. The
-        whole table is then held to the fold of every span."""
-        from .. import canon, ranges
+                       way, plan, st, ck, log, src_where, dst_where,
+                       size=10_000):
+        """A table with no key, in the parts `way` cuts it into
+        (`ranges.keyless`), each checkpointed once it is written - a stop
+        costs the part it was in. By where the source stores its rows or
+        the source's own hash of them: a part read whole and written in one
+        statement, so it commits whole or not at all, and the target's
+        count places a stop (`spans_to_copy`). By buckets of the rows'
+        canonical hash, found alike on the target: a bucket streamed in
+        batches, marked begun before its first and emptied on the target
+        by the same hash if a stop left it part way (`buckets_to_copy`).
+        The whole table is then held to the fold of every part; where it
+        does not add up and the target finds buckets too, each bucket is
+        held to the source's and only those that differ are copied
+        again."""
+        from .. import canon, decide, ranges
         sc, dc, at = plan[0], plan[1], plan[2]
+        classes = [c for _, c in sc]
+        began = time.monotonic()
+        how = ("by buckets of the rows' hash" if way.chunk != "pages"
+               else "by where the rows are stored")
+
+        def clear(where_there):
+            return self.dst_engine.neutral_empty(
+                "dst", db, dst_t, where=scoped(where_there, dst_where))
+
+        def whole_part(where):
+            rows = []
+            for batch in self.src_engine.neutral_batches(
+                    "src", db, src_t, src_cols, 10 ** 9,
+                    where=scoped(where, src_where)):
+                rows += batch
+            rows, _ = self._flatten_absent(rows)
+            if rows:
+                self.dst_engine.neutral_write("dst", db, dst_t, dst_cols,
+                                              rows)
+            return canon.fold_rows(classes, ([r[i] for i in at]
+                                             for r in rows))
+
+        def streamed(start, where):
+            ranges.bucket_begun(st, start, ck.save)
+            n, total = 0, 0
+            for batch in self.src_engine.neutral_batches(
+                    "src", db, src_t, src_cols, size,
+                    where=scoped(where, src_where)):
+                rows, _ = self._flatten_absent(batch)
+                if rows:
+                    self.dst_engine.neutral_write("dst", db, dst_t,
+                                                  dst_cols, rows)
+                k, total = canon.fold_rows(
+                    classes, ([r[i] for i in at] for r in rows), total)
+                n += k
+            return n, total
 
         def scoped(where, extra):
             return (f"({where}) and ({extra})" if where and extra
@@ -1588,24 +1691,18 @@ class HeteroEngine(Engine):
                                      else {}))
             ck.save()
         for attempt in (1, 2):
-            todo = ranges.spans_to_copy(st, spans, there, count_of,
-                                        restart, log, key)
-            for start, where in todo:
-                rows = []
-                for batch in self.src_engine.neutral_batches(
-                        "src", db, src_t, src_cols, 10 ** 9,
-                        where=scoped(where, src_where)):
-                    rows += batch
-                rows, _ = self._flatten_absent(rows)
-                if rows:
-                    self.dst_engine.neutral_write("dst", db, dst_t,
-                                                  dst_cols, rows)
-                n, total = canon.fold_rows([c for _, c in sc],
-                                           ([r[i] for i in at]
-                                            for r in rows))
+            if way.by_bucket:
+                todo = ranges.buckets_to_copy(st, way.spans, clear, log, key)
+            else:
+                todo = [(s_, w, None) for s_, w in ranges.spans_to_copy(
+                    st, [(s_, w) for s_, w, _ in way.spans], there,
+                    count_of, restart, log, key)]
+            for start, where, _ in todo:
+                n, total = (streamed(start, where) if way.by_bucket
+                            else whole_part(where))
                 ranges.span_copied(st, start, n, total, ck.save)
                 log(f"{key}: {len(st['spans_done'])} of {len(st['spans'])}"
-                    " spans copied (no key: by where the rows are stored)")
+                    f" parts copied (no key: {how})")
             whole = ranges.spans_total(st)
             got = self.dst_engine.neutral_digest(
                 "dst", db, dst_t, dc,
@@ -1623,15 +1720,41 @@ class HeteroEngine(Engine):
                     break
             if attempt == 2:
                 raise SystemExit(
-                    f"{key}: copied twice by where its rows are stored (it"
-                    f" has no key), and the target holds {got[0]:,} rows"
-                    " that do not add up to what was copied. The target"
-                    " changes what it is given, or another writer is"
-                    " writing this table")
+                    f"{key}: copied twice {how} (it has no key), and the"
+                    f" target holds {got[0]:,} rows that do not add up to"
+                    " what was copied. The target changes what it is"
+                    " given, or another writer is writing this table")
+            if way.by_bucket:
+                # held bucket by bucket to the source's: only those that
+                # differ are emptied there and copied again
+                bad = []
+                for start, where, where_there in way.spans:
+                    a = self.src_engine.neutral_digest(
+                        "src", db, src_t, sc, where=scoped(where, src_where))
+                    b = self.dst_engine.neutral_digest(
+                        "dst", db, dst_t, dc,
+                        where=scoped(where_there, dst_where))
+                    if (int(a[0]), str(a[1])) != (int(b[0]), str(b[1])):
+                        bad.append(start)
+                log(f"{key}: the target does not hold what was copied;"
+                    f" {len(bad)} of {len(way.spans)} buckets differ, and"
+                    " only those are copied again")
+                st["spans_done"] = [x for x in st["spans_done"]
+                                    if x not in bad]
+                for x in bad:
+                    st["span_tally"].pop(str(x), None)
+                    ranges.bucket_begun(st, x, ck.save)
+                ck.save()
+                continue
             log(f"{key}: the target does not hold what was copied;"
                 " emptying it and copying it again")
             for k in ("spans", "spans_done", "span_tally"):
                 st.pop(k, None)
+        # the way's measured rate, a row, for the next table's climb
+        costs = decide.HopCosts(self.hop, "keyless/")
+        took = time.monotonic() - began
+        for part, rung in way.strategy.names.items():
+            costs.saw(f"{part}/{rung}", max(got[0], 1), took)
         st["done"] = True
         ck.save()
 
@@ -2482,6 +2605,7 @@ class HeteroEngine(Engine):
         over."""
         import json
 
+        from .. import verdict
         from .base import Result
         src = self.src_engine
         if not getattr(src, "CHANGE_POINT_READS_ONLY", False):
@@ -2516,8 +2640,10 @@ class HeteroEngine(Engine):
                                   " is not on the target"))
                 continue
             src_t, dst_t = by_leaf[self._leaf(table)]
+            how = {}
             sc, dc, _ = self._comparable_columns(db, src, src_t,
-                                                 self.dst_engine, dst_t)
+                                                 self.dst_engine, dst_t, how)
+            compared = verdict.compared_clause(how)
             key = sorted(next(iter(keyed.values())))
             if not sc or any(k not in dict(sc) for k in key):
                 clean = False
@@ -2541,13 +2667,13 @@ class HeteroEngine(Engine):
                 res.append(Result(
                     "delta", f"{db}.{table}", "diff",
                     f"of {len(keyed)} changed rows: missing={len(missing)}"
-                    f" extra={len(extra)} changed={len(changed)}",
+                    f" extra={len(extra)} changed={len(changed)}{compared}",
                     str(self.hop.report_dir(db)),
                     f"migkit sync {self.hop.name} --db {db} --kind rows"))
             else:
                 res.append(Result("delta", f"{db}.{table}", "ok",
                                   f"{len(keyed)} changed rows verified equal"
-                                  " on both sides"))
+                                  f" on both sides{compared}"))
             if log:
                 log(f"{table}: {len(keyed)} changed, "
                     + ("clean" if res[-1].status == "ok" else "DIFF"))
@@ -2577,7 +2703,9 @@ class HeteroEngine(Engine):
             if leaf in healed:
                 status, detail = "ok", (f"the difference was still arriving"
                                         f" through migkit's change tail"
-                                        f" ({proof.get(leaf, 'confirmed')})")
+                                        f" ({proof.get(leaf, 'confirmed')})"
+                                        + self.__dict__.get(
+                                            "_compared", {}).get(scope, ""))
             out.append((scope, status, detail, a, b))
         return out
 

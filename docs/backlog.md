@@ -224,9 +224,9 @@ The four choices go through it with their answers unchanged:
 `capabilities.GAPS` is and resolved against the code: a way removed turns
 its cell stale. Ten shapes by 23 engines: 115 cells with a way, 57 not
 applicable, 58 not yet. A `yes` means migkit carries the shape correctly
-today. A table without a key, or with a text key, still goes in one pass
-or by where its rows are stored, until F1's hash buckets resume it by
-bucket. Tests: `tests/test_the_decision_engine.py`.
+today. A table without a key, or with a text key, goes by where its rows
+are stored, by buckets of its rows' hash, or in one pass
+(`ranges.keyless`, 2026-09-30). Tests: `tests/test_the_decision_engine.py`.
 
 Still open:
 * ranking the mover by the hop's measured rates. It waits on the
@@ -2297,8 +2297,9 @@ and 1,000,000 rows across four pairs:
   no key resumes by stored position; MySQL is written through a pinned
   `LOAD DATA LOCAL`; and the table copiers set secondary indexes aside -
   see C1 and C3 in the problems file for what each measured.
-* **C4** load on the source
-* **D11** documents outside the table
+* ~~**C4** load on the source~~ done (2026-09-30): see "Verify depth" below
+* ~~**D11** documents outside the table~~ done (2026-09-30): see "Verify
+  depth" below
 * **E4** change streams vs oplog
 * **F1** dual writes
 * ~~**F4** poolers~~ done (2026-09-25): named in `assess`, and a refused connection setting said as the pooler's
@@ -6511,6 +6512,109 @@ databases. What is not yet anywhere:
    with ids that map onto a team's task sheet, and each step's progress
    and evidence written back, so the migration's tracking is not typed
    by hand.
+
+### Verify depth (done 2026-09-30, not merged yet)
+
+Seven items and one found on the way, each with its tests (written, not
+run: the owner's rule for this round - the full suite runs once).
+
+* **P0-KEYLESS, a table with no key copied and gone on from by buckets**
+  (`ranges.keyless`, a `decide.compose` of how it is cut and how a stop is
+  gone on from): by where the source stores its rows (PostgreSQL's pages,
+  as before), by buckets of each row's canonical hash - the top bits of the
+  hash the check's `row` leaves are made of (`leaves.bucket_where`), found
+  by the server on each side, so the copy, its resume and the check find a
+  row in one place - by the source's own hash of the row (SQL Server's
+  `binary_checksum(*)`, DuckDB's `hash`, ClickHouse's `cityHash64`; the
+  target's count places a stop), or in one pass for a table small enough
+  that starting over costs less than a scan a bucket (`BUCKET_ROWS`, set,
+  not measured). A bucket is marked begun before its first row and done
+  after its last; one begun and not done is emptied on the target by the
+  same hash and copied again, so nothing needs counting. A table that does
+  not add up is held bucket by bucket to the source and only the buckets
+  that differ are copied again. Rows held more than once are carried by
+  count. The way is kept in the checkpoint, so a restart climbs the same
+  one; spans kept by an older run are gone on from as pages. Built into the
+  copier every pair shares, PostgreSQL's (for a server before 14) and
+  MySQL's (where a stop started the table over), SQLite through a hash
+  function registered on its connections.
+  Tests: `test_a_keyless_table_resumes_by_its_rows_hash.py`.
+* **F1.d, generations under writes** (`leaves.generations`, a `confirm`
+  rung): where the source's log moved while the tables were read, the
+  leaves that differ are read again generation by generation - after the
+  tail's position where a tail runs, else the hop's `settle` - until none
+  still moves (`MIGKIT_GENERATIONS`, 5). A leaf equal on both sides has
+  settled; one that differs and held still on both sides is a difference
+  as of now, localized from those leaves and held to their sums; one still
+  moving at the last never settled, and no verdict is given for its rows.
+  A table whose every differing leaf settled is ok, said leaf by leaf. The
+  kept proof's fixed two rounds are the same generations now: stopped
+  once nothing moves, the rest named as never settled.
+  Tests: `test_generations_under_writes.py`.
+* **D11, references parked in integer columns, and the objects' bytes**:
+  an integer column is taken for references where at least half its values
+  name an object on the source (an id counting past the first object's oid
+  names a few by chance); what it names and the target does not is
+  counted beside what named nothing on the source already. Every object
+  both sides hold is compared by the md5 and length of each piece
+  (`LO_PIECE`), some hundreds of objects a statement. Domains over `oid`
+  (the `lo` type) count as `oid`. Tests:
+  `test_documents_named_by_an_integer_are_checked.py`.
+* **D15, how much of a row is compared**: every cross-engine verdict (the
+  data check's, ok or not, the kept proof's, a pair's delta) ends with the
+  columns compared exactly (one engine, one type, a rendering that is the
+  whole value), by value and as what (`canon.how_compared`, `AS`), and not
+  at all and why - only on one side, no shared rendering, left out by the
+  hop's mapping (`verdict.compared_clause`). Tests:
+  `test_every_cross_engine_verdict_says_what_it_compared.py`.
+* **C3.repair, a statement-level record of a repair** (`repairlog`): every
+  row repair - every pair's, PostgreSQL's (now one transaction a table),
+  MySQL's, SQL Server's, MongoDB's, Redis's, the generic engine's - writes
+  each statement with the row the target held and the one it will hold
+  before any lands, and marks how far it got. `sync` says a repair that
+  stopped; `rollback` puts each row back only where the target still holds
+  what the repair wrote (a row changed since is named and left); a record
+  replays the same way. Tests:
+  `test_a_repair_is_recorded_statement_by_statement.py`.
+* **10.more, newer-row-wins everywhere a target is addressed by key**:
+  every pair (`Engine._apply_rows`, the column's value by its class on each
+  side), SQL Server (whose row repair was a note to do it by hand and now
+  goes through the neutral contract), MongoDB (a field), Redis (a hash's
+  field), the generic engine. Tests:
+  `test_the_newer_row_wins_on_every_engine.py`.
+* **C4, the verification's load on its source**: SQL Server's check asks
+  its schedulers' runnable tasks and an availability group secondary's
+  redo still to do; the cross-engine check (every engine checked through
+  the pair) brakes on both sides a table at a time - the pair's probe
+  raised on a PostgreSQL side and had read with no brake from it. A
+  replica's brake (`throttle.REPLICA_RISE`, 5 s, set): its lag rising above
+  the least the run has seen of it. A PostgreSQL standby that has replayed
+  all it received reads no lag - an idle primary made the time since the
+  last replayed commit grow, and braked every table for nothing. A MongoDB
+  secondary reads its own distance behind the primary. Tests:
+  `test_verification_brakes_for_a_replica.py`.
+* **Found on the way (R22's model), wide values hashed where they lie**: a
+  text or byte value wider than `canon.WIDE` (1 MB) goes into a digest's
+  row text as its length and the md5 of its bytes - in PostgreSQL's and
+  MySQL's canonical renderings, PostgreSQL's own row hash, MySQL's own,
+  SQL Server's, SQLite's and the fold in this process alike - instead of
+  its hex or text written out and copied; a key, a record and a
+  column-by-column comparison keep the value whole. A PostgreSQL table
+  whose widest row would pass `DIGEST_MEMORY` with a copy a worker is
+  digested by fewer parallel workers (`_digest_workers`, from
+  `row_sizes`, the measure the move's model sizes by). Tests:
+  `test_wide_values_are_hashed_where_they_lie.py` (a source capped at
+  1 GB digesting rows of 150 MB).
+
+And the localizers of a differing table (the sketch, the groups, the
+bisecting reader, the leaves read back) go through `decide.attempt` now: a
+way that cannot run or whose rows do not add up is `Blocked`, its fact set
+for the passes' climb (`groups failed` and the others), and the next is
+taken; what one found - differences or none - is the answer, never a
+reason to switch.
+
+Not done: wide JSON and XML values are still rendered whole (their text is
+the value's; `octet_length` of a `jsonb` has to render it to count it).
 
 ### Paused 2026-09-27 (the owner's call: out of tokens) - resume here
 

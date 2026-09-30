@@ -304,7 +304,12 @@ class TableCopy:
         the range's own snapshot, the target's as it stands."""
         sql = self.eng._range_digest_sql(self.db, self.table, where)
         conn = self._digester(side)
+        # a table of wide rows digested by fewer parallel workers, each of
+        # which holds the row it hashes (`_digest_workers`); the server's
+        # own default of two at most otherwise
+        workers = self.eng._digest_workers(self.db, self.table, 2)
         if side == "dst":
+            conn.execute(f"set max_parallel_workers_per_gather = {workers}")
             return conn.execute(sql).fetchone()[0]
         conn.execute("begin transaction isolation level repeatable read"
                      " read only")
@@ -315,6 +320,8 @@ class TableCopy:
                 if any(s in str(e) for s in _SNAPSHOT_GONE):
                     raise SnapshotLost(str(e)) from e
                 raise
+            conn.execute(f"set local max_parallel_workers_per_gather ="
+                         f" {workers}")
             return conn.execute(sql).fetchone()[0]
         finally:
             conn.execute("rollback")

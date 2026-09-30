@@ -2323,7 +2323,9 @@ class MySQLEngine(Engine):
                 lag = None if got is None else float(got)
             except (TypeError, ValueError):
                 lag = None
-        return Health(busy_ratio=busy, lag_seconds=lag)
+        # a replica's own lag, which its brake holds the check's rise in
+        # (`throttle.REPLICA_RISE`)
+        return Health(busy_ratio=busy, lag_seconds=lag, replica=bool(rows))
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
         if table and self.through_pair(db, table):
@@ -5379,6 +5381,10 @@ class MySQLEngine(Engine):
 
         undo = Path(undo_dir) if undo_dir else d / "undo"
         undo.mkdir(parents=True, exist_ok=True)
+        # every statement written down before any lands (`repairlog`); the
+        # repair below is one transaction, so it lands whole or not at all
+        record = self._repair_record(db, t, pks, missing + changed, changed,
+                                     extra, undo)
         # record every touched pk's pre-repair target row so restore is exact
         sconn, dconn = self._conn("src"), self._conn("dst")
         touched = missing + extra + changed
@@ -5415,9 +5421,32 @@ class MySQLEngine(Engine):
                                     f"insert into `{ddb}`.`{t}` ({collist})"
                                     f" values ({ph})", rows)
             dconn.commit()
+            record.applied(record.n)
         finally:
+            record.close()
             sconn.close()
             dconn.close()
+
+    def _repair_record(self, db, t, pks, copied, changed, extra, undo):
+        """The statement-level record of one table's repair (`repairlog`),
+        written out whole: each key copied is a write - or a delete, where
+        the repair removes a changed row the source no longer has - and
+        each extra key a delete, with the row the target held and the one
+        it will hold."""
+        from .. import repairlog
+        sc, _, _ = self._comparable_columns(db, self, t, self, t)
+        missing = [k for k in pks if k not in dict(sc)]
+        if missing:
+            raise SystemExit(
+                f"{t}: the key column {', '.join(missing)} has no text both"
+                " sides render, so the repair could not be recorded row by"
+                " row. Nothing was repaired on this table.")
+        writes = repairlog.canon_keys(sc, pks, copied)
+        return repairlog.planned(
+            undo, repairlog.CanonIO(self, "dst", db, t, sc, pks),
+            repairlog.CanonIO(self, "src", db, t, sc, pks).rows(writes),
+            writes, repairlog.canon_keys(sc, pks, changed),
+            repairlog.canon_keys(sc, pks, extra))
 
     #: Characters that make the printed-SQL path unusable, measured on
     #: MySQL 8 with a text primary key:
@@ -6421,6 +6450,11 @@ class MySQLEngine(Engine):
                            time.monotonic() - began)
         sconn, dconn = self._conn("src"), self._conn("dst")
         try:
+            if not intpk and self._copy_in_buckets(
+                    sconn, dconn, db, t, collist, ph, rf, st, ck, key, log,
+                    ctx):
+                timed()
+                return
             if not intpk:
                 log(f"{key}: no single int pk, single-shot copy")
                 clear = (f"delete from `{ddb}`.`{t}` where ({rf})" if rf
@@ -6561,6 +6595,74 @@ class MySQLEngine(Engine):
         finally:
             sconn.close()
             dconn.close()
+
+    def _copy_in_buckets(self, sconn, dconn, db, t, collist, ph, rf, st, ck,
+                         key, log, ctx=None):
+        """A table with no single integer key, large enough that a restart
+        would cost it whole, copied in buckets of its rows' hash
+        (`ranges.keyless`, backlog P0-KEYLESS) - MySQL keeps no position of
+        a row a span could be read by. Each bucket is found on both servers
+        by the same hash, copied in one transaction and read back as a
+        range is (`_range_checked`), and checkpointed; one a stop left
+        begun is emptied on the target by that hash and copied again.
+        Returns whether the table went this way."""
+        from .. import decide, ranges
+        sc, dc, _ = self._comparable_columns(db, self, t, self, t)
+        way = ranges.keyless(
+            key, st, self, self, db, t, t, sc, dc,
+            int(self._rows_of("src", db, t) or 0), lambda: None,
+            self.digest_salt(), decide.HopCosts(self.hop, "keyless/"))
+        ddb = self._d("dst", db)
+
+        def scoped(where):
+            return f"({where}) and ({rf})" if rf else f"({where})"
+
+        def clear(where_there=None):
+            with dconn.cursor() as cur:
+                gone = cur.execute(f"delete from `{ddb}`.`{t}`"
+                                   + (f" where {scoped(where_there)}"
+                                      if where_there else
+                                      f" where ({rf})" if rf else ""))
+            dconn.commit()
+            return gone
+        if way.restart:
+            clear()
+            log(f"{key}: the copy that stopped went another way; the target"
+                " table is emptied and copied again")
+        if not way.by_bucket:
+            return False
+        log(f"{key}: {way.strategy.said} -"
+            f" {way.strategy.reasons.get('chunk', '')}")
+        began = time.monotonic()
+        if "spans" not in st:
+            # a fresh start: what the target holds is not this copy's
+            clear()
+        moved = 0
+        for start, where, there in ranges.buckets_to_copy(
+                st, way.spans, clear, log, key):
+            ranges.bucket_begun(st, start, ck.save)
+            # emptied only where a stop left it begun (`buckets_to_copy`):
+            # a bucket not begun holds nothing on the target. Server to
+            # server where the table goes that way, else as rows
+            n = (self._passed(ctx, scoped(where), "do 0", None,
+                              f"{key} bucket {start}", False, log)
+                 if ctx is not None else None)
+            if n is None:
+                n = self._range_checked(
+                    sconn, dconn, db, t, collist, ph,
+                    f" where {scoped(where)}", (), "do 0", scoped(there),
+                    f"{key} bucket {start}", log).n
+            moved += int(n)
+            ranges.span_copied(st, start, int(n), None, ck.save)
+            log(f"{key}: {len(st['spans_done'])} of {len(st['spans'])}"
+                " buckets copied (no key: by buckets of the rows' hash)")
+        costs = decide.HopCosts(self.hop, "keyless/")
+        took = time.monotonic() - began
+        for part, rung in way.strategy.names.items():
+            costs.saw(f"{part}/{rung}", max(moved, 1), took)
+        st["done"] = True
+        ck.save()
+        return True
 
     #: bytes from which a table is large enough for its ways to be timed
     #: against each other. The dump's and the load's starts are paid once a

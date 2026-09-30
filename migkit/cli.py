@@ -1282,12 +1282,19 @@ def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
 
 
 def _repair_one(hop, eng, db, kind, do_apply):
+    from . import repairlog
     actions = eng.repair_plan(db, kind)
     if not actions:
         console.print(f"{db}: nothing to repair")
         return
     undo_dir = hop.report_dir(db) / "undo"
     undo_dir.mkdir(parents=True, exist_ok=True)
+    for path, upto, planned in repairlog.stopped(undo_dir)[:5]:
+        # what an earlier repair had applied when it stopped is in its
+        # record, statement by statement; this one plans from the check
+        console.print(f"  [yellow]an earlier repair stopped after statement"
+                      f" {upto} of {planned}: {repairlog.said(path)}"
+                      "[/yellow]")
     paused = _make_room_for_rows(hop, eng, db, actions) if do_apply else []
     try:
         _apply_actions(hop, eng, db, actions, do_apply, undo_dir)
@@ -3560,12 +3567,13 @@ def history(hop_name, db, show_ts):
               help="state timestamp or tag, default latest")
 @click.option("--apply", "do_apply", is_flag=True)
 def rollback(hop_name, db, state_ts, do_apply):
-    """Restore target sequences from a saved state, show row-level undo
-    steps; where the hop streamed back or cut over, the old source's
-    counters raised past the new primary's."""
+    """Restore target sequences from a saved state, put back the rows the
+    repairs since it wrote, where the target still holds what they wrote;
+    where the hop streamed back or cut over, the old source's counters
+    raised past the new primary's."""
     hop = get_hop(hop_name)
     eng = get_engine(hop)
-    from . import approvals, cutover, freeze, hopkeys
+    from . import approvals, cutover, freeze, hopkeys, repairlog
     if do_apply:
         hopkeys.refuse_writes(hop, "a rollback")
         approvals.require(hop, "rollback", db,
@@ -3584,7 +3592,28 @@ def rollback(hop_name, db, state_ts, do_apply):
             console.print("  the application's roles are still kept from"
                           " writing to the target; --apply gives their"
                           " writes back")
-    _restore_target(hop, eng, db, state_ts, do_apply, back is None)
+    # the row repairs since the state gone back to, or the last run's where
+    # none was saved, each by its statement-level record (`repairlog`)
+    from .state import get_store
+    states = sorted(m.get("ts", "") for m in get_store(hop).list(db))
+    chosen = [x for x in states if state_ts in x] if state_ts else states
+    rows_back = repairlog.to_reverse(hop.report_dir(db) / "undo",
+                                     chosen[-1] if chosen else None)
+    _restore_target(hop, eng, db, state_ts, do_apply,
+                    back is None and not rows_back)
+    if rows_back:
+        console.print("\nrow repairs to put back, newest first:")
+        for path in rows_back:
+            console.print(f"  {repairlog.said(path)}")
+        if do_apply:
+            lk = _lock(hop)
+            try:
+                for path in rows_back:
+                    repairlog.reverse(
+                        path, eng.repair_io(db, repairlog.read(path)[0]),
+                        log=lambda m: console.print(f"  {m}"))
+            finally:
+                lk.unlink()
     if back is not None:
         lk = _lock(hop) if do_apply else None
         try:

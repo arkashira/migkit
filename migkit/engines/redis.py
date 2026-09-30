@@ -904,6 +904,24 @@ class RedisEngine(Engine):
         missing = self._read_drilldown(db, "missing")
         changed = self._read_drilldown(db, "changed")
         extra = self._read_drilldown(db, "extra")
+        if changed and self.newer_wins_column():
+            changed = self._newer_keys(db, raw_s, raw_t, changed)
+        # every statement written down before any lands (`repairlog`): each
+        # key's serialised value and expiry as the target holds it, and as
+        # the source's will be
+        from .. import repairlog
+        io = repairlog.DumpIO(raw_t, f"db{db}")
+        writes = [(k,) for k in missing + changed]
+        before = io.rows(writes + [(k,) for k in extra])
+        after = repairlog.DumpIO(raw_s, f"db{db}").rows(writes)
+        rec = repairlog.Record(undo_dir, f"db{db}", "dump", (), ["key"])
+        num = {}
+        for k in writes:
+            if k in after:
+                num[k] = rec.planned("write", k, before.get(k), after[k])
+        for k in extra:
+            num[(k,)] = rec.planned("delete", (k,), before.get((k,)), None)
+        rec.ready()
 
         def remember(client, key, handle):
             payload = client.dump(key.encode())
@@ -914,7 +932,7 @@ class RedisEngine(Engine):
                 "key": key, "pttl": ttl,
                 "dump": base64.b64encode(payload).decode()}) + "\n")
 
-        with undo.open("a") as handle:
+        with undo.open("a") as handle, rec:
             done = 0
             for key in missing + changed:
                 remember(raw_t, key, handle)
@@ -933,9 +951,52 @@ class RedisEngine(Engine):
                         " by value, which migkit does not do yet (backlog"
                         " item 0e)")
                 done += 1
+                rec.applied(num.get((key,)))
             for key in extra:
                 remember(raw_t, key, handle)
                 raw_t.delete(key.encode())
+                rec.applied(num.get((key,)))
+
+    def _newer_keys(self, db, src, dst, changed):
+        """The changed keys to overwrite under `newer_wins`: a hash whose
+        field the hop names is later on the target is kept, and the key
+        written to `data-db<N>.kept-newer`. A key that holds no such field
+        on either side - a string, a list, a hash without it - is
+        overwritten: the source is the truth where the values cannot say
+        otherwise. Compared as numbers where both read as numbers (an epoch,
+        a counter), else as text (an ISO timestamp)."""
+        field = self.newer_wins_column()
+
+        def read(side, keys):
+            client = src if side == "src" else dst
+            out = {}
+            for k in keys:
+                try:
+                    got = client.hget(k.encode(), field.encode())
+                except Exception:  # noqa: BLE001 - not a hash: no field
+                    got = None
+                if got is None:
+                    continue
+                text = got.decode("utf-8", "replace")
+                try:
+                    out[k] = float(text)
+                except ValueError:
+                    out[k] = text
+            return out
+        overwrite, kept = self._keep_the_newer(f"db{db}", changed, read)
+        if kept:
+            (self.hop.report_dir(db) / f"data-db{db}.kept-newer").write_text(
+                "".join(k + "\n" for k in kept))
+        return overwrite
+
+    def repair_io(self, db, head):
+        """A repair record's keys on the target, as their serialised
+        values."""
+        from .. import repairlog
+        if head.get("form") != "dump":
+            return super().repair_io(db, head)
+        return repairlog.DumpIO(self._keys("dst", db, decode=False),
+                                head["table"])
 
     def check_deep(self, db):
         s = self._keys("src", db)

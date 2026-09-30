@@ -182,8 +182,11 @@ def test_matching_sides_are_ok_and_admit_what_they_cannot_see(lo_pair,
     got = _engine(lo_pair, tmp_path)._large_objects("postgres")
     assert got.status == "ok", got.detail
     assert "1 large objects on both sides" in got.detail, got.detail
-    # the blind spot it cannot cover is stated rather than left implied
-    assert "plain integer column are not found" in got.detail, got.detail
+    # how an integer column is taken for references is stated rather than
+    # left implied (`test_documents_named_by_an_integer_are_checked.py`)
+    assert "at least half its values name an object" in got.detail, \
+        got.detail
+    assert "(0 found that way)" in got.detail, got.detail
 
 
 def test_the_verdict_needs_no_server(tmp_path):

@@ -226,6 +226,43 @@ def narrowing(engine, src_type, dst_type):
     return None
 
 
+#: names a group of columns lists before it says how many more
+NAMED = 12
+
+
+def compared_clause(how):
+    """The clause every cross-engine verdict ends with: which columns were
+    compared exactly, which by value and as what, and which not at all and
+    why (problems D15) - from `Engine._comparable_columns(how=...)`, every
+    column of the pair in one of the three.
+
+    A group names its first `NAMED` columns and counts the rest; the
+    counts are always whole, so a column is never in no group."""
+    if not how:
+        return ""
+    groups = {"exactly": [], "by value": [], "not at all": []}
+    for name in sorted(how):
+        kind, why = how[name]
+        groups.setdefault(kind, []).append((name, why))
+
+    def listed(items, with_why):
+        shown = [f"{n} ({w})" if with_why else n for n, w in items[:NAMED]]
+        more = len(items) - NAMED
+        return ", ".join(shown) + (f" and {more:,} more" if more > 0 else "")
+    parts = []
+    exact = groups["exactly"]
+    if exact:
+        parts.append(f"{len(exact)} exactly (one engine, one type):"
+                     f" {listed(exact, False)}")
+    value = groups["by value"]
+    if value:
+        parts.append(f"{len(value)} by value: {listed(value, True)}")
+    none = groups["not at all"]
+    if none:
+        parts.append(f"{len(none)} not at all: {listed(none, True)}")
+    return f"; of {len(how)} columns, compared " + "; ".join(parts)
+
+
 def narrowing_result(db, narrow):
     """The deep check's answer about narrower target columns, from
     `narrowing`'s lines, in one set of words for every engine."""

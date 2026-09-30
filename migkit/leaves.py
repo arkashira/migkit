@@ -232,7 +232,7 @@ class Hasher:
 
     def __init__(self, spec, classes, key_at):
         self.spec = spec
-        self.fns = [render.renderer(c) for c in classes]
+        self.fns = [render.digest_renderer(c) for c in classes]
         self.key_at = list(key_at)
 
     def texts(self, values):
@@ -277,6 +277,44 @@ def _row_hash(s, cols, salt):
 def _shift(s, value, bits):
     return (s.eng.leaf_shift(value, bits) if s.dialect
             else f"({value} >> {bits})")
+
+
+# --- a table with no key, in buckets of its rows' hash ------------------------
+# The copy of a table with no key goes by the same leaves as the check of it
+# (`Spec("row")`): a bucket is the top bits of each row's hash, one node of
+# the tree the check reads, so the copy, its resume and the check all find
+# a row in one place (backlog P0-KEYLESS).
+
+def bucket_columns(cols):
+    """The columns a bucket is found by: those whose canonical text every
+    engine writes alike in SQL - a class rendered in this process
+    (`canon.FOLDED_HERE`) is left out. A bucket is a partition of the rows,
+    so a column left out of finding it is still copied and checked; rows
+    alike in every other column only share a bucket."""
+    return [(n, c) for n, c in cols if not canon.folded_here(c)]
+
+
+def bucket_where(s, spec, bucket):
+    """The rows of one node of a `row` spec's tree - the top `spec.bits` of
+    the hash of the row's canonical text over `bucket_columns` equal to
+    `bucket` - as a predicate in side `s`'s SQL, where its server hashes
+    its rows as the leaves do (`Side.sql`: PostgreSQL, MySQL, the
+    warehouses' and DuckDB's dialects) or SQLite through the function
+    migkit registers on its connections (`migkit_hash60`); None where the
+    rows are rendered only in this process, or no column is left to find a
+    bucket by."""
+    cols = bucket_columns(s.cols)
+    if not cols:
+        return None
+    if s.engine == "sqlite":
+        h = (f"migkit_hash60('{spec.salt}' ||"
+             f" {canon.row_expr('sqlite', cols)})")
+        return f"(({h}) >> {BITS - spec.bits}) = {int(bucket)}"
+    by = Side(s.eng, s.side, s.db, s.table, cols)
+    if not by.sql:
+        return None
+    shifted = _shift(by, _row_hash(by, cols, spec.salt), BITS - spec.bits)
+    return f"{shifted} = {int(bucket)}"
 
 
 def _inner(s, spec, extra=None, keys=False):
@@ -674,6 +712,151 @@ def localize(a, b, spec, ta, tb, held=HELD):
     return out
 
 
+# --- generations under writes (F1.d) -----------------------------------------
+
+#: generations a check gives a source written while it is read: each reads
+#: again only the leaves that still differ (`MIGKIT_GENERATIONS`)
+GENERATIONS = 5
+#: seconds between two generations where no tail's position is waited
+#: past; the hop's `settle` where it says one
+GENERATION_SECONDS = 2.0
+
+
+def most_generations():
+    import os
+    try:
+        return max(0, int(os.environ.get("MIGKIT_GENERATIONS", "")
+                          or GENERATIONS))
+    except ValueError:
+        return GENERATIONS
+
+
+def settle(before_a, before_b, now_a, now_b, which):
+    """(settled, still, moving) of the leaves `which`, read at two
+    generations - {leaf: digest} each side, before and now: equal now on
+    both sides, differing and not moved on either side since, or differing
+    and moved. What held still differs as of now; what moved is still
+    being written, or still arriving."""
+    z = (0, 0, 0)
+    settled, still, moving = set(), set(), set()
+    for x in which:
+        na, nb = now_a.get(x, z), now_b.get(x, z)
+        if na == nb:
+            settled.add(x)
+        elif na == before_a.get(x, z) and nb == before_b.get(x, z):
+            still.add(x)
+        else:
+            moving.add(x)
+    return settled, still, moving
+
+
+@dataclass
+class Generations:
+    """What differing leaves did over the generations they were read."""
+    ta: Tree                   #: the source's leaves, each as last read
+    tb: Tree                   #: and the target's
+    differed: int = 0          #: leaves that differed at the first read
+    rounds: int = 0            #: generations read
+    settled: set = field(default_factory=set)
+    still: set = field(default_factory=set)
+    moving: set = field(default_factory=set)
+
+    @property
+    def all_settled(self):
+        return bool(self.differed) and not self.still and not self.moving
+
+    def said(self):
+        """The clause: how the leaves that differed came out."""
+        if not self.rounds:
+            return ""
+        head = (f"; read while the source was written: {self.differed:,}"
+                f" leaves that differed read again over {self.rounds}"
+                f" generation{'s' if self.rounds != 1 else ''}")
+        if self.all_settled:
+            return head + (" - every one read equal on both sides (still"
+                           " arriving, then equal); compared leaf by leaf,"
+                           " each leaf as of the generation it settled in")
+        parts = []
+        if self.settled:
+            parts.append(f"{len(self.settled):,} settled (still arriving,"
+                         " then equal)")
+        if self.still:
+            parts.append(f"{len(self.still):,} held still and differ")
+        if self.moving:
+            parts.append(f"{len(self.moving):,} never settled - still being"
+                         f" written after {self.rounds} generations, so no"
+                         " verdict is given for their rows")
+        return head + " - " + ", ".join(parts)
+
+
+def generations(a, b, spec, ta, tb, wait, most=None):
+    """The leaves where `ta` and `tb` differ, read again generation by
+    generation until none is still moving (migration-verifier's rounds,
+    over the digest tree): each generation, after `wait(n)`, reads on both
+    sides only the leaves that differed and moved in the one before. A leaf
+    equal on both sides has settled; one that differs and did not move on
+    either side since the last generation holds still - a difference as of
+    now, localized from those leaves; one still moving after `most`
+    generations never settled, and is said so."""
+    most = most_generations() if most is None else most
+    z = (0, 0, 0)
+    bad = set(ta.differing(tb))
+    out = Generations(Tree(ta.leaves), Tree(tb.leaves), differed=len(bad))
+    before_a = {x: ta.leaves.get(x, z) for x in bad}
+    before_b = {x: tb.leaves.get(x, z) for x in bad}
+    for n in range(1, most + 1):
+        if not bad:
+            break
+        wait(n)
+        na, nb = both(scan, a, b, spec, sorted(bad))
+        out.rounds = n
+        settled, still, moving = settle(before_a, before_b, na.leaves,
+                                        nb.leaves, bad)
+        for x in bad:
+            for tree, now in ((out.ta, na), (out.tb, nb)):
+                if now.leaves.get(x, z) == z:
+                    tree.leaves.pop(x, None)
+                else:
+                    tree.leaves[x] = now.leaves[x]
+        out.settled |= settled
+        out.still |= still
+        before_a = {x: na.leaves.get(x, z) for x in moving}
+        before_b = {x: nb.leaves.get(x, z) for x in moving}
+        bad = moving
+    out.moving = set(bad) if out.rounds else set()
+    if not out.rounds:
+        out.still = set(ta.differing(tb))
+    return out
+
+
+def _generation_wait(pair, db, a):
+    """What a generation waits on: past the source's position of now where
+    a tail follows it (`fence_wait`), else the hop's `settle` seconds."""
+    from . import tailctl
+    opts = pair.hop.options or {}
+    pause = float(opts.get("settle") or GENERATION_SECONDS)
+
+    def wait(n):
+        if tailctl.alive(pair.hop.report_dir(db)):
+            try:
+                pos = a.eng.log_position("src", db)
+            except Exception:  # noqa: BLE001 - waited by the clock instead
+                pos = None
+            if pos is not None and pair.fence_wait(
+                    db, pos, int(opts.get("fence_timeout", 300))):
+                return
+        time.sleep(pause)
+    return wait
+
+
+class Said(str):
+    """A drilldown's clause, and whether what differed settled - every
+    leaf that differed read equal within its generations - with the rows
+    the settled leaves hold."""
+    settled = False
+    rows_src = rows_dst = None
+
+
 def confirm(pair_side_a, pair_side_b, found, most=5000):
     """The changed rows read by key on both sides and compared value by
     value: {key text: [columns that differ]} for those that still differ,
@@ -1040,6 +1223,17 @@ PASSES = (
                    " to migkit's own digests"),
     )),
     decide.Part("confirm", (
+        _R("generations", "what differs read again, generation by"
+                          " generation, until it holds still",
+           needs=(_N("the source written while it was read",
+                     lambda f: bool(f.get("written")),
+                     "the source's log did not move while the table was"
+                     " read, or it keeps none to ask, so what differs is"
+                     " not still being written"),),
+           because="a source written while it is read differs in the"
+                   " leaves still being written; each generation reads"
+                   " again only what still differs, past the tail's"
+                   " position where one runs, until it holds still"),
         _R("fenced", "held to the totals, then asked again past the tail's"
                      " position", needs=(_N("a tail running",
                                             lambda f: bool(f.get("tail")),
@@ -1210,11 +1404,13 @@ def int_keyed(a, b):
             and dict(b.cols).get(b.key[0]) == "integer")
 
 
-def _facts(pair, db, a, b, digests):
+def _facts(pair, db, a, b, digests, began=None):
     """What the passes' needs read for one table, each read once and only
     for a rung still in the running (`decide.Facts`): the round trip is
     timed only where few differences are expected, a reader looked for
-    only where two readings are called for."""
+    only where two readings are called for, and the source's log asked
+    again only where its position before the digests was read (`began`):
+    moved since, the source was written while it was read."""
     from . import second_reader, tailctl
     expected = None
     counts = [d[0] for d in digests] if digests else None
@@ -1241,6 +1437,7 @@ def _facts(pair, db, a, b, digests):
         rtt_ms=lambda: max(rtt_ms(a.eng, "src", db) or 0,
                            rtt_ms(b.eng, "dst", db) or 0),
         tail=lambda: tailctl.alive(pair.hop.report_dir(db)),
+        written=lambda: _written(a, db, began),
         **{"row hash reader": lambda: bool(
             second_reader.interpreter()
             and engines <= set(second_reader.READER_TYPES)),
@@ -1276,6 +1473,18 @@ def group_of(pair, db, a, b, rows):
                                       pair.src_name == pair.dst_name, rows)
 
 
+def _written(a, db, began):
+    """Whether the source's log moved since `began`, its position before
+    the table was read: False where it keeps none to ask."""
+    if began is None:
+        return False
+    try:
+        now = a.eng.log_position("src", db)
+    except Exception:  # noqa: BLE001 - nothing to tell by
+        return False
+    return now is not None and now != began
+
+
 #: the module the bisecting reader reads each engine through: installed
 #: without it, it says so and exits 0, having read nothing (measured)
 DRIVERS = {"postgres": "psycopg2", "mysql": "mysql.connector"}
@@ -1289,81 +1498,113 @@ def _driver(engine):
         return False
 
 
-def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None):
+def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
+          began=None):
     """The clause naming the rows that differ in a table whose digest
     differs, found from its leaves - or None where the row walk is the
-    way: a keyed table small enough to walk (`DRILL_CAP`), or a key that
-    cannot be lined up across the pair."""
+    way: a keyed table small enough to walk (`DRILL_CAP`) on a source not
+    written while it was read, or a key that cannot be lined up across the
+    pair. `began` is the source's log position before its digest was
+    read: where it has moved since, what differs is read again by
+    generations (`generations`) before a row is named, and a `Said` whose
+    `settled` is true comes back where every leaf that differed settled."""
     got = sides(pair, db, src_t, dst_t, sc, dc, scope)
     if got is None:
         return None
     a, b = got
-    if a.key and rows <= pair.DRILL_CAP:
-        return None
     name = pair._leaf(src_t)
-    facts = _facts(pair, db, a, b, digests)
+    facts = _facts(pair, db, a, b, digests, began)
+    if a.key and rows <= pair.DRILL_CAP and not facts["written"]:
+        return None
     costs = decide.HopCosts(pair.hop, "verify passes/")
     strat = strategy(f"{db}.{name}", facts, costs)
     if not strat:
         return f"; rows not localised: {strat.why_not}"
     salt = pair.digest_salt()
-    began = time.monotonic()
-    found = None
-    if strat.parts["localize"].name == "sketch":
-        spec = plan(rows, "hash" if a.key else "row", salt=salt)
-        found, why = _tried(by_sketch, a, b, spec, facts["expected"])
-        if found is None:
-            facts["sketch failed"] = why
-            strat = strategy(f"{db}.{name}", facts, costs)
-        else:
-            costs.saw("localize/sketch", max(rows, 1),
-                      time.monotonic() - began)
-    if found is None and strat.parts["localize"].name == "groups":
-        began = time.monotonic()
-        found, why = _tried(by_groups, pair, db, a, b, digests, rows,
-                            facts["group column"])
-        if found is None:
-            facts["groups failed"] = why
-            strat = strategy(f"{db}.{name}", facts, costs)
-        else:
-            costs.saw("localize/groups", max(rows, 1),
-                      time.monotonic() - began)
-    if found is None and strat.parts["localize"].name == "bisection":
-        began = time.monotonic()
-        found, why = _tried(by_bisection, pair, db, a, b, digests)
-        if found is None:
-            facts["bisection failed"] = why
-            strat = strategy(f"{db}.{name}", facts, costs)
-        else:
-            costs.saw("localize/bisection", max(rows, 1),
-                      time.monotonic() - began)
-    if found is None:
-        began = time.monotonic()
+    work = f"{db}.{name}"
+    gens = None
+    # a source written while it is read differs in leaves still being
+    # written: those are read again by generations, which the sketch and
+    # the bisecting reader cannot do, so the leaves localize
+    live = strat.parts["confirm"].name == "generations"
+
+    def by_leaves():
+        nonlocal gens
+        t0 = time.monotonic()
         kind = strat.parts["leaves"].name if a.key else "row"
         lohi = key_range(a, b) if kind == "range" else None
         if kind == "range" and lohi is None:
             kind = "hash"
         spec = plan(rows, kind, *(lohi or (None, None)), salt=salt)
         ta, tb = both(scan, a, b, spec)
+        took = time.monotonic() - t0
+        if live:
+            gens = generations(a, b, spec, ta, tb,
+                               _generation_wait(pair, db, a))
+            if gens.all_settled:
+                # nothing to name: an earlier run's lists go
+                pair._write_drill(db, name, missing=[], changed=[], extra=[])
+                out = Said(gens.said())
+                out.settled = True
+                out.rows_src, out.rows_dst = gens.ta.root[0], gens.tb.root[0]
+                return out
+            ta = Tree({x: v for x, v in gens.ta.leaves.items()
+                       if x in gens.still})
+            tb = Tree({x: v for x, v in gens.tb.leaves.items()
+                       if x in gens.still})
         found = localize(a, b, spec, ta, tb)
-        took = time.monotonic() - began
-        costs.saw("leaves/" + ("hash" if kind == "row" else kind),
-                  max(rows, 1), took)
-        costs.saw("localize/leaf reads", max(rows, 1), took)
-    return _clause(pair, db, name, a, b, found, strat, rows)
+        if not live:
+            costs.saw("leaves/" + ("hash" if kind == "row" else kind),
+                      max(rows, 1), took)
+            costs.saw("localize/leaf reads", max(rows, 1),
+                      time.monotonic() - t0)
+        return found
+
+    def run(choice):
+        """One localizer. Where it cannot run or its rows do not add up it
+        is `Blocked`, its fact set for the passes' own climb, and the next
+        is taken (`decide.attempt`); what it found - differences or none -
+        is the answer. The leaves read back are the last way, and a
+        failure of theirs goes to the caller, which walks the rows."""
+        way = choice.rung.name
+        if way == "leaf reads":
+            return by_leaves()
+        t0 = time.monotonic()
+        try:
+            if way == "sketch":
+                found, why = by_sketch(
+                    a, b, plan(rows, "hash" if a.key else "row", salt=salt),
+                    facts["expected"])
+            elif way == "groups":
+                found, why = by_groups(pair, db, a, b, digests, rows,
+                                       facts["group column"])
+            else:
+                found, why = by_bisection(pair, db, a, b, digests)
+        except Exception as e:  # noqa: BLE001 - a way that could not run
+            if not decide.operational(e):
+                raise
+            found, why = None, (str(e).strip().splitlines()[-1][:120]
+                                if str(e) else type(e).__name__)
+        if found is None:
+            facts[f"{way} failed"] = why
+            raise decide.Blocked(why)
+        costs.saw(f"localize/{way}", max(rows, 1), time.monotonic() - t0)
+        return found
+    if live:
+        found = by_leaves()
+    else:
+        facts["localizer"] = None
+        _, found = decide.attempt(work, PASSES[2].rungs, run, facts,
+                                  costs=_Localizer(costs),
+                                  switch=decide.only_blocked)
+        # the rest of the passes, climbed with what the localizers said
+        strat = strategy(work, facts, costs) or strat
+    if isinstance(found, Said):
+        return found
+    return Said(_clause(pair, db, name, a, b, found, strat, rows, gens))
 
 
-def _tried(fn, *args):
-    """(what a localizer found, None), or (None, why it did not): an
-    error is a way of not proving itself, and the next rung is taken."""
-    try:
-        return fn(*args)
-    except Exception as e:  # noqa: BLE001 - said, and climbed past
-        return None, str(e).strip().splitlines()[-1][:120] if str(e) \
-            else type(e).__name__
-
-
-def _clause(pair, db, name, a, b, found, strat, rows=0):
+def _clause(pair, db, name, a, b, found, strat, rows=0, gens=None):
     how = (f"; found from a sketch of the differences ({found.differ:,}"
            " rows decoded)" if found.how == "sketch" else
            f"; {found.said} ({found.rows:,} rows read back)"
@@ -1373,11 +1614,20 @@ def _clause(pair, db, name, a, b, found, strat, rows=0):
            if found.how == "bisection" else
            f"; found from {found.leaves:,} leaves that differ, read back"
            f" ({found.rows:,} rows)")
-    if found.complete:
-        how += ("; what was found adds up to the whole difference of the"
-                " two tables' totals")
+    whole = ("what was found adds up to the whole difference of the two"
+             " tables' totals" if gens is None else
+             "what was found adds up to what the leaves that held still"
+             " differ by")
+    if gens is not None and not gens.still:
+        # every leaf still differing was still being written: no row is
+        # named from leaves that would not hold still
+        how = "; no row named: every leaf that differs was still moving"
+    elif found.complete:
+        how += "; " + whole
     else:
         how += f"; differs, not fully localized: {found.why}"
+    if gens is not None:
+        how += gens.said()
     cols, same = confirm(a, b, found) if found.changed else ({}, 0)
     if cols:
         first = next(iter(cols.values()))
@@ -1397,7 +1647,9 @@ def _clause(pair, db, name, a, b, found, strat, rows=0):
             if n:
                 parts.append(f"{n:,} row{'s' if n != 1 else ''} on the"
                              f" {where} that the {other} does not hold")
-        body = "; ".join(parts) or "no row differs by value"
+        body = "; ".join(parts) or (
+            "no row named" if gens is not None and not gens.still
+            else "no row differs by value")
         return (f"; {body} (the table has no key: rows are told apart by"
                 " their values, and a row held twice counts twice)" + how)
     return pair._drill_clause(db, name, found.missing, found.changed,

@@ -70,3 +70,27 @@ def renderer(cls):
             return slow(cls, v)
     return one
 
+
+def digest_renderer(cls):
+    """f(value) giving what `canon.digest_value(cls, value)` gives: the
+    column's `renderer`, and a text or byte value wider than `canon.WIDE`
+    as its length and md5, as every server's digest writes it."""
+    from . import canon
+    one = renderer(cls)
+    if cls == "bytes":
+        def wide(v):
+            if isinstance(v, (bytes, bytearray, memoryview)) \
+                    and len(v) > canon.WIDE:
+                return canon.wide_bytes(v)
+            return one(v)
+        return wide
+    if cls == "text":
+        def wide(v):
+            if type(v) is str and len(v) * 4 > canon.WIDE:
+                got = canon.wide_text(v)
+                if got is not None:
+                    return got
+            return one(v)
+        return wide
+    return one
+

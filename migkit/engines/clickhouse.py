@@ -187,6 +187,14 @@ class ClickHouseEngine(NeutralCopier, Engine):
                       " = {d:String} and table = {t:String}",
             {"d": self._d(side, db), "t": table})}
 
+    def row_bucket_sql(self, side, db, table, columns, n):
+        """The server's own hash of the whole row, in [0, n), for a table
+        whose sorting key names no column (`ranges.keyless`)."""
+        if not columns:
+            return None
+        return (f"cityHash64({', '.join(self._q(c) for c, _ in columns)})"
+                f" % {int(n)}")
+
     def neutral_key(self, side, db, table):
         got = self._rows(side, db, "select sorting_key from system.tables"
                                    " where database = {d:String} and name ="

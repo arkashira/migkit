@@ -1089,8 +1089,8 @@ def compose(work, parts, facts=None, need=(), costs=None, keep=None):
 # backlog item it waits on. A cell nobody declared is a failure, not a
 # guess. `yes` means migkit carries that shape correctly today; how fast
 # and how resumably is the rungs' business (a table without a key or with a
-# key of text goes in one pass or by where its rows are stored until F1's
-# hash buckets resume it by bucket).
+# key of text goes by where its rows are stored, by buckets of its rows'
+# hash, or in one pass - `ranges.keyless`).
 
 SHAPES = {
     "keyless": "a table without a key",
