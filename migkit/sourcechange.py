@@ -336,6 +336,23 @@ DEFINITIONS = {d.name: d for d in (
     Definition(
         "whole_entries", "db2i", "a journal that keeps whole entries",
         make=lambda c: [_cl(f"CHGJRN JRN({c.name}) MINENTDTA(*NONE)")]),
+    # -- an archive's (`archive`): rows, not a setting ---------------------
+    # the rows a hop's rule archives, removed from the source once the
+    # archive holds them proved; put back from the archive by the hop's
+    # `archive: {restore: true}`. `c.tables` are the tables, `c.name` the
+    # rule's words
+    Definition(
+        "archived_rows", "any",
+        "the archived rows removed from the source",
+        make=lambda c: [f"-- delete from {t} the rows archived by its rule,"
+                        " each proved on the archive first" for t in
+                        c.tables],
+        undo=lambda c: [f"-- the removed rows of {t} put back from the"
+                        " archive (archive: {restore: true})"
+                        for t in c.tables],
+        speeds=False, after="never by itself",
+        without="the archived rows stay on the source as well as in the"
+                " archive"),
 )}
 
 
@@ -586,6 +603,46 @@ def settle(hop, offer, facts, saving, go, ask, log):
     else:
         log("dry-run: --go at a terminal asks it")
     return None
+
+
+@dataclass(frozen=True)
+class _Named:
+    name: str
+
+
+def settle_named(hop, name, lines, go, ask, log):
+    """A change on the source that is no faster way's - the archived rows
+    removed - offered in `lines` and answered as `settle` answers one:
+    the hop's own answer for it by name (never a word given for every
+    change), else asked at a terminal under `--go` and recorded. Returns
+    the answer, or None: the source is left as it is."""
+    got = answers(hop).get(name)
+    if got is not None:
+        log(f"{DEFINITIONS[name].said}: answered {got[0]} ({got[1]})")
+        return got[0]
+    for line in lines:
+        log(line)
+    log(f"  answered ahead in the hop: {OPTION}: {{{name}: yes | no}}")
+    if go and ask is not None:
+        answer = answer_word(ask(QUESTION)) or "no"
+        record_answer(hop, [_Named(name)], answer)
+        log(f"answered {answer}, recorded for this hop's later runs")
+        return answer
+    log("not answered - the source is left as it is" if go else
+        "dry-run: --go at a terminal asks it")
+    return None
+
+
+def written(hop, entry):
+    """A write on the source that is no setting (`archive`'s rows),
+    recorded beside the changes in the hop's ledger and its changelog -
+    in states of its own, so nothing that takes a change off again reads
+    it as one."""
+    rec = _record(hop)
+    rec.setdefault("written", []).append(entry)
+    _save(hop, rec)
+    _audit(hop, {"op": "source-write", **{k: entry.get(k) for k in (
+        "id", "change", "state", "table", "rows")}})
 
 
 # --- the record -------------------------------------------------------------

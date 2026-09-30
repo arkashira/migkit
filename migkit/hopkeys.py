@@ -60,7 +60,8 @@ STREAMS = ("kafka", "kinesis", "pubsub")
 #: the keys of a hop itself
 HOP_KEYS = {
     "goal": Key("what the hop is for - copy, cutover, verify, two-way,"
-                " keep-in-sync, rehearse, upgrade or subset", "str"),
+                " keep-in-sync, rehearse, upgrade, subset, consolidate,"
+                " split or archive", "str"),
     "engine": Key("the engine both sides run, or hetero - read from the"
                   " addresses when they are addresses", "str"),
     "source": Key("where the data is: an address or the long form",
@@ -100,6 +101,33 @@ HOP_OPTIONS = {
     "atlas": Key("the structural schema reading, on or off", "bool",
                  ("postgres", "mysql"), knob="way",
                  named_for_a_program=True),
+    "archive": Key("goal archive: remove - the archived rows removed from"
+                   " the source once proved (with the source's answer,"
+                   " source_changes: {archived_rows: yes}), restore - the"
+                   " removed rows put back from the archive, batch - rows"
+                   " a batch", "dict", subs=("remove", "restore", "batch")),
+    "charset": Key("the character set, and the collation, the target's"
+                   " text is converted to - a name, or {to, collation,"
+                   " repair: double-encoded | none}; converted by MySQL's"
+                   " own conversion after the copy, held to elsewhere",
+                   "str|dict", subs=("to", "collation", "repair")),
+    "consolidate": Key("goal consolidate: column - the column each"
+                       " source's rows are held under, value or values -"
+                       " this source's, keys - refuse, tenant, offset or"
+                       " remap, offsets - each value's under offset, with"
+                       " - the other hops writing the same target",
+                       "dict", subs=("column", "value", "values", "keys",
+                                     "offsets", "with")),
+    "split": Key("goal split: with - the other parts of the same source,"
+                 " shared - tables every part takes whole, rest - refuse"
+                 " or stays (the rows no part takes stay on the source)",
+                 "dict", subs=("with", "shared", "rest")),
+    "table_engine": Key("the storage engine the target's tables are made"
+                        " in - a name, or {to, accept: [group numbering,"
+                        " remote rows], foreign_keys: {child.column:"
+                        " parent.column}}", "str|dict",
+                        ("mysql", "hetero"),
+                        subs=("to", "accept", "foreign_keys")),
     "cdc_confidence_seconds": Key("seconds the follow of a change log"
                                   " stays behind the source's clock",
                                   "number", ("cassandra",)),
@@ -762,6 +790,69 @@ GOALS = {
                              " it; every row as the source's, its masked"
                              " columns as the rule writes them, none"
                              " beyond the subset"},
+    "consolidate": {"what": "many databases or tenants into one: each"
+                            " source's rows under a column the hop names,"
+                            " filled with its own value, keys kept apart"
+                            " by the hop's rule, proved source by source",
+                    "options": {}, "writes": True,
+                    "next": ["migkit assess {hop}",
+                             "migkit move {hop} --mode full",
+                             "migkit move {hop} --mode full --go",
+                             "migkit check {hop}"],
+                    "source": "read, never written: each table through its"
+                              " row filter",
+                    "target": "one database the sources share: this"
+                              " source's rows there replaced by its own,"
+                              " under its value, keys shifted where the"
+                              " rule shifts them; the other sources' rows"
+                              " left as they are; the counters raised past"
+                              " every source's keys",
+                    "guarantees": "keys two sources hold found before"
+                                  " anything is written and refused, or kept"
+                                  " apart by the rule (tenant, offset,"
+                                  " remap); every source's rows proved in"
+                                  " the target under its value; no row"
+                                  " under a value no source has"},
+    "split": {"what": "one database into many - a service extracted, a"
+                      " database split by region: each part's rows by its"
+                      " rule, every row placed exactly once, proved",
+              "options": {}, "writes": True,
+              "next": ["migkit assess {hop}",
+                       "migkit move {hop} --mode full",
+                       "migkit move {hop} --mode full --go",
+                       "migkit check {hop}"],
+              "source": "read, never written: every row counted against"
+                        " every part's rule before the move",
+              "target": "this part's tables (the hop's scope) filled with"
+                        " the rows its rule takes (mapping.where)",
+              "guarantees": "rows no part takes and rows two parts take"
+                            " found before the move and refused (rest:"
+                            " stays, shared); each key in exactly one"
+                            " part's target, the targets together the"
+                            " source's; references across the split"
+                            " counted and said"},
+    "archive": {"what": "old rows to cheaper storage: the rows each rule"
+                        " picks added to an archive and proved there, then"
+                        " removed from the source only once proved and"
+                        " only where the hop allows it",
+                "options": {}, "writes": True,
+                "next": ["migkit assess {hop}",
+                         "migkit move {hop} --mode full",
+                         "migkit move {hop} --mode full --go",
+                         "migkit check {hop}"],
+                "source": "read; written only with archive: {remove: true}"
+                          " and the source's own answer by name"
+                          " (source_changes: {archived_rows: yes}) behind"
+                          " the hop's approvals: each archived row removed"
+                          " once the archive holds it as the source has it"
+                          " now, a row other rows still name never",
+                "target": "the archive: the rows each rule picks added,"
+                          " what it holds already kept, never overwritten",
+                "guarantees": "every row the rule picks in the archive as"
+                              " the source has it; every row removed from"
+                              " the source in the archive with the digest"
+                              " it had, in the ledger; put back from the"
+                              " archive by archive: {restore: true}"},
 }
 
 #: each mode of `move` and `sync`: what it does on each side, as the dry
@@ -1085,6 +1176,11 @@ WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover",
            "ship")
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
+#: the goals that move the data once
+ONCE = ("copy", "subset", "consolidate", "split", "archive")
+#: each goal's own setting, read by no other goal
+GOAL_OPTION = {"subset": "subset", "consolidate": "consolidate",
+               "split": "split", "archive": "archive"}
 
 
 def goal_options(hop, goal):
@@ -1453,7 +1549,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     "error", f"{where}.options.{k}",
                     f"goal {goal} writes to neither side, and {k} writes"
                     " - drop one of the two"))
-    if goal in ("copy", "subset"):
+    if goal in ONCE:
         for k in STREAMING:
             if opts.get(k):
                 out.append(Problem(
@@ -1509,10 +1605,16 @@ def _goal_settings(where, opts, goal, engine):
                 " refer to, and no rows are chosen - subset: {start:"
                 " {table: a condition, a share like 10% or a number of"
                 " rows}}"))
-    elif subset is not None:
+    for g, k in GOAL_OPTION.items():
+        if g != goal and k != "subset" and opts.get(k) is not None:
+            out.append(Problem("warn", f"{where}.options.{k}",
+                               f"read only by a hop whose goal is {g}, so"
+                               " it does nothing here"))
+    if subset is not None and goal != "subset":
         out.append(Problem("warn", f"{where}.options.subset",
                            "read only by a hop whose goal is subset, so it"
                            " does nothing here"))
+    out += _scenario_settings(where, opts, goal)
     said = opts.get("rehearses")
     rehearsed = (said.get("hop") if isinstance(said, dict) else said) or ""
     if goal == "rehearse":
@@ -1541,6 +1643,54 @@ def _goal_settings(where, opts, goal, engine):
         out.append(Problem("warn", f"{where}.options.physical.upgrade",
                            "read only by a hop whose goal is upgrade, so it"
                            " does nothing here"))
+    return out
+
+
+def _scenario_settings(where, opts, goal):
+    """The settings of the scenarios a hop may say, each read as its own
+    module reads it (`charsets`, `tableengine`, `consolidate`, `split`,
+    `archive`) - one reading, so what loads is what runs - and what a
+    goal needs of its own: a consolidation's column."""
+    from types import SimpleNamespace
+
+    from . import archive, charsets, consolidate, split, tableengine
+    out = []
+    probe = SimpleNamespace(goal=goal, options=opts)
+    for key, read in (("charset", charsets.settings),
+                      ("table_engine", tableengine.settings),
+                      ("consolidate", consolidate.settings),
+                      ("split", split.settings),
+                      ("archive", archive.settings)):
+        try:
+            read(probe)
+        except SystemExit as e:
+            out.append(Problem("error", f"{where}.options.{key}", str(e)))
+    if goal == "consolidate":
+        got = opts.get("consolidate")
+        if not isinstance(got, dict) or not got.get("column"):
+            out.append(Problem(
+                "error", f"{where}.options.consolidate",
+                "goal consolidate holds each source's rows under a column,"
+                " and none is named - consolidate: {column: tenant_id,"
+                " value: <this source's>}"))
+        elif str(got.get("keys") or "") == "offset" and not got.get(
+                "offsets"):
+            out.append(Problem(
+                "error", f"{where}.options.consolidate.offsets",
+                "keys: offset shifts each source's keys by its own offset,"
+                " and none is given - offsets: {<value>: <number>}, or"
+                " keys: remap for migkit to work them out"))
+    got = opts.get("archive")
+    if goal == "archive" and isinstance(got, dict) and got.get("remove"):
+        answers = opts.get("source_changes")
+        named = isinstance(answers, dict) and "archived_rows" in answers
+        if not named:
+            out.append(Problem(
+                "warn", f"{where}.options.archive.remove",
+                "the archived rows are removed only with the source's own"
+                " answer by its name, and the hop gives none ahead - a"
+                " terminal asks it under --go; without one they stay"
+                " (source_changes: {archived_rows: yes})"))
     return out
 
 

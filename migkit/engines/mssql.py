@@ -51,6 +51,7 @@ def _without_parameters(text):
 
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    CHARSETS = True
     #: a change tracking version only says where a read begins: one of its
     #: own reads from an older one again, while the retention keeps it
     REREADS_FROM_A_POSITION = True
@@ -860,6 +861,7 @@ class MSSQLEngine(DbapiRows, Engine):
                               f" none ahead of source{note}"))
         from .. import workload
         res.append(workload.compare(self, db))
+        res.append(self._mojibake(db))
         return res
 
     # --- the source's own statements, from its Query Store (R23, 4) -----
@@ -1034,6 +1036,11 @@ class MSSQLEngine(DbapiRows, Engine):
                     f"{len(stmts)} identities differ, {same} already equal"))
         if kind in ("rows", "all"):
             actions += self._rows_found_plan(db)
+            # after the rows, never before: a row copied again takes the
+            # source's text, which is where the broken text lives
+            text = self._mojibake_repair(db)
+            if text:
+                actions.append(text)
         return actions
 
     def _found(self, db, t):
@@ -1084,6 +1091,8 @@ class MSSQLEngine(DbapiRows, Engine):
         return self._found(db, table)
 
     def apply(self, db, action):
+        if action.kind == "text":
+            return self._apply_text(db, action)
         if action.kind == "rows":
             t = action.scope.split(".", 1)[1]
             sc, dc, _ = self._comparable_columns(db, self, t, self, t)

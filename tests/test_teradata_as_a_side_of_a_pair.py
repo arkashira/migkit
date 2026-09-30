@@ -559,8 +559,12 @@ def test_the_deep_check_finds_a_table_left_mid_load_and_leftovers(fake):
     assert "orders_ERR_1" in got["shop load leftovers"].detail
     fake.set(lambda h, s, a: [("orders",)] if "from DBC.TablesV" in s
              else _catalog(h, s, a))
-    (clean,) = _engine().check_deep("shop")
-    assert clean.status == "ok"
+    got = {r.scope: r for r in _engine().check_deep("shop")}
+    assert got["shop target tables"].status == "ok"
+    # beside it, the text stored twice as UTF-8 on the source: asked, its
+    # answer whatever the stand-in gives
+    assert "shop mojibake" in got
+    assert set(got) == {"shop target tables", "shop mojibake"}
 
 
 def test_a_tail_batch_lands_with_its_line_in_the_ledger(fake):

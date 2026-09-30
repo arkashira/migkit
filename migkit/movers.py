@@ -2150,9 +2150,11 @@ def _my_create_missing(hop, db, log=None):
     # is said (assess names it before the move)
     keeps_history = eng._brands()[1].name == "mariadb"
     plain = []
+    from . import tableengine
     for t in want:
         got = eng._q("src", f"show create table {src}.{eng._quote_ident(t)}")
-        ddl = got[0][1]
+        # in the engine the table changes to, where it changes one
+        ddl = tableengine.schema(hop, eng, db, t, got[0][1])
         if not keeps_history and re.search(r"\bWITH SYSTEM VERSIONING\b",
                                            ddl, re.I):
             ddl = re.sub(r"\s+WITH(OUT)? SYSTEM VERSIONING\b", "", ddl,
