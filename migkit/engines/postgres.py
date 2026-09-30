@@ -592,6 +592,7 @@ class PostgresEngine(Engine):
                                 options=options)
         self._read_hstore(conn, side, db)
         self._read_json(conn)
+        self._read_float4(conn)
         return conn
 
     def _conn3(self, side, db):
@@ -613,6 +614,29 @@ class PostgresEngine(Engine):
                                connect_timeout=15, **ep.libpq_tls(),
                                cursor_factory=psycopg.ClientCursor,
                                prepare_threshold=None, options=options)
+
+    @staticmethod
+    def _read_float4(conn):
+        """A `real`, and each element of a `real[]`, read as the 32-bit
+        float it is. The driver parses the text the server prints - nine
+        digits under `extra_float_digits=3`, `0.100000001` - as a double,
+        another number from the float the column holds, so an array of
+        them moved into a `Float64` array would hold values the source
+        never had. (A plain `real` column is read through `::float8`
+        already, `canon.read_expr`.)"""
+        import struct
+
+        from psycopg2.extensions import new_array_type, new_type, \
+            register_type
+
+        def f32(text, cur):
+            if text is None:
+                return None
+            return struct.unpack("<f", struct.pack("<f", float(text)))[0]
+        one = new_type((700,), "MIGKIT_FLOAT4", f32)
+        register_type(one, conn)
+        register_type(new_array_type((1021,), "MIGKIT_FLOAT4_ARRAY", one),
+                      conn)
 
     @staticmethod
     def _read_json(conn):
@@ -953,7 +977,9 @@ class PostgresEngine(Engine):
             places = ", ".join(["%s"] * len(key))
             keys = ", ".join(f'"{k}"' for k in key)
             resume = f"({keys}) > ({places})"
-            args = list(after)
+            # a `jsonb` key is read back as the document it holds, which
+            # the driver will not send: as its JSON
+            args = [canon.sql_value(v) for v in after]
         # the driver formats every statement it is given parameters for
         where = self._where(where, resume, True, percent=True)
         order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
@@ -1070,10 +1096,13 @@ class PostgresEngine(Engine):
                                 f" {quoted} with no data")
                     into = "migkit_batch"
                 arrays = self._array_columns(side, db, table)
+                sparse = self._sparse_columns(side, db, table)
                 with cur.copy(f"copy {into} ({cols}) from stdin") as copy:
                     for r in canon.sql_rows(
-                            [c for _, c in columns], rows,
-                            {i for i, n in enumerate(names) if n in arrays}):
+                            [canon.SPARSE if n in sparse else c
+                             for n, c in columns], rows,
+                            {i for i, n in enumerate(names) if n in arrays},
+                            "postgres"):
                         copy.write_row(r)
                 if keyed:
                     sets = ", ".join(f'"{n}" = excluded."{n}"'
@@ -1084,6 +1113,17 @@ class PostgresEngine(Engine):
                         f" migkit_batch on conflict ({conflict}) do "
                         + (f"update set {sets}" if sets else "nothing"))
         return len(rows)
+
+    def _sparse_columns(self, side, db, table):
+        """The `sparsevec` columns of a table, asked once: a vector is
+        read dense (`canon.read_expr`) and a `sparsevec` takes only its
+        own text, `{1:0.5,4:2}/6`."""
+        known = self.__dict__.setdefault("_sparse_of", {})
+        at = (side, db, str(table))
+        if at not in known:
+            known[at] = {n for n, t in self.neutral_columns(side, db, table)
+                         if str(t).lower().startswith("sparsevec")}
+        return known[at]
 
     def _array_columns(self, side, db, table):
         """The columns of a table that are arrays, asked once: a list on
@@ -2489,7 +2529,7 @@ class PostgresEngine(Engine):
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
-        if any(c in canon.FOLDED_HERE for _, c in columns):
+        if any(canon.folded_here(c) for _, c in columns):
             return canon.fold_batches(columns, self.neutral_batches(
                 side, db, table, columns, 5000, where=where))
         sch, tbl = self._split(table)

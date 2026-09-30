@@ -35,7 +35,7 @@ def test_an_unmapped_type_is_refused_rather_than_treated_as_text():
     cls, why = c.comparable("postgres", "point")
     assert cls is None
     assert "no canonical rendering" in why and "point" in why
-    assert c.type_class("mysql", "geometry") is None
+    assert c.type_class("postgres", "tsrange") is None
 
 
 def test_an_engine_with_no_rendering_raises_instead_of_guessing():

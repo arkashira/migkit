@@ -107,8 +107,8 @@ def pair():
     else:
         pytest.fail("postgres never answered")
     assert pg_sql("create database cx", "postgres").returncode == 0
-    assert pg_sql('create table t ("_id" bigint primary key, name text,'
-                  " n bigint, keep text)").returncode == 0
+    assert pg_sql('create table t ("_id" integer primary key, name text,'
+                  " n integer, keep text)").returncode == 0
 
     from migkit.engines.mongodb import MongoEngine
     from migkit.engines.postgres import PostgresEngine

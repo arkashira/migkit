@@ -452,7 +452,9 @@ class MySQLEngine(Engine):
         place = "(" + ", ".join(["%s"] * len(names)) + ")"
         insert = (f"insert into `{self._d(side, db)}`.`{table}` ({cols})"
                   f" values {place}{tail}")
-        rows = [tuple(canon.sql_value(v) for v in r) for r in rows]
+        classes = [c for _, c in columns]
+        rows = [tuple(canon.write_value("mysql", c, v)
+                      for c, v in zip(classes, r)) for r in rows]
         conn = self._conn(side)
         try:
             with conn.cursor() as cur:
@@ -1781,7 +1783,7 @@ class MySQLEngine(Engine):
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
-        if any(c in canon.FOLDED_HERE for _, c in columns):
+        if any(canon.folded_here(c) for _, c in columns):
             return canon.fold_batches(columns, self.neutral_batches(
                 side, db, table, columns, 5000, where=where))
         row = canon.row_expr("mysql", columns)

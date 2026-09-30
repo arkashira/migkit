@@ -81,6 +81,18 @@ VALUES = {
     | st.uuids().map(lambda u: str(u).upper()) | st.text(max_size=6),
     "inet": st.ip_addresses() | st.ip_addresses().map(str)
     | st.text(max_size=6),
+    "interval": st.tuples(st.integers(-10**6, 10**6),
+                          st.integers(-10**6, 10**6),
+                          st.integers(-10**15, 10**15)).map(
+        lambda p: f"P{p[0]}M{p[1]}DT{p[2]}S") | st.timedeltas()
+    | st.text(max_size=6),
+    "vector": st.lists(st.floats(width=32), max_size=4)
+    | st.binary(max_size=12) | st.text(max_size=6),
+    "geometry": st.tuples(st.integers(0, 5000), st.floats(), st.floats())
+    .map(lambda p: {"type": "Point", "coordinates": [p[1], p[2]]})
+    | st.sampled_from(["0101000020E610000000000000002059400000000000802B40"])
+    | st.text(max_size=6),
+    "bson": _json | st.integers() | st.text(max_size=6),
 }
 # the digits past the microsecond a value read at nine carries, and a
 # MySQL TIME, which the driver hands over as a duration

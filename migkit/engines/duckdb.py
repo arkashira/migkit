@@ -53,6 +53,25 @@ class DuckDBEngine(DbapiRows, Engine):
             return f"strftime({quoted}, '%Y-%m-%d %H:%M:%S.%n')"
         return None
 
+    def _read_as(self, quoted, declared):
+        """An `INTERVAL` as its three parts, ISO 8601: the library reads
+        one as a `timedelta`, a month as 30 days - measured on 1.5,
+        `1 year 2 months 3 days 04:05:06.5` came back 423 days
+        (`intervals`). An hour of one is not held to 24, and
+        `microseconds` is the seconds with their fraction."""
+        if str(declared).strip().upper() != "INTERVAL":
+            return None
+        from .. import intervals
+        c = quoted
+        return (f"case when {c} is null then null else 'P' ||"
+                f" (datepart('year', {c}) * 12 + datepart('month', {c}))"
+                f"::varchar || 'M' || datepart('day', {c})::varchar || 'DT'"
+                f" || (((datepart('hour', {c})::hugeint * 3600"
+                f" + datepart('minute', {c}) * 60) * 1000000"
+                f" + datepart('microseconds', {c}))::decimal(38, 0)"
+                f" / 1000000)::decimal(38, 6)::varchar || 'S' end",
+                intervals.parse)
+
     def _create_name(self, side, db, table):
         return self._qualified(side, db, str(table).split(".")[-1])
 
@@ -111,8 +130,8 @@ class DuckDBEngine(DbapiRows, Engine):
         names = [n for n, _ in columns]
         arrays = []
         from .. import nanotime
-        for col in zip(*rows):
-            values = [canon.sql_value(v) for v in col]
+        for (_, cls), col in zip(columns, zip(*rows)):
+            values = [canon.write_value("duckdb", cls, v) for v in col]
             if any(getattr(v, "nanosecond", 0) for v in values):
                 # Arrow reads a datetime at six digits; a value carrying
                 # more goes as the whole count of nanoseconds it is

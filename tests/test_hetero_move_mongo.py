@@ -106,7 +106,7 @@ def servers():
         pytest.fail("postgres never answered")
     assert mongosh(SEED, "admin").stdout.strip().endswith("4")
     assert pg_sql("create database cx", "postgres").returncode == 0
-    assert pg_sql('create table src ("_id" bigint primary key, name text,'
+    assert pg_sql('create table src ("_id" integer primary key, name text,'
                   " ratio double precision, flag boolean)").returncode == 0
     assert pg_sql("select count(*) from src").stdout.strip() == "0"
     yield

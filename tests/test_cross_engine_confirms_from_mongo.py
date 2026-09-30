@@ -79,7 +79,7 @@ def pair():
             s.settimeout(5)
             assert s.connect_ex(("127.0.0.1", MG_PORT)) == 0
         mongosh("db.t.insertMany([{_id: 1, v: 'a'}, {_id: 2, v: 'b'}])")
-        pg('create table t ("_id" bigint primary key, v text);'
+        pg('create table t ("_id" integer primary key, v text);'
            " insert into t values (1, 'a'), (2, 'b')")
         yield
     finally:

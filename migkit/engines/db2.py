@@ -25,6 +25,19 @@ DECLARED = ("case when typename in ('DECIMAL', 'NUMERIC') then typename"
             " else typename end")
 
 
+def _twelve(text):
+    """A Db2 timestamp's text of twelve digits after the second as the
+    value, nine kept; one with a digit past the ninth, which no other
+    engine holds and no rendering here writes, as uncomparable - never
+    as the value cut to nine, which would meet a target holding the cut
+    value."""
+    from .. import canon, nanotime
+    head, _, frac = str(text).partition(".")
+    if frac[9:].strip("0"):
+        return canon.uncomparable(f"{head}.{frac}")
+    return nanotime.parse(f"{head}.{frac[:9]}" if frac else head)
+
+
 class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "db2"
@@ -36,6 +49,27 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
     LIMIT = "fetch"
     PADDED = ("CHARACTER", "CHAR", "GRAPHIC")
     SCALED = ("DECIMAL", "NUMERIC")
+
+    def _nanos_text(self, quoted, declared):
+        """A `TIMESTAMP(p)` of more than six digits as the server writes
+        it, every digit kept: the driver hands a timestamp over as a
+        Python datetime, six digits. Db2 keeps up to twelve; `FF12` writes
+        them all, and a value with a digit past the ninth - which no other
+        engine holds - is read as uncomparable (`_twelve`)."""
+        from .. import canon
+        name, nums = canon._split_declared(declared)
+        digits = nums[0] if nums else 6
+        if name != "timestamp" or digits <= 6:
+            return None
+        return (f"varchar_format({quoted}, 'YYYY-MM-DD HH24:MI:SS."
+                f"FF{12 if digits > 9 else 9}')")
+
+    def _read_as(self, quoted, declared):
+        from .. import canon
+        name, nums = canon._split_declared(declared)
+        if name == "timestamp" and nums and nums[0] > 9:
+            return (self._nanos_text(quoted, declared), _twelve)
+        return None
 
     def _connect(self, side, db):
         import ibm_db_dbi

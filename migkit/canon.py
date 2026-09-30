@@ -69,7 +69,28 @@ double or a default - is counted on the source and refused before the move
 # rather than a new set of pairwise rules.
 CLASSES = ("integer", "decimal", "float", "boolean", "text", "bytes",
            "date", "timestamp", "time", "json", "own text", "number",
-           "xml", "uuid", "inet", "json on one engine")
+           "xml", "uuid", "inet", "json on one engine", "interval",
+           "vector", "geometry", "bson")
+
+#: A duration as months, days and nanoseconds kept apart (`intervals`):
+#: PostgreSQL's and DuckDB's `interval`, Cassandra's `duration`, Oracle's
+#: two. MySQL, SQL Server and MongoDB have no such type.
+INTERVAL = "interval"
+#: An embedding: its elements as the floats they are (`vectors`).
+VECTOR = "vector"
+#: A vector on its way into pgvector's `sparsevec`, which takes only its
+#: own text (`write_value`); rendered as any vector is
+SPARSE = "vector into sparsevec"
+#: A geometry or a geography: its SRID and its ISO well-known binary,
+#: longitude first (`geo`).
+GEOMETRY = "geometry"
+#: A MongoDB value of a type no other engine has (an ObjectId, a
+#: `Timestamp`, a regular expression, MinKey, a document), or a field
+#: holding values of several types: kept elsewhere as its canonical
+#: Extended JSON in a JSON column, and compared with its type
+#: (`bsontype`). Beside another engine's column a MongoDB field is
+#: `bson/<tag>` and the column `bson:<tag>` (`bson_pair`).
+BSON = "bson"
 
 #: JSON compared between two columns of one engine and one type: that
 #: engine's own normal form of it, rendered on the server as it always was.
@@ -226,6 +247,13 @@ TYPES = {
         "datetime": "timestamp", "timestamp": "timestamp",
         "time": "time",
         "json": "json",
+        # MySQL 9's embedding, 32-bit floats read as their bytes
+        "vector": "vector",
+        "geometry": "geometry", "point": "geometry",
+        "linestring": "geometry", "polygon": "geometry",
+        "multipoint": "geometry", "multilinestring": "geometry",
+        "multipolygon": "geometry", "geometrycollection": "geometry",
+        "geomcollection": "geometry",
     },
     "postgres": {
         "smallint": "integer", "integer": "integer", "bigint": "integer",
@@ -242,11 +270,15 @@ TYPES = {
         # a text search vector prints its lexemes sorted and once each, and
         # a query its normalised form, so their text is the value itself
         "tsvector": "text", "tsquery": "text",
-        # pgvector's types print each element as the shortest decimal that
-        # reads back to the same float - so their text is exactly the value.
-        # Unmapped, a vector column was left out of every comparison: a
-        # wrong vector passed `check` (measured)
-        "vector": "text", "halfvec": "text", "sparsevec": "text",
+        # pgvector's types, read as the 32-bit floats they hold (a
+        # `halfvec` and a `sparsevec` through `::vector`). Unmapped, a
+        # vector column was left out of every comparison: a wrong vector
+        # passed `check` (measured)
+        "vector": "vector", "halfvec": "vector", "sparsevec": "vector",
+        "interval": "interval",
+        # PostGIS: a geography is a geometry on the sphere, the same
+        # binary with SRID 4326 unless it says otherwise
+        "geometry": "geometry", "geography": "geometry",
         # a key/value set is a JSON object of strings: the extension casts
         # it to jsonb, which the `json` rendering then normalises the way
         # the other side's JSON is
@@ -327,6 +359,10 @@ TYPES = {
         "datetime": "timestamp", "datetime2": "timestamp",
         "smalldatetime": "timestamp",
         "time": "time",
+        # read as their SRID and binary (`read_as`); a shape written here
+        # goes in through its own constructor, which the row copy does
+        # not call, so into SQL Server the move refuses them
+        "geography": "geometry", "geometry": "geometry",
     },
     # Parquet, by the Arrow type names a table's `_table.json` gives:
     # `decimal_text` is a decimal kept as its text, where the source
@@ -378,6 +414,12 @@ TYPES = {
         "nchar": "text", "clob": "text", "nclob": "text", "long": "text",
         "raw": "bytes", "blob": "bytes", "long raw": "bytes",
         "date": "timestamp", "timestamp": "timestamp",
+        # the mappings only (the Oracle engine reads and writes them as
+        # its driver hands them over): year-to-month is months alone,
+        # day-to-second days and a time of nine digits
+        "interval year to month": "interval",
+        "interval day to second": "interval",
+        "vector": "vector",
     },
     # Db2 (LUW), by `syscat.columns` type names. A character column with
     # no code page holds bytes (`FOR BIT DATA`), and is declared VARBINARY
@@ -409,6 +451,7 @@ TYPES = {
         "timestamp_ns": "timestamp", "timestamp_ms": "timestamp",
         "timestamp_s": "timestamp",
         "json": "json",
+        "interval": "interval",
     },
     # SAP ASE, by `systypes` names
     "ase": {
@@ -473,8 +516,10 @@ TYPES = {
         "date": "date", "timestamp": "timestamp", "time": "time",
         "uuid": "uuid",
     },
-    # Cassandra and ScyllaDB. Collections and user types stay unmapped. A
-    # `timestamp` holds milliseconds.
+    # Cassandra and ScyllaDB. A list or a set of plain values is a JSON
+    # array, a map of them an object (`collection`); user types stay
+    # unmapped. A `timestamp` holds milliseconds, a `duration` months,
+    # days and nanoseconds, as PostgreSQL's interval does.
     "cassandra": {
         "tinyint": "integer", "smallint": "integer", "int": "integer",
         "bigint": "integer", "varint": "integer", "counter": "integer",
@@ -482,16 +527,26 @@ TYPES = {
         "boolean": "boolean", "text": "text", "varchar": "text",
         "ascii": "text", "uuid": "uuid", "timeuuid": "uuid", "inet": "inet",
         "blob": "bytes", "date": "date", "timestamp": "timestamp",
-        "time": "time",
+        "time": "time", "duration": "interval",
     },
+    # By the BSON type each field holds (`$type`), a binary by its subtype
+    # (`uuid` for 4, `binData` for 0, `binData3` and on for the rest). A
+    # type no other engine has, a document, an array, or a field holding
+    # values of more than one type, is `bson`: carried elsewhere as its
+    # canonical Extended JSON and compared with its type.
     "mongodb": {
         "int": "integer", "long": "integer",
         "double": "float",
         "decimal": "decimal",
         "bool": "boolean",
-        "string": "text", "objectid": "text", "symbol": "text",
-        "bindata": "bytes",
+        "string": "text",
+        "bindata": "bytes", "uuid": "uuid",
         "date": "timestamp",
+        "objectid": "bson", "symbol": "bson", "timestamp": "bson",
+        "regex": "bson", "minkey": "bson", "maxkey": "bson",
+        "javascript": "bson", "javascriptwithscope": "bson",
+        "dbpointer": "bson", "undefined": "bson", "object": "bson",
+        "array": "bson",
     },
 }
 
@@ -507,9 +562,32 @@ TYPES = {
 ARRAY_ELEMENTS = ("integer", "decimal", "float", "boolean", "text")
 
 
+def _generic(text, name):
+    """The parameters of `name<...>` (Cassandra's `list<int>`, `map<text,
+    int>`, `frozen<set<text>>`, `vector<float, 3>`) split at the top
+    level, or None where `text` is not one."""
+    low = text.strip()
+    if not (low.lower().startswith(name + "<") and low.endswith(">")):
+        return None
+    inner, parts, depth, cur = low[len(name) + 1:-1], [], 0, []
+    for ch in inner:
+        if ch in "<(":
+            depth += 1
+        elif ch in ">)":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur).strip())
+    return parts
+
+
 def array_element(engine, declared):
     """The element type of an array type (`integer[]`, `INTEGER[3]`,
-    ClickHouse's `Array(Nullable(Int64))`), or None for any other type."""
+    ClickHouse's `Array(Nullable(Int64))`, Cassandra's `list<int>` and
+    `set<int>`), or None for any other type."""
     text = str(declared or "").strip()
     low = text.lower()
     if engine == "clickhouse" and low.startswith("array(") \
@@ -519,9 +597,69 @@ def array_element(engine, declared):
             while inner.startswith(wrapper) and inner.endswith(")"):
                 inner = inner[len(wrapper):-1].strip()
         return inner
+    if engine == "cassandra":
+        got = _generic(text, "frozen")
+        if got and len(got) == 1:
+            text = got[0]
+        for kind in ("list", "set"):
+            got = _generic(text, kind)
+            if got and len(got) == 1:
+                return got[0]
+        return None
     if "[" in low and engine != "clickhouse":
         return text[:low.index("[")].strip()
     return None
+
+
+def collection_kind(engine, declared):
+    """`list`, `set` or `map` for a Cassandra collection, else None - the
+    types that hold an empty collection as NULL (`unfit`'s
+    `empty-collection`)."""
+    if engine != "cassandra":
+        return None
+    text = str(declared or "").strip()
+    got = _generic(text, "frozen")
+    if got and len(got) == 1:
+        text = got[0]
+    for kind in ("list", "set", "map"):
+        if _generic(text, kind) is not None:
+            return kind
+    return None
+
+
+def vector_dims(engine, declared):
+    """How many elements a vector column holds, or None where it does not
+    say (pgvector's plain `vector`, ClickHouse's `Array(Float32)`)."""
+    text = str(declared or "").strip()
+    got = _generic(text, "vector")
+    if got and len(got) == 2 and got[1].strip().isdigit():
+        return int(got[1])
+    if engine == "duckdb":
+        import re
+        m = re.fullmatch(r"(?i)\s*(float|real|float4|double|float8)\s*"
+                         r"\[\s*(\d+)\s*\]\s*", text)
+        if m:
+            return int(m.group(2))
+    nums = params(text)
+    return nums[0] if nums and str(text).lower().split("(")[0].strip() in (
+        "vector", "halfvec", "sparsevec") else None
+
+
+def _is_vector(engine, declared):
+    """A type that is an embedding rather than an array of numbers:
+    ClickHouse's `Array(Float32)` (elements that cannot be NULL), DuckDB's
+    fixed-size `FLOAT[n]`, Cassandra's `vector<float, n>`."""
+    text = str(declared or "").strip()
+    low = text.lower().replace(" ", "")
+    if engine == "clickhouse":
+        return low == "array(float32)"
+    if engine == "duckdb":
+        import re
+        return bool(re.fullmatch(r"(float|real|float4)\[\d+\]", low))
+    if engine == "cassandra":
+        got = _generic(text, "vector")
+        return bool(got) and got[0].strip().lower() == "float"
+    return False
 
 
 def type_class(engine, declared):
@@ -534,6 +672,8 @@ def type_class(engine, declared):
     if not declared:
         return None
     base = str(declared).strip().lower()
+    if _is_vector(engine, declared):
+        return VECTOR
     element = array_element(engine, declared)
     if element is not None:
         # an array of the type, not the type: `integer[]` was classed
@@ -543,6 +683,17 @@ def type_class(engine, declared):
         # holds it as, and compared as JSON is; any other is named
         return ("json" if type_class(engine, element) in ARRAY_ELEMENTS
                 else None)
+    if collection_kind(engine, declared) == "map":
+        # a map of plain values is a JSON object; its keys are text there
+        got = _generic(str(declared).strip(), "frozen")
+        inner = got[0] if got and len(got) == 1 else str(declared).strip()
+        k, v = _generic(inner, "map")
+        return ("json" if type_class(engine, k) in ("text", "uuid", "inet")
+                and type_class(engine, v) in ARRAY_ELEMENTS else None)
+    if engine == "oracle" and base.startswith("interval"):
+        import re
+        # `INTERVAL DAY(2) TO SECOND(6)`: the numbers inside, not the name
+        base = " ".join(re.sub(r"\([^)]*\)", " ", base).split())
     for cut in ("(", " ("):
         if cut in base:
             base = base.split(cut)[0].strip()
@@ -551,8 +702,7 @@ def type_class(engine, declared):
     if "|" in base:
         # a set of types rather than one, which is how a schemaless engine
         # answers. `null` and `missing` say nothing about what the field
-        # holds when it holds something, so they are dropped; anything left
-        # over one real type is ambiguous and stays unmapped.
+        # holds when it holds something, so they are dropped
         seen = {t.strip() for t in base.split("|")} - {"null", "missing", ""}
         if len(seen) > 1 and {TYPES.get(engine, {}).get(t)
                               for t in seen} == {"integer"}:
@@ -560,9 +710,19 @@ def type_class(engine, declared):
             # and a 64-bit one when it does not, so one field holds both;
             # left unmapped, it was never compared
             return "integer"
+        if len(seen) > 1 and engine == "mongodb":
+            # several types in one field: each value kept with its own
+            # (`bson`), where one column type would have changed some
+            return BSON
         if len(seen) != 1:
             return None
         base = seen.pop()
+    if engine == "mongodb" and base.startswith("bindata") \
+            and base != "bindata":
+        # a binary of a subtype other than 0 (bytes) and 4 (a UUID): a
+        # legacy UUID of unknown byte order, a hash, encrypted - kept as it
+        # is, subtype and all
+        return BSON
     return TYPES.get(engine, {}).get(base)
 
 
@@ -718,6 +878,88 @@ def decimal_class(src, src_declared, dst, dst_declared):
     return NUMBER
 
 
+def bson_pair(src, src_declared, dst, dst_declared):
+    """(source class, target class) for a column with MongoDB on exactly
+    one side, or None for any other pair: MongoDB's field `bson/<tag>`
+    and the other side's column `bson:<tag>`, where `<tag>` is the BSON
+    type MongoDB holds that column's values as (`bsontype.column_tag`) -
+    both rendered with the type in front, so a type that changes on the
+    way is a difference (type-fidelity G5). A vector, a shape or an
+    interval is compared as that on both sides. (None, None) where the
+    other side's column has no BSON type at all (a time of day)."""
+    if (src == "mongodb") == (dst == "mongodb"):
+        return None
+    from . import bsontype
+    first = src == "mongodb"
+    other, declared = (dst, dst_declared) if first else (src, src_declared)
+    cls = type_class(other, declared)
+    if cls in (VECTOR, GEOMETRY, INTERVAL):
+        return (cls, cls)
+    t = bsontype.column_tag(other, declared, cls) if cls else None
+    if t is None:
+        return (None, None)
+    if t == "decimal" and decimal_class("mongodb", "decimal", other,
+                                        declared) == NUMBER:
+        t = "number"
+    mine, theirs = bsontype.MONGO + t, bsontype.OTHER + t
+    return (mine, theirs) if first else (theirs, mine)
+
+
+def bson_alike(scls, dcls, src_declared, dst_declared):
+    """Whether a MongoDB field and another engine's column (`bson_pair`)
+    hold one kind of value: every type the field holds is the one the
+    column is held as in MongoDB - a field of `long`s beside a `bigint`,
+    anything beside a JSON column. A field of `int`s beside a `bigint`
+    is not: it comes back a `long`."""
+    from . import bsontype
+    pair = (str(scls), str(dcls))
+    if pair[0].startswith(bsontype.MONGO) and \
+            pair[1].startswith(bsontype.OTHER):
+        mongo, t = src_declared, pair[1][len(bsontype.OTHER):]
+    elif pair[1].startswith(bsontype.MONGO) and \
+            pair[0].startswith(bsontype.OTHER):
+        mongo, t = dst_declared, pair[0][len(bsontype.OTHER):]
+    else:
+        return False
+    if t == "json":
+        return True
+    seen = {x.strip() for x in str(mongo or "").split("|")} \
+        - {"null", "missing", ""}
+    want = {"number": "decimal"}.get(t, t)
+    return bool(seen) and seen == {want}
+
+
+#: what a hop that lets a MongoDB field's type change (`accept_changes`)
+#: compares it as: its value alone, in the class of the column it went to
+BY_VALUE = {"int": "integer", "long": "integer", "double": "float",
+            "decimal": "decimal", "number": NUMBER, "bool": "boolean",
+            "string": "text", "date": "timestamp", "binData": "bytes",
+            "uuid": "uuid", "json": "json"}
+
+
+def mongo_value_class(engine, declared, cls):
+    """The class a MongoDB field's values alone go in, for a field whose
+    type the hop lets change: an ObjectId or a symbol as text, a binary
+    of any subtype as bytes; any other field its own class."""
+    if engine != "mongodb" or cls != BSON:
+        return cls
+    seen = {t.strip().lower() for t in str(declared or "").split("|")} \
+        - {"null", "missing", ""}
+    if seen and seen <= {"objectid", "symbol", "string"}:
+        return "text"
+    if seen and all(t.startswith("bindata") or t == "uuid" for t in seen):
+        return "bytes"
+    return cls
+
+
+def by_value(cls):
+    """A `bson/...` or `bson:...` class as the plain class of its value,
+    for a column whose type change the hop accepts; any other as it is."""
+    if isinstance(cls, str) and cls.startswith(bsontype_prefixes()):
+        return BY_VALUE.get(cls[5:], cls)
+    return cls
+
+
 def read_expr(engine, quoted, cls):
     """What to select for a column read to be *moved* - the value as the
     driver should get it - where the column's own text would lose part of
@@ -739,6 +981,35 @@ def read_expr(engine, quoted, cls):
     if cls == "decimal" and engine == "postgres":
         # a `money` column arrives as its locale's text otherwise
         return f"{quoted}::numeric"
+    if cls == INTERVAL and engine == "postgres":
+        # its three parts, as ISO 8601 writes them: psycopg2 reads an
+        # interval as a `timedelta`, which folds a month into 30 days
+        # (`intervals`). An hour of an interval is not held to 24, and
+        # `microseconds` is the seconds with their fraction
+        c = quoted
+        return (f"case when {c} is null then null else 'P' ||"
+                f" (extract(year from {c}) * 12 + extract(month from {c}))"
+                f"::bigint || 'M' || extract(day from {c})::bigint || 'DT'"
+                f" || (round((extract(hour from {c}) * 3600"
+                f" + extract(minute from {c}) * 60) * 1000000"
+                f" + extract(microseconds from {c}))::numeric / 1000000)"
+                f"::text || 'S' end")
+    if cls == "bson:json" and engine == "postgres":
+        # as the text it holds, as MySQL's JSON comes: decoded, a JSON
+        # string read back as the Python string it spells, and `"5"` and
+        # `5` were then one to whatever read it after
+        return f"{quoted}::text"
+    if cls == GEOMETRY and engine == "mysql":
+        # MySQL's own storage, marked as its: four bytes of SRID and the
+        # binary, latitude first for a geographic SRID (`geo.from_mysql`)
+        return (f"case when {quoted} is null then null else"
+                f" concat('mysql:', hex({quoted})) end")
+    if cls == VECTOR and engine == "postgres":
+        # as 32-bit floats: a `halfvec`'s text is the shortest decimal of
+        # a 16-bit float, which read as a 32-bit one is another number,
+        # and a `sparsevec` is written by index; `::vector` writes both
+        # as the floats they hold
+        return f"{quoted}::vector::text"
     return quoted
 
 
@@ -775,7 +1046,15 @@ def _float_text(d):
 #: MySQL writes `1.10` back as `1.1` and `100000000000000000000` as
 #: `1e20` (measured on 8.4), `jsonb` keeps both as written, and a `json`
 #: value holding `\u0000` stopped the whole digest at `::jsonb`.
-FOLDED_HERE = frozenset({"json", "xml", "inet"})
+FOLDED_HERE = frozenset({"json", "xml", "inet", INTERVAL, VECTOR, GEOMETRY,
+                         BSON})
+
+
+def folded_here(cls):
+    """Whether a column of this class is rendered in this process on every
+    engine (`FOLDED_HERE`, and a MongoDB-typed class `bson/...` or
+    `bson:...`, which no SQL writes)."""
+    return cls in FOLDED_HERE or str(cls).startswith(bsontype_prefixes())
 
 
 def fold_batches(columns, batches):
@@ -984,6 +1263,9 @@ def render_value(cls, value):
         # zone, the same instant read from DuckDB at the machine's +07 and
         # from PostgreSQL at UTC were seven hours apart (measured)
         ns = getattr(value, "nanosecond", 0) or 0
+        if isinstance(value, str) and value.startswith(UNCOMPARABLE):
+            # a value its reader marked: Db2's digits past the ninth
+            return value
         if isinstance(value, str):
             # a value the driver could not make a datetime of - MySQL's
             # zero date - as `date_format` writes it
@@ -1020,7 +1302,40 @@ def render_value(cls, value):
         # both sides came through the same driver, so the same value is the
         # same Python object and the same text
         return value if isinstance(value, str) else str(value)
+    if cls == INTERVAL:
+        from . import intervals
+        return _or_uncomparable(intervals.text, value)
+    if cls == VECTOR:
+        from . import vectors
+        return _or_uncomparable(vectors.text, value)
+    if cls == GEOMETRY:
+        from . import geo
+        return _or_uncomparable(geo.text, value)
+    if cls == BSON or cls.startswith(bsontype_prefixes()):
+        from . import bsontype
+        if cls.startswith(bsontype.OTHER):
+            t = cls[len(bsontype.OTHER):]
+            return bsontype.render_other(t, value, t == "number")
+        return bsontype.render(value, cls == bsontype.MONGO + "number")
     raise ValueError(f"no in-process rendering for class {cls!r}")
+
+
+def bsontype_prefixes():
+    """The class prefixes of a MongoDB field and another engine's column
+    compared by BSON type (`bsontype`)."""
+    return ("bson/", "bson:")
+
+
+def _or_uncomparable(render, value):
+    """`render(value)`, or the value marked uncomparable where it is not
+    one of the class at all - text in a vector column that is no vector:
+    a difference, never a match and never a stop of the whole table."""
+    import struct
+    try:
+        return render(value)
+    except (ValueError, TypeError, IndexError, KeyError,
+            struct.error) as e:
+        return uncomparable(f"{type(value).__name__}: {str(e)[:60]}")
 
 
 # What a class becomes when a table has to be created to receive it.
@@ -1050,6 +1365,13 @@ DDL = {
         "time": ("time(6)", "time({0})"),
         "json": ("jsonb", "jsonb"),
         "xml": ("xml", "xml"),
+        "interval": ("interval", "interval"),
+        "vector": ("vector", "vector({0})"),
+        "geometry": ("geometry", "geometry"),
+        # a document keeps its fields in their order in `json`, where
+        # `jsonb` sorts them; a key (and a value of one type no other
+        # engine has) goes in `jsonb`, which can be one
+        "bson": ("jsonb", "json"),
     },
     "mysql": {
         OWN: ("text", "{0}"),
@@ -1070,6 +1392,9 @@ DDL = {
         "time": ("time(6)", "time({0})"),
         "json": ("json", "json"),
         "xml": ("longtext", "longtext"),
+        "vector": ("vector", "vector({0})"),
+        "geometry": ("geometry", "geometry"),
+        "bson": ("json", "json"),
     },
     "mssql": {
         OWN: ("nvarchar(max)", "{0}"),
@@ -1087,6 +1412,7 @@ DDL = {
         "time": ("time(6)", "time({0})"),
         "json": ("nvarchar(max)", "nvarchar(max)"),
         "xml": ("xml", "xml"),
+        "bson": ("nvarchar(max)", "nvarchar(max)"),
     },
     "clickhouse": {
         # the source's own type, as `neutral_columns` reads it without its
@@ -1103,6 +1429,8 @@ DDL = {
         "bytes": ("String", "String"),
         "date": ("Date32", "Date32"),
         "timestamp": ("DateTime64(6)", "DateTime64({0})"),
+        "vector": ("Array(Float32)", "Array(Float32)"),
+        "bson": ("String", "String"),
     },
     "oracle": {
         OWN: ("CLOB", "CLOB"),
@@ -1116,6 +1444,8 @@ DDL = {
         "bytes": ("BLOB", "BLOB"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
+        "vector": ("VECTOR", "VECTOR({0}, FLOAT32)"),
+        "bson": ("CLOB", "CLOB"),
     },
     "db2": {
         OWN: ("CLOB", "CLOB"),
@@ -1130,6 +1460,7 @@ DDL = {
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),
+        "bson": ("CLOB", "CLOB"),
     },
     "duckdb": {
         # a type of the same engine is made as the source declares it:
@@ -1148,6 +1479,9 @@ DDL = {
         "timestamp": ("TIMESTAMP", "TIMESTAMP"),
         "time": ("TIME", "TIME"),
         "json": ("JSON", "JSON"),
+        "interval": ("INTERVAL", "INTERVAL"),
+        "vector": ("FLOAT[]", "FLOAT[{0}]"),
+        "bson": ("JSON", "JSON"),
     },
     "ase": {
         OWN: ("text", "text"),
@@ -1177,6 +1511,7 @@ DDL = {
         "timestamp": ("timestamp", "timestamp"),
         "time": ("time", "time"),
         "json": ("super", "super"),
+        "bson": ("super", "super"),
     },
     "snowflake": {
         OWN: ("VARCHAR", "VARCHAR"),
@@ -1192,6 +1527,7 @@ DDL = {
         "timestamp": ("TIMESTAMP_NTZ(9)", "TIMESTAMP_NTZ({0})"),
         "time": ("TIME(9)", "TIME({0})"),
         "json": ("VARIANT", "VARIANT"),
+        "bson": ("VARIANT", "VARIANT"),
     },
     "bigquery": {
         OWN: ("STRING", "STRING"),
@@ -1207,6 +1543,7 @@ DDL = {
         "timestamp": ("DATETIME", "DATETIME"),
         "time": ("TIME", "TIME"),
         "json": ("JSON", "JSON"),
+        "bson": ("JSON", "JSON"),
     },
     "cassandra": {
         OWN: ("text", "text"),
@@ -1221,6 +1558,9 @@ DDL = {
         "date": ("date", "date"),
         "timestamp": ("timestamp", "timestamp"),
         "time": ("time", "time"),
+        "interval": ("duration", "duration"),
+        "vector": ("vector<float>", "vector<float, {0}>"),
+        "bson": ("text", "text"),
     },
     "sqlite": {
         OWN: ("text", "{0}"),
@@ -1236,6 +1576,7 @@ DDL = {
         "timestamp": ("text", "text"),
         "time": ("text", "text"),
         "json": ("text", "text"),
+        "bson": ("text", "text"),
     },
 }
 
@@ -1281,13 +1622,69 @@ FLOAT4_DDL = {
 }
 
 
+#: The 32-bit integer to build, where a MongoDB field holds 32-bit ones
+#: only: in a `bigint` it came back a `long` (`bsontype`)
+INT4_DDL = {
+    "postgres": "integer", "mysql": "int", "mssql": "int",
+    "clickhouse": "Int32", "oracle": "NUMBER(10)", "db2": "INTEGER",
+    "duckdb": "INTEGER", "ase": "int", "redshift": "integer",
+    "snowflake": "NUMBER(10,0)", "bigquery": "INT64", "cassandra": "int",
+    "sqlite": "integer",
+}
+
+#: An array of plain values built as the engine's own array, of the
+#: element's type, where it has one; a JSON array elsewhere. PostgreSQL
+#: keeps building `jsonb` for another engine's array, as it did.
+ARRAY_DDL = {"clickhouse": "Array(Nullable({0}))", "cassandra": "list<{0}>",
+             "duckdb": "{0}[]"}
+
+#: element classes each engine's array holds exactly: a decimal element
+#: would be held at the built column's scale, and is refused instead
+ARRAY_HOLDS = {"clickhouse": ("integer", "float", "boolean", "text"),
+               "cassandra": ("integer", "float", "boolean", "text",
+                             "decimal"),
+               "duckdb": ("integer", "float", "boolean", "text")}
+
+#: engines whose JSON column cannot be a key
+JSON_UNKEYED = {"mysql": "a JSON column", "mssql": "an nvarchar(max)",
+                "oracle": "a CLOB", "db2": "a CLOB", "redshift": "a SUPER",
+                "snowflake": "a VARIANT", "bigquery": "a JSON column"}
+
+
 def ddl_numbers(engine, declared, cls):
     """The numbers a target column is built from: the source's own
     (`params`), and for a float its width - `(4,)` for a single-precision
-    one - which its declared name carries rather than its parentheses."""
+    one - which its declared name carries rather than its parentheses. An
+    array says `("array", element class)`, a vector its dimensions, a
+    MongoDB field of 32-bit integers `(32,)` and one holding documents
+    or values of several types `("document",)`."""
     if cls == "float":
         base = str(declared or "").strip().lower().split("(")[0].strip()
         return (4,) if base in FLOAT4.get(engine, ()) else ()
+    if engine == "mongodb":
+        seen = {t.strip().lower() for t in str(declared or "").split("|")} \
+            - {"null", "missing", ""}
+        if cls == "integer":
+            return (32,) if seen == {"int"} else ()
+        if cls == BSON:
+            return ("document",) if len(seen) > 1 or seen & {
+                "object", "array", "javascriptwithscope"} else ()
+        return ()
+    if cls == "json":
+        element = array_element(engine, declared)
+        if element is not None:
+            inner = type_class(engine, element)
+            # the element's own numbers after its class: a `real[]` is
+            # built as an array of 32-bit floats
+            return ("array", inner) + tuple(
+                ddl_numbers(engine, element, inner) if inner else ())
+        return ()
+    if cls == VECTOR:
+        dims = vector_dims(engine, declared)
+        return (dims,) if dims else ()
+    if cls == GEOMETRY:
+        base = str(declared or "").strip().lower().split("(")[0].strip()
+        return ("geography",) if base == "geography" else ()
     return params(declared)
 
 
@@ -1311,6 +1708,14 @@ def ddl_type(engine, cls, numbers=(), key=False):
     if table is None:
         raise ValueError(f"no DDL types for engine {engine!r}")
     pair = table.get(cls)
+    if cls == "json" and tuple(numbers[:1]) == ("array",) \
+            and engine in ARRAY_DDL:
+        element = numbers[1] if len(numbers) > 1 else None
+        if element not in ARRAY_HOLDS[engine]:
+            raise ValueError(f"no array of {element or 'that'} on {engine}"
+                             " that holds each element as it is")
+        return ARRAY_DDL[engine].format(
+            ddl_type(engine, element, tuple(numbers[2:])))
     if pair is None:
         raise ValueError(f"no DDL type for class {cls!r} on {engine}")
     if key and cls == "text" and not numbers and engine in KEY_TEXT:
@@ -1318,6 +1723,23 @@ def ddl_type(engine, cls, numbers=(), key=False):
     if cls == "float":
         return (FLOAT4_DDL.get(engine, pair[0]) if tuple(numbers) == (4,)
                 else pair[0])
+    if cls == "integer" and tuple(numbers) == (32,):
+        return INT4_DDL.get(engine, pair[0])
+    if cls == "json" and tuple(numbers[:1]) == ("array",):
+        return pair[0]
+    if cls == BSON:
+        if key and engine in JSON_UNKEYED:
+            raise ValueError(
+                f"{engine} cannot key {JSON_UNKEYED[engine]}, which is what"
+                " keeps a MongoDB value's type")
+        return pair[1] if tuple(numbers) == ("document",) and not key \
+            else pair[0]
+    if cls == GEOMETRY:
+        return ("geography" if engine == "postgres"
+                and tuple(numbers) == ("geography",) else pair[0])
+    if cls == VECTOR and not numbers and engine in ("duckdb", "cassandra"):
+        raise ValueError(f"{engine} builds a vector of a fixed number of"
+                         " elements, and the source's does not say how many")
     wide, parametrised = pair
     if not numbers or "{0}" not in parametrised:
         return wide
@@ -1382,12 +1804,13 @@ PLAIN = frozenset({"integer", "decimal", "float", "boolean", "date",
                    "timestamp", "time"})
 
 
-def sql_rows(classes, rows, keep=()):
-    """`rows` with `sql_value` applied where a column can need it: a
+def sql_rows(classes, rows, keep=(), engine=None):
+    """`rows` with `write_value` applied where a column can need it: a
     million rows of eight columns called it eight million times, and half
     of those were numbers and times it passes through untouched. The
     columns at `keep` are handed on as they are (an array column, which
-    takes a list as the array it is)."""
+    takes a list as the array it is). `engine` is the one written to, for
+    the classes it takes a form of its own of."""
     need = [i for i, c in enumerate(classes) if c not in PLAIN
             and i not in keep]
     if not need:
@@ -1396,9 +1819,164 @@ def sql_rows(classes, rows, keep=()):
     for r in rows:
         r = list(r)
         for i in need:
-            r[i] = sql_value(r[i])
+            r[i] = write_value(engine, classes[i], r[i])
         out.append(r)
     return out
+
+
+#: How many digits after the second SQL Server's `datetime2` and `time`
+#: take in their text: its driver sends a Python time at three (measured
+#: with pymssql 2.4, `datetime(2024, 1, 1, 0, 0, 0, 123456)` went as
+#: `'2024-01-01 00:00:00.123'`), so the fourth to seventh were lost on
+#: every write, and the check found them after it
+MSSQL_DIGITS = 7
+
+
+def write_value(engine, cls, value):
+    """One value on its way into `engine`'s driver, for a column of class
+    `cls` there: `sql_value`, and for the classes that engine keeps in a
+    form of its own - an interval, a vector, a shape, an array in an
+    engine that has arrays, a MongoDB value in a JSON column - that form.
+    One place, so the copy, a repair and a key looked up all send a value
+    the same way."""
+    if value is None or value is ABSENT:
+        return value
+    if isinstance(cls, str) and cls.startswith(bsontype_prefixes()):
+        from . import bsontype
+        if cls.startswith(bsontype.MONGO):
+            # into MongoDB: the type the other side's column holds it as
+            return bsontype.as_bson(cls[len(bsontype.MONGO):], value)
+        if cls == bsontype.OTHER + "json":
+            if engine in ("cassandra", "clickhouse") and \
+                    isinstance(value, (dict, list, tuple)):
+                # a collection column there (a list, a set, a map, an
+                # Array) takes the collection, its numbers as Python's
+                return bsontype.plain(value)
+            # a MongoDB value into a JSON column: its canonical Extended
+            # JSON - a document's fields in its own order, a number with
+            # its type, a string as the JSON string it is. `json_write`
+            # sorted a plain document's fields
+            return bsontype.ejson(value)
+        cls = {"string": "text", "uuid": "uuid",
+               "binData": "bytes"}.get(cls[len(bsontype.OTHER):], cls)
+    if engine == "mssql" and cls in ("timestamp", "time"):
+        return mssql_time_text(value)
+    if engine != "mongodb":
+        if hasattr(value, "to_decimal"):
+            # BSON's Decimal128, as the decimal it holds: no SQL driver
+            # takes one
+            value = value.to_decimal()
+        elif type(value).__name__ == "Int64" and isinstance(value, int):
+            # BSON's 64-bit integer: an int, which pymysql's escape
+            # table, keyed by exact type, does not know it as
+            value = int(value)
+    if cls == INTERVAL:
+        from . import intervals
+        if engine == "cassandra":
+            from cassandra.util import Duration
+            got = intervals.of(value)
+            return Duration(got.months, got.days, got.nanos)
+        if engine in ("postgres", "duckdb"):
+            return intervals.postgres_text(value) or intervals.text(value)
+        if engine == "oracle":
+            # its driver's own forms: months alone as a year-to-month, days
+            # and time as a day-to-second's `timedelta`; the part the other
+            # has no room for is refused before the move (`interval-part`)
+            got = intervals.of(value)
+            if not got.days and not got.nanos:
+                import oracledb
+                years, months = divmod(abs(got.months), 12)
+                sign = -1 if got.months < 0 else 1
+                return oracledb.IntervalYM(sign * years, sign * months)
+            return intervals.timedelta_of(got) or intervals.text(got)
+        return intervals.text(value)
+    if cls == SPARSE:
+        from . import vectors
+        return vectors.sparse_text(value)
+    if cls == VECTOR:
+        from . import vectors
+        if engine == "mysql":
+            return vectors.packed(value)
+        if engine == "postgres":
+            return vectors.pg_text(value)
+        if engine == "oracle":
+            # its driver binds a VECTOR from an array of 32-bit floats
+            import array
+            return array.array("f", vectors.of(value))
+        return vectors.of(value)
+    if cls == GEOMETRY:
+        from . import geo
+        if engine == "mysql":
+            return geo.to_mysql(value)
+        if engine == "mongodb":
+            return geo.to_geojson(value)
+        return geo.ewkb_hex(value)
+    if engine == "mongodb":
+        # MongoDB takes a document, an ObjectId, any BSON value as it is
+        return sql_value(value) if isinstance(value, (memoryview,
+                                                      bytearray)) else value
+    if cls in ("json", BSON, JSON_ONE):
+        if _bson_value(value):
+            from . import bsontype
+            return bsontype.ejson(value)
+        if engine in ARRAY_DDL and isinstance(value, (list, tuple)):
+            # an array column of an engine that has them takes the list
+            return list(value)
+        if engine == "cassandra" and isinstance(value, dict):
+            # and a map, the mapping
+            return dict(value)
+    if cls in ("text", "uuid") and not isinstance(value, str) \
+            and _bson_value(value):
+        # a MongoDB value into a text column the hop lets it change into
+        # (`accept_changes`): its own text, an ObjectId's hexadecimal
+        from . import bsontype
+        got = bsontype.tag(value)
+        if got == "uuid":
+            import uuid
+            return str(uuid.UUID(bytes=bytes(value)))
+        return str(value)
+    return sql_value(value)
+
+
+def has_own_form(cls):
+    """Whether a value of this class on its way into an engine takes a
+    form of its own there (`write_value`) - an interval, a vector, a
+    shape, a MongoDB-typed value - rather than the driver's reading of
+    it as it came."""
+    return cls in (INTERVAL, VECTOR, GEOMETRY) or \
+        str(cls).startswith(bsontype_prefixes())
+
+
+def _bson_value(value):
+    """Whether a value is, or holds, one of BSON's own types - which JSON
+    writes only as Extended JSON."""
+    if isinstance(value, dict):
+        return any(_bson_value(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_bson_value(v) for v in value)
+    mod = type(value).__module__ or ""
+    return mod.startswith("bson")
+
+
+def mssql_time_text(value):
+    """A time as SQL Server reads its `datetime2`/`time` text, every digit
+    it carries up to the seventh (`MSSQL_DIGITS`) - what its drivers cut:
+    the statements' to three, the bulk load's conversion to six. An
+    instant as its UTC reading, as every engine here renders one; any
+    other value as `sql_value` sends it."""
+    import datetime
+    if not isinstance(value, (datetime.datetime, datetime.time)):
+        return sql_value(value)
+    ns = value.microsecond * 1000 + (getattr(value, "nanosecond", 0) or 0)
+    if isinstance(value, datetime.datetime) and value.tzinfo is not None:
+        value = value.astimezone(datetime.timezone.utc)
+    head = f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
+    if isinstance(value, datetime.datetime):
+        head = f"{value.year:04d}-{value.month:02d}-{value.day:02d} {head}"
+    # without the zeros at the end: a `datetime` takes no more than three
+    # digits in its text, whatever they are
+    frac = f"{ns:09d}"[:MSSQL_DIGITS].rstrip("0")
+    return f"{head}.{frac}" if frac else head
 
 
 def sql_value(value):
@@ -1488,6 +2066,25 @@ def from_text(cls, text):
     """
     if text is None:
         return None
+    if isinstance(cls, str) and cls.startswith(bsontype_prefixes()):
+        # `long` and 5: MongoDB's value by its type, or the other side's
+        # column's value as it holds that type
+        from . import bsontype
+        got = bsontype.value_of(text)
+        if cls.startswith(bsontype.OTHER):
+            # the other side's value is looked up as it is written there
+            # (`write_value`): a JSON column's from the BSON value
+            t = cls[len(bsontype.OTHER):]
+            if t == "json":
+                return got
+            if t in ("int", "long"):
+                return int(got)
+            if t == "string":
+                return str(got)
+            if t == "uuid":
+                import uuid
+                return str(uuid.UUID(bytes=bytes(got)))
+        return got
     if cls == "integer":
         return int(text)
     if cls == "float":
@@ -1708,7 +2305,7 @@ INT_RANGES.update({
     # at most 64 bits, whatever the column or field is declared
     "sqlite": {n: _I64 for n in ("int", "integer", "tinyint", "smallint",
                                  "mediumint", "bigint", "int2", "int8")},
-    "mongodb": {"int": _I64, "long": _I64},
+    "mongodb": {"int": _I32, "long": _I64},
 })
 
 CHAR_TYPES = {
@@ -1879,6 +2476,32 @@ UNFIT_WORDS = {
     "signed-zero": "keys that differ only by the sign of a zero, which {dst}"
                    " takes for one key - the later row would overwrite the"
                    " earlier",
+    "bson-type": "a value of another BSON type than the {arg} the {dst}"
+                 " column holds - it would come back to MongoDB a {arg}",
+    "bson-order": "a document of more than one field, whose fields {dst}'s"
+                  " JSON puts in an order of its own",
+    "bson-form": "a value MongoDB's {arg} has no form for",
+    "bson-none": "a {arg}, which MongoDB has no type for",
+    "vector-width": "a vector whose elements a {arg}-bit float on {dst}"
+                    " does not hold exactly",
+    "vector-dims": "a vector of other than the {arg} dimensions the {dst}"
+                   " column holds",
+    "vector-nonfinite": "a vector holding NaN or an infinity, which {dst}"
+                        " refuses",
+    "geometry-geojson": "a shape GeoJSON cannot say - an SRID other than"
+                        " 4326, or a measure (M) - which {dst} keeps as"
+                        " GeoJSON",
+    "geometry-form": "a value that is no GeoJSON shape, which the {dst}"
+                     " column holds shapes only",
+    "empty-collection": "an empty {arg}, which {dst} stores as NULL - the"
+                        " two are one there",
+    "interval-part": "an interval with {arg}, which the {dst} interval type"
+                     " has no part for",
+    "set-order": "an array out of order or holding a value twice, which a"
+                 " set on {dst} keeps sorted and once each",
+    "no-writer": "a {arg}, which the row copy has no way to write into"
+                 " {dst}",
+    "null-element": "a NULL inside a collection, which {dst} refuses",
 }
 
 
@@ -1899,6 +2522,13 @@ def _temporal_digits(engine, declared):
 def _declared_digits(engine, declared):
     name, nums = _split_declared(declared)
     base = name.split(" ")[0]
+    if type_class(engine, declared) == INTERVAL:
+        # an interval's time: microseconds in PostgreSQL and DuckDB,
+        # nanoseconds in a Cassandra `duration`, as declared in Oracle's
+        # day-to-second (six where it says nothing)
+        if engine == "oracle":
+            return (nums[-1] if name.endswith("second") and nums else 6)
+        return {"postgres": 6, "duckdb": 6, "cassandra": 9}.get(engine)
     if engine == "postgres":
         return nums[0] if nums else 6
     if engine == "mysql":
@@ -1944,15 +2574,21 @@ def _fixed_decimal(engine, declared):
     return None
 
 
-#: What a value of a class is stored as on an engine that makes a table
-#: on the first write, so has no column type to be read before: a MongoDB
-#: date keeps milliseconds, a whole number the driver writes as 64 bits
-#: at most, a decimal as a Decimal128 of 34 digits
-WRITTEN_AS = {
-    "mongodb": {"timestamp": "date", "integer": "long", "decimal": "decimal",
-                "float": "double", "text": "string", "bytes": "bindata",
-                "boolean": "bool"},
-}
+def written_as(src, declared, dst):
+    """What a value of a source column is stored as on an engine that
+    makes a table on the first write, so has no column type to be read
+    before - MongoDB: the BSON type the column's values are written as
+    (`bsontype.column_tag`), a date keeping milliseconds, a whole number
+    by its column's width (a `bigint` a `long`: pymongo's own choice was
+    32 bits wherever a value fit), a decimal a Decimal128 of 34 digits.
+    None where the engine has no type for it."""
+    if dst != "mongodb":
+        return None
+    from . import bsontype
+    cls = type_class(src, declared)
+    if cls in (VECTOR, GEOMETRY):
+        return cls
+    return bsontype.column_tag(src, declared, cls) if cls else None
 
 #: The widest decimal each engine builds: (precision, scale)
 DECIMAL_MOST = {"mysql": (65, 30), "mssql": (38, 38), "clickhouse": (76, 76),
@@ -1991,6 +2627,111 @@ ADDRESS_ONLY = {"clickhouse": ("ipv4", "ipv6"), "cassandra": ("inet",)}
 DYNAMO_RANGE = ("1e-130", "1e126")
 
 
+#: JSON types that keep an object's fields in an order of their own
+JSON_SORTS_KEYS = {("mysql", "json"), ("postgres", "jsonb")}
+
+#: vector types by the width of float each element is kept in
+VECTOR_WIDTH = {"postgres": {"vector": 32, "halfvec": 16, "sparsevec": 32},
+                "mysql": {"vector": 32}, "clickhouse": {"array": 32},
+                "cassandra": {"vector": 32}, "duckdb": {"float": 32,
+                                                        "real": 32,
+                                                        "float4": 32}}
+
+#: engines whose vector refuses NaN and the infinities
+NO_NONFINITE_VECTOR = {"postgres"}
+
+#: engines a shape goes into only through their own constructor, which
+#: the row copy does not call: SQL Server takes no binary but its own
+#: serialisation into a `geography` or a `geometry`
+NO_SHAPE_WRITER = {"mssql"}
+
+
+def vector_width(engine, declared):
+    """16, 32 or 64: the float each element of a vector column is kept in,
+    or None where the column says nothing (a MongoDB array holds doubles,
+    and a double need not be a float)."""
+    base = str(declared or "").strip().lower()
+    for cut in ("(", "<", "["):
+        base = base.split(cut)[0].strip()
+    if engine == "oracle":
+        return 64 if "float64" in str(declared).lower() else 32
+    return VECTOR_WIDTH.get(engine, {}).get(base)
+
+
+def _unfit_bson(src, src_declared, scls, dst, dst_declared):
+    """The kinds a MongoDB value has on its way into another engine, or
+    another engine's on its way into MongoDB (`bsontype`)."""
+    from . import bsontype
+    if src == "mongodb" and dst != "mongodb":
+        got = bson_pair(src, src_declared, dst, dst_declared)
+        if not got or not got[1] or not got[1].startswith(bsontype.OTHER):
+            return []
+        t = got[1][len(bsontype.OTHER):]
+        # what the field holds, by `$type` over every document: a field
+        # holding only the column's type has no value of another to count
+        seen = {x.strip() for x in str(src_declared or "").split("|")} \
+            - {"null", "missing", ""}
+        if t != "json":
+            want = {"number": "decimal"}.get(t, t)
+            return [] if seen == {want} else [("bson-type", t)]
+        base = str(dst_declared or "").strip().lower().split("(")[0]
+        sorts = (dst, base) in JSON_SORTS_KEYS or \
+            collection_kind(dst, dst_declared) == "map"
+        return ([("bson-order", None)] if sorts
+                and seen & {"object", "array"} else [])
+    if dst == "mongodb" and src != "mongodb" and scls:
+        if scls in (VECTOR, GEOMETRY):
+            return []
+        t = bsontype.column_tag(src, src_declared, scls)
+        if t is None:
+            return [("bson-none", scls)]
+        if t == "bool":
+            return [("bson-form", t)]
+    return []
+
+
+def _unfit_shapes(src, src_declared, scls, dst, dst_declared, dcls,
+                  src_facts):
+    """The kinds of a vector, a shape and a collection on their way."""
+    if src == "mongodb" and dst != "mongodb":
+        got = bson_pair(src, src_declared, dst, dst_declared)
+        if got and got[0] in (VECTOR, GEOMETRY, INTERVAL):
+            scls = got[0]
+    out = []
+    if scls == VECTOR and dcls == VECTOR and dst != "mongodb":
+        mine, theirs = (vector_width(src, src_declared),
+                        vector_width(dst, dst_declared))
+        if theirs and (mine is None or mine > theirs):
+            out.append(("vector-width", theirs))
+        n = vector_dims(dst, dst_declared)
+        if n and vector_dims(src, src_declared) != n:
+            out.append(("vector-dims", n))
+        if dst in NO_NONFINITE_VECTOR and src not in NO_NONFINITE_VECTOR:
+            out.append(("vector-nonfinite", None))
+    if scls == GEOMETRY and dst == "mongodb":
+        out.append(("geometry-geojson", None))
+    if scls == GEOMETRY and src == "mongodb":
+        # a document is a shape only where it is GeoJSON
+        out.append(("geometry-form", None))
+    if scls == GEOMETRY and dcls == GEOMETRY and dst in NO_SHAPE_WRITER:
+        out.append(("no-writer", "shape"))
+    kind = collection_kind(dst, dst_declared)
+    if kind and src != dst and (scls in ("json", BSON) or src == "mongodb"):
+        # a collection empty on the source and NULL on the target read
+        # alike to nobody, and differently to the application
+        out.append(("empty-collection", kind))
+        if kind in ("list", "set"):
+            out.append(("null-element", None))
+        if kind == "set":
+            out.append(("set-order", None))
+    if dst == "clickhouse" and str(dst_declared or "").strip().lower() \
+            .startswith("array(") and (src_facts or {}).get("null") \
+            is not False:
+        # an Array cannot be Nullable: a NULL is written as an empty one
+        out.append(("null", None))
+    return out
+
+
 def unfit(src, src_declared, dst, dst_declared, facts=None,
           src_facts=None):
     """[(kind, arg)] to ask of one source column before it is moved into
@@ -2002,13 +2743,23 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
     Only kinds that can happen for this pair: asking a question whose
     answer is always nothing costs a scan and says nothing."""
     facts = facts or {}
+    if dst == "mongodb" and src != "mongodb" and src_declared:
+        # into MongoDB a value is written as the type its source column is
+        # held as there (`bsontype.column_tag`), whatever the field
+        # already holds: held to the field's type, a `bigint` beside a
+        # field of 32-bit integers was refused past 2**31 and would have
+        # been written as a 64-bit one
+        dst_declared = written_as(src, src_declared, dst) or dst_declared
     scls, dcls = type_class(src, src_declared), type_class(dst, dst_declared)
     out = []
-    if dcls == "json" and src not in ("postgres", "mysql"):
+    if dcls == "json" and src not in ("postgres", "mysql", "mongodb"):
         # a document store's value is a document of its own types, of
         # which JSON holds only some - a field migkit has no class for as
-        # well as one it has
+        # well as one it has. MongoDB's go as their Extended JSON
         out.append(("json-form", None))
+    out += _unfit_bson(src, src_declared, scls, dst, dst_declared)
+    out += _unfit_shapes(src, src_declared, scls, dst, dst_declared, dcls,
+                         src_facts)
     if not scls:
         return out
     other = src != dst
@@ -2019,6 +2770,18 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
             out.append(("time24", None))
         if src == "mysql":
             out.append(("timeday", None))
+    if scls == dcls == INTERVAL:
+        mine, theirs = (_declared_digits(src, src_declared),
+                        _declared_digits(dst, dst_declared))
+        if theirs is not None and (mine is None or mine > theirs):
+            out.append(("fraction", theirs))
+        # Oracle keeps an interval as one of two types, each with no room
+        # for the other's parts
+        held = _split_declared(dst_declared)[0] if dst == "oracle" else ""
+        if held.endswith("to second"):
+            out.append(("interval-part", "months"))
+        elif held.endswith("to month"):
+            out.append(("interval-part", "days or a time"))
     if scls in ("timestamp", "time") and dcls in ("timestamp", "time"):
         mine, theirs = (_temporal_digits(src, src_declared),
                         _temporal_digits(dst, dst_declared))
@@ -2098,7 +2861,8 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
     if facts.get("null") is False \
             and (src_facts or {}).get("null") is not False:
         out.append(("null" if dst == "clickhouse" else "not-null", None))
-    return out
+    # each kind asked once, whichever rule found it
+    return list(dict.fromkeys(out))
 
 
 def unfit_words(kind, arg, dst):
@@ -2306,6 +3070,29 @@ def unfit_value(kind, value, arg):
         return value is None
     if value is None or value is ABSENT:
         return False
+    if kind.startswith(("bson-", "vector-", "geometry-")) \
+            or kind in ("empty-collection", "null-element", "set-order"):
+        return _unfit_typed(kind, value, arg)
+    if kind == "no-writer":
+        return True
+    if kind == "interval-part":
+        from . import intervals
+        try:
+            got = intervals.of(value)
+        except ValueError:
+            return True
+        return bool(got.months) if arg == "months" \
+            else bool(got.days or got.nanos)
+    if kind == "fraction" and isinstance(value, str) \
+            and value.startswith(UNCOMPARABLE):
+        # digits past the ninth, which its reader could not keep
+        return True
+    if kind == "fraction" and _interval_like(value):
+        from . import intervals
+        try:
+            return intervals.of(value).nanos % (10 ** (9 - arg)) != 0
+        except ValueError:
+            return False
     if hasattr(value, "to_decimal"):
         value = value.to_decimal()
     if kind == "timeday":
@@ -2393,6 +3180,89 @@ def unfit_value(kind, value, arg):
         except ValueError:
             return True
         return False
+    return False
+
+
+def _interval_like(value):
+    """An interval as a reader hands it over: one, a Cassandra `Duration`,
+    or the ISO text PostgreSQL's and DuckDB's reads give."""
+    from . import intervals
+    return (isinstance(value, intervals.Interval)
+            or hasattr(value, "nanoseconds")
+            or isinstance(value, str) and value[:1] == "P")
+
+
+def _json_value(value):
+    """A JSON column's value as the Python it is: MySQL's comes as text."""
+    import json
+    from decimal import Decimal
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+    if isinstance(value, str):
+        try:
+            return json.loads(value, parse_float=Decimal)
+        except ValueError:
+            return value
+    return value
+
+
+def _unfit_typed(kind, value, arg):
+    """`unfit_value` for the kinds of a MongoDB value, a vector, a shape
+    and a collection. A value that is not one of its class at all is
+    one that would not arrive as it is."""
+    from . import bsontype, geo, vectors
+    if kind == "bson-type":
+        return not bsontype.matches(arg, value)
+    if kind == "bson-order":
+        def fields(x):
+            if isinstance(x, dict):
+                return len(x) > 1 or any(fields(v) for v in x.values())
+            if isinstance(x, (list, tuple)):
+                return any(fields(v) for v in x)
+            return False
+        return fields(value)
+    if kind == "bson-form":
+        try:
+            bsontype.as_bson(arg, value)
+        except (ValueError, TypeError, ArithmeticError):
+            return True
+        return False
+    if kind == "bson-none":
+        return True
+    if kind.startswith("vector-"):
+        try:
+            got = vectors.of(value)
+        except (ValueError, TypeError):
+            return True
+        if kind == "vector-width":
+            return vectors.width(got) > arg
+        if kind == "vector-dims":
+            return len(got) != arg
+        return not vectors.finite(got)
+    if kind in ("geometry-geojson", "geometry-form"):
+        import struct
+        try:
+            got = geo.of(value)
+            if kind == "geometry-geojson":
+                geo.to_geojson(got)
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError,
+                struct.error):
+            return True
+        return False
+    got = _json_value(value)
+    if kind == "empty-collection":
+        return isinstance(got, (list, tuple, dict, set)) and not got
+    if kind == "null-element":
+        return isinstance(got, (list, tuple, set)) and any(
+            x is None for x in got)
+    if kind == "set-order":
+        if not isinstance(got, (list, tuple)):
+            return False
+        try:
+            return list(got) != sorted(set(got))
+        except TypeError:
+            # elements of kinds that do not order among themselves
+            return True
     return False
 
 

@@ -218,7 +218,7 @@ def test_the_exponent_form_is_not_what_gets_compared():
 
 def test_mongodb_decimal_is_a_mapped_class_now():
     assert canon.type_class("mongodb", "decimal") == "decimal"
-    # and the types that are still unmapped stay unmapped rather than
-    # being swept along with it
-    for unmapped in ("object", "array"):
-        assert canon.type_class("mongodb", unmapped) is None, unmapped
+    # a document and an array are carried as their Extended JSON, each
+    # value with its type (`bsontype`), not swept into the decimal class
+    for kept in ("object", "array"):
+        assert canon.type_class("mongodb", kept) == "bson", kept

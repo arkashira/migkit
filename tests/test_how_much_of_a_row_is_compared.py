@@ -188,10 +188,13 @@ def test_the_cross_engine_path_refuses_seventeen_of_them(cmp_pair, tmp_path,
     assert len(src) + len(notes) == 37, (len(src), len(notes))
     # the honest part: every refusal is named, none is dropped quietly
     assert len(notes) == len({n.split(":")[0] for n in notes}), notes
-    for column in ("iv",):
+    for column in ("rng", "pt"):
         assert any(n.startswith(f"{column}:") for n in notes), (column, notes)
         hit = [n for n in notes if n.startswith(f"{column}:")][0]
         assert "no canonical rendering" in hit, hit
+    # an interval is compared as its months, days and time now
+    # (`test_cassandra_durations_and_collections_are_carried.py`)
+    assert dict(src).get("iv") == "interval", src
     # an enum is compared as the text of its label now
     # (`test_enums_and_domains_across_engines.py`), and a key/value set as
     # a JSON object and a text search vector as its text

@@ -51,6 +51,13 @@ class DbapiRows(NeutralCopier):
         cuts the rest (`nanotime`). None where it holds six or fewer."""
         return None
 
+    def _read_as(self, quoted, declared):
+        """(expression, parse) reading a column of this declared type as a
+        text the driver hands over whole and `parse` turns into the value
+        - an interval's three parts, a shape's SRID and binary - where
+        the driver's own reading of it loses part; None elsewhere."""
+        return None
+
     def _wide_times(self, side, db, table):
         """{column: the expression reading it whole} for a table's
         columns of more than six digits after the second. Asked once per
@@ -58,20 +65,26 @@ class DbapiRows(NeutralCopier):
         known = self.__dict__.setdefault("_wide_times_of", {})
         at = (side, db, str(table))
         pads = self.__dict__.setdefault("_padded_of", {})
+        parsers = self.__dict__.setdefault("_parsers_of", {})
         if at not in known and not self.PADDED and \
-                type(self)._nanos_text is DbapiRows._nanos_text:
+                type(self)._nanos_text is DbapiRows._nanos_text and \
+                type(self)._read_as is DbapiRows._read_as:
             # an engine with neither: nothing to ask its catalogue about
-            known[at], pads[at] = {}, set()
+            known[at], pads[at], parsers[at] = {}, set(), {}
         if at not in known:
             padded = {p.lower() for p in self.PADDED}
-            wide, pad = {}, set()
+            wide, pad, parse = {}, set(), {}
             columns = self.neutral_columns(side, db, table)
             for name, typ in columns:
                 got = self._nanos_text(self._q(name), typ)
                 if got:
                     wide[name] = got
+                other = self._read_as(self._q(name), typ)
+                if other:
+                    wide[name], parse[name] = other
                 if str(typ).split("(")[0].strip().lower() in padded:
                     pad.add(name)
+            parsers[at] = parse
             if not columns:
                 # a table not there yet is asked again once it is
                 pads[at] = pad
@@ -86,11 +99,14 @@ class DbapiRows(NeutralCopier):
         from .. import nanotime
         wide = self._wide_times(side, db, table)
         padded = self.__dict__["_padded_of"][(side, db, str(table))]
-        at = [i for i, n in enumerate(names) if n in wide]
+        parse = self.__dict__.get("_parsers_of", {}).get(
+            (side, db, str(table)), {})
+        at = [(i, parse.get(n, nanotime.parse))
+              for i, n in enumerate(names) if n in wide]
         pad = [i for i, n in enumerate(names) if n in padded]
         for r in rows:
-            for i in at:
-                r[i] = nanotime.parse(r[i])
+            for i, fn in at:
+                r[i] = fn(r[i]) if r[i] is not None else None
             for i in pad:
                 if isinstance(r[i], str):
                     r[i] = r[i].rstrip(" ")
@@ -256,14 +272,16 @@ class DbapiRows(NeutralCopier):
                     part = rows[i:i + self.DELETE_BATCH]
                     self._run(cur, f"delete from {quoted} where "
                                    + " or ".join([one] * len(part)),
-                              [canon.sql_value(r[j]) for r in part
-                               for j in at])
+                              [canon.write_value(self.CANON_ENGINE,
+                                                 columns[j][1], r[j])
+                               for r in part for j in at])
             insert = self._sql(
                 f"insert into {quoted}"
                 f" ({', '.join(self._q(n) for n in names)}) values"
                 f" ({', '.join([MARK] * len(names))})", True)
-            cur.executemany(insert, [tuple(canon.sql_value(v) for v in r)
-                                     for r in rows])
+            cur.executemany(insert, [tuple(
+                canon.write_value(self.CANON_ENGINE, c, v)
+                for (_, c), v in zip(columns, r)) for r in rows])
             if undo:
                 self._run(cur, undo)
             conn.commit()

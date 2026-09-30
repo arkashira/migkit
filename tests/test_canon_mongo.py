@@ -32,7 +32,7 @@ db.getSiblingDB("cx").v.insertMany([
 print(db.getSiblingDB("cx").v.countDocuments({}));
 """
 PG_SEED = """
-create table v (_id bigint primary key, name text,
+create table v (_id integer primary key, name text,
                 ratio double precision, flag boolean);
 insert into v values (1,'café',1e20,true),(2,'',0.000001,false),
                      (3,null,null,null),(4,null,null,null);
@@ -171,21 +171,27 @@ def test_absent_and_null_are_counted_apart(pair):
     assert "null" in types and "bool" in types
 
 
-def test_a_field_holding_two_real_types_is_refused(pair):
+def test_a_field_holding_two_real_types_keeps_each_ones_type(pair):
     """`null` alongside a type says nothing; `string` alongside `int` is a
-    field migkit cannot render one way, and picking the more common one would
-    be inventing the answer."""
+    field no one column type holds, and picking the more common one would
+    be inventing the answer - so each value is kept with its own type
+    (`bson`: a JSON column of each value's Extended JSON elsewhere), and
+    compared with it."""
     mo, _ = pair
     assert canon.type_class("mongodb", "bool|null") == "boolean"
-    assert canon.type_class("mongodb", "string|int") is None
+    assert canon.type_class("mongodb", "string|int") == "bson"
     assert mongosh("db.v.insertOne({_id:98, ratio:'not a number'})"
                    ".acknowledged").returncode == 0
     try:
         declared = dict(mo.neutral_columns("src", "cx", "v"))["ratio"]
         assert "string" in declared and "double" in declared, declared
         cls, why = canon.comparable("mongodb", declared)
-        assert cls is None
-        assert "no canonical rendering" in why
+        assert cls == "bson" and not why, (cls, why)
+        # beside the table's double column, the string is another type
+        assert canon.render_value("bson/double", "not a number") \
+            != canon.render_value("bson:double", 1.5)
+        assert canon.render_value("bson/double", 1.5) \
+            == canon.render_value("bson:double", 1.5)
     finally:
         mongosh("db.v.deleteOne({_id:98})")
 

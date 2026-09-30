@@ -50,6 +50,10 @@ def test_the_table_each_would_create(name, ddl):
 def test_a_page_is_read_with_limit(name):
     eng = _engine(name)
     eng.neutral_key = lambda side, db, table: ["id"]
+    # Snowflake reads a timestamp's nine digits as its text, so it asks
+    # which columns are timestamps first
+    eng.neutral_columns = lambda side, db, table: [("id", "INTEGER"),
+                                                   ("name", "TEXT")]
     sql, args, key, names = eng._read_query(
         "dst", "sales", "orders", [("id", "integer"), ("name", "text")],
         (41,), 500, None)

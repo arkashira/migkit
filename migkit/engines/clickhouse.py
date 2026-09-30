@@ -117,6 +117,10 @@ class ClickHouseEngine(NeutralCopier, Engine):
     @staticmethod
     def _value(cls, v):
         import datetime
+        if isinstance(v, (list, tuple)) and cls != "bytes":
+            # an Array's elements, each as a column's value is: a
+            # `String` one is read as bytes (`AS_BYTES`) and decoded here
+            return [ClickHouseEngine._value(cls, x) for x in v]
         if isinstance(v, (bytes, bytearray)) and cls != "bytes":
             return bytes(v).decode("utf-8", "surrogateescape")
         if isinstance(v, datetime.datetime) and v.tzinfo is not None:
@@ -314,8 +318,11 @@ class ClickHouseEngine(NeutralCopier, Engine):
         defs = []
         for col in columns:
             t = canon.ddl_type("clickhouse", col[1], col[2])
+            # an Array cannot be Nullable: its NULLs are counted before the
+            # move (`canon.unfit`), as an empty array is what it writes
             defs.append(f"{self._q(col[0])} "
-                        + (t if col[0] in key else f"Nullable({t})"))
+                        + (t if col[0] in key or t.startswith("Array(")
+                           else f"Nullable({t})"))
         order = (", ".join(self._q(k) for k in key)) if key else "tuple()"
         return (f"create table {self._qualified(side, db, table)}"
                 f" ({', '.join(defs)}) engine = MergeTree order by ({order})")
@@ -361,7 +368,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 for i, r in enumerate(rows):
                     places = []
                     for j, idx in enumerate(at):
-                        v = canon.sql_value(r[idx])
+                        v = canon.write_value("clickhouse",
+                                              columns[idx][1], r[idx])
                         params[f"v{i}_{j}"] = v
                         places.append(f"{{v{i}_{j}:{self._param_type(v)}}}")
                     tuples.append("(" + ", ".join(places) + ")")
@@ -371,7 +379,9 @@ class ClickHouseEngine(NeutralCopier, Engine):
                     f" ({', '.join(tuples)})", parameters=params,
                     settings={"lightweight_deletes_sync": 2})
             client.insert(table,
-                          [[canon.sql_value(v) for v in r] for r in written],
+                          [[canon.write_value("clickhouse", c, v)
+                            for (_, c), v in zip(columns, r)]
+                           for r in written],
                           column_names=names, database=self._d(side, db))
         finally:
             client.close()

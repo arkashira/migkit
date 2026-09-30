@@ -241,8 +241,32 @@ class MongoEngine(Engine):
                             {"$eq": [{"$type": "$kv.v"}, "null"]}, 1, 0]}}}},
             {"$sort": {"_id": 1}},
         ])
-        return {r["_id"]: (sorted(r["types"]), r["present"], r["nulls"])
-                for r in rows}
+        out = {r["_id"]: (sorted(r["types"]), r["present"], r["nulls"])
+               for r in rows}
+        for field, (types, present, nulls) in out.items():
+            if "binData" in types:
+                out[field] = (sorted(set(types) - {"binData"}
+                                     | self._binary_kinds(coll, field)),
+                              present, nulls)
+        return out
+
+    @staticmethod
+    def _binary_kinds(coll, field):
+        """The binary subtypes one field holds, by the names the type map
+        knows them by: `binData` for plain bytes (0), `uuid` for a UUID
+        (4), `binData3` and on for the rest. `$type` says `binData` for
+        every subtype and no aggregation operator reads one before
+        MongoDB 8, so the field's binaries are read here - only that
+        field, and only where it holds any. Known only as `binData`, a
+        UUID (subtype 4) went to another engine as plain bytes and came
+        back subtype 0, its sixteen bytes compared equal on both hops."""
+        kinds = set()
+        for doc in coll.find({field: {"$type": "binData"}},
+                             {field: 1, "_id": 0}):
+            v = doc.get(field)
+            sub = getattr(v, "subtype", 0)
+            kinds.add({0: "binData", 4: "uuid"}.get(sub, f"binData{sub}"))
+        return kinds or {"binData"}
 
     def neutral_columns(self, side, db, table):
         """[(field, types joined by '|')] - the set, not a declaration.
@@ -355,8 +379,12 @@ class MongoEngine(Engine):
         return self._by_key_map(columns, key, rows)
 
     @staticmethod
-    def _bind(value):
-        """One value on its way into a BSON document.
+    def _bind(value, cls=None):
+        """One value on its way into a BSON document - by the BSON type
+        the column it came from is held as, where the copy says
+        (`canon.write_value`, `bsontype`): a `bigint` as a 64-bit
+        integer, a `uuid` as a binary of subtype 4, a JSON column's
+        Extended JSON as the value it stands for.
 
         MongoDB has a decimal type and pymongo will not reach it on its own:
         measured, `insert_one({"n": Decimal("1.50")})` raises `InvalidDocument:
@@ -369,10 +397,20 @@ class MongoEngine(Engine):
         (`1.50` stays `1.50`), which is what makes the two sides render to
         the same text.
         """
+        import datetime
         import decimal
+
+        from .. import canon
+        if cls is not None and value is not canon.ABSENT:
+            value = canon.write_value("mongodb", cls, value)
         if isinstance(value, decimal.Decimal):
             from bson.decimal128 import Decimal128
             return Decimal128(value)
+        if type(value) is datetime.date:
+            # pymongo takes no date without a time (`cannot encode
+            # object`): a BSON date at its midnight, as a `date` column's
+            # BSON type says
+            return datetime.datetime(value.year, value.month, value.day)
         return value
 
     def neutral_write(self, side, db, table, columns, rows):
@@ -394,9 +432,11 @@ class MongoEngine(Engine):
                              " without _id - there would be no way to write"
                              " the same row twice without duplicating it")
         at = names.index("_id")
+        classes = [c for _, c in columns]
         ops = []
         for row in rows:
-            body = {n: self._bind(v) for n, v in zip(names, row)
+            body = {n: self._bind(v, c) for n, c, v in zip(names, classes,
+                                                            row)
                     if n != "_id" and v is not canon.ABSENT}
             unset = {n: "" for n, v in zip(names, row)
                      if n != "_id" and v is canon.ABSENT}
@@ -407,7 +447,8 @@ class MongoEngine(Engine):
                 update["$unset"] = unset
             if not update:
                 update = {"$setOnInsert": {}}
-            ops.append(UpdateOne({"_id": row[at]}, update, upsert=True))
+            ops.append(UpdateOne({"_id": self._bind(row[at], classes[at])},
+                                 update, upsert=True))
         coll = self._client(side)[self._d(side, db)][table]
         coll.bulk_write(ops, ordered=False)
         return len(rows)

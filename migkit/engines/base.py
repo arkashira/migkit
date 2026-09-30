@@ -2808,6 +2808,14 @@ class Engine:
             notes.append(f"columns only on the target, not compared:"
                          f" {', '.join(got['only_dst'])}")
         notes += [f"{name}: {why}" for name, why in got["unreadable"]]
+        accepted = getattr(self, "_accepted", None)
+        if accepted:
+            # a MongoDB field whose type the hop lets change on the way
+            # (`accept_changes`) is compared by its value alone
+            got["pairs"] = [
+                (n, canon.by_value(s), canon.by_value(d))
+                if accepted(src_table, back.get(n, n)) else (n, s, d)
+                for n, s, d in got["pairs"]]
         # read by the source's own name, written and compared by the target's
         src_cols = [(back.get(n, n), s) for n, s, _ in got["pairs"]]
         dst_cols = [(n, d) for n, _, d in got["pairs"]]
@@ -2845,8 +2853,30 @@ class Engine:
                 # and a range left out of a same-engine comparison hid a
                 # changed value behind "every compared column equal"
                 scls = dcls = canon.OWN
+            typed = canon.bson_pair(src_engine.CANON_ENGINE, src_types[name],
+                                    dst_engine.CANON_ENGINE, dst_types[name])
+            if typed is not None:
+                # MongoDB on one side: each value with its BSON type, the
+                # other side's as MongoDB holds that column's
+                if not all(typed):
+                    eng, typ = ((dst_engine.CANON_ENGINE, dst_types[name])
+                                if src_engine.CANON_ENGINE == "mongodb"
+                                else (src_engine.CANON_ENGINE,
+                                      src_types[name]))
+                    out["unreadable"].append((
+                        name, f"{eng} type {typ!r} has no BSON type, so"
+                        " MongoDB holds none of its values to compare"))
+                    continue
+                out["pairs"].append((name,) + tuple(typed))
+                continue
             if not scls or not dcls:
                 out["unreadable"].append((name, swhy or dwhy))
+                continue
+            if src_engine.CANON_ENGINE == dst_engine.CANON_ENGINE \
+                    == "mongodb":
+                # two MongoDB sides: each value with its BSON type, so a
+                # 32-bit 5 does not meet a 64-bit one (`bsontype`)
+                out["pairs"].append((name, canon.BSON, canon.BSON))
                 continue
             if scls == dcls and scls in canon.FOLDED_HERE and same and \
                     str(src_types[name]).lower() == \
@@ -2860,7 +2890,8 @@ class Engine:
                     src_engine.CANON_ENGINE, src_types[name],
                     dst_engine.CANON_ENGINE, dst_types[name])
             if {scls, dcls} in ({"xml", "text"}, {"uuid", "text"},
-                                {"inet", "text"}):
+                                {"inet", "text"}, {"interval", "text"},
+                                {"vector", "text"}):
                 # a document, a UUID or an address kept as text on one
                 # side: compared as what it is, which is the same text
                 # where it was the same
@@ -3015,11 +3046,12 @@ class Engine:
         sequence item 0: expected str instance, NoneType found` and took the
         whole data check down with it.
         """
-        from .. import masking
+        from .. import bsontype, masking
         hide = hop is not None and masking.keys(hop, table)
+        # a key compared with its BSON type is shown as its value
         return "/".join("NULL" if part is None
                         else masking.token(hop, part) if hide
-                        else str(part) for part in key)
+                        else str(bsontype.shown(part)) for part in key)
 
     def _apply_rows(self, db, name, src_engine, src_t, src_cols,
                     dst_engine, dst_t, dst_cols):
@@ -3115,9 +3147,15 @@ class Engine:
             if rows:
                 dst_engine.neutral_write("dst", db, dst_t, dst_cols,
                                          list(rows.values()))
+        # a key part of a class with a form of its own on the target (an
+        # ObjectId kept in a `jsonb` key) addresses the row in that form
+        into = {s: d for (s, _), (_, d) in zip(src_cols, dst_cols)
+                if canon.has_own_form(d)}
         for key_text in drop:
-            dst_engine._apply_delete("dst", db, dst_t,
-                                     dict(zip(key, values(key_text))))
+            dst_engine._apply_delete("dst", db, dst_t, {
+                k: canon.write_value(dst_engine.CANON_ENGINE, into[k], v)
+                if k in into else v
+                for k, v in zip(key, values(key_text))})
 
     def _drill_tables(self, db):
         """Tables the last check left a drilldown for, and what it found.
@@ -3222,14 +3260,19 @@ class Engine:
         from .. import canon
         cols = ", ".join(canon.read_expr(engine, quote(n), c)
                          for n, c in columns)
+        # a key value as this engine takes it for its column's class: an
+        # ObjectId kept in a `jsonb` key is looked up as its Extended JSON
+        of = dict(columns)
         if len(key) == 1:
             where = f"{quote(key[0])} in ({', '.join([mark] * len(keys))})"
-            args = [canon.sql_value(k[0]) for k in keys]
+            args = [canon.write_value(engine, of.get(key[0]), k[0])
+                    for k in keys]
         else:
             left = "(" + ", ".join(quote(k) for k in key) + ")"
             one = "(" + ", ".join([mark] * len(key)) + ")"
             where = f"{left} in ({', '.join([one] * len(keys))})"
-            args = [canon.sql_value(v) for k in keys for v in k]
+            args = [canon.write_value(engine, of.get(n), v) for k in keys
+                    for n, v in zip(key, k)]
         if scope:
             where = f"({where}) and ({scope})"
         return f"select {cols} from {quoted_table} where {where}", args

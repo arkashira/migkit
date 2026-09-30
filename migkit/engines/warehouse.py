@@ -137,6 +137,25 @@ class SnowflakeEngine(FoldsToCapitals, _Warehouse):
     PADDED = ()
     SCALED = ("NUMBER", "DECIMAL", "NUMERIC")
 
+    def _nanos_text(self, quoted, declared):
+        """A timestamp or a time as Snowflake writes it with all nine of
+        its digits - nine unless declared fewer - where the driver hands
+        it over as a Python datetime or time, six. An instant
+        (`TIMESTAMP_LTZ`, `TIMESTAMP_TZ`) as its UTC reading, as every
+        engine here renders one."""
+        from .. import canon
+        name, nums = canon._split_declared(declared)
+        if (nums[0] if nums else 9) <= 6:
+            return None
+        if name == "time":
+            return f"to_varchar({quoted}, 'HH24:MI:SS.FF9')"
+        if name == "timestamp_ntz":
+            return f"to_varchar({quoted}, 'YYYY-MM-DD HH24:MI:SS.FF9')"
+        if name in ("timestamp_ltz", "timestamp_tz"):
+            return (f"to_varchar(convert_timezone('UTC', {quoted}),"
+                    " 'YYYY-MM-DD HH24:MI:SS.FF9')")
+        return None
+
     def _connect(self, side, db):
         try:
             import snowflake.connector

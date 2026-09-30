@@ -2278,9 +2278,11 @@ JSON, tsvector as text), moved and checked equal. A changed key/value set
 and a changed text search vector each read as a difference
 (`tests/test_hstore_and_tsvector_across_engines.py`).
 
-`interval` still has no counterpart. MySQL has no type that holds months
-and seconds apart, and the driver turns a month into thirty days on the
-way. It stays out of the comparison, and the footnote says so.
+`interval` is compared as its months, days and nanoseconds kept apart
+(`migkit/intervals.py`, 2026-09-30): read as its parts on PostgreSQL and
+DuckDB, whose drivers turn a month into thirty days, and carried to
+Cassandra's `duration`. MySQL, SQL Server and MongoDB have no type that
+holds the three apart, and a move there is refused by name.
 
 **20. The PostgreSQL-only helpers, ported where the idea exists elsewhere.**
 

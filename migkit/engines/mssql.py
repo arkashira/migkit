@@ -837,6 +837,19 @@ class MSSQLEngine(DbapiRows, Engine):
     #: PostgreSQL's `char(10)`, which reads 'abc'
     PADDED = ("char", "nchar")
 
+    def _read_as(self, quoted, declared):
+        """A `geography` or a `geometry` as its SRID and its well-known
+        binary with Z and M (`geo`), the same rendering the row hash reads
+        it by (`CLR_RENDERED`): the driver hands back SQL Server's own
+        serialisation of it, which no other engine reads."""
+        from .. import canon, geo
+        name = canon._split_declared(declared)[0]
+        if name not in ("geography", "geometry"):
+            return None
+        return (f"case when {quoted} is null then null else "
+                + self.CLR_RENDERED[name].format(c=quoted) + " end",
+                geo.of)
+
     def _nanos_text(self, quoted, declared):
         """A `datetime2` or `time` of seven digits as the server writes
         it: the driver hands back six."""
@@ -1395,7 +1408,8 @@ class MSSQLEngine(DbapiRows, Engine):
             names = [n for n, _ in columns]
             texts = self._as_text(side, db, table, names)
             try:
-                staged = canon.sql_rows([c for _, c in columns], rows)
+                staged = canon.sql_rows([c for _, c in columns], rows,
+                                        engine="mssql")
                 if texts:
                     at = [(i, texts[n][0]) for i, n in enumerate(names)
                           if n in texts]
@@ -1906,20 +1920,19 @@ class _NotLoaded(Exception):
 def _time_text(v):
     """A datetime or a time as SQL Server writes one of seven digits after
     the second (style 121), from the six a Python value holds and the
-    digits past them it carries (`nanotime`). A value with a zone is not
-    one a column without a zone is written from here."""
+    digits past them it carries (`nanotime`), as the statements send it
+    (`canon.mssql_time_text`). A value with a zone is not one a column
+    without a zone is written from here."""
     import datetime
+
+    from .. import canon
     if v is None or isinstance(v, str):
         return v
     if getattr(v, "tzinfo", None) is not None:
         raise _NotLoaded("a time with a zone, for a column without one")
-    frac = f"{v.microsecond:06d}{(getattr(v, 'nanosecond', 0) or 0) // 100}"
-    clock = f"{v.hour:02d}:{v.minute:02d}:{v.second:02d}.{frac}"
-    if isinstance(v, datetime.datetime):
-        return f"{v.year:04d}-{v.month:02d}-{v.day:02d} {clock}"
-    if isinstance(v, datetime.time):
-        return clock
-    raise _NotLoaded(f"a {type(v).__name__} for a time column")
+    if not isinstance(v, (datetime.datetime, datetime.time)):
+        raise _NotLoaded(f"a {type(v).__name__} for a time column")
+    return canon.mssql_time_text(v)
 
 
 def _said(e):

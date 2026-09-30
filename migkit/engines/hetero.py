@@ -344,10 +344,13 @@ class HeteroEngine(Engine):
         if got["only_dst"]:
             parts.append(f"{len(got['only_dst'])} columns only the target"
                          " has: " + ", ".join(got["only_dst"][:6]))
+        from .. import canon
         drift = [f"{n} is {got['src_types'][n]} on the source and"
                  f" {got['dst_types'][n]} on the target, which are not the"
                  " same kind of value"
-                 for n, s, d in got["pairs"] if s is not d]
+                 for n, s, d in got["pairs"] if s is not d
+                 and not canon.bson_alike(s, d, got["src_types"][n],
+                                          got["dst_types"][n])]
         parts += drift[:4]
         blind = got["unreadable"]
         if parts:
@@ -657,9 +660,9 @@ class HeteroEngine(Engine):
                              "dst", db, dst_t)}
         elif self.dst_engine.CREATES_ON_WRITE:
             # nothing to build, and what each value becomes is the engine's
-            written = canon.WRITTEN_AS.get(self.dst_engine.CANON_ENGINE, {})
-            dst_types = {n: written.get(canon.type_class(
-                self.src_engine.CANON_ENGINE, t)) for n, t in mapped.items()}
+            dst_types = {n: canon.written_as(
+                self.src_engine.CANON_ENGINE, t,
+                self.dst_engine.CANON_ENGINE) for n, t in mapped.items()}
         else:
             dst_types = {}
             columns, built_key = self._target_shape(db, src_t, leaf)
@@ -1183,10 +1186,22 @@ class HeteroEngine(Engine):
         from .. import canon
         src_cols, dst_cols = [], []
         for name in both:
-            src_cols.append((back.get(name, name), canon.type_class(
-                self.src_engine.CANON_ENGINE, src_types[name])))
-            dst_cols.append((name, canon.type_class(
-                self.dst_engine.CANON_ENGINE, dst_types[name])))
+            s = canon.type_class(self.src_engine.CANON_ENGINE,
+                                 src_types[name])
+            d = canon.type_class(self.dst_engine.CANON_ENGINE,
+                                 dst_types[name])
+            typed = canon.bson_pair(self.src_engine.CANON_ENGINE,
+                                    src_types[name],
+                                    self.dst_engine.CANON_ENGINE,
+                                    dst_types[name])
+            if typed and all(typed):
+                # MongoDB on one side: what each value is written as is the
+                # BSON type the other side's column holds (`bsontype`)
+                s, d = typed
+                if self._accepted(src_table, back.get(name, name)):
+                    s, d = canon.by_value(s), canon.by_value(d)
+            src_cols.append((back.get(name, name), s))
+            dst_cols.append((name, d))
         return src_cols, dst_cols, notes
 
     @staticmethod
@@ -1288,12 +1303,19 @@ class HeteroEngine(Engine):
         names = [n for n, _ in sc]
         where = [names.index(k) for k in key]
         missing, changed, cols = [], [], []
+        # a key into MongoDB as it was written there (`bsontype`): an
+        # ObjectId kept in a JSON column is looked for as the ObjectId
+        into = (dict(dc) if self.dst_engine.CANON_ENGINE == "mongodb"
+                and self.src_engine.CANON_ENGINE != "mongodb" else {})
+        at_key = [dst_key[key.index(names[j])] for j in where]
         for i in range(0, len(mine), self.READ_BACK):
             part = mine[i:i + self.READ_BACK]
             a = self._by_key_map(sc, key, part)
             b = self.dst_engine.neutral_rows_by_key(
                 "dst", db, dst_t, dc, dst_key,
-                [tuple(r[j] for j in where) for r in part])
+                [tuple(canon.write_value("mongodb", into[n], r[j])
+                       if n in into else r[j]
+                       for n, j in zip(at_key, where)) for r in part])
             gone, _, differ = self._rows_differ(sc, dc, a, b)
             missing += gone
             changed += differ
@@ -1813,6 +1835,12 @@ class HeteroEngine(Engine):
             if cls is None:
                 unknown.append(f"{name} ({typ})")
                 continue
+            if self._accepted(src_table, back[name]):
+                # a MongoDB value whose type the hop lets change is built
+                # as the column its value alone goes in: an ObjectId as
+                # text
+                cls = canon.mongo_value_class(self.src_engine.CANON_ENGINE,
+                                              typ, cls)
             numbers = canon.ddl_numbers(self.src_engine.CANON_ENGINE, typ,
                                         cls)
             if cls == "decimal" and not numbers:
@@ -1831,6 +1859,25 @@ class HeteroEngine(Engine):
                    if forward.get(k, k) in {c[0] for c in columns}]
         except Exception:
             key = []
+        if not same:
+            # a class the target has no type for is named here, with why,
+            # rather than stopping the build on the first
+            none = []
+            for name, cls, numbers, _ in columns:
+                try:
+                    canon.ddl_type(self.dst_engine.CANON_ENGINE, cls,
+                                   numbers, name in key)
+                except ValueError as e:
+                    none.append(f"{name} ({mapped.get(name)}): {e}")
+            if none:
+                raise SystemExit(
+                    f"{leaf} is not on the target and migkit cannot build"
+                    f" it: {self.dst_name} has no column that holds these"
+                    " as they are - " + "; ".join(none) + ". Create the"
+                    " table yourself with the columns you want them in (a"
+                    " value a column changes is then counted and refused,"
+                    " or let through by the hop's `accept_changes`), and"
+                    " run this again")
         return columns, key
 
     def _measured_decimal(self, db, src_table, column):
@@ -2985,6 +3032,37 @@ class HeteroEngine(Engine):
                             "key": dict(c["key"])})
         return out
 
+    def _typed_change(self, db, change, target):
+        """A change with each value of a class that has a form of its own
+        on the target (`canon.write_value`) in that form, as the copy
+        writes it: into MongoDB by the BSON type the source column is held
+        as - a `bigint` a 64-bit integer, where the driver's default was a
+        32-bit 5 - out of it an ObjectId as its Extended JSON; an interval,
+        a vector or a shape as the target takes one. The other values are
+        handed on as they are, as they always were."""
+        from .. import canon
+        known = self.__dict__.setdefault("_typed_of", {})
+        at = (db, change["table"])
+        if at not in known:
+            try:
+                src_cols, dst_cols, _ = self._move_columns(
+                    change["table"], target, db)
+            except Exception:  # noqa: BLE001 - the change as it is
+                src_cols, dst_cols = [], []
+            known[at] = {s: d for (s, _), (_, d) in zip(src_cols, dst_cols)
+                         if canon.has_own_form(d)}
+        classes = known[at]
+        if not classes:
+            return change
+        engine = self.dst_engine.CANON_ENGINE
+        out = dict(change)
+        for part in ("key", "values"):
+            if change.get(part):
+                out[part] = {n: canon.write_value(engine, classes[n], v)
+                             if n in classes else v
+                             for n, v in change[part].items()}
+        return out
+
     def _mapped_change(self, db, change):
         """A change with `mapping.columns` applied as the copy applied it:
         dropped columns left out, renamed ones under their target names.
@@ -3293,8 +3371,9 @@ class HeteroEngine(Engine):
                         for c in changes:
                             to = self._tail_target(targets, c["table"])
                             accounts.named(c["table"], to)
-                            mapped.append(dict(self._mapped_change(db, c),
-                                               table=to))
+                            mapped.append(dict(self._mapped_change(
+                                db, self._typed_change(db, c, to)),
+                                table=to))
                         changes, flattened = self._flatten_changes(mapped)
                         if flattened:
                             log(f"{flattened} values were not there on the"

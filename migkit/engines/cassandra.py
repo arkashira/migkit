@@ -116,6 +116,15 @@ class CassandraEngine(NeutralCopier, Engine):
             return v.time()
         if isinstance(v, uuid.UUID):
             return str(v)
+        if isinstance(v, (list, tuple)) or type(v).__name__ == "SortedSet":
+            # a list, a set (sorted, as the driver keeps one) or a vector:
+            # the list of its elements, each read as the rest are
+            return [CassandraEngine._value(x) for x in v]
+        if hasattr(v, "items") and not isinstance(v, str):
+            # a map (`OrderedMapSerializedKey`): the mapping, keys as text
+            # are what a JSON object has
+            return {(k if isinstance(k, str) else str(k)):
+                    CassandraEngine._value(x) for k, x in v.items()}
         return v
 
     def neutral_batches(self, side, db, table, columns, size=1000,
@@ -232,7 +241,8 @@ class CassandraEngine(NeutralCopier, Engine):
             f" ({', '.join('?' for _ in names)})")
         got = execute_concurrent_with_args(
             session, stmt, [tuple(UNSET_VALUE if v is None
-                                  else canon.sql_value(v) for v in r)
+                                  else canon.write_value("cassandra", c, v)
+                                  for (_, c), v in zip(columns, r))
                             for r in rows], concurrency=64)
         failed = [result for ok, result in got if not ok]
         if failed:
