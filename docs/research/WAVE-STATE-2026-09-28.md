@@ -96,3 +96,12 @@ Then the queue above (live tail L/R/C/P items after tail_apply owners merge; eng
 - WIP kept: committed on each branch, except a939c23, ab097a0, addeddc, ae13c03 = staged (secret-check blocked; fix the flagged test values before committing). aa2c527 DONE (merge first). a2ba2fe/ae351bc/ae866ee clean (already committed).
 - Resume order (8-10 at a time): merge aa2c527 -> resume cutover a2ba2fe, stored code ae866ee, R20 proof a31b892, R20 pass-through a5244da, interlock a6bfe7c, write paths a5bea35, types rest addeddc, UX ab097a0 -> then Oracle a47bffb, SQL Server a8d572b, MySQL tools ae351bc, physical ad4909f, engine gaps aa5d0ed, 0f pgcopydb ad4afda, R20 cross-engine ae13c03, R22 a90aadb/a939c23 -> then not-yet-resumed a075608 DVT, a7120bc warehouse, a8c4cd1 copybook.
 - Two-way merge 395c8e5 docker re-check (bdv1qvq3k) was killed before running: re-run on resume.
+
+## RESUMED 2026-09-30 (owner: "ไล่ทำเลย", cron back on: 07f17dcd every 10 min)
+- Pushed 2026-09-29: 7de74bc..254c0f9 (outward aa2c527 merged as 254c0f9; worktree removed).
+- c8f32de secret check: 12 digits inside a fraction/UUID are not an account id; 192.0.2.x (RFC 5737) allowed; `flagged(line)` + teeth test.
+- Old agent ids resume by SendMessage to the full id (transcripts kept across sessions).
+- Batch 1 resumed (8): a2ba2fe cutover, ae866ee stored code, a31b892 R20 proof, a5244da R20 pass-through, a6bfe7c interlock, a5bea35 write paths, addeddc types rest (staged -> commit first), ab097a0 R21 UX (staged -> fix 14 flags first).
+- Two-way docker re-check on master (395c8e5 tests) running.
+- Next when slots free: a47bffb Oracle, a8d572b SQL Server, ae351bc MySQL tools, ad4909f physical, aa5d0ed engine gaps, ad4afda 0f pgcopydb, ae13c03 R20 cross-engine (staged, 3 flags), a90aadb/a939c23 R22 (a939c23 staged, 2 flags), then a075608 DVT, a7120bc warehouse, a8c4cd1 copybook.
+- Machine: swap 17/18 GB used at resume; one container pair at a time.
