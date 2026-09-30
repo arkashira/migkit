@@ -39,6 +39,12 @@ PROGRAMS = {
     "atlas": ("", ""),
     "liquibase": ("", ""),
     "riotx": ("", ""),
+    # fetched from their vendors too: the Redis copy by the replica
+    # protocol, the Cassandra bulk loader, and Kafka's own cluster mirror
+    # (the script of the Kafka release that starts it)
+    "redis-shake": ("", ""),
+    "dsbulk": ("", ""),
+    "connect-mirror-maker.sh": ("", ""),
     # the brew package is an installer that asks for an administrator's
     # password, and no apt repository of the defaults carries it
     "mysqlsh": ("", ""),
@@ -88,6 +94,11 @@ PROGRAM_LICENCES = {
     # of IBM's terms (`TERMS`)
     "ibmi-odbc": "LicenseRef-IBM-i-Access-Client-Solutions",
     "db2-connect": "LicenseRef-IBM-Db2-Connect",
+    "redis-shake": "MIT", "dsbulk": "Apache-2.0",
+    "connect-mirror-maker.sh": "Apache-2.0",
+    # built here from its source (`SOURCE_BUILDS`), never on PATH by
+    # another name
+    "reindex-from-snapshot": "Apache-2.0",
 }
 
 #: the container images migkit runs, pulled by docker where they are run
@@ -96,7 +107,10 @@ PROGRAM_LICENCES = {
 #: every other's all the same (`install_missing`)
 IMAGES = {"pgcopydb": "dimitri/pgcopydb:latest",
           "debezium": "quay.io/debezium/connect:3.0",
-          "redpanda": "redpandadata/redpanda:latest"}
+          "redpanda": "redpandadata/redpanda:latest",
+          # Kafka's own, which carries the cluster mirror's start script:
+          # the build `VENDOR` pins, where the release is not installed
+          "connect-mirror-maker.sh": "apache/kafka:3.8.0"}
 
 #: not a program on PATH: the second reader lives in an environment of its
 #: own (`migkit.second_reader`), because it pins an older numeric stack
@@ -418,6 +432,13 @@ def _present(cmd):
 SOURCE_BUILDS = {
     "ora2pg": ("v25.0", "https://github.com/darold/ora2pg/archive/refs/tags"
                         "/v25.0.tar.gz"),
+    # the snapshot reader of OpenSearch's migration project: its releases
+    # carry the assistant's charts and no build of the reader, which its
+    # own Gradle build makes (Java 17, the build's wrapper fetching Gradle
+    # itself)
+    "reindex-from-snapshot": (
+        "3.3.8", "https://github.com/opensearch-project/opensearch-migrations"
+                 "/archive/refs/tags/3.3.8.tar.gz"),
     "sqlines": ("4d0d87896cead95481fc4656f831a8ac6d7ec291",
                 "https://github.com/dmtolpeko/sqlines/archive/"
                 "4d0d87896cead95481fc4656f831a8ac6d7ec291.tar.gz"),
@@ -479,6 +500,11 @@ def built_program(name):
         program = home / "sqlines"
         if program.exists():
             return ([str(program)], {})
+    if name == "reindex-from-snapshot":
+        program = home / "bin" / RFS_SCRIPT
+        if program.exists():
+            return ([str(program)], {"JAVA_HOME": _java_home() or ""})
+        return None
     found = which(name)
     return ([found], {}) if found else None
 
@@ -516,6 +542,8 @@ def install_from_source(name, log=print):
             # migkit - it runs as a program of its own
             ok = step(["perl", "Makefile.PL", f"INSTALL_BASE={home}"], top) \
                 and step(["make"], top) and step(["make", "install"], top)
+        elif name == "reindex-from-snapshot":
+            ok = _build_rfs(top, home, log)
         else:
             for rel, edits in SQLINES_PATCHES.items():
                 path = os.path.join(top, rel)
@@ -541,6 +569,35 @@ def install_from_source(name, log=print):
         if not ok:
             return False
     return built_program(name) is not None
+
+
+#: the start script the snapshot reader's Gradle build lays out
+RFS_SCRIPT = "DocumentsFromSnapshotMigration"
+
+
+def _build_rfs(top, home, log):
+    """The snapshot reader built by its own Gradle wrapper into a
+    distribution - its start script and every jar it needs - and kept
+    whole under `home`. Java 17 is what its build asks for."""
+    import os
+    java = _java_home()
+    if not java:
+        log("  the build needs a Java 17, and none was found")
+        return False
+    got = subprocess.run(["./gradlew", "--no-daemon", "-q",
+                          f":{RFS_SCRIPT}:installDist"], cwd=top,
+                         capture_output=True, text=True,
+                         env={**os.environ, "JAVA_HOME": java})
+    if got.returncode != 0:
+        log("  the build stopped: "
+            + (got.stderr.strip().splitlines() or [""])[-1][:120])
+        return False
+    built = os.path.join(top, RFS_SCRIPT, "build", "install", RFS_SCRIPT)
+    if not os.path.isdir(built):
+        return False
+    shutil.rmtree(home, ignore_errors=True)
+    shutil.copytree(built, home, symlinks=True)
+    return True
 
 
 # name, what it lets the operator do, programs required, optional faster path.
@@ -592,8 +649,21 @@ CAPABILITIES = [
      [], []),
     ("Redis: copy",
      "keyspace copy, every node of a cluster, expiry and access history"
-     " kept; a faster path into Redis's own products",
-     [], ["riotx"]),
+     " kept; a faster path by the replica protocol, and one into Redis's"
+     " own products",
+     [], ["redis-shake", "riotx"]),
+    ("Kafka: copy",
+     "topic copy with every group's position translated; a faster path"
+     " through the cluster mirror Kafka ships",
+     [], ["connect-mirror-maker.sh"]),
+    ("Cassandra / ScyllaDB: bulk copy",
+     "tables copied with each cell's time to live and write time; a"
+     " faster path through the bulk loader, resumable where it stopped",
+     [], ["dsbulk"]),
+    ("OpenSearch: copy from a snapshot",
+     "indexes copied from the source's own snapshot, the cluster itself"
+     " left unread",
+     [], ["reindex-from-snapshot"]),
     ("Cross-engine (any pair)",
      "create missing tables, resumable copy, cross-dialect verify;"
      " MySQL to PostgreSQL also in one bulk pass",
@@ -770,7 +840,8 @@ def install_missing(log=print, ask=None):
 #: programs no package manager carries, fetched from their vendor at the
 #: build measured here: {program: version}
 VENDOR = {"atlas": "1.3.0", "liquibase": "5.0.4", "mysqlsh": "26.7.1",
-          "mongosync": "1.21.0", "riotx": "1.15.1"}
+          "mongosync": "1.21.0", "riotx": "1.15.1", "redis-shake": "4.6.2",
+          "dsbulk": "1.11.0", "connect-mirror-maker.sh": "3.8.0"}
 VENDOR_URL = "https://fastdl.mongodb.org/tools/mongosync/"
 #: where each other vendor publishes its builds, by version
 VENDOR_URLS = {
@@ -780,9 +851,26 @@ VENDOR_URLS = {
                  "v{version}/",
     "riotx": "https://github.com/redis/riotx-dist/releases/download/"
              "v{version}/",
+    "redis-shake": "https://github.com/tair-opensource/RedisShake/releases/"
+                   "download/v{version}/",
+    "dsbulk": "https://github.com/datastax/dsbulk/releases/download/"
+              "{version}/",
+    "connect-mirror-maker.sh": "https://archive.apache.org/dist/kafka/"
+                               "{version}/",
 }
 #: how each asks its build for its version, where not `--version`
 VERSION_ARGS = {"atlas": ["version"]}
+#: builds that are not asked their version: the file of their own tree
+#: whose name carries it proves the build. The cluster mirror's start
+#: script takes only its properties file; its jars are named by release
+VERSION_FILES = {"connect-mirror-maker.sh":
+                 "libs/connect-mirror-{version}.jar"}
+#: builds whose program sits at the top of the archive, not under `bin`:
+#: the replica-protocol copy's release is its binary and its sample
+#: configuration side by side. It takes only a configuration file, so it
+#: is asked nothing either: the archive fetched by its versioned name is
+#: the build
+AT_TOP = ("redis-shake",)
 
 
 def _vendor_url(program, version):
@@ -842,6 +930,19 @@ def vendor_file(program, open_build=False):
         if not (name and arch):
             return None
         return f"riotx-standalone-{version}-{name}-{arch}.zip"
+    if program == "redis-shake":
+        # one static binary per system and architecture
+        name = {"Darwin": "darwin", "Linux": "linux"}.get(system)
+        arch = "arm64" if arm else "amd64" if x86 else None
+        if not (name and arch):
+            return None
+        return f"redis-shake-v{version}-{name}-{arch}.tar.gz"
+    if program == "dsbulk":
+        # Java, the same archive everywhere
+        return f"dsbulk-{version}.tar.gz"
+    if program == "connect-mirror-maker.sh":
+        # the Kafka release itself, built for Scala 2.13, on Java 17
+        return f"kafka_2.13-{version}.tgz"
     if system == "Darwin":
         arch = "arm-arm64" if arm else "x86_64"
         return f"mongosync-macos-{arch}-{version}.zip"
@@ -913,7 +1014,8 @@ def install_vendor(program, log=print, into=None, open_build=False):
             found = sorted((os.path.join(root, program)
                             for root, _, files in os.walk(tree)
                             if program in files and (root.endswith("bin")
-                                                     or program in NEEDS_JAVA)),
+                                                     or program in NEEDS_JAVA
+                                                     or program in AT_TOP)),
                            key=lambda p: p.count(os.sep))
             if not found:
                 log("  the fetched archive holds no program by that name")
@@ -957,6 +1059,12 @@ def install_vendor(program, log=print, into=None, open_build=False):
                     os.symlink(real, target)
             os.chmod(os.path.realpath(target),
                      os.stat(os.path.realpath(target)).st_mode | 0o755)
+    if program in VERSION_FILES:
+        home = _home() / "tools" / f"{program}-{version}"
+        return (home / VERSION_FILES[program].format(version=version)
+                ).exists() and os.access(target, os.X_OK)
+    if program in AT_TOP:
+        return os.access(target, os.X_OK)
     got = subprocess.run([target, *VERSION_ARGS.get(program, ["--version"])],
                          capture_output=True, text=True)
     return version in (got.stdout + got.stderr)
@@ -977,7 +1085,10 @@ VENDOR_EXTRAS = {"liquibase": [
 #: vendor programs that run on Java, and the package that brings a Java
 #: 17 - what the Liquibase 5 archive asks for - where none is found:
 #: (brew formula, apt package)
-NEEDS_JAVA = {"liquibase": ("openjdk", "openjdk-17-jre-headless")}
+NEEDS_JAVA = {"liquibase": ("openjdk", "openjdk-17-jre-headless"),
+              "dsbulk": ("openjdk", "openjdk-17-jre-headless"),
+              "connect-mirror-maker.sh": ("openjdk",
+                                          "openjdk-17-jre-headless")}
 
 
 def _java_home():

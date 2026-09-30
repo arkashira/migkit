@@ -305,6 +305,7 @@ class KafkaEngine(Engine):
         src = self._consumer("src", isolation_level="read_committed")
         dst = self._consumer("dst")
         producer = self._producer(max_in_flight_requests_per_connection=1)
+        marked = self._marks_positions()
         sent = 0
         try:
             parts = self._partitions(src, topic)
@@ -356,12 +357,18 @@ class KafkaEngine(Engine):
                         if ahead > 0:
                             ahead -= 1
                         else:
+                            headers = list(m.headers or [])
+                            if marked:
+                                headers = [h for h in headers
+                                           if h[0] != self.HEADER] + [
+                                    (self.HEADER, self._position(
+                                        p, m.offset))]
                             producer.send(
                                 topic,
                                 value=self._translated(topic, "value",
                                                        m.value),
                                 key=self._translated(topic, "key", m.key),
-                                headers=list(m.headers or []),
+                                headers=headers,
                                 partition=p, timestamp_ms=m.timestamp)
                             sent += 1
                         pst["copied"] += 1
@@ -549,10 +556,13 @@ class KafkaEngine(Engine):
     INTERNAL = ("__", "_schemas", "_confluent", "_redpanda")
 
     def _topics(self, consumer):
-        """Every topic migkit verifies: internal ones and the ones the hop
-        excludes left out. This engine used to ignore `exclude`."""
+        """Every topic migkit verifies: internal ones, the cluster mirror's
+        own on the target (`mirror.internal`) and the ones the hop excludes
+        left out. This engine used to ignore `exclude`."""
+        from .. import mirror
         return sorted(t for t in consumer.topics()
                       if not t.startswith(self.INTERNAL)
+                      and not mirror.internal(t)
                       and not self.hop.excluded("cluster", t))
 
     def _partitions(self, consumer, topic):
@@ -915,35 +925,221 @@ class KafkaEngine(Engine):
                         return m.offset
         return None
 
-    def _translate(self, sc, dc, tp, offset):
-        """(the target's offset, "") for a group's committed source offset,
-        or (None, why).
+    #: the header migkit's copier writes each message's source position in,
+    #: where the hop asks for it (`offset_header`): `<partition>:<offset>`
+    HEADER = "migkit.source.offset"
 
-        A committed offset is the next message the group reads. On a target
-        whose log does not line up with the source's, the same number is a
-        different message; so the message itself is found on the target, by
-        the time it was written and then its key and value, and the group is
-        put at it. Where that message is one of several the same, the first
-        is taken: the consumer reads one again rather than skipping one.
-        A group at the end of the source's log is put after the source's
-        last message on the target."""
-        beg = sc.beginning_offsets([tp])[tp]
-        end = sc.end_offsets([tp])[tp]
-        if offset < beg:
-            return None, "its position is older than the source's log"
-        if offset >= end:
-            if end <= beg:
-                return None, "the partition is empty on the source"
-            last = self._message_at(sc, tp, end - 1)
-            found = self._find(dc, tp, last) if last else None
-            return ((found + 1, "") if found is not None else
-                    (None, "the source's last message is not on the target"))
+    def _marks_positions(self):
+        """Whether the hop asks each copied message to carry its source
+        position (`offset_header`): a header more, which its consumers see,
+        so only on the hop's word."""
+        return bool((self.hop.options or {}).get("offset_header"))
+
+    @staticmethod
+    def _position(partition, offset):
+        return f"{int(partition)}:{int(offset)}".encode()
+
+    @classmethod
+    def _position_of(cls, headers):
+        """(partition, offset) a message's header says it was copied from,
+        or None."""
+        for name, value in headers or ():
+            if name == cls.HEADER and value:
+                try:
+                    p, o = bytes(value).decode().split(":", 1)
+                    return int(p), int(o)
+                except (ValueError, UnicodeDecodeError):
+                    return None
+        return None
+
+    def _by_header(self, dc, tp, offset, at):
+        """The target's offset of the message copied from source `offset`
+        of this partition, by the position its header carries: from the
+        first message at its time (`at`), the first whose header says that
+        offset or a later one - a transaction's marker takes an offset no
+        message has. None where no message there carries the header."""
+        start = dc.offsets_for_times({tp: at}).get(tp) if at is not None \
+            else None
+        dc.assign([tp])
+        if start is None:
+            dc.seek_to_beginning(tp)
+        else:
+            dc.seek(tp, start.offset)
+        seen = 0
+        while seen < self.TRANSLATE_SCAN:
+            batch = dc.poll(timeout_ms=3000)
+            if not batch:
+                return None
+            for msgs in batch.values():
+                for m in msgs:
+                    seen += 1
+                    got = self._position_of(m.headers)
+                    if got and got[0] == tp.partition and got[1] >= offset:
+                        return m.offset
+                    if got is None and at is not None and m.timestamp > at:
+                        # past its time with no header: these messages
+                        # were not copied with their positions
+                        return None
+        return None
+
+    def _same_message(self, sc, dc, tp, offset, there):
+        """Whether target offset `there` holds the source's message at
+        `offset`: time, key and value alike."""
+        a = self._message_at(sc, tp, offset)
+        return a is not None and self._message_at(dc, tp, there, "dst") == a
+
+    def _located(self, sc, dc, tp, offset, tables, group):
+        """(the target's offset of the source's message at `offset`, how it
+        was found), or (None, why). By the header the copier wrote where
+        the target's messages carry one; by the cluster mirror's own tables
+        where it copied them (`mirror.read_table`) - a checkpoint of this
+        very group at this very offset, or the offset syncs around it - each
+        proved by the message before it is taken; by the message itself
+        (its time, key and value) otherwise."""
+        from .. import mirror
         message = self._message_at(sc, tp, offset)
         if message is None:
             return None, "the message it reads next could not be read"
+        at = self._by_header(dc, tp, offset, message[0])
+        if at is not None:
+            return at, "by the source position each message carries"
+        cands = []
+        point = (tables.get("checkpoints") or {}).get(
+            (group, tp.topic, tp.partition))
+        if point and point[0] == offset:
+            cands.append(point[1])
+        guess = mirror.downstream((tables.get("syncs") or {}).get(
+            (tp.topic, tp.partition)), offset)
+        if guess is not None:
+            cands.append(guess)
+        for there in dict.fromkeys(cands):
+            if there >= 0 and self._message_at(dc, tp, there, "dst") \
+                    == message:
+                return there, "by the cluster mirror's record of where it" \
+                              " landed, proved by the message"
         found = self._find(dc, tp, message)
-        return ((found, "") if found is not None else
-                (None, "the message it reads next is not on the target"))
+        if found is not None:
+            return found, "by the message it points at"
+        return None, "the message it reads next is not on the target"
+
+    def _place(self, sc, dc, tp, offset, tables=None, group=None):
+        """(where on the target a group committed at source `offset` goes,
+        how it was found, what was clamped) - or (None, why, "") where
+        there is nowhere to put it.
+
+        A committed offset is the next message the group reads. It goes to
+        the target's offset of that same message; where the target does
+        not hold it, right after the last message the group had read, if
+        the target holds that one - never before what the group consumed,
+        so it reads nothing twice, and where the next ones have not reached
+        the target, at its end, so it skips none of them when they do. The
+        result is clamped to what the target holds (backlog F7.kclamp):
+        never past its end and never before its start, whichever way it
+        was found - and a clamp is said. A position older than what the
+        source still holds has no message to be found by, and is not
+        guessed at: where its reader goes is its own reset policy's."""
+        tables = tables or {}
+        beg = sc.beginning_offsets([tp])[tp]
+        end = sc.end_offsets([tp])[tp]
+        note = ""
+        if offset < beg:
+            return None, "its position is older than the source's log", ""
+        if end <= beg:
+            return None, "the partition is empty on the source", ""
+        if offset >= end:
+            last, how = self._located(sc, dc, tp, end - 1, tables, group)
+            if last is None:
+                return None, "the source's last message is not on the" \
+                             " target", ""
+            at = last + 1
+        else:
+            at, how = self._located(sc, dc, tp, offset, tables, group)
+            if at is None and offset > beg:
+                read, how2 = self._located(sc, dc, tp, offset - 1, tables,
+                                           group)
+                if read is not None:
+                    at, how = read + 1, how2 + ", after the last it read"
+                    note = (note + "; " if note else "") + (
+                        f"the target holds up to the last message it read,"
+                        f" and the {end - offset:,} it reads next have not"
+                        " reached the target yet")
+            if at is None:
+                return None, how, ""
+        dbeg = dc.beginning_offsets([tp])[tp]
+        dend = dc.end_offsets([tp])[tp]
+        if at > dend:
+            note = (note + "; " if note else "") + (
+                f"clamped to the target's end {dend}: {at - dend} of the"
+                " messages it had read are not on the target")
+            at = dend
+        if at < dbeg:
+            note = (note + "; " if note else "") + (
+                f"clamped to the target's first message {dbeg}")
+            at = dbeg
+        return at, how, note
+
+    def group_positions(self, db):
+        """([row], [unsure], checked): every group committed on the source,
+        partition by partition, as it goes on the target - row {"group",
+        "topic", "partition", "source", "target", "held", "how", "note"},
+        `held` the target's committed offset now - and the partitions with
+        nowhere to go, each with why. Where both logs start and end
+        together the number means the same message and is taken as it is;
+        elsewhere it is placed by the message (`_place`). Raises where the
+        groups cannot be listed: none listed is not the same as none."""
+        from .. import mirror
+        rows, unsure, checked = [], [], 0
+        groups = self._groups("src") | self._groups("dst")
+        sc = dc = None
+        tables = None
+        try:
+            for group in sorted(groups):
+                try:
+                    offs_s = self._group_offsets("src", group)
+                except Exception:  # noqa: BLE001 - said, not guessed
+                    unsure.append(f"{group} (its offsets could not be read)")
+                    continue
+                if not offs_s:
+                    continue
+                try:
+                    offs_d = self._group_offsets("dst", group)
+                except Exception:  # noqa: BLE001 - the target has none
+                    offs_d = {}
+                checked += 1
+                same, apart = self._comparable(list(offs_s))
+                for tp in same:
+                    rows.append({"group": group, "topic": tp.topic,
+                                 "partition": tp.partition,
+                                 "source": offs_s[tp], "target": offs_s[tp],
+                                 "held": offs_d.get(tp), "how": "number",
+                                 "note": ""})
+                for tp in apart:
+                    if sc is None:
+                        sc, dc = self._consumer("src"), self._consumer("dst")
+                    if tables is None:
+                        tables = {k: mirror.read_table(self, k)
+                                  for k in ("syncs", "checkpoints")}
+                    try:
+                        there, how, note = self._place(sc, dc, tp,
+                                                       offs_s[tp], tables,
+                                                       group)
+                    except Exception as e:  # noqa: BLE001 - said
+                        there, how, note = (None, f"{type(e).__name__}:"
+                                                  f" {str(e)[:60]}", "")
+                    if there is None:
+                        unsure.append(f"{group} {tp.topic}[{tp.partition}]"
+                                      f" ({how})")
+                        continue
+                    rows.append({"group": group, "topic": tp.topic,
+                                 "partition": tp.partition,
+                                 "source": offs_s[tp], "target": there,
+                                 "held": offs_d.get(tp), "how": how,
+                                 "note": note})
+        finally:
+            for consumer in (sc, dc):
+                if consumer is not None:
+                    consumer.close()
+        return rows, unsure, checked
 
     def check_deep(self, db):
         """Consumer-group parity: the classic kafka-migration failure is
@@ -971,59 +1167,29 @@ class KafkaEngine(Engine):
                               f"{len(missing)} consumer groups missing on"
                               f" target: {', '.join(missing[:6])}", "",
                               f"migkit sync {self.hop.name} --db {db}"
-                              " --kind sequences --apply, or mirror them with"
-                              " MirrorCheckpointConnector"))
+                              " --kind sequences --apply, which puts each"
+                              " group at the same message on the target"))
         else:
             res.append(Result("deep", "groups", "ok",
                               f"{len(gs)} consumer groups present on"
                               " target"))
-        behind, unsure, changed = [], [], []
-        checked = translated = 0
-        sc = dc = None
-        for group in sorted(gs | gd):
-            try:
-                offs_s = self._group_offsets("src", group)
-            except Exception:
-                unsure.append(f"{group} (its offsets could not be read)")
+        rows, unsure, checked = self.group_positions(db)
+        behind, changed = [], []
+        translated = sum(1 for r in rows if r["how"] != "number")
+        for r in rows:
+            if r["held"] == r["target"]:
                 continue
-            if not offs_s:
-                continue
-            try:
-                offs_d = self._group_offsets("dst", group)
-            except Exception:
-                offs_d = {}
-            checked += 1
-            same, apart = self._comparable(list(offs_s))
-            for tp in apart:
-                if sc is None:
-                    sc, dc = self._consumer("src"), self._consumer("dst")
-                try:
-                    there, why = self._translate(sc, dc, tp, offs_s[tp])
-                except Exception as e:  # noqa: BLE001 - said, not guessed
-                    there, why = None, f"{type(e).__name__}: {str(e)[:60]}"
-                if there is None:
-                    unsure.append(f"{group} {tp.topic}[{tp.partition}]"
-                                  f" ({why})")
-                    continue
-                translated += 1
-                if offs_d.get(tp) != there:
-                    behind.append(f"{group} {tp.topic}[{tp.partition}]"
-                                  f" src={offs_s[tp]} dst={offs_d.get(tp)}"
-                                  f" (the same message is at {there} on the"
-                                  " target)")
-                    changed.append(json.dumps(
-                        {"group": group, "topic": tp.topic,
-                         "partition": tp.partition, "offset": there}))
-            for tp in same:
-                if offs_d.get(tp) != offs_s[tp]:
-                    behind.append(f"{group} {tp.topic}[{tp.partition}]"
-                                  f" src={offs_s[tp]} dst={offs_d.get(tp)}")
-                    changed.append(json.dumps(
-                        {"group": group, "topic": tp.topic,
-                         "partition": tp.partition, "offset": offs_s[tp]}))
-        for consumer in (sc, dc):
-            if consumer is not None:
-                consumer.close()
+            said = (f"{r['group']} {r['topic']}[{r['partition']}]"
+                    f" src={r['source']} dst={r['held']}")
+            if r["how"] != "number":
+                said += (f" (the same message is at {r['target']} on the"
+                         " target)")
+            if r["note"]:
+                said += f" ({r['note']})"
+            behind.append(said)
+            changed.append(json.dumps(
+                {"group": r["group"], "topic": r["topic"],
+                 "partition": r["partition"], "offset": r["target"]}))
         self._write_drill(db, "groups", missing=missing, changed=changed)
         # a pass has to say what it did not look at, or a group with one
         # untranslatable partition reads as a group that was checked
@@ -1046,9 +1212,9 @@ class KafkaEngine(Engine):
                 " two logs do not start and end together, and the message"
                 " the group reads next was not found on the target, so"
                 " migkit will not copy a number between them", "",
-                "translate each group's position by message time rather than"
-                " by number, or reset the target's groups deliberately with"
-                " kafka-consumer-groups --reset-offsets"))
+                "copy the topic again so the target holds the message the"
+                " group reads next, or reset the target's groups"
+                " deliberately with kafka-consumer-groups --reset-offsets"))
         return res
 
     def repair_plan(self, db, kind):
@@ -1056,47 +1222,72 @@ class KafkaEngine(Engine):
 
         Not the messages: re-producing them would give them new offsets and
         new timestamps, and a topic is not a table that can be written into
-        twice. `check --check deep` is what fills the list this reads.
+        twice. Each group is placed afresh from where it stands on the
+        source now (`group_positions`) - at a cutover the source has just
+        been frozen, and a position read at the last check would be stale -
+        clamped to what the target holds. The action's rows after its first
+        line are what `apply` commits; its undo, the target's offsets as
+        they were, is what a cutover that goes back commits again.
         """
         if kind not in ("sequences", "all"):
             return []
-        changed = self._read_drill(db, "groups", "changed")
-        if not changed:
-            return []
         import json
-        rows = [json.loads(line) for line in changed]
-        groups = sorted({r["group"] for r in rows})
+        rows, unsure, _ = self.group_positions(db)
+        todo = [r for r in rows if r["held"] != r["target"]]
+        if not todo:
+            return []
+        groups = sorted({r["group"] for r in todo})
+        clamped = [f"{r['group']} {r['topic']}[{r['partition']}]:"
+                   f" {r['note']}" for r in todo if r["note"]]
         return [RepairAction(
             db, "sequences",
-            [f"commit {len(rows)} offsets on the target for"
+            [f"commit {len(todo)} offsets on the target for"
              f" {len(groups)} groups: {', '.join(groups[:6])}"
-             + (" ..." if len(groups) > 6 else "")],
-            [], "where the two logs do not line up, each offset is the one"
-                " of the same message on the target; the target's current"
-                " offsets go to the undo file first")]
+             + (" ..." if len(groups) > 6 else "")]
+            + [json.dumps({"group": r["group"], "topic": r["topic"],
+                           "partition": r["partition"],
+                           "offset": r["target"]}) for r in todo],
+            [json.dumps({"group": r["group"], "topic": r["topic"],
+                         "partition": r["partition"], "offset": r["held"]})
+             for r in todo],
+            "where the two logs do not line up, each offset is the one"
+            " of the same message on the target; the target's current"
+            " offsets go to the undo file first"
+            + (f"; clamped: {'; '.join(clamped[:4])}" if clamped else "")
+            + (f"; {len(unsure)} partitions with nowhere to go are left"
+               f" as they are: {', '.join(unsure[:4])}" if unsure else ""))]
 
     def apply(self, db, action):
-        """Set the target's committed offsets to the source's.
+        """Set the target's committed offsets: the rows the action carries
+        (`repair_plan`, or a cutover's undo of it), else the ones the last
+        deep check wrote down.
 
         Measured: `alter_group_offsets` creates the group when it is not
         there, which is what a migrated cluster needs, and reports per
         partition - `{TopicPartition: NoError}` - so the result is read
-        rather than assumed.
+        rather than assumed. A row with no offset is a group the target did
+        not have: going back, that group is removed again, once none of its
+        partitions has an offset to put back.
         """
         import json
 
         from kafka import TopicPartition
         from kafka.structs import OffsetAndMetadata
-        rows = [json.loads(line)
-                for line in self._read_drill(db, "groups", "changed")]
+        carried = [json.loads(s) for s in (action.statements or [])
+                   if str(s).startswith("{")]
+        rows = carried or [json.loads(line) for line in
+                           self._read_drill(db, "groups", "changed")]
         if not rows:
             return
         undo_dir = self.hop.report_dir(db) / "undo"
         undo_dir.mkdir(parents=True, exist_ok=True)
-        by_group = {}
+        by_group, gone = {}, {}
         for row in rows:
-            by_group.setdefault(row["group"], {})[
-                TopicPartition(row["topic"], row["partition"])] = row["offset"]
+            tp = TopicPartition(row["topic"], row["partition"])
+            if row.get("offset") is None:
+                gone.setdefault(row["group"], []).append(tp)
+            else:
+                by_group.setdefault(row["group"], {})[tp] = row["offset"]
         admin = self._admin("dst")
         try:
             with (undo_dir / "group-offsets.jsonl").open("a") as handle:
@@ -1119,6 +1310,8 @@ class KafkaEngine(Engine):
                             f"the target refused offsets for {group}:"
                             f" {'; '.join(bad[:6])}. Offsets committed"
                             " before this one stand; nothing was deleted")
+            for group in sorted(g for g in gone if g not in by_group):
+                admin.delete_consumer_groups([group])
         finally:
             admin.close()
 

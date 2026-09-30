@@ -33,9 +33,9 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 
 | Status | S | M | L | Total |
 |---|---|---|---|---|
-| DONE | 49 | 61 | 9 | 119 |
+| DONE | 50 | 66 | 9 | 125 |
 | IN PROGRESS | 16 | 34 | 11 | 61 |
-| OPEN | 60 | 59 | 22 | 141 |
+| OPEN | 59 | 54 | 22 | 135 |
 | BLOCKED | 8 | 5 | 6 | 19 |
 | NOT PURSUED | 6 | 0 | 0 | 6 |
 | **Total** | 139 | 159 | 48 | **346** |
@@ -46,15 +46,15 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | verify | 27 | 4 | 14 | 1 | 1 | 47 |
 | change follow | 18 | 2 | 36 | 5 | 0 | 61 |
 | two-way | 2 | 1 | 4 | 0 | 0 | 7 |
-| cutover | 4 | 2 | 7 | 0 | 0 | 13 |
+| cutover | 5 | 2 | 6 | 0 | 0 | 13 |
 | types | 7 | 3 | 3 | 0 | 0 | 13 |
 | engines | 9 | 10 | 15 | 6 | 1 | 41 |
 | conversion | 4 | 10 | 16 | 0 | 0 | 30 |
 | security | 6 | 3 | 6 | 1 | 1 | 17 |
 | ease of use | 5 | 6 | 5 | 1 | 1 | 18 |
 | operations/scale | 14 | 6 | 12 | 5 | 0 | 37 |
-| tools used whole | 7 | 6 | 8 | 0 | 0 | 21 |
-| **Total** | 119 | 61 | 141 | 19 | 6 | **346** |
+| tools used whole | 12 | 6 | 3 | 0 | 0 | 21 |
+| **Total** | 125 | 61 | 135 | 19 | 6 | **346** |
 
 ## Items
 
@@ -201,12 +201,12 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 139 | F4.d | Empty Cassandra collections | IN PROGRESS addeddc (types remainder) | S | types | WAVE 3b05234 note |
 | 140 | F6 | Speed of migkit's own paths: MySQL decoder in its own process chosen by measured rate, PostgreSQL tail on one kept connection, apply trims and GC held, renderer per column | DONE f3884fa | M | change follow | L2724-2784 |
 | 141 | F6.no | Free-threaded 3.14t, subinterpreters, PyPy for all of migkit, orjson or XXH3 in the digest | NOT PURSUED ("not now", F6; XXH3 measured and not adopted, R18.3) | S | move | L2730-2731, L5025-5028 |
-| 142 | F7.rshake | RedisShake as a rung (readers, Lua, filters, status port) | OPEN | M | tools used whole | L356-357, L599-600, L2789 |
-| 143 | F7.mm2 | MirrorMaker 2 wrapped whole with a source-offset header and group translation | OPEN | M | tools used whole | L357-358, L607-609, L2789-2790 |
-| 144 | F7.dsbulk | DSBulk (splits, checkpoint and replay, count modes, preserved TTL and timestamps) | OPEN | M | tools used whole | L358-359, L2790 |
-| 145 | F7.rfs | OpenSearch reindex-from-snapshot | OPEN | M | tools used whole | L2791 |
-| 146 | F7.ddbexp | DynamoDB export to and import from S3 | OPEN | M | tools used whole | L2791 |
-| 147 | F7.kclamp | Kafka consumer-offset clamp at cutover | OPEN | S | cutover | L2793 |
+| 142 | F7.rshake | RedisShake as a rung (readers, Lua, filters, status port) | DONE in worktree aa63b99, not merged (tests written; the full run to come): readers climbed per database (backup file, append-only file, the snapshot a replica gets, a scan), exclusions as its key filters where exact, a cluster target's database 0, the target's limits read, plain commands into an older target, status port as progress (`redisshake`); one Redis ladder on measured rate (`bulkways`) | M | tools used whole | L356-357, L599-600, L2789 |
+| 143 | F7.mm2 | MirrorMaker 2 wrapped whole with a source-offset header and group translation | DONE in worktree aa63b99, not merged (tests written; the full run to come): run from the release or Kafka's image, nothing written to the source (measured: its flow back's heartbeat made four topics there until turned off), ended where the source stood, positions kept for the copier; its syncs and checkpoints decoded and proved by the message; the copier's `offset_header`; measured 76.6 s against the copier's 13.1 s for 200,000 messages (`mirror`) | M | tools used whole | L357-358, L607-609, L2789-2790 |
+| 144 | F7.dsbulk | DSBulk (splits, checkpoint and replay, count modes, preserved TTL and timestamps) | DONE in worktree aa63b99, not merged (tests written; the full run to come): splits sized, each cell's time to live and write time, checkpoints resumed, no error skipped, counted on the target by the loader, per table against the token ranges (`dsbulk`, `tableways`) | M | tools used whole | L358-359, L2790 |
+| 145 | F7.rfs | OpenSearch reindex-from-snapshot | DONE in worktree aa63b99, not merged (tests written; the full run to come): an index out of a snapshot the hop names, the reader built from source and proved by its usage, the disk held to twice the largest shard (`fromsnapshot`) | M | tools used whole | L2791 |
+| 146 | F7.ddbexp | DynamoDB export to and import from S3 | DONE in worktree aa63b99, not merged (tests written; the full run to come): the service's export taken in by its import or by migkit's writer, manifest or export count held, a failed import's table removed, the files removed (`ddbexport`, against moto) | M | tools used whole | L2791 |
+| 147 | F7.kclamp | Kafka consumer-offset clamp at cutover | DONE in worktree aa63b99, not merged (tests written; the full run to come): a group at its very message, else after the last it read at the target's end and said, never past the end or before the start; placed afresh at cutover, undone as it was (`KafkaEngine._place`) | S | cutover | L2793 |
 | 148 | F7.selfstop | A scheduled tail that stops when caught up | DONE in worktree af2dabd, not merged (tests written; the full run to come): a slot's run ends once caught up with where the source's log was when it first read to the end, and at the slot's end at the latest (`tailctl.until`, `schedule.slot_end`); `tail.stop` asks any tail to end; `move` gated by its schedule as `check` is | S | change follow | L2793-2794 |
 | 149 | F7.beat | Source-commit timestamp in the tail's beat | DONE in worktree af2dabd, not merged (tests written; the full run to come): every reader marks each transaction's commit time (`canon.ended`), the beat carries `through` and `lag`, `/metrics` says both | S | change follow | L2794-2795 |
 | 150 | F7.commit | A batch ended at the last COMMIT seen, so a transaction that fits is never split | DONE in worktree af2dabd, not merged (tests written; the full run to come): the batch cut after the last change that ended a transaction, its commit's position saved (`txn_at`), the rest read with the next (`_commit_cut`) | S | change follow | L2795; goldengate-qlik-hvr report L1113 |

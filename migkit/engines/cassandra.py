@@ -638,69 +638,114 @@ class CassandraEngine(NeutralCopier, Engine):
             return out
         return key, select, writes
 
+    def _table_ways(self):
+        """How a table goes (`tableways`): the bulk loader where it can
+        keep what migkit's copier keeps, the copier's token ranges
+        always."""
+        from ..decide import Need, Rung
+        return (
+            Rung("loader", "the bulk loader, by token-range splits, each"
+                           " cell's time to live and write time kept",
+                 gives=frozenset({"resume by chunk"}),
+                 needs=(Need("the bulk loader installed",
+                             lambda f: f["loader"],
+                             "the bulk loader is not installed here"),
+                        Need("a table it carries as the copier does",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"])),
+                 because="Java's own driver reading and writing many"
+                         " ranges at once, resumable where it stopped"),
+            Rung("ranges", "the token ranges, read side by side",
+                 because="each row written back with its time to live and"
+                         " write time"),
+        )
+
     def native_bulk(self, db, tables, go, log, shape_only=()):
-        """Each table's rows copied as the source holds them, by ranges of
-        the partitioner's tokens read side by side, each row written back
-        with what is left of its time to live and its write time - so a
-        row that expires on the source expires on the target at the same
+        """Each table's rows copied as the source holds them, each written
+        back with what is left of its time to live and its write time - so
+        a row that expires on the source expires on the target at the same
         moment, and a later write on either side still wins as it would
-        have. A table the target lacks is made by the source's own
-        definition. A counter table is refused by name: a counter is added
-        to, never written."""
+        have - by the way climbed for the table (`_table_ways`): the bulk
+        loader (`dsbulk`) or migkit's own token ranges. A table the target
+        lacks is made by the source's own definition. A counter table is
+        refused by name: a counter is added to, never written."""
         steps = [f"{t}: rows copied with their time to live and write"
                  " time, by token ranges" for t in tables]
         if not go:
             return steps
-        from concurrent.futures import ThreadPoolExecutor
+        from .. import dsbulk, tableways
+        from ..decide import Facts
+        from ..util import which
         workers = max(1, int(getattr(self.hop, "workers_most", 0)
                              or self.hop.workers or 1))
         for t in list(shape_only) + list(tables):
             if t not in self.neutral_tables("dst", db):
                 self._made_like(db, t)
         for t in tables:
-            cols = self._columns("src", db, t)
-            if any(str(c.type) == "counter" for c in cols):
+            if any(str(c.type) == "counter"
+                   for c in self._columns("src", db, t)):
                 raise SystemExit(f"{t} holds counters, which are added to"
                                  " and never written: it is not copied by"
                                  " this path")
-            part = [c.column_name for c in sorted(
-                (c for c in cols if c.kind == "partition_key"),
-                key=lambda c: c.position)]
-            q = self._q
-            _, select, writes = self._row_writer(db, t)
-            read = self._session("src").prepare(
-                f"select {select} from {self._qualified('src', db, t)}"
-                " where token(" + ", ".join(q(n) for n in part)
-                + ") >= ? and token(" + ", ".join(q(n) for n in part)
-                + ") <= ?")
-            dst = self._session("dst")
-            target = self._qualified("dst", db, t)
-            dst.execute(f"truncate {target}")
-            n = workers * self.RANGES_PER_WORKER
-            step = (self.HIGH - self.LOW) // n
-            bounds = [(self.LOW + i * step,
-                       self.HIGH if i == n - 1 else self.LOW + (i + 1) * step
-                       - 1) for i in range(n)]
 
-            def one(rng, read=read, writes=writes):
-                from cassandra.concurrent import execute_concurrent
-                moved, batch = 0, []
-                for row in self._session("src").execute(read, rng):
-                    batch += writes(row)
-                    moved += 1
-                    if len(batch) >= 500:
-                        self._sent(execute_concurrent(dst, batch,
-                                                      concurrency=64), t)
-                        batch = []
-                if batch:
+        def run(way, t):
+            if way == "loader":
+                moved = dsbulk.copy_table(self, db, t, workers, log)
+                if log:
+                    log(f"{t}: {moved:,} rows copied by the bulk loader,"
+                        " counted on the target")
+                return moved
+            return self._copy_by_ranges(db, t, workers, log)
+        tableways.each(self, db, tables, self._table_ways(),
+                       lambda t: Facts(loader=lambda: bool(which(
+                           dsbulk.PROGRAM)), unfit=lambda: dsbulk.unfit(
+                           self, db, t)),
+                       run, log)
+        return steps
+
+    def _copy_by_ranges(self, db, t, workers, log):
+        """One table by token ranges read side by side, each row written
+        back with its time to live and write time; the rows copied."""
+        from concurrent.futures import ThreadPoolExecutor
+        cols = self._columns("src", db, t)
+        part = [c.column_name for c in sorted(
+            (c for c in cols if c.kind == "partition_key"),
+            key=lambda c: c.position)]
+        q = self._q
+        _, select, writes = self._row_writer(db, t)
+        read = self._session("src").prepare(
+            f"select {select} from {self._qualified('src', db, t)}"
+            " where token(" + ", ".join(q(n) for n in part)
+            + ") >= ? and token(" + ", ".join(q(n) for n in part)
+            + ") <= ?")
+        dst = self._session("dst")
+        target = self._qualified("dst", db, t)
+        dst.execute(f"truncate {target}")
+        n = workers * self.RANGES_PER_WORKER
+        step = (self.HIGH - self.LOW) // n
+        bounds = [(self.LOW + i * step,
+                   self.HIGH if i == n - 1 else self.LOW + (i + 1) * step
+                   - 1) for i in range(n)]
+
+        def one(rng):
+            from cassandra.concurrent import execute_concurrent
+            moved, batch = 0, []
+            for row in self._session("src").execute(read, rng):
+                batch += writes(row)
+                moved += 1
+                if len(batch) >= 500:
                     self._sent(execute_concurrent(dst, batch,
                                                   concurrency=64), t)
-                return moved
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                moved = sum(pool.map(one, bounds))
-            if log:
-                log(f"{t}: {moved:,} rows copied in {n} token ranges")
-        return steps
+                    batch = []
+            if batch:
+                self._sent(execute_concurrent(dst, batch,
+                                              concurrency=64), t)
+            return moved
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            moved = sum(pool.map(one, bounds))
+        if log:
+            log(f"{t}: {moved:,} rows copied in {n} token ranges")
+        return moved
 
     @staticmethod
     def _sent(results, table):

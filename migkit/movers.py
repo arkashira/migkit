@@ -28,7 +28,7 @@ from .util import quiet_argv, run, tool_env, which
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
         "pgloader", "mongodump", "mongosync", "riotx", "native", "pgpull",
-        "pgsubscribe")
+        "pgsubscribe", "redisshake", "mirror")
 
 
 def _native(engine):
@@ -98,6 +98,18 @@ def _ladder():
              needs=(_moves("riotx"), _installed("riotx")),
              because="many keys at once, and a cluster's nodes side by"
                      " side"),
+        # the replica protocol's copy of a keyspace, and Kafka's own
+        # cluster mirror: each ranked against migkit's copier on the hop's
+        # measured rate (`bulkways`), where the list's order only starts it
+        Rung("redisshake", "the keyspace copy by the replica protocol",
+             needs=(_moves("redisshake"), _installed("redis-shake")),
+             because="one snapshot of the whole keyspace as of the moment"
+                     " the source forked"),
+        Rung("mirror", "the cluster mirror",
+             needs=(_moves("mirror"),
+                    Need("its runner here", lambda f: bool(_mirror_runner()),
+                         "the cluster mirror is not installed here")),
+             because="Kafka's own Java clients, many partitions at once"),
         Rung("native", "the engine's own means", needs=(_moves("native"),)),
         # a single table goes by the table copier: resuming by chunk
         # matters more than raw speed there
@@ -181,6 +193,9 @@ def fitted(hop, engine, via):
     ways below it in `_ladder` are the fallback: one ladder for the pick
     and the fit, so the two cannot disagree on what comes next.
     """
+    from . import bulkways
+    if bulkways.measured(engine):
+        return bulkways.fitted(hop, engine, via)
     if via not in _FITS:
         return via, None
     import dataclasses
@@ -376,6 +391,8 @@ def supported(engine, via):
             "mongodump": engine == "mongodb",
             "mongosync": engine == "mongodb",
             "riotx": engine == "redis",
+            "redisshake": engine == "redis",
+            "mirror": engine == "kafka",
             "native": _native(engine)}.get(via, True)
 
 
@@ -416,7 +433,8 @@ def stream_supported(engine):
 #: is passed on with its name taken out.
 DRIVEN = ("pg_dump", "pg_restore", "pgcopydb", "psql", "mydumper",
           "myloader", "mysqlsh", "pgloader", "mongodump", "mongorestore",
-          "mongosync", "riotx")
+          "mongosync", "riotx", "redis-shake", "connect-mirror-maker.sh",
+          "dsbulk", "DocumentsFromSnapshotMigration")
 #: environment variables whose values are secrets, for the debug log
 _SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
 #: (DebugLog, secrets) for the run in progress, set by `run_via`
@@ -428,7 +446,9 @@ _DEBUG = None
 _RUNNING = None
 _RUNNING_LOCK = threading.Lock()
 LOADERS = ("pg_restore", "myloader", "mongorestore")
-COPIERS = ("pgcopydb", "pgloader", "mongosync", "riotx", "mysqlsh")
+COPIERS = ("pgcopydb", "pgloader", "mongosync", "riotx", "mysqlsh",
+           "redis-shake", "connect-mirror-maker.sh", "dsbulk",
+           "DocumentsFromSnapshotMigration")
 
 
 def _program_role(program):
@@ -7388,7 +7408,23 @@ def _movers():
             "pgloader": pgloader_move, "mongodump": mongodump_move,
             "mongosync": mongosync_move, "riotx": riotx_move,
             "native": native_move, "pgpull": legs.pull_move,
-            "pgsubscribe": legs.subscribe_move}
+            "pgsubscribe": legs.subscribe_move,
+            "redisshake": _redisshake_move, "mirror": _mirror_move}
+
+
+def _redisshake_move(hop, db, workers, go, log):
+    from . import redisshake
+    return redisshake.move(hop, db, workers, go, log)
+
+
+def _mirror_move(hop, db, workers, go, log):
+    from . import mirror
+    return mirror.move(hop, db, workers, go, log)
+
+
+def _mirror_runner():
+    from . import mirror
+    return mirror.runner()
 
 
 #: the programs each bulk path runs, in the order it runs them
@@ -7400,7 +7436,9 @@ PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
             "mongodump": ("mongodump", "mongorestore"),
             "mongosync": ("mongosync",),
             "riotx": ("riotx",),
-            "native": (), "pgpull": (), "pgsubscribe": ()}
+            "native": (), "pgpull": (), "pgsubscribe": (),
+            "redisshake": ("redis-shake",),
+            "mirror": ("connect-mirror-maker.sh",)}
 #: the programs a bulk path runs besides those, where they are installed:
 #: the MySQL bulk copy carries the tables chosen for the straight copy by it
 ALSO = {"mydumper": ("mysqlsh",)}
@@ -7419,6 +7457,9 @@ def programs(via):
     (`pgcopydb_runner`), so which program it is depends on the machine."""
     if via == "pgcopydb":
         return ("pgcopydb",) if pgcopydb_runner() == "local" else ("docker",)
+    if via == "mirror":
+        return (("docker",) if _mirror_runner() == "image"
+                else ("connect-mirror-maker.sh",))
     return PROGRAMS.get(via, ())
 
 

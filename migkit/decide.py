@@ -84,6 +84,14 @@ WORDS = {
               " {rung} cannot allow",
     "masked on the way": "the hop masks its columns on the way, which"
                          " {rung} cannot do",
+    "access history": "the target evicts keys by how recently or how often"
+                      " they were read, and {rung} does not carry that",
+    "certificate checked": "the hop checks the server's certificate, which"
+                           " {rung} cannot do",
+    "source position": "each message carries its source position, which"
+                       " {rung} cannot write",
+    "into an older server": "the target refuses the source's serialised"
+                            " values, which {rung} writes",
 }
 
 

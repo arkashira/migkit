@@ -46,7 +46,9 @@ TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "mirrormaker", "pgcompare", "ora2pg", "sqlines", "plpgsql_check",
          "sqlglot", "pglast", "mysqlsh", "mysql shell", "pg_basebackup",
          "pg_verifybackup", "openlogreplicator", "cobrix", "stingray",
-         "jt400", "apprise")
+         "jt400", "apprise", "redisshake", "dsbulk",
+         "connect-mirror-maker", "reindex-from-snapshot",
+         "documentsfromsnapshot")
 
 
 def _engine(tmp_path):

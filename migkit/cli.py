@@ -1628,6 +1628,9 @@ def movers_pick_and_run(hop, eng, db, go):
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     via, _ = movers.for_hop(hop, engine, "", go)
+    # the way the move takes too (`movers.fitted`): the one the pick
+    # names may not carry this hop, or be the fastest measured here
+    via, _ = movers.fitted(hop, engine, via)
     for d in ([db] if db else eng.databases()):
         if via == "builtin":
             _move_full(hop, eng, d, "", 500000, go)
@@ -1653,6 +1656,9 @@ def _table_plan(hop, eng, d, via, go=False):
         lister = getattr(eng, "_all_tables", None)
         tables = lister("src", d) if lister else eng.neutral_tables("src", d)
         facts = eng.table_facts("src", d)
+    except NotImplementedError:
+        # a keyspace or a cluster's topics: no table to plan
+        return []
     except Exception as e:
         from .movers import DRIVEN
         from .wording import without_programs
@@ -1790,7 +1796,13 @@ def _copy_routed(hop, eng, d, via, chunk, log):
     from . import movers
     if not hasattr(eng, "move_table"):
         return
-    routed = movers.routed_to_copier(hop, d, via, eng.neutral_tables("src", d),
+    try:
+        tables = eng.neutral_tables("src", d)
+    except NotImplementedError:
+        # a keyspace or a cluster's topics: nothing a bulk path leaves to
+        # the copier table by table
+        return
+    routed = movers.routed_to_copier(hop, d, via, tables,
                                      movers.qualifier_for(hop))
     if not routed:
         return

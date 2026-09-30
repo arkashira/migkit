@@ -888,48 +888,112 @@ class DynamoDBEngine(NeutralCopier, Engine):
 
     # ---- items copied as the service holds them ----------------------------
 
+    def _table_ways(self):
+        """How a table goes (`tableways`): through the service's own export
+        and import where the table is large enough to repay their wait,
+        its export and migkit's writer where the import cannot make the
+        table, and a parallel scan always (`ddbexport`)."""
+        from .. import ddbexport
+        from ..decide import Need, Rung
+        big = Need("a table large enough to repay the export's wait",
+                   lambda f: f["bytes"] >= ddbexport.EXPORT_FROM,
+                   "the table is small enough that a scan copies it before"
+                   " an export would have begun")
+        exported = Need("an export of the source", lambda f: f["export"]
+                        is None, lambda f: f["export"])
+        return (
+            Rung("import", "the service's own export and import, neither"
+                           " costing the tables' capacity",
+                 gives=frozenset({"consistent as of"}),
+                 needs=(big, exported,
+                        Need("a table the import can make",
+                             lambda f: f["import"] is None,
+                             lambda f: f["import"])),
+                 because="the table read and written by the service"
+                         " itself"),
+            Rung("export", "the service's own export, its items written by"
+                           " migkit",
+                 gives=frozenset({"consistent as of"}),
+                 needs=(big, exported),
+                 because="the source read by the service as of one moment,"
+                         " costing it no capacity"),
+            Rung("scan", "a parallel scan of the source",
+                 because="each item as the service holds it"),
+        )
+
     def native_bulk(self, db, tables, go, log, shape_only=()):
         """Each table's items copied as the service holds them - no value
-        converted, so a map, a list or a set arrives as it was - by a
-        parallel scan, one segment per worker (as many as the move worked
-        out it may run), each writing its items back 25 at a time. A table
-        the target lacks is made with the source's key, billing and
-        secondary indexes; one it has is emptied first."""
+        converted, so a map, a list or a set arrives as it was - by the way
+        climbed for it (`_table_ways`): the service's own export and
+        import, its export and migkit's writer, or a parallel scan, one
+        segment per worker (as many as the move worked out it may run),
+        each writing its items back 25 at a time. A table the target lacks
+        is made with the source's key, billing and secondary indexes -
+        by the import itself where it makes it; one the target has is
+        emptied first."""
         steps = [f"{t}: items copied as they are, by a parallel scan"
                  for t in tables]
         if not go:
             return steps
-        from concurrent.futures import ThreadPoolExecutor
+        from .. import ddbexport, tableways
+        from ..decide import Facts
         segments = max(1, int(getattr(self.hop, "workers_most", 0)
                               or self.hop.workers or 1))
-        for t in list(shape_only) + list(tables):
+        for t in list(shape_only):
             if t not in self.neutral_tables("dst", db):
                 self._made_like(db, t)
-        for t in tables:
-            self.neutral_empty("dst", db, t)
-            src, dst = self._name("src", db, t), self._name("dst", db, t)
 
-            def segment(i, src=src, dst=dst):
-                reader, writer = self._client("src"), self._client("dst")
-                start, moved = None, 0
-                while True:
-                    got = reader.scan(TableName=src, Segment=i,
-                                      TotalSegments=segments,
-                                      **({"ExclusiveStartKey": start}
-                                         if start else {}))
-                    items = got.get("Items", [])
-                    self._batch_write(writer, dst, [
-                        {"PutRequest": {"Item": item}} for item in items])
-                    moved += len(items)
-                    start = got.get("LastEvaluatedKey")
-                    if not start:
-                        return moved
-            with ThreadPoolExecutor(max_workers=segments) as pool:
-                moved = sum(pool.map(segment, range(segments)))
+        def run(way, t):
+            if way == "import":
+                moved = ddbexport.carry(self, db, t, True, log)
+                how = "by the service's export and import"
+            else:
+                if t not in self.neutral_tables("dst", db):
+                    self._made_like(db, t)
+                self.neutral_empty("dst", db, t)
+                if way == "export":
+                    moved = ddbexport.carry(self, db, t, False, log)
+                    how = "from the service's export"
+                else:
+                    moved = self._copy_by_scan(db, t, segments)
+                    how = f"in {segments} segments"
             self._describe_like(db, t)
             if log:
-                log(f"{t}: {moved:,} items copied in {segments} segments")
+                log(f"{t}: {moved:,} items copied {how}")
+            return moved
+        tableways.each(self, db, tables, self._table_ways(),
+                       lambda t: Facts(
+                           bytes=lambda: ddbexport.table_bytes(self, db, t),
+                           export=lambda: ddbexport.export_unfit(self, db,
+                                                                 t),
+                           **{"import": lambda: ddbexport.import_unfit(
+                               self, db, t)}),
+                       run, log)
         return steps
+
+    def _copy_by_scan(self, db, t, segments):
+        """One table by a parallel scan of the source, a segment a worker,
+        its items written back 25 at a time; the items copied."""
+        from concurrent.futures import ThreadPoolExecutor
+        src, dst = self._name("src", db, t), self._name("dst", db, t)
+
+        def segment(i):
+            reader, writer = self._client("src"), self._client("dst")
+            start, moved = None, 0
+            while True:
+                got = reader.scan(TableName=src, Segment=i,
+                                  TotalSegments=segments,
+                                  **({"ExclusiveStartKey": start}
+                                     if start else {}))
+                items = got.get("Items", [])
+                self._batch_write(writer, dst, [
+                    {"PutRequest": {"Item": item}} for item in items])
+                moved += len(items)
+                start = got.get("LastEvaluatedKey")
+                if not start:
+                    return moved
+        with ThreadPoolExecutor(max_workers=segments) as pool:
+            return sum(pool.map(segment, range(segments)))
 
     def _made_like(self, db, table):
         """The target table made with the source's key, billing and

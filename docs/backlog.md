@@ -3239,6 +3239,76 @@ batch goes as one transaction; one in lanes is read again after a stop,
 as before. The tail's reader and its lanes fail over through
 `decide.attempt`.
 
+**F7, the non-SQL tools used whole - built 2026-09-30, tests written, the
+full suite to run.** Each tool wrapped whole and accounted for option by
+option in `tooluse` (used, unused with why, topped up), its install
+recipe in `tools` (`doctor --install`), and every way it gives a rung:
+* **F7.rshake** (`redisshake.py`): readers climbed per database - the
+  hop's backup file or append-only file where named (`rdb_file`,
+  `aof_file`, `aof_timestamp`), the snapshot the source hands a replica,
+  a scan where the source refuses one; the hop's exclusions as the
+  program's key filters only where each says exactly what the pattern
+  says (held key by key against `Hop.excluded`); a cluster target's
+  database 0 through its script; the target's own limits read; every key
+  written as plain commands where the target refuses the source's
+  serialised form (read from the servers' versions, proved on one key);
+  the status port as progress. Its rung lacks certificate checks and
+  access history, so a hop that checks certificates or a target that
+  evicts takes migkit's copier.
+* **One Redis ladder, one Kafka ladder** (`bulkways.py`): the engine's
+  rungs out of `movers._ladder` climbed on the hop's measured rate
+  (`planner.record_rate` under each way's name), a way never timed
+  first; a copy the copier stopped goes on by the copier.
+* **F7.mm2** (`mirror.py`): Kafka's cluster mirror run from the Kafka
+  release or its image, told everything in a properties file of
+  migkit's: nothing written to the source (offset syncs on the target,
+  no heartbeat either way - measured: the flow back's heartbeat, left
+  on, made four topics in the source), committed messages only, the copy
+  ended where the source stood when it began (its saved positions read),
+  each partition's position kept where migkit's copier keeps it.
+  Exactly-once is off: its markers took 427 offsets over 200,000
+  messages, and the count is how a message written twice is found. Its
+  offset syncs and checkpoints are decoded as its binary schema writes
+  them and used as candidates proved by the message (measured: its
+  checkpoint put a group at 1 where the message was at 1001). Measured
+  against the copier on one broker pair, 200,000 messages: the copier
+  13.1 s, the mirror 76.6 s from its image, most of it its start. The
+  copier's own `offset_header` writes each message's source position in
+  a header, which places a group exactly where messages look alike.
+* **F7.kclamp** (`KafkaEngine._place`, `group_positions`): a group goes
+  to the target's offset of the message it reads next; where the target
+  lacks it, right after the last message it read, at the target's end,
+  and said; never past the target's end or before its start; a position
+  with nowhere to go is left and said. `repair_plan` places afresh
+  (at a cutover the source was just frozen) and its undo puts the
+  target's groups back, a group migkit made removed.
+* **F7.dsbulk** (`dsbulk.py`, `CassandraEngine._table_ways`): read out
+  in token-range splits sized from the workers, each cell's time to live
+  and write time kept, into a directory of this user's only, loaded
+  back, both runs resumable by their checkpoint; no error skipped; the
+  load's count and the loader's own count of the target held to the
+  read-out's. Passed over for counters, columns of many cells, and TLS
+  (not yet).
+* **F7.rfs** (`fromsnapshot.py`, `OpenSearchEngine._table_ways`): an
+  index copied out of a snapshot the hop names (`snapshot` on the
+  source), the source never searched; the reader built from its source
+  and proved by its own usage before it is trusted; the disk held to
+  twice the largest shard; its working index removed.
+* **F7.ddbexp** (`ddbexport.py`, `DynamoDBEngine._table_ways`): the
+  service's export (point-in-time recovery must already be on) taken
+  in by its import where the target lacks the table, by migkit's writer
+  where it has it; the manifest's MD5 and counts where written, the
+  export's count otherwise; a failed import's partial table removed; the
+  export's files removed however the way ends.
+* The per-table ladder of the native engines is one logic (`tableways`):
+  climbed on the seconds a row each way measured, a tool that cannot run
+  on a table said and switched past by `decide.attempt`, migkit's own
+  never skipped.
+
+Not measured here: the replica-protocol copy, the bulk loader and the
+snapshot reader are not installed on this machine, and no real AWS
+account is touched, so their ranks come from the first runs of a hop.
+
 ### Leapfrog: conversion (docs/research/leapfrog-conversion-2026-09-28.md)
 
 The paid converters cannot close the gap with more rules: none has the

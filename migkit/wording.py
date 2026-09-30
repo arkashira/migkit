@@ -43,6 +43,12 @@ PHASES = {
             " committing",
     "copy-table": "copying table by table",
     "keyspace": "copying the keyspace straight from source to target",
+    "mirror": "copying the topics straight from source to target, to where"
+              " the source stood when it began",
+    "snapshot": "copying the indexes from the source's own snapshot, the"
+                " cluster itself left unread",
+    "export": "the source's own export of each table, read from where it"
+              " was written",
     "indexes-off": "dropping secondary indexes for the load",
     "indexes-on": "rebuilding the secondary indexes",
     "statistics": "refreshing the target's statistics",

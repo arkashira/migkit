@@ -707,14 +707,39 @@ class OpenSearchEngine(NeutralCopier, Engine):
                 self._call(side, "DELETE", "/_search/scroll",
                            {"scroll_id": scroll}, missing_ok=True)
 
+    def _table_ways(self):
+        """How an index goes (`tableways`): out of the source's own
+        snapshot where the hop names one and the reader can carry it
+        (`fromsnapshot`), by migkit's sliced scroll always."""
+        from .. import fromsnapshot
+        from ..decide import Need, Rung
+        return (
+            Rung("snapshot", "the source's own snapshot, the cluster itself"
+                             " left unread",
+                 gives=frozenset({"resume by chunk"}),
+                 needs=(Need("the snapshot reader built here",
+                             lambda f: f["reader"],
+                             "the snapshot reader is not built here"),
+                        Need("an index it can carry",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"])),
+                 prove=fromsnapshot.prove,
+                 because="the snapshot's shards read on this machine, no"
+                         " search on the source"),
+            Rung("scroll", "a sliced scroll of the source",
+                 because="each document written with the source's own"
+                         " version of it"),
+        )
+
     def native_bulk(self, db, tables, go, log, shape_only=()):
         """Each index's documents copied as the source holds them - the
-        `_source`, the `_id` and the routing unchanged - by a sliced
-        scroll, a slice per worker, each written back through `_bulk` with
-        the source's own version of it (`_versioned`). An index the target
-        lacks is made with the source's mappings and analysis; while it
-        loads it keeps no replica and does not refresh, and gets both back
-        after.
+        `_source`, the `_id` and the routing unchanged - by the way climbed
+        for it (`_table_ways`): out of a snapshot of the source the hop
+        names, or by a sliced scroll, a slice per worker, each written
+        back through `_bulk` with the source's own version of it
+        (`_versioned`). An index the target lacks is made with the
+        source's mappings and analysis; while it loads it keeps no replica
+        and does not refresh, and gets both back after (`_loading`).
 
         What the target already holds is not emptied first: a document it
         holds at the source's version or a newer one is left, an older one
@@ -727,46 +752,26 @@ class OpenSearchEngine(NeutralCopier, Engine):
                  for t in tables]
         if not go:
             return steps
-        from concurrent.futures import ThreadPoolExecutor
+        from .. import fromsnapshot, tableways
+        from ..decide import Facts
         slices = max(1, int(getattr(self.hop, "workers_most", 0)
                             or self.hop.workers or 1))
         for t in list(shape_only) + list(tables):
             if t.lower() not in self.neutral_tables("dst", db):
                 self._made_like(db, t)
-        for t in tables:
-            src, dst = self._index("src", db, t), self._index("dst", db, t)
+
+        def run(way, t):
+            dst = self._index("dst", db, t)
             self._refresh("dst", db, t)
             held = int(self._call("dst", "GET", f"/{dst}/_count")
                        .get("count", 0))
-            kept = self._call("dst", "GET", f"/{dst}/_settings")
-            index_settings = ((kept.get(dst) or {}).get("settings") or {}
-                              ).get("index", {})
-            restore = {"number_of_replicas": index_settings.get(
-                           "number_of_replicas", "1"),
-                       "refresh_interval": index_settings.get(
-                           "refresh_interval", "1s")}
-            self._call("dst", "PUT", f"/{dst}/_settings",
-                       {"index": {"number_of_replicas": 0,
-                                  "refresh_interval": "-1"}})
-
-            def one(i, src=src, dst=dst):
-                body = {"size": 1000, "sort": ["_doc"],
-                        "seq_no_primary_term": True}
-                if slices > 1:
-                    body["slice"] = {"id": i, "max": slices}
-                moved = 0
-                for hits in self._scroll("src", src, body):
-                    self._bulk("dst", (self._versioned(h, dst)
-                                       for h in hits))
-                    moved += len(hits)
-                return moved
-            try:
-                with ThreadPoolExecutor(max_workers=slices) as pool:
-                    moved = sum(pool.map(one, range(slices)))
-            finally:
-                self._call("dst", "PUT", f"/{dst}/_settings",
-                           {"index": restore})
-                self._call("dst", "POST", f"/{dst}/_refresh")
+            with self._loading(dst):
+                if way == "snapshot":
+                    moved = fromsnapshot.copy_index(self, db, t, slices, log)
+                    how = "out of the source's snapshot"
+                else:
+                    moved = self._copy_by_scroll(db, t, slices)
+                    how = f"in {slices} slices"
             gone, refused = self._strays(db, t) if held else (0, 0)
             if refused:
                 raise SystemExit(
@@ -774,10 +779,61 @@ class OpenSearchEngine(NeutralCopier, Engine):
                     " the last minute refuse the source's version of them"
                     " for a minute more - move again after it")
             if log:
-                log(f"{t}: {moved:,} documents copied in {slices} slices"
+                log(f"{t}: {moved:,} documents copied {how}"
                     + (f", {gone:,} the source does not hold taken from"
                        " the target" if gone else ""))
+            return moved
+        tableways.each(self, db, tables, self._table_ways(),
+                       lambda t: Facts(
+                           reader=lambda: fromsnapshot.program() is not None,
+                           unfit=lambda: fromsnapshot.unfit(self, db, t)),
+                       run, log)
         return steps
+
+    def _loading(self, index):
+        """While `index` loads on the target: no replica and no refresh,
+        each put back as it was after, however the load ends."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def window():
+            kept = self._call("dst", "GET", f"/{index}/_settings")
+            index_settings = ((kept.get(index) or {}).get("settings")
+                              or {}).get("index", {})
+            restore = {"number_of_replicas": index_settings.get(
+                           "number_of_replicas", "1"),
+                       "refresh_interval": index_settings.get(
+                           "refresh_interval", "1s")}
+            self._call("dst", "PUT", f"/{index}/_settings",
+                       {"index": {"number_of_replicas": 0,
+                                  "refresh_interval": "-1"}})
+            try:
+                yield
+            finally:
+                self._call("dst", "PUT", f"/{index}/_settings",
+                           {"index": restore})
+                self._call("dst", "POST", f"/{index}/_refresh")
+        return window()
+
+    def _copy_by_scroll(self, db, t, slices):
+        """One index by a sliced scroll of the source, each document
+        written with the source's own version of it; the documents
+        copied."""
+        from concurrent.futures import ThreadPoolExecutor
+        src, dst = self._index("src", db, t), self._index("dst", db, t)
+
+        def one(i):
+            body = {"size": 1000, "sort": ["_doc"],
+                    "seq_no_primary_term": True}
+            if slices > 1:
+                body["slice"] = {"id": i, "max": slices}
+            moved = 0
+            for hits in self._scroll("src", src, body):
+                self._bulk("dst", (self._versioned(h, dst) for h in hits))
+                moved += len(hits)
+            return moved
+        with ThreadPoolExecutor(max_workers=slices) as pool:
+            return sum(pool.map(one, range(slices)))
 
     def _strays(self, db, table):
         """(deleted, refused): the target's documents of one index the

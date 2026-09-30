@@ -137,6 +137,9 @@ HOP_OPTIONS = {
                         "str"),
     "exclude_schema": Key("schemas left out of the schema dump", "str",
                           ("postgres",)),
+    "export_bucket": Key("s3://bucket/prefix the source's own export of a"
+                         " table is written under, for a copy that reads"
+                         " the table off it", "str", ("dynamodb",)),
     "fence_timeout": Key("seconds a fenced re-check waits", "int"),
     "fk_scan_seconds": Key("the budget of the orphaned-row scan", "int",
                            ("postgres",)),
@@ -169,6 +172,10 @@ HOP_OPTIONS = {
                   " behind", "str|list|dict", subs=("to", "events", "lag")),
     "evidence": Key("the evidence export: {sign: a private SSH key} it is"
                     " signed with", "dict", subs=("sign",)),
+    "offset_header": Key("each message the copy carries keeps its source"
+                         " partition and offset in a header, so a group's"
+                         " position is placed on the target exactly", "bool",
+                         ("kafka",)),
     "on_conflict": Key("source-wins or keep-target", "str"),
     "partition_by": Key("the column a stream partitions by", "str",
                         STREAMS),
@@ -432,6 +439,19 @@ ENDPOINT_OPTIONS = {
     "redis_product": Key("community, cloud or software: the Redis product"
                          " the target is, where its name cannot say",
                          "str", ("redis",)),
+    "rdb_file": Key("a backup file of the source's keyspace, read in its"
+                    " place so the server is left alone", "str",
+                    ("redis",)),
+    "aof_file": Key("the source's append-only file, read in its place",
+                    "str", ("redis",)),
+    "aof_timestamp": Key("the moment, in seconds since the epoch, the"
+                         " append-only file is read up to", "int",
+                         ("redis",)),
+    "snapshot": Key("a snapshot of the source an index may be copied from:"
+                    " its name, its repository on the source, and where its"
+                    " files are", "dict", ("opensearch",),
+                    subs=("name", "repository", "local_dir", "s3_uri",
+                          "s3_region")),
     "verify": Key("check the certificate", "bool", ("opensearch",)),
     "odbc_driver": Key("the ODBC driver's file", "str", ("ase",)),
     "replication": Key("a created keyspace's replication", "str|dict",
