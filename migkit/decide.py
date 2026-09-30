@@ -1107,18 +1107,27 @@ def remember(where, work, name):
     writes its position in a shape of its own. Written whole or not at
     all."""
     path = _kept_file(where)
-    got = _read(path)
-    got[str(work)] = name
-    _write(path, got)
+    with _KEPT_LOCK:
+        got = _read(path)
+        got[str(work)] = name
+        _write(path, got)
+
+
+#: one read-modify-write of a kept-ways file at a time: the tables of one
+#: move copy side by side, and two threads each reading the file, adding
+#: their own table and writing it back would lose one of the two
+_KEPT_LOCK = __import__("threading").RLock()
 
 
 def _write(path, got):
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.{__import__('threading').get_ident()}.tmp"
     with open(tmp, "w") as f:
         json.dump(got, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -1318,9 +1327,10 @@ def given_up(where, work):
 
 def _keep_given_up(where, work, name, rec):
     path = _kept_file(where)
-    got = _read(path)
-    got.setdefault(_up_key(work), {})[name] = rec
-    _write(path, got)
+    with _KEPT_LOCK:
+        got = _read(path)
+        got.setdefault(_up_key(work), {})[name] = rec
+        _write(path, got)
 
 
 def _cost_words(costs, failed, instead):
