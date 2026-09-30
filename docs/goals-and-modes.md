@@ -17,7 +17,7 @@ for the hop at hand, all from one table in the code (`hopkeys.GOALS`,
 | `two-way` | written: the target's changes carried to it by key, and its own told apart from what migkit wrote there, so nothing goes round | written the same way: the source's changes carried to it | a change made on either side arrives on the other once; where both sides changed one row, what only one side changed is kept and a column both changed is settled by its rule, alike on both sides (`two_way`: `on_conflict`, `tables`, `delete_vs_update`) |
 | `keep-in-sync` | read, and its log of changes followed for as long as it runs; nothing else is written to it | a copy kept level with the source, the application kept from writing to it (`protect_target`) | each cycle's changes compared, the stream's lag said, a difference named |
 | `rehearse` | a copy or a sample of the real run's source, read and followed as a cutover follows it; written only by a cutover the hop turns on, as the real run's would be | a target of its own, filled, followed and cut over to as the real run's will be; its own writes are timed there, rolled back | every phase measured and kept for the real run's forecast (the hop it names in `rehearses:`); the two sides proved equal before the real run is allowed to start |
-| `upgrade` | read and followed as a cutover follows it; never upgraded where it runs - its downtime is the cutover's alone | a server of the new version filled and followed, or a copy of the source's pages upgraded there by the new version's own upgrade (`physical: {upgrade: ...}`), then followed from the copy's position | what the new version removes or changes said before anything is written; the source's own statements planned, timed and held to the same answers on both versions |
+| `upgrade` | read and followed as a cutover follows it; never upgraded where it runs - its downtime is the cutover's alone | a server of the new version or of a higher edition (SQL Server Web to Enterprise, MySQL Community to Enterprise) filled and followed, or a copy of the source's pages taken there - SQL Server's own backup restored (`physical: {backup: DIR}`), MySQL's clone, PostgreSQL's pages - upgraded by the new version's own upgrade where the version moves (`physical: {upgrade: ...}`), then followed from the copy's position | what the new version removes or changes, and what the new edition lacks of what the source uses, said before anything is written; the source's own statements planned, timed and held to the same answers on both versions |
 | `subset` | read, never written: the rows chosen (`subset: {start: ...}`) and those they refer to | its tables in scope emptied and filled with the subset, masked on the way where the hop says (`mask_on_write`) | every reference in the copy resolves inside it; every row as the source's, its masked columns as the rule writes them, none beyond the subset |
 
 **`goal: cutover` does not turn `cutover:` on.** The goal sets up the
@@ -106,6 +106,38 @@ switched off, its writes frozen - each step reversible and behind the
 hop's approvals; after the flip it stays frozen until
 `migkit rollback HOP --db DB --apply`, or until the point of no return
 gives it back.
+
+## The case between the two servers
+
+A hop of one engine may still join two servers that differ, and migkit
+reads how from the servers themselves - never from an address - and says
+it as the first line of every plan (`the case: ...`). `migkit assess` and
+the check before the first write hold to each part, every refusal with its
+fix, all at once (`migkit/case.py`):
+
+| Case | What migkit reads | What it holds to |
+|---|---|---|
+| **a fork change** - MySQL, MariaDB or Percona Server; PostgreSQL, Citus, YugabyteDB, CockroachDB, and Amazon Aurora or AlloyDB where the server says it is one; Redis, Valkey, KeyDB or Dragonfly; Elasticsearch or OpenSearch; MongoDB, Percona Server for MongoDB, FerretDB or Azure Cosmos DB; Kafka or another broker of its protocol | one brand a side, from what only that software says of itself (`migkit/variants.py`) | what the source uses that the target has not: types, collations, extensions, module types, the commands migkit sends, a view's pipeline or a validator asked of the target, field types of the other search engine - and each fork's own ways: MariaDB's transaction ids and its JSON kept as text, Citus's distributed tables, each search engine's own users and roles |
+| **a version down** - a rollback plan, an older target | each side's version, compared only between two of one program | a copy of the pages refused up front (pages, a clone or a backup are read only by the version that wrote them or a newer one) and the logical copy chosen; what the newer source uses that the older target has not - identity and generated columns, partitioning, SQL-standard bodies, `NULLS NOT DISTINCT` (PostgreSQL); invisible columns, indexes on expressions, check constraints, `utf8mb4_0900_*` collations, SRIDs, window functions and `JSON_TABLE` in code (MySQL); types and collations of a later SQL Server, its compatibility level; time-series, clustered and encrypted collections (MongoDB); `BOOLEAN`, `VECTOR`, long names and extended strings (Oracle) |
+| **an edition change** - SQL Server Express, Web, Standard, Enterprise, Developer; Oracle XE, Free, SE2, EE; MySQL Community, Enterprise; MongoDB Community, Enterprise | each side's edition (`SERVERPROPERTY('Edition')`, `v$version`, `@@license`, `buildInfo`) | what the source's databases use that the target's edition lacks (`sys.dm_db_persisted_sku_features`, Oracle's partitioned, compressed and encrypted tables, MySQL's enterprise plugins and what uses them, MongoDB's encrypted storage, auditing, LDAP and Kerberos users): *stripped* - the logical copy makes the tables without it, the rows the same; *lost* - encryption at rest, auditing, change data capture - refused unless the hop accepts it; *refused* where what uses it cannot be made there. The target edition's caps against the source: Express's database size, the memory and cores Web, Standard and SE2 use. An edition down is said as the licence-driven move it is |
+
+The way is chosen by the same rungs as any hop's: a copy of the pages
+(SQL Server's own copy-only backup, proved by its checksums and restored;
+MySQL's clone; PostgreSQL's pages) holds only where the target's version
+and edition take what the pages hold - a clone needs every plugin its
+source runs on the target, a restore every feature the database holds -
+and the logical copy carries the rest.
+
+`goal: upgrade` takes an edition up as an upgrade: the target at the
+source's version, of a higher edition, is moved into as it is, and a copy
+of the pages needs no step after it. An edition down, or a version down,
+is `goal: cutover` or `copy`.
+
+What a change of edition may leave behind, the hop may accept by name:
+
+    options:
+      edition:
+        accept: [TransparentDataEncryption, audit]   # as assess names them
 
 ## A change on the source a faster way needs
 

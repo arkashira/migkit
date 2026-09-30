@@ -58,6 +58,11 @@ position the copy itself says it holds, never from a guess and never from
 * A cloud's copy (`cloudseed`): the provider's own seed position -
   `aurora_volume_logical_start_lsn()`, the restored instance's replay end,
   its GTID set - and the same continuation.
+* SQL Server: its own copy-only backup, proved by its checksums and
+  restored on the target (`backupseed`); the change tracking version the
+  restored copy holds, which the tail goes on from by key. Its rung holds
+  only where the target's edition has what the database holds
+  (`editions`).
 
 **Chosen, not assumed.** Each way is a `decide.Rung` with what it gives,
 what it needs, how it is proved and what it cost on this hop (`rungs`),
@@ -360,7 +365,13 @@ _EMPTY = Need("an empty target", ("dst_tables",),
                          " only onto an empty one"))
 
 def _upgrading(facts):
-    return (getattr(facts.hop, "goal", "") or "") == "upgrade"
+    """A hop whose goal upgrades the version: an upgrade of the edition
+    alone - the target at the source's version already - has no step
+    after the copy (`upgrade.edition_only`)."""
+    if (getattr(facts.hop, "goal", "") or "") != "upgrade":
+        return False
+    from . import upgrade
+    return not upgrade.edition_only(facts.hop, getattr(facts, "eng", None))
 
 
 #: a hop whose goal is an upgrade takes a copy of the pages only where it
@@ -778,6 +789,25 @@ class MyFacts(Facts):
         rows = self._q("src", "select distinct user from mysql.user")
         return {str(r[0]) for r in rows}
 
+    def _active(self, side):
+        return {str(r[0]) for r in self._q(
+            side, "select plugin_name from information_schema.plugins"
+                  " where plugin_status = 'ACTIVE'")}
+
+    def _src_active(self):
+        return self._active("src")
+
+    def _dst_active(self):
+        return self._active("dst")
+
+
+def _plugins_short(f):
+    """The plugins the source runs and the target does not - the clone's
+    own, which migkit puts on the target first, aside: MySQL's clone
+    refuses a target without every plugin its donor runs (an enterprise
+    edition's audit, firewall or thread pool into a community one)."""
+    return sorted(set(f["src_active"]) - set(f["dst_active"]) - {"clone"})
+
 
 def _granted(grants, privilege):
     """A dynamic privilege is listed by name wherever it is held: `GRANT
@@ -844,6 +874,13 @@ def _my_needs():
              lambda f: (f"{_said_count(f['not_innodb'])} are not InnoDB, and"
                         " a clone carries only InnoDB's data - those tables"
                         " would arrive empty")),
+        Need("every plugin the source runs, on the target too",
+             ("src_active", "dst_active"), lambda f: not _plugins_short(f),
+             lambda f: (f"{_said_count(_plugins_short(f))} run on the"
+                        " source and not on the target, and a clone needs"
+                        " every plugin its source runs on the target as"
+                        " well - put each on the target first (an edition"
+                        " without one moves logically)")),
         _EMPTY,
         Need("BACKUP_ADMIN on the source", ("src_backup_admin",),
              lambda f: f["src_backup_admin"],
@@ -933,7 +970,7 @@ CLONE = "the target cloning itself from the source"
 
 
 def _rungs():
-    from . import cloudseed
+    from . import backupseed, cloudseed
     local = (
         Rung("physical-pages", PAGES, gives=GIVES | {"pages proved"},
              needs=_pg_needs(), prove=_pg_prove, footprint=1,
@@ -945,7 +982,7 @@ def _rungs():
              because="a clone carries the pages and the indexes built and"
                      " decodes nothing", engine="mysql"),
     )
-    return local + cloudseed.rungs()
+    return local + backupseed.rungs() + cloudseed.rungs()
 
 
 def rungs(engine=None):
@@ -955,9 +992,11 @@ def rungs(engine=None):
 
 
 def facts_for(hop, eng, mode):
-    from . import cloudseed
+    from . import backupseed, cloudseed
     if (settings(hop) or {}).get("cloud"):
         return cloudseed.facts_for(hop, eng, mode)
+    if _engine_of(hop) == "mssql":
+        return backupseed.facts_for(hop, eng, mode)
     return (PgFacts if _engine_of(hop) == "postgres" else MyFacts)(
         hop, eng, mode)
 
@@ -1946,6 +1985,10 @@ def _upgrade_step(hop, eng, rec, dbs, go, log):
     from . import upgrade
     if upgrade.settings(hop) is None or rec is None:
         return
+    if upgrade.edition_only(hop, eng):
+        log("the copy is at the target's version already: the upgrade is"
+            " of the edition, and nothing is upgraded after it")
+        return
     if upgrade.upgraded(rec):
         log(f"the target was upgraded to {rec['upgraded'].get('version')}"
             f" on {rec['upgraded'].get('at')}; going on from it")
@@ -1998,6 +2041,9 @@ def carry(hop, eng, db, mode, go, log, ask=None):
             cloudseed.carry(hop, eng, rung, db, mode, go, log)
         elif rung.engine == "postgres":
             _pg_carry(hop, eng, rung, db, mode, go, log)
+        elif rung.engine == "mssql":
+            from . import backupseed
+            backupseed.carry(hop, eng, rung, db, mode, go, log)
         else:
             _my_carry(hop, eng, rung, db, mode, go, log)
         return True

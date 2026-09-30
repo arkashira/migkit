@@ -63,9 +63,19 @@ class MongoEngine(Engine):
         """
         def one(side):
             try:
-                return dict(self._client(side).admin.command("buildInfo"))
+                out = dict(self._client(side).admin.command("buildInfo"))
             except Exception:
                 return {}
+            # a command only Azure Cosmos DB answers: MongoDB refuses it as
+            # one it does not have, and its answer names the brand
+            try:
+                got = self._client(side).admin.command(
+                    "getLastRequestStatistics")
+                out["cosmos_request_charge"] = str(got.get("RequestCharge",
+                                                           ""))
+            except Exception:
+                pass
+            return out
         return (one("src"), one("dst"))
 
     def _server_versions(self):
