@@ -109,3 +109,6 @@ Then the queue above (live tail L/R/C/P items after tail_apply owners merge; eng
 - Cron replaced: 8dc4282b (every 10 min) with the rule above. Running 10: batch 1 (8) + a47bffb Oracle + a8d572b SQL Server.
 - 4e92945 write paths (a5bea35): measured way per table via decide.climb (`measured_ways`), MySQL staged upserts via pinned LOAD DATA LOCAL (only when local_infile already on), PG psycopg3 pipelined statements + binary COPY where exact, counters as one atomic upsert. Tests written-not-run: test_the_origin_is_taken_whichever_driver_writes.py, arrays expected strings, chooser pins, two-way tests vs merged writer.
 - Resumed: ae351bc MySQL tools (told to reuse measured_ways).
+- f5285cb R21 (ab097a0): addresses.py (hop from two addresses, SCHEMES), clouds.py (who runs each side), hopkeys.py (ONE option registry + did-you-mean + goal: table), guide.py (init as a guide), dba.py (scripts in each cloud's terms), imports.py (DMS task / change-capture connector / LOAD DATABASE). Not run: docker tests in test_init_is_the_guide.py; doctor docker tests (output grew); registry test vs keys added by write paths/others. Not built: R21 item 8 dashboard setup page.
+- RULE for every agent from now: any option key read must be declared in migkit/hopkeys.py; cloud detection lives in clouds.py.
+- Resumed: ad4909f physical rungs.
