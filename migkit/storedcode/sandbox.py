@@ -160,9 +160,9 @@ class Sandbox:
                                     " servers")
         from ..engines import engine_named
         from ..engines.hetero import HeteroEngine
+        from ..hopkeys import WRITING
         opts = {k: v for k, v in (self.hop.options or {}).items()
-                if k not in ("proof_sandbox", "cutover", "reverse",
-                             "topology")}
+                if k not in ("proof_sandbox", "cutover") and k not in WRITING}
         s, t = self.pair.src_name, self.pair.dst_name
         self.src = engine_named(s, Hop(
             name=f"{self.hop.name}-proof-src", engine=s,
