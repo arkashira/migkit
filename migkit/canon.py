@@ -1979,21 +1979,59 @@ def change(op, table, key, values=None, before=None, txn=None):
 
 
 #: what a change record carries from its source's log and no writer
-#: applies: the transaction it was made in, and whether it is that
-#: transaction's last change the reader handed back
-FROM_THE_LOG = ("txn", "txn_end")
+#: applies: the transaction it was made in, whether it is that
+#: transaction's last change the reader handed back, the position just
+#: after its commit and the time the source committed it
+FROM_THE_LOG = ("txn", "txn_end", "txn_at", "txn_ts")
 
 
-def ended(out, begun):
+def ended(out, begun, at=None, ts=None):
     """At a transaction's commit: mark the last change of it in `out` as
     its end (`txn_end`), where it handed back any - `begun` is how many
     changes `out` held when the transaction began. A batch cut after a
     change so marked holds whole source transactions and never half of
     one, which is what the connector's transaction metadata gives its
     readers too. A transaction the reader left all of out - on tables the
-    hop excludes - marks nothing."""
+    hop excludes - marks nothing.
+
+    `at` is the position a read started from there goes on after the
+    transaction - what the tail saves where it ends a batch at this
+    commit (`hetero.tail_apply`); `ts` the time the source committed it,
+    in seconds since the epoch - what the tail's beat says it has applied
+    through (`tailctl.beat`)."""
     if len(out) > begun:
         out[-1]["txn_end"] = True
+        if at is not None:
+            out[-1]["txn_at"] = at
+        if ts is not None:
+            out[-1]["txn_ts"] = float(ts)
+
+
+def ddl(table, kind, sql=None, to=None, txn=None):
+    """A change to a table's shape or its whole contents, at its place in
+    the source's log: `truncate`, `drop`, `rename` (to `to`), `create` or
+    `alter` - a DDL the log carries, as the reader found it (`sql` where it
+    has the statement's text). Not a row change: no writer applies one,
+    and the tail takes each out of its batch before anything else sees it
+    (`hetero.tail_apply`), cutting that table's changes there."""
+    if kind not in DDL_KINDS:
+        raise ValueError(f"unknown DDL kind {kind!r}, expected one of"
+                         f" {', '.join(DDL_KINDS)}")
+    out = {"op": "ddl", "table": str(table), "kind": kind}
+    if sql:
+        out["sql"] = str(sql)
+    if to:
+        out["to"] = str(to)
+    if txn is not None:
+        out["txn"] = txn
+    return out
+
+
+DDL_KINDS = ("truncate", "drop", "rename", "create", "alter")
+
+
+def is_ddl(change):
+    return change.get("op") == "ddl"
 
 
 #: classes whose values reach a writer as numbers or times, never as a

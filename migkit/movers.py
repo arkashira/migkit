@@ -5715,7 +5715,12 @@ def stream_ways():
              needs=(pg, Need("the target able to dial the source",
                              lambda f: follow_selected() != "follow",
                              "the target cannot dial the source"
-                             " (MIGKIT_CDC=follow)")),
+                             " (MIGKIT_CDC=follow)"),
+                    # asked last: it reads the source's publication
+                    Need("a source that takes tables into its publication"
+                         " without losing their changes",
+                         lambda f: not f.get("publication_risk"),
+                         lambda f: f["publication_risk"])),
              because="the servers' own replication, nothing running here"),
         Rung("tail", "migkit's own change tail",
              needs=(Need("a change tail", lambda f: f["tail"],
@@ -5725,7 +5730,8 @@ def stream_ways():
                          " not have"),
                     unless_measured(
                         "tail", lambda f: not (f["engine"] == "postgres"
-                                               and f["repl"]),
+                                               and f["repl"])
+                        or bool(f.get("publication_risk")),
                         "a PostgreSQL source's changes go by its servers'"
                         " replication or the leg run from here")),
              because="read and applied by migkit, by key, with every batch"
@@ -5760,25 +5766,29 @@ def stream_ways():
 PIPELINE_SAID = "migkit's streaming pipeline"
 
 
-def stream_way(hop, engine, repl, tail, ready, drop=False):
+def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None):
     """The `decide.Choice` of the way this hop's changes follow its source,
     from what the engine has (`repl`: its servers' replication, `tail`:
     migkit's change tail, `ready`: the tail's driver installed) and what
     each way was measured to cost on this hop; `drop` where the way is
-    being taken down rather than set up."""
+    being taken down rather than set up. `risk()`, where given, says why
+    the servers' own replication would lose a table's changes here
+    (`PostgresEngine.publication_add_risk`), read only if that way is
+    still in the running."""
     from .decide import climb
-    facts = stream_facts(hop, engine, repl, tail, ready, drop)
+    facts = stream_facts(hop, engine, repl, tail, ready, drop, risk)
     return climb(hop.name, stream_ways(), facts, costs=facts["costs"])
 
 
-def stream_facts(hop, engine, repl, tail, ready, drop=False):
+def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None):
     """What `stream_ways`' needs read, as `stream_way` climbs them and as
     `decide.attempt` runs them (`cli._cdc`): one reading of the hop."""
     from .decide import Facts, HopCosts
     return Facts({"engine": engine, "repl": bool(repl), "tail": bool(tail),
                   "ready": bool(ready), "costs": HopCosts(hop, "cdc/"),
                   "drop": bool(drop)},
-                 broker=lambda: tooluse.allowed("redpanda", hop))
+                 broker=lambda: tooluse.allowed("redpanda", hop),
+                 publication_risk=risk or (lambda: ""))
 
 
 def _target_writes(hop, db):
@@ -5811,6 +5821,12 @@ def follow_dir(hop, db):
 def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     """Carry changes to the target from where migkit runs, and stop at a
     position that can be named.
+
+    A catch-up with an end: the end is the source's position when the leg
+    is ready. Where the hop's `follow_until` is `stopped` the leg runs on
+    instead until asked - ctrl-c, a service manager's stop, `tail.stop`
+    (`_follow_until_asked`) - and the end is named then, so it still ends
+    where it can say it did (P3).
 
     `CREATE SUBSCRIPTION` makes the *target* dial the source, which plenty
     of migrations cannot do at all, and leaves the source's password in
@@ -5876,8 +5892,11 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
         f" target under origin {origin}",
         "tell the leg to apply as soon as it is ready"
         "   (without this nothing is ever applied)",
-        "end it at the source's position of that moment"
-        "   (the provable stop)",
+        ("keep it applying until asked to end (follow_until: stopped),"
+         " then end it at the source's position of that moment"
+         if _follow_runs(hop) else
+         "end it at the source's position of that moment"
+         "   (the provable stop)"),
         f"state kept in {d} - the source releases WAL as soon as the leg"
         " has written it there, so that directory is the only copy until"
         " the target has it",
@@ -5937,11 +5956,16 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     # what the target had taken before the leg, for its cost: the rows it
     # writes over the time from being told to apply to its end
     written = _target_writes(hop, db)
+    # the catch-up with an end, as it always was; or, where the hop's
+    # `follow_until` is stopped, a leg that runs until asked to end
+    running = _follow_runs(hop) and timeout is None
     with out.open("ab") as fh:
         proc = _sp.Popen(argv, stdout=fh, stderr=fh, env=env)
     try:
-        _follow_sentinel(d, env, proc, log)
+        _follow_sentinel(d, env, proc, log, end=not running)
         applying = time.monotonic()
+        if running:
+            _follow_until_asked(hop, db, d, env, proc, log)
         limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
         try:
             proc.wait(timeout=limit)
@@ -6044,15 +6068,76 @@ def follow_teardown(hop, db, go, log=None):
     return steps
 
 
-def _follow_sentinel(d, env, proc, log=None):
+def _follow_runs(hop):
+    """Whether the change leg run from here runs until asked to end, not
+    to the position of the moment it starts (P3): only where the hop's
+    `follow_until` says `stopped` - a leg with no word on it catches up
+    and ends, as it always did."""
+    from . import tailctl
+    return (hop.options or {}).get("follow_until") is not None \
+        and tailctl.until(hop) == "stopped"
+
+
+def _follow_until_asked(hop, db, d, env, proc, log=None):
+    """A leg left applying until someone asks it to end - ctrl-c, a
+    service manager's stop, or `tail.stop` beside the hop's position
+    (`tailctl`) - and then ended as a catch-up is: its end named at the
+    source's position of that moment, so what was written before the
+    request reaches the target. Marked running while it waits, for
+    `/metrics` and for a repair to see it; returns once the end is
+    named, for the caller to wait for the leg to reach it."""
+    import signal
+    import time as _t
+
+    from . import tailctl
+    where = hop.report_dir(db)
+    asked = []
+
+    def ask(*_):
+        asked.append(True)
+    try:
+        before = signal.signal(signal.SIGTERM, ask)
+    except ValueError:
+        before = None
+    try:
+        with tailctl.Running(where):
+            if log:
+                log("the change leg applies until it is asked to end:"
+                    f" ctrl-c, or `tail.stop` in {where}")
+            try:
+                while proc.poll() is None and not asked \
+                        and not tailctl.stop_asked(where):
+                    _t.sleep(2)
+            except KeyboardInterrupt:
+                asked.append(True)
+            if proc.poll() is not None:
+                return
+            if log:
+                log("asked to end: the leg applies up to the source's"
+                    " position of now, then stops")
+            _follow_end(d, env, log)
+    finally:
+        if before is not None:
+            signal.signal(signal.SIGTERM, before)
+
+
+def _follow_end(d, env, log=None):
+    """Name the stop of a running leg: the source's position of this
+    moment (`set endpos --current`). The leg applies up to it and exits."""
+    _sentinel_set(d, env, ["set", "endpos", "--current"], "end position",
+                  log)
+
+
+def _follow_sentinel(d, env, proc, log=None, end=True):
     """Turn the apply on and name the stop, once the run has made its
     sentinel. `follow` creates it at startup, so this cannot be done before
     the process exists - which is exactly why it is migkit's job and not a
-    line in a runbook somebody forgets."""
+    line in a runbook somebody forgets. `end` False leaves the stop to be
+    named later (`_follow_end`), for a leg that runs until asked."""
     import subprocess as _sp
     import time as _t
-    end = _t.monotonic() + 120
-    while _t.monotonic() < end:
+    ready_by = _t.monotonic() + 120
+    while _t.monotonic() < ready_by:
         if proc.poll() is not None:
             raise SystemExit("the CDC leg exited before it was told to"
                              " apply anything, so nothing reached the"
@@ -6065,18 +6150,24 @@ def _follow_sentinel(d, env, proc, log=None):
     else:
         raise SystemExit("the CDC leg never became ready to be told to apply;"
                          f" its log is {d / 'follow.log'}")
-    for args, why in ((["set", "apply"], "apply"),
-                      (["set", "endpos", "--current"], "end position")):
-        p = _sp.run(["pgcopydb", "stream", "sentinel"] + args + ["--dir",
-                    str(d)], capture_output=True, text=True, env=env)
-        if p.returncode:
-            from .wording import without_programs
-            raise SystemExit(f"could not set the {why} on the CDC leg:"
-                             + without_programs(
-                                 " " + (p.stderr or p.stdout)[-200:],
-                                 DRIVEN))
-        if log:
-            log(f"change stream {why} set")
+    _sentinel_set(d, env, ["set", "apply"], "apply", log)
+    if end:
+        _follow_end(d, env, log)
+
+
+def _sentinel_set(d, env, args, why, log=None):
+    """One setting of a running leg's sentinel, or a stop that says which
+    could not be set."""
+    import subprocess as _sp
+    p = _sp.run(["pgcopydb", "stream", "sentinel"] + args + ["--dir",
+                str(d)], capture_output=True, text=True, env=env)
+    if p.returncode:
+        from .wording import without_programs
+        raise SystemExit(f"could not set the {why} on the CDC leg:"
+                         + without_programs(
+                             " " + (p.stderr or p.stdout)[-200:], DRIVEN))
+    if log:
+        log(f"change stream {why} set")
 
 
 def stream_cannot_carry(hop, db, tables, columns_left_out=False):

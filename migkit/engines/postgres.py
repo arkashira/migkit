@@ -1605,6 +1605,8 @@ class PostgresEngine(Engine):
     PLUGIN = "test_decoding"
 
     READS_ORIGIN_MARK = True
+    SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_write_rules_cache",
+                    "_arrays_of", "_sparse_of")
 
     def origin_mark(self, side, db):
         """The mark of the rung this side stands on (`marks`), written
@@ -1631,7 +1633,7 @@ class PostgresEngine(Engine):
                             " on conflict (origin) do update set n ="
                             f" public.{twoway.TABLE}.n + 1, seen = coalesce("
                             f"excluded.seen, public.{twoway.TABLE}.seen)",
-                            (twoway.thread_origin(self.hop),
+                            (self._origin_row(),
                              twoway.batch_seen(self)))
 
     def _origin_table(self, side, db):
@@ -1931,7 +1933,7 @@ class PostgresEngine(Engine):
                     return None
                 cur.execute(f"select seen from public.{twoway.TABLE}"
                             " where origin = %s",
-                            (twoway.thread_origin(self.hop),))
+                            (self._origin_row(),))
                 got = cur.fetchone()
         finally:
             conn.close()
@@ -2211,6 +2213,43 @@ class PostgresEngine(Engine):
             return sorted(int(x) for x in got.split() if x)
         self._wait_visible(side, db, name, unseen)
 
+    def visible_now(self, side, db):
+        """Return once every transaction the commit log says committed and
+        a read cannot see yet has shown - those are the only ones a slot
+        can have decoded out of a read's sight (a commit a synchronous
+        standby holds is in the log and not shown). Only those found now
+        are waited for; a later one is after anything already read."""
+        target = self._d(side, db)
+
+        def hidden(xids):
+            if not xids:
+                return set()
+            listed = ",".join(str(x) for x in sorted(xids))
+            got = self._psql(side, target,
+                             "select x from unnest(array[" + listed
+                             + "]::bigint[]) x where txid_status(x)"
+                             " = 'committed'")
+            return {int(x) for x in got.split() if x}
+        _, _, running = self._snapshot_parts(self._psql(
+            side, target, "select txid_current_snapshot()::text"))
+        first = hidden(running)
+        began = time.time()
+        while first:
+            _, _, running = self._snapshot_parts(self._psql(
+                side, target, "select txid_current_snapshot()::text"))
+            first &= running
+            if not first:
+                return
+            if time.time() - began > self.VISIBLE_WAIT:
+                raise SystemExit(
+                    f"{len(first)} transactions committed are still out of"
+                    f" sight of any read after {self.VISIBLE_WAIT}s"
+                    f" (transaction ids {', '.join(map(str, sorted(first)[:5]))})"
+                    " - a synchronous standby that does not answer holds a"
+                    " commit this way. A table added to the tail is not"
+                    " copied around them; make the standby answer")
+            time.sleep(0.2)
+
     @staticmethod
     def _snapshot_parts(text):
         """(xmin, xmax, {in progress}) from `txid_current_snapshot()`."""
@@ -2284,10 +2323,12 @@ class PostgresEngine(Engine):
         # stayed at the last change, and on a quiet database never did.
         upto, local = self._log_end(ask, self._d(side, db), two_way)
         # each change with its transaction's xid, for the tail to hold to
-        # the marks the table copier kept (`mark_covers`)
+        # the marks the table copier kept (`mark_covers`); each commit with
+        # the time the source made it, for the tail's beat
         rows = self._slot_rows(side, db, "select lsn::text, xid::text, data"
                                          " from pg_logical_slot_peek_changes("
-                                         "%s, %s, %s"
+                                         "%s, %s, %s, 'include-timestamp',"
+                                         " 'true'"
                                + (", 'only-local', 'true'" if local else "")
                                + ")", (name, upto, int(limit)))
         self._marks_seen = []
@@ -2351,7 +2392,10 @@ class PostgresEngine(Engine):
                 marked, begun = None, len(out)
                 continue
             if data.startswith("COMMIT"):
-                canon.ended(out, begun)
+                # the commit's own position is where a read goes on after
+                # it, and its time is the source's (`include-timestamp`)
+                canon.ended(out, begun, at=lsn or None,
+                            ts=pgslot.commit_time(data))
                 continue
             if two_way and marked is None:
                 said = pgslot.mark_message(data)
@@ -2363,6 +2407,15 @@ class PostgresEngine(Engine):
             if parsed is None:
                 continue
             table = parsed["table"]
+            if parsed["op"] == "truncate":
+                # at its place among the rows, for the tail to cut the
+                # table's changes there (`canon.ddl`)
+                if not marked:
+                    out += [canon.ddl(t, "truncate", txn=int(xid)
+                                      if str(xid or "").isdigit() else None)
+                            for t in parsed["tables"]
+                            if not self.hop.excluded(db, *t.split("."))]
+                continue
             if two_way and str(table).split(".")[-1] == "migkit_origin":
                 if marked is None:
                     marked = {"kind": "table", "ident": None}
@@ -10222,6 +10275,64 @@ class PostgresEngine(Engine):
             return []
         return [f"alter subscription {name} refresh publication with"
                 " (copy_data = true);"]
+
+    #: the first minor release of each branch that decodes a table added
+    #: to a publication while it is written without losing its changes
+    #: (2025-05-08, "Avoid data loss when DDL operations that don't take a
+    #: strong lock affect tables that are being logically replicated": the
+    #: walsender decoded on with a stale catalogue and filtered the added
+    #: table's changes out). 12 and older were never fixed. The August
+    #: set (17.6, 16.10, 15.14, 14.19, 13.22) also stopped the fix
+    #: re-distributing invalidations until memory ran out - a failure that
+    #: says so, not a loss
+    PUBLICATION_ADD_FIXED = {17: 170005, 16: 160009, 15: 150013,
+                             14: 140018, 13: 130021}
+
+    def publication_add_risk(self, db):
+        """Why taking the hop's tables into its publication here could lose
+        changes, or "" where it cannot: the publication is there already,
+        some of the hop's tables are not in it - a run after tables were
+        added, whose `set table` takes them in while the application
+        writes them (`_publication_sql`) - and the source is older than
+        the minor release that fixed PostgreSQL losing such a table's
+        changes (`PUBLICATION_ADD_FIXED`). A publication made with every
+        table from the start is not that. Asked by the ladder of change
+        ways (`movers.stream_ways`), which takes migkit's own tail
+        instead: it reads every table from the slot and alters no
+        publication (research, leapfrog live tail, L8)."""
+        version = self._server_version("src", db)
+        if not version:
+            return ""
+        major = version // 10000
+        fixed = self.PUBLICATION_ADD_FIXED.get(major)
+        if major > max(self.PUBLICATION_ADD_FIXED) or (
+                fixed and version >= fixed):
+            return ""
+        name = self._repl_name()
+        try:
+            there = self._plan_rows("src", db, "select 1 from pg_publication"
+                                               f" where pubname = '{name}'")
+            if not there:
+                return ""
+            has = {t for (t,) in self._plan_rows(
+                "src", db, "select schemaname||'.'||tablename from"
+                f" pg_publication_tables where pubname = '{name}'")}
+            tables = [t for (t,) in self._plan_rows(
+                "src", db, "select schemaname||'.'||tablename from pg_tables"
+                " where schemaname not in ('pg_catalog','information_schema')"
+                " order by 1") if not self.hop.excluded(db, *t.split(".", 1))]
+        except RuntimeError:
+            return ""
+        new = [t for t in tables if t not in has]
+        if not new:
+            return ""
+        floor = (f"{fixed // 10000}.{fixed % 100}" if fixed
+                 else "a supported major version")
+        return (f"the publication would take in {len(new)} tables while"
+                f" they are written ({', '.join(new[:3])}"
+                + (" ..." if len(new) > 3 else "") + f"), and the source"
+                f" runs {major}.{version % 100}: before {floor} PostgreSQL"
+                " itself can lose the changes of a table added so")
 
     def loops_prevented(self, db):
         """Why streams both ways would send changes round for ever here,

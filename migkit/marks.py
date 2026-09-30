@@ -329,6 +329,79 @@ def settle(pair, db, token_path, exact, log):
     return name
 
 
+def exact_wanted(hop):
+    """Whether a one-way tail numbers its batches on the target (F7, R19
+    lever 11): by default, unless the hop's `exact_batches` is false."""
+    got = (hop.options or {}).get("exact_batches")
+    return got is None or bool(got)
+
+
+def settle_exact(pair, db, token_path, log):
+    """The rung a one-way tail numbers its batches on the target by, or
+    None where the target keeps none - the tail then reads again after a
+    stop what it cannot tell was applied, as it always did.
+
+    Only `table`: the rung that says which batch a side committed on
+    PostgreSQL, MySQL and MariaDB alike with no grant and no version
+    beyond making the table, and measured the cheapest of those that do on
+    PostgreSQL (204 us a transaction against the origin's 676, `COST`).
+    A tagged GTID or an origin proves itself through a read of the side's
+    own log (`mark_prove`), which a one-way target need not keep; the
+    table is proved by what it keeps: a batch's mark written in a
+    transaction of its own and read back (`origin_seen`). The number the
+    probe leaves is below every batch's (`hetero._saved_batch`), so it is
+    never taken for one."""
+    import secrets
+
+    dst = pair.dst_engine
+    if not exact_wanted(pair.hop) or not callable(
+            getattr(dst, "mark_facts", None)) or not callable(
+            getattr(dst, "origin_seen", None)):
+        return None
+    family = getattr(dst, "CANON_ENGINE", "")
+    if kept_rung(token_path) == "table":
+        dst._mark_rung, dst._numbered = "table", True
+        return "table"
+    try:
+        facts = dst.mark_facts("dst", db)
+    except Exception as e:  # noqa: BLE001 - not numbered, then
+        log("batches are not numbered on the target: its facts could not"
+            f" be read ({type(e).__name__})")
+        return None
+    r = rung(family, "table")
+    why = r.needs(facts) if r is not None else \
+        f"{family} keeps no batch of migkit's"
+    probe = -1 - secrets.randbits(30)
+    if not why:
+        dst._mark_rung, dst._numbered = "table", True
+        dst._batch_seen = json.dumps({"token": None, "batch": probe})
+        try:
+            with dst._apply_session("dst", db):
+                pass
+            got = dst.origin_seen("dst", db)
+            if not got or int(got.get("batch", 0)) != probe:
+                why = "the probe's mark did not read back"
+        except Exception as e:  # noqa: BLE001 - said, not numbered
+            why = (str(e).strip().splitlines() or [type(e).__name__])[0]
+        finally:
+            dst.__dict__.pop("_batch_seen", None)
+    if why:
+        dst.__dict__.pop("_numbered", None)
+        dst.__dict__.pop("_mark_rung", None)
+        log(f"batches are not numbered on the target ({why}): after a"
+            " stop the tail reads again from its saved position, as it"
+            " always did")
+        return None
+    got = saved(token_path)
+    got["rung"] = "table"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(json.dumps(got, default=str))
+    log("batches are numbered on the target (a row of migkit_origin): a"
+        " stop goes on after the last batch the target committed, not"
+        " from before it")
+    return "table"
+
+
 def climb(side_engine, db, exact, log):
     facts = dict(side_engine.mark_facts("dst", db), exact=bool(exact))
     ranked, _ = choose_rung(side_engine, facts)

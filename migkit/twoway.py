@@ -113,12 +113,14 @@ def refuse_unless_able(src, dst):
                 " (or MariaDB) sides")
 
 
-def thread_origin(hop):
+def thread_origin(hop, numbered=False):
     """The row of `migkit_origin` this applying thread moves: one a
     thread, so lanes applying side by side do not wait on one row - and
-    one for the hop where it counts (`exact`), whose batches are one
-    transaction each."""
-    if exact(hop):
+    one for the hop where it counts (`exact`), or where a one-way tail
+    numbers its batches (`numbered`, `marks.settle_exact`): a numbered
+    batch is one transaction, and the row is read back by whichever
+    thread, or process, goes on after a stop."""
+    if numbered or exact(hop):
         return hop.name
     return f"{hop.name}:{threading.get_ident() % 1024}"
 

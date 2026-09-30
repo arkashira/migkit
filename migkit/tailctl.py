@@ -14,7 +14,15 @@ Files in the database's report directory, nothing else:
 * `tail.paused`  written by the tail once it is holding still
 * `tail.beat`    written by the tail every time round its loop
 * `tail.stopped` what stopped it, when that was not a person
+* `tail.stop`    written by whoever wants it to end: it applies what it
+                 read, saves its position and ends between batches
 * `tail-source.json` which source the saved position belongs to
+
+How long it runs is the hop's `follow_until` (`until`): `stopped`, until
+asked - ctrl-c, a service manager's stop, `tail.stop` - or `caught_up`,
+until it has reached where the source's log was once it read to the end,
+which is what a run its schedule started does unless the hop says
+otherwise.
 """
 import json
 import os
@@ -23,7 +31,36 @@ import time
 
 PID, PAUSE, PAUSED = "tail.pid", "tail.pause", "tail.paused"
 BEAT, STOPPED = "tail.beat", "tail.stopped"
+STOP = "tail.stop"
 SOURCE = "tail-source.json"
+UNTIL = ("stopped", "caught_up")
+
+
+def until(hop, scheduled=False):
+    """How long a follow runs (`follow_until`): `stopped` or `caught_up`.
+    A run a schedule started ends once caught up unless the hop says
+    otherwise: left running, it held its slot until the schedule's
+    `max_duration` cut it off, and every slot counted as failed."""
+    got = (hop.options or {}).get("follow_until")
+    if got is None:
+        return "caught_up" if scheduled else "stopped"
+    got = str(got).strip().lower().replace("-", "_").replace(" ", "_")
+    if got not in UNTIL:
+        raise SystemExit(f"follow_until: {got} is not one of"
+                         f" {', '.join(UNTIL)} - run until asked to stop,"
+                         " or until caught up with the source")
+    return got
+
+
+def stop(where):
+    """Ask what follows here to end at its next batch, its position
+    saved."""
+    where.mkdir(parents=True, exist_ok=True)
+    (where / STOP).write_text(str(time.time()))
+
+
+def stop_asked(where):
+    return (where / STOP).exists()
 
 
 class Running:
@@ -37,11 +74,13 @@ class Running:
         # what stopped the last one, for whoever was told it had stopped
         self.was_stopped = _read(self.where / STOPPED)
         (self.where / STOPPED).unlink(missing_ok=True)
+        # a stop asked of a run that has ended is not asked of this one
+        (self.where / STOP).unlink(missing_ok=True)
         (self.where / PID).write_text(f"{socket.gethostname()} {os.getpid()}")
         return self
 
     def __exit__(self, kind=None, exc=None, tb=None):
-        for name in (PID, PAUSED, BEAT):
+        for name in (PID, PAUSED, BEAT, STOP):
             (self.where / name).unlink(missing_ok=True)
         if kind is not None and not issubclass(kind, KeyboardInterrupt):
             # ctrl-c and a service manager's stop are a person's; anything
@@ -62,15 +101,26 @@ def _read(path):
         return None
 
 
-def beat(where, caught_up_at, changes, room=None):
+def beat(where, caught_up_at, changes, room=None, through=None, lag=None,
+         tables=None):
     """Written every time round the tail's loop: when it last reached the
     end of the source's log, how many changes it has applied, and how much
     longer the source keeps what it has not read (`stream_room`). Written
-    whole or not at all, so a reader never sees half of it."""
+    whole or not at all, so a reader never sees half of it.
+
+    `through` is when the source committed the last change applied (its
+    log's own time, `canon.ended`), and `lag` how long that change took
+    from the source's commit to the target's - GoldenGate's end-to-end
+    latency and Q Replication's `END2END_LATENCY`, with no table on the
+    source; skewed by as much as the two clocks are apart. `tables` is
+    {state: tables in it} of a tail whose tables move on their own
+    (`tailtables`), with `set_aside_bytes`."""
     tmp = where / (BEAT + ".tmp")
     tmp.write_text(json.dumps({"at": time.time(),
                                "caught_up_at": caught_up_at,
-                               "changes": changes, "room": room}))
+                               "changes": changes, "room": room,
+                               "through": through, "lag": lag,
+                               "tables": tables}))
     os.replace(tmp, where / BEAT)
 
 
@@ -94,7 +144,8 @@ def state(where):
     out = {"running": alive(where) if marked else False,
            "marked": marked, "paused": (where / PAUSED).exists(),
            "stopped": was, "beat_age": None, "behind": None,
-           "changes": None, "room": None}
+           "changes": None, "room": None, "lag": None, "through": None,
+           "tables": None}
     b = _read(where / BEAT) if marked else None
     if b:
         now = time.time()
@@ -102,6 +153,9 @@ def state(where):
         out["behind"] = max(now - b["caught_up_at"], 0)
         out["changes"] = b.get("changes")
         out["room"] = b.get("room")
+        out["lag"] = b.get("lag")
+        out["through"] = b.get("through")
+        out["tables"] = b.get("tables")
     return out
 
 

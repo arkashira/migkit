@@ -162,7 +162,10 @@ def test_a_process_that_stops_is_left_and_the_read_asked_again(
     assert changes == list(range(10, 20)) and token == 20
     assert asked[-2:] == [("python-process", 10), ("python-thread", 10)]
     assert reader.names == ["python-thread"] and reader.on == "python-thread"
-    assert any("reading in a thread from the same position" in s
+    # the switch said in one line, as every way that fails is
+    # (`decide.attempt`)
+    assert any("the reader in a process of its own could not run" in s
+               and "switching to the reader in a thread" in s
                for s in said), said
 
 

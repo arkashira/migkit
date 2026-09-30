@@ -10,6 +10,9 @@ SKIP_DBS = {"master", "tempdb", "model", "msdb"}
 
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    #: a change tracking version only says where a read begins: one of its
+    #: own reads from an older one again, while the retention keeps it
+    REREADS_FROM_A_POSITION = True
 
     def _cmd(self, side, db, sql):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -1901,14 +1904,76 @@ class MSSQLEngine(DbapiRows, Engine):
                 version, op = r[0], str(r[1]).strip()
                 ident = dict(zip(key, r[2:2 + len(key)]))
                 values = dict(zip(cols, r[2 + len(key):-1]))
+                # the version is the transaction's that changed the row
+                # last: what the tail holds to a copy's marks
+                # (`mark_covers`)
                 if op == "D" or not r[-1]:
-                    found.append((version, canon.change("delete", t, ident)))
+                    found.append((version, canon.change(
+                        "delete", t, ident, txn=int(version))))
                 else:
                     found.append((version, canon.change(
                         "insert" if op == "I" else "update", t, ident,
-                        values)))
+                        values, txn=int(version))))
         found.sort(key=lambda x: x[0])
-        return [c for _, c in found], now
+        # the changes of one version are one transaction's, and a read
+        # from a version goes on after it
+        out, group = [], []
+        for i, (version, c) in enumerate(found):
+            group.append(c)
+            if i + 1 == len(found) or found[i + 1][0] != version:
+                canon.ended(group, 0, at=int(version))
+                out += group
+                group = []
+        return out, now
+
+    def snapshot_mark(self, side, db):
+        """The database's change tracking version now, after the database
+        it was read in (`database_id` and its creation time on this
+        server): every transaction at or below it has committed, and a
+        read begun after it sees it. None where the database tracks no
+        changes."""
+        on = self._marked_on(side, db)
+        try:
+            got = self.run_rule(side, db, "select"
+                                " change_tracking_current_version()")
+        except Exception:  # noqa: BLE001 - no tracking, no mark
+            return None
+        if not on or not got or got[0][0] is None:
+            return None
+        return f"{on}|{int(got[0][0])}"
+
+    def _marked_on(self, side, db):
+        """The database a mark belongs to - its server, its id there and
+        when it was made - asked once: a version means nothing in another
+        database."""
+        known = self.__dict__.setdefault("_marks_on", {})
+        if (side, db) not in known:
+            try:
+                got = self.run_rule(side, db, "select @@servername, db_id(),"
+                                    " convert(varchar(30), (select"
+                                    " create_date from sys.databases where"
+                                    " database_id = db_id()), 126)")
+                known[(side, db)] = ("/".join(str(x) for x in got[0])
+                                     if got else None)
+            except Exception:  # noqa: BLE001 - no mark, then
+                known[(side, db)] = None
+        return known[(side, db)]
+
+    def mark_covers(self, side, db, mark, change):
+        """Whether the change's version (`txn`, the transaction that last
+        changed the row) is at or below the mark's, in the same
+        database."""
+        version = change.get("txn")
+        if not isinstance(mark, str) or not isinstance(version, int) \
+                or isinstance(version, bool):
+            return None
+        on, _, at = mark.rpartition("|")
+        if not on or on != self._marked_on(side, db):
+            return None
+        try:
+            return version <= int(at)
+        except ValueError:
+            return None
 
     # the same-engine hop keeps its target following through the pair's
     # tail, which reads the feed above and applies by key

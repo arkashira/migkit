@@ -164,6 +164,19 @@ def tail_stopped(hop, db, stopped, log):
                 True, f"migkit-{hop.name}-{db}-tail", log)
 
 
+def table_parked(hop, db, table, why, log):
+    """One table of a running tail set aside (`tailtables`): the tail goes
+    on for every other table, and this one waits for its target."""
+    from . import masking
+    if masking.active(hop):
+        why = "its target does not follow its source's shape"
+    text = (f"migkit: the change tail of {hop.name} {db} parked {table}:"
+            f" {why}. The other tables go on")
+    return send(hop, text, {"event": "table parked", "hop": hop.name,
+                            "db": db, "table": table, "why": why},
+                True, f"migkit-{hop.name}-{db}-{table}-parked", log)
+
+
 def tail_started(hop, db, log):
     """A tail that had stopped with an error is running again."""
     text = f"migkit: the change tail of {hop.name} {db} is running again"

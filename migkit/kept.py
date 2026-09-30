@@ -350,10 +350,14 @@ class Keeper:
         out or mapped: what the source's leaves move by."""
         self.batch = list(changes)
 
-    def saved(self, applied, token, before):
+    def saved(self, applied, token, before, unkept=()):
         """The tail is about to save `token`, having written `applied`
         since `before`: the leaves moved by the batch, committed with the
-        position they now stand at."""
+        position they now stand at. `unkept`: the source's tables whose
+        target the batch did not keep in step with their changes - one
+        being copied beside the tail, one parked, one emptied on the
+        target (`tailtables`) - whose every leaf is read again at the next
+        proof."""
         st = self.store
         tables = self.tables()
         if not st.get("seeded"):
@@ -374,6 +378,10 @@ class Keeper:
         # {id of a row image: its hashes}, for the batch: the tail writes
         # the image it read wherever the hop maps nothing
         self.hashed, self.unplaced = {}, set()
+        for name in unkept:
+            t = by_src.get(self.pair._leaf(name))
+            if t is not None:
+                self.unplaced.add(t.name)
         for c in self.batch:
             t = by_src.get(self.pair._leaf(c["table"]))
             if t is not None:

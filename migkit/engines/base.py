@@ -4579,6 +4579,15 @@ class Engine:
         change out."""
         return None
 
+    def visible_now(self, side, db):
+        """Return once every transaction this side's log already holds is
+        visible to a read begun after - where the engine logs a commit
+        before it shows it. A table that joins a running tail is copied
+        only after this (`tailtables`): the tail left out its changes up to
+        where it had read, and a copy that could not see one of them would
+        leave it nowhere. Nothing to wait for here."""
+        return None
+
     def marked_rule(self, side, db, sql):
         """(mark before, the rows `sql` answers, mark after): what this
         side had made visible just before the read and just after it
@@ -4604,6 +4613,33 @@ class Engine:
     #: tail must not read ahead of what it applied
     READS_AHEAD = False
 
+    #: whether a reader of its own can read this engine's log again from
+    #: an older position without moving the tail's: a table that left a
+    #: tail and comes back gets its changes since from there
+    #: (`tailtables`). Not a PostgreSQL slot, which is read once
+    REREADS_FROM_A_POSITION = False
+
+    #: whether a read can end inside a source transaction, its position
+    #: saying only where to read on from: the tail then ends a batch at
+    #: the last commit it holds and reads the rest again
+    #: (`hetero.tail_apply`, F7)
+    READ_ENDS_INSIDE_TRANSACTIONS = False
+
+    #: the DDLs of this engine's log that stop a tail whose hop's `ddl` is
+    #: stop (`tailtables`): those the tail stopped on before there was a
+    #: `ddl` - and a table emptied, which was carried by nothing
+    DDL_STOPS = ("truncate",)
+
+    #: the caches of this engine's own that hold a table's columns, taken
+    #: away once a DDL has changed the table under them (`forget_shapes`)
+    SHAPE_CACHES = ("_column_rules_of", "_ordered_of")
+
+    def forget_shapes(self):
+        """What this engine keeps of its tables' columns, forgotten: a
+        column added under it is asked for again, not written without."""
+        for name in self.SHAPE_CACHES:
+            self.__dict__.pop(name, None)
+
     def release_changes(self):
         """Let go of what `neutral_changes` holds open from one read to the
         next - a stream, a connection - once the tail is done with it."""
@@ -4622,24 +4658,36 @@ class Engine:
         the dialect differs. An engine that grew its own copy of the loop
         would be one bug fix away from behaving differently on one target.
         """
+        from .. import decide
         lanes = self._lanes(side, db, changes)
-        if lanes:
-            try:
-                self._apply_lanes(side, db, lanes)
+
+        def run(choice):
+            if choice.rung.name == "lanes":
+                try:
+                    self._apply_lanes(side, db, lanes)
+                except Exception as e:
+                    # a lane that failed - a deadlock between two, a value
+                    # two lanes' rows both claimed - may leave the others
+                    # committed; every change is a row's final state or its
+                    # removal, so the whole batch applied again, in one
+                    # transaction and in order, puts the target right
+                    raise _LaneFailed(str(e).strip().splitlines()[0][:200]
+                                      if str(e).strip()
+                                      else type(e).__name__) from e
                 return len(changes)
-            except Exception:  # noqa: BLE001 - the batch again, whole
-                # a lane that failed - a deadlock between two, a value
-                # two lanes' rows both claimed - may leave the others
-                # committed; every change is a row's final state or its
-                # removal, so the whole batch applied again, in one
-                # transaction and in order, puts the target right, and
-                # raises if it cannot
-                self.__dict__["lane_retries"] = \
-                    self.__dict__.get("lane_retries", 0) + 1
-        n = 0
-        with self._apply_session(side, db):
-            n = self._apply_each(side, db, changes)
-        return n
+            with self._apply_session(side, db):
+                return self._apply_each(side, db, changes)
+
+        def undo(rung, error):
+            self.__dict__["lane_retries"] = \
+                self.__dict__.get("lane_retries", 0) + 1
+        # the one runtime fallback (`decide.attempt`): only the lanes'
+        # failure switches; one of the batch's own transaction is raised as
+        # it is - a connection lost there is the tail's to read again
+        return decide.attempt(
+            "applying a batch", _apply_ways(), run,
+            decide.Facts({"lanes": bool(lanes)}), undo=undo,
+            switch=lambda e: isinstance(e, _LaneFailed))[1]
 
     #: changes a batch holds before it is applied in lanes side by side
     LANES_FROM = 2000
@@ -4820,9 +4868,12 @@ class Engine:
             held = self._apply_held()
             held.conn = conn
             try:
-                if (self.hop.options or {}).get("two_way"):
+                if (self.hop.options or {}).get("two_way") \
+                        or self.__dict__.get("_batch_seen"):
                     # first in the transaction, so the tail reading this
-                    # side the other way leaves the whole of it out
+                    # side the other way leaves the whole of it out - and
+                    # on a one-way tail that numbers its batches, so the
+                    # side says which it committed last (`marks`)
                     self.origin_mark(side, db)
                 yield
                 conn.commit()
@@ -4840,6 +4891,14 @@ class Engine:
     #: whether this engine's change reader leaves out the transactions a
     #: two-way tail applied (`twoway`)
     READS_ORIGIN_MARK = False
+
+    def _origin_row(self):
+        """The row of `migkit_origin` this thread's batch moves
+        (`twoway.thread_origin`): the hop's own where its batches are
+        numbered."""
+        from .. import twoway
+        return twoway.thread_origin(self.hop,
+                                    bool(self.__dict__.get("_numbered")))
 
     def origin_mark(self, side, db):
         """Write this thread's row of `migkit_origin` in the transaction
@@ -5236,6 +5295,23 @@ def sizes_of(lengths, exact=False, rows=None):
             "mean": sum(got) / len(got),
             "rows": rows if rows is not None else len(got),
             "exact": bool(exact)}
+
+
+class _LaneFailed(RuntimeError):
+    """A lane of a batch that failed, for the batch to go in one
+    transaction instead (`Engine.neutral_apply`)."""
+
+
+def _apply_ways():
+    """How a batch of changes is applied (`Engine.neutral_apply`): in
+    lanes side by side where the batch is large enough and its tables
+    allow (`_lanes`), else - or where a lane fails - in one transaction,
+    in the batch's order."""
+    from ..decide import Need, Rung
+    return (Rung("lanes", "in lanes side by side",
+                 needs=(Need("lanes", lambda f: f["lanes"],
+                             "the batch goes in one transaction"),)),
+            Rung("one", "in one transaction, in the batch's order"))
 
 
 class NeutralCopier:

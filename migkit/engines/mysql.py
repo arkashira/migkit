@@ -122,6 +122,12 @@ class MySQLEngine(Engine):
     #: a binlog position only says where to read from: the tail may read
     #: the next batch before the one before it is applied
     READS_AHEAD = True
+    REREADS_FROM_A_POSITION = True
+    #: a read stops inside a transaction larger than what is left of it
+    #: (`neutral_changes`), and goes on from there
+    READ_ENDS_INSIDE_TRANSACTIONS = True
+    SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_generated_cache",
+                    "_unique_counts", "_types_loaded")
 
     def neutral_tables(self, side, db):
         return self._tables(side, db)
@@ -944,13 +950,17 @@ class MySQLEngine(Engine):
                        **{t: "log_bin_compress" for t in range(166, 172)}}
 
     @staticmethod
-    def _row_events(stream, marks=()):
+    def _row_events(stream, marks=(), ddl=False, when=None):
         """The stream's events, with each compressed transaction's opened
         in its place (`binlog_payload`), and `COMMITTED` wherever a
         transaction has ended: after its XID, after a compressed one, and
         after a statement that commits on its own. A position is only ever
         kept at one of those - see `neutral_changes`. `marks`: the events
-        a two-way tail's marks travel in (`binlog_marks`), kept too."""
+        a two-way tail's marks travel in (`binlog_marks`), kept too.
+        `ddl`: a statement that commits on its own is handed on too, before
+        its `COMMITTED` - the DDL at its place among the rows. `when`, a
+        dict, is given the time the source wrote each commit (`ts`) before
+        its `COMMITTED`."""
         from pymysqlreplication.event import QueryEvent, XidEvent
 
         from ..binlog_payload import TransactionPayloadEvent
@@ -960,8 +970,12 @@ class MySQLEngine(Engine):
                 # inside the compressed transaction with its rows
                 yield from (e for e in ev.events if hasattr(e, "rows")
                             or isinstance(e, marks))
+                if when is not None:
+                    when["ts"] = getattr(ev, "timestamp", None)
                 yield COMMITTED
             elif isinstance(ev, XidEvent):
+                if when is not None:
+                    when["ts"] = getattr(ev, "timestamp", None)
                 yield COMMITTED
             elif isinstance(ev, QueryEvent):
                 said = ev.query
@@ -969,6 +983,10 @@ class MySQLEngine(Engine):
                     said = said.decode("utf-8", "replace")
                 if not str(said).strip().upper().startswith(
                         ("BEGIN", "XA START", "XA END")):
+                    if ddl:
+                        yield ev
+                    if when is not None:
+                        when["ts"] = getattr(ev, "timestamp", None)
                     yield COMMITTED
             else:
                 yield ev
@@ -1039,8 +1057,41 @@ class MySQLEngine(Engine):
                 cur.execute(f"insert into {name} (origin, n, seen) values"
                             " (%s, 1, %s) on duplicate key update n = n + 1,"
                             " seen = coalesce(values(seen), seen)",
-                            (twoway.thread_origin(self.hop),
+                            (self._origin_row(),
                              twoway.batch_seen(self)))
+
+    def _ddl_of(self, ev, side, db, gtid, keys_of):
+        """[canon.ddl] for a statement the binlog carries as text, one for
+        each table of the tail's database it touches and the hop does not
+        leave alone; each such table's key forgotten, to be asked again
+        at its next row. A statement run from another database that names
+        a table of this one counts; one naming another database's does
+        not."""
+        from .. import canon, logddl
+        here = self._d(side, db)
+        sql = ev.query.decode("utf-8", "replace") \
+            if isinstance(ev.query, bytes) else str(ev.query)
+        out = []
+        for d, t, kind, to in logddl.mysql(ev.query, ev.schema):
+            if to is not None and to[0] != here:
+                # renamed into another database: gone from this one
+                kind, to = ("drop", None)
+            if d != here:
+                if kind == "rename" and to is not None:
+                    # renamed into this one from another: a table made here
+                    d, t, kind, to = here, to[1], "create", None
+                else:
+                    continue
+            for name in (t, to[1] if to else None):
+                if name is not None:
+                    keys_of.pop(name, None)
+            if self.hop.excluded(db, t) and not (
+                    to is not None and not self.hop.excluded(db, to[1])):
+                continue
+            out.append(canon.ddl(t, kind, sql=sql[:4000],
+                                 to=to[1] if to is not None else None,
+                                 txn=gtid))
+        return out
 
     @staticmethod
     def _mark_in(ev):
@@ -1289,7 +1340,7 @@ class MySQLEngine(Engine):
                     return None
                 cur.execute(f"select seen from {self._my_ident(self._d(side, db))}"
                             f".`{twoway.TABLE}` where origin = %s",
-                            (twoway.thread_origin(self.hop),))
+                            (self._origin_row(),))
                 got = cur.fetchone()
         finally:
             conn.close()
@@ -1371,6 +1422,7 @@ class MySQLEngine(Engine):
             stream, events = held["stream"], held["events"]
             boundary, in_txn, skip = held["boundary"], held["in_txn"], 0
             keys_of, gtid = held["keys_of"], held["gtid"]
+            when = held["when"]
         else:
             if held:
                 held["stream"].close()
@@ -1388,7 +1440,10 @@ class MySQLEngine(Engine):
                              XidEvent, QueryEvent, GtidEvent, register(),
                              *mark_events],
                 filter_non_implemented_events=False)
-            events = self._row_events(stream, mark_events)
+            # each commit's time, as the source wrote it (`canon.ended`)
+            when = {}
+            events = self._row_events(stream, mark_events, ddl=True,
+                                      when=when)
             boundary = {"log_file": token.get("log_file"),
                         "log_pos": token.get("log_pos")}
             in_txn, skip = 0, int(token.get("skip_rows") or 0)
@@ -1407,10 +1462,13 @@ class MySQLEngine(Engine):
         try:
             for ev in events:
                 if ev is COMMITTED:
-                    canon.ended(out, begun)
-                    begun = len(out)
                     boundary = {"log_file": stream.log_file,
                                 "log_pos": stream.log_pos}
+                    # where a read goes on after it: a batch the tail ends
+                    # here saves this (`hetero.tail_apply`)
+                    canon.ended(out, begun, at=dict(boundary),
+                                ts=when.pop("ts", None))
+                    begun = len(out)
                     in_txn, skip, marked, gtid = 0, 0, None, None
                     token = dict(boundary)
                     if len(out) >= limit:
@@ -1429,6 +1487,12 @@ class MySQLEngine(Engine):
                     if got and not marked:
                         marked = got
                         seen.append(marked)
+                    continue
+                if isinstance(ev, QueryEvent):
+                    # a DDL, at its place among the rows, for each table of
+                    # this database it touches (`canon.ddl`); a table whose
+                    # key it may have changed is asked for its key again
+                    out += self._ddl_of(ev, side, db, gtid, keys_of)
                     continue
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:
@@ -1527,7 +1591,8 @@ class MySQLEngine(Engine):
                 self.__dict__["_binlog_held"] = {
                     "token": token, "where": (side, db), "stream": stream,
                     "events": events, "boundary": boundary,
-                    "in_txn": in_txn, "keys_of": keys_of, "gtid": gtid}
+                    "in_txn": in_txn, "keys_of": keys_of, "gtid": gtid,
+                    "when": when}
             else:
                 stream.close()
         if skipped:
@@ -1751,6 +1816,13 @@ class MySQLEngine(Engine):
         point = self.change_point(side, db)
         self._commits_under_way(side)
         return point
+
+    def visible_now(self, side, db):
+        """The commits under way waited out (`_commits_under_way`): MySQL
+        writes a transaction to its binlog before the engine commits it,
+        so one a tail has already read can still be out of a read's
+        sight."""
+        self._commits_under_way(side)
 
     #: how long a copy waits for the commits under way when its position
     #: is taken, before it stops rather than read around them

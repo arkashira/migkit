@@ -3,6 +3,7 @@ import signal
 import sys
 import time
 
+from .. import tailtables
 from ..util import is_transient
 from .base import Engine, RepairAction, Result
 
@@ -3359,13 +3360,67 @@ class HeteroEngine(Engine):
                 " Keep the key's columns.")
         return out
 
+    def _to_target(self, db, changes, targets, accounts=None):
+        """(the source's changes as the target takes them, how many values
+        landed as NULL): out of the hop's row filter turned into deletes
+        (`_in_scope`), under the target's table and column names, each
+        value in the form the target keeps (`_typed_change`,
+        `_mapped_change`) - the one way the tail and a reader beside it
+        (`carry`) put a change on the target. `accounts` hears of the
+        deletes a key moved out of the filter adds, and of each table's
+        target name (`_Accounts`)."""
+        if not changes:
+            return [], 0
+        kept = changes
+        changes = self._in_scope(db, changes)
+        if accounts is not None:
+            accounts.grown(kept, changes)
+        mapped = []
+        for c in changes:
+            to = self._tail_target(targets, c["table"])
+            if accounts is not None:
+                accounts.named(c["table"], to)
+            mapped.append(dict(self._mapped_change(
+                db, self._typed_change(db, c, to)), table=to))
+        return self._flatten_changes(mapped)
+
+    def carry(self, db, changes):
+        """Changes of the source applied to the target as the tail applies
+        them, for a reader beside it (`tailtables`, a table's changes since
+        it left, read again)."""
+        from .. import canon
+        bare = [{k: v for k, v in c.items() if k not in canon.FROM_THE_LOG}
+                for c in changes if not canon.is_ddl(c)]
+        out, _ = self._to_target(db, bare, self._tail_targets(db))
+        if out:
+            self.dst_engine.neutral_apply("dst", db, out)
+
+    @staticmethod
+    def _commit_cut(changes):
+        """Where a batch ends at the last source commit it holds: the
+        length of the batch through the last change a transaction ended
+        at that says where a read goes on after it (`txn_at`), or None
+        where it ends at one already, or holds none (one transaction
+        larger than a read, carried in parts as before). The rest of the
+        batch is read with the next: a transaction that fits a batch is
+        never split across two - which a target shows as half of it for
+        as long as the next batch takes (F7; GoldenGate's GROUPTRANSOPS
+        ends a group at a commit the same way)."""
+        if not changes or changes[-1].get("txn_end"):
+            return None
+        for i in range(len(changes) - 1, -1, -1):
+            if changes[i].get("txn_end") and \
+                    changes[i].get("txn_at") is not None:
+                return i + 1
+        return None
+
     def _tail_target(self, targets, table):
         # a table made on the source after the tail began goes by its
         # mapped name, as the move would have sent it
         return (targets.get(self._leaf(table))
                 or self._leaf(self._rename(table)))
 
-    def _shape_gate(self, db, token_path, position):
+    def _shape_gate(self, db, token_path, position, skip=(), stop=True):
         """The source's column shape the tail may apply under, or None
         where it cannot be read cheaply.
 
@@ -3378,15 +3433,25 @@ class HeteroEngine(Engine):
         and says what changed. Only where the catalogue is one query: a
         document store's shape is a scan of every document, and its stream
         names its own drops and renames.
+
+        Where the hop's `ddl` does not stop the tail (`stop` False), the
+        tables the target lags on are handed back instead (`_shape_now`),
+        and the tables of `skip` - being copied, parked or out of the tail
+        (`tailtables`) - are not held to the target at all.
         """
+        return self._shape_now(db, token_path, position, skip, stop)[0]
+
+    def _shape_now(self, db, token_path, position, skip=(), stop=True):
+        """(the source's shape or None, {source table: (target table,
+        [its columns the target does not have])})."""
         import json as _json
 
         from .. import drift
         if drift.reader(self) is None:
-            return None
+            return None, {}
         now = drift.shape(self.src_engine, "src", db)
         if now is None:
-            return None
+            return None, {}
         path = token_path.parent / "tail-shape.json"
         try:
             saved = {t: [tuple(c) for c in cols] for t, cols in
@@ -3394,26 +3459,38 @@ class HeteroEngine(Engine):
         except (OSError, ValueError):
             saved = None
         moved = drift.changes(saved, now) if saved is not None else []
+        behind = {}
         if moved:
-            behind = self._target_lacks(db, saved, now)
-            if behind:
+            skip = {self._leaf(t) for t in skip}
+            behind = {t: got for t, got in
+                      self._lacking(db, saved, now).items()
+                      if self._leaf(t) not in skip}
+            if behind and stop:
+                named = [f"{d}.{n}" for d, cols in behind.values()
+                         for n in cols]
                 raise SystemExit(
                     f"{db}: the source's schema changed under the tail - "
                     + "; ".join(moved[:6])
                     + (" ..." if len(moved) > 6 else "")
-                    + f". The target does not have {', '.join(behind[:6])}"
+                    + f". The target does not have {', '.join(named[:6])}"
                     f" yet, so nothing after {str(position)[:60]} was"
                     " applied. Bring the target's schema level with the"
                     " source's, then run the tail again; it resumes from"
                     " there.")
         token_path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json.dumps(now))
-        return now
+        return now, behind
 
     def _target_lacks(self, db, before, after):
         """`table.column` the source has now, on tables whose shape changed,
         that the target does not."""
-        out = []
+        return [f"{d}.{n}" for d, cols in
+                self._lacking(db, before, after).values() for n in cols]
+
+    def _lacking(self, db, before, after):
+        """{source table: (target table, [columns the source has now that
+        the target does not])}, of the tables whose shape changed."""
+        out = {}
         if self.dst_engine.CREATES_ON_WRITE:
             # a column arrives with the first row that has it
             return out
@@ -3427,9 +3504,71 @@ class HeteroEngine(Engine):
                         self.dst_engine.neutral_columns("dst", db, dst_t)}
             except Exception:
                 have = set()
-            out += [f"{dst_t}.{n}" for n, _ in cols
-                    if str(n).lower() not in have]
+            missing = [n for n, _ in cols if str(n).lower() not in have]
+            if missing:
+                out[t] = (dst_t, missing)
         return out
+
+    def _level(self, db, name):
+        """Whether the target has every column the source's `name` has
+        now: a parked table's target come level (`tailtables`)."""
+        cols = sorted((str(n), str(t)) for n, t in
+                      self.src_engine.neutral_columns("src", db, name))
+        return not self._lacking(db, {}, {name: cols})
+
+    def _additive(self, db, src_table, dst_t, missing):
+        """(the statements that add `missing` to the target's `dst_t` as
+        the source has them, "") - or (None, why) where one of them is not
+        a change the target can take at its place in the log without a row
+        coming out different. A column that takes NULL, or has a default
+        that is the same value whenever it is taken, holds that value on
+        both sides in the rows made before it; a NOT NULL column with no
+        default, an identity, a key column or a default worked out when it
+        is taken (`now()`) parks the table instead. Each statement is the
+        target's own `create table` rendering of the column
+        (`neutral_create_sql`), so the column is built as a copy builds
+        it."""
+        try:
+            columns, key = self._target_shape(db, src_table,
+                                              self._leaf(dst_t))
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - parked
+            return None, (str(e).strip().splitlines() or ["?"])[0][:200]
+        by = {c[0]: c for c in columns}
+        out = []
+        for name in missing:
+            col = by.get(name)
+            if col is None:
+                return None, f"{name} is not a column the hop carries"
+            rule = col[3] if len(col) > 3 else {}
+            if name in key or rule.get("identity"):
+                return None, f"{name} is part of the key or numbered"
+            if rule.get("null") is False and rule.get("default") is None:
+                return None, (f"{name} takes no NULL and has no default:"
+                              " the rows before it hold whatever each"
+                              " engine makes up")
+            if not tailtables.constant_default(rule.get("default")):
+                return None, (f"{name}'s default ({rule.get('default')}) is"
+                              " worked out when it is taken, so the rows"
+                              " before it differ on the two sides")
+            made = self.dst_engine.neutral_create_sql("dst", db, dst_t,
+                                                      [col], ())
+            got = re.match(r"^create table (.+?) \((.*)\)$", str(made),
+                           re.S | re.I)
+            if not got:
+                return None, (f"{self.dst_name} builds tables in a way"
+                              " migkit does not turn into an added column")
+            out.append(f"alter table {got.group(1)} add {got.group(2)}")
+        return out, ""
+
+    def _run_ddl(self, db, sql):
+        """One statement on the target that changes its schema, and what
+        the engines keep of the shape it changed forgotten."""
+        try:
+            self.dst_engine.execute_ddl("dst", db, sql)
+        except NotImplementedError:
+            self.dst_engine.neutral_create_code("dst", db, sql)
+        self.dst_engine.forget_shapes()
+        self.__dict__.pop("_typed_of", None)
 
     def target_mark(self, db):
         return self.dst_engine.target_mark(db)
@@ -3498,6 +3637,28 @@ class HeteroEngine(Engine):
         replays changes that were already applied, which the appliers are
         idempotent for. Saving the token first would skip them instead, and a
         skipped change is a row that silently never arrives.
+
+        **A batch ends at a source commit** (F7). Where a read can stop
+        inside a transaction (`READ_ENDS_INSIDE_TRANSACTIONS`), the batch
+        is cut after the last change that ended one, the position saved is
+        that commit's (`txn_at`), and the rest goes into the next batch
+        with what is read after it: a transaction that fits a batch is
+        never half on the target. One larger than a read is carried in
+        parts, as before.
+
+        **Its tables move on their own** (`tailtables`): a table added to
+        the hop's scope is copied beside the stream under its own marks,
+        one taken out leaves it, and a DDL does what the hop's `ddl` says
+        - stops the tail (the default, as before), parks only its table,
+        or is carried at its place in the log where it can be - while
+        every other table goes on.
+
+        **It ends** when asked - ctrl-c, a service manager's stop,
+        `tail.stop` (`tailctl`) - or, where the hop's `follow_until` is
+        `caught_up` or a schedule started it, once it has reached where
+        the source's log was when it first read to its end, and at the
+        latest when the schedule's slot ends: its position saved, the way
+        it would go on from next time.
         """
         import json as _json
         import time as _time
@@ -3516,10 +3677,19 @@ class HeteroEngine(Engine):
             self._can_tail(db)
             if token:
                 _tailctl.same_source(self.src_engine, db, token_path, token)
-        log(f"tailing {self.src_name} -> {self.dst_name}, ctrl-c to stop"
+        from .. import (canon, drift, failpoint, marks, notify, schedule,
+                        tailctl, twoway)
+        where = token_path.parent
+        # how long it runs: until asked, or until caught up (a slot's run
+        # ends at the slot's end at the latest)
+        slot_ends = schedule.slot_end()
+        until = tailctl.until(self.hop, scheduled=slot_ends is not None)
+        policy = tailtables.policy(self.hop)
+        log(f"tailing {self.src_name} -> {self.dst_name}"
+            + (", until caught up" if until == "caught_up"
+               else ", ctrl-c to stop")
             + ("" if go else " (count-only, add --go to apply)")
             + (f", resuming from {str(token)[:40]}" if token else ""))
-        from .. import drift, failpoint, marks, notify, tailctl, twoway
         two_way = twoway.settings(self.hop) is not None
         # batches numbered where one applied twice would be wrong: the
         # target's mark of the last one it committed says whether the
@@ -3532,18 +3702,36 @@ class HeteroEngine(Engine):
         # (`EXACT_BATCHES`, the warehouses and the lakes), whatever the hop
         exact = exact or (go and getattr(self.dst_engine, "EXACT_BATCHES",
                                          False))
+        # a one-way tail numbers its batches too, where the target keeps a
+        # number (F7, R19 lever 11): after a stop it goes on after the last
+        # batch committed rather than applying it again
+        numbered = go and not two_way and not exact and marks.settle_exact(
+            self, db, token_path, log) is not None
+        if numbered:
+            exact, rung = True, "table"
         batch = self._saved_batch(token_path, token) if exact else 0
         if exact:
             token, batch = self._committed_ahead(db, token, batch,
                                                  token_path, log)
         seen = 0
         saved_token = token
+        # where the next read starts: the saved position, or past it where
+        # the batch before ended at a commit short of what was read (F7)
+        read_at, carried = token, []
+        can_cut = bool(getattr(self.src_engine,
+                               "READ_ENDS_INSIDE_TRANSACTIONS", False))
         # when a read last came back short of its limit - it had reached
         # the end of the source's log - for `/metrics` to say how far
         # behind the tail is; and how much longer the source keeps what it
         # has not read, asked once a minute
         caught_up = _time.time()
         room, room_at, room_said = None, 0.0, False
+        # where the source's log was when the tail first read to its end,
+        # for a tail that ends once caught up
+        fence = None
+        # the source's commit time of the last change applied, and how long
+        # it took from there to the target (`tailctl.beat`)
+        through, lag = None, None
         # connection failures in a row, for the wait before the next try
         lost = 0
         limit = self.TAIL_BATCH
@@ -3553,24 +3741,31 @@ class HeteroEngine(Engine):
         targets = self._tail_targets(db)
         # the changes the table copier already read are left out, and how
         # many were (`_CopiedRanges`)
-        copied, left = _CopiedRanges(self, db, token_path.parent), 0
+        copied, left = _CopiedRanges(self, db, where), 0
         # every change read, per table: applied, or left out and why
-        accounts = _Accounts(token_path.parent)
+        accounts = _Accounts(where)
         # the proof kept up with every position saved, where the hop keeps
         # it (`kept.Keeper`)
         from .. import kept as _kept
         keeper = (_kept.Keeper(self, db, token_path, token, log)
                   if go and _kept.wanted(self.hop) else None)
+        # each table's state, beside the position (`tailtables`)
+        tables = tailtables.TableSet(self, db, token_path, log) \
+            if go else None
 
         def said():
             return (f"{seen} changes"
                     + ("" if go else " seen (nothing applied)")
                     + (f"; {left} more left out, already in what the copy"
                        " read" if left else ""))
+
+        def not_live():
+            return tables.not_live() if tables is not None else set()
         # the source's shape the tail last applied under, saved beside its
         # position, so a DDL made while it was stopped is seen too
-        known = self._shape_gate(db, token_path, saved_token)
-        running = tailctl.Running(token_path.parent) if go else None
+        known, lacking = self._shape_now(db, token_path, saved_token,
+                                         not_live(), policy == "stop")
+        running = tailctl.Running(where) if go else None
         # the target's triggers held off for as long as changes are applied,
         # as the servers' own replication applies them: what the source's
         # triggers wrote is in the log with the rest, and the target's
@@ -3588,6 +3783,15 @@ class HeteroEngine(Engine):
                 pass
         # the collector's passes held to what the batches leave (`_batch_gc`)
         gc_back = _batch_gc() if go else None
+
+        def beat():
+            if not go:
+                return
+            got = None
+            if tables is not None:
+                got = tables.counts()
+                got["set_aside_bytes"] = sum(tables.spilled().values())
+            tailctl.beat(where, caught_up, seen, room, through, lag, got)
         try:
             if running:
                 running.__enter__()
@@ -3595,14 +3799,26 @@ class HeteroEngine(Engine):
                     notify.tail_started(self.hop, db, log)
             if window:
                 window.__enter__()
+            if tables is not None:
+                tables.resumed(saved_token)
             while True:
                 # between batches, never inside one: everything read so far
                 # is applied and its position saved before it holds still
-                tailctl.hold_if_asked(token_path.parent, log)
+                tailctl.hold_if_asked(where, log)
+                if go and tailctl.stop_asked(where):
+                    log(f"stopped as asked after {seen} changes; the"
+                        f" position is saved at {str(saved_token)[:60]}")
+                    break
+                if slot_ends is not None and _time.time() >= slot_ends:
+                    log(f"the schedule's slot has ended, after {seen}"
+                        " changes; the position is saved at"
+                        f" {str(saved_token)[:60]} for the next")
+                    break
                 if go and _time.time() - room_at >= 60:
                     room_at = _time.time()
                     try:
-                        room = self.src_engine.stream_room("src", db, token)
+                        room = self.src_engine.stream_room("src", db,
+                                                           saved_token)
                     except Exception as e:  # noqa: BLE001
                         # a reading for /metrics does not stop the tail
                         room = None
@@ -3611,13 +3827,25 @@ class HeteroEngine(Engine):
                                 f" its log for the tail: {type(e).__name__}")
                             room_said = True
                 try:
+                    if tables is not None:
+                        if tables.boundary(saved_token, known):
+                            # read ahead under the scope before it: read
+                            # again from the saved position
+                            if ahead is not None:
+                                ahead.close()
+                                ahead = self._change_reader(db, token_path,
+                                                            log)
+                            read_at, carried = saved_token, []
+                        tables.check_level(lambda name: self._level(db,
+                                                                    name))
                     asked = _time.time()
                     if ahead is not None:
-                        changes, token = ahead.next(token, limit)
+                        got, read_to = ahead.next(read_at, limit)
                     else:
-                        changes, token = self.src_engine.neutral_changes(
-                            "src", db, token, limit=limit)
-                    if len(changes) < limit:
+                        got, read_to = self.src_engine.neutral_changes(
+                            "src", db, read_at, limit=limit)
+                    short = len(got) < limit
+                    if short:
                         caught_up = asked
                         limit = self.TAIL_BATCH
                     else:
@@ -3626,47 +3854,42 @@ class HeteroEngine(Engine):
                         # position written, a statement a table - is paid
                         # less often
                         limit = min(limit * 2, self.TAIL_BATCH_MOST)
-                    accounts.read(changes)
+                    changes, carried = carried + got, []
+                    read_at = token = read_to
+                    cut = self._commit_cut(changes) if can_cut else None
+                    if cut is not None:
+                        changes, carried = changes[:cut], changes[cut:]
+                        token = changes[-1]["txn_at"]
+                    rows = [c for c in changes if not canon.is_ddl(c)]
+                    accounts.read(rows)
                     if keeper:
-                        keeper.read(changes)
+                        keeper.read(rows)
                     # an online schema change's working tables are not on the
                     # target and are not the application's data
-                    kept = [c for c in changes
+                    kept = [c for c in rows
                             if not drift.transient(c["table"])]
-                    accounts.dropped("not the application's", changes, kept)
-                    if kept and known is not None:
+                    accounts.dropped("not the application's", rows, kept)
+                    if (kept or len(rows) < len(changes)) \
+                            and known is not None:
                         # before the batch is applied: rows on both sides of a
                         # DDL may be in it, and its position is not saved yet
-                        known = self._shape_gate(db, token_path, saved_token)
-                    changes, carried = copied.leave_out(kept)
-                    accounts.left("already in what the copy read", carried)
-                    left += sum(carried.values())
-                    if changes:
-                        kept = changes
-                        changes = self._in_scope(db, changes)
-                        accounts.grown(kept, changes)
-                    if changes:
-                        mapped = []
-                        for c in changes:
-                            to = self._tail_target(targets, c["table"])
-                            accounts.named(c["table"], to)
-                            mapped.append(dict(self._mapped_change(
-                                db, self._typed_change(db, c, to)),
-                                table=to))
-                        changes, flattened = self._flatten_changes(mapped)
-                        if flattened:
-                            log(f"{flattened} values were not there on the"
-                                f" source and landed as NULL - {self.dst_name}"
-                                " cannot store the difference")
-                        if go and two_way:
-                            # each row held to the target's as it is now:
-                            # changed there too, the hop's policy decides
-                            kept = changes
-                            changes = twoway.resolve(self, db, changes, log)
-                            accounts.dropped("the target's own change kept",
-                                             kept, changes)
-                        accounts.check(db, changes, saved_token)
-                        if exact:
+                        known, more = self._shape_now(
+                            db, token_path, saved_token, not_live(),
+                            policy == "stop")
+                        lacking = {**lacking, **more}
+                    plan, before, work, released = self._tail_batch(
+                        db, changes, lacking, tables, policy, two_way,
+                        saved_token, targets, copied, accounts, log)
+                    lacking = {}
+                    left += sum(accounts.now.get(tailtables.COPIED,
+                                                 {}).values())
+                    applied = [c for mapped, _ in plan for c in mapped]
+                    accounts.check(db, applied, saved_token)
+                    numbered_now = exact and bool(applied) and (
+                        two_way or (len(plan) == 1
+                                    and self._one_transaction(applied)))
+                    if exact:
+                        if numbered_now:
                             self.dst_engine._batch_seen = _json.dumps(
                                 {"token": token, "batch": batch + 1},
                                 default=str)
@@ -3679,50 +3902,66 @@ class HeteroEngine(Engine):
                                         saved_token, batch, rung,
                                         {"token": token, "batch": batch + 1}),
                                     default=str))
-                        if go:
-                            self.dst_engine.neutral_apply("dst", db, changes)
-                            failpoint.hit("tail.applied")
-                        seen += len(changes)
-                        if go:
-                            batch += 1 if exact else 0
-                            token_path.parent.mkdir(parents=True, exist_ok=True)
-                            if keeper:
-                                keeper.saved(changes, token, saved_token)
-                            token_path.write_text(_json.dumps(
-                                self._token_body(
-                                    token, batch if exact else None, rung),
-                                default=str))
-                            saved_token = token
-                            failpoint.hit("tail.saved")
-                            accounts.save()
-                        log(said())
-                        if go:
-                            tailctl.beat(token_path.parent, caught_up, seen,
-                                         room)
-                    else:
-                        accounts.check(db, [], saved_token)
-                        if go and token != saved_token:
-                            # the log moved on with nothing to apply: the new
-                            # position is how far the target is, which is what
-                            # a fence reads
-                            if keeper:
-                                keeper.saved([], token, saved_token)
-                            token_path.write_text(_json.dumps(
-                                self._token_body(
-                                    token, batch if exact else None, rung),
-                                default=str))
-                            saved_token = token
-                        if go and accounts.rows:
-                            accounts.save()
-                        if go:
-                            tailctl.beat(token_path.parent, caught_up, seen,
-                                         room)
-                        if carried:
-                            # every change read was one the copy holds: read
-                            # on, as a batch applied would
-                            log(said())
                         else:
-                            _time.sleep(1)
+                            # in lanes side by side, or in runs a DDL cut:
+                            # more than one transaction, so not one batch's
+                            # number - read again after a stop, as before
+                            self.dst_engine.__dict__.pop("_batch_seen", None)
+                    unkept = set()
+                    if go:
+                        for mapped, act in plan:
+                            if mapped:
+                                self.dst_engine.neutral_apply("dst", db,
+                                                              mapped)
+                            if act is not None:
+                                self._carry_ddl(db, act, targets, log)
+                                unkept.add(act[1])
+                        if applied or plan[-1][1] is not None or before:
+                            failpoint.hit("tail.applied")
+                    seen += len(applied)
+                    ends = [c.get("txn_ts") for c in changes
+                            if c.get("txn_ts") is not None]
+                    if go and (applied or token != saved_token
+                               or released):
+                        batch += 1 if numbered_now else 0
+                        token_path.parent.mkdir(parents=True, exist_ok=True)
+                        if tables is not None:
+                            tables.commit(work)
+                        if keeper:
+                            keeper.saved(applied, token, saved_token,
+                                         unkept | not_live())
+                        token_path.write_text(_json.dumps(
+                            self._token_body(
+                                token, batch if exact else None, rung),
+                            default=str))
+                        saved_token = token
+                        if applied:
+                            failpoint.hit("tail.saved")
+                        if accounts.rows:
+                            accounts.save()
+                        if ends:
+                            through = max(ends)
+                            lag = max(_time.time() - through, 0.0)
+                    elif go and tables is not None:
+                        tables.commit(work)
+                    if applied or released:
+                        log(said())
+                    beat()
+                    if until == "caught_up" and go and short and \
+                            not carried:
+                        if fence is None:
+                            fence = self._fence(db)
+                        reached = (self.src_engine.position_reached(
+                            saved_token, fence) if fence is not None
+                            else None)
+                        if reached or (reached is None and not got):
+                            log(f"caught up with the source at"
+                                f" {str(saved_token)[:60]}, after {seen}"
+                                " changes - ended, as follow_until says;"
+                                " the next run goes on from there")
+                            break
+                    if not got and not carried and not released:
+                        _time.sleep(1)
                 except Exception as e:  # noqa: BLE001 - classified below
                     if not is_transient(e):
                         raise
@@ -3732,17 +3971,18 @@ class HeteroEngine(Engine):
                     # position was kept, so it is read again from there -
                     # which the appliers are idempotent for - once the
                     # server answers
-                    token = saved_token
+                    token = read_at = saved_token
+                    carried = []
+                    if tables is not None:
+                        tables.forget(saved_token)
                     if exact:
                         self.dst_engine.__dict__.pop("_batch_seen", None)
                     lost += 1
                     wait = min(60, 2 ** min(lost, 6))
-                    said = (str(e).strip().splitlines() or [""])[0][:100]
-                    log(f"lost a connection ({said}); trying again in"
+                    first = (str(e).strip().splitlines() or [""])[0][:100]
+                    log(f"lost a connection ({first}); trying again in"
                         f" {wait}s from the last saved position")
-                    if go:
-                        tailctl.beat(token_path.parent, caught_up, seen,
-                                     room)
+                    beat()
                     _time.sleep(wait)
                     if exact:
                         # a commit whose answer was lost with the
@@ -3750,7 +3990,7 @@ class HeteroEngine(Engine):
                         try:
                             token, batch = self._committed_ahead(
                                 db, token, batch, token_path, log)
-                            saved_token = token
+                            saved_token = read_at = token
                         except Exception as again:  # noqa: BLE001
                             if not is_transient(again):
                                 raise
@@ -3761,6 +4001,8 @@ class HeteroEngine(Engine):
         finally:
             if gc_back is not None:
                 gc_back()
+            if tables is not None:
+                tables.close()
             if ahead is not None:
                 ahead.close()
             else:
@@ -3771,11 +4013,138 @@ class HeteroEngine(Engine):
             finally:
                 if running:
                     running.__exit__(*sys.exc_info())
-                    why = tailctl.stopped(token_path.parent)
+                    why = tailctl.stopped(where)
                     if sys.exc_info()[0] is not None and why:
                         notify.tail_stopped(self.hop, db, why, log)
                 if term is not None:
                     signal.signal(signal.SIGTERM, term)
+
+    def _tail_batch(self, db, changes, lacking, tables, policy, two_way,
+                    token, targets, copied, accounts, log):
+        """One batch as the target is to take it: ([(changes to apply, the
+        DDL carried after them or None)], the statements run on the target
+        for it, the tables' states the batch leaves, changes set aside
+        earlier applied first).
+
+        Cut at each DDL the batch holds into runs, each routed by the
+        tables' states at its place (`tailtables.route`): a truncate the
+        hop's `ddl` carries is done between the runs it falls between; a
+        column the target lacks is added here, before anything of the
+        batch, where it is one the target takes at any place
+        (`_additive`) and the hop says apply - its table parked where it
+        is not, or where the target refuses it. `token` is where the batch
+        was read from. Count-only (`tables` None) routes nothing: every
+        change goes on, and a DDL is said."""
+        from .. import canon, drift, twoway
+        work = tables.begin() if tables is not None else None
+        released, back = [], {}
+        if tables is not None:
+            released, back, gone = tables.release(work)
+            accounts.released(back)
+            if gone:
+                log(f"{gone} changes held for a copy were in what it read,"
+                    " and left out")
+        before = []
+        for src_t, (dst_t, missing) in sorted(lacking.items()):
+            leaf = self._leaf(src_t)
+            if work is None:
+                log(f"{src_t}: the target does not have"
+                    f" {', '.join(missing)} (count-only: nothing done)")
+                continue
+            if (work.get(leaf) or {}).get("state", "live") != "live":
+                continue
+            sqls, why = (self._additive(db, src_t, dst_t, missing)
+                         if policy == "apply" else
+                         (None, "the hop's ddl is park"))
+            for sql in sqls or ():
+                # before any of the batch: a column added takes NULL or
+                # its constant in every row, so the rows before its place
+                # in the log land as they did on the source
+                try:
+                    self._run_ddl(db, sql)
+                    before.append(sql)
+                    log(f"{src_t}: carried to the target at its place in"
+                        f" the log: {sql}")
+                except Exception as e:  # noqa: BLE001 - parked, said
+                    if not self._level(db, src_t):
+                        sqls, why = None, (str(e).strip().splitlines()
+                                           or [type(e).__name__])[0][:200]
+                        break
+            if not sqls:
+                tables.park(work, leaf, token,
+                            f"the target does not have"
+                            f" {', '.join(missing)} ({why})")
+        runs, acts = [[]], []
+        for c in changes:
+            if drift.transient(c["table"]):
+                continue
+            if not canon.is_ddl(c):
+                runs[-1].append(c)
+                continue
+            if work is None:
+                log(f"{c['table']}: {c['kind']} on the source (count-only:"
+                    " nothing done)")
+                continue
+            act = tables.ddl(work, c, token, two_way)
+            if act is not None:
+                acts.append(act)
+                runs.append([])
+        plan = []
+        for i, run in enumerate(runs):
+            if work is not None:
+                run, why_left = tables.route(work, run, token)
+                for why, counts in why_left.items():
+                    accounts.left(why, counts)
+            if i == 0:
+                run = released + run
+            run, carried = copied.leave_out(run)
+            accounts.left(tailtables.COPIED, carried)
+            mapped, flattened = self._to_target(db, run, targets, accounts)
+            if flattened:
+                log(f"{flattened} values were not there on the source and"
+                    f" landed as NULL - {self.dst_name} cannot store the"
+                    " difference")
+            if two_way and work is not None and mapped:
+                # each row held to the target's as it is now: changed
+                # there too, the hop's policy decides
+                kept = mapped
+                mapped = twoway.resolve(self, db, mapped, log)
+                accounts.dropped("the target's own change kept", kept,
+                                 mapped)
+            plan.append((mapped, acts[i] if i < len(acts) else None))
+        return plan, before, work, released
+
+    def _one_transaction(self, changes):
+        """Whether the target applies `changes` in one transaction: not in
+        lanes side by side (`Engine._lanes`) - a target that keeps a ledger
+        of its batches applies each whole (`EXACT_BATCHES`)."""
+        dst = self.dst_engine
+        return (getattr(dst, "EXACT_BATCHES", False)
+                or len(changes) < getattr(dst, "LANES_FROM", 2000)
+                or int(getattr(self.hop, "workers", 1) or 1) < 2
+                or not getattr(dst, "WRITES_IN_PARALLEL", True))
+
+    def _carry_ddl(self, db, act, targets, log):
+        """A DDL the hop's `ddl` carries, done on the target at its place
+        among the runs of a batch: a table emptied on the source emptied
+        there - within the hop's row filter, as a copy empties it."""
+        kind, src_t = act
+        if kind != "truncate":
+            return
+        dst_t = self._tail_target(targets, src_t)
+        _, dst_where = self._row_scope(db, src_t)
+        gone = self.dst_engine.neutral_empty(
+            "dst", db, dst_t, **({"where": dst_where} if dst_where else {}))
+        log(f"{src_t}: emptied on the source; {dst_t} emptied on the target"
+            f" at the same place in the log ({gone or 0:,} rows)")
+
+    def _fence(self, db):
+        """Where the source's log is now, in the form the tail saves its
+        position in, or None where that cannot be compared."""
+        try:
+            return self.src_engine.log_position("src", db)
+        except Exception:  # noqa: BLE001 - ends on an empty read instead
+            return None
 
     def watch_sample(self, db):
         """Rows on each side, for any pair rather than one of them.
@@ -4011,11 +4380,20 @@ class _Accounts:
     stops the tail with the numbers, before anything of the batch is
     applied or its position saved; the batch is read again when the tail
     starts. What has run so far is kept beside the position
-    (`tail-accounts.json`)."""
+    (`tail-accounts.json`).
+
+    A tail whose tables move on their own (`tailtables`) accounts for
+    three reasons more - held for a range of a copy not landed yet, set
+    aside while the table is parked, out of the hop's scope - and for the
+    changes set aside earlier that a batch applies (`released`): read +
+    released = applied + left out, table by table. The check that would
+    have caught TiDB DM decoding an added table's rows empty and dropping
+    them (tiflow #12859), and PostgreSQL before 17.5 filtering a table
+    added to a publication."""
 
     #: why a change read is not applied, in the words the file keeps
-    WHY = ("already in what the copy read", "not the application's",
-           "the target's own change kept")
+    WHY = (tailtables.COPIED, "not the application's",
+           "the target's own change kept") + tailtables.WHY
 
     def __init__(self, where):
         import json
@@ -4027,11 +4405,18 @@ class _Accounts:
             self.total = {}
         self.rows = {}
         self.now, self.split, self.back = {}, Counter(), {}
+        self.came_back = Counter()
 
     def read(self, changes):
         from collections import Counter
         self.now = {"read": Counter(c["table"] for c in changes)}
         self.split, self.back, self.rows = Counter(), {}, {}
+        self.came_back = Counter()
+
+    def released(self, counts):
+        """`counts` {source table: changes} set aside in an earlier batch
+        and applied in this one."""
+        self.came_back.update(counts)
 
     def left(self, why, counts):
         """`counts` {source table: changes} left out for `why`."""
@@ -4065,19 +4450,23 @@ class _Accounts:
         applied = Counter(self.back.get(c["table"], c["table"])
                           for c in changes)
         read = self.now.get("read", Counter())
+        back = self.came_back
         self.rows = {}
-        for t in set(read) | set(applied):
+        for t in set(read) | set(applied) | set(back):
             gone = {w: self.now.get(w, Counter())[t] for w in self.WHY}
             out = applied[t] + sum(gone.values())
-            if read[t] + self.split[t] != out:
+            if read[t] + back[t] + self.split[t] != out:
                 raise SystemExit(
-                    f"{db}.{t}: the tail read {read[t]:,} changes and"
-                    f" accounts for {out - self.split[t]:,} -"
+                    f"{db}.{t}: the tail read {read[t]:,} changes"
+                    + (f" and took back {back[t]:,} set aside" if back[t]
+                       else "")
+                    + f" and accounts for {out - self.split[t]:,} -"
                     f" {applied[t]:,} to apply, {out - applied[t]:,} left"
                     " out. Nothing of the batch was applied, and the"
                     f" position stays at {str(saved)[:60]}: the batch is"
                     " read again when the tail starts")
             self.rows[t] = {"read": read[t], "applied": applied[t],
+                            **({"taken back": back[t]} if back[t] else {}),
                             **{w: n for w, n in gone.items() if n}}
 
     def save(self):
@@ -4400,25 +4789,57 @@ class _Reader:
         os.replace(tmp, self.where / self.FILE)
 
     def next(self, token, limit):
+        """One read, on the way standing now - and where that way cannot
+        run (its process stopping without an answer), on the next, from
+        the same position, by the one runtime fallback every way of
+        migkit's takes (`decide.attempt`): the way failed is left for the
+        run and the switch said in one line. A read the source itself
+        refuses, or a connection lost, is not the way failing: it is
+        raised as it is, for the tail to read again from its saved
+        position."""
         import time as _time
 
+        from .. import decide
         from ..ranges import WorkerGone
         now = _time.monotonic()
         self._timed(token, now)
-        name, skip = self.on, self.fresh
+        skip = [self.fresh]
         self.fresh = False
-        try:
-            changes, after = self._rung(name).next(token, limit)
-        except WorkerGone as e:
-            self.log(f"the change reader's process stopped ({e}); reading"
-                     " in a thread from the same position")
-            self.readers.pop(name, None)
-            self.names.remove(name)
-            self.costs.pop(name, None)
-            self.chosen = "python-thread" if self.chosen else None
-            self.on, name, skip = "python-thread", "python-thread", True
-            changes, after = self._rung(name).next(token, limit)
-        self.last = (name, len(changes), after, now, skip)
+        said = {n: (s, f) for n, s, f in READ_RUNGS}
+        rungs = [decide.Rung(n, f"the reader {said[n][0]}",
+                             footprint=said[n][1])
+                 for n, _ in self.ranked()]
+
+        def run(choice):
+            name = choice.rung.name
+            if name != self.on:
+                self._switch(name)
+                skip[0] = True
+                self.fresh = False
+            return self._rung(name).next(token, limit)
+
+        def undo(rung, error):
+            # the reader that failed, dropped, and not tried again this run
+            was = self.readers.pop(rung.name, None)
+            if was is not None:
+                try:
+                    was.close()
+                except Exception:  # noqa: BLE001 - it is gone already
+                    pass
+            if rung.name in self.names:
+                self.names.remove(rung.name)
+            self.costs.pop(rung.name, None)
+            # a choice made stands on what is left; none made, what is
+            # left is timed as before
+            self.chosen = (self.names[0] if self.chosen and self.names
+                           else None)
+        choice, (changes, after) = decide.attempt(
+            "reading the source's changes", rungs, run, keep=self.on,
+            undo=undo, log=self.log,
+            switch=lambda e: isinstance(e, WorkerGone))
+        name = choice.rung.name
+        self.on = name
+        self.last = (name, len(changes), after, now, skip[0])
         return changes, after
 
     def close(self):

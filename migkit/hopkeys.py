@@ -121,12 +121,20 @@ HOP_OPTIONS = {
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
                    subs=("budget", "start_below", "freeze", "pooler",
                          "flip", "flip_undo", "keys", "jobs")),
+    "ddl": Key("what a DDL on the source does to a running tail: stop"
+               " it, park only the table it touched, or apply what can be"
+               " carried at its place in the log", "str"),
     "deadline": Key("when the move must be done by - a duration (6h,"
                     " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
                     " names the cheapest machine for migkit that meets it",
                     "str|number"),
     "deep": Key("compare every key's value, not a sample", "bool",
                 ("redis",)),
+    "exact_batches": Key("a one-way tail numbers its batches on the target,"
+                         " so a stop resumes after the last committed", "bool",
+                         knob="way"),
+    "follow_until": Key("stopped or caught_up: how long a follow runs",
+                        "str"),
     "exclude_schema": Key("schemas left out of the schema dump", "str",
                           ("postgres",)),
     "fence_timeout": Key("seconds a fenced re-check waits", "int"),
@@ -223,6 +231,9 @@ HOP_OPTIONS = {
                           ("postgres",)),
     "source_engine": Key("the source's engine of a hetero hop", "str",
                          ("hetero",)),
+    "spool_limit": Key("bytes a parked table's changes may take on this"
+                       " machine before the table is copied again instead",
+                       "int", knob="size"),
     "state": Key("where run state is kept", "dict",
                  subs=("backend", "bucket", "prefix", "region",
                        "endpoint_url", "mirror")),

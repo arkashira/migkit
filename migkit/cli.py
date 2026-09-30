@@ -178,7 +178,7 @@ def _sharing(hop):
 
 #: a database's run files another machine needs to carry a stream on
 RUN_FILES = ("tail-token.json", "tail-shape.json", "tail-source.json",
-             "copy-position.json")
+             "copy-position.json", "tail-tables.json", "tail-copy.json")
 
 
 def _shared(hop, d):
@@ -2667,6 +2667,26 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     the data, migkit verifies it.
 
     Use only over a trusted network (or run migkit on a cloud VM)."""
+    from . import schedule
+    hop = get_hop(hop_name)
+    if not schedule.gate(hop, "move", console.print):
+        return _move_run(hop_name, db, table, mode, chunk, do_drop, go)
+    # a run its schedule started: a follow ends once caught up
+    # (`tailctl.until`), and what it ended as is the schedule's
+    ok = False
+    try:
+        got = _move_run(hop_name, db, table, mode, chunk, do_drop, go)
+        ok = True
+        return got
+    except SystemExit as e:
+        ok = e.code in (None, 0)
+        raise
+    finally:
+        schedule.finished(hop, ok)
+
+
+def _move_run(hop_name, db, table, mode, chunk, do_drop, go):
+    """`move`, with what stopped it said in migkit's words."""
     from . import decide
     try:
         return _move(hop_name, db, table, mode, chunk, do_drop, go)
@@ -3008,8 +3028,16 @@ def _cdc(hop, eng, db, do_drop, go, engine):
             capabilities.require(hop.engine, "stream")
         return _tail(hop, tailer, db, go)
     from . import decide
+
+    def risk():
+        # a table taken into a running publication below the fixed minor
+        # releases: migkit's own tail alters no publication
+        if not hasattr(eng, "publication_add_risk"):
+            return ""
+        return "; ".join(r for d in ([db] if db else eng.databases())
+                         for r in [eng.publication_add_risk(d)] if r)
     facts, rungs = _stream_facts(hop, eng, engine, has_repl, has_tail,
-                                  do_drop)
+                                  do_drop, risk)
     where = hop.report_dir(db) / "stream.json"
     work = f"following {hop.name}'s source"
     # a way refused as it starts - a target that cannot dial the source -
@@ -3057,16 +3085,19 @@ def _cdc(hop, eng, db, do_drop, go, engine):
                                                " is missing"))
 
 
-def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False):
+def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
+                  risk=None):
     """(facts, rungs) of the ways this hop's changes may follow its source
     (`movers.stream_ways`, read as `movers.stream_way` reads them), the leg
     run from here held also where the servers' own replication could not
-    start here: what a target that cannot dial the source falls to."""
+    start here: what a target that cannot dial the source falls to.
+    `risk()` says why the servers' own replication would lose a table's
+    changes (`PostgresEngine.publication_add_risk`)."""
     import dataclasses
 
     from . import decide, movers
     facts = movers.stream_facts(hop, engine, has_repl, has_tail,
-                                has_tail and _tail_ready(eng), drop)
+                                has_tail and _tail_ready(eng), drop, risk)
     rungs = []
     for r in movers.stream_ways():
         if r.name == "follow":

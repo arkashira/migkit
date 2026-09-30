@@ -331,27 +331,52 @@ def already_read(st, values, covers, ahead=False):
     one that cannot say, a range not begun whose copy is not known to be
     running - a copy that stopped may never come back to it, and a table
     copied again some other way is not what this entry says."""
+    places = place(st, values)
+    if not places:
+        return False
+    for where, mark in places:
+        if where in ("read", "reading"):
+            if mark is None or covers(mark) is not True:
+                return False
+        elif where != "todo" or not ahead:
+            return False
+    return True
+
+
+def place(st, values):
+    """Where each of `values` - a change's keys - lies in the ranges of the
+    checkpoint entry `st`: [(where, the mark its range was begun under)],
+    `where` one of `read` (its range copied), `reading` (begun and not
+    done), `todo` (not begun) or `outside` (no range of the plan holds it,
+    or its key is not a whole number); [] where the entry has no ranges.
+    A table whose copy is done has no range left to begin: one not begun
+    is `outside` then."""
     import bisect
     rs = st.get("ranges")
     if not rs or not values:
-        return False
+        return []
     seen = st.get("ranges_seen") or {}
+    done = set(st.get("ranges_done") or ())
+    out = []
     for v in values:
         if not isinstance(v, int) or isinstance(v, bool):
-            return False
+            out.append(("outside", None))
+            continue
         # asked for every change the tail reads: found by halves, the
         # plan kept in key order
         i = bisect.bisect_left(rs, v, key=lambda r: r[0]) - 1
         if i < 0 or v > rs[i][1]:
-            return False
+            out.append(("outside", None))
+            continue
         at = str(rs[i][0])
         if at in seen:
-            if seen[at] is None or covers(seen[at]) is not True:
-                return False
-        elif not ahead or st.get("done") \
-                or rs[i][0] in (st.get("ranges_done") or ()):
-            return False
-    return True
+            out.append(("read" if rs[i][0] in done else "reading",
+                        seen[at]))
+        elif st.get("done") or rs[i][0] in done:
+            out.append(("outside", None))
+        else:
+            out.append(("todo", None))
+    return out
 
 
 def spans_to_copy(st, spans, there, count_of, restart, log, label):

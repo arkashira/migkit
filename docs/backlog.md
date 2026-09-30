@@ -2312,7 +2312,7 @@ and 1,000,000 rows across four pairs:
 | pgcopydb receives passwords in URIs on its command line | done (2026-09-24/25): no password in the local copy's URIs (a password file), and the container's URIs come from the environment through `-e NAME` |
 | PostgreSQL index window names indexes without their schema | done (2026-09-24): schema-qualified and quoted |
 | `create publication` | done (2026-09-24): made only where it is missing, and a subscription a first run made is left to run - a second `--mode cdc` stopped on `already exists` (`tests/test_bounding_the_subscription.py`) |
-| `follow` | ends at the current position; there is no long-running mode |
+| `follow` | done (2026-09-30, not merged): `follow_until: stopped` keeps the leg run from here applying until it is asked to end, then ends it at the source's position of that moment; without it the catch-up ends as it always did (`movers._follow_until_asked`) |
 | generic engine | done (2026-09-25): string length and nullability are read from the same catalogue the comparison library asks, in the standard spelling and then Oracle's; where neither answers, the verdict still says they were not compared (`tests/test_generic_schema.py`) |
 | MySQL `_health` | done (2026-09-24): a side that is itself a replica reports how far behind it is, by column name on MySQL and MariaDB, and the throttle backs off on it (`tests/test_mysql_fence.py`) |
 | hetero | has no deep battery |
@@ -3211,6 +3211,22 @@ the schema as of their position (dts-tidb-vitess); warehouse loads with
 the Storage Write API and Snowpipe channels as exact paths
 (aws-azure-google-snowflake); the 16 security fixes (security scorecard).
 Correction carried: AWS ended DMS Fleet Advisor on 2026-05-20.
+**Built 2026-09-30, the tail's (tests written, the full run to come):**
+a batch ends at the last source commit it holds where a read can stop
+inside a transaction (MySQL, MongoDB): the commit's position saved
+(`canon.ended`'s `txn_at`), the rest read with the next batch. Every
+reader marks each commit's time; the beat carries `through` and `lag`
+(source commit to target commit) and `/metrics` says both. A follow
+runs until asked (ctrl-c, a service manager's stop, `tail.stop`) or,
+with `follow_until: caught_up` or where a schedule started it, until it
+reaches where the source's log was when it first read to the end, and at
+the slot's end at the latest - a scheduled tail held its slot to
+`max_duration` and every slot counted as failed. A one-way tail numbers
+its batches on the target by default (`marks.settle_exact`, the table
+rung proved by what it keeps; `exact_batches: false` off), wherever a
+batch goes as one transaction; one in lanes is read again after a stop,
+as before. The tail's reader and its lanes fail over through
+`decide.attempt`.
 
 ### Leapfrog: conversion (docs/research/leapfrog-conversion-2026-09-28.md)
 
@@ -3332,6 +3348,35 @@ WarehousePG), MariaDB Xpand discontinued.
   dropped as superseded + spooled - the check that would have caught
   TiDB DM dropping rows of added tables (tiflow #12859) and PostgreSQL
   before 17.5 losing changes on `ALTER PUBLICATION ADD TABLE`.
+  **Built 2026-09-30 (L1, L3-L8; tests written, the full run to come):**
+  `migkit/tailtables.py` keeps a state per table beside the position
+  (`tail-tables.json`: live, copying, parked, removed). The hop file's
+  `exclude` is read again when it changes: a table put in is copied
+  beside the stream by the pair's own copier under its own marks - after
+  what the stream left out of it is visible (`Engine.visible_now`) - its
+  changes held on disk per range until the range lands, then held to
+  the range's mark (`ranges.place`); a table taken out leaves, its
+  position and its target's digest kept, and comes back by its changes
+  since, read again from there, where the source reads its log again,
+  its shape and its target are unchanged (L6, a rung) - else by a copy.
+  The seam on SQL Server is the change tracking version, on MongoDB the
+  majority commit point (L3). DDL is read at its place: a binlog
+  statement (`logddl`), a slot's TRUNCATE line, a change stream's
+  collection event (`canon.ddl`). The hop's `ddl`: `stop` (the default,
+  as before - and a table emptied on the source now stops it, where on
+  MySQL it was carried by nothing), `park` (only that table, its changes
+  spooled on this machine and synced before the position, released once
+  its target is level, copied again past `spool_limit`), `apply` (a
+  column that takes NULL or has a constant default added on the target
+  as the target's own create renders it, a truncate carried between the
+  rows around it, the rest parked). L7's identity counts held, set
+  aside, out of scope and taken back. L8: the subscription rung needs a
+  source past the 2025-05-08 minors (17.5, 16.9, 15.13, 14.18, 13.21)
+  where tables would be taken into a running publication, and the tail
+  is taken instead (`publication_add_risk`). Not done: a target table
+  dropped or renamed with the source's (migkit never drops a target
+  table - the table leaves the tail and says so); the digest-first
+  re-copy of only differing ranges (R19 lever 3) for a table added back.
 * **R1-R9, with and without the engine's change feature:** depths
   D0-D4 printed by `assess` per table, with the statement that would
   raise each. R7: lift MySQL's refusal of `MINIMAL`/`NOBLOB`/

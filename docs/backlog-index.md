@@ -129,7 +129,7 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 67 | P3.pw | pgcopydb given no password on its command line | DONE (in text) | S | security | L2064 |
 | 68 | P3.idx | Index window names indexes schema-qualified | DONE (in text) | S | move | L2065 |
 | 69 | P3.pub | `create publication` made only where missing | DONE (in text) | S | change follow | L2066 |
-| 70 | P3.follow | `follow` ends at the current position; no long-running mode | OPEN (the table's note is unchanged; migkit's own tail runs long) | S | change follow | L2067 |
+| 70 | P3.follow | `follow` ends at the current position; no long-running mode | DONE in worktree af2dabd, not merged (tests written; the full run to come): the leg run from here runs until asked with `follow_until: stopped` and ends at the source's position of that moment; without it a catch-up with an end, as before (`movers._follow_until_asked`) | S | change follow | L2067 |
 | 71 | P3.generic | Generic engine reads string length and nullability | DONE (in text) | S | engines | L2068 |
 | 72 | P3.health | MySQL `_health` reports replica lag and the throttle backs off | DONE (in text) | S | operations/scale | L2069 |
 | 73 | P3.hetero-deep | Deep battery for cross-engine hops | DONE (matrix: hetero deep checks yes) | M | verify | L450, L631, L2070 |
@@ -207,12 +207,12 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 145 | F7.rfs | OpenSearch reindex-from-snapshot | OPEN | M | tools used whole | L2791 |
 | 146 | F7.ddbexp | DynamoDB export to and import from S3 | OPEN | M | tools used whole | L2791 |
 | 147 | F7.kclamp | Kafka consumer-offset clamp at cutover | OPEN | S | cutover | L2793 |
-| 148 | F7.selfstop | A scheduled tail that stops when caught up | OPEN | S | change follow | L2793-2794 |
-| 149 | F7.beat | Source-commit timestamp in the tail's beat | OPEN | S | change follow | L2794-2795 |
-| 150 | F7.commit | A batch ended at the last COMMIT seen, so a transaction that fits is never split | OPEN | S | change follow | L2795; goldengate-qlik-hvr report L1113 |
+| 148 | F7.selfstop | A scheduled tail that stops when caught up | DONE in worktree af2dabd, not merged (tests written; the full run to come): a slot's run ends once caught up with where the source's log was when it first read to the end, and at the slot's end at the latest (`tailctl.until`, `schedule.slot_end`); `tail.stop` asks any tail to end; `move` gated by its schedule as `check` is | S | change follow | L2793-2794 |
+| 149 | F7.beat | Source-commit timestamp in the tail's beat | DONE in worktree af2dabd, not merged (tests written; the full run to come): every reader marks each transaction's commit time (`canon.ended`), the beat carries `through` and `lag`, `/metrics` says both | S | change follow | L2794-2795 |
+| 150 | F7.commit | A batch ended at the last COMMIT seen, so a transaction that fits is never split | DONE in worktree af2dabd, not merged (tests written; the full run to come): the batch cut after the last change that ended a transaction, its commit's position saved (`txn_at`), the rest read with the next (`_commit_cut`) | S | change follow | L2795; goldengate-qlik-hvr report L1113 |
 | 151 | F7.merge | Changed-columns merge when two sides touched different columns (and USEMIN) | OPEN | S | two-way | L2795-2796; goldengate-qlik-hvr report L1124 |
 | 152 | F7.edges | Statistics-based chunk edges | OPEN | S | move | L2796 |
-| 153 | F7.exact | Exact batches by default on one-way tails (resume after the committed batch) | OPEN | M | change follow | L2797, L5167-5171 (R19.11) |
+| 153 | F7.exact | Exact batches by default on one-way tails (resume after the committed batch) | DONE in worktree af2dabd, not merged (tests written; the full run to come): numbered on the table rung, proved by what it keeps (`marks.settle_exact`), wherever a batch is applied as one transaction; `exact_batches: false` off | M | change follow | L2797, L5167-5171 (R19.11) |
 | 154 | F7.sec | The 16 remaining security fixes from the security scorecard | OPEN (some defaults in aa2c527's F0 work) | M | security | L2799; WAVE queue |
 | 155 | CV.P1 | Candidate portfolio, selection by evidence | IN PROGRESS ae866ee (storedcode/rungs.py, keep.py in its worktree) | M | conversion | L2802-2828; leapfrog-conversion L305 |
 | 156 | CV.P2 | Counterexample bank, re-run on every candidate | IN PROGRESS ae866ee | S | conversion | L2808-2810; report L306 |
@@ -247,14 +247,14 @@ keeps them apart from R1-R22), `DTS.*` (the DTS gaps in "Paused"), `AUD.*`
 | 185 | ER6 | SAP application data through ODP over OData | OPEN | M | engines | L2860-2863 |
 | 186 | ER7 | SaaS: dlt, Singer taps, Airbyte connectors as programs, Salesforce Pub/Sub | OPEN | L | engines | L2864-2867 |
 | 187 | W5 | Other sources: Netezza, SAP HANA, Informix (x86), Progress, Vertica, Exasol, Databricks/Iceberg | OPEN | L | engines | L2720, L2833-2835, L2982-2987 |
-| 188 | L1 | Tables added or removed in a running tail, each with its own snapshot and seam | OPEN | M | change follow | L2875-2882, L2792 (F7), L5498 (DTS "a running job changed"); live-tail report L1066 |
+| 188 | L1 | Tables added or removed in a running tail, each with its own snapshot and seam | DONE in worktree af2dabd, not merged (tests written; the full run to come): `tailtables` - the hop file's `exclude` read again as it changes, a table added copied beside the stream under its own marks, its changes held per range until it lands | M | change follow | L2875-2882, L2792 (F7), L5498 (DTS "a running job changed"); live-tail report L1066 |
 | 189 | L2 | Exact seam on PostgreSQL by xid visibility, not LSN | DONE 6f07ceb | S | change follow | L2883-2887, L5116-5155 |
-| 190 | L3 | Exact seam on SQL Server (CT version in SNAPSHOT) and MongoDB (clusterTime) | OPEN (MySQL by GTID marks done in 6f07ceb) | S | change follow | live-tail report L1068 |
-| 191 | L4 | A DDL parks only its table, its changes spooled | OPEN | M | change follow | L2881-2882, L2792-2793 (F7) |
-| 192 | L5 | Positional DDL: additive changes applied at their log position, events decoded under the schema as of their position (DTS DDL replication, allow-list, added columns) | OPEN | M | change follow | L1277-1278, L1287-1288, L2882, L2797 (F7), L5497-5498 |
-| 193 | L6 | Re-add a table from its removal position | OPEN | S | change follow | live-tail report L1071 |
-| 194 | L7 | Per-table accounting identity every batch | DONE 6f07ceb (grep: hetero._Accounts; the spool term arrives with L4) | S | change follow | L2887-2890, L5139-5141 |
-| 195 | L8 | Publication-add guard below PostgreSQL 17.5 | OPEN | S | change follow | L2889-2890; report L1073 |
+| 190 | L3 | Exact seam on SQL Server (CT version in SNAPSHOT) and MongoDB (clusterTime) | DONE in worktree af2dabd, not merged (tests written; the full run to come): `snapshot_mark`/`mark_covers` by change tracking version and by the majority commit point, each change carrying its own | S | change follow | live-tail report L1068 |
+| 191 | L4 | A DDL parks only its table, its changes spooled | DONE in worktree af2dabd, not merged (tests written; the full run to come): `ddl: park` (the default stays stop), the spool synced on this machine before the position, released once the target is level, copied again past `spool_limit` | M | change follow | L2881-2882, L2792-2793 (F7) |
+| 192 | L5 | Positional DDL: additive changes applied at their log position, events decoded under the schema as of their position (DTS DDL replication, allow-list, added columns) | DONE in worktree af2dabd, not merged (tests written; the full run to come): `ddl: apply` - DDL read at its place (binlog statement, slot TRUNCATE, stream collection events), a column that takes NULL or has a constant default added on the target, a truncate carried between the rows around it; row events decoded with their own table map | M | change follow | L1277-1278, L1287-1288, L2882, L2797 (F7), L5497-5498 |
+| 193 | L6 | Re-add a table from its removal position | DONE in worktree af2dabd, not merged (tests written; the full run to come): a rung of `tailtables._add_ways`, only where the source reads its log again from a position, the shape is the same and the target's digest unchanged; else copied | S | change follow | live-tail report L1071 |
+| 194 | L7 | Per-table accounting identity every batch | DONE 6f07ceb; the spool terms (held, set aside, out of scope, taken back) in worktree af2dabd, not merged | S | change follow | L2887-2890, L5139-5141 |
+| 195 | L8 | Publication-add guard below PostgreSQL 17.5 | DONE in worktree af2dabd, not merged (tests written; the full run to come): `publication_add_risk` (the 2025-05-08 minors) a need of the subscription rung, migkit's own tail taken instead | S | change follow | L2889-2890; report L1073 |
 | 196 | LT.R1 | Depth D0-D4 per table in assess/doctor, with the statement that raises it | OPEN | S | change follow | L2891-2893 |
 | 197 | LT.R2 | SQL Server without CT/CDC: the log-backup chain restored onto a SQL Server migkit owns | BLOCKED (full SQL Server is x86-only) | L | change follow | L2897-2900 |
 | 198 | LT.R3 | SQL Server live `fn_dblog` reader | BLOCKED (full SQL Server is x86-only) | L | change follow | report L1076 |

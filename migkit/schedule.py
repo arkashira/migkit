@@ -31,6 +31,20 @@ import sys
 import time
 
 STATE = "schedule.json"
+#: the environment a slot's run is started with: when its slot ends
+#: (`max_duration` from its start), in seconds since the epoch
+SLOT_ENDS = "MIGKIT_SLOT_ENDS"
+
+
+def slot_end():
+    """When the slot this process runs for ends, or None where no schedule
+    started it. A follow started by a slot ends once caught up, and at
+    the latest here, its position saved (`tailctl.until`)."""
+    got = os.environ.get(SLOT_ENDS, "")
+    try:
+        return float(got) if got else None
+    except ValueError:
+        return None
 
 
 def spec_of(hop):
@@ -103,6 +117,8 @@ def gate(hop, command, log):
     state.update(last_slot=slot, running=os.getpid(), started=time.time())
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state))
+    os.environ[SLOT_ENDS] = str(time.time()
+                                + int(spec.get("max_duration", 14400)))
     return True
 
 
@@ -132,7 +148,8 @@ def run(hop, spec, argv=None, sleeper=time.sleep):
         if left <= 0:
             return False
         proc = subprocess.Popen(cmd, env={**os.environ,
-                                          "MIGKIT_SCHEDULED": "0"})
+                                          "MIGKIT_SCHEDULED": "0",
+                                          SLOT_ENDS: str(deadline)})
         try:
             ok = proc.wait(timeout=left) == 0
         except subprocess.TimeoutExpired:

@@ -402,6 +402,20 @@ TAIL_HELP = [
     "# TYPE migkit_tail_retention_margin_bytes gauge",
     "# HELP migkit_tail_source_held_bytes Log the source holds for the tail",
     "# TYPE migkit_tail_source_held_bytes gauge",
+    "# HELP migkit_tail_commit_lag_seconds From the source's commit of the"
+    " last change applied to the target's (the two clocks' difference"
+    " included)",
+    "# TYPE migkit_tail_commit_lag_seconds gauge",
+    "# HELP migkit_tail_applied_through_age_seconds Since the source"
+    " committed the last change the tail applied",
+    "# TYPE migkit_tail_applied_through_age_seconds gauge",
+    "# HELP migkit_tail_tables Tables of the tail in each state: live,"
+    " copying (added, copied beside the stream), parked (a DDL the target"
+    " does not follow yet), removed",
+    "# TYPE migkit_tail_tables gauge",
+    "# HELP migkit_tail_set_aside_bytes Changes the tail holds on this"
+    " machine for tables being copied or parked",
+    "# TYPE migkit_tail_set_aside_bytes gauge",
     "# HELP migkit_follow_applying The change leg run from here is applying"
     " (0: it waits to be told to)",
     "# TYPE migkit_follow_applying gauge",
@@ -464,6 +478,20 @@ def _tail_metrics(where, lbl):
             for key, value in (st["room"] or {}).items():
                 if key in ROOM and value is not None:
                     out.append(f"{ROOM[key]}{{{tl}}} {int(value)}")
+            if st.get("lag") is not None:
+                out.append(f"migkit_tail_commit_lag_seconds{{{tl}}}"
+                           f" {float(st['lag']):.3f}")
+            if st.get("through") is not None:
+                out.append(f"migkit_tail_applied_through_age_seconds"
+                           f"{{{tl}}}"
+                           f" {max(time.time() - float(st['through']), 0):.3f}")
+            for state, n in sorted((st.get("tables") or {}).items()):
+                if state == "set_aside_bytes":
+                    out.append(f"migkit_tail_set_aside_bytes{{{tl}}}"
+                               f" {int(n)}")
+                else:
+                    out.append(f'migkit_tail_tables{{{tl},state="{state}"}}'
+                               f" {int(n)}")
         if st["stopped"]:
             out.append(f"migkit_tail_stopped{{{tl}}} 1")
     return out

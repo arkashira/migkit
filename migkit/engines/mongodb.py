@@ -497,6 +497,12 @@ class MongoEngine(Engine):
             " start the tail again from a token taken after it")
 
     CHANGE_POINT_READS_ONLY = True
+    #: a resume token only says where a stream opens: one of its own reads
+    #: from an older one again
+    REREADS_FROM_A_POSITION = True
+    #: a tail stopped on a collection dropped or renamed before there was a
+    #: `ddl` (`_not_a_row_change`), and still does where it says stop
+    DDL_STOPS = ("truncate", "drop", "rename", "create", "alter")
 
     def stream_room(self, side, db, token):
         """Seconds of oplog older than the tail's resume point: the oplog
@@ -681,6 +687,11 @@ class MongoEngine(Engine):
                     "    mongosh --eval 'rs.initiate()'")
             raise
         out = []
+        # the transaction the last event read was in, the events of it in
+        # `out` from `begun`, and where a read goes on after it: its end
+        # is known only at the next event, or not at all where the read
+        # stops inside it (`canon.ended`)
+        txn, begun, after, ts, event = None, 0, None, None, None
         try:
             while len(out) < limit:
                 event = stream.try_next()
@@ -688,15 +699,30 @@ class MongoEngine(Engine):
                     break
                 op = event.get("operationType")
                 table = (event.get("ns") or {}).get("coll")
+                now = self._txn_of(event)
+                if now != txn or now is None:
+                    if txn is not None or after is not None:
+                        canon.ended(out, begun, at=after, ts=ts)
+                    begun = len(out)
+                txn = now
+                after = (event.get("_id") or {}).get("_data")
+                ts = self._event_time(event)
                 # a collection the hop leaves alone, dropped or written,
                 # is the target's business and not the tail's
                 if table and self.hop.excluded(db, table):
                     continue
+                if op in self.STREAM_DDL:
+                    got = self._ddl_event(db, op, event)
+                    if got is None:
+                        raise self._not_a_row_change(op, event)
+                    out += got
+                    continue
                 if op not in self.STREAM_OPS:
                     raise self._not_a_row_change(op, event)
                 key = dict(event.get("documentKey") or {})
+                at = event.get("clusterTime")
                 if self.STREAM_OPS[op] == "delete":
-                    out.append(canon.change("delete", table, key))
+                    out.append(canon.change("delete", table, key, txn=at))
                 elif event.get("fullDocument") is None:
                     # The lookup found nothing, which means the document was
                     # deleted between the change and this read. Whatever
@@ -712,11 +738,120 @@ class MongoEngine(Engine):
                                  .get("removedFields") or []):
                         values[gone] = canon.ABSENT
                     out.append(canon.change(self.STREAM_OPS[op], table,
-                                            key, values))
+                                            key, values, txn=at))
+            else:
+                # stopped at the limit: the last transaction may go on in
+                # the next read, unless it was one event of its own
+                if txn is None:
+                    canon.ended(out, begun, at=after, ts=ts)
+                txn = None
+            if txn is not None or event is None:
+                # read to the stream's end: the transaction read last is
+                # whole, a server's transaction being in the stream at once
+                canon.ended(out, begun, at=after, ts=ts)
             last = stream.resume_token
         finally:
             stream.close()
         return out, (last or {}).get("_data") if last else token
+
+    #: a change stream can end a read inside a multi-document transaction,
+    #: and a resume token only says where to read from: the tail may end a
+    #: batch at the last transaction's end and read the rest again
+    #: (`hetero.tail_apply`)
+    READ_ENDS_INSIDE_TRANSACTIONS = True
+
+    #: the collection events a change stream reports, as `canon.ddl` kinds
+    #: - with `showExpandedEvents` (6.0 and later) the rest of them too;
+    #: `dropDatabase` and `invalidate` end the stream and are not one
+    #: collection's
+    STREAM_DDL = {"drop": "drop", "rename": "rename", "create": "create",
+                  "modify": "alter", "createIndexes": "alter",
+                  "dropIndexes": "alter", "shardCollection": "alter",
+                  "reshardCollection": "alter",
+                  "refineCollectionShardKey": "alter"}
+
+    def _ddl_event(self, db, op, event):
+        """[canon.ddl] for a collection event, None where it is not one
+        collection's."""
+        from .. import canon
+        table = (event.get("ns") or {}).get("coll")
+        if not table:
+            return None
+        to = None
+        if op == "rename":
+            dest = event.get("to") or {}
+            to = dest.get("coll") if dest.get("db") == self._d(
+                "src", db) else None
+            if to is None:
+                return [canon.ddl(table, "drop",
+                                  txn=event.get("clusterTime"))]
+        return [canon.ddl(table, self.STREAM_DDL[op], to=to,
+                          txn=event.get("clusterTime"))]
+
+    @staticmethod
+    def _txn_of(event):
+        """(session, transaction number) of a multi-document transaction's
+        event, None for one that is its own."""
+        if event.get("txnNumber") is None:
+            return None
+        lsid = event.get("lsid") or {}
+        return (str(lsid.get("id")), int(event["txnNumber"]))
+
+    @staticmethod
+    def _event_time(event):
+        """The source's commit time of an event, in seconds: its wall time
+        (6.0 and later), else its cluster time's seconds."""
+        wall = event.get("wallTime")
+        if wall is not None:
+            try:
+                import datetime
+                if wall.tzinfo is None:
+                    wall = wall.replace(tzinfo=datetime.timezone.utc)
+                return wall.timestamp()
+            except (AttributeError, ValueError):
+                pass
+        at = event.get("clusterTime")
+        return float(at.time) if at is not None else None
+
+    def snapshot_mark(self, side, db):
+        """The replica set's majority commit point now, `set|seconds:inc`:
+        every write at or before it is committed on a majority and in the
+        primary's own view, so a read begun after it sees it. Not the
+        cluster time a command answers with - writes still in flight
+        around it can show later than one after them (the oplog's
+        holes); the majority point has none behind it. None where the
+        server says no majority point, a standalone or a sharded
+        cluster's router."""
+        from pymongo.errors import PyMongoError
+        on = (self.stream_identity(side, db) or {}).get("replica set")
+        if not on:
+            return None
+        try:
+            got = self._client(side).admin.command("hello")
+        except PyMongoError:
+            return None
+        at = ((got.get("lastWrite") or {}).get("majorityOpTime") or {}) \
+            .get("ts")
+        if at is None:
+            return None
+        return f"{on}|{at.time}:{at.inc}"
+
+    def mark_covers(self, side, db, mark, change):
+        """Whether the change's cluster time is at or before the mark's
+        (`snapshot_mark`), on the same replica set."""
+        at = change.get("txn")
+        if not isinstance(mark, str) or at is None \
+                or not hasattr(at, "time") or not hasattr(at, "inc"):
+            return None
+        on, _, point = mark.rpartition("|")
+        if not on or on != (self.stream_identity(side, db) or {}).get(
+                "replica set"):
+            return None
+        try:
+            t, _, i = point.partition(":")
+            return (int(at.time), int(at.inc)) <= (int(t), int(i))
+        except ValueError:
+            return None
 
     def neutral_digest(self, side, db, table, columns, where=None):
         """(count, digest) folded here rather than in the server.

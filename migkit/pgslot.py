@@ -120,9 +120,17 @@ def parse_line(line):
     if not sep:
         raise ValueError(f"no table name in {line[:80]!r}")
     op, sep, body = rest.partition(": ")
+    if not sep and rest.strip().upper().startswith("TRUNCATE"):
+        op, sep, body = rest.strip(), ":", ""
     if not sep:
         raise ValueError(f"no operation in {line[:80]!r}")
-    op = op.strip().lower()
+    op = op.strip().lower().rstrip(":")
+    if op == "truncate":
+        # `table public.a, public.b: TRUNCATE: (no-flags)` - one line for
+        # every table the statement emptied, read off 14 and 16
+        return {"table": head.split(",")[0].strip(), "op": "truncate",
+                "tables": [t.strip() for t in head.split(",") if t.strip()],
+                "old": [], "new": []}
     if op not in ("insert", "update", "delete"):
         raise ValueError(f"unknown operation {op!r} in {line[:80]!r}")
 
@@ -140,6 +148,28 @@ def parse_line(line):
     else:
         new = _scan_fields(body)
     return {"table": head.strip(), "op": op, "old": old, "new": new}
+
+
+def commit_time(line):
+    """The time a `COMMIT` line says the source committed, in seconds since
+    the epoch, or None where it says none: the plugin prints it with
+    `include-timestamp`, in the session's zone, which the tail's
+    connection holds at UTC -
+
+        COMMIT 745 (at 2026-09-30 10:00:00.123456+00)
+    """
+    import datetime
+    import re
+    got = re.search(r"\(at ([^)]+)\)\s*$", line or "")
+    if not got:
+        return None
+    text = got.group(1).strip()
+    if re.search(r"[+-]\d\d$", text):
+        text += ":00"
+    try:
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 #: the prefix of the logical message a two-way tail writes first in each
