@@ -2789,6 +2789,34 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## Decided by the owner 2026-09-30
+
+* **A faster way that needs a change on the source is offered, never
+  assumed and never hidden.** First case: MySQL `CLONE` needs the clone
+  plugin on the source. migkit finds out for real whether the change is
+  possible there (the managed services mostly refuse it - read the
+  server's answer and privileges, never guess from the name), and when
+  it is, offers it in one step: what it would change, that it is taken
+  off again afterwards, and what it saves in measured or estimated
+  minutes and source load. The operator answers yes (migkit does it,
+  behind the approvals, reversibly - easier than typing the statements)
+  or no. On no, or where it is impossible, migkit says what not using
+  it means (the next way, its time and its load on the source), records
+  the decision, and goes on with that way. Many teams will not allow a
+  change on a production source - DMS/DTS do not make one - so no is a
+  normal answer, not an error. One mechanism for every such change
+  (decide.py rung needs + approvals + dba.py), not one per engine.
+* **Target interlock default stands:** a move into tables that already
+  hold rows refuses unless the hop sets `target_rows` (refuse, replace,
+  keep).
+* **`goal: cutover` does not turn `cutover:` on.** The migkit-driven
+  cutover runs only where the hop sets `cutover:`. Without it migkit
+  lists the steps to do by hand. Every goal and mode must be explained
+  plainly - in `init`, `assess`, the dry run and the docs: what each
+  does on each side, and what turning `cutover:` on adds (the timed
+  path, the freeze, the drain, the fenced check, the counters, the
+  stream back, the undo, the outage measured).
+
 ## Decided by the owner 2026-09-28 - all of it is to be built
 
 * **Everything below and in "Research round 2026-09-28" and "Where
