@@ -2464,8 +2464,17 @@ class HeteroEngine(Engine):
             files = getattr(eng, "deep_files", None)
             if files is not None:
                 out += files(side, db)
-        return (out or super().check_deep(db)) + ([proved] if proved else [])\
-            + schema
+        # the source's own statements, translated, planned and timed on
+        # both engines and held to the same answers (R23, 4), where the
+        # source keeps statement statistics and both sides speak SQL
+        perf = []
+        if getattr(self.src_engine, "workload_reads", None) is not None \
+                and self.src_engine.SQL_DIALECT \
+                and self.dst_engine.SQL_DIALECT:
+            from .. import workload
+            perf.append(workload.compare(self, db))
+        return (out or super().check_deep(db)) \
+            + ([proved] if proved else []) + schema + perf
 
     def _assess_extra(self):
         """How deep migkit reaches each side, where its engine says

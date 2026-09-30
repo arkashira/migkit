@@ -59,8 +59,8 @@ STREAMS = ("kafka", "kinesis", "pubsub")
 
 #: the keys of a hop itself
 HOP_KEYS = {
-    "goal": Key("what the hop is for - copy, cutover, verify, two-way or"
-                " keep-in-sync", "str"),
+    "goal": Key("what the hop is for - copy, cutover, verify, two-way,"
+                " keep-in-sync, rehearse, upgrade or subset", "str"),
     "engine": Key("the engine both sides run, or hetero - read from the"
                   " addresses when they are addresses", "str"),
     "source": Key("where the data is: an address or the long form",
@@ -189,7 +189,7 @@ HOP_OPTIONS = {
                           "target_role_arn", "kms_key", "instance_class",
                           "way", "subnet_group", "security_groups",
                           "subscription", "resource_group", "location",
-                          "project", "address")),
+                          "project", "address", "upgrade")),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -207,6 +207,10 @@ HOP_OPTIONS = {
                     ("mysql",), knob="way", named_for_a_program=True),
     "region": Key("the region the machine and the target's class are"
                   " priced in, where the addresses do not say", "str"),
+    "rehearses": Key("goal rehearse: the hop this one rehearses, whose plan"
+                     " is forecast from what this one measures - its name,"
+                     " or {hop, databases: {this hop's database: that"
+                     " hop's}}", "str|dict", subs=("hop", "databases")),
     "reladiff": Key("the second data reading, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
     "repair_window": Key("seconds a writer is paused for a repair",
@@ -251,6 +255,11 @@ HOP_OPTIONS = {
     "state": Key("where run state is kept", "dict",
                  subs=("backend", "bucket", "prefix", "region",
                        "endpoint_url", "mirror")),
+    "subset": Key("goal subset: the rows a copy for testing starts from -"
+                  " start: {table: a condition, a share like 10% or a"
+                  " number of rows} - whether the rows that refer to them"
+                  " come too (children), and the most rows it may hold"
+                  " (most)", "dict", subs=("start", "children", "most")),
     "tables": Key("the tables of a generic hop", "list", ("generic",)),
     "target_engine": Key("the target's engine of a hetero hop", "str",
                          ("hetero",)),
@@ -566,6 +575,65 @@ GOALS = {
                                " (protect_target)",
                      "guarantees": "each cycle's changes compared, the"
                                    " stream's lag said, a difference named"},
+    "rehearse": {"what": "the whole path the real run will take - copy,"
+                         " follow, prove, cut over - on a copy or a sample"
+                         " of the source into a target of its own, every"
+                         " phase timed, so the hop it rehearses"
+                         " (rehearses:) is forecast from what it measured",
+                 "options": {"protect_target": SUPPORTED},
+                 "writes": True,
+                 "next": ["migkit move {hop} --mode full+cdc --go",
+                          "migkit check {hop}",
+                          "migkit move {hop} --mode cdc --drop --go",
+                          "migkit assess {hop}"],
+                 "source": "a copy or a sample of the real run's source,"
+                           " read and followed as a cutover follows it;"
+                           " written only by a cutover the hop turns on,"
+                           " as the real run's would be",
+                 "target": "a target of its own, filled, followed and cut"
+                           " over to as the real run's will be; its own"
+                           " writes are timed there, rolled back",
+                 "guarantees": "every phase measured and kept for the real"
+                               " run's forecast; the two sides proved equal"
+                               " before the real run is allowed to start"},
+    "upgrade": {"what": "the same engine at a newer version with the least"
+                        " downtime: what the new version changes checked"
+                        " first, then the data moved into it and followed,"
+                        " or a copy of its pages upgraded on the target"
+                        " where the hop allows it, and switched over",
+                "options": {"protect_target": SUPPORTED},
+                "writes": True,
+                "next": ["migkit assess {hop}",
+                         "migkit move {hop} --mode full+cdc",
+                         "migkit move {hop} --mode full+cdc --go",
+                         "migkit check {hop}",
+                         "migkit move {hop} --mode cdc --drop --go"],
+                "source": "read and followed as a cutover follows it; never"
+                          " upgraded where it runs - its downtime is the"
+                          " cutover's alone",
+                "target": "a server of the new version filled and followed,"
+                          " or a copy of the source's pages upgraded there"
+                          " by the new version's own upgrade, then followed"
+                          " from the copy's position",
+                "guarantees": "what the new version removes or changes said"
+                              " before anything is written; the source's own"
+                              " statements planned, timed and held to the"
+                              " same answers on both versions"},
+    "subset": {"what": "a copy for testing: the rows chosen and every row"
+                       " they refer to, masked where the hop says, into a"
+                       " staging or developer database, proved row by row",
+               "options": {}, "writes": True,
+               "next": ["migkit move {hop} --mode full",
+                        "migkit move {hop} --mode full --go",
+                        "migkit check {hop}"],
+               "source": "read, never written: the rows chosen and those"
+                         " they refer to",
+               "target": "its tables in scope emptied and filled with the"
+                         " subset, masked on the way where the hop says",
+               "guarantees": "every reference in the copy resolves inside"
+                             " it; every row as the source's, its masked"
+                             " columns as the rule writes them, none"
+                             " beyond the subset"},
 }
 
 #: each mode of `move` and `sync`: what it does on each side, as the dry
@@ -1004,14 +1072,15 @@ def _contradictions(where, raw, opts, goal, engine):
                     "error", f"{where}.options.{k}",
                     f"goal {goal} writes to neither side, and {k} writes"
                     " - drop one of the two"))
-    if goal == "copy":
+    if goal in ("copy", "subset"):
         for k in STREAMING:
             if opts.get(k):
                 out.append(Problem(
                     "error", f"{where}.options.{k}",
-                    f"goal copy moves the data once, and {k} keeps a"
+                    f"goal {goal} moves the data once, and {k} keeps a"
                     " stream running - make the goal cutover or two-way,"
                     " or drop the option"))
+    out += _goal_settings(where, opts, goal, engine)
     out += _source_changes(where, opts, goal)
     from .interlock import CHOICES
     rows = opts.get("target_rows")
@@ -1035,6 +1104,57 @@ def _contradictions(where, raw, opts, goal, engine):
             raw.get("databases"), (list, tuple)):
         out.append(Problem("error", f"{where}.databases",
                            "is not a list"))
+    return out
+
+
+def _goal_settings(where, opts, goal, engine):
+    """The settings a goal reads, held to the goal: the rows a subset
+    starts from, the hop a rehearsal rehearses, and each said as doing
+    nothing on a hop whose goal does not read it."""
+    out = []
+    name = where.split(".", 1)[-1]
+    subset = opts.get("subset")
+    if goal == "subset":
+        start = subset.get("start") if isinstance(subset, dict) else None
+        if not isinstance(start, dict) or not start:
+            out.append(Problem(
+                "error", f"{where}.options.subset",
+                "goal subset copies the rows chosen and every row they"
+                " refer to, and no rows are chosen - subset: {start:"
+                " {table: a condition, a share like 10% or a number of"
+                " rows}}"))
+    elif subset is not None:
+        out.append(Problem("warn", f"{where}.options.subset",
+                           "read only by a hop whose goal is subset, so it"
+                           " does nothing here"))
+    said = opts.get("rehearses")
+    rehearsed = (said.get("hop") if isinstance(said, dict) else said) or ""
+    if goal == "rehearse":
+        if not rehearsed:
+            out.append(Problem(
+                "warn", f"{where}.options.rehearses",
+                "goal rehearse and no hop named as the one it rehearses:"
+                " what it measures is taken by any hop of the same"
+                " engines, and none is forecast from it by name"))
+        elif str(rehearsed) == name:
+            out.append(Problem("error", f"{where}.options.rehearses",
+                               "a hop does not rehearse itself - name the"
+                               " hop of the real run"))
+    elif said is not None:
+        out.append(Problem("warn", f"{where}.options.rehearses",
+                           "read only by a hop whose goal is rehearse, so"
+                           " it does nothing here"))
+    if goal == "upgrade" and engine == "hetero":
+        out.append(Problem(
+            "error", f"{where}.goal",
+            "goal upgrade is one engine at a newer version, and this hop"
+            " joins two engines - a move between engines is goal cutover"))
+    physical = opts.get("physical")
+    if isinstance(physical, dict) and physical.get("upgrade") is not None \
+            and goal != "upgrade":
+        out.append(Problem("warn", f"{where}.options.physical.upgrade",
+                           "read only by a hop whose goal is upgrade, so it"
+                           " does nothing here"))
     return out
 
 

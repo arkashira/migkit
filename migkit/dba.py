@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from . import sourcechange as sc
 
 #: goals that follow the source's changes, and that write to the source
-STREAMS = ("cutover", "keep-in-sync", "two-way")
+STREAMS = ("cutover", "keep-in-sync", "two-way", "rehearse", "upgrade")
 
 
 @dataclass

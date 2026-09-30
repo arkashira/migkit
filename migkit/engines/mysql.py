@@ -442,6 +442,20 @@ class MySQLEngine(Engine):
         rows = [list(r) for r in self._q(side, sql, args)]
         return self._by_key_map(columns, key, rows)
 
+    def neutral_rows_matching(self, side, db, table, columns, match, values):
+        """Every row whose `match` columns hold one of `values`, asked of
+        the server by the select a read by key makes, a thousand values a
+        statement."""
+        if not match or not values:
+            return []
+        values, out = list(values), []
+        for i in range(0, len(values), 1000):
+            sql, args = self._by_key_query(
+                f"`{self._d(side, db)}`.`{table}`", columns, list(match),
+                values[i:i + 1000], lambda n: f"`{n}`", "%s", None, "mysql")
+            out += [list(r) for r in self._q(side, sql, args)]
+        return out
+
     def neutral_write(self, side, db, table, columns, rows):
         if not rows:
             return 0
@@ -3707,18 +3721,31 @@ class MySQLEngine(Engine):
                     "select @@")
 
     def workload_reads(self, db, n):
-        """[(label, statement, runnable)] - the source's busiest reads by
-        total time, from `performance_schema`'s digests. The label is the
-        digest's normalised text, never the sample's literal values."""
-        rows = self._q("src", "select DIGEST_TEXT, QUERY_SAMPLE_TEXT from"
+        """[(label, statement, runnable, mean ms, calls)] - the source's
+        busiest reads by total time, from `performance_schema`'s digests.
+        The label is the digest's normalised text, never the sample's
+        literal values."""
+        return self._workload(db, n, ("SELECT",))
+
+    def workload_writes(self, db, n):
+        """The source's busiest inserts, updates, deletes and replaces, as
+        `workload_reads` gives its reads - their mean time the source's own
+        statistics' (a write is never run on the source)."""
+        return self._workload(db, n, ("INSERT", "UPDATE", "DELETE",
+                                      "REPLACE"))
+
+    def _workload(self, db, n, verbs):
+        like = " or ".join("DIGEST_TEXT like %s" for _ in verbs)
+        rows = self._q("src", "select DIGEST_TEXT, QUERY_SAMPLE_TEXT,"
+                              " AVG_TIMER_WAIT / 1e9, COUNT_STAR from"
                               " performance_schema"
                               ".events_statements_summary_by_digest"
-                              " where SCHEMA_NAME = %s and DIGEST_TEXT"
-                              " like 'SELECT %%'"
+                              f" where SCHEMA_NAME = %s and ({like})"
                               " order by SUM_TIMER_WAIT desc limit %s",
-                       (self._d("src", db), int(n) * 3))
+                       (self._d("src", db), *[f"{v} %" for v in verbs],
+                        int(n) * 3))
         out = []
-        for digest, sample in rows:
+        for digest, sample, mean, calls in rows:
             text = f"{digest} {sample}".lower()
             if any(m in text for m in self.MIGKIT_MARKS):
                 continue
@@ -3726,23 +3753,82 @@ class MySQLEngine(Engine):
             # a sample cut at the server's text limit is not a statement
             whole = bool(sample) and not sample.rstrip().endswith("...") \
                 and "?" not in sample
-            out.append((" ".join(str(digest).split())[:70], sample, whole))
+            out.append((" ".join(str(digest).split())[:70], sample, whole,
+                        float(mean) if mean is not None else None,
+                        int(calls or 1)))
             if len(out) >= n:
                 break
         return out
 
-    def _read_only(self, side, db):
+    def _read_only(self, side, db, write=False):
         conn = self._conn(side)
         cur = conn.cursor()
         cur.execute(f"use {self._my_ident(self._d(side, db))}")
         cur.execute("set session max_execution_time = 5000")
-        cur.execute("start transaction read only")
+        # a write is only planned here, never run: its plan is asked in a
+        # transaction that may hold one, and rolled back all the same
+        cur.execute("start transaction" if write
+                    else "start transaction read only")
         return conn, cur
+
+    #: the statements that write, planned in a transaction that may write
+    WRITES = ("insert", "update", "delete", "replace")
+
+    def workload_rows(self, side, db, sql, most):
+        """The statement's answer, at most `most` rows, run read-only under
+        a time limit."""
+        conn, cur = self._read_only(side, db)
+        try:
+            cur.execute(sql)
+            return [tuple(r) for r in cur.fetchmany(int(most))]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def workload_time_write(self, side, db, sql):
+        """A write's time in ms on the target, inside a transaction that is
+        rolled back; a lock it would wait on for more than a second stops
+        it (None), so a change tail writing the same rows is never held up
+        for long."""
+        import pymysql
+        self._target_only(side, "time a write")
+        conn, cur = self._read_only(side, db, write=True)
+        try:
+            cur.execute("set session innodb_lock_wait_timeout = 1")
+            began = time.perf_counter()
+            try:
+                cur.execute(sql)
+            except pymysql.err.OperationalError as e:
+                if e.args and e.args[0] == 1205:
+                    return None
+                raise
+            return (time.perf_counter() - began) * 1000.0
+        finally:
+            conn.rollback()
+            conn.close()
+
+    #: the settings the optimizer's choices turn on, compared between two
+    #: servers of one engine (`workload.settings_differ`)
+    PLANNER_SETTINGS = ("optimizer_switch", "innodb_buffer_pool_size",
+                        "join_buffer_size", "sort_buffer_size",
+                        "tmp_table_size", "max_heap_table_size",
+                        "optimizer_search_depth", "eq_range_index_dive_limit",
+                        "range_optimizer_max_mem_size",
+                        "innodb_stats_persistent_sample_pages",
+                        "internal_tmp_mem_storage_engine")
+
+    def planner_settings(self, side, db):
+        marks = ", ".join(["%s"] * len(self.PLANNER_SETTINGS))
+        return {str(k).lower(): str(v) for k, v in self._q(
+            side, "select variable_name, variable_value from"
+                  " performance_schema.global_variables where"
+                  f" variable_name in ({marks})", self.PLANNER_SETTINGS)}
 
     def workload_plan(self, side, db, sql):
         """{table: "index <name>" or None where the plan reads it whole}."""
         import json as _json
-        conn, cur = self._read_only(side, db)
+        conn, cur = self._read_only(
+            side, db, write=str(sql).lstrip().lower().startswith(self.WRITES))
         try:
             cur.execute(f"explain format=json {sql}")
             plan = _json.loads(cur.fetchone()[0])

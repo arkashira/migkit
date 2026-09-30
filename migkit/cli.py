@@ -749,26 +749,14 @@ def assess(hop_name):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    items = eng.assess()
-    from . import cutover
-    try:
-        level, what = cutover.summary(hop, eng, hop.databases
-                                      or eng.databases())
-    except Exception as e:  # noqa: BLE001 - said, the rest stands
-        level, what = "warn", f"cutover: could not be worked out ({e})"
-    items.append({"level": level, "scope": "cutover", "item": what,
-                  "detail": ""})
-    # the source's load, the class the target needs and the machine to run
-    # migkit on (R22): asked of the first database, which holds the load
-    from . import machine
-    dbs = list(hop.databases or [])
-    if not dbs:
-        try:
-            dbs = eng.databases()
-        except Exception:  # noqa: BLE001 - said by the engine's own rows
-            dbs = []
-    if dbs:
-        items += machine.assess_items(hop, eng, dbs[0])
+    # everything the hop's goal needs, in one place, each with its fix
+    # (`ready`): the servers, what they allow, the target, the resources,
+    # the goal's own checks, the rehearsal and its forecast, and what a
+    # person does by hand and when
+    from . import ready, rehearsal
+    rehearsal.mark(hop)
+    got = ready.items(hop, eng)
+    items = [i.row() for i in got]
     color = {"pass": "green", "warn": "yellow", "fail": "red"}
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for it in items:
@@ -782,6 +770,13 @@ def assess(hop_name):
             console.print(line)
     (hop.report_dir() / "assess.json").write_text(
         json.dumps(items, indent=1))
+    hand = [i for i in got if i.by_hand and i.level != "pass"]
+    if hand:
+        # what a person still does, each at its moment - the plan says it
+        # again then; there is no other document to keep
+        console.print("\nby hand:")
+        for i in hand:
+            console.print(f"  {i.when}: {i}")
     _say_goal(hop)
     console.print(f"\n{counts['pass']} pass, {counts['warn']} warn,"
                   f" {counts['fail']} fail")
@@ -1085,8 +1080,16 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     #: the evidence
     timings = {}
 
+    from . import rehearsal, subset
+    rehearsal.mark(hop)
+
     def run_db(d):
+        if subset.settings(hop) is not None:
+            # a copy for testing holds the rows chosen, not the source's
+            # every row: it is proved against what it was to hold
+            return [r.__dict__ for r in subset.check(hop, eng, d)]
         out = []
+        began = time.time()
         # the source's shape before and after this database's checks, where
         # it is one query: an answer a DDL overtook is taken back, and a
         # resumed run reuses nothing the source has changed under since
@@ -1156,6 +1159,11 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             if after is not None:
                 shape_file.parent.mkdir(parents=True, exist_ok=True)
                 shape_file.write_text(json.dumps(after))
+        if not table and not only and not reuse:
+            # the whole battery over the whole database: its time is the
+            # check phase of the next plan, this hop's or the one it
+            # rehearses (`rehearsal.record_check`)
+            rehearsal.record_check(hop, eng, d, time.time() - began)
         return out
 
     console.print(f"checking {hop_name}: {len(dbs)} dbs x {checks},"
@@ -1537,6 +1545,15 @@ def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval,
     executes, --go checkpoints for rollback. --mode runs the whole flow
     end to end with verification wrapped around every step, so migkit can
     stand in for a managed migration service on a trusted VM."""
+    from . import subset
+    if mode != "verify" and subset.settings(get_hop(hop_name)) is not None:
+        # a copy for testing holds the rows chosen, masked: made equal to
+        # the whole source it would not be one any more
+        raise SystemExit(f"{hop_name} is a copy for testing (goal subset):"
+                         " it is taken afresh by migkit move"
+                         f" {hop_name} --mode full --go, and proved by"
+                         f" migkit check {hop_name}; sync makes a target"
+                         " equal to the whole source. Nothing was written")
     if mode != "reconcile":
         return _orchestrate(ctx, hop_name, db, mode, do_apply or go,
                             serve, interval, on_conflict)
@@ -1563,6 +1580,12 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
         from . import hopkeys
         hopkeys.refuse_writes(hop, f"sync --mode {mode}")
     eng = get_engine(hop)
+    if go and mode in ("seed", "migrate", "stream"):
+        from . import ready
+        ready.gate(hop, eng, [db] if db else None,
+                   "cdc" if mode == "stream" else
+                   "full+cdc" if mode == "migrate" else "full", False,
+                   lambda m: console.print(f"  {m}"))
     tail = "  (dry-run; add --apply/--go to execute)" if not go else ""
     if not go:
         from . import hopkeys
@@ -1733,12 +1756,16 @@ def _record_run(hop, eng, d, via, rows, began, spent):
     its rows and seconds, the bytes it carried, and the CPU seconds this
     machine spent - where the copy ran here and not in a container, whose
     CPU this process does not see."""
-    from . import machine, movers, planner, sizing
+    from . import machine, movers, planner, rehearsal, sizing
     here = movers.PROGRAMS.get(via) != ("docker",)
-    planner.record_rate(hop, via, rows, time.time() - began,
+    took = time.time() - began
+    planner.record_rate(hop, via, rows, took,
                         machine.size_of(eng, d, hop),
                         spent.seconds() if here else None,
                         sizing.host().get("cpus") if here else None)
+    # the copy held to the forecast it started with, where it kept one
+    for line in rehearsal.held_to(hop, d, "copy", took):
+        console.print(f"  {line}")
 
 
 
@@ -1768,18 +1795,22 @@ def _resource_plan(hop, eng, d, via, facts=None, tables=None, go=False):
     if short:
         out.append(f"  memory: NOT ENOUGH - {short}")
     return out + planner.phase_lines(_planned(hop, m, facts, tables, n,
-                                              via, d))
+                                              via, d, go))
 
 
-def _planned(hop, m, facts, tables, n, via, d):
+def _planned(hop, m, facts, tables, n, via, d, go=False):
     """The phases of the move from its model, kept with it for `watch` and
-    the metrics."""
-    from . import planner
+    the metrics - and, as a run starts on a hop that rehearses or is
+    rehearsed, as the forecast the run is held to as each phase ends
+    (`rehearsal.keep_forecast`)."""
+    from . import planner, rehearsal
     m.planned = planner.phases(hop, m, facts, tables, n, via)
     try:
         m.save(hop.report_dir(d))
     except OSError:
         pass
+    if go and (rehearsal.settings(hop) or rehearsal.of(hop)):
+        rehearsal.keep_forecast(hop, d, m.planned, via)
     return m.planned
 
 
@@ -1915,7 +1946,7 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     if not m.planned:
         try:
             _planned(hop, m, eng.table_facts("src", d), names, plan.start,
-                     "builtin", d)
+                     "builtin", d, go=True)
         except Exception:  # noqa: BLE001 - the move goes on without it
             pass
     most = plan.most
@@ -2939,9 +2970,37 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         from . import approvals
         approvals.require(hop, "cutover", db,
                           lambda m: console.print(f"  {m}"))
+    from . import ready, rehearsal, subset
+    rehearsal.mark(hop)
+    if go:
+        # everything known now that would stop this step before its end,
+        # each with its fix, before anything is written (`ready`)
+        ready.gate(hop, eng, [db] if db else None, mode, do_drop,
+                   lambda m: console.print(f"  {m}"))
+    else:
+        # the plan says them where the run would stop on them, and what a
+        # person does before it
+        for i in ready.stops(hop, eng, [db] if db else None, mode,
+                             do_drop):
+            console.print(f"  with --go this stops: {i}")
+        from . import upgrade
+        if upgrade.settings(hop) is not None and mode != "cdc":
+            # the way the upgrade goes, and what an upgrade in place on the
+            # source would have cost
+            try:
+                for line in upgrade.plan_lines(
+                        hop, eng, db or (eng.databases() or [""])[0]):
+                    console.print(f"  {line}")
+            except Exception as e:  # noqa: BLE001 - the plan goes on
+                console.print(f"  upgrade: the way could not be worked"
+                              f" out: {upgrade._quiet(str(e).strip()[:160])}")
     for d in ([db] if db else eng.databases()):
         # before the target is written to at all, its grants included
         _interlock(hop, eng, d, go)
+    if subset.settings(hop) is not None:
+        return subset.move(hop, eng, [db] if db else eng.databases(),
+                           mode, table, go,
+                           lambda m: console.print(f"  {m}"))
     if not table and not do_drop and _carried_physically(hop, eng, db, mode,
                                                          go):
         return
@@ -3208,7 +3267,17 @@ def _cutover(hop, eng, db, go, engine):
                                  lambda m: console.print(f"  {m}"),
                                  detail=detail)
     leg = _stream_leg(hop, eng, db, dbs, engine)
-    return cutover.run(hop, eng, dbs, go, leg, console.print, approve)
+    from . import rehearsal
+    rehearsal.mark(hop)
+    got = cutover.run(hop, eng, dbs, go, leg, console.print, approve)
+    last = cutover.last_run(hop) if go else None
+    if last and last.get("state") == "flipped" \
+            and last.get("outage") is not None and dbs:
+        # the outage held to the forecast the move started with
+        for line in rehearsal.held_to(hop, dbs[0], "cutover",
+                                      float(last["outage"])):
+            console.print(f"  {line}")
+    return got
 
 
 def _stream_leg(hop, eng, db, dbs, engine):

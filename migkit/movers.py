@@ -2826,6 +2826,23 @@ tooluse.register("mysqlsh", options=_features({
     "skipBinlog": (UNUSED, "the target's binlog is kept for its replicas"),
     "analyzeTables": (UNUSED, "migkit settles the target's statistics after"
                               " every bulk copy"),
+    "util.checkForServerUpgrade": (
+        TOPPED, "run against the source for the version the upgrade goes"
+                " to, each problem it finds an assess row in migkit's words"
+                " beside migkit's own checks of what that version changes -"
+                " its settings and defaults read from both servers"
+                " (`upgrade.checker`)"),
+    "targetVersion": (USED, "the new version, as the target or the hop's"
+                            " upgrade settings say it"),
+    "outputFormat": (USED, "JSON, read problem by problem"),
+    "configPath": (UNUSED, "the source's configuration file is not on this"
+                           " machine; its settings are read from the server"
+                           " instead"),
+    "include": (UNUSED, "every check it has is run"),
+    "exclude": (UNUSED, "every check it has is run"),
+    "list": (UNUSED, "its checks are run, not listed"),
+    "checkTimeout": (UNUSED, "the whole run is bounded by migkit's own"
+                             " wait of ten minutes"),
 }))
 
 

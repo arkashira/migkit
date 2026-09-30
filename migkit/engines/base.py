@@ -2854,6 +2854,34 @@ class Engine:
         """
         raise self._no_canon("read rows by key")
 
+    def neutral_rows_matching(self, side, db, table, columns, match, values):
+        """[row] of `table` whose `match` columns hold one of `values` - the
+        rows that refer to others, for a copy that follows them
+        (`subset`). A read by key cannot answer it: several rows share one
+        value, and its answer keeps one row a key. Here the table is read
+        through in key order and the rows that match are kept; an engine
+        that can ask its server for them overrides this. `columns` holds
+        the `match` columns, whose classes render each side alike."""
+        from .. import canon
+        if not match or not values:
+            return []
+        classes = dict(columns)
+        names = [n for n, _ in columns]
+        at = [names.index(m) for m in match]
+        want = {tuple(canon.render_value(classes[m], v)
+                      for m, v in zip(match, value)) for value in values}
+        out, after = [], None
+        while True:
+            rows, last = self.neutral_read(side, db, table, columns, after,
+                                           5000)
+            for r in rows:
+                if tuple(canon.render_value(classes[match[i]], r[j])
+                         for i, j in enumerate(at)) in want:
+                    out.append(r)
+            if last is None or not rows:
+                return out
+            after = last
+
     def _drill_path(self, db, name, kind):
         return self.hop.report_dir(db) / f"data-{name}.{kind}"
 

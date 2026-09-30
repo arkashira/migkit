@@ -6693,6 +6693,30 @@ cutover, R21, types, users, workload). Not yet anywhere:
    into the forecast for the real run - time per phase, downtime,
    bytes, cost - with the confidence of a sample of that size; the real
    run later compared with its forecast.
+   *Done 2026-10-01 (`rehearsal`); its tests wait for the one run of the
+   suite at the end:* `goal: rehearse` with `rehearses: <hop>` (or `{hop,
+   databases: {its db: that hop's}}`) runs the real hop's whole path -
+   `move --mode full+cdc --go`, `check`, `move --mode cdc --drop --go` -
+   into a target of its own, and marks what it rehearses and what decided
+   its path in its reports (`rehearsal.json`), so a rehearsal run from
+   another machine's reports is found too. No second estimator: the real
+   hop's plan is `planner.phases` over `model`, fed by the rehearsal before
+   any other hop - its stages (`model._earlier`, truth `REHEARSED`, named in
+   the plan), its copies' rates (`planner._elsewhere`, `_bytes_rates`), its
+   checks' time (kept as `rehearsal.CHECK` with the rates, only for a hop
+   that rehearses or is rehearsed), its cutover's outage
+   (`planner._with_cutover`, and the cutover preflight's budget line); a
+   plan that may not write takes the target's writes from it
+   (`model.build(write=False)`). The confidence of the sample: the p90
+   widened by 0.15 a factor of ten between the rows the rehearsal carried
+   and this move's, at most 0.6 (`sample_spread`) - a rule, not a
+   measurement - and the share said. The real run keeps its forecast as it
+   starts (`forecast.json`) and each phase is held to it once as it ends -
+   within, slower than its p90, faster than half its p50
+   (`forecast-runs.jsonl`). What the rehearsal did differently from the
+   hop (engines, exclude, mapping, the options that choose ways, places
+   and secrets left out) is named by `ready`; a rehearsal that ended with
+   differences stops the real move.
 3. **An interlock on the target:** the plan shows each side's identity
    (cluster id, host, version, size, whether it holds data) and `--go`
    refuses when the target is the source itself, when it looks like a
@@ -6721,10 +6745,45 @@ cutover, R21, types, users, workload). Not yet anywhere:
    translated workload (P10) is timed too, writes as well as reads, and
    the target is advised (indexes, statistics, the settings its load
    needs) before cutover.
+   *Done 2026-10-01 (`workload`); its tests wait for the one run of the
+   suite at the end:* across engines (the hetero pair's deep check, where
+   the source keeps statement statistics) each statement is translated by
+   `storedcode.translate` with the hop's renames (`convert.localizer`) -
+   refused ones counted and said - planned and timed on each side in its
+   own SQL, and a read run on both is held to the same answer as a
+   multiset of values (numbers by their digits, moments in UTC), weighted
+   by the calls each had; the same across two major versions of one
+   engine. Writes come from the same statistics (`workload_writes`):
+   planned on both sides and never run on the source, their source time
+   the statistics' mean; timed on the target only on a rehearsal's own
+   before its cutover, in a transaction rolled back with a short lock wait.
+   The finding's fix names the source's index as the target makes it
+   (`for-the-target.sql`), the target's missing statistics, and the
+   planner's settings that differ between two servers of one engine
+   (`planner_settings`). SQL Server joins PostgreSQL and MySQL: its Query
+   Store, `SHOWPLAN_XML`, compatibility level. Fixed on the way: a bitmap
+   scan read as a table read whole on PostgreSQL. Oracle's bind capture
+   is left to the Oracle files' owner.
 5. **Copies for testing:** a referentially complete subset (the closure
    of foreign keys from the rows chosen) with masking, into a staging
    or developer database - the same engine pairs, the same proof of
    what was copied.
+   *Done 2026-10-01 (`subset`); its tests wait for the one run of the
+   suite at the end:* `goal: subset` with `subset: {start: {table: a
+   condition | N% | N | all}, children, most}` and the hop's
+   `mask_on_write`. `move --mode full --go` chooses the rows, follows every
+   foreign key to the row it names until nothing new arrives (with
+   `children: true` the rows that name those too, through
+   `neutral_rows_matching`), refuses past `most` or on a reference it
+   cannot follow, empties the target's tables in scope children first and
+   writes parents first, and proves it: each row read back by the kept
+   keys and compared value for value, masked columns held to the rule, no
+   row beyond the subset, every reference resolving inside the copy.
+   `check` asks the same of the source as it is now. A share is taken by a
+   hash of the key, the same rows every run. Masking is held to the
+   parallel dump's rules (`movers.mask_plan`): never a key or a column a
+   reference runs through, never random. Refused: following changes,
+   one table alone, `sync`.
 6. **Right the first time, not a runbook to recover with** (the
    owner: "not a document - make it succeed once, no rollback needed,
    high correctness, high quality"): the rehearsal (2), the preflight
@@ -6734,10 +6793,51 @@ cutover, R21, types, users, workload). Not yet anywhere:
    not as a plan. What people must still do by hand (a DBA grant, an
    application switch) is listed by the plan at the moment it is
    needed, not in a separate document.
+   *Done 2026-10-01 (`ready`); its tests wait for the one run of the
+   suite at the end:* one place for everything a goal needs, each with its
+   fix: the engine's assess, what the goal needs each server to allow
+   (`dba.needs`, the DBA's script), the interlock's refusals asked before
+   the write (`interlock.refusals`, `whose_rows` shared with
+   `before_copy`), the target's disk against the tables and this
+   machine's memory against the widest rows, a colliding mapping, the
+   goal's own checks (upgrade, subset), the rehearsal and its forecast,
+   the cutover, and what a person does and when (`by_hand`). `assess` is
+   now `ready.items`; `move --go` and `sync --go` stop before the first
+   write on every item sure to stop the step, all at once
+   (`MIGKIT_PREFLIGHT=warn` goes on), and the plan without `--go` says
+   each as "with --go this stops". What is only likely - a target that may
+   hold its schemas already, a disk too small only with the indexes, a
+   path not rehearsed - is said and does not stop it.
 7. **A major-version upgrade as a goal:** `goal: upgrade` - the same
    engine at a new version with the least downtime, choosing between
    the in-place upgrade and a logical move by measurement, with the
    extensions and their versions checked first.
+   *Done 2026-10-01 (`upgrade`); its tests wait for the one run of the
+   suite at the end:* migkit never upgrades the source where it runs (a
+   change of the source's server). The ways are `decide` rungs: a copy of
+   the pages at the source's version upgraded in place on the target -
+   PostgreSQL's own upgrade run where the target's data is (`physical:
+   {upgrade: {bin, old_bin, data, start}}`, the new data directory made
+   as the source's was with its sign-in rules and known settings carried,
+   the files linked, cloned or copied as the upgrade's own check proves),
+   MySQL's new server started on the clone's data, a cloud's own upgrade
+   API (RDS/Aurora, Azure Flexible Server, Cloud SQL) - then followed from
+   the copy's own position; or a logical move into a target already at the
+   new version. The physical rungs need the upgrade said for this goal
+   (`physical.UPGRADES`). The in-place step is timed and said as the
+   downtime an upgrade on the source would have cost (`in_place_line`).
+   Checked first, from both servers' catalogues: settings the source sets
+   that the new version lacks (with what replaced each), every default the
+   source relies on that changed (compiled default against compiled
+   default), extensions offered at the source's version or a later one,
+   types and removed functions in the source's own code, PostgreSQL 15's
+   public schema, 17's search path for maintenance, md5 passwords,
+   collation library versions (indexes rebuilt on the target after a copy
+   of the pages), MySQL's reserved words, sign-in plugins, a jump its
+   in-place upgrade does not take and its own upgrade checker, MongoDB's
+   removed index types, SQL Server's compatibility level and deprecated
+   features; plan regressions through `workload` once the target holds
+   the rows.
 8. **Working inside the team's tools**, as the others do: Airbyte and
    Fivetran ship Airflow operators, a Terraform provider and an API;
    Datafold runs its diff in GitHub CI on pull requests; Liquibase,

@@ -8,6 +8,46 @@ from .dbapi import MARK, DbapiRows
 SKIP_DBS = {"master", "tempdb", "model", "msdb"}
 
 
+def plan_tables(xml):
+    """{table: "index <name>" or None where it is read whole} of an
+    estimated plan as `SHOWPLAN_XML` gives it: a scan of the table or of
+    its clustered index reads it whole; a seek, or a scan of another
+    index, reaches it through that index."""
+    import xml.etree.ElementTree as ET
+    out = {}
+    for op in ET.fromstring(xml).iter():
+        if not str(op.tag).endswith("}RelOp"):
+            continue
+        how = op.get("PhysicalOp", "")
+        for child in op:
+            if not str(child.tag).endswith(("}IndexScan", "}TableScan")):
+                continue
+            obj = next((o for o in child if str(o.tag).endswith("}Object")),
+                       None)
+            if obj is None:
+                continue
+            table = obj.get("Table", "").strip("[]")
+            index = obj.get("Index", "").strip("[]")
+            out[table] = (None if how in ("Table Scan", "Clustered Index Scan")
+                          else f"index {index}" if index
+                          else out.get(table))
+    return out
+
+
+def _without_parameters(text):
+    """A statement the Query Store keeps with its parameters declared in
+    front of it - `(@P1 int,@P2 nvarchar(50))select ...` - without that
+    declaration; any other as it is."""
+    if not text.startswith("(@"):
+        return text
+    depth = 0
+    for i, ch in enumerate(text):
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        if depth == 0:
+            return text[i + 1:].strip()
+    return text
+
+
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
     #: a change tracking version only says where a read begins: one of its
@@ -622,7 +662,148 @@ class MSSQLEngine(DbapiRows, Engine):
             res.append(Result("deep", f"{db} boundary", "ok",
                               f"max(pk) checked on {n} tables,"
                               f" none ahead of source{note}"))
+        from .. import workload
+        res.append(workload.compare(self, db))
         return res
+
+    # --- the source's own statements, from its Query Store (R23, 4) -----
+
+    #: statements of migkit's own checks, left out of the application's
+    MIGKIT_MARKS = ("sys.", "information_schema", "hashbytes(",
+                    "checksum_agg(", "serverproperty(", "@@")
+
+    def workload_reads(self, db, n):
+        """[(label, statement, runnable, mean ms, calls)] - the source's
+        busiest reads by total time, from its Query Store - or why there
+        are none. A statement the application sent with parameters is kept
+        as the server holds it, `(@P1 int)select ...`: planned where the
+        parameters can be declared, never run."""
+        return self._workload(db, n, ("select", "with"))
+
+    def workload_writes(self, db, n):
+        """The source's busiest inserts, updates, deletes and merges, as
+        `workload_reads` gives its reads - their mean time the Query Store's
+        (a write is never run on the source)."""
+        return self._workload(db, n, ("insert", "update", "delete",
+                                      "merge"))
+
+    def _workload(self, db, n, verbs):
+        state = self._rows("src", db, "select actual_state_desc from"
+                                      " sys.database_query_store_options")
+        if not state or str(state[0][0]).upper() not in ("READ_WRITE",
+                                                          "READ_ONLY"):
+            return ("the source keeps no statement statistics here (its"
+                    " Query Store is off in this database)")
+        rows = self._rows("src", db, f"""
+            select top ({int(n) * 3}) qt.query_sql_text,
+                   sum(rs.avg_duration * rs.count_executions)
+                       / nullif(sum(rs.count_executions), 0) / 1000.0,
+                   sum(rs.count_executions)
+              from sys.query_store_query_text qt
+              join sys.query_store_query q
+                on q.query_text_id = qt.query_text_id
+              join sys.query_store_plan p on p.query_id = q.query_id
+              join sys.query_store_runtime_stats rs on rs.plan_id = p.plan_id
+             group by qt.query_sql_text
+             order by sum(rs.avg_duration * rs.count_executions) desc""")
+        out = []
+        for text, mean, calls in rows:
+            body = _without_parameters(" ".join(str(text or "").split()))
+            low = body.lower()
+            if not low.startswith(verbs) or any(m in low for m in
+                                                self.MIGKIT_MARKS):
+                continue
+            out.append((body[:70], body, "@" not in body,
+                        float(mean) if mean is not None else None,
+                        int(calls or 1)))
+            if len(out) >= n:
+                break
+        return out
+
+    def workload_plan(self, side, db, sql):
+        """{table: "index <name>" or None where the plan reads it whole},
+        from the estimated plan (`SHOWPLAN_XML`): nothing is run."""
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute("SET SHOWPLAN_XML ON")
+            try:
+                cur.execute(sql)
+                got = cur.fetchone()[0]
+            finally:
+                cur.execute("SET SHOWPLAN_XML OFF")
+        finally:
+            conn.close()
+        return plan_tables(got)
+
+    def workload_time(self, side, db, sql):
+        """The statement's time in ms, its rows read and let go; it waits
+        on no lock for more than five seconds."""
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute("SET LOCK_TIMEOUT 5000")
+            began = time.perf_counter()
+            cur.execute(sql)
+            while cur.fetchmany(10000):
+                pass
+            return (time.perf_counter() - began) * 1000.0
+        finally:
+            conn.close()
+
+    def workload_rows(self, side, db, sql, most):
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute("SET LOCK_TIMEOUT 5000")
+            cur.execute(sql)
+            return [tuple(r) for r in cur.fetchmany(int(most))]
+        finally:
+            conn.close()
+
+    def workload_time_write(self, side, db, sql):
+        """A write's time in ms on the target, inside a transaction rolled
+        back; a lock it would wait on for more than a second stops it."""
+        import pymssql
+        self._target_only(side, "time a write")
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute("SET LOCK_TIMEOUT 1000")
+            began = time.perf_counter()
+            try:
+                cur.execute(sql)
+            except pymssql.OperationalError as e:
+                if "1222" in str(e):
+                    return None
+                raise
+            return (time.perf_counter() - began) * 1000.0
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def planner_settings(self, side, db):
+        """What the optimizer's choices turn on: the database's
+        compatibility level - the cardinality estimator it runs - its
+        scoped configurations, and the server's parallelism."""
+        out = {}
+        for (level,) in self._rows(side, db, "select compatibility_level"
+                                             " from sys.databases where"
+                                             " name = db_name()"):
+            out["compatibility_level"] = str(level)
+        for name, value in self._rows(
+                side, db, "select name, cast(value as nvarchar(64)) from"
+                          " sys.database_scoped_configurations where name"
+                          " in ('LEGACY_CARDINALITY_ESTIMATION', 'MAXDOP',"
+                          " 'PARAMETER_SNIFFING', 'QUERY_OPTIMIZER_HOTFIXES')"):
+            out[str(name).lower()] = str(value)
+        for name, value in self._rows(
+                side, db, "select name, cast(value_in_use as nvarchar(64))"
+                          " from sys.configurations where name in ('max"
+                          " degree of parallelism', 'cost threshold for"
+                          " parallelism')"):
+            out[str(name)] = str(value)
+        return out
 
     def repair_plan(self, db, kind):
         actions = []

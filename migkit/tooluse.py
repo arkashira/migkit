@@ -49,7 +49,8 @@ CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.engines.warehouse", "migkit.engines.lake",
                 "migkit.storedcode.programs", "migkit.notify",
                 "migkit.traces", "migkit.redisshake", "migkit.mirror",
-                "migkit.dsbulk", "migkit.fromsnapshot", "migkit.ddbexport"]
+                "migkit.dsbulk", "migkit.fromsnapshot", "migkit.ddbexport",
+                "migkit.upgrade"]
 
 _HERE = Path(__file__).parent
 

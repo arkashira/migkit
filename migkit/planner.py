@@ -205,8 +205,15 @@ def measured_rate(hop, path):
 
 def _elsewhere(hop, path):
     """([run], [hop name]) from the other hops of the same kind on the same
-    path: a rehearsal's runs, for the migration it rehearses."""
-    from . import config
+    path: the runs of this hop's own rehearsal where it has one on the path
+    (`rehearsal.of`), else every other hop's of the same engines."""
+    from . import config, rehearsal
+    rec = rehearsal.of(hop)
+    if rec is not None:
+        got = [r for r in _runs(rec["dir"] / "throughput.json", path)
+               if r.get("kind") in (None, _kind(hop))]
+        if got:
+            return got, [f"the rehearsal {rec['name']}"]
     kind, runs, names = _kind(hop), [], []
     try:
         dirs = sorted(p for p in config.REPORTS.iterdir() if p.is_dir())
@@ -489,7 +496,10 @@ def phases(hop, model, facts, tables=None, n=None, via="builtin"):
     out += _index_builds(model if measured else None, facts, names, copy,
                          first, via)
     src = model.stages.get("source") if measured else None
-    if src is not None and src.bound() and disk:
+    ran = _check_from_runs(hop, disk * ratio, rows) if disk else None
+    if ran is not None:
+        out.append(ran)
+    elif src is not None and src.bound() and disk:
         back = model.stages.get("target-check")
         there = (back.per_stream * (n or 1) if back is not None
                  and back.per_stream else None)
@@ -513,10 +523,11 @@ def _copy_from_runs(hop, via, disk, rows, out):
     if got:
         rates, whose = got
         copy = disk / rates[-1]
+        wide = _widened(hop, whose, rows)
         out.append(Phase(
-            "copy", copy, disk / rates[0] if len(rates) > 1
-            else _p90(copy, 0), "", "measured on an earlier run"
-            + (f" of {whose}" if whose else ""),
+            "copy", copy, max(disk / rates[0] if len(rates) > 1
+                              else _p90(copy, 0), _p90(copy, wide)), "",
+            "measured on an earlier run" + (f" of {whose}" if whose else ""),
             f"{_size(disk)} at the table copy's ~{_size(rates[-1])}/s"
             " measured before; which resource bound it was not measured"))
         return copy
@@ -525,13 +536,57 @@ def _copy_from_runs(hop, via, disk, rows, out):
         return None
     rates, whose = got
     copy = rows / rates[len(rates) // 2]
+    wide = _widened(hop, whose, rows)
     out.append(Phase(
-        "copy", copy, rows / rates[0] if len(rates) > 1 else _p90(copy, 0),
+        "copy", copy, max(rows / rates[0] if len(rates) > 1
+                          else _p90(copy, 0), _p90(copy, wide)),
         "", "measured on an earlier run" + (f" of {whose}" if whose else ""),
         f"{rows:,} rows at the {len(rates)} rate"
         + ("s" if len(rates) > 1 else "") + " measured on this path; which"
         " resource bound it was not measured"))
     return copy
+
+
+def _widened(hop, whose, rows):
+    """The spread a forecast from this hop's rehearsal takes for a move of
+    `rows` (`rehearsal.sample_spread`), from the most rows the rehearsal
+    carried in one run; nothing for runs of any other hop."""
+    if not whose or not str(whose).startswith("the rehearsal") or not rows:
+        return 0.0
+    from . import movers, rehearsal
+    rec = rehearsal.of(hop)
+    if rec is None:
+        return 0.0
+    had = [r.get("rows") for p in tuple(movers.VIAS) + (rehearsal.CHECK,)
+           for r in _runs(rec["dir"] / "throughput.json", p)
+           if r.get("rows")]
+    return rehearsal.sample_spread(max(had), rows) if had else 0.0
+
+
+def _check_from_runs(hop, size, rows):
+    """[the check's phase] from whole checks measured - this hop's own
+    (`rehearsal.CHECK`), else its rehearsal's: the bytes a second a check
+    read both sides at. None where neither was measured: the check is then
+    composed from the resource model's stages."""
+    from . import rehearsal
+    if hop is None or not size:
+        return None
+    runs, whose = _runs(_rates_path(hop), rehearsal.CHECK), None
+    if not runs:
+        rec = rehearsal.of(hop)
+        if rec is not None:
+            runs = _runs(rec["dir"] / "throughput.json", rehearsal.CHECK)
+            whose = f"the rehearsal {rec['name']}"
+    runs = [r for r in runs if r.get("bytes") and r.get("seconds")]
+    if not runs:
+        return None
+    rates = sorted(r["bytes"] / r["seconds"] for r in runs)
+    took = size / rates[len(rates) // 2]
+    p90 = max(size / rates[0], _p90(took, _widened(hop, whose, rows)))
+    return Phase("check", took, p90, "", "measured on an earlier run"
+                 + (f" of {whose}" if whose else ""),
+                 f"every row read on both sides and digested there, at the"
+                 f" ~{_size(rates[-1])}/s whole checks were measured at")
 
 
 #: where the engines keep the table copy's cost a byte by way
@@ -560,7 +615,12 @@ def _bytes_rates(hop):
     mine = rates(_rates_path(hop))
     if mine:
         return sorted(mine), None
-    from . import config
+    from . import config, rehearsal
+    rec = rehearsal.of(hop)
+    if rec is not None:
+        got = rates(rec["dir"] / "throughput.json", _kind(hop))
+        if got:
+            return sorted(got), f"the rehearsal {rec['name']}"
     kind, whose, found = _kind(hop), [], []
     try:
         dirs = sorted(p for p in config.REPORTS.iterdir() if p.is_dir())
@@ -618,9 +678,10 @@ def _with_cutover(hop, got):
     if hop is None or not got or got[-1].name != "cutover" or got[-1].never:
         return got
     try:
-        from . import cutover
+        from . import cutover, rehearsal
         last = cutover.last_run(hop)
         conf = cutover.settings(hop)
+        rec = rehearsal.of(hop)
     except (Exception, SystemExit):  # noqa: BLE001 - as assumed, then
         return got
     if last and last.get("state") == "flipped" \
@@ -629,6 +690,16 @@ def _with_cutover(hop, got):
         return got[:-1] + [Phase(
             "cutover", took, 1.5 * took, "", "measured on an earlier run",
             "the write outage of this hop's last cutover")]
+    theirs = rehearsal.last_cutover(rec)
+    if theirs and theirs.get("state") == "flipped" \
+            and theirs.get("outage") is not None:
+        took = float(theirs["outage"])
+        return got[:-1] + [Phase(
+            "cutover", took, 1.5 * took, "",
+            f"measured on the rehearsal {rec['name']}",
+            "the write outage of the rehearsal's last cutover"
+            + (f"; the budget here is {float(conf['budget']):g}s"
+               if conf else ""))]
     if conf:
         budget = float(conf["budget"])
         est = got[-1]

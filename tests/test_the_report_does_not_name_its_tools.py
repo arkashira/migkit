@@ -48,7 +48,7 @@ TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "pg_verifybackup", "openlogreplicator", "cobrix", "stingray",
          "jt400", "apprise", "redisshake", "dsbulk",
          "connect-mirror-maker", "reindex-from-snapshot",
-         "documentsfromsnapshot")
+         "documentsfromsnapshot", "pg_upgrade", "initdb")
 
 
 def _engine(tmp_path):

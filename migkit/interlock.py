@@ -358,6 +358,51 @@ def _named(t):
     return ".".join(p for p in t if p)
 
 
+def whose_rows(hop, eng, d, tables, dst):
+    """(the tables holding rows this hop did not write, the tables holding
+    rows an earlier run of it wrote into this same target) of `tables`, or
+    None where the target cannot be asked. Reads only."""
+    tables = [tuple(t) for t in tables if not hop.excluded(d, *t)]
+    held = None if dst.get("unread") else eng.rows_held(d, tables)
+    if held is None:
+        return None
+    rec, _ = _load(hop, d)
+    wrote = rec.get("wrote") or {}
+    ours = wrote.get("fingerprint") == fingerprint(dst, LASTING)
+    kept_then = {tuple(t) for t in wrote.get("kept") or []}
+    theirs = {t for t in held if not ours or t in kept_then}
+    return theirs, set(held) - theirs
+
+
+def refusals(hop, eng, d, tables=None):
+    """[why a write step into `d` would stop] - the target the source
+    itself, production the hop does not name, and (for a copy of
+    `tables`) rows it did not write that the hop does not say what to do
+    with - asked the way `before_write` and `before_copy` ask, and
+    nothing kept or said: what `ready` says before anything runs."""
+    src, dst = identity(hop, eng, "src", d), identity(hop, eng, "dst", d)
+    out = []
+    same = itself(src, dst)
+    if same:
+        out.append(f"the target is the source itself: {same}")
+    prod = production(hop, dst)
+    if prod and not prod[2]:
+        out.append(f"the target looks like production: {prod[0]} matches"
+                   f" {prod[1]} in the hop's production list, and the hop"
+                   " does not name it as its target (production_target)")
+    if tables is not None and choice(hop) == "refuse":
+        got = whose_rows(hop, eng, d, tables, dst)
+        theirs = got[0] if got else set()
+        if theirs:
+            names = sorted(_named(t) for t in theirs)
+            out.append(f"{len(theirs)} tables the copy writes already hold"
+                       " rows on the target: " + ", ".join(names[:8])
+                       + (" ..." if len(names) > 8 else "")
+                       + " - and the hop does not say what to do with them"
+                       " (target_rows: replace or keep)")
+    return out
+
+
 def before_copy(hop, eng, d, tables, go, log, whole=False):
     """`before_write` for a copy of `d` into the target, and the rows the
     target already holds in the tables it writes: the tables the hop keeps
@@ -373,18 +418,14 @@ def before_copy(hop, eng, d, tables, go, log, whole=False):
         return decided[d]
     fp = fingerprint(dst, LASTING)
     tables = [tuple(t) for t in tables if not hop.excluded(d, *t)]
-    held = None if dst.get("unread") else eng.rows_held(d, tables)
-    if held is None:
+    got = whose_rows(hop, eng, d, tables, dst)
+    if got is None:
         if _once(hop, ("rows unknown", d)):
             log("whether the target already holds rows in the tables this"
                 " copy writes could not be asked here")
         return set()
+    theirs, mine = got
     rec, path = _load(hop, d)
-    wrote = rec.get("wrote") or {}
-    ours = wrote.get("fingerprint") == fp
-    kept_then = {tuple(t) for t in wrote.get("kept") or []}
-    theirs = {t for t in held if not ours or t in kept_then}
-    mine = set(held) - theirs
     how = choice(hop)
     kept = set()
     if theirs:

@@ -54,10 +54,12 @@ from dataclasses import asdict, dataclass
 
 MEASURED = "measured"
 EARLIER = "measured on an earlier run"
+#: measured on the rehearsal of this hop (`rehearsal`), which it names
+REHEARSED = "measured on its rehearsal"
 CATALOGUED = "catalogued"
 ASSUMED = "assumed"
 #: from the strongest to the weakest
-TRUTHS = (MEASURED, EARLIER, CATALOGUED, ASSUMED)
+TRUTHS = (MEASURED, EARLIER, REHEARSED, CATALOGUED, ASSUMED)
 
 #: seconds each probe may take; the probes of a move take about six of
 #: these
@@ -358,7 +360,7 @@ class Model:
         from .decide import Costs
         out = Costs()
         for s in self.stages.values():
-            if s.per_stream and s.truth in (MEASURED, EARLIER):
+            if s.per_stream and s.truth in (MEASURED, EARLIER, REHEARSED):
                 out[s.name] = 2 ** 20 * len(s.steps) / s.per_stream
         return out
 
@@ -649,6 +651,10 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
             if m.arrival is None or recent > m.arrival[0]:
                 m.arrival = (recent, MEASURED,
                              f"over the {took:.0f}s the probes took")
+        if not write:
+            # what a plan may not measure without writing to the target,
+            # from the rehearsal of this hop where one measured it
+            _earlier(m, hop, db, only=("target", "target-check"))
     else:
         _earlier(m, hop, db)
     return m
@@ -695,14 +701,27 @@ def forget():
         _CACHE.clear()
 
 
-def _earlier(m, hop, db):
-    """The stages of the last run that measured them - this hop's, or
-    another hop's of the same engines (a rehearsal's) - as `EARLIER`."""
-    from . import config
+def _earlier(m, hop, db, only=None):
+    """The stages of the last run that measured them - this hop's, its
+    rehearsal's (`rehearsal.of`, named), or another hop's of the same
+    engines - as `EARLIER` (`REHEARSED` for the rehearsal's). `only` names
+    the stages a plan could not measure now, taken from the rehearsal
+    alone and only where the probes left them out. A rehearsal that
+    carried fewer rows than this move widens the p90 by
+    `rehearsal.sample_spread`."""
+    from . import config, rehearsal
     from .planner import _kind
-    here = load(hop.report_dir(db))
-    found = here if here is not None and here.measured else None
-    if found is None:
+    rec = rehearsal.of(hop)
+    found = whose = None
+    if only is None:
+        here = load(hop.report_dir(db))
+        found = here if here is not None and here.measured else None
+    if found is None and rec is not None:
+        where = rehearsal.model_dir(rec, db)
+        got = load(where) if where is not None else None
+        if got is not None and got.measured:
+            found, whose = got, rec
+    if found is None and only is None:
         kind = _kind(hop)
         try:
             dirs = sorted(p for p in config.REPORTS.iterdir() if p.is_dir())
@@ -718,12 +737,33 @@ def _earlier(m, hop, db):
                 break
     if found is None:
         return
+    said = rehearsal.line(hop, whose, found.rows, m.rows) if whose else ""
+    if only is not None:
+        took = []
+        for name in only:
+            s = found.stages.get(name)
+            if s is None or name in m.stages:
+                continue
+            s.truth = REHEARSED
+            m.stages[name] = s
+            took.append(s.said)
+        if took:
+            m.spread = max(m.spread or 0.0,
+                           rehearsal.sample_spread(found.rows, m.rows))
+            m.notes.append(f"{said}; {', '.join(took)} from there, the"
+                           " rest measured here now")
+        if found.apply and m.apply is None:
+            m.apply = (found.apply[0], REHEARSED) + tuple(found.apply[2:])
+        return
     for s in found.stages.values():
         if s.truth == MEASURED:
-            s.truth = EARLIER
+            s.truth = REHEARSED if whose else EARLIER
         m.stages[s.name] = s
     m.measured = True
     m.spread = found.spread
+    if whose is not None:
+        m.spread = max(m.spread or 0.0,
+                       rehearsal.sample_spread(found.rows, m.rows))
     m.overlapped, m.path = found.overlapped, found.path
     m.observed = found.observed
     if found.per_row:
@@ -731,7 +771,10 @@ def _earlier(m, hop, db):
         m.per_row = found.per_row
         m.carried = int(m.rows * found.per_row) if m.rows else m.carried
     if found.apply and m.apply is None:
-        m.apply = (found.apply[0], EARLIER) + tuple(found.apply[2:])
+        m.apply = (found.apply[0], REHEARSED if whose else EARLIER) \
+            + tuple(found.apply[2:])
+    if said:
+        m.notes.append(said)
 
 
 def _subdirs(d):

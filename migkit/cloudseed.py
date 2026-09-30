@@ -347,6 +347,45 @@ class Aws:
         return self.clone(src, log) if way == "clone" else \
             self.snapshot(src, log)
 
+    def upgrade(self, target, version, up, log):
+        """The copy upgraded to `version` in place by RDS itself, with the
+        parameter group of the new version's family where the hop names
+        one; waited for until it runs that version."""
+        rds, ident = self.client("target"), target["id"]
+        cluster = target.get("kind") == "cluster"
+        extra = {}
+        if up.get("parameter_group"):
+            extra["DBClusterParameterGroupName" if cluster
+                  else "DBParameterGroupName"] = up["parameter_group"]
+        if cluster and up.get("instance_parameter_group"):
+            extra["DBInstanceParameterGroupName"] = \
+                up["instance_parameter_group"]
+        if cluster:
+            rds.modify_db_cluster(DBClusterIdentifier=ident,
+                                  EngineVersion=version,
+                                  AllowMajorVersionUpgrade=True,
+                                  ApplyImmediately=True, **extra)
+        else:
+            rds.modify_db_instance(DBInstanceIdentifier=ident,
+                                   EngineVersion=version,
+                                   AllowMajorVersionUpgrade=True,
+                                   ApplyImmediately=True, **extra)
+        log(f"{ident} asked to upgrade to {version}")
+        describe, key, field = ((rds.describe_db_clusters, "DBClusters",
+                                 "DBClusterIdentifier") if cluster else
+                                (rds.describe_db_instances, "DBInstances",
+                                 "DBInstanceIdentifier"))
+
+        def ask():
+            got = describe(**{field: ident})[key][0]
+            status = got.get("Status") or got.get("DBInstanceStatus")
+            if status in ("failed", "incompatible-parameters"):
+                raise SystemExit(f"{ident} is {status} after its upgrade")
+            done = str(got.get("EngineVersion", "")).split(".")[:1] == \
+                str(version).split(".")[:1]
+            return got if status == "available" and done else None
+        _until(ask, f"the upgrade of {ident}", log)
+
     def binlog_position(self, target, log):
         """The source's binlog position the restored MySQL server holds,
         from its own error log: Aurora's "Binlog position from crash
@@ -447,6 +486,25 @@ class Azure:
     def binlog_position(self, target, log):
         return None
 
+    def upgrade(self, target, version, up, log):
+        """The copy upgraded to `version` in place by the provider's own
+        major version upgrade."""
+        if self.engine == "postgres":
+            from azure.mgmt.postgresqlflexibleservers.models import \
+                ServerForUpdate
+            body = ServerForUpdate(version=str(version), create_mode="Update")
+        else:
+            from azure.mgmt.mysqlflexibleservers.models import ServerForUpdate
+            body = ServerForUpdate(version=str(version))
+        poller = self.client().servers.begin_update(
+            self.opts["resource_group"], target["id"], body)
+        log(f"{target['id']} asked to upgrade to {version}")
+        got = poller.result()
+        have = str(getattr(got, "version", "") or "")
+        if have.split(".")[:1] != str(version).split(".")[:1]:
+            raise SystemExit(f"{target['id']} runs {have or 'an unknown'}"
+                             f" version after its upgrade to {version}")
+
 
 # --- Google ------------------------------------------------------------------
 
@@ -519,6 +577,35 @@ class Google:
 
     def binlog_position(self, target, log):
         return None
+
+    def upgrade(self, target, version, up, log):
+        """The copy upgraded in place by Cloud SQL's own major version
+        upgrade: its `databaseVersion` set to the new one (`POSTGRES_16`,
+        `MYSQL_8_4`), or to what the hop names (`database_version`)."""
+        want = str(up.get("database_version") or (
+            ("POSTGRES_" if self.engine == "postgres" else "MYSQL_")
+            + str(version).replace(".", "_")))
+        api = self.client()
+        op = api.instances().patch(project=self.opts["project"],
+                                   instance=target["id"],
+                                   body={"databaseVersion": want}).execute()
+        log(f"{target['id']} asked to upgrade to {want}")
+
+        def done():
+            got = api.operations().get(project=self.opts["project"],
+                                       operation=op["name"]).execute()
+            if got.get("status") != "DONE":
+                return None
+            if got.get("error"):
+                raise SystemExit("the upgrade failed: " + "; ".join(
+                    e.get("message", "") for e in got["error"].get(
+                        "errors", [])))
+            return got
+        _until(done, f"the upgrade of {target['id']}", log)
+        have = self._get(target["id"]).get("databaseVersion", "")
+        if have != want:
+            raise SystemExit(f"{target['id']} runs {have} after its upgrade"
+                             f" to {want}")
 
 
 PROVIDERS = {"aws": Aws, "azure": Azure, "google": Google}
@@ -740,7 +827,7 @@ def _encrypted_across():
 def rungs():
     out = []
     for engine in ("postgres", "mysql"):
-        base = (physical._WHOLE, _SDK, _SOURCE_SEEN)
+        base = (physical._WHOLE, physical.UPGRADES, _SDK, _SOURCE_SEEN)
         aws = (_names("aws"), _says(("source_id", "target_id")),
                _theirs("aws"), *base, _engine_matches(engine))
         out += [
@@ -853,6 +940,7 @@ def carry(hop, eng, rung, db, mode, go, log):
             f" {opts['target_id']} ({way}), then the changes after it from"
             " the position it holds")
         if not go:
+            _upgrade_step(hop, eng, {}, cloud, dbs, go, log)
             log("dry-run: nothing asked of the provider")
             return
         facts = facts_for(hop, eng, mode)
@@ -901,6 +989,7 @@ def carry(hop, eng, rung, db, mode, go, log):
             rec.update(point)
             physical._save_seed(hop, rec)
             log(f"the copy goes on from {rec['lsn']}")
+        _upgrade_step(hop, eng, rec, cloud, dbs, go, log)
         if follow:
             physical.pg_continue(hop, eng, dbs, rec, go, log)
         return
@@ -908,8 +997,29 @@ def carry(hop, eng, rung, db, mode, go, log):
         token = _mysql_point(hop, eng, rec, cloud, log)
         rec.update(token)
         physical._save_seed(hop, rec)
+    _upgrade_step(hop, eng, rec, cloud, dbs, go, log)
     token = {"log_file": rec["log_file"], "log_pos": rec["log_pos"]}
     physical._record_positions(hop, dbs, token, token)
+
+
+def _upgrade_step(hop, eng, rec, cloud, dbs, go, log):
+    """For a hop whose goal is an upgrade: the provider's copy, at the
+    source's version, upgraded by the same provider once its position is
+    read - a restarted server no longer says where its recovery ended - and
+    before anything is applied to it (`upgrade.cloud_in_place`)."""
+    from . import upgrade
+    if upgrade.settings(hop) is None:
+        return
+    if upgrade.upgraded(rec):
+        log(f"the copy was upgraded to {rec['upgraded'].get('version')} on"
+            f" {rec['upgraded'].get('at')}; going on from it")
+        return
+    if not go:
+        log("then the provider upgrades the copy to"
+            f" {(upgrade.settings(hop) or {}).get('version') or 'the new'}"
+            " version, and its changes go on from the copy's position")
+        return
+    upgrade.cloud_in_place(hop, eng, rec, cloud, dbs, log)
 
 
 def _mysql_point(hop, eng, rec, cloud, log):

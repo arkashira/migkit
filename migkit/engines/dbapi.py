@@ -238,6 +238,29 @@ class DbapiRows(NeutralCopier):
         return self._by_key_map(columns, key, self._whole_times(
             side, db, table, [n for n, _ in columns], found))
 
+    def neutral_rows_matching(self, side, db, table, columns, match, values):
+        """Every row whose `match` columns hold one of `values`, asked of
+        the server as a read by key asks, `DELETE_BATCH` values a
+        statement."""
+        from .. import canon
+        if not match or not values:
+            return []
+        values = list(values)
+        one = "(" + " and ".join(f"{self._q(k)} = {MARK}"
+                                 for k in match) + ")"
+        wide = self._wide_times(side, db, table)
+        cols = ", ".join(wide.get(n, self._q(n)) for n, _ in columns)
+        found = []
+        for i in range(0, len(values), self.DELETE_BATCH):
+            part = values[i:i + self.DELETE_BATCH]
+            found += self._rows(
+                side, db, f"select {cols} from"
+                          f" {self._qualified(side, db, table)} where "
+                          + " or ".join([one] * len(part)),
+                [canon.sql_value(v) for k in part for v in k])
+        return self._whole_times(side, db, table, [n for n, _ in columns],
+                                 found)
+
     def neutral_digest(self, side, db, table, columns, where=None):
         """Folded here, over rows the driver hands back as values, with the
         renderer and the arithmetic every engine's digest is held to."""
@@ -498,3 +521,8 @@ class FoldsToCapitals:
                                           keys, where)
         return self._by_key_map(columns, key, self._unpad(
             side, db, table, columns, [list(r) for r in got.values()]))
+
+    def neutral_rows_matching(self, side, db, table, columns, match, values):
+        return self._unpad(side, db, table, columns, [
+            list(r) for r in super().neutral_rows_matching(
+                side, db, table, columns, match, values)])

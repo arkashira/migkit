@@ -446,15 +446,25 @@ def preflight(hop, eng, dbs, leg, conf):
             add("warn", "no flip command: the application is pointed at"
                         " the target by hand while the clock runs")
         last = last_run(hop)
+        from . import rehearsal
+        rec = rehearsal.of(hop)
+        theirs = rehearsal.last_cutover(rec)
         if last and last.get("state") == "flipped" \
                 and last.get("outage") is not None:
             add("fail" if last["outage"] > conf["budget"] else "ok",
                 f"the last cutover of this hop took {last['outage']:.2f}s"
                 f" of outage; the budget is {conf['budget']:g}s")
+        elif theirs and theirs.get("state") == "flipped" \
+                and theirs.get("outage") is not None:
+            add("fail" if theirs["outage"] > conf["budget"] else "ok",
+                f"the rehearsal {rec['name']}'s last cutover took"
+                f" {theirs['outage']:.2f}s of outage; the budget is"
+                f" {conf['budget']:g}s")
         else:
             add("warn", "no cutover of this hop has been measured to the"
                         f" end: the {conf['budget']:g}s budget is the only"
-                        " bound - rehearse on a copy first")
+                        " bound - rehearse on a copy first (goal:"
+                        " rehearse)")
     return out
 
 

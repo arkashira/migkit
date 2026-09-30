@@ -359,6 +359,23 @@ _EMPTY = Need("an empty target", ("dst_tables",),
                          " pages replaces the whole server, so it is taken"
                          " only onto an empty one"))
 
+def _upgrading(facts):
+    return (getattr(facts.hop, "goal", "") or "") == "upgrade"
+
+
+#: a hop whose goal is an upgrade takes a copy of the pages only where it
+#: says how the target is upgraded after it: the copy arrives at the
+#: source's own version (`upgrade`)
+UPGRADES = Need("the hop to say how the target is upgraded after the copy",
+                ("options",),
+                lambda f: isinstance(f["options"].get("upgrade"), dict)
+                and bool(f["options"]["upgrade"]),
+                "the goal is an upgrade, and a copy of the pages arrives at"
+                " the source's own version: the hop says how the target is"
+                " upgraded after it (physical: {upgrade: {...}}), or points"
+                " at a target that already runs the new version for a"
+                " logical move", when=_upgrading)
+
 _SIGNS_IN = Need("the hop's target user among the source's", (
     "src_users",), lambda f: f["target_signs_in"],
     lambda f: (f"the copy carries the source's users and none of the"
@@ -471,6 +488,7 @@ def _pg_needs():
         _hop_says(("data", "run", "stop", "start"),
                   "where the target's data directory is and how its"
                   " server is stopped and started"),
+        UPGRADES,
         _WHOLE,
         Need("a source that gives a replication connection",
              ("managed_src",), lambda f: not f["managed_src"],
@@ -789,6 +807,7 @@ def _my_needs():
     said = CLONE
     return (
         _hop_allows(said),
+        UPGRADES,
         _WHOLE,
         Need("a source that allows a clone", ("managed_src",),
              lambda f: not f["managed_src"],
@@ -1442,7 +1461,10 @@ def _pg_is_the_seed(eng, rec):
                                              " pg_control_system()").strip()
     except Exception:  # noqa: BLE001 - not reachable: not this seed
         return False
-    return sysid == rec.get("system")
+    # the new version's own upgrade makes a cluster of its own, whose
+    # identifier it recorded (`upgrade.pg_in_place`)
+    return sysid == rec.get("system") or \
+        sysid == (rec.get("upgraded") or {}).get("system")
 
 
 def pg_continue(hop, eng, dbs, rec, go, log):
@@ -1567,6 +1589,7 @@ def _pg_carry(hop, eng, rung, db, mode, go, log):
             " the server started - with the source's users and the"
             " settings the source keeps in its data directory")
         if not go:
+            _upgrade_step(hop, eng, {}, dbs, go, log)
             log("dry-run: nothing stopped, copied or made")
             return
         facts = facts_for(hop, eng, mode)
@@ -1604,6 +1627,7 @@ def _pg_carry(hop, eng, rung, db, mode, go, log):
                if rec["page_checksums"] else
                "; the source has no page checksums, so the pages are proved"
                " by the manifest and by migkit's check after"))
+    _upgrade_step(hop, eng, rec, dbs, go, log)
     if follow:
         pg_continue(hop, eng, dbs, rec, go, log)
     elif go:
@@ -1846,6 +1870,7 @@ def _my_carry(hop, eng, rung, db, mode, go, log):
             " restarts; the changes after it are read from the position the"
             " clone records")
         if not go:
+            _upgrade_step(hop, eng, {}, dbs, go, log)
             log("dry-run: nothing cloned")
             return
         import contextlib
@@ -1891,17 +1916,48 @@ def _my_carry(hop, eng, rung, db, mode, go, log):
         planner.record_rate(hop, rung.name, _rows(eng, dbs), took)
         log(f"the target is the source as of {token['log_file']}:"
             f"{token['log_pos']}, in {took:,.0f}s")
+    _upgrade_step(hop, eng, rec, dbs, go, log)
     token = {"log_file": rec["log_file"], "log_pos": rec["log_pos"]}
     _record_positions(hop, dbs, token, token)
 
 
 def _my_is_the_seed(eng, rec):
+    if (rec or {}).get("upgraded"):
+        # the new version's server on the clone's data: the same server by
+        # its own id, the clone's position as recorded before the upgrade
+        try:
+            uuid = str(eng._q("dst", "select @@server_uuid")[0][0])
+        except Exception:  # noqa: BLE001 - not reachable: not this seed
+            return False
+        return uuid == rec["upgraded"].get("uuid")
     try:
         got = _clone_status(eng)
     except Exception:  # noqa: BLE001 - no clone there
         return False
     return (got["state"] == "Completed" and got["log_file"] == rec.get(
         "log_file") and got["log_pos"] == rec.get("log_pos"))
+
+
+def _upgrade_step(hop, eng, rec, dbs, go, log):
+    """For a hop whose goal is an upgrade: the copy, at the source's
+    version, upgraded in place on the target before anything is applied
+    to it (`upgrade`); said, without `go`. A copy an earlier run upgraded
+    is gone on from."""
+    from . import upgrade
+    if upgrade.settings(hop) is None or rec is None:
+        return
+    if upgrade.upgraded(rec):
+        log(f"the target was upgraded to {rec['upgraded'].get('version')}"
+            f" on {rec['upgraded'].get('at')}; going on from it")
+        return
+    if not go:
+        log("then the target is upgraded in place by the new version's own"
+            " upgrade, and its changes go on from the copy's position")
+        return
+    if _engine_of(hop) == "postgres":
+        upgrade.pg_in_place(hop, eng, rec, dbs, log)
+    else:
+        upgrade.my_in_place(hop, eng, rec, dbs, log)
 
 
 # --- the move ----------------------------------------------------------------

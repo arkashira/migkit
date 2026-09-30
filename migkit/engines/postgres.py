@@ -1066,6 +1066,25 @@ class PostgresEngine(Engine):
                 rows = [list(r) for r in cur.fetchall()]
         return self._by_key_map(columns, key, rows)
 
+    def neutral_rows_matching(self, side, db, table, columns, match, values):
+        """Every row whose `match` columns hold one of `values`, asked of
+        the server by the select a read by key makes, a thousand values a
+        statement."""
+        if not match or not values:
+            return []
+        sch, tbl = self._split(table)
+        values, out = list(values), []
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                for i in range(0, len(values), 1000):
+                    sql, args = self._by_key_query(
+                        f'"{sch}"."{tbl}"', columns, list(match),
+                        values[i:i + 1000], lambda n: f'"{n}"', "%s", None,
+                        "postgres")
+                    cur.execute(sql, args)
+                    out += [list(r) for r in cur.fetchall()]
+        return out
+
     def neutral_write(self, side, db, table, columns, rows):
         """Rows in through COPY, and over what the table already holds by
         its key: into a temporary table first, then one statement that
@@ -5198,30 +5217,110 @@ class PostgresEngine(Engine):
     # --- the source's own reads, planned and timed on both sides (G1) ----
 
     def workload_reads(self, db, n):
-        """[(label, statement, runnable)] - the source's busiest reads by
-        total time, from `pg_stat_statements` - or why there are none.
-        The hop's own user's statements are left out: they are migkit's
-        checks, not the application's reads."""
+        """[(label, statement, runnable, mean ms, calls)] - the source's
+        busiest reads by total time, from `pg_stat_statements` - or why
+        there are none. The hop's own user's statements are left out: they
+        are migkit's checks, not the application's reads."""
+        return self._workload(db, n, "select|with")
+
+    def workload_writes(self, db, n):
+        """The source's busiest inserts, updates, deletes and merges, as
+        `workload_reads` gives its reads - their mean time the source's own
+        statistics' (a write is never run on the source)."""
+        return self._workload(db, n, "insert|update|delete|merge")
+
+    def _workload(self, db, n, verbs):
         if self._psql("src", db, "select count(*) from pg_extension where"
                                  " extname = 'pg_stat_statements'") != "1":
             return ("the source keeps no statement statistics here"
                     " (pg_stat_statements is not installed in this"
                     " database)")
         rows = self._psql("src", db, f"""
-            select replace(replace(query, chr(10), ' '), chr(31), ' ')
+            select replace(replace(replace(query, chr(10), ' '), chr(31),
+                           ' '), chr(30), ' ')
+                   || chr(30) || round(mean_exec_time::numeric, 3)
+                   || chr(30) || calls
               from pg_stat_statements
              where dbid = (select oid from pg_database
                             where datname = current_database())
                and userid <> (select oid from pg_roles
                                where rolname = current_user)
-               and query ~* '^\\s*(select|with)\\M'
+               and query ~* '^\\s*({verbs})\\M'
                and query !~* '(pg_catalog|information_schema|pg_stat)'
              order by total_exec_time desc limit {int(n)}""")
         import re
         out = []
-        for q in (l for l in rows.splitlines() if l.strip()):
+        for line in (l for l in rows.splitlines() if l.strip()):
+            q, _, rest = line.partition("\x1e")
+            mean, _, calls = rest.partition("\x1e")
             label = " ".join(q.split())[:70]
-            out.append((label, q, not re.search(r"\$\d", q)))
+            out.append((label, q, not re.search(r"\$\d", q),
+                        float(mean) if mean else None,
+                        int(calls) if calls.isdigit() else 1))
+        return out
+
+    def workload_rows(self, side, db, sql, most):
+        """The statement's answer, at most `most` rows, run read-only under
+        a time limit."""
+        conn = self._conn(side, self._d(side, db))
+        try:
+            conn.set_session(readonly=True)
+            with conn.cursor() as cur:
+                cur.execute("set statement_timeout = 5000")
+                cur.execute(sql)
+                return [tuple(r) for r in cur.fetchmany(int(most))]
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def workload_time_write(self, side, db, sql):
+        """A write's execution time in ms on the target, inside a
+        transaction that is rolled back; a lock it would wait on for more
+        than a fifth of a second stops it (None), so a change tail writing
+        the same rows is never held up."""
+        import psycopg2
+        self._target_only(side, "time a write")
+        conn = self._conn(side, self._d(side, db))
+        try:
+            with conn.cursor() as cur:
+                cur.execute("set local statement_timeout = 5000")
+                cur.execute("set local lock_timeout = 200")
+                try:
+                    cur.execute("explain (analyze, timing off, format json)"
+                                f" {sql}")
+                except psycopg2.errors.LockNotAvailable:
+                    return None
+                got = cur.fetchone()[0]
+        finally:
+            conn.rollback()
+            conn.close()
+        import json as _json
+        plan = got if isinstance(got, list) else _json.loads(got)
+        return float(plan[0]["Execution Time"])
+
+    #: the settings the planner's choices turn on, compared between two
+    #: servers of one engine (`workload.settings_differ`)
+    PLANNER_SETTINGS = ("work_mem", "effective_cache_size", "shared_buffers",
+                        "random_page_cost", "seq_page_cost",
+                        "default_statistics_target",
+                        "effective_io_concurrency", "jit",
+                        "max_parallel_workers_per_gather",
+                        "join_collapse_limit", "from_collapse_limit",
+                        "plan_cache_mode", "enable_seqscan",
+                        "enable_indexscan", "enable_bitmapscan",
+                        "enable_hashjoin", "enable_mergejoin",
+                        "enable_nestloop", "enable_partitionwise_join")
+
+    def planner_settings(self, side, db):
+        names = ", ".join(f"'{n}'" for n in self.PLANNER_SETTINGS)
+        out = {}
+        for line in self._psql(side, db, "select name || chr(31) ||"
+                                         " setting || coalesce(unit, '')"
+                                         f" from pg_settings where name in"
+                                         f" ({names})").splitlines():
+            name, _, value = line.partition("\x1f")
+            if name:
+                out[name] = value
         return out
 
     def _plan_json(self, side, db, sql, analyze=False):
@@ -5249,12 +5348,25 @@ class PostgresEngine(Engine):
         which is PostgreSQL 16 and later."""
         out = {}
 
+        def under(node):
+            """The indexes a bitmap scan's own children read the table by:
+            they name no table, and the heap scan above them names no
+            index - read apart, a table reached through an index read as
+            a table read whole."""
+            for child in node.get("Plans") or []:
+                if child.get("Index Name"):
+                    yield child["Index Name"]
+                yield from under(child)
+
         def walk(node):
             rel = node.get("Relation Name")
             if rel:
                 kind = node.get("Node Type", "")
+                by = next(under(node), None) \
+                    if kind == "Bitmap Heap Scan" else None
                 out[rel] = (f"index {node.get('Index Name')}"
                             if "Index" in kind and node.get("Index Name")
+                            else f"index {by}" if by
                             else None if kind == "Seq Scan"
                             else out.get(rel))
             for child in node.get("Plans") or []:
