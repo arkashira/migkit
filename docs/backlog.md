@@ -5411,6 +5411,60 @@ range digest, the fenced re-check, exact batches or the final proof.
 9. **One scan for the whole tree, any key (F1):** every leaf digest in
    one `GROUP BY bucket` pass, buckets by a hash of the key, an in-SQL
    IBLT when differences are few and the link is slow.
+
+   *Built (2026-09-29), 8 and 9 (`migkit/leaves.py`, `migkit/kept.py`,
+   `bench/proof.py`):*
+   * **One scan, every leaf** (`leaves.scan`): count, row-hash sum and
+     key-hash sum per leaf in one `GROUP BY` a side, salted 60-bit md5 of
+     canon's text; leaves by ranges of one integer key (read back by its
+     index), else by the top bits of the key's hash (composite, text and
+     cross-engine keys alike), else - no key - by the row's hash with
+     duplicates carried by the count. It replaced `hetero._bisect`.
+     Measured, PostgreSQL pair, 10 rows apart: the whole verify of a
+     differing table 26.6s -> 5.67s at 1M rows, 92.4s -> 29.7s at 5M
+     (the halving asked 194 and 290 digests); over a 50 ms round trip,
+     10 differences 136.8s -> 5.16s, 1,000 differences past 900s ->
+     19.7s. The tree over equal tables costs +33% (1M) and +48% (5M)
+     over the plain digest, so the plain digest stays the first pass.
+   * **The self-check** (`leaves.localize`): each leaf read back must add
+     up to its digest on its side, and what is found to the difference
+     of the two tables' totals - else "differs, not fully localized".
+   * **The sketch** (`leaves.Sketch`, `by_sketch`): an IBLT of sum cells
+     (count, key, hash, hash squared) built in one scan in SQL on
+     PostgreSQL and MySQL (in this process elsewhere), peeled here; a
+     cell is pure only where its square lane matches. Over the 50 ms
+     link: 5.92s at 10 differences, 6.18s at 1,000 (the leaves 19.7s).
+     Decodes multiplicities, so a table with no key is reconciled too.
+   * **The passes as rungs** (`leaves.PASSES`, `decide.compose`): prove
+     (kept leaves, one scan), leaves (range, hash), localize (sketch,
+     leaf reads, the bisecting reader), confirm (fenced, totals), keep
+     (kept, again), a second reading (none, another reader's row hash,
+     bisection). The localizer is climbed on its own measured costs. The
+     bisecting reader over every column is faster on one engine (1.97s
+     against 5.12s at 1M, 10.7s against 23.0s at 5M) and is a localizer
+     there, what it names held to migkit's digests; without `-c %` it
+     compared keys alone and missed all 4 changed rows.
+   * **The proof kept up as the data moves** (`kept`, hop option
+     `keep_proof`): every carried table's leaves, both sides, in one
+     SQLite file beside the tail's position, seeded by one fenced read,
+     moved by each batch's before and after images in the step that saves
+     the position (a batch committed there and never saved is taken back
+     out on restart), marked "to read again" where an image is not whole,
+     a row filter or a server-text column applies, or the marks cannot
+     place a change; a background pass re-reads the coldest leaves (a row
+     written behind the tail's back shows there); the proof compares the
+     kept numbers and re-reads only what differs, is marked, was touched
+     since the last pass or is older than the bound, fenced, twice more
+     for what still differs. The hop's own engine's check (PostgreSQL,
+     MySQL) and the pair's stand on it. Measured: 7.2 us a change to keep
+     both sides (in process); at 1M rows the final proof 1.46s against
+     1.74s for the table digest in full and 2.56s for the one-scan tree.
+     Not from the copy's range digests (a range is read batch by batch,
+     each under its own snapshot, its mark taken once - the reason is in
+     `kept`). Not measured yet: the tail's rate with every leaf kept (the
+     run measured, 32,207 against 46,689 changes a second, marked every
+     touched leaf because the slot's timestamp text did not render - now
+     typed first), the final proof at 5M rows, and the `offset 0` fence.
 10. **The fastest hash the pair allows:** same engine and version ->
     the server's native row hash (`hash_record_extended` and the like,
     no text rendering); cross-engine -> canonical rendering + md5,

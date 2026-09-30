@@ -1,12 +1,13 @@
-"""Rows that differ in a table too large to walk, found by halving the key
-range on both sides (plan 19).
+"""Rows that differ in a table too large to walk, found from the leaves of
+its digest tree (plan 19, then backlog R20.9).
 
 The walk that names differing rows stops after 20,000 rows a side and says
 so. In a table of 60,000 rows, a changed row past that point was never
-named. Now a table past the cap, keyed by one integer, is digested in
-halves on both engines, and only the halves that disagree are followed
-down to ranges small enough to walk. An integer range holds the same rows
-in both engines, where a text range would depend on each one's collation.
+named. It was then found by digesting halves of the key range, each half
+read again on both engines; now every leaf comes out of one scan a side,
+and only the leaves that disagree are read back - by the key's index,
+where it is one integer on both sides and a range of it holds the same
+rows in both engines.
 """
 import socket
 import subprocess
@@ -101,7 +102,8 @@ def test_differences_past_the_walks_reach_are_named(pair, tmp_path):
     assert "1 missing on the target (41234)" in detail, detail
     assert "1 with different values (55000)" in detail, detail
     assert "1 only on the target (60001)" in detail, detail
-    assert "found by halving the key range" in detail, detail
+    assert "leaves that differ" in detail, detail
+    assert "adds up to the whole difference" in detail, detail
     assert "there may be more" not in detail, detail
     # the files sync reads name the same three
     assert (tmp_path / "data-t.changed").read_text().strip() == "[\"55000\"]"

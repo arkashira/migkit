@@ -411,6 +411,11 @@ class HeteroEngine(Engine):
                          f"{self._leaf(t)} exists more than once on one side,"
                          " so migkit will not guess which one the other side"
                          " means - name the schema", None, None))
+        # pass D: where the hop keeps its proof and the tail keeps it up,
+        # the kept leaves prove the tables they hold (`kept.prove`)
+        from .. import kept, leaves
+        proved = (kept.prove(self, db, log=stream) or {}) if pairs and \
+            kept.wanted(self.hop) else {}
         for src_t, dst_t in pairs:
             scope = f"{db}.{self._leaf(src_t)}"
             try:
@@ -425,6 +430,14 @@ class HeteroEngine(Engine):
                 rows.append((scope, "warn",
                              "no column on this table can be compared across"
                              " these two engines" + tail, None, None))
+                continue
+            got = proved.get(self._leaf(src_t))
+            if got is not None and leaves.strategy(
+                    scope, {"kept": True}).parts["prove"].name == "kept":
+                status, detail, na, nb = got
+                if stream:
+                    stream(f"{scope}: {status}")
+                rows.append((scope, status, detail + tail, na, nb))
                 continue
             try:
                 wheres = self._row_scope(db, src_t)
@@ -470,106 +483,34 @@ class HeteroEngine(Engine):
                     f" digest src={a[1]} dst={b[1]}")
             rows.append((scope, "diff",
                          head + self._drill(db, src_t, dst_t, src_cols,
-                                            dst_cols, max(a[0], b[0]))
+                                            dst_cols, max(a[0], b[0]),
+                                            (a, b))
                          + tail, a[0], b[0]))
         return rows
 
-    #: how many rows per side a drilldown will walk before saying it stopped
-
-    def _drill(self, db, src_t, dst_t, src_cols, dst_cols, rows=0):
+    def _drill(self, db, src_t, dst_t, src_cols, dst_cols, rows=0,
+               digests=None):
         """The base's walk, over this hop's two engines, through the hop's
         row filter on each side - or, for a table the walk would stop
-        short in, the key range halved until what differs is small enough
-        to walk (plan 19)."""
+        short in and a table with no key, the rows found from the leaves
+        of its digest tree (`leaves.drill`)."""
+        from .. import leaves
         scope = self._row_scope(db, src_t)
-        if rows > self.DRILL_CAP:
-            found = self._bisect(db, src_t, dst_t, src_cols, dst_cols, scope)
-            if found is not None:
-                return found
+        note = ""
+        try:
+            found = leaves.drill(self, db, src_t, dst_t, src_cols, dst_cols,
+                                 scope, rows, digests)
+        except Exception as e:  # noqa: BLE001 - walked instead, and said
+            found = None
+            note = ("; the leaves could not be read"
+                    f" ({str(e).strip().splitlines()[-1][:90]}), so the rows"
+                    " were walked")
+        if found is not None:
+            return found
         return self._drill_rows(db, self._leaf(src_t),
                                 self.src_engine, src_t, src_cols,
-                                self.dst_engine, dst_t, dst_cols, scope)
-
-    #: rows in a key range small enough to walk row by row
-    BISECT_LEAF = 2000
-
-    def _bisect(self, db, src_t, dst_t, src_cols, dst_cols, scope):
-        """Rows that differ, found by digesting halves of the key range on
-        both sides and following only the halves that disagree: in a table
-        of millions with a handful of differences, each side is read a few
-        dozen ranges deep, and only the ranges that differ are walked.
-
-        For a single integer key only: an integer range holds the same rows
-        in every engine, where a range of text depends on each engine's
-        collation, and halves that do not hold the same rows would each
-        read as different. None where it does not apply, for the walk."""
-        src, dst = self.src_engine, self.dst_engine
-        if not (src.SQL_DIALECT and dst.SQL_DIALECT):
-            return None
-        try:
-            key = list(src.neutral_key("src", db, src_t))
-            if key != list(dst.neutral_key("dst", db, dst_t)) or len(key) != 1:
-                return None
-            cls = dict(src_cols).get(key[0])
-            if cls != "integer" or dict(dst_cols).get(key[0]) != "integer":
-                return None
-            (k,) = key
-            bounds = []
-            for eng, side, table, where in ((src, "src", src_t, scope[0]),
-                                            (dst, "dst", dst_t, scope[1])):
-                got = eng.run_rule(side, db, (
-                    f"select min({eng._quote_ident(k)}),"
-                    f" max({eng._quote_ident(k)}) from"
-                    f" {eng._qualified(side, db, table)}"
-                    + (f" where ({where})" if where else "")))
-                bounds += [v for v in got[0] if v is not None]
-        except Exception:  # noqa: BLE001 - the walk, which says why not
-            return None
-        if not bounds:
-            return None
-        asked = [0]
-
-        def digest(eng, side, table, cols, where, lo, hi):
-            q = eng._quote_ident(k)
-            rng = f"{q} >= {int(lo)} and {q} < {int(hi)}"
-            asked[0] += 1
-            return eng.neutral_digest(side, db, table, cols,
-                                      where=f"({where}) and {rng}" if where
-                                      else rng)
-
-        leaves, todo = [], [(int(min(bounds)), int(max(bounds)) + 1)]
-        while todo:
-            lo, hi = todo.pop()
-            a = digest(src, "src", src_t, src_cols, scope[0], lo, hi)
-            b = digest(dst, "dst", dst_t, dst_cols, scope[1], lo, hi)
-            if a == b:
-                continue
-            if max(a[0], b[0]) <= self.BISECT_LEAF or hi - lo <= 1:
-                leaves.append((lo, hi))
-                continue
-            mid = lo + (hi - lo) // 2
-            todo += [(mid, hi), (lo, mid)]
-        missing, changed, extra, capped = [], [], [], []
-        for lo, hi in sorted(leaves):
-            wheres = []
-            for eng, where in ((src, scope[0]), (dst, scope[1])):
-                q = eng._quote_ident(k)
-                rng = f"{q} >= {lo} and {q} < {hi}"
-                wheres.append(f"({where}) and {rng}" if where else rng)
-            found = self._localise(db, self._leaf(src_t), src, src_t,
-                                   src_cols, dst, dst_t, dst_cols,
-                                   tuple(wheres))
-            if isinstance(found, str):
-                return found
-            missing += found[0]
-            changed += found[1]
-            extra += found[2]
-            capped += found[3]
-        return self._drill_clause(
-            db, self._leaf(src_t), missing, changed, extra,
-            sorted(set(capped)),
-            f"; found by halving the key range: {asked[0]} digests,"
-            f" {len(leaves)} ranges walked")
+                                self.dst_engine, dst_t, dst_cols,
+                                scope) + note
 
     def _neutral_compare(self, db, table=None, stream=None):
         return [Result("data", scope, status, detail)
@@ -3258,6 +3199,11 @@ class HeteroEngine(Engine):
         copied, left = _CopiedRanges(self, db, token_path.parent), 0
         # every change read, per table: applied, or left out and why
         accounts = _Accounts(token_path.parent)
+        # the proof kept up with every position saved, where the hop keeps
+        # it (`kept.Keeper`)
+        from .. import kept as _kept
+        keeper = (_kept.Keeper(self, db, token_path, token, log)
+                  if go and _kept.wanted(self.hop) else None)
 
         def said():
             return (f"{seen} changes"
@@ -3324,6 +3270,8 @@ class HeteroEngine(Engine):
                         # less often
                         limit = min(limit * 2, self.TAIL_BATCH_MOST)
                     accounts.read(changes)
+                    if keeper:
+                        keeper.read(changes)
                     # an online schema change's working tables are not on the
                     # target and are not the application's data
                     kept = [c for c in changes
@@ -3380,6 +3328,8 @@ class HeteroEngine(Engine):
                         if go:
                             batch += 1 if exact else 0
                             token_path.parent.mkdir(parents=True, exist_ok=True)
+                            if keeper:
+                                keeper.saved(changes, token, saved_token)
                             token_path.write_text(_json.dumps(
                                 self._token_body(
                                     token, batch if exact else None, rung),
@@ -3397,6 +3347,8 @@ class HeteroEngine(Engine):
                             # the log moved on with nothing to apply: the new
                             # position is how far the target is, which is what
                             # a fence reads
+                            if keeper:
+                                keeper.saved([], token, saved_token)
                             token_path.write_text(_json.dumps(
                                 self._token_body(
                                     token, batch if exact else None, rung),

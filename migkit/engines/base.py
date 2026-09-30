@@ -3891,6 +3891,17 @@ class Engine:
         change out."""
         return None
 
+    def marked_rule(self, side, db, sql):
+        """(mark before, the rows `sql` answers, mark after): what this
+        side had made visible just before the read and just after it
+        (`snapshot_mark`), so a change the first covers is in what was
+        read and one the second does not cover is not - and one between
+        the two is not known either way. The kept proof holds a leaf read
+        from the source to its changes by these (`kept`)."""
+        lo = self.snapshot_mark(side, db)
+        rows = self.run_rule(side, db, sql)
+        return lo, rows, self.snapshot_mark(side, db)
+
     def stream_room(self, side, db, token):
         """How much longer the source keeps what a tail at `token` has not
         read yet, before that falls out of its log: `{"seconds": n}` or

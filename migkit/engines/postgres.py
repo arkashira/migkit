@@ -2353,6 +2353,34 @@ class PostgresEngine(Engine):
                 return f"{on}|{got[0][0]}"
         return None
 
+    def marked_rule(self, side, db, sql):
+        """The read and its mark in one REPEATABLE READ transaction: the
+        snapshot `pg_current_snapshot` names is the one the read is made
+        under, so the two marks are one and no change falls between
+        them."""
+        on = self._marked_on(side, db)
+        conn = self._conn(side, self._d(side, db))
+        try:
+            conn.rollback()
+            conn.set_session(isolation_level="REPEATABLE READ",
+                             readonly=True)
+            with conn.cursor() as cur:
+                mark = None
+                for fn in ("pg_current_snapshot", "txid_current_snapshot"):
+                    try:
+                        cur.execute(f"select {fn}()::text")
+                        mark = cur.fetchone()[0]
+                        break
+                    except Exception:  # noqa: BLE001 - the older name
+                        conn.rollback()
+                cur.execute(sql)
+                rows = cur.fetchall()
+        finally:
+            conn.rollback()
+            conn.close()
+        mark = f"{on}|{mark}" if mark and on else None
+        return mark, rows, mark
+
     def _marked_on(self, side, db):
         """The server a mark belongs to: its cluster's system identifier,
         or, where this user may not read that, when it started - an xid
@@ -3907,6 +3935,12 @@ class PostgresEngine(Engine):
             return [Result("data", f"{db} {table}", status, detail,
                            str(self._report(db)),
                            f"migkit sync {self.hop.name} --db {db} --kind rows")]
+        if not consistent:
+            # pass D: the leaves the tail keeps, where the hop keeps them
+            from .. import kept
+            got = kept.proved_db(self, db, stream, with_counts)
+            if got:
+                return got
         if consistent:
             rc, out = self._fast_consistent(db)
             if stream:

@@ -2325,6 +2325,12 @@ class MySQLEngine(Engine):
         return got if table else got + self._mapped_data(db, stream)
 
     def _own_check_data(self, db, table=None, stream=None, with_counts=False):
+        if not table:
+            # pass D: the leaves the tail keeps, where the hop keeps them
+            from .. import kept
+            got = kept.proved_db(self, db, stream, with_counts)
+            if got:
+                return got
         st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
         tables = [table] if table else sorted(
             t for t in st & dt if not self.through_pair(db, t))

@@ -115,6 +115,9 @@ HOP_OPTIONS = {
     "float_tolerance": Key("how far two floats may differ", "number",
                            ("postgres",)),
     "format": Key("the change stream's message format", "str", STREAMS),
+    "keep_proof": Key("the tail keeps every table's digest leaves up as"
+                      " it applies, so a check reads only what changed",
+                      "bool"),
     "key": Key("the key column(s) of a listed table", "str|list",
                ("generic",)),
     "liquibase": Key("the second schema reading, on or off", "bool",
@@ -178,6 +181,8 @@ HOP_OPTIONS = {
     "topology": Key("one_way or two_way", "str"),
     "transfer_price_per_gb": Key("what a carried gigabyte costs",
                                  "number"),
+    "two_readings": Key("a second, independent reading of every table"
+                        " that differs", "bool"),
     "two_way": Key("migkit's own tails both ways", "dict|bool",
                    subs=("on_conflict", "column", "source_rank",
                          "target_rank", "delta")),

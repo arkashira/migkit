@@ -135,7 +135,9 @@ def test_a_value_that_only_differs_in_one_column_is_still_found(pg_pair,
 def test_a_table_with_no_key_says_why_rather_than_writing_nothing(pg_pair,
                                                                    tmp_path):
     """An empty list of differing rows reads as "nothing to repair", which is
-    the opposite of what a table nobody can line up means."""
+    the opposite of what a table nobody can line up means. With no key to
+    name them by, the rows are told apart by their values: one on each side
+    that the other does not hold, and no key list for a repair."""
     lite = tmp_path / "t.db"
     psql(pg_pair["src"],
          "create table nokey (a text, b int);"
@@ -146,7 +148,10 @@ def test_a_table_with_no_key_says_why_rather_than_writing_nothing(pg_pair,
     got = _hop(pg_pair["src"], lite, tmp_path).check_data("postgres")
     row = [r for r in got if r.scope.endswith(".nokey")][0]
     assert row.status == "diff", row.detail
-    assert "rows not localised" in row.detail, row.detail
+    assert "1 row on the source that the target does not hold" in \
+        row.detail, row.detail
+    assert "1 row on the target that the source does not hold" in \
+        row.detail, row.detail
     assert "no key" in row.detail, row.detail
     assert not list(tmp_path.glob("data-nokey.*")), list(tmp_path.iterdir())
 
@@ -176,9 +181,13 @@ def test_a_composite_key_is_matched_on_every_part(pg_pair, tmp_path):
     assert [AWKWARD, "1"] not in changed + missing
 
 
-def test_the_walk_stops_at_the_cap_and_says_it_did(pg_pair, tmp_path):
+def test_the_walk_stops_at_the_cap_and_says_it_did(pg_pair, tmp_path,
+                                                    monkeypatch):
     """A drilldown that reads a whole production table without saying where
-    it stopped is worse than one that admits the limit."""
+    it stopped is worse than one that admits the limit. Past the walk's
+    reach the leaves of the digest tree name every row (backlog R20.9);
+    where they cannot be read, the walk still stops at its cap and says
+    so."""
     lite = tmp_path / "t.db"
     psql(pg_pair["src"],
          "create table t (id bigint primary key, v text);"
@@ -190,7 +199,21 @@ def test_the_walk_stops_at_the_cap_and_says_it_did(pg_pair, tmp_path):
     eng.DRILL_CAP = 10
     got = eng.check_data("postgres")
     row = [r for r in got if r.scope.endswith(".t")][0]
+    assert "stopped after" not in row.detail, row.detail
+    assert "leaves that differ" in row.detail, row.detail
+    assert "adds up to the whole difference" in row.detail, row.detail
+    found = _drill_file(tmp_path, "changed")
+    assert sorted(int(k) for (k,) in found) == list(range(2, 41, 2)), found
+
+    from migkit import leaves
+
+    def unread(*a, **k):
+        raise RuntimeError("no leaves today")
+    monkeypatch.setattr(leaves, "drill", unread)
+    got = eng.check_data("postgres")
+    row = [r for r in got if r.scope.endswith(".t")][0]
     assert "stopped after 10 rows" in row.detail, row.detail
+    assert "the leaves could not be read (no leaves today)" in row.detail
     found = _drill_file(tmp_path, "changed")
     assert found and len(found) <= 10, found
     # and what it did find is real: every id it named differs on the target
