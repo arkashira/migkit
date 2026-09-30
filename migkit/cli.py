@@ -26,7 +26,12 @@ def chat(msg):
 
 def _lock(hop):
     """The hop's write lease, held while the operation runs and renewed
-    by a heartbeat (`migkit.lease`). `.unlink()` releases it."""
+    by a heartbeat (`migkit.lease`). `.unlink()` releases it. Inside a
+    move that holds a hop with a standby (`ha`), the holding itself."""
+    from . import ha
+    got = ha.held(hop)
+    if got is not None:
+        return got.nested()
     from .lease import Lease
     from .state import run_state
     lease = Lease(hop.report_dir() / "lease.json",
@@ -184,7 +189,13 @@ RUN_FILES = ("tail-token.json", "tail-shape.json", "tail-source.json",
 def _shared(hop, d):
     """This database's run files, fetched from the hop's run state where
     this machine lacks them - or None without one."""
+    from . import ha
     from .state import Mirror, run_state
+    pushed = ha.mirror(hop, d)
+    if pushed is not None:
+        # a hop with a standby: its files go with the holding's own pushes,
+        # each over no newer holder's
+        return pushed
     remote = run_state(hop)
     if remote is None:
         return None
@@ -1994,7 +2005,10 @@ def _copy_table(eng, d, sch, t, chunk, ck, log):
 
 
 def _copy_table_by(eng, d, sch, t, chunk, ck, log):
-    if not eng.through_pair(d, f"{sch}.{t}" if sch else t):
+    from . import ha
+    if not eng.through_pair(d, f"{sch}.{t}" if sch else t) \
+            and (getattr(eng, "src_engine", None) is not None
+                 or ha.copier(eng.hop) == "own"):
         return eng.move_table(d, sch, t, chunk, ck, log)
     pair = eng.columns_pair()
     src = next((n for n in pair.src_engine.neutral_tables("src", d)
@@ -2363,6 +2377,11 @@ def _move_full(hop, eng, db, table, chunk, go):
                          + _resource_plan(hop, eng, d, "builtin", None,
                                           _catalogue_names(eng, d, tables))):
                 console.print(line)
+            # where each machine works, where the hop's machines work
+            # together (`ha`)
+            from . import ha
+            for line in ha.plan_lines(hop, eng, d):
+                console.print(f"  {line}")
             continue
         # a value the target would round, cut or refuse stops the move
         # here, before the first table is copied; a table an earlier run
@@ -2390,7 +2409,11 @@ def _move_full(hop, eng, db, table, chunk, go):
                 lk.unlink()
                 lk = None
                 point = _first_point(ck, point)
-                _share_tables(hop, eng, d, tables, chunk, ck, share)
+                from . import claims
+                if claims.shared_ranges(hop):
+                    _share_ranges(hop, eng, d, tables, chunk, ck)
+                else:
+                    _share_tables(hop, eng, d, tables, chunk, ck, share)
                 lk = _finisher(hop, d, ck)
                 if lk is None:
                     continue
@@ -2489,6 +2512,63 @@ def _share_tables(hop, eng, d, tables, chunk, ck, remote):
                     " machine stops renewing its lease")
                 said_waiting = True
             time.sleep(min(term() / 3, 5))
+
+
+def _share_ranges(hop, eng, d, tables, chunk, ck):
+    """Every table copied by every machine that runs the move
+    (`share_tables: ranges`, `claims`): a table large enough is split once,
+    by the first machine to reach it, and its ranges taken by every
+    machine's workers; the rest are taken whole, one machine each, and
+    taken over from where their machine left them once it stops renewing.
+    Through the table copier every pair shares, whose every write is held
+    to the number its taker holds (`fencing`). Returns once every table
+    is done, by whichever machines."""
+    from . import claims, ha, shared
+    from .engines.hetero import HeteroEngine
+
+    def log(m):
+        console.print(f"  {m}")
+    pair = eng if isinstance(eng, HeteroEngine) else eng._as_pair()
+    store = shared.store_for(hop, log)
+    there = pair.src_engine.neutral_tables("src", d)
+    names = {t: next((n for n in there if pair._leaf(n) == t), t)
+             for _, t in tables}
+    keys = {t: pair.move_key(d, "", pair._leaf(names[t])) for t in names}
+    # each machine starts at a table of its own, so the tables taken whole
+    # are not all asked for by every machine at once
+    turn = abs(hash(ha.mover())) % max(len(names), 1)
+    said = False
+    while True:
+        ck.reload()
+        left = [t for t in names if not (ck.get(keys[t]) or {}).get("done")]
+        if not left:
+            return
+        left = left[turn % len(left):] + left[:turn % len(left)]
+        moved = False
+        for t in left:
+            src = names[t]
+            psch, _, ptbl = src.rpartition(".")
+            way = claims.way(hop, d, keys[t], store,
+                             lambda s=src: pair.splits_across_machines(d, s))
+
+            def copy(s=src, a=psch, b=ptbl, k=keys[t]):
+                with pair.load_window(d, log, {s}):
+                    pair.move_table(d, a, b, chunk, ck, log)
+                return int((ck.get(k) or {}).get("moved") or 0)
+            if way == "ranges":
+                copy()
+                moved = True
+            elif claims.whole(hop, d, keys[t], store, copy, log):
+                _changelog(hop, {"op": "move", "db": d, "table": src,
+                                 "shared": True})
+                moved = True
+        if not moved:
+            if not said:
+                log(f"{d}: {len(left)} tables are being copied by other"
+                    " machines; waiting for them, and for any whose"
+                    " machine stops renewing its claim")
+                said = True
+            time.sleep(min(ha.term() / 3, 5))
 
 
 def _finisher(hop, d, ck):
@@ -2809,6 +2889,16 @@ def _copy_record_used(hop, d):
 
 
 def _tail(hop, eng, db, go):
+    from . import ha
+    if go and ha.standby(hop) and ha.held(hop) is None:
+        # the machines shared the copy; the stream is one machine's, the
+        # others standing by
+        return ha.run_led(hop, lambda: _tail_held(hop, eng, db, go),
+                          lambda m: console.print(m))
+    return _tail_held(hop, eng, db, go)
+
+
+def _tail_held(hop, eng, db, go):
     path = _tail_token(hop, db)
     _interlock(hop, eng, db, go)
     shared = _shared(hop, db)
@@ -3005,7 +3095,21 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
 
 
 def _move_run(hop_name, db, table, mode, chunk, do_drop, go):
-    """`move`, with what stopped it said in migkit's words."""
+    """`move`, with what stopped it said in migkit's words - on a hop with
+    a standby, by the machine that holds it, this one standing by until
+    it does (`ha`). Where the machines share the copy, only the change
+    stream after it is held so (`_tail`)."""
+    from . import ha
+    hop = get_hop(hop_name)
+    if go and not do_drop and ha.standby(hop) \
+            and not (hop.options or {}).get("share_tables"):
+        return ha.run_led(hop, lambda: _move_worded(
+            hop_name, db, table, mode, chunk, do_drop, go),
+            lambda m: console.print(m))
+    return _move_worded(hop_name, db, table, mode, chunk, do_drop, go)
+
+
+def _move_worded(hop_name, db, table, mode, chunk, do_drop, go):
     from . import decide
     try:
         return _move(hop_name, db, table, mode, chunk, do_drop, go)
@@ -3094,6 +3198,17 @@ def _carried_physically(hop, eng, db, mode, go):
     from . import physical
     if mode not in ("full", "full+cdc") or not physical.settings(hop):
         return False
+    from . import ha
+    if go and ha.standby(hop):
+        # a copy of the pages goes around every writer migkit holds to
+        # the holder's number, so a machine that lost the hop could not be
+        # refused on the target
+        raise SystemExit(
+            f"{hop.name}: a seed from a copy of the source's pages cannot"
+            " be held to the number of the machine that holds the hop, so"
+            " it is not run with standby on. Seed it from one machine"
+            " with standby off, then turn standby on for the change stream"
+            " (--mode cdc). Nothing was written")
     import sys
     lk = _lock(hop) if go else None
     try:
@@ -3235,6 +3350,12 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         from . import legs
         base, passed = movers.for_hop(hop, engine, table, go)
         v, why = movers.fitted(hop, engine, base)
+        if v != "builtin":
+            # a hop with a standby is copied only by a way whose every
+            # write the target holds to the holder's number (`ha`)
+            from . import ha
+            v = ha.copier(hop, v, "the bulk load",
+                          lambda m: console.print(f"  {m}"))
         if passed and not legs.direct(v) and not table:
             # the hop asked for the servers to pull from each other: why
             # they do not is the first thing the operator reads
@@ -3270,6 +3391,16 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     # by key, so replaying that stretch converges instead.
     tailer = eng if has_tail else _tail_pair(eng)
     if tailer is not None and hasattr(eng, "move_table"):
+        from . import ha
+        if go and ha.copied(hop, db):
+            # taken over after the copy was finished: the stream goes on
+            # from where the last holder stood, as a restart of it would -
+            # the tables are not checked again against a source that has
+            # moved on since, which would copy them again
+            console.print(f"  {db}: the copy was finished before this"
+                          " machine took the move over; the change stream"
+                          " goes on from where it stood")
+            return _tail(hop, tailer, db, go)
         if go:
             _tail_before_copy(hop, tailer, db)
         _move_full(hop, eng, db, table, chunk, go)
@@ -4091,6 +4222,10 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
                              f" (recent {human_int(int(avg))}/s)"
                              f" eta {human_secs(max(src - dst, 0) / avg)}")
             for more in _move_said(hop, d):
+                line += f"\n    {more}"
+            # the machines that move it, where they work together (`ha`)
+            from . import ha
+            for more in ha.health(hop, d):
                 line += f"\n    {more}"
             said = ahead[d].line()
             if said:

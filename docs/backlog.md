@@ -4474,6 +4474,36 @@ the gaps nothing above covers yet, now items of their own.
   `test_another_machine_takes_the_run_over.py`), and one table's ranges
   spread across machines with a conditional-write checkpoint (R5, looked
   at and left). Paid peers: GoldenGate HA, Striim clusters, DMS Multi-AZ.
+  *Built (2026-10-01, tests written, not yet run):* `standby: true` runs
+  the same move on two or more machines; one holds the hop's lease and
+  moves it, the others stand by and take it over within the term
+  (`MIGKIT_STANDBY_SECONDS`, 15) of its last renewal (`ha`). The lease
+  carries a number one higher at every taking (`lease`), raised on every
+  target database before the taker reads anything, and held by the target
+  in every transaction a writer commits, last before its commit, under a
+  shared lock the raise must wait for (`fencing`, a row of
+  `migkit_origin`; proved on each target first) - a machine that lost the
+  hop is refused by the target itself. The tail's files (position and
+  batch number, shape, tables' states, spools, kept proof, ways, copy
+  position) are pushed to the machines' store before every commit and
+  every two seconds, only over no newer number's, so the store is at
+  most the one batch behind the target that `committed_ahead` already
+  resolves: a takeover is a restart from another machine. The store is
+  chosen from the hop file alone and proved (`shared`: the run state's
+  bucket by If-Match/If-None-Match, a shared directory under a lock, or
+  rows of `migkit_origin` on the target). `share_tables: ranges`: a large
+  table's ranges claimed by every machine's workers through one record
+  written only over the version read (`claims`), each claim under a
+  number the target holds in the range's own row, each machine sized
+  from its share of the servers; the other tables claimed whole. Health
+  in `watch`, the ledger of holdings and `one_writer`'s proof (numbers
+  rising, each holding going on from the last one's saved position, the
+  target holding the newest number, the last batch's mark under its
+  owner) in `watch` and the evidence's "who wrote what". Not built: the
+  engines' own copiers and bulk programs carry no number, so a hop with
+  a standby is copied by the pair's table copier; a physical seed is
+  refused with a standby; targets other than PostgreSQL and MySQL
+  (MariaDB) cannot hold a number yet, and a standby is refused over them.
 * **W2. The estate, not the hop.** Discovery of every database on a
   network or account, target sizing from the source's performance
   history (Azure's SKU recommendations, Fleet Advisor), cost of the

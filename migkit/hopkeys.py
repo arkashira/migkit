@@ -261,9 +261,16 @@ HOP_OPTIONS = {
                             "bool|dict", ("postgres",), subs=("source",)),
     "settle": Key("seconds a re-check waits for a stream to settle",
                   "int"),
-    "share_tables": Key("machines share one move's tables", "bool"),
+    "share_tables": Key("machines share one move's tables: true, each"
+                        " table to one machine; ranges, a large table's"
+                        " ranges as well, every write held to the number"
+                        " of the claim that took it", "bool|str"),
     "slot": Key("the slot a pipeline migkit did not set up reads, which"
                 " the fence waits for", "str|list", ("postgres",)),
+    "standby": Key("the same move run on two or more machines: one moves"
+                   " it, the others take it over from the last position"
+                   " committed once it stops renewing its lease, the"
+                   " target refusing the one that lost it", "bool"),
     "source_changes": Key("the answer, given ahead, to a change on the"
                           " source a faster way needs: yes (migkit makes it"
                           " and takes it off again), no or dba - for every"
@@ -277,9 +284,10 @@ HOP_OPTIONS = {
     "spool_limit": Key("bytes a parked table's changes may take on this"
                        " machine before the table is copied again instead",
                        "int", knob="size"),
-    "state": Key("where run state is kept", "dict",
+    "state": Key("where run state is kept, and a directory every"
+                 " machine of the hop sees (shared)", "dict",
                  subs=("backend", "bucket", "prefix", "region",
-                       "endpoint_url", "mirror")),
+                       "endpoint_url", "mirror", "shared")),
     "subset": Key("goal subset: the rows a copy for testing starts from -"
                   " start: {table: a condition, a share like 10% or a"
                   " number of rows} - whether the rows that refer to them"
@@ -826,6 +834,77 @@ CUTOVER = {
 }
 
 
+#: what the machines of a hop do together where it says so (`standby`,
+#: `share_tables: ranges`), for `init`, `assess`, the dry run and the docs
+#: (`machines_lines`): the one place these are written
+MACHINES = {
+    "standby": {
+        "what": "the same move run on two or more machines: one holds the"
+                " hop and moves it, the others stand by and take it over"
+                " from the last position committed once it stops renewing"
+                " its lease (MIGKIT_STANDBY_SECONDS, 15 by default)",
+        "source": "read by the machine that holds the hop only; a machine"
+                  " standing by reads nothing until it takes over",
+        "target": "written by the machine that holds the hop only, every"
+                  " write held to the number its lease carries: the target"
+                  " refuses a write under an older number, so a machine"
+                  " that paused past its term cannot land a batch after the"
+                  " next one began; the tables are copied by the table"
+                  " copier every pair shares, whose writes carry the"
+                  " number",
+        "guarantees": "no batch applied twice and none lost across a"
+                      " takeover - what a restart on one machine gives;"
+                      " which machine wrote which batch kept, and proved"
+                      " one writer at a time (watch, the evidence)",
+        "needs": "a store every machine writes only over the version it"
+                 " read and that keeps files: the run state's bucket"
+                 " (state: {backend: s3}) or a directory every machine sees"
+                 " (state: {shared: <path>}); and a target that refuses a"
+                 " write under an older number, proved before the first"
+                 " write (PostgreSQL, MySQL, MariaDB)",
+    },
+    "ranges": {
+        "what": "every machine running the move copies at once: a table"
+                " large enough is split once and its ranges taken by every"
+                " machine's workers, each machine sized from its own share"
+                " of the servers; the other tables are taken whole, one"
+                " machine each",
+        "source": "read by every machine, each range by the one that took"
+                  " it",
+        "target": "written by every machine, each range held to the number"
+                  " of the claim that took it; a range taken again after"
+                  " its machine stopped renewing is emptied and copied"
+                  " again, and the older claim's late writes are refused",
+        "guarantees": "every range copied and read back by the claim that"
+                      " holds it, the table finished by one machine; which"
+                      " machine copied which range kept with the evidence",
+        "needs": "a store every machine writes only over the version it"
+                 " read: the run state's bucket, a directory every machine"
+                 " sees, or a table of migkit's own on the target",
+    },
+}
+
+
+def machines_lines(hop):
+    """What the hop's machines do together, where it says so: [] for a
+    hop run on one machine."""
+    opts = hop.options or {}
+    keys = [k for k, on in (
+        ("standby", bool(opts.get("standby"))),
+        ("ranges", str(opts.get("share_tables") or "").lower() == "ranges"))
+        if on]
+    out = []
+    for k in keys:
+        m = MACHINES[k]
+        out += [f"{'standby' if k == 'standby' else 'share_tables: ranges'}:"
+                f" {m['what']}",
+                f"  on the source: {m['source']}",
+                f"  on the target: {m['target']}",
+                f"  it guarantees: {m['guarantees']}",
+                f"  it needs: {m['needs']}"]
+    return out
+
+
 #: what each of a hop's limits holds the move to (`limits:` and
 #: `deadline:`), as the plan says it: every one is a hard limit - the
 #: plan keeps to it where any way can, and says what binds where none can
@@ -918,6 +997,7 @@ def explain_goal(hop, goal=None):
            f"  it guarantees: {g['guarantees']}"]
     if goal == "cutover" or cutover_on(hop):
         out += ["  " + line for line in cutover_lines(hop)]
+    out += ["  " + line for line in machines_lines(hop)]
     return out
 
 
@@ -1289,6 +1369,10 @@ def _contradictions(where, raw, opts, goal, engine):
                     " or drop the option"))
     out += _goal_settings(where, opts, goal, engine)
     out += _source_changes(where, opts, goal)
+    share = opts.get("share_tables")
+    if isinstance(share, str) and share.lower() != "ranges":
+        out.append(Problem("error", f"{where}.options.share_tables",
+                           f"{share!r} - true, or ranges"))
     from .interlock import CHOICES
     rows = opts.get("target_rows")
     if rows is not None and str(rows).lower() not in CHOICES:

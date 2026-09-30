@@ -2,6 +2,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .. import fencing
 from ..pieces import BATCH_BYTES, PAIR_MEMORY, PAIR_ROWS, row_bytes
 
 # Engine-independent name for what a finding is about.
@@ -5032,6 +5033,14 @@ class Engine:
                     # side says which it committed last (`marks`)
                     self.origin_mark(side, db)
                 yield
+                if fencing.armed(self.hop) is not None:
+                    # last before the commit: a writer that lost its hold
+                    # is refused by the target here (`fencing`)
+                    cur = conn.cursor()
+                    try:
+                        fencing.hold(self, side, db, cur)
+                    finally:
+                        cur.close()
                 conn.commit()
             except BaseException:
                 try:
@@ -5047,6 +5056,10 @@ class Engine:
     #: whether this engine's change reader leaves out the transactions a
     #: two-way tail applied (`twoway`)
     READS_ORIGIN_MARK = False
+    #: the dialect migkit's own rows are written in here (`shared`,
+    #: `fencing`), None where the engine keeps none - it then answers
+    #: `own_table(side, db)` and `own_name(side, db)` as well
+    OWN_DIALECT = None
 
     def _origin_row(self):
         """The row of `migkit_origin` this thread's batch moves

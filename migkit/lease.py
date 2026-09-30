@@ -11,10 +11,21 @@ the holder is gone, wherever it ran.
 Every read and write of the lease happens under an exclusive lock on a
 file beside it, so two processes deciding at once cannot both win. With
 the s3 state backend the lease is kept in the bucket instead, written
-only over the version that was read, which does the same across machines.
+only over the version that was read, which does the same across machines
+- and so is any store machines share (`shared`), through the same two
+calls.
 
 `MIGKIT_LEASE_SECONDS` sets the term (60 by default); the heartbeat
 renews it every third of that.
+
+A lease the machines of one hop take over from each other (`fenced`,
+backlog W1) carries a number, one higher each time it is taken and kept
+when it is let go, so every holder there ever was has a number above the
+last one's. The number is what the target holds a writer to
+(`fencing`): the lease says who may write, and the number lets the
+target refuse one that no longer may. Such a holder also knows how long
+ago it last renewed (`fresh`): past two thirds of the term it cannot be
+sure it still holds, and writes nothing until a renewal says it does.
 """
 import fcntl
 import json
@@ -33,6 +44,11 @@ def term():
 
 class Held(SystemExit):
     pass
+
+
+class Lost(SystemExit):
+    """This holder's lease was taken by another, or could not be renewed
+    within its term: it holds nothing, and writes nothing more."""
 
 
 class _FileRecord:
@@ -66,8 +82,9 @@ class _FileRecord:
 
 
 class _BucketRecord:
-    """The lease in the run state's bucket, written only over the version
-    that was read. A write that loses reads again and decides again."""
+    """The lease in the run state's bucket, or any store machines share,
+    written only over the version that was read. A write that loses reads
+    again and decides again."""
 
     RELEASED = {"holder": None, "expires": 0}
 
@@ -111,28 +128,41 @@ def holder(path, remote=None):
             have = json.loads(path.read_text())
         except (OSError, ValueError):
             have = None
-    if not isinstance(have, dict) or have.get("expires", 0) <= time.time() \
-            or Lease._dead(have):
+    if not isinstance(have, dict) or not have.get("holder") \
+            or have.get("expires", 0) <= time.time() or Lease._dead(have):
         return None
     return have
 
 
 class Lease:
-    def __init__(self, path, what="a write operation", remote=None):
+    def __init__(self, path, what="a write operation", remote=None,
+                 fenced=False, term=None):
         self.path = path
         self.record = (_BucketRecord(remote, path) if remote
                        else _FileRecord(path))
         self.what = what
         self.me = f"{socket.gethostname()}:{os.getpid()}:{id(self)}"
         self.took_over = None
+        #: the number this holding carries, where the lease is `fenced`
+        self.fenced, self.fence = fenced, None
+        self._term = term
+        #: when it was last renewed, on this machine's steady clock
+        self.renewed = None
+        #: what the record held when this holder found it was not its any
+        #: more
+        self.lost = None
         self._stop = threading.Event()
         self._beat = None
+        self._renewing = threading.Lock()
+
+    def term(self):
+        return float(self._term) if self._term else term()
 
     def acquire(self):
         def decide(have):
             now = time.time()
             self.took_over = None
-            if have and have.get("holder") != self.me:
+            if have and have.get("holder") and have.get("holder") != self.me:
                 if have.get("expires", 0) > now and not self._dead(have):
                     raise Held(
                         f"another migkit {have.get('what', 'operation')} is"
@@ -143,10 +173,18 @@ class Lease:
                         f" - or, if it is gone, for the lease to lapse"
                         f" ({int(have['expires'] - now)}s)")
                 self.took_over = have
-            return {"holder": self.me, "host": socket.gethostname(),
-                    "pid": os.getpid(), "what": self.what,
-                    "since": now, "expires": now + term()}
+            got = {"holder": self.me, "host": socket.gethostname(),
+                   "pid": os.getpid(), "what": self.what,
+                   "since": now, "expires": now + self.term()}
+            if self.fenced:
+                # one above every number this lease was ever taken with,
+                # kept when it was let go
+                self.fence = int((have or {}).get("fence") or 0) + 1
+                got["fence"] = self.fence
+            return got
+        began = time.monotonic()
         self.record.change(decide)
+        self.renewed = began
         self._beat = threading.Thread(target=self._renew, daemon=True)
         self._beat.start()
         return self
@@ -165,7 +203,11 @@ class Lease:
         except (PermissionError, TypeError, ValueError):
             return False
 
-    def _renew(self):
+    def _renew_once(self):
+        """One renewal: True where this holder still holds and its term is
+        moved on, False where another took it (`lost` says who). The
+        clock is read before the write, so `renewed` is never later than
+        the term the store now holds began."""
         lost = []
 
         def decide(have):
@@ -174,21 +216,89 @@ class Lease:
                 # longer holds anything, and must not write it back
                 lost.append(have)
                 return KEEP
-            return {**have, "expires": time.time() + term()}
-        while not self._stop.wait(term() / 3):
+            return {**have, "expires": time.time() + self.term()}
+        with self._renewing:
+            if self.lost is not None:
+                return False
+            began = time.monotonic()
+            self.record.change(decide)
+            if lost:
+                self.lost = lost[0] or {}
+                return False
+            self.renewed = began
+            return True
+
+    def _renew(self):
+        while not self._stop.wait(self.term() / 3):
             try:
-                self.record.change(decide)
+                if not self._renew_once():
+                    return
             except Exception:  # noqa: BLE001 - the next beat tries again
                 continue
-            if lost:
-                return
+
+    def fresh(self):
+        """Whether this holder may write now: not taken over, and renewed
+        within two thirds of its term - the other third is what a writer
+        that checked just before it paused has, before the term it
+        renewed ends and another may take it."""
+        return (self.lost is None and self.renewed is not None
+                and time.monotonic() - self.renewed < self.term() * 2 / 3)
+
+    def check(self):
+        """Nothing, where this holder may write; a renewal first where it
+        has not been renewed lately; `Lost` where it does not hold, or
+        cannot say that it does."""
+        if self.fresh():
+            return
+        try:
+            held = self._renew_once()
+        except Exception as e:  # noqa: BLE001 - said as the reason
+            raise Lost(f"the {self.what} could not renew its lease within"
+                       f" its term ({type(e).__name__}: {e}); it writes"
+                       " nothing more until it holds it again") from None
+        if not held:
+            by = self.lost or {}
+            raise Lost(f"the {self.what} was taken over by"
+                       f" {by.get('host') or 'another machine'}"
+                       + (f" process {by.get('pid')}" if by.get("pid")
+                          else "")
+                       + " while this machine was not heard from; it writes"
+                         " nothing more")
+
+    def bump(self, above):
+        """The number this holding carries, raised past `above` - the
+        target holds a higher one than the lease remembered (the lease's
+        record was lost, or kept elsewhere once): only while this holder
+        holds it."""
+        if not self.fenced:
+            return self.fence
+
+        def decide(have):
+            if not have or have.get("holder") != self.me:
+                return KEEP
+            return {**have, "fence": int(above) + 1}
+        got = self.record.change(decide)
+        if got is KEEP:
+            self.lost = self.lost or {}
+            raise Lost(f"the {self.what} was taken over while its number"
+                       " was being raised; it writes nothing more")
+        self.fence = int(above) + 1
+        return self.fence
 
     def release(self):
         self._stop.set()
         if self._beat:
             self._beat.join(timeout=5)
-        self.record.change(lambda have: None if have and have.get("holder")
-                           == self.me else KEEP)
+
+        def decide(have):
+            if not have or have.get("holder") != self.me:
+                return KEEP
+            if self.fenced:
+                # let go, its number kept for the next holder to go above
+                return {"holder": None, "expires": 0,
+                        "fence": have.get("fence") or self.fence}
+            return None
+        self.record.change(decide)
 
     # the callers held the old lock file and removed it when done
     unlink = release

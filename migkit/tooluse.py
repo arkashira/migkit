@@ -53,7 +53,8 @@ CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.dsbulk", "migkit.fromsnapshot", "migkit.ddbexport",
                 "migkit.upgrade",
                 "migkit.engines.teradata", "migkit.engines.sapodp",
-                "migkit.engines.saas", "migkit.engines.saas_salesforce"]
+                "migkit.engines.saas", "migkit.engines.saas_salesforce",
+                "migkit.shared"]
 
 _HERE = Path(__file__).parent
 
