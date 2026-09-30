@@ -2791,6 +2791,43 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## P0-DEPTH. migkit's own parts that are still flat (owner, 2026-10-01)
+
+Asked: "our own parts - flat, not smart, or already good?" Read at
+55a1939. Deep already and left alone: the verification core (digests,
+one-scan leaves, sketch, kept proof, generations), exact batches,
+watermark and the two-way marks ladder, canon's types, the stored-code
+proof, the cutover path, the interlock, the copybook decoder, the
+fallback and the source-change offer. Flat, to be made smart:
+
+1. **Repair is always row by row.** A table with ten differing rows and
+   one with ten million get the same statements. Make repair a ladder in
+   decide.py: rows by key in batches, ranges copied again (the leaves say
+   which), the table reloaded by the fastest mover - chosen by predicted
+   cost and the size of the drift, with the same statement record, undo
+   and proof after.
+2. **Two-way conflicts are five whole-row policies** (error, apply_remote,
+   keep_local, last_update_wins, source_priority) plus counters. Add: the
+   changed-columns merge when the two sides touched different columns
+   (F7.merge), min/max/delta resolutions, a policy per table and per
+   column, and every conflict and its resolution in the evidence export.
+3. **Numbers set by reasoning, not measured:** `canon.WIDE` (1 MB),
+   `BUCKET_ROWS`, `REPLICA_RISE` (5 s), `DIGEST_MEMORY`, the probe floor
+   (256 MB), `TIE` (5%), the per-table program threshold (256 MB) and
+   others the docstrings mark as reasoned. Each gets measured on the
+   final run and then kept in the decision engine's knowledge base, so
+   a machine and a hop tune them from their own runs.
+4. **The resource model is built but unproven:** its one docker run named
+   the wrong bottleneck in four of eleven cases and allows a 100%
+   prediction error. Calibrate on the final run; P0-SMART's cost models
+   take its readings as priors, not as truth.
+5. **The pace backs off by TCP's rule on each resource** - sound, but
+   reactive. With the hop's limits (P0-SMART) it holds a target (the
+   source's load cap, the lag a replica may reach) instead of only
+   reacting.
+6. **The cross-engine copier carries rows through Python** - being
+   removed (R20 cross-engine, running).
+
 ## P0-PARITY. Every engine as deep as PostgreSQL and MySQL (owner, 2026-10-01)
 
 Asked: "can the other engines do better - smart, deep, not flat; if they
