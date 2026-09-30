@@ -3372,6 +3372,21 @@ fallback and the source-change offer. Flat, to be made smart:
    changed-columns merge when the two sides touched different columns
    (F7.merge), min/max/delta resolutions, a policy per table and per
    column, and every conflict and its resolution in the evidence export.
+   **Built 2026-10-01 (tests written, the full run to come):** a batch's
+   changes to a row held as one against the target's row; only a column
+   both sides changed is a conflict, the rest merged (`canon.Kept` keeps
+   the target's own columns where they stand, NOT NULL or not). Rules
+   per hop, table, column and group: error, park (the row set aside
+   until decided on both sides, the tail going on), overwrite, ignore,
+   source_priority, newest, max/min (of the column or of a named one),
+   delta, union; `delete_vs_update` and `delete_missing` settle the whole
+   row kinds, each with a stated default. Every rule settles one conflict
+   alike from both ends; `hopkeys` refuses a pair of hops that would not
+   (`twoway.apart`). Every conflict in `conflicts.jsonl`, the hop's
+   record, `/metrics`, `notify` and the evidence export. The limit said
+   in `twoway`: a value changed and changed back between two exchanges
+   is invisible to any before image - a row deleted after the version
+   that won needs tombstones, not built.
 3. **Numbers set by reasoning, not measured:** `canon.WIDE` (1 MB),
    `BUCKET_ROWS`, `REPLICA_RISE` (5 s), `DIGEST_MEMORY`, the probe floor
    (256 MB), `TIE` (5%), the per-table program threshold (256 MB) and

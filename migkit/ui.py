@@ -300,7 +300,7 @@ def prometheus(hops):
         lines += _move_metrics(REPORTS / name, lbl)
         for inside in (_tables_moved_metrics, _copy_metrics, _check_metrics,
                        _verify_metrics, _table_metrics, _cutover_metrics,
-                       _stream_metrics):
+                       _conflict_metrics, _stream_metrics):
             try:
                 lines += inside(REPORTS / name, lbl)
             except Exception:  # noqa: BLE001 - a scrape never fails on one
@@ -367,6 +367,13 @@ INSIDE_HELP = [
     "# TYPE migkit_cutover_phase_seconds gauge",
     "# HELP migkit_cutover_running A cutover is under way (1)",
     "# TYPE migkit_cutover_running gauge",
+    "# HELP migkit_two_way_conflicts Rows a two-way tail found both sides"
+    " had changed, by table, kind and what was decided, since its reports"
+    " began",
+    "# TYPE migkit_two_way_conflicts gauge",
+    "# HELP migkit_two_way_rows_parked Rows a two-way conflict set aside"
+    " until they are decided on both sides",
+    "# TYPE migkit_two_way_rows_parked gauge",
     "# HELP migkit_stream_behind_source_seconds How far the change stream's"
     " reader is behind the source, by its own account",
     "# TYPE migkit_stream_behind_source_seconds gauge",
@@ -499,6 +506,26 @@ def _cutover_metrics(where, lbl):
         for phase, secs in sorted((last.get("took") or {}).items()):
             out.append(f'migkit_cutover_phase_seconds{{{lbl},'
                        f'phase="{_lv(phase)}"}} {secs}')
+    return out
+
+
+def _conflict_metrics(where, lbl):
+    """The rows a two-way tail found both sides had changed, by table,
+    kind and what was decided, and the rows parked now - from its counts
+    (`twoway.COUNTS`), which hold names and numbers and never a value."""
+    from . import twoway
+    out = []
+    for d in _db_dirs(where):
+        got = _json_at(d / twoway.COUNTS, {}) or {}
+        dl = f'{lbl},db="{_lv(d.name)}"'
+        for line, n in sorted((got.get("counts") or {}).items()):
+            table, kind, decision = (str(line).split("\t") + ["", ""])[:3]
+            out.append(f'migkit_two_way_conflicts{{{dl},'
+                       f'table="{_lv(table)}",kind="{_lv(kind)}",'
+                       f'decision="{_lv(decision)}"}} {int(n)}')
+        for table, n in sorted((got.get("parked") or {}).items()):
+            out.append(f'migkit_two_way_rows_parked{{{dl},'
+                       f'table="{_lv(table)}"}} {int(n)}')
     return out
 
 

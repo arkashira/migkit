@@ -5183,9 +5183,10 @@ class Engine:
     def _apply_added(self, side, db, table, rows):
         """[(key, values)] where a counter's value is what it adds
         (`canon.Added`): a row the target has is moved where it stands
-        (`n = n + by`, the rest set), in the batch's transaction, so what
-        the target's own side added meanwhile is kept; a row it has not got
-        is made with what the source ended with."""
+        (`n = n + by`, the rest set, a value it keeps - `canon.Kept` - not
+        touched), in the batch's transaction, so what the target's own side
+        added meanwhile is kept; a row it has not got is made with what the
+        source ended with."""
         from .. import canon
         if not callable(getattr(self, "_qualified", None)):
             raise SystemExit(f"two_way.delta: {type(self).__name__} cannot"
@@ -5219,7 +5220,7 @@ class Engine:
                         continue
                     sets, args = [], []
                     for n, v in sorted(values.items()):
-                        if n in key:
+                        if n in key or isinstance(v, canon.Kept):
                             continue
                         if isinstance(v, canon.Added):
                             sets.append(f"{q(n)} = {q(n)} + %s")

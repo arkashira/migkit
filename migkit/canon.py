@@ -235,15 +235,47 @@ class Added:
     __hash__ = None
 
 
+class Kept(Added):
+    """A value the target keeps as its row holds it (a two-way row's
+    column the target changed and the source did not, or whose conflict
+    the target's side won): left as it stands where the row is there, and
+    written as `to` - the target's own value, read when the conflict was
+    settled - only where the row has to be made. Not left out of the
+    change instead: an upsert inserts first, and a column it leaves out is
+    NULL there, which a NOT NULL column refuses before the key's conflict
+    is found. Applied by the same statement as a counter (`Added`, `by`
+    0), so what the target's side writes between the read and the batch
+    is not written over either."""
+
+    __slots__ = ()
+
+    def __init__(self, to):
+        super().__init__(0, to)
+
+    def __repr__(self):
+        return f"Kept({self.to!r})"
+
+    def __eq__(self, other):
+        return isinstance(other, Kept) and self.to == other.to
+
+    __hash__ = None
+
+
 def merged_values(earlier, later):
     """A row's values after a later change over an earlier one, in place:
     later over earlier, except that two additions to one counter are one
-    addition of both, and an addition to a value the batch itself wrote
-    is that value moved."""
+    addition of both, an addition to a value the batch itself wrote is
+    that value moved, and a value kept where it stands (`Kept`) keeps one
+    the batch wrote before it."""
     for name, value in later.items():
         was = earlier.get(name)
-        if isinstance(value, Added):
-            if isinstance(was, Added):
+        if isinstance(value, Kept):
+            if name in earlier and not isinstance(was, (Added, _Absent)):
+                continue
+        elif isinstance(value, Added):
+            if isinstance(was, Kept):
+                pass
+            elif isinstance(was, Added):
                 value = Added(was.by + value.by, value.to)
             elif was is not None and name in earlier \
                     and not isinstance(was, _Absent):

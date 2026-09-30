@@ -7,7 +7,7 @@ Receivers come from two places, and both are used:
       notify:
         to: [env:SLACK_HOOK, keyring:migkit-line, pagerduty:env:PD_KEY]
         events: [verdict, drift, lag, cutover, approval, failure,
-                 fallback, done]        # all of them when left out
+                 fallback, conflict, done]    # all of them when left out
         lag: 300                        # seconds behind before it is said
 
 * `MIGKIT_NOTIFY`: addresses separated by commas, for every hop
@@ -47,6 +47,10 @@ What is told, each an event a hop may keep or leave out (`events`):
 * `failure`: a command stopping on an error, a change tail stopping (or
   setting one table aside), and running again
 * `fallback`: a way the engine gave up for another as it ran, in one line
+* `conflict`: rows a two-way tail found both sides had changed - a row
+  parked until it is decided on both sides as it is parked, the ones its
+  rules settled at most once every `CONFLICTS_EVERY` seconds, counted by
+  kind (`twoway`)
 * `done`: a command that wrote (`--go`, `--apply`) finishing
 
 What is sent never carries a row's values: a check, a scope, a status, a
@@ -70,9 +74,13 @@ TIMEOUT = 10
 TOLD = ("same", "different", "error")
 #: every event a hop may be told of
 EVENTS = ("verdict", "drift", "lag", "cutover", "approval", "failure",
-          "fallback", "done")
+          "fallback", "conflict", "done")
 #: seconds a change tail may be behind before `lag` is said
 LAG = 300
+#: seconds between two messages of the conflicts a two-way tail's rules
+#: settled - a busy pair settles some every batch, and one message a batch
+#: would bury the rest; a row parked is told as it is parked
+CONFLICTS_EVERY = 300
 
 # the library says what it could not deliver in its own log, which would
 # print where the operator reads migkit - and can carry parts of an
@@ -518,6 +526,42 @@ def table_parked(hop, db, table, why, log):
                             "db": db, "table": table, "why": why},
                 True, f"migkit-{hop.name}-{db}-{table}-parked", log,
                 event="failure")
+
+
+def conflicts(hop, db, kinds, parked, log):
+    """Rows a two-way tail found both sides had changed in a batch
+    ({kind: rows}) and how many it parked (`twoway`): a parked row is told
+    at once - it waits for somebody to decide it on both sides - and the
+    rows the hop's rules settled are counted up and told at most once
+    every `CONFLICTS_EVERY` seconds. Names and counts, never a value."""
+    if not receivers(hop) or not (kinds or parked):
+        return 0
+    memory = dict(_memory(hop).get("conflicts") or {})
+    mine = dict(memory.get(db) or {})
+    pending = {k: int(n) for k, n in (mine.get("pending") or {}).items()}
+    for k, n in kinds.items():
+        pending[k] = pending.get(k, 0) + int(n)
+    since = time.time() - float(mine.get("at") or 0)
+    if not parked and since < CONFLICTS_EVERY:
+        memory[db] = {**mine, "pending": pending}
+        _remember(hop, conflicts=memory)
+        return 0
+    rows = sum(pending.values())
+    text = (f"migkit: the change tail of {hop.name} {db} found {rows:,}"
+            " row(s) changed on both sides ("
+            + ", ".join(f"{n:,} {k}" for k, n in sorted(pending.items()))
+            + ")"
+            + (f"; {parked:,} parked until decided on both sides, the other"
+               " rows going on" if parked else
+               ", each settled by the hop's rules")
+            + " - every one is in conflicts.jsonl")
+    sent = send(hop, text, {"event": "conflict", "hop": hop.name, "db": db,
+                            "kinds": pending, "parked": parked},
+                bool(parked), f"migkit-{hop.name}-{db}-conflict", log,
+                severity="warning", event="conflict")
+    memory[db] = {"at": time.time(), "pending": {} if sent else pending}
+    _remember(hop, conflicts=memory)
+    return sent
 
 
 def tail_started(hop, db, log):
