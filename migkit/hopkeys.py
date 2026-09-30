@@ -143,6 +143,16 @@ HOP_OPTIONS = {
     "partition_by": Key("the column a stream partitions by", "str",
                         STREAMS),
     "performance": Key("gate: a slower target fails the check", "str"),
+    "physical": Key("the target may be seeded from a copy of the source's"
+                    " pages or a cloud's own copy (`physical`,"
+                    " `cloudseed`), and how", "dict", ("postgres", "mysql"),
+                    subs=("data", "run", "stop", "start", "restart",
+                          "source", "source_plugin", "cloud", "source_id",
+                          "target_id", "region", "target_region",
+                          "target_role_arn", "kms_key", "instance_class",
+                          "way", "subnet_group", "security_groups",
+                          "subscription", "resource_group", "location",
+                          "project", "address")),
     "proof_sandbox": Key("the two scratch servers stored code is run and"
                          " compared on, or docker for migkit to start"
                          " them", "str|dict", ("hetero",),

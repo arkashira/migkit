@@ -2278,9 +2278,15 @@ def _tail(hop, eng, db, go):
         if go:
             eng.tail_seed(db, path, rec["before"])
             _copy_record_used(hop, db)
-        console.print(f"  {db}: starting from where the source's log was"
-                      f" before the copy of {rec['at']}, so what changed"
-                      " during it and since is carried too")
+        if rec.get("physical"):
+            # a copy of the pages holds the source to one position exactly
+            console.print(f"  {db}: starting from the position the copy of"
+                          f" {rec['at']} holds, so nothing is applied twice"
+                          " and nothing is missed")
+        else:
+            console.print(f"  {db}: starting from where the source's log was"
+                          f" before the copy of {rec['at']}, so what changed"
+                          " during it and since is carried too")
     elif not path.exists() and not getattr(
             eng, "TAIL_GOES_ON_FROM_THE_COPY", False) and (rec or _checkpoint(
             hop, hop.report_dir(db) / "move.json")):
@@ -2498,6 +2504,45 @@ def _protect_target(hop, eng, db, release=False):
             hop, eng, d, lambda m: console.print(f"  {m}"))
 
 
+def _carried_physically(hop, eng, db, mode, go):
+    """The move seeded from a copy of the source's pages or a cloud's own
+    copy, where the hop allows it and a physical rung is chosen
+    (`physical`) - True where it was, and the move is done. A hop without
+    `physical:` never reaches the servers here."""
+    from . import physical
+    if mode not in ("full", "full+cdc") or not physical.settings(hop):
+        return False
+    lk = _lock(hop) if go else None
+    try:
+        console.print("[bold]physical seed[/bold]")
+        if not physical.carry(hop, eng, db, mode, go,
+                              lambda m: console.print(f"  {m}")):
+            return False
+    finally:
+        if lk:
+            lk.unlink()
+    if not go:
+        console.print("\ndry-run, add --go to execute")
+        return True
+    _changelog(hop, {"op": "move-physical", "db": db, "mode": mode})
+    # the copy carried the source's roles and grants, and none of what a
+    # freeze of the old target had done
+    _protect_target(hop, eng, db)
+    if mode == "full+cdc" and not getattr(eng, "REPLICA_COPIES", False):
+        tailer = eng if hasattr(eng, "tail_apply") else _tail_pair(eng)
+        if db and tailer is not None:
+            _tail(hop, tailer, db, go)
+        else:
+            for d in eng.databases():
+                console.print(f"  {d}: its changes go on from the copy's own"
+                              f" position - migkit move {hop.name} --mode"
+                              f" cdc --db {d} --go")
+        return True
+    console.print("[green]seeded[/green] - verify: migkit check"
+                  f" {hop.name}")
+    return True
+
+
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from . import cutover, hopkeys, movers
     hop = get_hop(hop_name)
@@ -2526,6 +2571,9 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         from . import approvals
         approvals.require(hop, "cutover", db,
                           lambda m: console.print(f"  {m}"))
+    if not table and not do_drop and _carried_physically(hop, eng, db, mode,
+                                                         go):
+        return
     if go and not (do_drop and mode == "cdc" and back_at_cutover):
         # before anything is copied, so no write of the application's lands
         # between the copy and the check; released by tearing the stream

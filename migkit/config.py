@@ -378,8 +378,11 @@ class Hop:
             target=self.source,
             databases=[self.target_db(d) for d in (self.databases or [])],
             db_map={v: k for k, v in (self.db_map or {}).items()},
+            # never `physical`: the way back would empty the old source's
+            # data directory to fill it with the new primary's pages
             options={k: v for k, v in (self.options or {}).items()
-                     if k not in ("reverse", "topology", "protect_target")})
+                     if k not in ("reverse", "topology", "protect_target",
+                                  "physical")})
 
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name

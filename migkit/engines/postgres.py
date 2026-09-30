@@ -2115,7 +2115,7 @@ class PostgresEngine(Engine):
     #: visible, before it stops rather than read around them
     VISIBLE_WAIT = 600
 
-    def _slot_with_its_snapshot(self, side, db, name):
+    def _slot_with_its_snapshot(self, side, db, name, plugin=None):
         """Make the slot a copy follows, and return once every change before
         its position is visible to any read made from now on.
 
@@ -2141,9 +2141,14 @@ class PostgresEngine(Engine):
         the wait is on what the commit log says has committed and a read
         cannot see yet - the same transactions, but for one that is between
         writing its commit and marking it.
+
+        `plugin` is the output plugin the slot decodes with: this engine's
+        own reader's by default, `pgoutput` for the slot a subscription
+        takes over after a copy of the pages (`physical`).
         """
         import psycopg2
         from psycopg2.extras import LogicalReplicationConnection
+        plugin = plugin or self.PLUGIN
         ep = self.hop.source if side == "src" else self.hop.target
         target = self._d(side, db)
         try:
@@ -2156,12 +2161,12 @@ class PostgresEngine(Engine):
             rep = None
         if rep is None:
             self._psql(side, target, "select pg_create_logical_replication_slot"
-                                     f"('{name}', '{self.PLUGIN}')")
+                                     f"('{name}', '{plugin}')")
             return self._visible_by_the_commit_log(side, db, name)
         try:
             cur = rep.cursor()
             cur.execute(f'CREATE_REPLICATION_SLOT "{name}" LOGICAL'
-                        f" {self.PLUGIN} EXPORT_SNAPSHOT")
+                        f" {plugin} EXPORT_SNAPSHOT")
             snapshot = cur.fetchone()[2]
             conn = self._conn(side, target)
             try:
@@ -9365,12 +9370,20 @@ class PostgresEngine(Engine):
     def _repl_name(self):
         return "migkit_" + self.hop.name.replace("-", "_")
 
-    def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
+    def replicate_sql(self, db, copy_data=True, secret=None, copied=None,
+                      slot=None, at=None, via=None):
+        """The statements that set the server's own replication up and
+        take it down. `slot` is a slot made earlier (before a physical
+        copy, `physical`), which the subscription takes instead of making
+        its own; `at` is the LSN it goes on from - its origin is advanced
+        there before it is enabled, so nothing before is applied again;
+        `via` is (host, port) of the source as the target reaches it."""
         # the subscription signs in as the hop's own source user, so there
         # is no replication user for `secret` to be the password of
         s = self.hop.source
         name = self._repl_name()
-        conn = (f"host={s.host} port={s.port} dbname={db}"
+        host, port = via or (s.host, s.port)
+        conn = (f"host={host} port={port} dbname={db}"
                 f" user={s.user} password={s.password}")
         streaming = self._subscription_streaming(db)
         # a stream the other way exists or will: this one must not send
@@ -9406,7 +9419,17 @@ class PostgresEngine(Engine):
                     f" {'true' if copy_data else 'false'}"
                     + (f", streaming = {streaming}" if streaming else "")
                     + (", origin = none" if origin else "")
-                    + ");"] + self._refresh_sql(db, name, tables),
+                    + (f", create_slot = false, slot_name = '{slot}'"
+                       if slot else "")
+                    + (", enabled = false" if at else "")
+                    + ");"] + ([
+                        "select pg_replication_origin_advance('pg_' || oid,"
+                        # the name was folded to lower case, unquoted
+                        f" '{at}') from pg_subscription where subname ="
+                        f" '{name.lower()}' and subdbid = (select oid from"
+                        " pg_database where datname = current_database());",
+                        f"alter subscription {name} enable;"] if at else [])
+                    + self._refresh_sql(db, name, tables),
             "drop_src": [f"drop publication if exists {name};"],
             "drop_dst": [f"drop subscription if exists {name};"],
             "status": "select subname, received_lsn, latest_end_lsn,"

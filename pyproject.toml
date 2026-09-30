@@ -75,6 +75,12 @@ dependencies = [
     # cloud metadata for managed-service hops
     "boto3",
     "google-cloud-pubsub>=2.20",
+    # a cloud's own copy as the target's seed (`cloudseed`): Azure's
+    # Flexible Server restore and Cloud SQL's clone, through their APIs
+    "azure-identity",
+    "azure-mgmt-postgresqlflexibleservers",
+    "azure-mgmt-mysqlflexibleservers",
+    "google-api-python-client",
     # the passwords `migkit init` keeps, in the OS keychain
     "keyring>=25",
 ]
@@ -95,7 +101,7 @@ diff = []
 dataframe = []
 s3 = []
 pgschema = []
-dev = ["pytest", "faker", "hypothesis", "pexpect"]
+dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]"]
 
 [project.scripts]
 migkit = "migkit.cli:main"
