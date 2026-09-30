@@ -11,15 +11,249 @@ stays as it is, so anything already reading it keeps working.
 
 Bump `FORMAT_VERSION` when a category is renamed or removed; adding one is not
 a breaking change.
+
+What a run ends as is decided here and nowhere else (`decide`), and said in
+the words of one table (`VERDICTS`): the check's exit code, the report's
+banner, `watch`, `sync`, the scheduler, CI and the cutover read it. Before
+it, four places decided "same" and disagreed - measured, a check whose
+verdict was `different` printed "all green" and exited 0, because the
+report's renderer had rewritten a `diff` as `ok` in the rows the exit code
+was counted from; an empty answer set read `same`.
 """
 import hashlib
 import json
 import time
+from dataclasses import dataclass
 
 from . import __version__
 from .engines.base import STATUSES
 
 FORMAT_VERSION = 1
+
+
+@dataclass(frozen=True)
+class Verdict:
+    word: str       # what every output says
+    exit: int       # what the command ends with
+    colour: str     # what the console and the report show it in
+    metric: int     # what `/metrics` carries
+
+
+#: every verdict a run ends as. `error` is a run that could not take an
+#: answer it set out to take; `incomplete` one that found no difference
+#: and did not look at everything - narrowed, overtaken by a DDL, answers
+#: reused or to be read, or nothing compared at all
+VERDICTS = {
+    "same": Verdict("same", 0, "green", 0),
+    "different": Verdict("different", 1, "yellow", 1),
+    "error": Verdict("could not verify", 3, "red", 2),
+    "incomplete": Verdict("incomplete", 3, "yellow", 4),
+}
+
+#: the exit codes of what is not a verdict: a command that did what it was
+#: asked (`done`), one given flags that do not go together (`usage`, which
+#: click's own errors end with too), one that stopped short (`failed`, the
+#: code of a verdict that could not be taken), one a guard stopped before
+#: it wrote (`refused`), and one stopped by Ctrl-C or SIGTERM
+EXIT = {"done": 0, "usage": 2, "failed": 3, "refused": 4,
+        "interrupted": 130}
+
+#: each answer on its own, as the verdict counts it
+ROWS = {"ok": "same", "skip": "not compared", "warn": "to read",
+        "diff": "different", "error": "could not verify"}
+
+#: when each verdict and each end is said, in the operator's words
+MEANS = {
+    "same": "every answer the run set out to take was taken, and the two"
+            " sides hold the same",
+    "done": "a command that is not a comparison did what it was asked; a"
+            " plan without --go or --apply was shown",
+    "different": "a difference was found - the check did its work; the"
+                 " report names which table, row and column",
+    "usage": "flags that do not go together, or a name that is not there"
+             " (a check --only does not know, a variable's value)",
+    "error": "an answer could not be taken: a server that did not answer,"
+             " a check that failed",
+    "incomplete": "nothing differs, and not everything was looked at: a"
+                  " narrowed run, answers to read, answers reused from"
+                  " an earlier run, a schema change mid-run, nothing"
+                  " compared",
+    "failed": "the command stopped part way, said why in words; the"
+              " details are in the hop's commands.log",
+    "refused": "a guard stopped the command before anything was written:"
+               " the goal, a hop that masks, an approval, the target not"
+               " the one the plan showed, a check known to fail",
+    "interrupted": "stopped by Ctrl-C or SIGTERM; what was saved as it"
+                   " went is kept",
+}
+
+
+def exit_codes():
+    """[(code, [what ends with it])] - every exit code a command ends with,
+    lowest first, each with the verdicts and ends it says in words
+    (`MEANS`): the table the manual shows, read off the ones the code
+    ends by."""
+    got = {}
+    for status, v in VERDICTS.items():
+        got.setdefault(v.exit, []).append((v.word, MEANS[status]))
+    for end, code in EXIT.items():
+        got.setdefault(code, []).append((end, MEANS[end]))
+    return sorted(got.items())
+
+
+class Refused(SystemExit):
+    """A guard stopped a command before it wrote anything: said in its
+    own words, the command ending with `EXIT["refused"]`."""
+
+
+class Usage(SystemExit):
+    """What the command was given does not go together, or names what is
+    not there: said, the command ending with `EXIT["usage"]`."""
+
+
+def ran(code):
+    """Whether a command that ended with `code` did its work - a check
+    that found a difference did; one that could not compare, a guard that
+    stopped it, a stop part way did not. What a schedule counts as a slot
+    that failed."""
+    return code in (EXIT["done"], VERDICTS["different"].exit)
+
+
+def exit_code(status):
+    return VERDICTS[status].exit
+
+
+def db_of(scope):
+    """The database an answer is about, from its scope (`shop`, `shop
+    narrowing`, `shop.public.orders`) - the one reading the report, the
+    repair and `--only --db` share, so `--db shop` is never taken for
+    `shop_archive`."""
+    first = (str(scope or "").split() or [""])[0]
+    return first.split(".")[0].replace("(migra)", "").strip()
+
+
+@dataclass(frozen=True)
+class Decision:
+    status: str
+    why: str
+    #: each record's weight in the verdict (`ROWS`, or "note" for a warn
+    #: the hop says does not stop the check), in the records' order
+    severity: tuple
+
+    @property
+    def exit(self):
+        return VERDICTS[self.status].exit
+
+    @property
+    def word(self):
+        return VERDICTS[self.status].word
+
+
+class _Gated:
+    """A hop that gates on performance, for asking `workload.gate` which
+    answers are about performance at all."""
+    options = {"performance": "gate"}
+
+
+def _notes(hop, records):
+    """The ids of the warns the hop says do not stop the check: a slower
+    target holds the same data, and stops it only under `performance:
+    gate` (`workload.gate`)."""
+    from . import workload
+    slow = workload.gate(_Gated, records)
+    gated = workload.gate(hop, records) if hasattr(hop, "options") else []
+    kept = {id(r) for r in gated}
+    return {id(r) for r in slow if id(r) not in kept}
+
+
+def _narrowed(coverage):
+    return "; ".join(
+        f"{k} " + (", ".join(map(str, v)) if isinstance(v, (list, tuple))
+                   else str(v))
+        for k, v in sorted(coverage.items()))
+
+
+def _named(rows, n=4):
+    scopes = sorted({str(r.get("scope", "")) for r in rows})
+    return ", ".join(scopes[:n]) + (" ..." if len(scopes) > n else "")
+
+
+def decide(records, hop=None, coverage=None):
+    """What a run's answers add up to (`Decision`): one rule for every
+    reader. Where a difference or an error is found it is said, whatever
+    else ran. Nothing reads `same` that did not compare everything it set
+    out to, in words that say why not: no answer at all, answers a DDL
+    overtook, a `warn` (something to read - rows the role cannot see,
+    columns no comparison covers), answers reused from an earlier run the
+    source may have moved under since, only skips, a narrowed run. A skip
+    among compared answers is said, not hidden: `same` names what was not
+    compared. A status the table has no word for counts as an error -
+    never as a pass."""
+    records = list(records)
+    notes = _notes(hop, records)
+    sev = []
+    bad, diff, stale, warn, reused, skip, ok = [], [], [], [], [], [], []
+    for r in records:
+        st = r.get("status")
+        if st not in STATUSES:
+            bad.append(r)
+            sev.append(ROWS["error"])
+            continue
+        if st == "warn" and id(r) in notes:
+            ok.append(r)
+            sev.append("note")
+            continue
+        sev.append(ROWS[st])
+        if st == "error":
+            bad.append(r)
+        elif st == "diff":
+            diff.append(r)
+        elif r.get("stale"):
+            stale.append(r)
+        elif st == "warn":
+            warn.append(r)
+        elif st == "skip":
+            skip.append(r)
+        else:
+            ok.append(r)
+            if r.get("reused_from") and not r.get("reuse_held"):
+                reused.append(r)
+    if bad:
+        odd = [r for r in bad if r.get("status") not in STATUSES]
+        why = (f"{len(bad)} answer{'s' if len(bad) > 1 else ''} could not"
+               f" be taken: {_named(bad)}")
+        if odd:
+            why += ("; an answer migkit has no word for ("
+                    + ", ".join(sorted({str(r.get('status')) for r in odd}))
+                    + ") is taken as not verified")
+        return Decision("error", why, tuple(sev))
+    if diff:
+        return Decision("different", f"{len(diff)} differ: {_named(diff)}",
+                        tuple(sev))
+    if not records:
+        return Decision("incomplete", "nothing was compared: no answer at"
+                        " all", tuple(sev))
+    if stale:
+        return Decision("incomplete", f"{len(stale)} answers were taken"
+                        " while the source's schema changed:"
+                        f" {_named(stale)}", tuple(sev))
+    if warn:
+        return Decision("incomplete", f"{len(warn)} answer"
+                        f"{'s' if len(warn) > 1 else ''} to read before the"
+                        f" two are called the same: {_named(warn)}",
+                        tuple(sev))
+    if reused:
+        return Decision("incomplete", f"{len(reused)} answers were reused"
+                        " from an earlier run and the source may have"
+                        f" changed since: {_named(reused)}", tuple(sev))
+    if not ok:
+        return Decision("incomplete", "every answer was skipped - nothing"
+                        f" was compared: {_named(skip)}", tuple(sev))
+    if coverage:
+        return Decision("incomplete", "the run was narrowed to "
+                        + _narrowed(coverage), tuple(sev))
+    return Decision("same", (f"{len(ok)} compared the same; not compared:"
+                             f" {_named(skip)}" if skip else ""), tuple(sev))
 
 
 def difference_kind(count_a, key_a, count_b, key_b):
@@ -376,7 +610,8 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     second lie in the other direction.
 
     A run whose answers a DDL on the source overtook (`mark_stale`) is
-    `incomplete` for the same reason, and names them under `stale`.
+    `incomplete` for the same reason, and names them under `stale`. The
+    status is `decide`'s, and `why` says why it is not `same`.
     """
     totals = {s: 0 for s in STATUSES}
     stale = sorted({str(r.get("scope", "")) for r in records
@@ -384,17 +619,11 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     for r in records:
         st = r.get("status", "unknown")
         totals[st] = totals.get(st, 0) + 1
-    if totals.get("error"):
-        status = "error"
-    elif totals.get("diff"):
-        status = "different"
-    elif totals.get("skip") and not (totals.get("ok") or totals.get("warn")):
-        status = "incomplete"
-    elif coverage or stale:
-        status = "incomplete"
-    else:
-        status = "same"
-    from . import session
+    got = decide(records, hop, coverage)
+    from . import digests, session
+    # digests the check took and could not keep: the answers stand, and
+    # the evidence lists as many tables fewer - said here, not swallowed
+    unwritten = digests.unwritten(session.current())
     return {
         **({"coverage": coverage} if coverage else {}),
         **({"stale": stale} if stale else {}),
@@ -406,12 +635,15 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         "session": session.current(),
         "engine": engine or hop.engine,
         "generated": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "status": status,
-        "has_differences": bool(totals.get("diff") or totals.get("error")),
+        "status": got.status,
+        **({"why": got.why} if got.why else {}),
+        "has_differences": bool(totals.get("diff") or totals.get("error")
+                                or got.status == "error"),
         "totals": totals,
         "by_category": _counts(records, "category"),
         "fingerprint": fingerprint(records),
         **({"load": load} if load else {}),
+        **({"digests_unwritten": unwritten} if unwritten else {}),
         "findings": [
             {"category": r.get("category", ""),
              "check": r.get("check", ""),

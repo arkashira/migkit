@@ -51,10 +51,13 @@ CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.storedcode.programs", "migkit.notify",
                 "migkit.traces", "migkit.redisshake", "migkit.mirror",
                 "migkit.dsbulk", "migkit.fromsnapshot", "migkit.ddbexport",
-                "migkit.upgrade", "migkit.engines.spanner",
-                "migkit.engines.bigtable", "migkit.engines.firestore",
-                "migkit.engines.keyspaces", "migkit.engines.neptune",
-                "migkit.engines.timestream"]
+                "migkit.upgrade",
+                "migkit.engines.teradata", "migkit.engines.sapodp",
+                "migkit.engines.saas", "migkit.engines.saas_salesforce",
+                "migkit.shared", "migkit.seedtools",
+                "migkit.engines.spanner", "migkit.engines.bigtable",
+                "migkit.engines.firestore", "migkit.engines.keyspaces",
+                "migkit.engines.neptune", "migkit.engines.timestream"]
 
 _HERE = Path(__file__).parent
 

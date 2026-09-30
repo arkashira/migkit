@@ -18,11 +18,11 @@ def test_the_line_adds_up_what_is_carried_and_not_what_is_left():
     facts = {"public.a": {"bytes": 50 * 2 ** 20, "index_bytes": 28 * 2 ** 20},
              "public.audit": {"bytes": 900 * 2 ** 20, "index_bytes": 0}}
     got = planner.size_line(decisions, facts, "postgres")
-    assert got.startswith("about 78.0 MB to carry (50.0 MB of tables,"
-                          " 28.0 MB of indexes"), got
-    assert "its WAL grows by about 78.0 MB" in got, got
+    assert got.startswith("about 78.0 MiB to carry (50.0 MiB of tables,"
+                          " 28.0 MiB of indexes"), got
+    assert "its WAL grows by about 78.0 MiB" in got, got
     got = planner.size_line(decisions, facts, "mysql")
-    assert "its binlog (where it keeps one) grows by about 40.0 MB" in got, \
+    assert "its binlog (where it keeps one) grows by about 40.0 MiB" in got, \
         got
     assert planner.size_line(decisions, {"public.a": {"rows": 1}},
                              "postgres") is None
@@ -58,7 +58,7 @@ def test_the_cost_of_carrying_it_at_the_price_the_hop_gives():
     decisions = [planner.Decision("public.a", planner.BULK, "")]
     facts = {"public.a": {"bytes": 10 * 2 ** 30, "index_bytes": 2 ** 30}}
     got = planner.size_line(decisions, facts, "postgres", 0.09)
-    assert "carrying the tables' 10.0 GB across costs about 0.90 at the" \
+    assert "carrying the tables' 10.0 GiB across costs about 0.90 at the" \
         " 0.09 per GB the hop gives" in got, got
     assert "costs" not in planner.size_line(decisions, facts, "postgres")
     got = planner.size_line(decisions, facts, "postgres", "cheap")

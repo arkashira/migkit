@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The manual - migkit 0.2.0</title>
+<meta name="description" content="migkit moves, follows, proves and cuts over databases between any two engines.">
+<style>
+:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+--line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
+--code:#f3f4f6;--codeink:#1d232b}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
+--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
+--warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--code);color:var(--codeink);padding:.1em .35em;
+border-radius:4px;font-size:.9em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+.layout{display:flex;max-width:1240px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
+overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;font-size:19px}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
+nav a.here{color:var(--ink);font-weight:600}
+nav a.sub{padding-left:12px;font-size:12.5px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+h1{font-size:30px;margin:.2em 0 .1em}
+h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
+border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.6em 0 .4em}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
+.rule{background:var(--panel);border-left:3px solid var(--acc);
+border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.mut{color:var(--mut);font-size:13px}
+.wide{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
+vertical-align:top}
+th{background:var(--panel);font-weight:600}
+.wide table{font-size:12.5px}
+.wide td,.wide th{padding:4px 6px}
+td.y{color:var(--ok);font-weight:600}
+td.p{color:var(--warn);font-weight:600}
+td.na{color:var(--mut)}
+.pill{display:inline-block;background:var(--panel);
+border:1px solid var(--line);
+color:var(--mut);border-radius:20px;padding:2px 10px;font-size:12px;
+margin:2px 4px 2px 0}
+footer{color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);
+margin-top:40px;padding-top:16px}
+@media(max-width:820px){nav{display:none}main{padding:24px 18px 80px}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+<div class="brand">migkit</div>
+<div class="tag">version 0.2.0</div>
+<a href="index.html" class="here">Overview</a>
+<a class="sub" href="#start">Five minutes</a>
+<a class="sub" href="#goals">What a hop is for</a>
+<a class="sub" href="#manual">The manual</a>
+<a class="sub" href="#safety">Safety</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="engines.html">Engines</a>
+<a href="goals.html">Goals and modes</a>
+<a href="recipes.html">Recipes</a>
+<a href="options.html">Hop options</a>
+<a href="environment.html">Environment</a>
+<a href="commands.html">Commands</a>
+<a href="troubleshooting.html">Troubleshooting</a>
+<a href="evidence.html">Evidence</a>
+<a href="releases.html">Releases</a>
+</nav>
+<main>
+<h1>migkit</h1>
+<p class="lede">Move, follow, prove and cut over databases between any two engines.</p>
+<p><span class="pill"><a href="engines.html#engine-postgres">PostgreSQL</a></span><span class="pill"><a href="engines.html#engine-mysql">MySQL</a></span><span class="pill"><a href="engines.html#engine-mongodb">MongoDB</a></span><span class="pill"><a href="engines.html#engine-mssql">SQL Server</a></span><span class="pill"><a href="engines.html#engine-redis">Redis</a></span><span class="pill"><a href="engines.html#engine-kafka">Kafka</a></span><span class="pill"><a href="engines.html#engine-sqlite">SQLite</a></span><span class="pill"><a href="engines.html#engine-parquet">Parquet files</a></span><span class="pill"><a href="engines.html#engine-clickhouse">ClickHouse</a></span><span class="pill"><a href="engines.html#engine-dynamodb">DynamoDB</a></span><span class="pill"><a href="engines.html#engine-oracle">Oracle Database</a></span><span class="pill"><a href="engines.html#engine-db2">Db2 (Linux, UNIX, Windows)</a></span><span class="pill"><a href="engines.html#engine-db2i">Db2 for i</a></span><span class="pill"><a href="engines.html#engine-db2zos">Db2 for z/OS</a></span><span class="pill"><a href="engines.html#engine-ase">SAP ASE</a></span><span class="pill"><a href="engines.html#engine-teradata">Teradata</a></span><span class="pill"><a href="engines.html#engine-opensearch">OpenSearch</a></span><span class="pill"><a href="engines.html#engine-cassandra">Cassandra</a></span><span class="pill"><a href="engines.html#engine-redshift">Amazon Redshift</a></span><span class="pill"><a href="engines.html#engine-snowflake">Snowflake</a></span><span class="pill"><a href="engines.html#engine-bigquery">BigQuery</a></span><span class="pill"><a href="engines.html#engine-kinesis">Kinesis Data Streams</a></span><span class="pill"><a href="engines.html#engine-pubsub">Google Pub/Sub</a></span><span class="pill"><a href="engines.html#engine-duckdb">DuckDB</a></span><span class="pill"><a href="engines.html#engine-copybook">Files described by COBOL copybooks</a></span><span class="pill"><a href="engines.html#engine-iceberg">Iceberg tables</a></span><span class="pill"><a href="engines.html#engine-delta">Delta tables</a></span><span class="pill"><a href="engines.html#engine-tidb">TiDB</a></span><span class="pill"><a href="engines.html#engine-cockroachdb">CockroachDB</a></span><span class="pill"><a href="engines.html#engine-dsql">Aurora DSQL</a></span><span class="pill"><a href="engines.html#engine-couchbase">Couchbase</a></span><span class="pill"><a href="engines.html#engine-cosmosdb">Cosmos DB for NoSQL</a></span><span class="pill"><a href="engines.html#engine-spanner">Google Cloud Spanner</a></span><span class="pill"><a href="engines.html#engine-bigtable">Google Cloud Bigtable</a></span><span class="pill"><a href="engines.html#engine-firestore">Firestore (native mode)</a></span><span class="pill"><a href="engines.html#engine-datastore">Firestore in Datastore mode</a></span><span class="pill"><a href="engines.html#engine-gaussdb">GaussDB (openGauss)</a></span><span class="pill"><a href="engines.html#engine-oceanbase">OceanBase (MySQL mode)</a></span><span class="pill"><a href="engines.html#engine-oceanbase-oracle">OceanBase (Oracle mode)</a></span><span class="pill"><a href="engines.html#engine-polardbx">PolarDB-X</a></span><span class="pill"><a href="engines.html#engine-dcdb">TDSQL (distributed)</a></span><span class="pill"><a href="engines.html#engine-keyspaces">Amazon Keyspaces</a></span><span class="pill"><a href="engines.html#engine-neptune">Amazon Neptune</a></span><span class="pill"><a href="engines.html#engine-timestream">Amazon Timestream</a></span><span class="pill"><a href="engines.html#engine-lindorm">Lindorm</a></span><span class="pill"><a href="engines.html#engine-geminidb-cassandra">GeminiDB (Cassandra API)</a></span><span class="pill"><a href="engines.html#engine-geminidb-redis">GeminiDB (Redis API)</a></span><span class="pill"><a href="engines.html#engine-geminidb-mongo">GeminiDB (MongoDB API)</a></span><span class="pill"><a href="engines.html#engine-sapodp">SAP application data (ODP)</a></span><span class="pill"><a href="engines.html#engine-saas">SaaS applications, read by a connector program</a></span><span class="pill">any two of them as a pair</span><span class="pill">any other SQL engine by its URL</span></p>
+<p class="rule"><b>migkit's own decision engine finds the fastest, exact, consistent way for each source -&gt; target pair</b>, and says which it chose and why. Around the move it does what a mover leaves out: it prepares the target, follows the source's changes, proves every row and object arrived, repairs what did not with the undo kept, and cuts over with the least downtime.</p>
+<h2 id="start">Five minutes</h2>
+<pre><code>uv tool install migkit
+migkit doctor --install
+migkit init
+migkit assess shop
+migkit move shop --mode full+cdc
+migkit move shop --mode full+cdc --go
+migkit check shop
+migkit move shop --mode cdc --drop --go</code></pre>
+<p>Each step, and what it does on each side: <a href="quickstart.html">the quickstart</a>.</p>
+<h2 id="goals">What a hop is for</h2>
+<table><tr><th>Goal</th><th>What it is for</th></tr><tr><td><a href="goals.html#goal-copy"><code>copy</code></a></td><td>move the data once and prove every row arrived</td></tr><tr><td><a href="goals.html#goal-cutover"><code>cutover</code></a></td><td>move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch</td></tr><tr><td><a href="goals.html#goal-verify"><code>verify</code></a></td><td>prove two databases hold the same; nothing is written to either</td></tr><tr><td><a href="goals.html#goal-two-way"><code>two-way</code></a></td><td>both sides written, each side's changes carried to the other</td></tr><tr><td><a href="goals.html#goal-keep-in-sync"><code>keep-in-sync</code></a></td><td>a copy that follows the source for as long as it runs, the application kept off it</td></tr><tr><td><a href="goals.html#goal-rehearse"><code>rehearse</code></a></td><td>the whole path the real run will take - copy, follow, prove, cut over - on a copy or a sample of the source into a target of its own, every phase timed, so the hop it rehearses (rehearses:) is forecast from what it measured</td></tr><tr><td><a href="goals.html#goal-upgrade"><code>upgrade</code></a></td><td>the same engine at a newer version, a higher edition (SQL Server Web to Enterprise), or both, with the least downtime: what the new version or edition changes checked first, then the data moved into it and followed, or a copy of its pages taken to the target where the hop allows it - upgraded there where the version moves - and switched over</td></tr><tr><td><a href="goals.html#goal-subset"><code>subset</code></a></td><td>a copy for testing: the rows chosen and every row they refer to, masked where the hop says, into a staging or developer database, proved row by row</td></tr></table>
+<h2 id="manual">The manual</h2>
+<ul><li><a href="quickstart.html">Quickstart</a>: install, two addresses, assess, move, check, cut over</li><li><a href="engines.html">Engines</a>: 50 engines, what each can do, the shapes of table, stored code, the managed services</li><li><a href="goals.html">Goals and modes</a>: what each does on the source and the target, and what it guarantees</li><li><a href="recipes.html">Recipes</a>: use cases as source -&gt; target pairs</li><li><a href="options.html">Hop options</a>: every key a hop may say</li><li><a href="environment.html">Environment</a>: every <code>MIGKIT_*</code> variable</li><li><a href="commands.html">Commands</a>: every command and option, and the metrics</li><li><a href="troubleshooting.html">Troubleshooting</a>: every refusal, in migkit's words</li><li><a href="evidence.html">Evidence</a>: what the evidence export holds</li><li><a href="releases.html">Releases</a>: each release's changes</li></ul>
+<h2 id="safety">Safety</h2>
+<ul><li>Every command that writes shows its plan first, starting with what each side will see, and writes nothing until <code>--go</code> or <code>--apply</code>.</li><li>What each goal does on the source is said before it runs: <a href="goals.html">goals</a>. No goal turns the cutover migkit drives on; a hop turns it on itself.</li><li>Every repair keeps its undo, and <code>migkit rollback</code> puts it back.</li><li><code>migkit check</code> never writes to either side.</li></ul>
+<footer>migkit 0.2.0 - this page is written from the code by
+<code>tools/gen_docs.py</code>, so it says what this version does.
+Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migkit</a>.
+AGPL-3.0-or-later.</footer>
+</main>
+</div>
+</body>
+</html>

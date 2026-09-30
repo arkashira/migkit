@@ -82,7 +82,7 @@ def test_carried_and_compared_and_a_change_is_seen(mysql_server, pg_pair,
         got = CliRunner().invoke(cli.main, ["check", "kv", "--only",
                                             "data"])
         said = " ".join((got.output + str(got.exception or "")).split())
-        assert got.exit_code == 0, said
+        assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
         assert "no canonical rendering" not in said, said
         # a change to either is a difference
         _my("update kvdb.kv set h = json_object('k', 'changed')"

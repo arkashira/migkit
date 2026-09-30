@@ -579,44 +579,79 @@ def test_a_side_that_will_not_export_its_snapshot_is_read_in_one_go(
                 " one transaction reading every table in turn") in text, text
 
 
-def _repair(monkeypatch, tmp_path, refused):
+def _repair(monkeypatch, tmp_path, quiet):
+    """A PostgreSQL row repair over one extra key, the load's reading of
+    what the target's user may do given as `quiet` (a mode, or the
+    refusal it raises), and each target script kept with the options its
+    session ran under."""
+    from migkit import movers
     from migkit.engines.postgres import PostgresEngine
     eng = _postgres(tmp_path)
     (tmp_path / "data-public.t.extra").write_text("5\n")
     monkeypatch.setattr(PostgresEngine, "_report", lambda self, db: tmp_path)
     monkeypatch.setattr(PostgresEngine, "_pk_cols_of",
                         lambda self, db, t: ["id"])
+
+    class Record:
+        n = 1
+
+        def applied(self, upto):
+            pass
+
+        def close(self):
+            pass
+    monkeypatch.setattr(PostgresEngine, "_repair_record",
+                        lambda self, *a: Record())
+
+    def asked(hop, db, tables):
+        if isinstance(quiet, BaseException):
+            raise quiet
+        return quiet
+    monkeypatch.setattr(movers, "_pg_quiet_triggers", asked)
     ran = []
 
     def psql_run(self, side, db, script):
-        ran.append(script)
-        if script.startswith("set session_replication_role"):
-            raise RuntimeError(refused)
+        ran.append((side, self.replica_env(db).get("PGOPTIONS", ""), script))
         return ""
     monkeypatch.setattr(PostgresEngine, "_psql_run", psql_run)
     return eng, ran
 
 
-def test_a_repair_whose_target_refuses_the_replica_role_runs_as_it_is(
-        monkeypatch, tmp_path):
-    eng, ran = _repair(monkeypatch, tmp_path, 'ERROR:  permission denied to'
-                       ' set parameter "session_replication_role"')
-    said = []
-    eng.lend_log(said.append)
+def test_a_repair_writes_as_a_replica_where_the_load_would(monkeypatch,
+                                                          tmp_path):
+    eng, ran = _repair(monkeypatch, tmp_path, "session")
     eng._repair_rows_native("app", "public.t")
-    assert len(ran) == 2 and ran[1] == ran[0].split("\n", 1)[1]
-    assert said == ["public.t: the target's triggers and foreign keys held"
-                    " quiet as a replica's are could not run (the target's"
-                    " user may not set the replica role: ERROR:  permission"
-                    " denied to set parameter \"session_replication_role\")"
-                    " - switching to the target's triggers and foreign keys"
-                    " as they are"]
+    assert [(side, opts) for side, opts, _ in ran] == [
+        ("dst", "-c session_replication_role=replica")]
+    assert "delete from" in ran[0][2]
+
+
+def test_a_repair_writes_the_tables_as_they_are_only_without_triggers(
+        monkeypatch, tmp_path):
+    eng, ran = _repair(monkeypatch, tmp_path, "none")
+    eng._repair_rows_native("app", "public.t")
+    assert [(side, opts) for side, opts, _ in ran] == [("dst", "")]
+
+
+def test_a_repair_the_load_would_refuse_is_refused_before_a_row_is_written(
+        monkeypatch, tmp_path):
+    """Where the target's user may not write as a replica and the table
+    has triggers, the load stops before the target is emptied; the repair
+    used to run with the triggers firing. It stops the same way now."""
+    refused = SystemExit("app: public.t have triggers on the target -"
+                         " foreign keys among them - and app can neither"
+                         " turn them off for the load nor load as a"
+                         " replica.")
+    eng, ran = _repair(monkeypatch, tmp_path, refused)
+    with pytest.raises(SystemExit, match="have triggers on the target"):
+        eng._repair_rows_native("app", "public.t")
+    assert ran == []
 
 
 def test_a_repair_the_target_refuses_otherwise_is_never_run_again(
         monkeypatch, tmp_path):
     from migkit.engines.postgres import PostgresEngine
-    eng, ran = _repair(monkeypatch, tmp_path, "unused")
+    eng, ran = _repair(monkeypatch, tmp_path, "session")
 
     def refused(self, side, db, script):
         ran.append(script)

@@ -9,11 +9,20 @@ probes below, so it cannot drift. Only the gaps are declared, each as not
 applicable (with why) or not yet (with the backlog item). The test holds
 the two against each other: a gap the probes see and nobody declared fails,
 and so does a declared gap the code has since closed.
+
+A probe reads the named engine's class only, and a method's source once.
+Measured (CPython 3.12, Apple arm64, cached bytecode, three runs): asking
+whether PostgreSQL can do six things imported all 34 engine modules and
+read their methods' source, 360-420 ms a command; now 2 engine modules
+and 138-161 ms, 82 of them the movers module the bulk and stream probes
+read. The gap words `decide` declares its shapes with are these
+(`NOT_YET`, `NOT_APPLICABLE`, `STREAM_ONLY`), not a second set.
 """
 import ast
+import functools
 import inspect
 
-from .engines import NAMES, _class_for, engines_with
+from .engines import NAMES, _class_for
 from .engines.base import Engine
 
 #: every capability, in the words an operator reads
@@ -43,9 +52,10 @@ NOT_YET = "not yet"
 _FILE_DB = ("a SQLite database is a file with no change log that can be"
             " read without writing to it, so it moves offline")
 _NO_PLANNER = "the engine keeps no optimiser statistics to refresh"
-_STREAM_ONLY = ("{} is where a pair delivers its changes (engine:"
-                " hetero, target_engine: {}), not a hop's engine: it"
-                " holds a stream of changes, not a copy to compare")
+#: a stream of changes as an engine: `decide`'s shapes say it too
+STREAM_ONLY = ("{} is where a pair delivers its changes (engine:"
+               " hetero, target_engine: {}), not a hop's engine: it"
+               " holds a stream of changes, not a copy to compare")
 _FILES = ("Parquet files are data at rest, with no server, settings or"
           " change log of their own")
 _LAKE = ("an Iceberg or Delta table is files and a log of commits, with no"
@@ -58,6 +68,14 @@ _ZOS_LOG = ("Db2 for z/OS hands its log out only to licensed code - a load"
 _EXTRACT = ("a file described by a copybook is an extract at rest, with no"
             " server, settings or change log; what changed since the last"
             " extract is found by comparing the two, which check does")
+_TD_LOG = ("Teradata keeps no change log a client can read, so a Teradata"
+           " source moves by copies, each proved by check")
+_READ_ONLY = ("{} is read, never written: it is a pair's source (engine:"
+              " hetero, source_engine: {}), and a hop between two of them"
+              " compares them")
+_READ_FOLLOW = ("{} is followed as a pair's source, its changes carried"
+                " into another engine (engine: hetero, source_engine: {});"
+                " two of them are compared, never one written")
 
 _GIVEN_KEYS = ("a {} is kept by the key the application gives it, not one"
                " a sequence hands out: there is no sequence to carry")
@@ -84,11 +102,8 @@ GAPS = {
     "kafka": {
         "sequences": (NOT_APPLICABLE,
                       "offsets are assigned by the broker, not carried"),
-        "bulk-move": (NOT_APPLICABLE, "a topic is a log: it is copied"
-                                      " message for message, in order, by"
-                                      " the topic copier - no dump of a log"
-                                      " a client could load keeps its"
-                                      " order faster"),
+        # bulk-move is read off the code: the cluster mirror
+        # (`movers.supported("kafka", "mirror")`) copies a topic whole
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "sqlite": {
@@ -185,6 +200,49 @@ GAPS = {
         "statistics": (NOT_YET, "34"),
         "snapshot": (NOT_YET, "34"),
     },
+    "teradata": {
+        "sequences": (NOT_APPLICABLE, "Teradata has no sequences, and an"
+                                      " identity column's next number is"
+                                      " the system's own, set on no table"
+                                      " that exists"),
+        "params": (NOT_APPLICABLE, "Teradata's system settings are read by"
+                                   " its own utility on a node, not through"
+                                   " SQL"),
+        "bulk-move": (NOT_APPLICABLE, "Teradata's whole-system copy is its"
+                                      " backup and restore, licensed apart"
+                                      " from the database; tables are"
+                                      " copied in its parallel sessions"
+                                      " (table-copy)"),
+        "stream": (NOT_APPLICABLE, _TD_LOG),
+        "fence": (NOT_APPLICABLE, _TD_LOG),
+        "confirm": (NOT_APPLICABLE, _TD_LOG),
+        "delta": (NOT_APPLICABLE, _TD_LOG),
+        "snapshot": (NOT_APPLICABLE, "Teradata keeps no snapshot a client"
+                                     " can take; a copy of the target is its"
+                                     " backup tool's"),
+    },
+    **{name: {
+        "deep": (NOT_APPLICABLE, f"{said} holds no state of a load to look"
+                                 " into: it is read through its own"
+                                 " interface"),
+        "sequences": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "params": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "bulk-move": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "table-copy": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "guard": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "statistics": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "snapshot": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "stream": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "fence": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "confirm": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "delta": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "users": (NOT_APPLICABLE, users),
+    } for name, said, users in (
+        ("sapodp", "an SAP system's application data",
+         "SAP authorisations are the system's roles (PFCG), not carried"),
+        ("saas", "a SaaS application",
+         "who may use an application is the application's own, not"
+         " carried"))},
     "ase": {
         "deep": (NOT_YET, "34"),
         "sequences": (NOT_YET, "34"),
@@ -420,11 +478,11 @@ GAPS = {
         "users": (NOT_YET, "CN2"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
-    "kinesis": {cap: (NOT_APPLICABLE, _STREAM_ONLY.format("Kinesis",
-                                                          "kinesis"))
+    "kinesis": {cap: (NOT_APPLICABLE, STREAM_ONLY.format("Kinesis",
+                                                         "kinesis"))
                 for cap in CAPABILITIES},
-    "pubsub": {cap: (NOT_APPLICABLE, _STREAM_ONLY.format("Pub/Sub",
-                                                         "pubsub"))
+    "pubsub": {cap: (NOT_APPLICABLE, STREAM_ONLY.format("Pub/Sub",
+                                                        "pubsub"))
                for cap in CAPABILITIES},
     "hetero": {
         "users": (NOT_YET, "0e"),
@@ -446,6 +504,7 @@ GAPS = {
 }
 
 
+@functools.lru_cache(maxsize=None)
 def _refuses_only(method):
     """A method whose whole body is a return of an error or skip result.
 
@@ -499,15 +558,21 @@ def _bulk(name):
                if via not in ("auto", "builtin"))
 
 
+def _there(cls, method):
+    """The class has the method, its own or inherited - what the engine
+    list (`engines_with`) counts - read off that one class."""
+    return cls is not None and getattr(cls, method, None) is not None
+
+
 def _has(method):
-    return lambda n, c: (n in engines_with(method)
+    return lambda n, c: (_there(c, method)
                          and not _refuses_only(getattr(c, method)))
 
 
-def _stream(name):
+def _stream(name, cls):
     from . import movers
-    return (movers.stream_supported(name) or name in engines_with("tail_apply")
-            or name in engines_with("replicate_sql"))
+    return (movers.stream_supported(name) or _there(cls, "tail_apply")
+            or _there(cls, "replicate_sql"))
 
 
 PROBES = {
@@ -519,11 +584,11 @@ PROBES = {
     "params": lambda n, c: _own(c, "check_params"),
     "bulk-move": lambda n, c: _bulk(n),
     "table-copy": _has("move_table"),
-    "stream": lambda n, c: _stream(n),
+    "stream": _stream,
     "fence": _has("fence_wait"),
     # the confirm pass is the base's; an engine runs it when it can fence
     # and can compare rows by key
-    "confirm": lambda n, c: (n in engines_with("fence_wait")
+    "confirm": lambda n, c: (_there(c, "fence_wait")
                              and _own(c, "_compare_pks")),
     "delta": _has("delta_verify"),
     "users": lambda n, c: n in _users_engines(),

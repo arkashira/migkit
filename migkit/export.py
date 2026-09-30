@@ -39,7 +39,17 @@ can quote a key.
 
 No program migkit drives is named anywhere in it: a way is said as the
 engine's ladder says it, and anything else is put through the same words
-filter every message is (`wording.without_programs`).
+filter every message is (`wording.without_programs`). No secret is in
+it: a record entry's key that names one (`redact.SECRET_KEY`) is not
+carried out, and every file is cleaned of the hop's secrets in every
+form and of any secret by its shape (`redact.Redactor`) as it is
+written. Its digests leave the machine for the run state's bucket only
+through the one gate of what leaves (`egress`).
+
+A run's own part is read from where the files stood as it began
+(`runlog.appended`), not from the hop's whole history: the export at the
+end of every command, a schedule's per-minute "not due" tick included,
+reads only what the run wrote.
 """
 import csv
 import hashlib
@@ -75,8 +85,6 @@ REMOVALS = ("follow-drop", "replicate-drop", "two-way-drop", "stream-down",
             "rollback", "rollback-counters")
 #: record entries that changed the target's rows after the copy
 REPAIRS = ("repair", "sync", "rollback", "rollback-counters")
-#: keys never carried out of a record, whatever they hold
-_SECRET = ("password", "passwd", "secret", "credential", "token_value")
 
 
 # ---- words ------------------------------------------------------------------
@@ -154,16 +162,21 @@ def _op(entry):
     return words(op)
 
 
-def _plain(value, depth=0):
+def _plain(value, depth=0, drop=True):
     """A value from a record, carried out as it is where it is plain,
-    with no secret-named key and no program's name."""
+    with no program's name - and, from an entry anyone wrote (`drop`),
+    no key that names a secret (`redact.SECRET_KEY`). migkit's own files
+    of positions and timings name keys `token` and `keys` that hold a
+    change position and a digest, and keep them."""
+    from .redact import SECRET_KEY
     if depth > 6:
         return None
     if isinstance(value, dict):
-        return {str(k): _plain(v, depth + 1) for k, v in value.items()
-                if not any(s in str(k).lower() for s in _SECRET)}
+        return {str(k): _plain(v, depth + 1, drop)
+                for k, v in value.items()
+                if not (drop and SECRET_KEY.search(str(k)))}
     if isinstance(value, (list, tuple)):
-        return [_plain(v, depth + 1) for v in value]
+        return [_plain(v, depth + 1, drop) for v in value]
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return words(value)
@@ -251,17 +264,38 @@ def _file_record(root, ref, statements=None):
     return out
 
 
-def _record(root, session):
-    from . import audit
-    entries = _lines(root / "changelog.jsonl")
-    n, chained, broken = audit.verify(root / "changelog.jsonl")
-    head = next((e.get("hash") for e in reversed(entries)
-                 if e.get("hash")), "")
-    chain = {"file": "changelog.jsonl", "entries": n, "chained": chained,
-             "whole": not broken, "broken": broken, "head": head}
+def _history(hop, session, name):
+    """The lines of the hop's file `name`: the run `session`'s, read from
+    where the file stood as it began where this process began it, else
+    every part of the file (`runlog.parts`)."""
+    from . import runlog
+    root = hop.report_dir()
     if session:
-        entries = [e for e in entries if e.get("session") == session]
-    return entries, chain
+        got = runlog.appended(hop, session, name)
+        if got is not None:
+            return [e for e in got if isinstance(e, dict)
+                    and e.get("session") == session]
+    out = []
+    for part in runlog.parts(root / name):
+        out += _lines(part)
+    if session:
+        out = [e for e in out if e.get("session") == session]
+    return out
+
+
+def _record(hop, session):
+    from . import runlog
+    root = hop.report_dir()
+    n, chained, broken, parts = runlog.verify_parts(root / "changelog.jsonl")
+    last = runlog.last_lines(root / "changelog.jsonl", 1)
+    try:
+        head = json.loads(last[0]).get("hash", "") if last else ""
+    except ValueError:
+        head = ""
+    chain = {"file": "changelog.jsonl", "entries": n, "chained": chained,
+             "whole": not broken, "broken": broken, "head": head,
+             "parts": parts}
+    return _history(hop, session, "changelog.jsonl"), chain
 
 
 def _route(hop):
@@ -330,10 +364,10 @@ def _verdict(root, session):
         return None
     if session and got.get("session") != session:
         return None
-    keep = ("status", "generated", "has_differences", "totals",
+    keep = ("status", "why", "generated", "has_differences", "totals",
             "fingerprint", "coverage", "stale", "load", "session",
-            "tool_version", "by_category")
-    return {k: _plain(got[k]) for k in keep if k in got}
+            "tool_version", "by_category", "digests_unwritten")
+    return {k: _plain(got[k], drop=False) for k in keep if k in got}
 
 
 def _checks(root, verdict):
@@ -435,7 +469,8 @@ def _code(root):
                 out.append({"db": d.name, "routine": words(v.get("routine")),
                             "status": v.get("status"),
                             "reason": words(v.get("reason")),
-                            "coverage": _plain(v.get("coverage")),
+                            "coverage": _plain(v.get("coverage"),
+                                               drop=False),
                             "counterexample": words(v.get("first"))
                             if v.get("first") else None})
         conv = _json(d / "code-conversion.json", {}) or {}
@@ -457,16 +492,14 @@ def _positions(root):
                                  else ()):
             got = _json(d / name)
             if got is not None:
-                out.setdefault(where, {})[name] = _plain(got)
+                out.setdefault(where, {})[name] = _plain(got, drop=False)
     return out
 
 
-def _decisions(root, session):
+def _decisions(hop, session):
     from .session import DECISIONS
     seen = {}
-    for d in _lines(root / DECISIONS):
-        if session and d.get("session") != session:
-            continue
+    for d in _history(hop, session, DECISIONS):
         key = (d.get("work"), d.get("way"), d.get("reason"))
         got = seen.setdefault(key, {
             "work": words(d.get("work")), "way": words(d.get("way")),
@@ -530,7 +563,8 @@ def _cutovers(root, entries, session):
                     "outage_seconds": rec.get("outage"),
                     "budget_seconds": conf.get("budget"),
                     "freeze": words(rec.get("freeze")),
-                    "phases_seconds": _plain(rec.get("took") or {}),
+                    "phases_seconds": _plain(rec.get("took") or {},
+                                             drop=False),
                     "approvers": list(rec.get("approvers") or []),
                     "databases": list(rec.get("dbs") or []),
                     "why": words(rec.get("why")),
@@ -602,27 +636,40 @@ def _timings(root, session):
     got = _json(root / "check-timings.json", {}) or {}
     if session and got.get("session") != session:
         got = {}
-    return {"checks_seconds": _plain(got.get("databases") or {}),
+    return {"checks_seconds": _plain(got.get("databases") or {},
+                                     drop=False),
             "checks_at": got.get("at")}
 
 
 def _steps(entries):
     out = []
     for e in entries:
-        step = {k: _plain(v) for k, v in e.items()
-                if k not in ("prev", "hash", "op", "undo_ref",
-                             "applied_ref")}
+        step = _plain({k: v for k, v in e.items()
+                       if k not in ("prev", "hash", "op", "undo_ref",
+                                    "applied_ref")})
         step["op"] = _op(e)
         out.append(step)
     return out
 
 
+def _movers(hop):
+    """Which machine wrote which batch and which range, and the proof of
+    one writer at a time, where the hop's machines work together (`ha`)."""
+    from . import ha
+    try:
+        rows = ha.evidence(hop)
+    except Exception:  # noqa: BLE001 - nothing kept to say
+        return []
+    return [{k: words(v) if isinstance(v, str) else _plain(v)
+             for k, v in r.items()} for r in rows]
+
+
 def gather(hop, session=None):
     """The machine view: the hop's whole history, or the run `session`'s
     part of it."""
-    from . import evidence
+    from . import digests, evidence
     root = hop.report_dir()
-    entries, chain = _record(root, session)
+    entries, chain = _record(hop, session)
     verdict = _verdict(root, session)
     tables = _tables(hop, session)
     return {
@@ -640,7 +687,7 @@ def gather(hop, session=None):
         "method": _method(tables),
         "code": _code(root) if not session else [],
         "positions": _positions(root),
-        "decisions": _decisions(root, session),
+        "decisions": _decisions(hop, session),
         "approvals": _approvals(root, entries),
         "repairs": _repairs(root, entries),
         "cutovers": _cutovers(root, entries, session),
@@ -649,25 +696,36 @@ def gather(hop, session=None):
         "removed": [{"op": _op(e), "db": e.get("db"), "at": e.get("at")}
                     for e in entries if e.get("op") in REMOVALS],
         "steps": _steps(entries),
+        "movers": _movers(hop),
         "record": chain,
         "at_rest": {"encrypted_to": len(evidence.recipients_of(hop))},
+        # digests the run took and could not keep: the tables above are
+        # fewer than the check compared by as many
+        **({"digests_unwritten": digests.unwritten(session)}
+           if session and digests.unwritten(session) else {}),
     }
 
 
 def left_anything(hop, session):
     """Whether the run `session` left anything to export: an entry in
-    the record (an export's own anchor is none), a way chosen, a digest
-    taken, a verdict written."""
-    from . import digests
+    the record (an export's own anchor, a rotation's carried head are
+    none), a way chosen, a digest taken, a verdict written - read from
+    where each file stood as the run began (`runlog.appended`), so a run
+    that left nothing costs a few `stat`s."""
+    from . import digests, runlog
     from .session import DECISIONS
     root = hop.report_dir()
-    if any(e.get("session") == session and e.get("op") != "evidence"
-           for e in _lines(root / "changelog.jsonl")):
+    if any(e.get("op") not in ("evidence", "rotated")
+           for e in _history(hop, session, "changelog.jsonl")):
         return True
-    if any(d.get("session") == session for d in _lines(root / DECISIONS)):
+    if _history(hop, session, DECISIONS):
         return True
     if digests.read(hop, session):
         return True
+    if digests.unwritten(session):
+        return True
+    if runlog.verdict_written(hop, session) is False:
+        return False
     got = _json(root / "verdict.json")
     return isinstance(got, dict) and got.get("session") == session
 
@@ -768,6 +826,11 @@ def _sections(doc):
                                                 "detail"],
                 [(a["level"], a["scope"], a["item"], a["detail"])
                  for a in doc["assessment"]]))
+    out.append(("who wrote what", ["db", "what", "machine", "number",
+                                   "from", "to"],
+                [(m.get("db"), m.get("what"), m.get("by"), m.get("number"),
+                  m.get("from"), m.get("to")) for m in doc.get("movers")
+                 or []]))
     out.append(("left and removed", ["what", "db", "at"],
                 [(r["op"], r["db"], r["at"]) for r in doc["removed"]]))
     out.append(("the record", ["at", "op", "db", "who", "host"],
@@ -777,15 +840,25 @@ def _sections(doc):
 
 
 def _headline(doc):
+    """(the verdict's key, its words, the tables not the same): the
+    verdict said as every output says it (`verdict.VERDICTS`)."""
+    from .verdict import VERDICTS
     v = doc.get("verdict") or {}
-    status = v.get("status") or ("no check in this run"
-                                 if doc["scope"] == "run" else "not checked")
+    key = v.get("status")
+    said = VERDICTS[key].word if key in VERDICTS else (
+        "no check in this run" if doc["scope"] == "run" else "not checked")
     diff = sum(1 for t in doc["tables"] if t["status"] != "same")
-    return status, diff
+    return key, said, diff
+
+
+def _unwritten(doc):
+    n = doc.get("digests_unwritten") or 0
+    return (f"; {n} digest{'s' if n > 1 else ''} the check took could not"
+            " be kept, so as many tables are missing here" if n else "")
 
 
 def markdown(doc):
-    status, diff = _headline(doc)
+    _, status, diff = _headline(doc)
     route = doc["route"]
     chain = doc["record"]
     out = [f"# migkit evidence: {doc['hop']}",
@@ -798,7 +871,7 @@ def markdown(doc):
            f"- route: {route['source']['engine']} {route['source']['address']}"
            f" -> {route['target']['engine']} {route['target']['address']}",
            f"- verdict: **{status}**; {len(doc['tables'])} tables with"
-           f" digests, {diff} not the same",
+           f" digests, {diff} not the same{_unwritten(doc)}",
            f"- record: {chain['entries']} entries, {chain['chained']}"
            " chained, " + ("the chain is whole" if chain["whole"] else
                           f"the chain is broken: {chain['broken']}")
@@ -835,14 +908,15 @@ def page(doc):
     """The HTML view, in the look of migkit's other reports."""
     from .report import CSS
     e = html.escape
-    status, diff = _headline(doc)
+    key, status, diff = _headline(doc)
     route = doc["route"]
     chain = doc["record"]
-    ok = status == "same" and not diff and chain["whole"]
+    ok = key == "same" and not diff and chain["whole"] \
+        and not doc.get("digests_unwritten")
     banner = (f'<div class="banner {"pass" if ok else "fail"}">'
               f'<span class="dot {"ok" if ok else "error"}"></span>'
               f"{e(str(status))} &mdash; {len(doc['tables'])} tables with"
-              f" digests, {diff} not the same</div>")
+              f" digests, {diff} not the same{e(_unwritten(doc))}</div>")
     tiles = [(sum(m["rows"] for m in doc["moved"]["databases"].values()),
               "rows moved"),
              (len(doc["tables"]), "tables digested"),
@@ -945,10 +1019,12 @@ def _signing_key(hop):
     return os.path.expanduser(str(key)) if key else None
 
 
-def _sign(path, key):
-    """`path` signed with the private SSH key `key` (`ssh-keygen -Y`),
-    beside it as `<path>.sig`; raises where it could not be."""
-    got = subprocess.run(["ssh-keygen", "-Y", "sign", "-n", NAMESPACE,
+def _sign(path, key, namespace=NAMESPACE):
+    """`path` signed with the private SSH key `key` (`ssh-keygen -Y`) in
+    `namespace`, beside it as `<path>.sig`; raises where it could not be.
+    A namespace a signature is made for is checked with it: an evidence
+    signature is no seed manifest's (`ship`)."""
+    got = subprocess.run(["ssh-keygen", "-Y", "sign", "-n", namespace,
                           "-f", key, str(path)], capture_output=True,
                          text=True, stdin=subprocess.DEVNULL, timeout=60)
     if got.returncode != 0:
@@ -956,16 +1032,42 @@ def _sign(path, key):
         raise RuntimeError(said[-1] if said else "could not sign")
 
 
+def _verify(path, signature, allowed, namespace=NAMESPACE):
+    """The signer `signature` (`_sign`'s) names for `path`, from the
+    allowed signers file `allowed`; raises where no signer there made it
+    or the file is not what was signed."""
+    found = subprocess.run(["ssh-keygen", "-Y", "find-principals", "-s",
+                            str(signature), "-f", str(allowed)],
+                           capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=60)
+    who = (found.stdout or "").strip().splitlines()
+    if found.returncode != 0 or not who:
+        raise RuntimeError("no signer the allowed signers name made this"
+                           " signature")
+    with open(path, "rb") as f:
+        got = subprocess.run(["ssh-keygen", "-Y", "verify", "-f",
+                              str(allowed), "-I", who[0], "-n", namespace,
+                              "-s", str(signature)], stdin=f,
+                             capture_output=True, text=True, timeout=60)
+    if got.returncode != 0:
+        said = (got.stderr or got.stdout).strip().splitlines()
+        raise RuntimeError(said[-1] if said else "the signature does not"
+                           " hold")
+    return who[0]
+
+
 def write(hop, session=None, log=None):
     """The bundle of the hop (`session` None: its whole history) or of
     one run, written under the hop's reports, anchored in its record;
     the directory it is in."""
     from . import audit
+    from .redact import Redactor
     say = log or (lambda m: None)
+    clean = Redactor(hop)
     root = hop.report_dir()
     out = root / DIR / session if session else root / DIR
     out.mkdir(parents=True, exist_ok=True)
-    doc = gather(hop, session)
+    doc = _cleaned(gather(hop, session), clean)
     key = _signing_key(hop)
     if key:
         doc["signature"] = {"namespace": NAMESPACE,
@@ -977,8 +1079,8 @@ def write(hop, session=None, log=None):
         try:
             _sign(out / "evidence.json", key)
         except Exception as e:  # noqa: BLE001 - said; the bundle stands
-            say(f"the evidence could not be signed ({str(e)[:160]}); it"
-                " is written unsigned")
+            say(f"the evidence could not be signed ({clean(str(e))[:160]});"
+                " it is written unsigned")
             (out / "evidence.json.sig").unlink(missing_ok=True)
             doc.pop("signature")
             body = json.dumps(doc, indent=1, sort_keys=True, default=str)
@@ -995,6 +1097,26 @@ def write(hop, session=None, log=None):
     return out
 
 
+#: keys whose values are numbers or digests migkit took, which anyone
+#: takes again to check them: never changed by the secrets' cleaning (a
+#: short password's value found inside a digest would change the digest)
+_TAKEN = ("digest", "keys", "salt", "sha256", "plain_sha256", "head",
+          "hash", "prev", "fingerprint", "rows", "session")
+
+
+def _cleaned(value, clean, key=""):
+    """The bundle with every text cleaned of the hop's secrets, in every
+    form and by their shape (`redact.Redactor`), before any view of it is
+    rendered - the numbers and digests in it as they were taken."""
+    if isinstance(value, dict):
+        return {k: _cleaned(v, clean, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cleaned(v, clean, key) for v in value]
+    if isinstance(value, str) and key not in _TAKEN:
+        return clean(value)
+    return value
+
+
 def _sign_line():
     return (f"ssh-keygen -Y verify -f allowed_signers -I <signer>"
             f" -n {NAMESPACE} -s evidence.json.sig < evidence.json")
@@ -1002,13 +1124,21 @@ def _sign_line():
 
 def _anchor_remote(hop, out, anchor, say):
     """The bundle's digests put in the hop's run-state bucket, where it
-    keeps one: an object-locked bucket keeps them as written."""
-    from . import state
+    keeps one and the egress lets them go there: an object-locked bucket
+    keeps them as written."""
+    from . import egress, state
+    if not egress.allows(hop, "evidence", say):
+        return
     try:
         remote = state.run_state(hop)
     except Exception:  # noqa: BLE001 - no bucket to reach is no anchor
         return
     if remote is None:
+        return
+    conf = (hop.options or {}).get("state") or {}
+    where = (conf.get("endpoint_url") if isinstance(conf, dict) else None) \
+        or "https://s3.amazonaws.com"
+    if not egress.permit(hop, "evidence", where, log=say):
         return
     try:
         remote.put(out / "evidence.sha256.json",

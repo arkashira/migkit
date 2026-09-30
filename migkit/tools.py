@@ -62,6 +62,12 @@ PROGRAMS = {
     # put beside the IBM data server driver
     "ibmi-odbc": ("", ""),
     "db2-connect": ("", ""),
+    # not programs either: Teradata's own driver for Python, installed into
+    # migkit's environment (`install_teradata`), and the connectors of the
+    # program sources' container kind, which docker pulls where a hop
+    # runs one (`engines.saas`)
+    "teradatasql": ("", ""),
+    "airbyte-connectors": ("", ""),
 }
 
 #: each program's licence, as SPDX names it. Every one is run as a program
@@ -94,6 +100,11 @@ PROGRAM_LICENCES = {
     # of IBM's terms (`TERMS`)
     "ibmi-odbc": "LicenseRef-IBM-i-Access-Client-Solutions",
     "db2-connect": "LicenseRef-IBM-Db2-Connect",
+    # Teradata's licence for its driver: free to use, not open source
+    "teradatasql": "LicenseRef-Teradata-SQL-Driver",
+    # the Elastic License 2.0 its certified connectors carry: any use but
+    # offering them to others as a managed service
+    "airbyte-connectors": "Elastic-2.0",
     "redis-shake": "MIT", "dsbulk": "Apache-2.0",
     "connect-mirror-maker.sh": "Apache-2.0",
     # built here from its source (`SOURCE_BUILDS`), never on PATH by
@@ -211,6 +222,24 @@ TERMS = {
         "Db2 for z/OS is reached only where its subsystem is activated for"
         " Db2 Connect by its administrator; Db2 for i through its ODBC"
         " driver or its Mapepire server"),
+    "teradatasql": Terms(
+        "Teradata's licence for its SQL driver for Python (no charge; its"
+        " early-release features, FastLoad and FastExport among them,"
+        " provided as they are)",
+        "https://github.com/Teradata/python-driver/blob/master/LICENSE",
+        "reading, writing and comparing Teradata tables, in its parallel"
+        " sessions where a table is large",
+        "Teradata is not reached from this machine: a hop with a Teradata"
+        " side stops, saying so"),
+    "airbyte-connectors": Terms(
+        "the Elastic License 2.0 of the certified connectors for SaaS"
+        " applications: any use but providing them to others as a managed"
+        " service",
+        "https://www.elastic.co/licensing/elastic-license",
+        "running a connector a hop names, as a program or a container on"
+        " this machine, for that hop's own copy and follow",
+        "a hop whose source is such a connector stops, saying so; the"
+        " other kinds of program source need no terms"),
     # the redo-file reader is open (AGPL); the client library it is built
     # against to reach the database is Oracle's own, free to use under
     # these terms and not open source
@@ -361,6 +390,35 @@ def db2_connect_present():
     return db2_connect_licence() is not None
 
 
+#: Teradata's driver, and the terms the certified SaaS connectors run
+#: under: not programs on PATH
+TERADATA_DRIVER, SAAS_CONNECTORS = "teradatasql", "airbyte-connectors"
+
+
+def teradata_driver_present():
+    import importlib.util
+    return importlib.util.find_spec("teradatasql") is not None
+
+
+def install_teradata(log=print):
+    """Teradata's driver into migkit's own environment, once its terms are
+    accepted: by the package manager migkit runs under where there is
+    one, else by pip. True once it imports."""
+    import sys
+    uv = which("uv")
+    step = ([uv, "pip", "install", "--python", sys.executable,
+             TERADATA_DRIVER] if uv else
+            [sys.executable, "-m", "pip", "install", "-q", TERADATA_DRIVER])
+    got = subprocess.run(step, capture_output=True, text=True)
+    if got.returncode != 0:
+        log("  it did not install: "
+            f"{(got.stderr.strip().splitlines() or [''])[-1][:120]}")
+        return False
+    import importlib
+    importlib.invalidate_caches()
+    return teradata_driver_present()
+
+
 def install_ibm(component, log=print):
     """IBM's ODBC driver for IBM i from IBM's own package repository, with
     the ODBC manager it loads through; or the operator's Db2 Connect
@@ -435,6 +493,10 @@ def _present(cmd):
         return ibmi_odbc_present()
     if cmd == DB2_CONNECT:
         return db2_connect_present()
+    if cmd == TERADATA_DRIVER:
+        return teradata_driver_present()
+    if cmd == SAAS_CONNECTORS:
+        return terms_accepted(SAAS_CONNECTORS)
     if cmd in SOURCE_BUILDS:
         return built_program(cmd) is not None
     return which(cmd)
@@ -655,6 +717,18 @@ CAPABILITIES = [
     ("SAP ASE: verify and copy",
      "compare and copy tables through ASE's own protocol",
      [ASE_DRIVER], []),
+    ("Teradata: verify, copy and load",
+     "compare tables on the servers, copy them in parallel sessions, load"
+     " whole batches",
+     [TERADATA_DRIVER], []),
+    ("SAP application data: copy, follow and verify",
+     "read extractors and CDS views through their OData services, follow"
+     " their delta queue, count on the SAP side",
+     [], []),
+    ("SaaS applications: copy, follow and verify",
+     "run a connector as a program, copy and follow what it reads, follow"
+     " Salesforce's own change events; containers need docker",
+     [], [SAAS_CONNECTORS, "docker"]),
     ("TiDB, CockroachDB, Aurora DSQL: verify, copy and follow",
      "compare and copy tables over the MySQL or PostgreSQL wire, and follow"
      " what each publishes of its changes, in commit order",
@@ -780,6 +854,8 @@ def by_hand(programs):
             continue    # built from its source (`install_from_source`)
         if c in (IBMI_ODBC, DB2_CONNECT):
             continue    # IBM's, put in place by `install_ibm`
+        if c in (TERADATA_DRIVER, SAAS_CONNECTORS):
+            continue    # put in place, or accepted, by `install_missing`
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
             out.append(c)
@@ -823,6 +899,10 @@ def install_missing(log=print, ask=None):
     fetch = [c for c in dict.fromkeys(wanted) if c in VENDOR and not which(c)]
     ibm = [c for c in dict.fromkeys(wanted) if c in (IBMI_ODBC, DB2_CONNECT)
            and not _present(c)]
+    # Teradata's driver, installed here; the SaaS connectors' terms, asked
+    # for here and used where a hop runs one - docker pulls a container
+    # where it runs, as it pulls the pipeline's images
+    teradata = TERADATA_DRIVER in wanted and not _present(TERADATA_DRIVER)
     redo = REDO_READER in wanted and not _present(REDO_READER)
     # the terms first, all of them, before anything is fetched or built: a
     # question asked halfway through a long download is one nobody is
@@ -830,7 +910,9 @@ def install_missing(log=print, ask=None):
     # pulls it where it runs, and migkit runs it only once they are
     # accepted (`tooluse.allowed`)
     answer = accept_terms(fetch + ibm + [i for i in IMAGES if i in TERMS]
-                          + ([REDO_READER_CLIENT] if redo else []), ask, log)
+                          + ([REDO_READER_CLIENT] if redo else [])
+                          + ([TERADATA_DRIVER] if teradata else [])
+                          + [SAAS_CONNECTORS], ask, log)
     for n, cmd in enumerate(fetch, 1):
         open_build = cmd in TERMS and not answer.get(cmd)
         if open_build and not TERMS[cmd].open_build:
@@ -847,6 +929,11 @@ def install_missing(log=print, ask=None):
         if not ok:
             log(f"  vendor component {n} did not install; run migkit"
                 " doctor again to see which capability is still short")
+    if teradata and answer.get(TERADATA_DRIVER):
+        log("installing the Teradata driver ...")
+        if not install_teradata(log):
+            log("  the Teradata driver is not in place; run migkit doctor"
+                " again to see which capability is still short")
     for n, cmd in enumerate([c for c in ibm if answer.get(c)], 1):
         log(f"putting IBM component {n} in place ...")
         if not install_ibm(cmd, log):
@@ -1443,6 +1530,11 @@ def _licences_of(dist):
     import re
     meta = dist.metadata
     expr = meta.get("License-Expression")
+    raw = (meta.get("License") or "").strip()
+    if not expr and re.fullmatch(r"[\w.+-]+(\s+OR\s+[\w.+-]+)+", raw):
+        # an SPDX expression of alternatives written in the free-text
+        # field (simplejson's `MIT OR AFL-2.1`)
+        expr = raw
     if expr:
         return _expression(expr)
     found = [spdx_of(c.split(" :: ")[-1])

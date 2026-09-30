@@ -55,7 +55,7 @@ def test_counts_and_data_detect_and_repair(pg_pair, tmp_path):
     assert "applied" in r.stdout
 
     r = _migkit(conf, "check", "t", "--only", "counts,data")
-    assert r.returncode == 0
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout
     assert "DIFF" not in r.stdout
 
 
@@ -75,7 +75,7 @@ def test_sequence_repair_matches_source_exactly(pg_pair, tmp_path):
     assert val == "3000"
 
     r = _migkit(conf, "check", "t", "--only", "autoinc")
-    assert r.returncode == 0
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout
 
 
 def test_resumable_move_survives_crash(pg_pair, tmp_path):
@@ -103,7 +103,7 @@ def test_resumable_move_survives_crash(pg_pair, tmp_path):
     assert "id 10,001 to 20,000 copied" in r.stdout
 
     r = _migkit(conf, "check", "t", "--only", "counts")
-    assert r.returncode == 0
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout
     n = psql(pg_pair["dst"], "select count(*) from big").stdout.strip()
     assert n == "30000"
 

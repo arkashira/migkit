@@ -17,7 +17,10 @@ only where `MIGKIT_AI_SHARE` includes `detail` and the hop masks nothing,
 since a value may have come from the source's rows. The hop option
 `code_model: {provider, url, model}` names another endpoint than the
 environment's for this hop (the key stays in `MIGKIT_AI_KEY`), and
-`code_model_rounds` how many rounds it gets.
+`code_model_rounds` how many rounds it gets. What leaves goes through
+the one gate (`egress`, by way of `assist.ask`): the egress settings are
+asked, the prompt cleaned of the hop's secrets, and an address that is
+not `https` - this machine's own aside - is not sent the key.
 """
 import re
 
@@ -51,7 +54,7 @@ def _endpoint(hop):
 def ask(hop, prompt):
     """The model's answer, through the hop's endpoint where it names one."""
     from .. import assist
-    return assist.ask(prompt, _endpoint(hop))
+    return assist.ask(prompt, _endpoint(hop), hop=hop)
 
 
 def may_show_values(hop):
@@ -91,9 +94,13 @@ def answer_statements(text, dst):
 
 def propose(hop, src, dst, routine, definition, tried):
     """One round's version, or Refused."""
+    from .. import egress
     if not configured(hop):
         raise Refused("no model is configured to be sent code (MIGKIT_AI and"
                       " MIGKIT_AI_SHARE=code)")
+    if not egress.allows(hop, "assist"):
+        raise Refused("the egress keeps code on this machine: MIGKIT_EGRESS"
+                      " or the hop's egress does not let it go to a model")
     got = answer_statements(ask(hop, prompt(src, dst, routine, definition,
                                             tried, may_show_values(hop))),
                             dst)

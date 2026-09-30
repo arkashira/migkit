@@ -191,10 +191,11 @@ def test_the_upgraded_target_checks_equal(hop):
     for _ in range(30):
         got = CliRunner().invoke(cli.main, ["check", "up", "--only",
                                             "counts,data"])
-        if got.exit_code == 0:
+        if got.exit_code == 3 and "the run was narrowed to" in got.output:
             break
         time.sleep(2)
-    assert got.exit_code == 0, got.output
+    assert got.exit_code == 3 and "the run was narrowed to" in \
+        got.output, got.output
     # and says otherwise when it is not
     _psql(DST_PORT, "alter subscription "
           + _psql(DST_PORT, "select subname from pg_subscription")[0][0]

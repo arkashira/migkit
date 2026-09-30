@@ -79,8 +79,8 @@ import os
 import time
 from dataclasses import dataclass, field
 
-NOT_YET = "not yet"
-NOT_APPLICABLE = "not applicable"
+#: the words of a gap are the capability table's
+from .capabilities import NOT_APPLICABLE, NOT_YET, STREAM_ONLY  # noqa: E402
 
 #: two measured costs closer than this share of the larger are a tie, and
 #: the footprint decides: a smaller difference is within what timing a
@@ -1346,7 +1346,7 @@ def _cost_words(costs, failed, instead):
 
 def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
             keep=None, log=None, undo=None, answer=None, prove=True,
-            otherwise=None, switch=operational):
+            otherwise=None, switch=operational, record=True):
     """(the `Choice`, what `run` returned): the work done on the first rung
     that runs.
 
@@ -1367,7 +1367,10 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
     that ran for an hour, a target replaced by a copy): there only what
     the way itself raises as `Blocked` - it failed before anything it
     cannot put back. What cannot be undone stops everything, with both
-    reasons; no rung left stops with every rung's reason (`Exhausted`)."""
+    reasons; no rung left stops with every rung's reason (`Exhausted`).
+    `record` False reads what `where` keeps and writes nothing to it or
+    to `costs`: a dry run climbs the ladder `--go` climbs, the ways given
+    up included, and leaves everything as it found it."""
     facts = facts if facts is not None else Facts()
     rungs = tuple(rungs)
     say = log or (lambda m: None)
@@ -1421,7 +1424,7 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
             if not operational(e) or not switch(e):
                 raise
             why, last_error = _first(e), e
-            if callable(getattr(costs, "outcome", None)):
+            if record and callable(getattr(costs, "outcome", None)):
                 # its chance of failing, for the next climb here and the
                 # next hop of these engines (`costmodel.risk`)
                 costs.outcome(rung.name, False, why)
@@ -1437,7 +1440,7 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
                     " is tried over it") from err
             now[rung.name] = {"why": why, "seen": seen(rung, facts),
                               "at": time.time()}
-            if where is not None:
+            if where is not None and record:
                 _keep_given_up(where, work, rung.name, now[rung.name])
             nxt = climb(work, ladder(), facts, need, costs,
                         prove=False).rung
@@ -1448,9 +1451,9 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
                    else " - no other way is left"))
             keep = None
             continue
-        if where is not None:
+        if where is not None and record:
             remember(where, work, rung.name)
-        if callable(getattr(costs, "outcome", None)):
+        if record and callable(getattr(costs, "outcome", None)):
             costs.outcome(rung.name, True)
         return choice, result
 
@@ -2038,18 +2041,18 @@ SHAPES = {
                    " back - the source at cutover",
 }
 
-_STREAM_ONLY = ("a stream of changes is where a pair delivers them, not a"
-                " hop's engine: it holds no table")
 _BY_KEY_ORDER = ("read by {}, never in key order, so the key's shape does"
                  " not arise")
 _NO_PROGRAM = ("no program is driven for this engine; migkit's own reader"
                " needs only to read")
 
 _DBAPI = ("mssql", "oracle", "db2", "db2i", "db2zos", "ase", "redshift",
-          "snowflake", "bigquery", "duckdb")
-_STREAMS = ("kinesis", "pubsub")
+          "snowflake", "bigquery", "duckdb", "teradata")
+#: sources read through an application's own interface, never written
+_READ_ONLY = ("sapodp", "saas")
 _FILES = ("sqlite", "duckdb", "parquet", "copybook")
-_NONE = {**{n: (NOT_APPLICABLE, _STREAM_ONLY) for n in _STREAMS},
+_NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
+            for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
          "generic": (NOT_YET, "33")}
 
 #: {shape: {engine or "*": ("yes", where) | (NOT_YET, item) |
@@ -2062,7 +2065,7 @@ WAYS = {
         "hetero": ("yes", "@_copy_in_spans"),
         **{n: ("yes", "@neutral_batches")
            for n in ("sqlite", "clickhouse", "cassandra", "dynamodb",
-                     "opensearch", "parquet") + _DBAPI},
+                     "opensearch", "parquet", "iceberg", "delta") + _DBAPI},
         "mongodb": (NOT_APPLICABLE, "every document carries an _id"),
         # the engines on another's wire read a keyless table in one pass
         # through the one DB-API reader (ER4)
@@ -2090,6 +2093,8 @@ WAYS = {
         "geminidb-redis": (NOT_APPLICABLE, "every value is under its key"),
         "geminidb-mongo": (NOT_APPLICABLE, "every document carries an _id"),
         "copybook": ("yes", "@position_spans"),
+        "teradata": ("yes", "@row_bucket_sql"),
+        **{n: ("yes", "@neutral_batches") for n in _READ_ONLY},
         "redis": (NOT_APPLICABLE, "every value is under its key"),
         "kafka": (NOT_APPLICABLE, "a message is addressed by its partition"
                                   " and offset, never by a key"),
@@ -2125,9 +2130,16 @@ WAYS = {
                                            " scan's cursor"),
         "dynamodb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scan segments")),
         "opensearch": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scroll slices")),
-        "parquet": (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time")),
+        **{n: (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time"))
+           for n in ("parquet", "iceberg", "delta")},
         "copybook": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
             "ranges of whole records")),
+        "teradata": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "its rows' hash buckets, as they lie on the AMPs")),
+        "sapodp": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "the pages its service hands out")),
+        "saas": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "the records its program hands over")),
         "redis": (NOT_APPLICABLE, "a key is one string, read by the scan's"
                                   " cursor"),
         "kafka": (NOT_APPLICABLE, "a message's key is carried, never"
@@ -2137,6 +2149,8 @@ WAYS = {
         **_NONE,
         **{n: ("yes", "@native_bulk")
            for n in ("cassandra", "dynamodb", "opensearch", "parquet")},
+        # read page by page, a page at a time held
+        **{n: ("yes", "@neutral_batches") for n in _READ_ONLY},
         "*": ("yes", "@move_table"),
     },
     "large values": {
@@ -2146,7 +2160,27 @@ WAYS = {
         "copybook": (NOT_APPLICABLE, "a field is as long as its copybook"
                                      " says, a record 32,760 bytes at most"
                                      " in a variable file"),
+        **{n: (NOT_APPLICABLE, "a value arrives whole in the application's"
+                               " answer: there is no piece of it to read"
+                               " apart") for n in _READ_ONLY},
         "oracle": ("yes", "@_read_in_pieces"),
+        # the one way of `pieces` - sized where they lie, batches cut by
+        # bytes, read and written in pieces, hashed where they lie - each
+        # engine's adapter its `LARGE_VALUES`
+        **{n: ("yes", "@LARGE_VALUES") for n in (
+            "mongodb", "mssql", "redis", "kafka", "sqlite", "parquet",
+            "clickhouse", "db2", "db2i", "db2zos", "ase", "opensearch",
+            "snowflake", "bigquery", "duckdb", "iceberg", "delta",
+            "hetero")},
+        "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
+                                     " under the 1 MB a scan page returns"),
+        "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
+                                      " most half a commit-log segment:"
+                                      " 16 MB by default"),
+        "redshift": (NOT_APPLICABLE, "a value is 16 MB at most (a VARBYTE"
+                                     " or a SUPER) and a VARCHAR 65,535"
+                                     " bytes, each read whole in batches"
+                                     " cut by bytes"),
         "*": (NOT_YET, "R10"),
     },
     "partitioned": {
@@ -2193,6 +2227,9 @@ WAYS = {
         "copybook": (NOT_APPLICABLE, "a file is not partitioned; one file"
                                      " of several record layouts is several"
                                      " tables, by segment"),
+        **{n: (NOT_APPLICABLE, "an application's data is read through its"
+                               " interface, which shows no partitions")
+           for n in _READ_ONLY},
         "*": (NOT_YET, "R13"),
     },
     "missing grant": {
@@ -2202,6 +2239,9 @@ WAYS = {
         # the redo-file reader's grants, named to the DBA; LogMiner
         # otherwise, which needs none of them
         "oracle": ("yes", "dba._ora_redo_files"),
+        # the bulk sessions' one grant, named to the DBA; single statements
+        # otherwise, which need none of it
+        "teradata": ("yes", "dba._teradata"),
         "hetero": (NOT_YET, "0"),
         "mongodb": (NOT_YET, "0"),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),
@@ -2210,6 +2250,8 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "freeze.freeze"),
         "mysql": ("yes", "freeze.freeze"),
+        **{n: (NOT_APPLICABLE, "it is read, never written") for n in
+           _READ_ONLY},
         "*": (NOT_YET, "R13"),
     },
     "slow link": {

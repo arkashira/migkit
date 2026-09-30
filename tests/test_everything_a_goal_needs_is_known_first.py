@@ -39,8 +39,8 @@ class _Eng:
 def _only(monkeypatch, **parts):
     """`ready`'s parts replaced by what each returns here."""
     from migkit import ready
-    for name in ("_servers", "_target", "_resources", "_goal_checks",
-                 "_rehearsed_quick", "_mapping"):
+    for name in ("_servers", "_target", "_resources", "_case",
+                 "_goal_checks", "_rehearsed_quick", "_mapping"):
         got = parts.get(name, [])
         monkeypatch.setattr(ready, name, lambda *a, got=got, **k: list(got))
 

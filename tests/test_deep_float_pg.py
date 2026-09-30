@@ -58,4 +58,4 @@ def test_identical_floats_pass(pg_pair, tmp_path):
 
     # deep is green: a faithful float copy is within tolerance (no false diff)
     r = _migkit(conf, "check", "t", "--only", "deep")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout

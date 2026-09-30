@@ -1,5 +1,6 @@
 import time
 
+from .. import pieces
 from ..decide import Rung
 from .base import Engine, RepairAction, Result
 from ..verdict import difference_kind_from_counts
@@ -63,9 +64,19 @@ class MongoEngine(Engine):
         """
         def one(side):
             try:
-                return dict(self._client(side).admin.command("buildInfo"))
+                out = dict(self._client(side).admin.command("buildInfo"))
             except Exception:
                 return {}
+            # a command only Azure Cosmos DB answers: MongoDB refuses it as
+            # one it does not have, and its answer names the brand
+            try:
+                got = self._client(side).admin.command(
+                    "getLastRequestStatistics")
+                out["cosmos_request_charge"] = str(got.get("RequestCharge",
+                                                           ""))
+            except Exception:
+                pass
+            return out
         return (one("src"), one("dst"))
 
     def _server_versions(self):
@@ -94,8 +105,80 @@ class MongoEngine(Engine):
     def list_move_tables(self, db):
         return [("", c) for c in self.neutral_tables("src", db)]
 
-    #: documents per read of the collection copier
+    #: documents per read of the collection copier, and the bytes of BSON
+    #: a read ends at (`_docs_until`)
     COPY_BATCH = 5000
+    COPY_BYTES = pieces.BATCH_BYTES
+    #: large values - a document is 16 MB at most, BSON's own limit, and a
+    #: file kept in GridFS is its chunks, documents of 255 KB each, carried
+    #: as the collections they are: every read of the copier, the pair and
+    #: the digest ends at `pieces.BATCH_BYTES` of BSON, and a collection is
+    #: sized by the server (`row_sizes`)
+    LARGE_VALUES = pieces.Way(
+        "sized by the server, read and written in batches cut by bytes, a"
+        " file in GridFS carried chunk by chunk")
+
+    def _docs_until(self, coll, flt, projection, limit, raw=False):
+        """The documents `find` gives in `_id` order, `limit` at most, up to
+        the one that brings them to `pieces.BATCH_BYTES` as BSON - measured
+        by the bytes each arrived as, and decoded one at a time unless
+        `raw`, the collection's own way. The cursor is closed there: the
+        next read goes on from the last `_id`. By a count alone, five
+        thousand documents a read of up to 16 MB each could be 80 GB."""
+        from bson import decode
+        from bson.raw_bson import RawBSONDocument
+        opts = coll.codec_options
+        cursor = coll.with_options(codec_options=opts.with_options(
+            document_class=RawBSONDocument)).find(
+            flt, projection).sort("_id", 1).limit(int(limit))
+        out, held = [], 0
+        try:
+            for d in cursor:
+                held += len(d.raw)
+                out.append(d if raw else decode(d.raw, codec_options=opts))
+                if held >= pieces.BATCH_BYTES:
+                    break
+        finally:
+            cursor.close()
+        return out
+
+    def row_sizes(self, side, db, tables=None):
+        """Each document's bytes as BSON, asked of the server
+        (`$bsonSize`): the largest and the mean over every document of a
+        collection of no more than `pieces.EXACT_UP_TO`, over a sample of a
+        larger one (`$sample`), the 99th percentile from its first
+        `SIZE_SAMPLE`. Only numbers cross."""
+        from .base import sizes_of
+        dbh = self._client(side)[self._d(side, db)]
+        try:
+            facts = self.table_facts(side, db)
+        except Exception:  # noqa: BLE001 - sized without the statistics
+            facts = {}
+        size = {"$bsonSize": "$$ROOT"}
+        out = {}
+        for t in (tables if tables is not None
+                  else self.neutral_tables(side, db)):
+            f = facts.get(t) or {}
+            exact = int(f.get("bytes") or 0) <= pieces.EXACT_UP_TO
+            head = [] if exact else [{"$sample": {"size": self.SIZE_SAMPLE}}]
+            try:
+                got = list(dbh[t].aggregate(head + [{"$group": {
+                    "_id": None, "most": {"$max": size},
+                    "mean": {"$avg": size}, "n": {"$sum": 1}}}],
+                    allowDiskUse=True))
+                first = [int(d["s"]) for d in dbh[t].aggregate([
+                    {"$limit": self.SIZE_SAMPLE},
+                    {"$project": {"_id": 0, "s": size}}])]
+            except Exception:  # noqa: BLE001 - that collection is not sized
+                continue
+            if not got or not got[0].get("n"):
+                continue
+            sized = sizes_of(first or [int(got[0]["most"])], exact=exact,
+                             rows=int(f.get("rows") or got[0]["n"]))
+            sized["largest"] = max(int(got[0]["most"]), sized["largest"])
+            sized["mean"] = float(got[0]["mean"])
+            out[t] = sized
+        return out
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
         """One collection, document for document as stored: every BSON type,
@@ -158,7 +241,7 @@ class MongoEngine(Engine):
             flt = {} if after is None else (
                 {"_id": {"$gt": after}} if one_type else
                 {"$expr": {"$gt": ["$_id", {"$literal": after}]}})
-            docs = list(src.find(flt).sort("_id", 1).limit(batch))
+            docs = self._docs_until(src, flt, None, batch, raw=True)
             if not docs:
                 break
             try:
@@ -340,9 +423,10 @@ class MongoEngine(Engine):
         # moved three of seven without a word. An expression compares in
         # the order the sort uses, across types.
         flt = ({"$expr": {"$gt": ["$_id", after[0]]}} if after else {})
-        cursor = coll.find(flt, projection).sort("_id", 1).limit(int(limit))
         rows, last = [], None
-        for doc in cursor:
+        # ending at `pieces.BATCH_BYTES` of BSON, and going on from the last
+        # `_id` the next time (`_docs_until`)
+        for doc in self._docs_until(coll, flt, projection, limit or 1000):
             rows.append([doc.get(n, canon.ABSENT) if n in doc
                          else canon.ABSENT for n in names])
             last = doc.get("_id")
@@ -889,9 +973,10 @@ class MongoEngine(Engine):
         after, started = None, False
         while True:
             flt = {"$expr": {"$gt": ["$_id", after]}} if started else {}
-            docs = with_retry(lambda: list(
-                coll.find(flt, projection).sort("_id", 1)
-                .limit(self.DIGEST_CHUNK)), label="mongo read")
+            # a chunk ends at `pieces.BATCH_BYTES` of BSON as well
+            docs = with_retry(lambda: self._docs_until(
+                coll, flt, projection, self.DIGEST_CHUNK),
+                label="mongo read")
             if not docs:
                 break
             k, total = canon.fold_rows(
@@ -2041,8 +2126,23 @@ class MongoEngine(Engine):
             actions.append(RepairAction(
                 db, "rows", [f"resync docs for {name} ({', '.join(counts)})"],
                 [], f"{name}: replace/insert from source per _id, deleted and"
-                    " overwritten target docs saved to undo first"))
+                    " overwritten target docs saved to undo first",
+                table=name))
         return actions
+
+    #: a document is put back as Extended JSON by its own record
+    #: (`repair_io`), never as canonical text: repaired by `_id` alone
+    ROWS_PUT_BACK = False
+
+    def repair_found(self, db, table):
+        """The `_id`s the last check named, each as its Extended JSON."""
+        return {kind: [(line,) for line in self._read_drill(db, table, kind)]
+                for kind in ("missing", "changed", "extra")}
+
+    def repair_sides(self, db, table):
+        """None: a collection's documents are lined up by `_id` alone, the
+        rows way (`repairways`)."""
+        return None
 
     def apply(self, db, action):
         from bson.json_util import dumps, loads

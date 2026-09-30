@@ -129,6 +129,12 @@ HOP_OPTIONS = {
                     " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
                     " names the cheapest machine for migkit that meets it",
                     "str|number"),
+    "edition": Key("what a change of edition may leave behind on the"
+                   " target - accept: [the features whose loss the hop"
+                   " accepts, as assess names them: encryption at rest,"
+                   " auditing, change data capture]", "dict",
+                   ("mssql", "oracle", "mysql", "mongodb"),
+                   subs=("accept",)),
     "deep": Key("compare every key's value, not a sample", "bool",
                 ("redis",)),
     "exact_batches": Key("a one-way tail numbers its batches on the target,"
@@ -178,10 +184,16 @@ HOP_OPTIONS = {
     "noise_prefix": Key("object names a schema check leaves out", "str",
                         ("postgres",)),
     "notify": Key("who is told what the migration is doing - an address,"
-                  " a list of them, or {to, events, lag}: the events told"
-                  " (verdict, drift, lag, cutover, approval, failure,"
-                  " fallback, done) and the seconds a change tail may be"
-                  " behind", "str|list|dict", subs=("to", "events", "lag")),
+                  " a list of them, or {to, events, lag, detail}: the"
+                  " events told (verdict, drift, lag, cutover, approval,"
+                  " failure, fallback, done), the seconds a change tail may"
+                  " be behind, and whether an error's words are sent and"
+                  " not only its kind", "str|list|dict",
+                  subs=("to", "events", "lag", "detail")),
+    "egress": Key("what may leave the machine for this hop - none, or"
+                  " the kinds that may (notify, traces, assist, evidence),"
+                  " or {allow, to}: the kinds and the hosts they may go"
+                  " to", "str|list|dict|bool", subs=("allow", "to")),
     "evidence": Key("the evidence export: {sign: a private SSH key} it is"
                     " signed with", "dict", subs=("sign",)),
     "offset_header": Key("each message the copy carries keeps its source"
@@ -198,15 +210,17 @@ HOP_OPTIONS = {
                         STREAMS),
     "performance": Key("gate: a slower target fails the check", "str"),
     "physical": Key("the target may be seeded from a copy of the source's"
-                    " pages or a cloud's own copy (`physical`,"
-                    " `cloudseed`), and how", "dict", ("postgres", "mysql"),
+                    " pages, SQL Server's own backup restored, or a cloud's"
+                    " own copy (`physical`, `backupseed`, `cloudseed`), and"
+                    " how", "dict", ("postgres", "mysql", "mssql"),
                     subs=("data", "run", "stop", "start", "restart",
                           "source", "source_plugin", "cloud", "source_id",
                           "target_id", "region", "target_region",
                           "target_role_arn", "kms_key", "instance_class",
                           "way", "subnet_group", "security_groups",
                           "subscription", "resource_group", "location",
-                          "project", "address", "upgrade")),
+                          "project", "address", "upgrade", "backup",
+                          "restore_from")),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -253,9 +267,31 @@ HOP_OPTIONS = {
                             "bool|dict", ("postgres",), subs=("source",)),
     "settle": Key("seconds a re-check waits for a stream to settle",
                   "int"),
-    "share_tables": Key("machines share one move's tables", "bool"),
+    "share_tables": Key("machines share one move's tables: true, each"
+                        " table to one machine; ranges, a large table's"
+                        " ranges as well, every write held to the number"
+                        " of the claim that took it", "bool|str"),
+    "ship": Key("the seed may go on media where the link is too narrow"
+                " (`ship`): the carrier (disk, snowball, databox,"
+                " transfer_appliance), where it is written (path, or"
+                " endpoint with bucket or container, prefix, region,"
+                " profile, ca_bundle, credential), its model or capacity,"
+                " where the far end reads it (load_from, load_endpoint,"
+                " load_region, load_profile, load_credential), how long it"
+                " takes to reach the far end as the operator states it"
+                " (shipping), and who must have signed its manifest"
+                " (signers)", "dict",
+                subs=("carrier", "path", "endpoint", "bucket", "container",
+                      "prefix", "region", "profile", "ca_bundle",
+                      "credential", "model", "capacity", "load_from",
+                      "load_endpoint", "load_region", "load_profile",
+                      "load_credential", "shipping", "signers")),
     "slot": Key("the slot a pipeline migkit did not set up reads, which"
                 " the fence waits for", "str|list", ("postgres",)),
+    "standby": Key("the same move run on two or more machines: one moves"
+                   " it, the others take it over from the last position"
+                   " committed once it stops renewing its lease, the"
+                   " target refusing the one that lost it", "bool"),
     "source_changes": Key("the answer, given ahead, to a change on the"
                           " source a faster way needs: yes (migkit makes it"
                           " and takes it off again), no or dba - for every"
@@ -269,9 +305,10 @@ HOP_OPTIONS = {
     "spool_limit": Key("bytes a parked table's changes may take on this"
                        " machine before the table is copied again instead",
                        "int", knob="size"),
-    "state": Key("where run state is kept", "dict",
+    "state": Key("where run state is kept, and a directory every"
+                 " machine of the hop sees (shared)", "dict",
                  subs=("backend", "bucket", "prefix", "region",
-                       "endpoint_url", "mirror")),
+                       "endpoint_url", "mirror", "shared")),
     "stream_lag": Key("seconds a change stream is taken to trail a write,"
                       " which the follow's fence waits past", "number",
                       ("keyspaces",), knob="size"),
@@ -408,9 +445,40 @@ ENDPOINT_OPTIONS = {
                       ("postgres", "mysql")),
     "aws_role_arn": Key("the role an aws_iam token is signed as", "str",
                         ("postgres", "mysql")),
-    "sslmode": Key("TLS: disable ... verify-full", "str", PG_FAMILY),
+    "sslmode": Key("TLS: disable ... verify-full", "str",
+                   PG_FAMILY + ("teradata",)),
     "sslrootcert": Key("the authority's certificate file", "str",
-                       PG_FAMILY),
+                       PG_FAMILY + ("teradata",)),
+    "logmech": Key("how a Teradata side signs in, where not by its own"
+                   " password (LDAP, KRB5)", "str", ("teradata",)),
+    "client": Key("the SAP client the services are read in", "str",
+                  ("sapodp",)),
+    "language": Key("the SAP logon language", "str", ("sapodp",)),
+    "service_path": Key("where the SAP system publishes its OData services,"
+                        " where not /sap/opu/odata/sap", "str",
+                        ("sapodp",)),
+    "kind": Key("how a program source is spoken to - the kind of"
+                " connector program it runs, its address's scheme", "str",
+                ("saas",)),
+    "program": Key("what a program source runs: a tap's command, a"
+                   " connector's image or command, a dlt source's"
+                   " module:function, a Salesforce org's sign-in host",
+                   "str", ("saas",)),
+    "config": Key("the file of a program's own settings, credentials"
+                  " included", "str", ("saas",)),
+    "streams": Key("the streams (or objects) of a program source to read,"
+                   " all of them when left out", "str|list", ("saas",)),
+    "install": Key("what installs a program source's program where it is"
+                   " not on this machine: a pip requirement, installed into"
+                   " an environment of its own", "str", ("saas",)),
+    "container": Key("run a connector as the container its image is, or as"
+                     " a program on this machine", "bool", ("saas",)),
+    "api_version": Key("the Salesforce API version the objects are read"
+                       " through", "str", ("saas",)),
+    "pubsub_endpoint": Key("where Salesforce's change events are read from"
+                           " (host:port)", "str", ("saas",)),
+    "pubsub_tls": Key("TLS to the change events' endpoint: off only for a"
+                      " local stand-in", "bool", ("saas",)),
     "sslcert": Key("a client certificate file", "str", PG_FAMILY),
     "sslkey": Key("a client key file", "str", PG_FAMILY),
     "sslcrl": Key("a revocation list file", "str", PG_FAMILY),
@@ -535,18 +603,19 @@ ENDPOINT_OPTIONS = {
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
-               " authorities (https on OpenSearch and Cosmos DB; false"
+               " authorities (https on OpenSearch, Cosmos DB and SAP; false"
                " reaches a Gremlin server without it)", "bool",
-               ("opensearch", "db2i", "couchbase", "cosmosdb", "neptune")
-               + TLS_OWN),
+               ("opensearch", "db2i", "couchbase", "cosmosdb", "sapodp",
+                "neptune") + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
-                       ("db2i", "couchbase") + TLS_OWN),
+                       ("db2i", "couchbase", "sapodp") + TLS_OWN),
     "tls_cert_file": Key("a client certificate file", "str", TLS_OWN),
     "tls_key_file": Key("a client key file", "str", ("redis", "cassandra")),
     "tls_crl_file": Key("a revocation list file", "str", ("mongodb",)),
     "tls_insecure": Key("TLS with nothing checked (an emulator's own"
                         " certificate)", "bool",
-                        ("db2i", "couchbase", "cosmosdb") + TLS_OWN),
+                        ("db2i", "couchbase", "cosmosdb", "sapodp")
+                        + TLS_OWN),
     "encrypt": Key("require, request or off", "str|bool", ("mssql",)),
     "redis_product": Key("community, cloud or software: the Redis product"
                          " the target is, where its name cannot say",
@@ -593,6 +662,8 @@ ENDPOINT_OPTIONS = {
 #: 2026-09-30): the cutover migkit drives runs only where the hop sets it,
 #: and `CUTOVER` says what that adds.
 SUPPORTED = object()
+#: the goal of a hop that names none
+DEFAULT_GOAL = "copy"
 GOALS = {
     "copy": {"what": "move the data once and prove every row arrived",
              "options": {}, "writes": True,
@@ -700,11 +771,14 @@ GOALS = {
                  "guarantees": "every phase measured and kept for the real"
                                " run's forecast; the two sides proved equal"
                                " before the real run is allowed to start"},
-    "upgrade": {"what": "the same engine at a newer version with the least"
-                        " downtime: what the new version changes checked"
-                        " first, then the data moved into it and followed,"
-                        " or a copy of its pages upgraded on the target"
-                        " where the hop allows it, and switched over",
+    "upgrade": {"what": "the same engine at a newer version, a higher"
+                        " edition (SQL Server Web to Enterprise), or both,"
+                        " with the least downtime: what the new version"
+                        " or edition changes checked first, then the data"
+                        " moved into it and followed, or a copy of its"
+                        " pages taken to the target where the hop allows"
+                        " it - upgraded there where the version moves -"
+                        " and switched over",
                 "options": {"protect_target": SUPPORTED},
                 "writes": True,
                 "next": ["migkit assess {hop}",
@@ -715,14 +789,18 @@ GOALS = {
                 "source": "read and followed as a cutover follows it; never"
                           " upgraded where it runs - its downtime is the"
                           " cutover's alone",
-                "target": "a server of the new version filled and followed,"
-                          " or a copy of the source's pages upgraded there"
-                          " by the new version's own upgrade, then followed"
-                          " from the copy's position",
-                "guarantees": "what the new version removes or changes said"
-                              " before anything is written; the source's own"
-                              " statements planned, timed and held to the"
-                              " same answers on both versions"},
+                "target": "a server of the new version or edition filled"
+                          " and followed, or a copy of the source's pages"
+                          " taken there - SQL Server's own backup restored,"
+                          " MySQL's clone, PostgreSQL's pages - upgraded by"
+                          " the new version's own upgrade where the version"
+                          " moves, then followed from the copy's position",
+                "guarantees": "what the new version removes or changes, and"
+                              " what the new edition lacks of what the"
+                              " source uses, said before anything is"
+                              " written; the source's own statements"
+                              " planned, timed and held to the same answers"
+                              " on both versions"},
     "subset": {"what": "a copy for testing: the rows chosen and every row"
                        " they refer to, masked where the hop says, into a"
                        " staging or developer database, proved row by row",
@@ -834,6 +912,125 @@ CUTOVER = {
 }
 
 
+#: what a hop's `ship:` does to a full copy (`migkit.ship`): the seed on
+#: media, in two halves the same command runs where each server is
+SHIP = {
+    "what": "a seed shipped on media: the copy cut in two halves, the rows"
+            " carried between them on a carrier - a disk, or a provider's"
+            " appliance - where the link is too narrow to copy them in"
+            " time; taken where the hop's carrier would meet the deadline"
+            " and the link would not, or where nothing measured says the"
+            " link is faster",
+    "source": "read into parts beside it, each table from the position the"
+              " change stream starts from - taken before a row is read -"
+              " each part in the format the target's own loader reads;"
+              " nothing written to it but what the stream itself makes"
+              " there (a slot)",
+    "carrier": "every part digested as the check digests, compressed,"
+               " encrypted to the hop's at_rest recipients and hashed as"
+               " stored; a manifest of them all, encrypted and signed; the"
+               " seal written last",
+    "target": "every part's hash checked before it is read, its rows held"
+              " to its digest, loaded by the target's own loader and"
+              " proved there; each table then held as a whole",
+    "guarantees": "no part loaded that is not the one exported; a part"
+                  " that fails is read again from the source over the"
+                  " link; the stream starts from the seed's position, and"
+                  " where the source no longer keeps its log back to it,"
+                  " only the rows that changed since are copied, found"
+                  " leaf by leaf - the seed is not shipped again",
+    "halves": "move --mode full or full+cdc runs the export where no sealed"
+              " seed is found, and the load where one is: run it beside"
+              " the source with the carrier attached, ship the carrier,"
+              " and run the same command beside the target",
+}
+
+
+def ship_lines(hop):
+    """What the seed on media does for this hop, where it names a
+    carrier; [] where it does not."""
+    got = (hop.options or {}).get("ship")
+    if not isinstance(got, dict) or not got:
+        return []
+    return [f"ship: {SHIP['what']}",
+            f"  on the source: {SHIP['source']}",
+            f"  on the carrier: {SHIP['carrier']}",
+            f"  on the target: {SHIP['target']}",
+            f"  it guarantees: {SHIP['guarantees']}",
+            f"  {SHIP['halves']}"]
+
+
+#: what the machines of a hop do together where it says so (`standby`,
+#: `share_tables: ranges`), for `init`, `assess`, the dry run and the docs
+#: (`machines_lines`): the one place these are written
+MACHINES = {
+    "standby": {
+        "what": "the same move run on two or more machines: one holds the"
+                " hop and moves it, the others stand by and take it over"
+                " from the last position committed once it stops renewing"
+                " its lease (MIGKIT_STANDBY_SECONDS, 15 by default)",
+        "source": "read by the machine that holds the hop only; a machine"
+                  " standing by reads nothing until it takes over",
+        "target": "written by the machine that holds the hop only, every"
+                  " write held to the number its lease carries: the target"
+                  " refuses a write under an older number, so a machine"
+                  " that paused past its term cannot land a batch after the"
+                  " next one began; the tables are copied by the table"
+                  " copier every pair shares, whose writes carry the"
+                  " number",
+        "guarantees": "no batch applied twice and none lost across a"
+                      " takeover - what a restart on one machine gives;"
+                      " which machine wrote which batch kept, and proved"
+                      " one writer at a time (watch, the evidence)",
+        "needs": "a store every machine writes only over the version it"
+                 " read and that keeps files: the run state's bucket"
+                 " (state: {backend: s3}) or a directory every machine sees"
+                 " (state: {shared: <path>}); and a target that refuses a"
+                 " write under an older number, proved before the first"
+                 " write (PostgreSQL, MySQL, MariaDB)",
+    },
+    "ranges": {
+        "what": "every machine running the move copies at once: a table"
+                " large enough is split once and its ranges taken by every"
+                " machine's workers, each machine sized from its own share"
+                " of the servers; the other tables are taken whole, one"
+                " machine each",
+        "source": "read by every machine, each range by the one that took"
+                  " it",
+        "target": "written by every machine, each range held to the number"
+                  " of the claim that took it; a range taken again after"
+                  " its machine stopped renewing is emptied and copied"
+                  " again, and the older claim's late writes are refused",
+        "guarantees": "every range copied and read back by the claim that"
+                      " holds it, the table finished by one machine; which"
+                      " machine copied which range kept with the evidence",
+        "needs": "a store every machine writes only over the version it"
+                 " read: the run state's bucket, a directory every machine"
+                 " sees, or a table of migkit's own on the target",
+    },
+}
+
+
+def machines_lines(hop):
+    """What the hop's machines do together, where it says so: [] for a
+    hop run on one machine."""
+    opts = hop.options or {}
+    keys = [k for k, on in (
+        ("standby", bool(opts.get("standby"))),
+        ("ranges", str(opts.get("share_tables") or "").lower() == "ranges"))
+        if on]
+    out = []
+    for k in keys:
+        m = MACHINES[k]
+        out += [f"{'standby' if k == 'standby' else 'share_tables: ranges'}:"
+                f" {m['what']}",
+                f"  on the source: {m['source']}",
+                f"  on the target: {m['target']}",
+                f"  it guarantees: {m['guarantees']}",
+                f"  it needs: {m['needs']}"]
+    return out
+
+
 #: what each of a hop's limits holds the move to (`limits:` and
 #: `deadline:`), as the plan says it: every one is a hard limit - the
 #: plan keeps to it where any way can, and says what binds where none can
@@ -918,7 +1115,7 @@ def explain_goal(hop, goal=None):
     """The goal said plainly: what it is for, what it does on the source
     and on the target, what it guarantees - and, for a hop that is cut
     over, what `cutover:` on or off means for it."""
-    goal = goal or getattr(hop, "goal", "") or "copy"
+    goal = goal or getattr(hop, "goal", "") or DEFAULT_GOAL
     g = GOALS[goal]
     out = [f"goal {goal}: {g['what']}",
            f"  on the source: {g['source']}",
@@ -926,6 +1123,8 @@ def explain_goal(hop, goal=None):
            f"  it guarantees: {g['guarantees']}"]
     if goal == "cutover" or cutover_on(hop):
         out += ["  " + line for line in cutover_lines(hop)]
+    out += ["  " + line for line in ship_lines(hop)]
+    out += ["  " + line for line in machines_lines(hop)]
     return out
 
 
@@ -936,7 +1135,8 @@ def explain_mode(command, mode, drop=False):
     return f"--mode {key[1]}: {got}" if got else ""
 
 #: options that write, which a hop whose goal writes nothing contradicts
-WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover")
+WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover",
+           "ship")
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
 
@@ -1137,6 +1337,7 @@ def check_hop(name, raw):
     _keys(out, f"{where}.options", opts, HOP_OPTIONS)
     if isinstance(opts, dict):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
+        out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
@@ -1208,6 +1409,11 @@ def _notify(where, got):
             out.append(Problem("error", f"{where}.lag",
                                f"{lag!r} - the seconds a change tail may be"
                                " behind before it is said"))
+        detail = got.get("detail")
+        if detail is not None and not isinstance(detail, bool):
+            out.append(Problem("error", f"{where}.detail",
+                               f"{detail!r} - true sends an error's words,"
+                               " false (the default) only its kind"))
     plain = 0
     for r in [to] if isinstance(to, str) else list(to or []):
         r = str(r)
@@ -1221,6 +1427,20 @@ def _notify(where, got):
             " this machine's keychain or write a reference: env:NAME,"
             " keyring:name, file:/path, vault:path#key"))
     return out
+
+
+def _egress(where, got):
+    """A kind of send migkit does not have, or a detail that is not
+    true or false."""
+    from . import egress
+    if got is None:
+        return []
+    allow = got.get("allow") if isinstance(got, dict) else got
+    try:
+        egress._listed(allow, where)
+    except SystemExit as e:
+        return [Problem("error", where, str(e).split(": ", 1)[-1])]
+    return []
 
 
 def _two_way(where, got):
@@ -1297,6 +1517,11 @@ def _contradictions(where, raw, opts, goal, engine):
                     " or drop the option"))
     out += _goal_settings(where, opts, goal, engine)
     out += _source_changes(where, opts, goal)
+    out += _ship(where, opts)
+    share = opts.get("share_tables")
+    if isinstance(share, str) and share.lower() != "ranges":
+        out.append(Problem("error", f"{where}.options.share_tables",
+                           f"{share!r} - true, or ranges"))
     from .interlock import CHOICES
     rows = opts.get("target_rows")
     if rows is not None and str(rows).lower() not in CHOICES:
@@ -1370,6 +1595,56 @@ def _goal_settings(where, opts, goal, engine):
         out.append(Problem("warn", f"{where}.options.physical.upgrade",
                            "read only by a hop whose goal is upgrade, so it"
                            " does nothing here"))
+    return out
+
+
+def _ship(where, opts):
+    """The seed on media's settings held before anything runs: a carrier
+    migkit knows, reached the way that carrier is, a shipping time and a
+    capacity it can read, and recipients to seal the parts to - a carrier
+    travels."""
+    from . import carriers, machine
+    got = opts.get("ship")
+    if got is None:
+        return []
+    at = f"{where}.options.ship"
+    if not isinstance(got, dict):
+        return [Problem("error", at, "is not a mapping")]
+    out = []
+    kind = str(got.get("carrier") or "").lower()
+    if kind not in carriers.KINDS:
+        out.append(Problem("error", f"{at}.carrier",
+                           f"{got.get('carrier')!r} - one of"
+                           f" {', '.join(carriers.KINDS)}"))
+    elif not (got.get("path") or got.get("endpoint")):
+        out.append(Problem("error", at,
+                           f"{carriers.SAID[kind]} is reached through a"
+                           " directory here (path:) or an endpoint"
+                           " (endpoint:), and the hop gives neither"))
+    elif kind == "databox" and got.get("path"):
+        why = carriers._share_problem(str(got["path"]))
+        if why:
+            out.append(Problem("error", f"{at}.path", why))
+    if got.get("shipping") is not None and \
+            machine.duration(got["shipping"]) is None:
+        out.append(Problem("error", f"{at}.shipping",
+                           f"{got['shipping']!r} - a duration (7d, 36h)"))
+    if got.get("capacity") is not None and \
+            carriers.size_of(got["capacity"]) is None:
+        out.append(Problem("error", f"{at}.capacity",
+                           f"{got['capacity']!r} - a size (80TB, 120TiB)"))
+    rest = opts.get("at_rest")
+    if not (isinstance(rest, dict) and rest.get("recipients")):
+        out.append(Problem("error", at,
+                           "a carrier travels, and its parts are sealed to"
+                           " the hop's at_rest recipients - this hop names"
+                           " none (options at_rest: {recipients: [...]})"))
+    if got.get("shipping") is None:
+        out.append(Problem("warn", f"{at}.shipping",
+                           "not given: how long the source keeps its log"
+                           " for the stream is not held against the time"
+                           " the carrier takes, and the plan cannot time"
+                           " the seed"))
     return out
 
 

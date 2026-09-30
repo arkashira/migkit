@@ -43,6 +43,12 @@ dependencies = [
     # the EBCDIC code pages Python lacks (Thai cp838, cp1047, cp1140-9...)
     # for files described by COBOL copybooks
     "ebcdic>=2.0",
+    # an SAP system's OData services and their metadata, the one way a
+    # program not SAP's may read its extractors (ODP over OData)
+    "pyodata>=1.12",
+    # SaaS sources written as dlt sources, read in this process with their
+    # own incremental state
+    "dlt>=1.30",
     "cassandra-driver>=3.29",
     "opensearch-py>=3.0",
     "snowflake-connector-python>=3.6",
@@ -120,6 +126,11 @@ dependencies = [
     # a run as spans, sent where the operator's OTEL_* variables say
     "opentelemetry-sdk>=1.40",
     "opentelemetry-exporter-otlp-proto-http>=1.40",
+    # a seed shipped on media (`ship`): the Azure appliance's blob
+    # endpoint and the storage account it is imported into, and the Cloud
+    # Storage bucket the Google appliance's parts land in
+    "azure-storage-blob>=12.20",
+    "google-cloud-storage>=2.18",
 ]
 
 [project.urls]
@@ -138,7 +149,9 @@ diff = []
 dataframe = []
 s3 = []
 pgschema = []
-dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]"]
+dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]",
+       # moto's server, the S3-compatible endpoint an appliance stands in as
+       "flask", "flask-cors", "prometheus-client"]
 
 [project.scripts]
 migkit = "migkit.cli:main"
@@ -163,4 +176,5 @@ migkit = ["data/*.json"]
 markers = ["docker: needs a docker daemon",
            "mssql: runs against SQL Server (the x86 workflow runs these)",
            "db2: runs against Db2 (the x86 workflow runs these)",
-           "ase: runs against SAP ASE (the x86 workflow runs these)"]
+           "ase: runs against SAP ASE (the x86 workflow runs these)",
+           "teradata: runs against a Teradata system (a Vantage Express VM on x86, MIGKIT_TERADATA_HOST)"]

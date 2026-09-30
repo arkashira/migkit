@@ -59,7 +59,7 @@ def test_sequence_collision_detected_and_repaired(pg_pair, tmp_path):
 
     # re-check is green: usable (1001 > 1000) and parity (dst == src == 1000)
     r = _migkit(conf, "check", "t", "--only", "autoinc")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout
 
     # prove it: next value clears the column max, a real insert does not collide
     nxt = psql(pg_pair["dst"], "select nextval('orders_id_seq')").stdout.strip()

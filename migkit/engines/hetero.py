@@ -3,7 +3,7 @@ import signal
 import sys
 import time
 
-from .. import tailtables
+from .. import fencing, pieces, tailtables
 from ..decide import Rung
 from ..util import is_transient
 from .base import Engine, RepairAction, Result
@@ -83,6 +83,19 @@ class HeteroEngine(Engine):
     # the in-process binlog tail below needs this driver; without it
     # `move --mode cdc` uses migkit's streaming pipeline instead
     tail_requires = "pymysqlreplication"
+
+    #: large values, for any pair (`pieces`): each side sizes its rows
+    #: where they lie, each side's read of a batch ends at
+    #: `pieces.BATCH_BYTES` or one row and each side's own pieces carry a
+    #: value past a piece; a written batch is read back and compared by
+    #: digest texts, a wide value by its length and md5 - the text both
+    #: servers' digests hold it to
+    LARGE_VALUES = pieces.Way(
+        "batches cut by bytes on both sides, values past a piece read and"
+        " written in pieces where each side can, wide values compared by"
+        " their length and md5")
+    #: what one worker of the pair's copier holds (`pieces.PAIR_MEMORY`)
+    COPY_MEMORY = pieces.PAIR_MEMORY
 
     def __init__(self, hop):
         super().__init__(hop)
@@ -507,11 +520,24 @@ class HeteroEngine(Engine):
                 rows.append((scope, "error",
                              str(e).splitlines()[-1][:120], None, None))
                 continue
+            # what the source itself says of the read: its own count held
+            # to the rows read, and what the comparison cannot prove there
+            proof, told = self._source_said(db, src_t)
+            tail += told
+            if a == b and proof == "diff":
+                # both sides agree on rows the read did not wholly get
+                if stream:
+                    stream(f"{scope}: diff")
+                rows.append((scope, "diff",
+                             f"rows {a[0]:,} equal on both sides as read,"
+                             f" and the source's own count says the read"
+                             f" was short{tail}", a[0], b[0]))
+                continue
             if stream:
                 stream(f"{scope}: {'ok' if a == b else 'diff'}")
             if a == b:
                 self._write_drill(db, self._leaf(src_t), missing=[],
-                                  changed=[], extra=[])
+                                  changed=[], extra=[], leaves=[])
                 rows.append((scope, "ok",
                              f"rows {a[0]:,} and every compared column equal"
                              f" across {self.src_name}/{self.dst_name}"
@@ -543,6 +569,35 @@ class HeteroEngine(Engine):
             if gate.line() and stream:
                 stream(f"# {side}: {gate.line()}")
         return rows
+
+    def _source_said(self, db, src_t):
+        """(status, words) the source adds about the whole read just made
+        of `src_t`, where it has anything of its own to say: the
+        application's own count held to the rows read (`read_proved` - an
+        SAP service, a SaaS application), and what the comparison cannot
+        prove there (`not_compared`). ("", "") where it says nothing."""
+        src = self.src_engine
+        status, words = "", []
+        ask = getattr(src, "read_proved", None)
+        if ask is not None:
+            try:
+                got = ask("src", db, src_t)
+            except Exception as e:  # noqa: BLE001 - said, not guessed
+                got = ("warn", "the source's own count could not be asked"
+                               f" ({str(e).strip().splitlines()[0][:90]})"
+                       if str(e).strip() else type(e).__name__)
+            if got:
+                status = got[0]
+                words.append(got[1])
+        tell = getattr(src, "not_compared", None)
+        if tell is not None:
+            try:
+                said = tell(db, src_t)
+            except Exception:  # noqa: BLE001 - nothing to add, then
+                said = ""
+            if said:
+                words.append(f"not proved: {said}")
+        return status, "".join(f"; {w}" for w in words)
 
     #: how the rows a differing table holds apart are found (`_drill`)
     DRILLS = (Rung("leaves", "the rows found from the leaves of its digest"
@@ -1329,11 +1384,13 @@ class HeteroEngine(Engine):
     def _rows_differ(sc, dc, a, b):
         """(missing, extra, changed) between rows read by key from each
         side - {key: row} in `sc` and `dc` order - compared in the one
-        rendering both sides render to."""
+        rendering both sides' digests render to (`canon.digest_value`): a
+        value wider than `canon.WIDE` by its length and md5, as the servers
+        hold it - never its hex, twice its size on each side."""
         from .. import canon
 
         def text(cols, row):
-            return tuple(canon.render_value(c, v)
+            return tuple(canon.digest_value(c, v)
                          for (_, c), v in zip(cols, row))
         missing = [k for k in a if k not in b]
         extra = [k for k in b if k not in a]
@@ -1491,9 +1548,14 @@ class HeteroEngine(Engine):
             return
         src_where, dst_where = self._row_scope(db, src_t)
         read_scope = {"where": src_where} if src_where else {}
-        self.set_aside_indexes(later, self.dst_engine, db, dst_t, st,
-                               self.src_engine._rows_of("src", db, src_t),
-                               log)
+        from .. import claims
+        if claims.way_of(self.hop, db, key) != "ranges":
+            # a table every machine writes at once keeps its indexes: one
+            # machine setting them aside would rebuild them under the
+            # others' writes
+            self.set_aside_indexes(later, self.dst_engine, db, dst_t, st,
+                                   self.src_engine._rows_of("src", db, src_t),
+                                   log)
         if self._move_in_ranges(db, key, src_t, dst_t, src_cols, chunk, st,
                                 ck, log, src_where, dst_where):
             return
@@ -1808,6 +1870,65 @@ class HeteroEngine(Engine):
         st["done"] = True
         ck.save()
 
+    def _splits(self, db, src_t, dst_t, src_cols, st, src_where,
+                shared=False):
+        """(its key, the source's rows) where a table is copied as ranges
+        of its key - one integer key, a SQL dialect on both sides, a
+        target many write at once, and large enough - or None. Where the
+        hop's machines share ranges (`claims`), one machine's workers are
+        no reason not to split: the others' are there too; and a table
+        they decided to share (`shared`) is not held to its size again - a
+        machine reading a smaller count would copy it whole beside the
+        others' ranges."""
+        from .. import claims, crossmove, ranges
+        workers = int(getattr(self.hop, "workers", 1) or 1)
+        src, dst = self.src_engine, self.dst_engine
+        k = list(src.neutral_key("src", db, src_t) or [])
+        # a target one writer at a time: ranges side by side waited on its
+        # lock and stopped - measured, SQLite to SQLite, 500,000 rows,
+        # `database is locked` in the seventh of eight ranges
+        if (len(k) != 1 or not src.SQL_DIALECT
+                or not dst.SQL_DIALECT or not src.RESUMES_BY_KEY
+                or not getattr(dst, "WRITES_IN_PARALLEL", True)
+                or dict(src_cols).get(k[0]) != "integer"):
+            return None
+        others = crossmove.besides_the_copier(self, db, src_t, dst_t)
+        machines = claims.shared_ranges(self.hop)
+        if workers < 2 and not others and not machines:
+            return None
+        try:
+            rows = int((src.table_facts("src", db).get(src_t) or {})
+                       .get("rows") or 0)
+        except Exception:  # noqa: BLE001 - not split, then
+            rows = 0
+        if "ranges" not in st and rows <= 2 * ranges.LEAST and not shared:
+            # an estimate, which a table never analysed does not have:
+            # where a way besides the copier would take the ranges, or
+            # other machines would, the rows are counted as far as it
+            # matters
+            if not others and not machines:
+                return None
+            rows = crossmove.rows_upto(self, db, src_t, src_where,
+                                       2 * ranges.LEAST)
+            if rows <= 2 * ranges.LEAST:
+                return None
+        return k[0], rows
+
+    def splits_across_machines(self, db, src_t):
+        """Whether the hop's machines would share `src_t`'s ranges: asked
+        once, by the first machine to reach the table (`claims.way`)."""
+        from .. import claims
+        if not claims.shared_ranges(self.hop):
+            return False
+        dst_t = self._leaf(self._rename(src_t))
+        try:
+            src_cols = self._move_columns(src_t, dst_t, db)[0]
+            src_where, _ = self._row_scope(db, src_t)
+        except Exception:  # noqa: BLE001 - copied whole, then
+            return False
+        return self._splits(db, src_t, dst_t, src_cols, {},
+                            src_where) is not None
+
     def _move_in_ranges(self, db, key, src_t, dst_t, src_cols, chunk, st,
                         ck, log, src_where, dst_where):
         """A large table with one integer key, copied as ranges of equal
@@ -1825,64 +1946,85 @@ class HeteroEngine(Engine):
         not the table copier's own, the rows go server to server and a
         range the two servers do not hold alike is copied again this way.
         Where such a way holds, one worker splits the table too - one
-        transaction of the whole table would restart from nothing."""
+        transaction of the whole table would restart from nothing.
+
+        Where the hop's machines share the table's ranges, every machine's
+        workers take them from one record instead (`claims.copy`), each
+        written by the table copier under its claim's number."""
         import dataclasses
         import pickle
 
-        from .. import crossmove, ranges
+        from .. import claims, crossmove, ranges
         workers = int(getattr(self.hop, "workers", 1) or 1)
         src, dst = self.src_engine, self.dst_engine
-        k = list(src.neutral_key("src", db, src_t) or [])
-        # a target one writer at a time: ranges side by side waited on its
-        # lock and stopped - measured, SQLite to SQLite, 500,000 rows,
-        # `database is locked` in the seventh of eight ranges
-        if (len(k) != 1 or not src.SQL_DIALECT
-                or not dst.SQL_DIALECT or not src.RESUMES_BY_KEY
-                or not getattr(dst, "WRITES_IN_PARALLEL", True)
-                or dict(src_cols).get(k[0]) != "integer"):
+        shared = claims.way_of(self.hop, db, key) == "ranges"
+        split = self._splits(db, src_t, dst_t, src_cols, st, src_where,
+                             shared)
+        if split is None:
             return False
-        others = crossmove.besides_the_copier(self, db, src_t, dst_t)
-        if workers < 2 and not others:
-            return False
-        try:
-            rows = int((src.table_facts("src", db).get(src_t) or {})
-                       .get("rows") or 0)
-        except Exception:  # noqa: BLE001 - not split, then
-            rows = 0
-        if "ranges" not in st and rows <= 2 * ranges.LEAST:
-            # an estimate, which a table never analysed does not have:
-            # where a way besides the copier would take the ranges, the
-            # rows are counted as far as it matters
-            if not others:
-                return False
-            rows = crossmove.rows_upto(self, db, src_t, src_where,
-                                       2 * ranges.LEAST)
-            if rows <= 2 * ranges.LEAST:
-                return False
+        k, rows = split
         # the hop as its fields say, without what a caller set on it here
         hop = dataclasses.replace(self.hop)
         try:
             pickle.dumps(hop)
         except Exception:  # noqa: BLE001 - one process, then
+            if shared:
+                raise
             return False
-        way = crossmove.TableWay(self, db, src_t, dst_t, log, key)
-        (k,) = k
         q = src._quote_ident(k)
         table = src._qualified("src", db, src_t)
         got = src.run_rule("src", db, f"select min({q}), max({q}) from"
                                       f" {table}" + (f" where ({src_where})"
                                                      if src_where else ""))
         if not got or got[0][0] is None:
-            return False
+            if not shared:
+                return False
+            # nothing on the source to share: the target holds nothing of
+            # it either, whichever machine gets here
+            dst.neutral_empty("dst", db, dst_t,
+                              **({"where": dst_where} if dst_where else {}))
+            st.update(done=True, moved=0)
+            ck[key] = st
+            ck.save()
+            return True
         lo, hi = int(got[0][0]), int(got[0][1])
 
         def edges():
-            every = ranges.step(rows, rows, workers)
+            # shared, the ranges are cut for more workers than this
+            # machine's: the machines that join later take theirs from the
+            # same plan, which is made once
+            every = ranges.step(rows, rows, workers * (4 if shared else 1))
             return [r[0] for r in src.run_rule("src", db, ranges.bounds_sql(
                 src._quote_ident, table, k, every, src_where))]
+
+        def outside():
+            # a target row outside the source's whole range was in none of
+            # the ranges
+            dst_k = dict(zip([n for n, _ in src_cols],
+                             [n for n, _ in self._move_columns(
+                                 src_t, dst_t, db)[1]])).get(k, k)
+            qd = dst._quote_ident(dst_k)
+            out = f"not ({qd} >= {lo} and {qd} <= {hi})"
+            gone = dst.neutral_empty(
+                "dst", db, dst_t, where=f"({dst_where}) and {out}"
+                if dst_where else out)
+            if gone:
+                log(f"{key}: removed {gone:,} target rows the source does"
+                    " not have")
+        if shared:
+            return claims.copy(
+                self, db, key, src_t, k, ck, lo, hi, edges, log, _copy_range,
+                lambda a, u, token: (hop, db, src_t, dst_t, a, u,
+                                     {"token": token}),
+                outside)
+        way = crossmove.TableWay(self, db, src_t, dst_t, log, key)
         todo = ranges.plan(st, lo, hi, edges, ck.save, table=src_t)
         st["key"] = k
         total = len(st["ranges"])
+        # every range's process writes under the number this process
+        # writes under, where one is armed (`fencing`)
+        token = fencing.armed(self.hop)
+        plain = token.plain() if token is not None else None
 
         def finished(item, got):
             rng, asked = item[4:6], item[6]
@@ -1910,20 +2052,10 @@ class HeteroEngine(Engine):
         slots = (ranges.active if ranges.active.workers > 1
                  else ranges.Slots(workers))
         slots.each_process(
-            [(hop, db, src_t, dst_t, a, u, {}) for a, u in todo],
+            [(hop, db, src_t, dst_t, a, u, {"token": plain})
+             for a, u in todo],
             _copy_range, finished, begin)
-        # a target row outside the source's whole range was in none of them
-        dst_k = dict(zip([n for n, _ in src_cols],
-                         [n for n, _ in self._move_columns(
-                             src_t, dst_t, db)[1]])).get(k, k)
-        qd = dst._quote_ident(dst_k)
-        outside = f"not ({qd} >= {lo} and {qd} <= {hi})"
-        gone = dst.neutral_empty(
-            "dst", db, dst_t, where=f"({dst_where}) and {outside}"
-            if dst_where else outside)
-        if gone:
-            log(f"{key}: removed {gone:,} target rows the source does not"
-                " have")
+        outside()
         st["done"] = True
         ck.save()
         return True
@@ -2046,8 +2178,8 @@ class HeteroEngine(Engine):
 
     #: what one read of the table copier holds, at most: rows, and bytes
     #: as the source's catalogue counts them
-    READ_ROWS = 50000
-    READ_BYTES = 64 * 2 ** 20
+    READ_ROWS = pieces.PAIR_ROWS
+    READ_BYTES = pieces.BATCH_BYTES
 
     def _read_rows(self, db, src_t, chunk):
         """Rows per read: `chunk` asked for 500,000 at a time, and a read
@@ -2055,7 +2187,9 @@ class HeteroEngine(Engine):
         about 250 bytes a row: 486 MB held at 500,000 rows a read - and a
         table of wide rows would hold that many times over. Capped by a
         count and by the table's own bytes a row, so what is held does not
-        grow with the row either. Each read is still a resumable step."""
+        grow with the row either. Each read is still a resumable step, and
+        ends by itself at the row that brings it to `pieces.BATCH_BYTES`
+        where rows are wider than their table's average (`pieces`)."""
         per_row = None
         try:
             facts = self.src_engine.table_facts("src", db).get(src_t) or {}
@@ -4004,7 +4138,8 @@ class HeteroEngine(Engine):
                     if exact:
                         if numbered_now:
                             self.dst_engine._batch_seen = _json.dumps(
-                                {"token": token, "batch": batch + 1},
+                                {"token": token, "batch": batch + 1,
+                                 **fencing.marked(self.hop)},
                                 default=str)
                             if rung not in (None, "table"):
                                 # where the batch ends, written before it
@@ -4305,10 +4440,18 @@ class HeteroEngine(Engine):
 
 def _copy_range(item):
     """What a process of `_move_in_ranges` runs: one range, from a hop
-    handed over whole."""
+    handed over whole - written under the number its caller holds, where
+    it hands one over (`fencing`)."""
     hop, db, src_t, dst_t, after, upto, asked = item
-    return HeteroEngine(hop).copy_range(db, src_t, dst_t, after, upto,
-                                        asked.get("way"))
+    token = fencing.token_of(asked.get("token"))
+    if token is not None:
+        fencing.arm(hop, token)
+    try:
+        return HeteroEngine(hop).copy_range(db, src_t, dst_t, after, upto,
+                                            asked.get("way"))
+    finally:
+        if token is not None:
+            fencing.disarm(hop, token)
 
 
 class _CopiedRanges:

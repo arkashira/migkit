@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recipes - migkit 0.2.0</title>
+<meta name="description" content="Use cases as source -&gt; target pairs, each from two addresses.">
+<style>
+:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+--line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
+--code:#f3f4f6;--codeink:#1d232b}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
+--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
+--warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--code);color:var(--codeink);padding:.1em .35em;
+border-radius:4px;font-size:.9em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+.layout{display:flex;max-width:1240px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
+overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;font-size:19px}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
+nav a.here{color:var(--ink);font-weight:600}
+nav a.sub{padding-left:12px;font-size:12.5px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+h1{font-size:30px;margin:.2em 0 .1em}
+h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
+border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.6em 0 .4em}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
+.rule{background:var(--panel);border-left:3px solid var(--acc);
+border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.mut{color:var(--mut);font-size:13px}
+.wide{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
+vertical-align:top}
+th{background:var(--panel);font-weight:600}
+.wide table{font-size:12.5px}
+.wide td,.wide th{padding:4px 6px}
+td.y{color:var(--ok);font-weight:600}
+td.p{color:var(--warn);font-weight:600}
+td.na{color:var(--mut)}
+.pill{display:inline-block;background:var(--panel);
+border:1px solid var(--line);
+color:var(--mut);border-radius:20px;padding:2px 10px;font-size:12px;
+margin:2px 4px 2px 0}
+footer{color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);
+margin-top:40px;padding-top:16px}
+@media(max-width:820px){nav{display:none}main{padding:24px 18px 80px}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+<div class="brand">migkit</div>
+<div class="tag">version 0.2.0</div>
+<a href="index.html">Overview</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="engines.html">Engines</a>
+<a href="goals.html">Goals and modes</a>
+<a href="recipes.html" class="here">Recipes</a>
+<a class="sub" href="#managed-postgres-across-clouds">A managed PostgreSQL on one cloud to a managed PostgreSQL on another</a>
+<a class="sub" href="#mysql-to-managed-mysql-cut-over-by-migkit">MySQL on servers of your own to a managed MySQL, the cutover run by migkit</a>
+<a class="sub" href="#oracle-to-postgres-with-stored-code">Oracle to PostgreSQL, with its stored code proved</a>
+<a class="sub" href="#sql-server-to-postgres">SQL Server to PostgreSQL, followed until the switch</a>
+<a class="sub" href="#postgres-major-upgrade">PostgreSQL to a newer major version of PostgreSQL</a>
+<a class="sub" href="#mongodb-with-a-way-back">MongoDB to MongoDB, with a way back ready at the switch</a>
+<a class="sub" href="#verify-two-databases">Two databases proved to hold the same, nothing written to either</a>
+<a class="sub" href="#masked-test-copy">Production to a staging database, as a masked subset</a>
+<a class="sub" href="#rehearse-then-run">A rehearsal on a copy, and the real run forecast from it</a>
+<a href="options.html">Hop options</a>
+<a href="environment.html">Environment</a>
+<a href="commands.html">Commands</a>
+<a href="troubleshooting.html">Troubleshooting</a>
+<a href="evidence.html">Evidence</a>
+<a href="releases.html">Releases</a>
+</nav>
+<main>
+<h1>Recipes</h1>
+<p class="lede">Use cases as source -&gt; target pairs, each from two addresses.</p>
+<p>Each recipe is one source -&gt; target pair, from two addresses; for each, migkit's own decision engine finds the fastest, exact, consistent way. The hops below are checked against the configuration's own registry, and each capability a recipe leans on against what the code does - a recipe this version cannot do is not on this page.</p>
+<ul><li><a href="#managed-postgres-across-clouds">A managed PostgreSQL on one cloud to a managed PostgreSQL on another</a></li><li><a href="#mysql-to-managed-mysql-cut-over-by-migkit">MySQL on servers of your own to a managed MySQL, the cutover run by migkit</a></li><li><a href="#oracle-to-postgres-with-stored-code">Oracle to PostgreSQL, with its stored code proved</a></li><li><a href="#sql-server-to-postgres">SQL Server to PostgreSQL, followed until the switch</a></li><li><a href="#postgres-major-upgrade">PostgreSQL to a newer major version of PostgreSQL</a></li><li><a href="#mongodb-with-a-way-back">MongoDB to MongoDB, with a way back ready at the switch</a></li><li><a href="#verify-two-databases">Two databases proved to hold the same, nothing written to either</a></li><li><a href="#masked-test-copy">Production to a staging database, as a masked subset</a></li><li><a href="#rehearse-then-run">A rehearsal on a copy, and the real run forecast from it</a></li></ul>
+<h2 id="managed-postgres-across-clouds">A managed PostgreSQL on one cloud to a managed PostgreSQL on another</h2>
+<p>The same engine on both sides and a different cloud under each. The application keeps writing to the source while the copy runs and its changes follow; the switch waits until the two are proved equal, and a stream back is ready from the moment of it.</p>
+<p>PostgreSQL -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  shop:
+    goal: cutover
+    source: postgres://app@db1.example.com:5432/shop?sslmode=verify-full
+    target: postgres://app@db2.example.com:5432/shop?sslmode=verify-full</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal cutover: move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch</li><li>on the source: read, and its log of changes followed from a position taken before the copy - the stream's own slot and publication on PostgreSQL, its binary log read on MySQL, a change stream on MongoDB - made by the stream and dropped when it is torn down; nothing else is written to it unless the hop turns cutover: on, and then only during the cutover</li><li>on the target: filled as a copy fills it, then kept level with the source change by change; kept from the application's writes until the cutover where the engine allows it (protect_target); after it, a stream back from it to the old source (reverse: at_cutover)</li><li>it guarantees: no change lost between the copy and the stream (the position is taken before the copy); each cycle's changes compared (watch --verify --delta); the stream torn down only once nothing writes to the source and the stream has passed where it stands</li><li>cutover: off - the goal does not turn it on; at the cutover migkit writes nothing to the source, and the operator does this by hand, in order (<a href="goals.html#cutover">the steps</a>)</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit sync shop --mode migrate
+migkit sync shop --mode migrate --go
+migkit watch shop
+migkit move shop --mode cdc --drop --go
+migkit check shop</code></pre>
+<p>What it leans on, each done by the code for this pair: carrying sequences and auto-increment values; copying table by table, resumably; keeping the target following the source; proving the target has caught up before cutover; carrying users and their grants.</p>
+<h2 id="mysql-to-managed-mysql-cut-over-by-migkit">MySQL on servers of your own to a managed MySQL, the cutover run by migkit</h2>
+<p>The cutover as one timed path: migkit holds the source's writes itself, waits for the stream to pass where the source stands, proves the two equal inside the outage, raises the target's counters, and undoes all of it if the budget passes.</p>
+<p>MySQL -&gt; MySQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  orders:
+    goal: cutover
+    source: mysql://app@10.0.0.5:3306/orders
+    target: mysql://app@db2.example.com:3306/orders
+    options:
+      cutover:
+        budget: 30
+      limits:
+        outage: 30</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal cutover: move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch</li><li>on the source: read, and its log of changes followed from a position taken before the copy - the stream's own slot and publication on PostgreSQL, its binary log read on MySQL, a change stream on MongoDB - made by the stream and dropped when it is torn down; nothing else is written to it unless the hop turns cutover: on, and then only during the cutover</li><li>on the target: filled as a copy fills it, then kept level with the source change by change; kept from the application's writes until the cutover where the engine allows it (protect_target); after it, a stream back from it to the old source (reverse: at_cutover)</li><li>it guarantees: no change lost between the copy and the stream (the position is taken before the copy); each cycle's changes compared (watch --verify --delta); the stream torn down only once nothing writes to the source and the stream has passed where it stands</li><li>cutover: on - migkit runs the cutover itself, as one timed path (<a href="goals.html#cutover">the steps</a>)</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit sync orders --mode migrate
+migkit sync orders --mode migrate --go
+migkit watch orders
+migkit move orders --mode cdc --drop --go</code></pre>
+<ul><li><code>cutover</code>: the cutover as one timed path that freezes the source and undoes itself (<code>migkit.cutover</code>)</li><li><code>limits</code>: what the move may take at most, kept to as hard limits by its plan (<code>LIMITS</code>): source_load (the share of the source's reads, 0.3 or 30%), money (in the currency transfer_price_per_gb is in), bytes_billed (a warehouse's), outage (the cutover's write outage, seconds), replica_lag (seconds the source's replica may fall behind), target_memory and target_connections</li></ul>
+<p>What it leans on, each done by the code for this pair: carrying sequences and auto-increment values; copying table by table, resumably; keeping the target following the source; proving the target has caught up before cutover; telling a difference still arriving from one that is wrong.</p>
+<h2 id="oracle-to-postgres-with-stored-code">Oracle to PostgreSQL, with its stored code proved</h2>
+<p>Two engines: the tables are built on the target in its own types, the rows copied and compared value by value in each engine's rendering, and every view, function, procedure and trigger converted by whichever way proves itself on it - run on both sides in a sandbox and compared, never trusted unrun.</p>
+<p>Oracle Database -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  erp:
+    goal: copy
+    source: oracle://app@db1.example.com:1521/ORCLPDB1/ERP
+    target: postgres://app@db2.example.com:5432/erp
+    options:
+      proof_sandbox: docker</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal copy: move the data once and prove every row arrived</li><li>on the source: read, never written: each table read as of one moment where the engine gives one; a row the application changes while it is read is not carried, and the check names it</li><li>on the target: the tables it lacks made, and filled with the source's rows, indexes built after them; a table that already holds rows is refused unless the hop says what to do with them (target_rows: refuse, replace or keep)</li><li>it guarantees: every row compared after the copy (migkit check): equal, or each row that differs named</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit move erp --mode full
+migkit move erp --mode full --go
+migkit check erp</code></pre>
+<ul><li><code>proof_sandbox</code>: the two scratch servers stored code, the constraints, the collations and the sized types are run and compared on, or docker for migkit to start them</li></ul>
+<p>What it leans on, each done by the code for this pair: comparing the data itself; carrying sequences and auto-increment values; copying table by table, resumably.</p>
+<p>Stored code carried for this pair: view, function, procedure, trigger - each version, whoever wrote it, run on both sides in the sandbox and compared.</p>
+<h2 id="sql-server-to-postgres">SQL Server to PostgreSQL, followed until the switch</h2>
+<p>A change of engine with the least downtime: the copy, then the source's changes carried as they happen, and the T-SQL procedures converted and proved beside them.</p>
+<p>SQL Server -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  crm:
+    goal: cutover
+    source: mssql://app@db1.example.com:1433/crm
+    target: postgres://app@db2.example.com:5432/crm
+    options:
+      proof_sandbox: docker</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal cutover: move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch</li><li>on the source: read, and its log of changes followed from a position taken before the copy - the stream's own slot and publication on PostgreSQL, its binary log read on MySQL, a change stream on MongoDB - made by the stream and dropped when it is torn down; nothing else is written to it unless the hop turns cutover: on, and then only during the cutover</li><li>on the target: filled as a copy fills it, then kept level with the source change by change; kept from the application's writes until the cutover where the engine allows it (protect_target); after it, a stream back from it to the old source (reverse: at_cutover)</li><li>it guarantees: no change lost between the copy and the stream (the position is taken before the copy); each cycle's changes compared (watch --verify --delta); the stream torn down only once nothing writes to the source and the stream has passed where it stands</li><li>cutover: off - the goal does not turn it on; at the cutover migkit writes nothing to the source, and the operator does this by hand, in order (<a href="goals.html#cutover">the steps</a>)</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit sync crm --mode migrate
+migkit sync crm --mode migrate --go
+migkit watch crm
+migkit move crm --mode cdc --drop --go</code></pre>
+<ul><li><code>proof_sandbox</code>: the two scratch servers stored code, the constraints, the collations and the sized types are run and compared on, or docker for migkit to start them</li></ul>
+<p>What it leans on, each done by the code for this pair: copying table by table, resumably; keeping the target following the source; proving the target has caught up before cutover.</p>
+<p>Stored code carried for this pair: view, function, procedure, trigger, event - each version, whoever wrote it, run on both sides in the sandbox and compared.</p>
+<h2 id="postgres-major-upgrade">PostgreSQL to a newer major version of PostgreSQL</h2>
+<p>What the new version removes or changes is checked before anything is written; then the new server is filled and followed - or, where the hop allows it, a copy of the source's pages is upgraded there - and switched to.</p>
+<p>PostgreSQL -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  billing:
+    goal: upgrade
+    source: postgres://app@db1.example.com:5432/billing
+    target: postgres://app@db2.example.com:5432/billing</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal upgrade: the same engine at a newer version, a higher edition (SQL Server Web to Enterprise), or both, with the least downtime: what the new version or edition changes checked first, then the data moved into it and followed, or a copy of its pages taken to the target where the hop allows it - upgraded there where the version moves - and switched over</li><li>on the source: read and followed as a cutover follows it; never upgraded where it runs - its downtime is the cutover's alone</li><li>on the target: a server of the new version or edition filled and followed, or a copy of the source's pages taken there - SQL Server's own backup restored, MySQL's clone, PostgreSQL's pages - upgraded by the new version's own upgrade where the version moves, then followed from the copy's position</li><li>it guarantees: what the new version removes or changes, and what the new edition lacks of what the source uses, said before anything is written; the source's own statements planned, timed and held to the same answers on both versions</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit assess billing
+migkit move billing --mode full+cdc
+migkit move billing --mode full+cdc --go
+migkit check billing
+migkit move billing --mode cdc --drop --go</code></pre>
+<p>What it leans on, each done by the code for this pair: comparing server settings; copying table by table, resumably; keeping the target following the source.</p>
+<h2 id="mongodb-with-a-way-back">MongoDB to MongoDB, with a way back ready at the switch</h2>
+<p>Collections copied and followed through the source's change stream; at the switch, the stream back to the old source starts, so going back loses nothing written since.</p>
+<p>MongoDB -&gt; MongoDB. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  catalog:
+    goal: cutover
+    source: mongodb://app@db1.example.com:27017/catalog
+    target: mongodb://app@db2.example.com:27017/catalog</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal cutover: move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch</li><li>on the source: read, and its log of changes followed from a position taken before the copy - the stream's own slot and publication on PostgreSQL, its binary log read on MySQL, a change stream on MongoDB - made by the stream and dropped when it is torn down; nothing else is written to it unless the hop turns cutover: on, and then only during the cutover</li><li>on the target: filled as a copy fills it, then kept level with the source change by change; kept from the application's writes until the cutover where the engine allows it (protect_target); after it, a stream back from it to the old source (reverse: at_cutover)</li><li>it guarantees: no change lost between the copy and the stream (the position is taken before the copy); each cycle's changes compared (watch --verify --delta); the stream torn down only once nothing writes to the source and the stream has passed where it stands</li><li>cutover: off - the goal does not turn it on; at the cutover migkit writes nothing to the source, and the operator does this by hand, in order (<a href="goals.html#cutover">the steps</a>)</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit sync catalog --mode migrate
+migkit sync catalog --mode migrate --go
+migkit watch catalog
+migkit move catalog --mode cdc --drop --go</code></pre>
+<p>What it leans on, each done by the code for this pair: copying table by table, resumably; keeping the target following the source; proving the target has caught up before cutover; carrying users and their grants.</p>
+<h2 id="verify-two-databases">Two databases proved to hold the same, nothing written to either</h2>
+<p>After a move someone else made, or between a primary and a copy of it: every table and row that differs named, and nothing written anywhere.</p>
+<p>MySQL -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  proof:
+    goal: verify
+    source: mysql://app@db1.example.com:3306/shop
+    target: postgres://app@db2.example.com:5432/shop</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal verify: prove two databases hold the same; nothing is written to either</li><li>on the source: read only</li><li>on the target: read only</li><li>it guarantees: equal, or every table and row that differs named; nothing written to either side</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit check proof</code></pre>
+<p>What it leans on, each done by the code for this pair: comparing the data itself.</p>
+<h2 id="masked-test-copy">Production to a staging database, as a masked subset</h2>
+<p>The rows chosen and every row they refer to, masked where the hop says, so every reference in the copy resolves inside it.</p>
+<p>PostgreSQL -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  staging:
+    goal: subset
+    source: postgres://app@db1.example.com:5432/shop
+    target: postgres://app@staging.example.com:5432/shop
+    options:
+      subset:
+        start:
+          orders: 10%
+        children: true
+      mask:
+      - customers.email</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal subset: a copy for testing: the rows chosen and every row they refer to, masked where the hop says, into a staging or developer database, proved row by row</li><li>on the source: read, never written: the rows chosen and those they refer to</li><li>on the target: its tables in scope emptied and filled with the subset, masked on the way where the hop says</li><li>it guarantees: every reference in the copy resolves inside it; every row as the source's, its masked columns as the rule writes them, none beyond the subset</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit move staging --mode full
+migkit move staging --mode full --go
+migkit check staging</code></pre>
+<ul><li><code>subset</code>: goal subset: the rows a copy for testing starts from - start: {table: a condition, a share like 10% or a number of rows} - whether the rows that refer to them come too (children), and the most rows it may hold (most)</li><li><code>mask</code>: values reports show as salted hashes</li></ul>
+<p>What it leans on, each done by the code for this pair: comparing the data itself; copying table by table, resumably.</p>
+<h2 id="rehearse-then-run">A rehearsal on a copy, and the real run forecast from it</h2>
+<p>The whole path on a copy of the source into a target of its own, every phase timed, so the real hop's plan is forecast from what was measured rather than guessed.</p>
+<p>PostgreSQL -&gt; PostgreSQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
+<pre><code>hops:
+  shop-rehearsal:
+    goal: rehearse
+    source: postgres://app@copy.example.com:5432/shop
+    target: postgres://app@db3.example.com:5432/shop
+    options:
+      rehearses: shop
+  shop:
+    goal: cutover
+    source: postgres://app@db1.example.com:5432/shop
+    target: postgres://app@db2.example.com:5432/shop</code></pre>
+<p>What <code>migkit init</code> and every dry run say of it:</p>
+<ul><li>goal rehearse: the whole path the real run will take - copy, follow, prove, cut over - on a copy or a sample of the source into a target of its own, every phase timed, so the hop it rehearses (rehearses:) is forecast from what it measured</li><li>on the source: a copy or a sample of the real run's source, read and followed as a cutover follows it; written only by a cutover the hop turns on, as the real run's would be</li><li>on the target: a target of its own, filled, followed and cut over to as the real run's will be; its own writes are timed there, rolled back</li><li>it guarantees: every phase measured and kept for the real run's forecast; the two sides proved equal before the real run is allowed to start</li></ul>
+<p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
+<pre><code>migkit move shop-rehearsal --mode full+cdc --go
+migkit check shop-rehearsal
+migkit move shop-rehearsal --mode cdc --drop --go
+migkit assess shop-rehearsal</code></pre>
+<ul><li><code>rehearses</code>: goal rehearse: the hop this one rehearses, whose plan is forecast from what this one measures - its name, or {hop, databases: {this hop's database: that hop's}}</li></ul>
+<p>What it leans on, each done by the code for this pair: copying table by table, resumably; keeping the target following the source.</p>
+<footer>migkit 0.2.0 - this page is written from the code by
+<code>tools/gen_docs.py</code>, so it says what this version does.
+Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migkit</a>.
+AGPL-3.0-or-later.</footer>
+</main>
+</div>
+</body>
+</html>

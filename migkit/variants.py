@@ -122,6 +122,13 @@ SIGNATURES = {
          "version"),
         ("greenplum", [("version", "greenplum")], "version"),
         ("redshift", [("version", "redshift")], "version"),
+        # Citus is PostgreSQL with its library loaded: its own settings
+        # (`citus.*`) are there only then, and the extension's version is
+        # the distribution's. Its coordinator's statistics describe shell
+        # tables whose rows live on the workers, so it is a brand of its
+        # own and not the software whose change marker is trusted
+        # (`unchanged.TRUSTED_BRANDS`)
+        ("citus", [("citus", "")], "citus"),
         ("postgres", [("version", "postgresql")], "server_version"),
     ],
     "mysql": [
@@ -148,7 +155,23 @@ SIGNATURES = {
     # is answering" - which is the truth.
     "mongodb": [
         ("ferretdb", [("ferretdb", "")], "version"),
+        # Azure Cosmos DB answers a command of its own, which MongoDB does
+        # not know: the charge of the last request (Microsoft Learn, "Find
+        # the request unit charge ... for MongoDB"). The probe asks it, and
+        # only an answer names the brand. Percona's build carries its own
+        # version beside MongoDB's in `buildInfo` (`psmdbVersion`).
+        ("cosmosdb", [("cosmos_request_charge", "")], "version"),
+        ("percona-server-mongodb", [("psmdbversion", "")], "psmdbversion"),
         ("mongodb", [("storageengines", ""), ("gitversion", "")], "version"),
+    ],
+    # Elasticsearch and OpenSearch answer `GET /` alike, but only OpenSearch
+    # names its distribution (`version.distribution: opensearch`), and only
+    # Elasticsearch its build flavour and its tagline. A managed service
+    # that still runs Elasticsearch 7.10 says Elasticsearch, which it is.
+    "opensearch": [
+        ("opensearch", [("distribution", "opensearch")], "number"),
+        ("elasticsearch", [("tagline", "you know, for search"),
+                           ("build_flavor", "")], "number"),
     ],
     # A Kafka client can read the cluster id, and Redpanda puts its name in
     # front of one. Measured:

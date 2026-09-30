@@ -568,7 +568,8 @@ def _my_facts(hop, mode="full+cdc", **over):
              src=dict(about), dst=dict(about), not_innodb=[], dst_tables=[],
              src_backup_admin=True, dst_clone_admin=True, src_plugin="ACTIVE",
              dst_plugin="ACTIVE", log_bin=True, gtid_mode="ON",
-             src_users={"app"}, plugin_rights=True, dynamic_loading=True)
+             src_users={"app"}, plugin_rights=True, dynamic_loading=True,
+             src_active={"InnoDB", "clone"}, dst_active={"InnoDB"})
     f.update(over)
     return f
 
@@ -592,6 +593,9 @@ def test_every_need_holding_takes_the_clone():
     ({"src_plugin": ""}, "INSTALL PLUGIN clone SONAME 'mysql_clone.so'"),
     ({"managed_src": "Amazon Aurora"}, "cloud: ..."),
     ({"log_bin": False}, "the binlog is off"),
+    # an enterprise source's plugins, which a community target runs none of
+    ({"src_active": {"InnoDB", "clone", "audit_log"}},
+     "audit_log run on the source and not on the target"),
 ])
 def test_each_clone_need_that_fails_is_said(over, words):
     hop = _hop("mysql", MY_OPTS)
@@ -747,7 +751,8 @@ def test_the_rungs_are_the_decision_engines_own():
     from migkit import decide
     for r in physical.rungs():
         assert isinstance(r, decide.Rung), r
-        assert r.name and r.said and r.engine in ("postgres", "mysql")
+        assert r.name and r.said and r.engine in ("postgres", "mysql",
+                                                  "mssql")
         assert {"exact", "whole server"} <= set(r.gives), r.name
         assert r.needs and all(isinstance(n, decide.Need) and n.what
                                 for n in r.needs), r.name

@@ -79,7 +79,8 @@ class Endpoint:
 
     def configured(self):
         return bool(self.host or self.options.get("hosts")
-                    or self.options.get("path") or self.options.get("url"))
+                    or self.options.get("path") or self.options.get("url")
+                    or self.options.get("program"))
 
     #: a PostgreSQL connection's TLS from the endpoint's options, under
     #: libpq's own names: `sslmode` (verify-full checks the certificate and
@@ -102,7 +103,7 @@ class Endpoint:
 
     def libpq_env(self):
         """The same, as the environment every program on libpq reads."""
-        return {"PG" + k.upper(): v for k, v in self.libpq_tls().items()}
+        return self._pg_env(self.libpq_tls())
 
     def mysql_tls(self):
         """A MySQL connection's TLS from the endpoint's options: `ssl_ca`
@@ -239,6 +240,154 @@ class Endpoint:
         return {"encryption": enc} if enc in ("require", "request",
                                               "off") else {}
 
+    # ---- the side as an address, and its TLS in every form ---------------
+    #: the connections whose TLS a URL of each scheme carries
+    URL_FAMILY = {"postgres": "postgres", "postgresql": "postgres",
+                  "pgsql": "postgres", "redshift": "postgres",
+                  "cockroachdb": "postgres", "dsql": "postgres",
+                  "mysql": "mysql", "mariadb": "mysql", "tidb": "mysql",
+                  "mongodb": "mongodb"}
+
+    def held_secrets(self):
+        """The secrets this side holds now, found without asking anything
+        (a keychain, a cloud): what `redact` hides."""
+        return [self.password] if self.password else []
+
+    def _netloc(self):
+        host = str(self.host or "")
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return host + (f":{self.port}" if self.port else "")
+
+    def url(self, scheme, db="", tls=True):
+        """This side as `scheme://user:password@host:port/db?...`, built
+        one way for every program and driver that takes an address.
+
+        The user, the password and the database are escaped whole
+        (`quote(..., safe="")`): measured with the user `app@corp` and a
+        password holding `/:@#`, fifteen builders escaped them four ways,
+        and one parsed the host as `corp`. An IPv6 address is bracketed; a
+        PostgreSQL socket directory goes in the `host` parameter; a
+        MongoDB side's `hosts` and `uri_options` are its own. With `tls`,
+        the query carries the side's resolved TLS in the form the scheme's
+        own clients read (`tls_forms`) - a scheme that has none refuses
+        rather than drop it, since a URL that quietly loses the TLS the
+        hop asks for is what `doctor` could not see."""
+        from urllib.parse import quote
+        family = self.URL_FAMILY.get(scheme)
+        if tls and family is None:
+            raise ValueError(f"a {scheme} address carries no TLS in its"
+                             " query: carry it the way its client takes it")
+        query = []
+        where = self._netloc()
+        if family == "mongodb":
+            where = str(self.options.get("hosts") or "") or where
+            extra = str(self.options.get("uri_options") or "")
+            if extra:
+                query.append(extra)
+        elif family == "postgres" and str(self.host or "").startswith("/"):
+            query.append("host=" + quote(str(self.host), safe=""))
+            if self.port:
+                query.append(f"port={int(self.port)}")
+            where = ""
+        if tls:
+            got = self.tls_forms(family)["query"]
+            if got:
+                query.append(got)
+        auth = ""
+        if self.user or self.password:
+            auth = quote(str(self.user or ""), safe="")
+            if self.password:
+                auth += ":" + quote(str(self.password), safe="")
+            auth += "@"
+        path = "/" + quote(str(db), safe="") if db else "/"
+        return (f"{scheme}://{auth}{where}{path}"
+                + ("?" + "&".join(query) if query else ""))
+
+    @staticmethod
+    def _pg_env(got):
+        return {"PG" + k.upper(): v for k, v in got.items()}
+
+    def tls_forms(self, family):
+        """The side's TLS - its options, or where they say nothing, what
+        asking the server found (`tls.auto`) - decided once and rendered
+        in every form a connection of `family` is made in, so no path
+        connects to it another way than the rest.
+
+        The hop's TLS used to reach migkit's own connections and be
+        dropped on the main data paths while `doctor` said verified: the
+        streaming copy, both native replications, the clone, the page
+        copy, the bulk programs and the change pipeline (audit
+        2026-10-01, SEC2).
+
+        PostgreSQL: `libpq` (the connection's keywords), `env` (the
+        variables every program on libpq reads), `query` (a URL's),
+        `far` (what a server that dials this side asks of it - a
+        subscription's or a foreign server's connection string: an
+        authority's file is on this machine, not that server's, so
+        `verify-*` is carried as `require`), `jdbc` and `connector` (a
+        Java client's and the change pipeline's fields, the files as
+        named here). MySQL: `driver` (the driver's keywords), `client`
+        (the command-line clients' flags), `dump` (the dump and load
+        programs': they know two modes, and a named authority is held to
+        the server's name too), `uri` and `query` (MySQL's URI-like
+        address), `source` and `master` (a replica's options for the
+        source, in MySQL's own and the older spelling: encrypted where
+        the side is, the certificate not checked for the same reason as
+        `far`, and the server's public key fetched only where it is
+        not), `clone` (a clone's `REQUIRE SSL`), `connector` (the change
+        pipeline's mode: it verifies through a Java key store, which an
+        authority's file is not, so it is carried as `required`).
+        MongoDB, Redis, Cassandra, SQL Server: `driver`, and MongoDB's
+        `query`. `mode` in each is the decision in the engine's words."""
+        from urllib.parse import urlencode
+        if family == "postgres":
+            got = self.libpq_tls()
+            mode = got.get("sslmode") or "prefer"
+            far = ({"sslmode": "require"}
+                   if mode in ("verify-ca", "verify-full")
+                   else {"sslmode": mode} if got.get("sslmode") else {})
+            java = {k: v for k, v in got.items() if k != "sslcrl"}
+            return {"mode": mode, "libpq": got, "env": self._pg_env(got),
+                    "query": urlencode(got or {"sslmode": "prefer"}),
+                    "far": far, "jdbc": java,
+                    "connector": {"database." + k: v
+                                  for k, v in java.items()}}
+        if family == "mysql":
+            got = self.mysql_tls()
+            ca = got.get("ssl_ca", "")
+            mode = ("VERIFY_IDENTITY" if got.get("ssl_verify_identity")
+                    else "VERIFY_CA") if ca else ("REQUIRED" if got else "")
+            uri, dump = {}, []
+            if mode:
+                cert = str(self.options.get("ssl_cert") or "")
+                key = str(self.options.get("ssl_key") or "")
+                uri = {"ssl-mode": mode, "ssl-ca": ca, "ssl-cert": cert,
+                       "ssl-key": key}
+                uri = {k: v for k, v in uri.items() if v}
+                dump = (["--ssl-mode", "VERIFY_IDENTITY", "--ca", ca] if ca
+                        else ["--ssl"])
+                dump += (["--cert", cert] if cert else []) + (
+                    ["--key", key] if key else [])
+            return {"mode": mode or "PREFERRED", "driver": got,
+                    "client": [f"--{k}={v}" for k, v in uri.items()],
+                    "dump": dump, "uri": uri, "query": urlencode(uri),
+                    "source": ("SOURCE_SSL = 1" if mode
+                               else "GET_SOURCE_PUBLIC_KEY = 1"),
+                    "master": "MASTER_SSL = 1" if mode else "",
+                    "clone": "REQUIRE SSL" if mode else "",
+                    "connector": ({"database.ssl.mode": "required"} if mode
+                                  else {})}
+        own = {"mongodb": self.mongo_tls, "redis": self.redis_tls,
+               "cassandra": self.cassandra_tls, "mssql": self.mssql_tls}
+        if family not in own:
+            raise ValueError(f"no TLS forms for {family!r}")
+        got = own[family]()
+        out = {"mode": "on" if got else "", "driver": got}
+        if family == "mongodb":
+            out["query"] = urlencode(got)
+        return out
+
 
 class IamEndpoint(Endpoint):
     """An endpoint that signs in with a token the cloud signs instead of a
@@ -269,6 +418,11 @@ class IamEndpoint(Endpoint):
     @password.setter
     def password(self, value):
         pass
+
+    def held_secrets(self):
+        """The token made last, if one has been: a new one is not signed
+        just to be hidden."""
+        return [self._token] if self._token else []
 
 
 #: the keychain entries migkit keeps passwords under: service `migkit`,
@@ -323,6 +477,11 @@ class KeychainEndpoint(Endpoint):
     @password.setter
     def password(self, value):
         pass
+
+    def held_secrets(self):
+        """The password once read: the keychain is not asked just for it
+        to be hidden."""
+        return [self._got] if self._got else []
 
 
 def _aws_client(service, region=None, role=None):
@@ -698,7 +857,7 @@ def load_hops(path=None):
 
 #: engines whose side signs in with nothing a keychain would hold
 _NO_KEYCHAIN = ("sqlite", "duckdb", "parquet", "bigquery", "pubsub",
-                "generic")
+                "generic", "saas")
 
 
 def build_hop(name, raw):

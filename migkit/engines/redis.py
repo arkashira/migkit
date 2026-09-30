@@ -1,5 +1,6 @@
 import time
 
+from .. import pieces
 from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result
 
@@ -283,8 +284,39 @@ class RedisEngine(Engine):
     def move_key(self, db, sch, tbl):
         return f"db{db}"
 
-    #: keys per read of the keyspace copier
+    #: keys per read of the keyspace copier, and the bytes a batch of their
+    #: serialised values holds at most (`_carry`)
     COPY_BATCH = 1000
+    COPY_BYTES = pieces.BATCH_BYTES
+    #: large values - a string is up to 512 MB, a collection any size: a key
+    #: past a piece is read and written a piece at a time by its type's own
+    #: commands (`_carry_in_pieces`), compared a piece at a time
+    #: (`_compare_in_pieces`), and sized by the memory it takes on the
+    #: server (`row_sizes`); what one worker holds is a piece of it
+    LARGE_VALUES = pieces.Way(
+        "sized by the server, keys past a piece read, written and compared"
+        " a piece at a time")
+    CARRIES_IN_PIECES = pieces.PIECE
+
+    def row_sizes(self, side, db, tables=None):
+        """{keyspace: sizes} (`Engine.row_sizes`): a key is a keyspace's row,
+        sized by the memory it takes on the server (`MEMORY USAGE`, which
+        samples a collection's elements) over the first `SIZE_SAMPLE` keys
+        shared out among the nodes - only numbers cross."""
+        from .base import sizes_of
+        lengths, whole = [], True
+        client = self._keys(side, db, decode=False)
+        for keys in self._scan_batches(side, self.SIZE_SAMPLE, False, db):
+            raw = [k.encode("utf-8", "surrogateescape")
+                   if isinstance(k, str) else k for k in keys]
+            got = self._memory_of(client, raw)
+            lengths += [got.get(k, 0) + 1 for k in raw]
+        if len(lengths) >= self.SIZE_SAMPLE:
+            whole = False
+        name = str(db)
+        if tables is not None and name not in {str(t) for t in tables}:
+            return {}
+        return {name: sizes_of(lengths, exact=whole)} if lengths else {}
 
     def _raw_kept(self, db, keys):
         """`_kept` over keys as the server holds them, which need not be
@@ -431,7 +463,149 @@ class RedisEngine(Engine):
 
     def _carry(self, src, dst, keys, how, label="", log=None):
         """Copy `keys` from `src` to `dst` as the source holds them, and
-        return how many landed.
+        return how many landed: a key past `pieces.PIECE` a piece at a time
+        (`_carry_in_pieces`), the others in their serialised form, in
+        batches of `pieces.BATCH_BYTES` by the memory each takes on the
+        source (`_carry_dumped`) - a thousand keys a batch were a thousand
+        payloads held at once, of whatever size."""
+        sizes = self._memory_of(src, keys)
+        big = [k for k in keys if (sizes.get(k) or 0) > pieces.PIECE]
+        landed = sum(self._carry_in_pieces(src, dst, k, how, label, log)
+                     for k in big)
+        rest = [k for k in keys if (sizes.get(k) or 0) <= pieces.PIECE]
+        for part in pieces.by_bytes(rest, size=lambda k: (sizes.get(k)
+                                                          or 0) + 1):
+            landed += self._carry_dumped(src, dst, part, how, label, log)
+        return landed
+
+    @staticmethod
+    def _memory_of(client, keys):
+        """{key: bytes it takes on the server} (`MEMORY USAGE`, which
+        samples a collection's elements), in one round trip; a key gone, or
+        a server that will not say, is left out - carried whole as before."""
+        pipe = client.pipeline(transaction=False)
+        for k in keys:
+            pipe.memory_usage(k)
+        try:
+            got = pipe.execute(raise_on_error=False)
+        except Exception:  # noqa: BLE001 - no sizes: every key whole
+            return {}
+        return {k: int(n) for k, n in zip(keys, got)
+                if isinstance(n, int) and not isinstance(n, bool)}
+
+    #: the types whose values are written piece by piece; a stream, or a
+    #: module's own type, is carried in its serialised form whatever its
+    #: size
+    PIECE_TYPES = ("string", "hash", "set", "zset", "list")
+
+    def _carry_in_pieces(self, src, dst, key, how, label="", log=None):
+        """One key past `pieces.PIECE`, carried a piece at a time: its
+        type's own reads on the source (GETRANGE, HSCAN, SSCAN, ZSCAN,
+        LRANGE), its type's own writes on the target (APPEND, HSET, SADD,
+        ZADD, RPUSH), then its moment of expiry - never held whole here,
+        and never one payload past what a target takes in one command (a
+        RESTORE of a key past 512 MB is refused). Its access history
+        starts again on the target: only a RESTORE sets it. A key written on
+        the source while it is read, which `WATCH` says, is read again from
+        its start, three times at most; on a cluster, where a transaction
+        cannot watch across the client, it is read once and `check` holds
+        it to the source. Returns 1 where it landed, 0 where it was gone."""
+        import redis
+        kind = src.type(key)
+        kind = kind.decode() if isinstance(kind, bytes) else str(kind)
+        if kind == "none":
+            return 0
+        if kind not in self.PIECE_TYPES:
+            return self._carry_dumped(src, dst, [key], how, label, log)
+        for _ in range(3):
+            try:
+                watch = src.pipeline(transaction=True)
+                watch.watch(key)
+            except Exception:  # noqa: BLE001 - a cluster: read once
+                watch = None
+            reader = watch if watch is not None else src
+            try:
+                at = self._due(reader, key, how)
+                dst.unlink(key)
+                self._pieces_of(reader, dst, key, kind)
+                if at:
+                    dst.pexpireat(key, at)
+                if watch is not None:
+                    watch.multi()
+                    watch.exists(key)
+                    watch.execute()
+                if log and not how.get("pieces_said"):
+                    how["pieces_said"] = True
+                    log(f"{label}: keys past {pieces.PIECE // 2 ** 20} MB"
+                        " carried a piece at a time; their access history"
+                        " starts again on the target")
+                return 1
+            except redis.WatchError:
+                continue
+            finally:
+                if watch is not None:
+                    watch.reset()
+        if log:
+            log(f"{label}: a key past a piece kept changing while it was"
+                " read; carried as last read, and `check` holds it to the"
+                " source")
+        return 1
+
+    def _due(self, client, key, how):
+        """The moment a key falls due, in milliseconds since the epoch, or
+        0 where it does not - read as `_carry_dumped` reads it: by the
+        source's own clock where it answers the time left."""
+        if how["expiry"] == "pexpiretime":
+            got = client.pexpiretime(key)
+            return int(got) if got and int(got) > 0 else 0
+        left = client.pttl(key)
+        if left is None or int(left) < 0:
+            return 0
+        sec, usec = self._client("src").time()
+        return sec * 1000 + usec // 1000 + int(left)
+
+    @staticmethod
+    def _pieces_of(src, dst, key, kind):
+        """The value of `key` read from `src` and written to `dst` a piece
+        at a time, by its type - the target's key emptied before."""
+        piece = pieces.PIECE
+        if kind == "string":
+            size = int(src.strlen(key))
+            for at in range(0, size, piece):
+                dst.append(key, src.getrange(key, at,
+                                             min(at + piece, size) - 1))
+            return
+        total = int({"hash": src.hlen, "set": src.scard, "zset": src.zcard,
+                     "list": src.llen}[kind](key) or 0)
+        if not total:
+            return
+        # elements a piece: as many as a piece holds at the key's own
+        # average, its memory over its elements
+        each = max(1, int(src.memory_usage(key) or piece) // total)
+        step = max(1, min(10_000, piece // each))
+        if kind == "list":
+            for at in range(0, total, step):
+                got = src.lrange(key, at, at + step - 1)
+                if got:
+                    dst.rpush(key, *got)
+            return
+        scan = {"hash": src.hscan, "set": src.sscan, "zset": src.zscan}[kind]
+        cursor = 0
+        while True:
+            cursor, got = scan(key, cursor, count=step)
+            if got:
+                if kind == "hash":
+                    dst.hset(key, mapping=got)
+                elif kind == "set":
+                    dst.sadd(key, *got)
+                else:
+                    dst.zadd(key, dict(got))
+            if int(cursor) == 0:
+                return
+
+    def _carry_dumped(self, src, dst, keys, how, label="", log=None):
+        """Copy `keys` from `src` to `dst` in the server's own serialised
+        form, and return how many landed.
 
         The expiry is carried as the moment it falls due (`ABSTTL`), read
         once: the relative TTL this sent before was read a pipeline ahead
@@ -700,32 +874,96 @@ class RedisEngine(Engine):
             ps.type(k)
             pt.type(k)
         stypes, dtypes = ps.execute(), pt.execute()
-        ps, pt = s.pipeline(transaction=False), t.pipeline(transaction=False)
+        # a key past a piece compared a piece at a time; the others read
+        # whole, in batches of `pieces.BATCH_BYTES` by the memory each takes
+        sizes = self._memory_of(s, keys)
         plan = []
         for k, ty, dty in zip(keys, stypes, dtypes):
             if ty != dty:
                 (missing if dty == "none" else changed).append(k)
-                continue
-            for p in (ps, pt):
-                if ty == "string":
-                    p.get(k)
-                elif ty == "hash":
-                    p.hgetall(k)
-                elif ty == "set":
-                    p.smembers(k)
-                elif ty == "zset":
-                    p.zrange(k, 0, -1, withscores=True)
-                elif ty == "list":
-                    p.lrange(k, 0, -1)
-                elif ty == "stream":
-                    p.xlen(k)
-                else:
-                    p.exists(k)
-            plan.append(k)
-        for k, a, b in zip(plan, ps.execute(), pt.execute()):
-            if a != b:
-                changed.append(k)
+            elif ty in self.PIECE_TYPES and (sizes.get(k) or 0) \
+                    > pieces.PIECE:
+                if not self._compare_in_pieces(s, t, k, ty):
+                    changed.append(k)
+            else:
+                plan.append((k, ty))
+        for part in pieces.by_bytes(plan, size=lambda kt: (sizes.get(kt[0])
+                                                           or 0) + 1):
+            ps = s.pipeline(transaction=False)
+            pt = t.pipeline(transaction=False)
+            for k, ty in part:
+                for p in (ps, pt):
+                    if ty == "string":
+                        p.get(k)
+                    elif ty == "hash":
+                        p.hgetall(k)
+                    elif ty == "set":
+                        p.smembers(k)
+                    elif ty == "zset":
+                        p.zrange(k, 0, -1, withscores=True)
+                    elif ty == "list":
+                        p.lrange(k, 0, -1)
+                    elif ty == "stream":
+                        p.xlen(k)
+                    else:
+                        p.exists(k)
+            for (k, _), a, b in zip(part, ps.execute(), pt.execute()):
+                if a != b:
+                    changed.append(k)
         return missing, changed
+
+    @staticmethod
+    def _compare_in_pieces(s, t, key, kind):
+        """Whether one key past `pieces.PIECE` holds the same on both
+        sides, read a piece at a time and stopping at the first piece that
+        differs: a string and a list by their ranges, a hash, a set and a
+        sorted set by the source's scan asked of the target member by
+        member - the same number of members, each there with the same
+        value, is the same collection."""
+        piece = pieces.PIECE
+        if kind == "string":
+            size = int(s.strlen(key))
+            if size != int(t.strlen(key)):
+                return False
+            return all(s.getrange(key, at, min(at + piece, size) - 1)
+                       == t.getrange(key, at, min(at + piece, size) - 1)
+                       for at in range(0, size, piece))
+        count = {"hash": "hlen", "set": "scard", "zset": "zcard",
+                 "list": "llen"}[kind]
+        total = int(getattr(s, count)(key) or 0)
+        if total != int(getattr(t, count)(key) or 0):
+            return False
+        if not total:
+            return True
+        each = max(1, int(s.memory_usage(key) or piece) // total)
+        step = max(1, min(10_000, piece // each))
+        if kind == "list":
+            return all(s.lrange(key, at, at + step - 1)
+                       == t.lrange(key, at, at + step - 1)
+                       for at in range(0, total, step))
+        scan = {"hash": s.hscan, "set": s.sscan, "zset": s.zscan}[kind]
+        cursor = 0
+        while True:
+            cursor, got = scan(key, cursor, count=step)
+            if got:
+                if kind == "hash":
+                    fields = list(got)
+                    if t.hmget(key, fields) != [got[f] for f in fields]:
+                        return False
+                elif kind == "set":
+                    pipe = t.pipeline(transaction=False)
+                    for m in got:
+                        pipe.sismember(key, m)
+                    if not all(pipe.execute()):
+                        return False
+                else:
+                    pipe = t.pipeline(transaction=False)
+                    for m, _ in got:
+                        pipe.zscore(key, m)
+                    if pipe.execute() != [score for _, score in got]:
+                        return False
+            if int(cursor) == 0:
+                return True
 
     def _scan_batches(self, side, sample, deep, db=0):
         """Batches of keys from one side, up to the sample cap - shared
@@ -894,7 +1132,22 @@ class RedisEngine(Engine):
             f"db{db}", "rows", statements, [],
             f"{len(missing)} missing, {len(changed)} changed,"
             f" {len(extra)} extra; every key the repair overwrites or removes"
-            " is dumped to the undo file before it is touched")]
+            " is dumped to the undo file before it is touched",
+            table=f"db{db}")]
+
+    #: a key is put back from its serialised value by its own record
+    #: (`repair_io`), never as canonical text: repaired key by key alone
+    ROWS_PUT_BACK = False
+
+    def repair_found(self, db, table):
+        """The keys the last check named."""
+        return {kind: [(k,) for k in self._read_drilldown(db, kind)]
+                for kind in ("missing", "changed", "extra")}
+
+    def repair_sides(self, db, table):
+        """None: a database's keys are lined up by name alone, the rows
+        way (`repairways`)."""
+        return None
 
     def apply(self, db, action):
         """Copy the keys back with DUMP/RESTORE, then remove the strays.

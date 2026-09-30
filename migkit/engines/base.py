@@ -2,6 +2,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .. import fencing
+from ..pieces import BATCH_BYTES, PAIR_MEMORY, PAIR_ROWS, row_bytes
+
 # Engine-independent name for what a finding is about.
 #
 # Every engine words its own checks differently - postgres calls it `encoding`,
@@ -104,6 +107,9 @@ class RepairAction:
     note: str = ""
     #: "pair" where the pair machinery carries it out (`through_pair`)
     by: str = ""
+    #: the table a row repair is for, as the check and its drilldown name
+    #: it: the way it goes is climbed for it (`repairways`)
+    table: str = ""
 
 
 #: held while an engine draws its run's salt (`Engine.digest_salt`)
@@ -1665,6 +1671,14 @@ class Engine:
         where it does or the engine cannot say before reading."""
         return None
 
+    def drop_lost_position(self, side, db):
+        """Let go of what the server keeps for migkit's change position
+        where the position is lost, so a new one can be taken (`ship`,
+        after a seed the source's log did not outlast). Nothing, where the
+        engine keeps nothing on the server for a position: a binary log's
+        file and offset, a resume token, an SCN."""
+        return None
+
     #: whether tables can be written side by side on this engine: a file
     #: that takes one writer at a time (SQLite) cannot
     WRITES_IN_PARALLEL = True
@@ -2277,13 +2291,33 @@ class Engine:
         """
         stream = self._stream_connector()
         actions = []
-        for name, found in sorted(self._drill_tables(db).items()):
+        tables = self._drill_tables(db)
+        # a table whose leaves differ in too many places for the check to
+        # name its rows: repaired by its spans or whole (`repairways`)
+        for name in self._leaves_kept(db):
+            tables.setdefault(name, {})
+        for name, found in sorted(tables.items()):
             if stream:
                 actions.append(self._resnapshot_action(db, name, found))
                 continue
             send = found.get("missing", []) + found.get("changed", [])
             drop = found.get("extra", [])
             statements = []
+            if not send and not drop:
+                kept = self.repair_leaves(db, name) or {}
+                parts = kept.get("leaves") or []
+                what = ("spans of " + ", ".join(kept.get("key") or [])
+                        if kept.get("kind") == "range" else "parts")
+                statements.append(
+                    f"{len(parts):,} {what} differ, holding"
+                    f" {sum(max(a, b) for _, a, b in parts):,} rows - too"
+                    " many places for the check to name the rows; copied"
+                    " again, what the target held kept first")
+                actions.append(RepairAction(
+                    f"{db}.{name}", "rows", statements, [],
+                    f"{len(parts):,} {what} differ and no row was named",
+                    table=name))
+                continue
             if send:
                 statements.append(
                     f"copy {len(send)} rows {carry}: "
@@ -2301,7 +2335,7 @@ class Engine:
                 f"{len(found.get('missing', []))} missing,"
                 f" {len(found.get('changed', []))} changed,"
                 f" {len(drop)} extra; every target row this overwrites or"
-                " removes is written to the undo file first"))
+                " removes is written to the undo file first", table=name))
         return actions
 
     def _resnapshot_action(self, db, name, found):
@@ -3432,11 +3466,13 @@ class Engine:
                       how=""):
         """The rows found, written to the estate's files, as a clause."""
         import json
+        # the leaves an earlier check kept go with its lists: the leaves'
+        # own drill keeps them again after this (`leaves.kept_leaves`)
         self._write_drill(
             db, name,
             missing=[json.dumps(list(k)) for k in missing],
             changed=[json.dumps(list(k)) for k in changed],
-            extra=[json.dumps(list(k)) for k in extra])
+            extra=[json.dumps(list(k)) for k in extra], leaves=[])
         parts = []
         for label, found in (("missing on the target", missing),
                              ("with different values", changed),
@@ -3504,7 +3540,8 @@ class Engine:
         from .. import canon
         if found is None:
             found = self._drill_tables(db).get(name, {})
-        if not found:
+        found = self._only_named(found)
+        if not any(found.get(k) for k in ("missing", "changed", "extra")):
             return
         key = list(src_engine.neutral_key("src", db, src_t))
         cls = {n: c for n, c in src_cols}
@@ -3625,6 +3662,16 @@ class Engine:
                     for k, v in zip(key, values(key_text))})
                 record.applied(first_delete + i)
 
+    def _only_named(self, found):
+        """`found` ({kind: [key as canonical text]}) narrowed to the keys a
+        repair by spans leaves to be repaired by key (`repairways`); as it
+        is otherwise."""
+        only = self.__dict__.get("_repair_only")
+        if only is None:
+            return found
+        return {k: [x for x in v if tuple(x) in only]
+                for k, v in found.items()}
+
     def _newer_neutral(self, db, name, dst_engine, dst_t, src_cols, dst_cols,
                        changed, src_rows, dst_rows):
         """`_keep_the_newer` over rows read through the neutral contract:
@@ -3670,12 +3717,94 @@ class Engine:
         target (`repairlog`): through the neutral contract of the engine
         the target is - this one, or the pair's target engine."""
         from .. import repairlog
+        eng = getattr(self, "dst_engine", None) or self
+        if head.get("form") == "snapshot":
+            return repairlog.TableIO(eng, db, head["table"], head["columns"],
+                                     head["key"],
+                                     self.hop.report_dir(db) / "undo")
         if head.get("form") != "canon":
             raise SystemExit(f"a repair record of form {head.get('form')!r}"
                              f" cannot be put back by {self.CANON_ENGINE}")
-        eng = getattr(self, "dst_engine", None) or self
         return repairlog.CanonIO(eng, "dst", db, head["table"],
                                  head["columns"], head["key"])
+
+    # --- the ways a table's rows are repaired (`repairways`) ---------------
+
+    #: whether rows read through the neutral contract are put back on this
+    #: target from their canonical text (`repairlog.CanonIO`, `TableIO`) -
+    #: what a span or a table copied again is undone by; where they are
+    #: not, a table is repaired by the engine's own rows way alone
+    ROWS_PUT_BACK = True
+    #: whether a span of a table copied again lands in one transaction on
+    #: this target (`repair_range`)
+    ONE_TRANSACTION_A_RANGE = False
+
+    def repair_found(self, db, table):
+        """{missing, changed, extra: [key as canonical text]} the last check
+        named for `table` - {} where it named none - or None where this
+        engine's drilldown cannot be read so."""
+        return self._drill_tables(db).get(table, {})
+
+    def _leaves_kept(self, db):
+        """The tables the last check kept differing leaves for
+        (`leaves.kept_leaves`)."""
+        return sorted(p.name[len("data-"):-len(".leaves")] for p in
+                      self.hop.report_dir(db).glob("data-*.leaves"))
+
+    def repair_leaves(self, db, table):
+        """The leaves the last check kept for `table`: which spans of its key
+        differ and how many rows each side holds in them; None where it
+        kept none."""
+        import json
+        got = self._read_drill(db, table, "leaves")
+        return json.loads(got[0]) if got else None
+
+    def repair_sides(self, db, table):
+        """`table` as a repair reads and writes it (`repairways.Sides`): the
+        pair's two tables and column plan, or this engine's own table on
+        both sides; None where its key cannot be lined up across them."""
+        from ..repairways import Sides
+        src = getattr(self, "src_engine", None)
+        if src is not None:
+            pairs, _, _, _ = self.match_tables(
+                src.neutral_tables("src", db),
+                self.dst_engine.neutral_tables("dst", db), self._rename)
+            match = [(s, d) for s, d in pairs if self._leaf(s) == table]
+            if len(match) != 1:
+                return None
+            (src_t, dst_t), dst = match[0], self.dst_engine
+            sc, dc, _ = self._column_plan(src_t, dst_t, db)
+        else:
+            src = dst = self
+            src_t = dst_t = table
+            sc, dc, _ = self._comparable_columns(db, self, table, self, table)
+        key = list(src.neutral_key("src", db, src_t) or [])
+        names = [n for n, _ in sc]
+        if not key or any(k not in names for k in key):
+            return None
+        dkey = [dc[names.index(k)][0] for k in key]
+        return Sides(src, src_t, list(sc), dst, dst_t, list(dc), key, dkey)
+
+    def repair_range_ready(self, db, sides):
+        """Why a span of `sides`' key cannot be copied again here the way
+        the move copies a range, or None: both sides select a span of the
+        key in SQL of their own, the target to empty it and the source to
+        read it."""
+        for side, eng in (("source", sides.src), ("target", sides.dst)):
+            if not eng.SQL_DIALECT or not eng.RESUMES_BY_KEY:
+                return (f"the {side} does not read a span of the key in SQL"
+                        " of its own")
+        return None
+
+    def repair_range(self, db, sides, lo, hi, log):
+        """[lo, hi) of `sides`' integer key on the target replaced by the
+        source's rows, the way the move's pair copies a range - that span
+        emptied, then copied and read back batch by batch (`copy_range`).
+        Returns the rows copied."""
+        pair = self if getattr(self, "src_engine", None) is not None \
+            else self._as_pair()
+        return pair.copy_range(db, sides.src_t, sides.dst_t, int(lo) - 1,
+                               int(hi) - 1)
 
     def _drill_tables(self, db):
         """Tables the last check left a drilldown for, and what it found.
@@ -4062,19 +4191,21 @@ class Engine:
         takes as carried - its largest, its 99th percentile and its mean -
         what one worker holds depends on the widest row, not the table's
         average. `exact` where every row was measured. Here: the first
-        `SIZE_SAMPLE` rows of each table through the neutral reader."""
+        `SIZE_SAMPLE` rows of each table through the neutral reader, a few
+        at a time and only their sizes kept (`pieces.sample_sizes`) - read
+        in one go, a sample of wide rows was two thousand of them held at
+        once before the move they were to size had begun."""
+        from .. import pieces
         out = {}
         for t in (tables if tables is not None
                   else self.neutral_tables(side, db)):
             try:
                 cols = self.neutral_columns(side, db, t)
-                rows, after = self.neutral_read(side, db, t, cols, None,
-                                                self.SIZE_SAMPLE)
+                lengths, whole = pieces.sample_sizes(
+                    self, side, db, t, cols, self.SIZE_SAMPLE)
             except Exception:  # noqa: BLE001 - that table is not sized
                 continue
-            out[t] = sizes_of([_row_bytes(r) for r in rows],
-                              exact=after is None
-                              or len(rows) < self.SIZE_SAMPLE)
+            out[t] = sizes_of(lengths, exact=whole)
         return out
 
     #: rows from which a table copied from its start is written with its
@@ -4502,7 +4633,13 @@ class Engine:
             hop.report_dir = report_dir
         else:
             hop.report_dir = own
-        return HeteroEngine(hop)
+        pair = HeteroEngine(hop)
+        # the rows a repair by spans leaves to be repaired by key, where
+        # this engine's rows are repaired by a pair made for the call
+        # (`_only_named`); never into the pair kept for mapped columns
+        if not within and "_repair_only" in self.__dict__:
+            pair.__dict__["_repair_only"] = self.__dict__["_repair_only"]
+        return pair
 
     def columns_pair(self):
         """The pair machinery that carries, compares and repairs the tables
@@ -4911,6 +5048,14 @@ class Engine:
                     # side says which it committed last (`marks`)
                     self.origin_mark(side, db)
                 yield
+                if fencing.armed(self.hop) is not None:
+                    # last before the commit: a writer that lost its hold
+                    # is refused by the target here (`fencing`)
+                    cur = conn.cursor()
+                    try:
+                        fencing.hold(self, side, db, cur)
+                    finally:
+                        cur.close()
                 conn.commit()
             except BaseException:
                 try:
@@ -4926,6 +5071,10 @@ class Engine:
     #: whether this engine's change reader leaves out the transactions a
     #: two-way tail applied (`twoway`)
     READS_ORIGIN_MARK = False
+    #: the dialect migkit's own rows are written in here (`shared`,
+    #: `fencing`), None where the engine keeps none - it then answers
+    #: `own_table(side, db)` and `own_name(side, db)` as well
+    OWN_DIALECT = None
 
     def _origin_row(self):
         """The row of `migkit_origin` this thread's batch moves
@@ -5391,20 +5540,8 @@ class Counted:
                 "sample": kept, "columns": columns}
 
 
-def _row_bytes(row):
-    """Bytes one row of values takes as carried: its strings and bytes by
-    length, anything else as eight."""
-    n = 0
-    for v in row:
-        if isinstance(v, (bytes, bytearray, memoryview)):
-            n += len(v)
-        elif isinstance(v, str):
-            n += len(v.encode("utf-8", "surrogatepass"))
-        elif v is None:
-            n += 1
-        else:
-            n += 8
-    return n + 1
+#: bytes one row of values takes as carried (`pieces.row_bytes`)
+_row_bytes = row_bytes
 
 
 def sizes_of(lengths, exact=False, rows=None):
@@ -5464,6 +5601,10 @@ class NeutralCopier:
     engine and hands the table to that one. A fix to the copier is then a
     fix for every engine it serves.
     """
+    #: what one worker holds is then the pair's copier's, whose reads are
+    #: `PAIR_ROWS` rows or `BATCH_BYTES` at most (`model.worker_memory`)
+    COPY_MEMORY = PAIR_MEMORY
+    COPY_BATCH, COPY_BYTES = PAIR_ROWS, BATCH_BYTES
 
     def list_move_tables(self, db):
         return self._as_pair().list_move_tables(db)

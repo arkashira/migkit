@@ -99,10 +99,13 @@ _FACTS = {
 
 
 def human_bytes(n):
-    """`12.4 GB`, not `13314398618`."""
+    """`12.4 GiB`, not `13314398618` - the one way a size or a rate is
+    said. Units of 1,024 named as 1,024s: this said "931.3 GB" for 10^12
+    bytes and "75 MB/s" for a published 78.75 MB/s while the machine's
+    memory was said in GiB (audit 2026-10-01, DU24)."""
     n = float(n)
-    for unit in ("bytes", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
+    for unit in ("bytes", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if abs(n) < 1024 or unit == "PiB":
             return (f"{int(n)} {unit}" if unit == "bytes"
                     else f"{n:.1f} {unit}")
         n /= 1024
@@ -183,6 +186,8 @@ class Tally:
 
 
 def _duration(seconds):
+    """The one way a duration is said (`util.human_secs` is this): rounded
+    to the second, then `59s`, `1m00s`, `1h00m`."""
     s = int(round(seconds))
     if s < 60:
         return f"{s}s"
@@ -193,24 +198,12 @@ def _duration(seconds):
     return f"{h}h{m:02d}m"
 
 
-#: `scheme://user:password@host` in any argument
-_URI_PASSWORD = re.compile(r"(://[^:/@\s]+:)[^@\s]*@")
-
-
 def redact(argv, secrets=()):
-    """`argv` as one line with every secret replaced by `***`.
-
-    Two ways a secret reaches a command line: a URI with the password in
-    it, and a value passed on its own. The URI form is found by shape; the
-    rest by value, so a password that happens to appear inside another
-    argument is caught too.
-    """
-    line = " ".join(str(a) for a in argv)
-    line = _URI_PASSWORD.sub(r"\1***@", line)
-    for s in secrets:
-        if s:
-            line = line.replace(str(s), "***")
-    return line
+    """`argv` as one line with every secret replaced by `***`: by shape (an
+    address's password, `password=...`) and by value, so a password in an
+    argument of its own is caught too (`redact.Redactor`)."""
+    from .redact import Redactor
+    return Redactor(secrets=secrets).argv(argv)
 
 
 class DebugLog:
@@ -225,10 +218,10 @@ class DebugLog:
         self.path = Path(path)
 
     def command(self, argv, secrets=()):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-        with self.path.open("a") as fh:
-            fh.write(f"{stamp} $ {redact(argv, secrets)}\n")
+        from .durable import append_line
+        from .util import stamp
+        append_line(self.path, f"{stamp()} $ {redact(argv, secrets)}",
+                    sync=False)
 
 
 class Step(str):
@@ -256,18 +249,20 @@ class Step(str):
 _PREFIX = r"(?im)^[ \t]*{name}(?:\[\d+\])?:[ \t]*"
 
 
-def without_programs(text, names):
+def without_programs(text, names, instead="the copy"):
     """A program's message with the program taken out of it.
 
     What a failed copy printed is often the only useful diagnosis - the
     database's own error (`password authentication failed`, `connection
     refused`) is in there, and that is the database's vocabulary, which the
-    operator's DBA reads. The program's name around it is not.
+    operator's DBA reads. The program's name around it is not. `instead`
+    is what stands in its place: a release note's "the copy is the schema
+    differ" said less than "a program migkit drives is".
     """
     for name in sorted({str(n) for n in names if n}, key=len, reverse=True):
         text = re.sub(_PREFIX.format(name=re.escape(name)), "", text)
         text = re.sub(rf"(?i)(?<![\w/-]){re.escape(name)}(?![\w-])",
-                      "the copy", text)
+                      instead, text)
     return text.strip()
 
 

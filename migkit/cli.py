@@ -1,6 +1,8 @@
 import contextlib
 import json
+import os
 import socket
+import threading
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,8 +17,24 @@ from .engines import get_engine
 from .util import without_secret, Timer, human_int, human_secs, which
 from . import __version__
 
-console = Console(highlight=False)
+#: soft-wrapped: output that is not a terminal was cut at 80 columns, and a
+#: CI log read "verdict: different" on one line and its path on the next
+console = Console(highlight=False, soft_wrap=True)
 QUIET = False
+
+
+def _esc(text):
+    """Text from a server, a file or an exception, shown as it is: a
+    bracket in it is not markup - `[dbo].[orders] src=10 dst=7` printed as
+    `. src=10 dst=7`, and a `[/x]` in one raised before `summary.json` was
+    written."""
+    from rich.markup import escape
+    return escape(str(text))
+
+
+def say_raw(text):
+    """A line of data, SQL or a server's words, printed as it is."""
+    console.print(str(text), markup=False, highlight=False)
 
 
 def chat(msg):
@@ -26,7 +44,12 @@ def chat(msg):
 
 def _lock(hop):
     """The hop's write lease, held while the operation runs and renewed
-    by a heartbeat (`migkit.lease`). `.unlink()` releases it."""
+    by a heartbeat (`migkit.lease`). `.unlink()` releases it. Inside a
+    move that holds a hop with a standby (`ha`), the holding itself."""
+    from . import ha
+    got = ha.held(hop)
+    if got is not None:
+        return got.nested()
     from .lease import Lease
     from .state import run_state
     lease = Lease(hop.report_dir() / "lease.json",
@@ -60,6 +83,9 @@ class _Checkpoint(dict):
         self.path = path
         self.remote = remote
         self._lock = threading.RLock()
+        # the changes made under the lock (`changed`), and the last of them
+        # a save has written
+        self._gen = self._saved = 0
         # the entries this process's copiers write into: theirs, whatever
         # another machine saved since
         self._mine = set()
@@ -79,28 +105,56 @@ class _Checkpoint(dict):
         self._mine.add(key)
         super().__setitem__(key, value)
 
-    def save(self):
+    def changed(self):
+        """One change made under the lock (`ranges.started`,
+        `ranges.finished`): its number, for `save(upto=...)`."""
+        with self._lock:
+            self._gen += 1
+            return self._gen
+
+    def save(self, upto=None):
         """Written whole or not at all - to a file beside it, then put in
         its place: a crash while writing left half a checkpoint, which the
         next run could not read. Tables copied side by side save through
-        one lock, and a table's entry that grows while it is written out is
-        written again."""
+        one lock; `upto`, a change made under it (`changed`), is not
+        written again where a save that began after it has written it -
+        ranges finishing side by side while one save writes are written by
+        the next, one save for all of them, not one each.
+
+        Compact: indented, the encoder falls back to its slow pure-Python
+        path - measured (CPython 3.12, in-process) on the checkpoint of 200
+        tables of 50 ranges each, 1.7 MB: 26.5 ms a save indented, 4.2 ms
+        compact, and such a copy saves twice a range."""
+        from . import failpoint
         with self._lock:
+            if upto is not None and self._saved >= upto:
+                return
             if self.remote is not None:
                 self._merge_into_remote()
-            for _ in range(20):
-                try:
-                    text = json.dumps(self, indent=1)
-                    break
-                except RuntimeError:
-                    # an entry changed size under the encoder: another
-                    # table's copier saving its progress
-                    continue
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            gen = self._gen
+            text = self._encoded()
+            tmp = self.path.with_name(
+                f"{self.path.name}.{os.getpid()}.{threading.get_ident()}"
+                ".tmp")
             tmp.write_text(text)
-            from . import failpoint
             failpoint.hit("checkpoint.written")
             tmp.replace(self.path)
+            self._saved = gen
+
+    def _encoded(self):
+        """The checkpoint as JSON. A copier that adds a field to its own
+        table's entry outside the lock while it is encoded makes the
+        encoder stop (`dictionary changed size`); encoded again, a bounded
+        number of times - the loop that did this ended in an unbound name
+        on its last turn and took the move down with it."""
+        for _ in range(100):
+            try:
+                return json.dumps(self, separators=(",", ":"), default=str)
+            except RuntimeError:
+                time.sleep(0.001)
+        raise SystemExit(f"the move's checkpoint {self.path} kept changing"
+                         " while it was written; nothing past the last save"
+                         " is lost, and the next run goes on from it")
 
     def discard(self):
         self.path.unlink(missing_ok=True)
@@ -178,25 +232,133 @@ def _sharing(hop):
 
 #: a database's run files another machine needs to carry a stream on
 RUN_FILES = ("tail-token.json", "tail-shape.json", "tail-source.json",
-             "copy-position.json", "tail-tables.json", "tail-copy.json")
+             "copy-position.json", "tail-tables.json", "tail-copy.json",
+             "copy-before.json")
 
 
 def _shared(hop, d):
     """This database's run files, fetched from the hop's run state where
     this machine lacks them - or None without one."""
+    from . import ha
     from .state import Mirror, run_state
+    pushed = ha.mirror(hop, d)
+    if pushed is not None:
+        # a hop with a standby: its files go with the holding's own pushes,
+        # each over no newer holder's
+        return pushed
     remote = run_state(hop)
     if remote is None:
         return None
     return Mirror(remote, [hop.report_dir(d) / n for n in RUN_FILES]).fetch()
 
 
+@contextlib.contextmanager
+def _refusing():
+    """A guard's stop, as the refusal it is (`verdict.Refused`: said in
+    its own words, exit 4) rather than a command that failed."""
+    from .verdict import Refused, Usage
+    try:
+        yield
+    except (Refused, Usage):
+        raise
+    except SystemExit as e:
+        if isinstance(e.code, str) and e.code.strip():
+            raise Refused(e.code) from e
+        raise
+
+
 def _interlock(hop, eng, d, go):
     """The interlock on the target, at the start of a write step
     (`interlock.before_write`)."""
     from . import interlock
-    return interlock.before_write(hop, eng, d, go,
-                                  lambda m: console.print(f"  {m}"))
+    with _refusing():
+        return interlock.before_write(hop, eng, d, go,
+                                      lambda m: console.print(
+                                          f"  {_esc(m)}"))
+
+
+def _refuse_unmasked(hop, stream):
+    """What a write that carries rows as the source holds them does to a
+    hop that masks columns on the way: refused, in its words."""
+    from .verdict import Refused
+    if stream:
+        # the masking is the dump's; a change read after it is the
+        # source's own row, and would land unmasked
+        raise Refused(f"{hop.name} masks columns on the way, and a change"
+                      " stream would carry their real values into the"
+                      " target: a hop that masks is copied (--mode full),"
+                      " not followed. Nothing has been started")
+    raise Refused(f"{hop.name} masks columns on the way, and a repair of"
+                  " rows writes the source's values as they are, unmasked:"
+                  " move those tables again with --mode full, which masks"
+                  " them; --kind sequences or --kind schema repairs the"
+                  " rest. Nothing has been started")
+
+
+def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
+                 approve=None, carries_rows=False, preflight=None, db=""):
+    """Every command that writes passes here before its first write - a
+    move, a stream and its teardown, a repair, `sync`'s flows and sweep, a
+    rollback, a converted schema - so none skips what another holds. Three
+    did: `sync --mode migrate/stream --go`, `sync --go`, and `tail` and
+    `replicate`, which streamed real values into a hop that masks, wrote
+    to a `goal: verify` hop and tore a stream down with no approval.
+
+    In order: the hop's goal allows writing (`hopkeys.refuse_writes`); a
+    hop that masks columns is not written rows as the source holds them -
+    a stream (`mode` cdc or full+cdc, not a teardown) or a repair of rows
+    (`carries_rows`); what would stop the step before its end, known now
+    (`ready`, where `preflight` names the mode); the approvals the hop
+    asks for `step`, for each of `approve` (`dbs` where not given); the
+    target held to what the plan showed for each of `dbs`
+    (`interlock.before_write`).
+
+    With `go`, the first that says no stops the command before anything
+    is written (`verdict.Refused`, exit 4); without, the plan says what
+    would stop it ("with --go this stops: ...") and goes on - a dry run
+    asks what `--go` asks."""
+    from . import approvals, hopkeys, ready
+    from .verdict import Refused
+
+    def stop(said):
+        if go:
+            raise Refused(said)
+        console.print(f"  with --go this stops: {_esc(said)}")
+    try:
+        with _refusing():
+            hopkeys.refuse_writes(hop, what)
+    except Refused as e:
+        stop(str(e.code))
+    stream = mode in ("cdc", "full+cdc") and not drop
+    if (hop.options or {}).get("mask_on_write") and (stream or carries_rows):
+        try:
+            _refuse_unmasked(hop, stream)
+        except Refused as e:
+            stop(str(e.code))
+    if preflight is not None:
+        if go:
+            with _refusing():
+                ready.gate(hop, eng, [db] if db else None, preflight, drop,
+                           lambda m: console.print(f"  {m}"))
+        else:
+            # the plan says them where the run would stop on them, and
+            # what a person does before it
+            for i in ready.stops(hop, eng, [db] if db else None,
+                                 preflight, drop):
+                console.print(f"  with --go this stops: {_esc(i)}")
+    if step:
+        for d in (approve if approve is not None else (dbs or [db])):
+            if go:
+                with _refusing():
+                    approvals.require(hop, step, d,
+                                      lambda m: console.print(
+                                          f"  {_esc(m)}"))
+            elif approvals.needed(hop, step):
+                console.print(f"  with --go this waits for the {step}"
+                              " approval the hop asks for"
+                              + (f" ({_esc(d)})" if d else ""))
+    for d in dbs or ():
+        _interlock(hop, eng, d, go)
 
 
 def _tables_to_copy(hop, eng, d, table=""):
@@ -223,8 +385,10 @@ def _keep_out(hop, eng, d, tables, go, whole=False):
     if tables is None:
         _interlock(hop, eng, d, go)
         return []
-    kept = interlock.before_copy(hop, eng, d, tables, go,
-                                 lambda m: console.print(f"  {m}"), whole)
+    with _refusing():
+        kept = interlock.before_copy(hop, eng, d, tables, go,
+                                     lambda m: console.print(f"  {_esc(m)}"),
+                                     whole)
     if not kept:
         return list(tables)
     interlock.leave_out(hop, d, kept)
@@ -249,13 +413,165 @@ def _require_configured(hop):
 class _Step(click.Command):
     """Every command as one run (`session.step`): its trace, the ways
     chosen in it kept with its evidence, and the hop's receivers told of
-    a failure, a fallback or a writing run done."""
+    a failure, a fallback or a writing run done.
+
+    And every command ends here, the one place that says how: its
+    schedule's gate, asked once before it runs (`schedule.gate`; a command
+    another invokes is not asked again, and a slot not due is said and
+    ends 0); SIGTERM taken as Ctrl-C, so a service manager's stop runs the
+    same cleanup; and the exit code from one table (`verdict.EXIT`,
+    `verdict.VERDICTS`) - a verdict's own, 2 for flags that do not go
+    together, 3 for a stop part way, 4 for a guard that refused, 130 for
+    an interrupt - where every stop, traceback and Ctrl-C ended 1, the
+    code of a difference. What stopped it is said in migkit's words: a
+    program's name taken out, a password never, the traceback kept in the
+    hop's debug log rather than shown (`_stopped`)."""
 
     def invoke(self, ctx):
-        from . import session
-        with session.step(ctx.info_name, ctx.params,
-                          lambda m: console.print(f"[yellow]{m}[/yellow]")):
-            return super().invoke(ctx)
+        from . import schedule, session
+        slot, code = None, 0
+        hop = None
+        with _term_as_interrupt():
+            try:
+                hop = _scheduled_hop(ctx)
+                if hop is not None:
+                    slot = schedule.gate(hop, ctx.info_name, console.print)
+                with session.step(ctx.info_name, ctx.params,
+                                  lambda m: console.print(
+                                      f"[yellow]{_esc(m)}[/yellow]")):
+                    return super().invoke(ctx)
+            except click.exceptions.ClickException as e:
+                code = e.exit_code
+                raise
+            except (click.exceptions.Exit, click.exceptions.Abort):
+                raise
+            except BaseException as e:  # noqa: BLE001 - every end, mapped
+                code = _stopped(e, ctx)
+                raise SystemExit(code) from None
+            finally:
+                if slot is not None:
+                    from .verdict import ran
+                    slot.finished(ran(code))
+
+
+@contextlib.contextmanager
+def _term_as_interrupt():
+    """SIGTERM - a service manager's stop, `kill` - taken as Ctrl-C for the
+    whole command, so every `finally` and every started program's stop
+    runs: it ended Python where it stood, leaving a copier's pool and a
+    target's dropped indexes behind. Only the main thread can take a
+    signal; elsewhere nothing changes."""
+    import signal
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        before = signal.signal(signal.SIGTERM, stop)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def _scheduled_hop(ctx):
+    """The hop a command run by its schedule (`MIGKIT_SCHEDULED=1`) is
+    for; None for a command run by hand, or one with no hop."""
+    from . import schedule
+    name = ctx.params.get("hop_name")
+    if not name or not schedule.flag("MIGKIT_SCHEDULED"):
+        return None
+    return get_hop(name)
+
+
+def _debug_log(ctx):
+    """The run's debug log, where the traceback of a stop is kept: the
+    hop's reports where the command has a hop, else beside every hop's."""
+    from . import config as _config
+    name = ctx.params.get("hop_name")
+    try:
+        root = get_hop(name).report_dir() if name else _config.REPORTS
+    except BaseException:  # noqa: BLE001 - a hop that does not load
+        root = _config.REPORTS
+    return Path(root) / "commands.log"
+
+
+def _secrets(ctx):
+    """The hop's passwords, for taking out of what is said."""
+    name = ctx.params.get("hop_name") if ctx is not None else None
+    if not name:
+        return ()
+    try:
+        hop = get_hop(name)
+        return (hop.source.password, hop.target.password)
+    except BaseException:  # noqa: BLE001 - nothing more to hide then
+        return ()
+
+
+def _clean(text, secrets=(), raw=False):
+    """Words that reach the operator: no program migkit drives named, and
+    no password - the hop's own or one in an address; for a program's or
+    a driver's own message (`raw`), the database's words where its log
+    holds them."""
+    from . import export
+    from .wording import database_words, redact
+    text = str(text)
+    said = database_words(text) if raw else ""
+    return export.words(redact([said or text], secrets))
+
+
+def _stopped(e, ctx):
+    """The exit code a command ends with for `e`, having said what
+    stopped it: the one table every command's end reads."""
+    import traceback
+
+    from . import schedule, verdict
+    from .lease import Held
+    if isinstance(e, KeyboardInterrupt):
+        console.print("[yellow]stopped - what was saved as it went is"
+                      " kept, and the next run goes on from it[/yellow]")
+        return verdict.EXIT["interrupted"]
+    if isinstance(e, schedule.NotDue):
+        return verdict.EXIT["done"]
+    if isinstance(e, SystemExit):
+        if e.code is None:
+            return verdict.EXIT["done"]
+        if isinstance(e.code, int) and not isinstance(e.code, bool):
+            return e.code
+        said = _clean(e.code, _secrets(ctx))
+        if said:
+            click.echo(said, err=True)
+        if isinstance(e, verdict.Usage):
+            return verdict.EXIT["usage"]
+        if isinstance(e, (verdict.Refused, Held)):
+            return verdict.EXIT["refused"]
+        return verdict.EXIT["failed"]
+    # anything else: the database's or the program's words, the traceback
+    # to the debug log - nobody reads a traceback for a server's refusal
+    where, secrets = _debug_log(ctx), _secrets(ctx)
+    try:
+        where.parent.mkdir(parents=True, exist_ok=True)
+        with where.open("a") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S") + " "
+                    + _clean("".join(traceback.format_exception(
+                        type(e), e, e.__traceback__)), secrets) + "\n")
+    except OSError:
+        where = None
+    said = _clean(str(e), secrets, raw=True)
+    if said == _clean(str(e), secrets):
+        # no words of the database's in it: its last line, which is where
+        # a program's or a driver's message says what went wrong
+        said = (said.strip().splitlines() or [""])[-1]
+    click.echo(f"{ctx.info_name} stopped: "
+               + (said or type(e).__name__)[:600]
+               + (f"\n(the details are in {where})" if where else ""),
+               err=True)
+    return verdict.EXIT["failed"]
 
 
 class _Commands(click.Group):
@@ -272,10 +588,7 @@ def main(quiet):
     watch the load, prove every row landed, and repair what did not.
 
     \b
-    engines: postgres mysql mssql mongodb redis kafka sqlite
-             any pair of those across engines (hetero)
-             generic (warehouses and other SQL engines: snowflake,
-             bigquery, redshift, clickhouse, oracle, trino, duckdb, ...)
+    {engines}
 
     \b
     typical flow:
@@ -294,6 +607,27 @@ def main(quiet):
     replicate, tail, setup-target, ui, state, monitor, ...) still work."""
     global QUIET
     QUIET = quiet
+
+
+def _engine_lines():
+    """The engines of `migkit --help`, read off `engines.NAMES`: the
+    lines written by hand named 7 engines and put ClickHouse and Oracle
+    under the generic one while the code had 34 (audit LG16)."""
+    from .engines import NAMES
+    lines, line = [], "engines:"
+    for name in (n for n in NAMES if n not in ("hetero", "generic")):
+        if len(line) + 1 + len(name) > 72:
+            lines.append(line)
+            line = " " * 12
+        line += " " + name
+    # the docstring's lines keep their indent until click takes it off
+    return "\n".join(lines + [line,
+                              " " * 13 + "any two of them as a pair (hetero),"
+                              " and any other SQL",
+                              " " * 13 + "engine by its URL (generic)"])
+
+
+main.help = main.help.replace("{engines}", _engine_lines())
 
 
 def _hops_table(required=True):
@@ -474,79 +808,136 @@ def doctor(install):
             console.print("  it cannot install these here; they need"
                           f" installing by hand: {', '.join(manual)}")
     hops, raw = _doctor_config()
-    from . import hopkeys
-    for name, hop in hops.items():
-        for _, line in hopkeys.said_by_doctor(hop, raw.get(name) or {}):
-            console.print(f"{name}: [yellow]{line}[/yellow]")
-        rtt = {}
-        reached = []
-        for side, ep in (("src", hop.source), ("dst", hop.target)):
-            if not ep.configured():
-                console.print(f"{name} {side}: not configured")
-                continue
-            try:
-                eng = get_engine(hop)
-                dbs = eng.databases() if side == "src" else None
-                note = f"{len(dbs)} dbs" if dbs else "reachable"
-                role = ""
-                if hasattr(eng, "_in_recovery"):
-                    try:
-                        role = (" [red]READER/read-only[/red]"
-                                if eng._in_recovery(side, "postgres")
-                                else " [dim]writer[/dim]")
-                    except Exception:
-                        role = ""
-                console.print(f"{name} {side}: [green]ok[/green]"
-                              f" ({ep.host}, {note}){role}")
-                one = (hop.databases or [dbs[0] if dbs else ""])[0]
-                said, rtt[side] = _link_said(
-                    eng, side, one, "source" if side == "src" else "target")
-                if said:
-                    console.print(f"  {said}")
-                said = _leg_said(eng, side, one, ep)
-                if said:
-                    console.print(f"  {said}")
-                said = _two_way_said(hop, eng, one) if side == "dst" else ""
-                if said:
-                    console.print(f"  {said}")
-                reached.append(side)
-            except Exception as e:
-                console.print(f"{name} {side}: [red]FAIL[/red] {e}")
-        said = _placement_said(rtt, hop)
+    failed = False
+    if hops:
+        # every hop at once, and each hop's two sides at once: a host that
+        # does not answer costs its connect wait once, not once for every
+        # side of every hop after it; what each says is kept to its hop
+        with ThreadPoolExecutor(max_workers=min(8, len(hops))) as pool:
+            said = list(pool.map(
+                lambda item: _doctor_hop(item[0], item[1],
+                                         raw.get(item[0]) or {}),
+                hops.items()))
+        for lines, bad in said:
+            for line in lines:
+                console.print(line)
+            failed = failed or bad
+    if failed:
+        from .verdict import EXIT
+        # a side that did not answer, or a connection that is not what the
+        # hop asks for: said above, and the command ends as a stop - it
+        # ended 0 whatever doctor found
+        raise SystemExit(EXIT["failed"])
+
+
+def _doctor_side(name, hop, eng, side, ep):
+    """(lines, round trip ms or None, reached, failed) of one side."""
+    from . import sizing
+    from .guide import _looking_at
+    out = []
+    if not ep.configured():
+        return [f"{_esc(name)} {side}: not configured"], None, False, False
+    try:
+        dbs = eng.databases() if side == "src" else None
+        note = f"{len(dbs)} dbs" if dbs else "reachable"
+        one = (hop.databases or [dbs[0] if dbs else ""])[0]
+        # a reader by what the server says of itself, as `init` asks it
+        # (`sizing.capacity`), on every engine that says
+        e, key = _looking_at(eng, hop, "source" if side == "src"
+                             else "target")
+        replica = sizing.capacity(e, key, one if side == "src"
+                                  else hop.target_db(one) if one
+                                  and key == "src" else one).get("replica")
+        role = {True: " [red]READER/read-only[/red]",
+                False: " [dim]writer[/dim]"}.get(replica, "")
+        out.append(f"{_esc(name)} {side}: [green]ok[/green]"
+                   f" ({_esc(ep.host)}, {note}){role}")
+        said, rtt = _link_said(eng, side, one,
+                               "source" if side == "src" else "target")
         if said:
-            console.print(f"{name}: {said}")
-        if len(reached) == 2:
-            try:
-                _doctor_setup(name, hop, eng)
-            except Exception as e:  # noqa: BLE001 - a probe never fails it
-                why = (str(e).splitlines() or [type(e).__name__])[-1]
-                console.print(f"{name}: what the servers allow could not"
-                              f" be asked - {why[:160]}")
-        for line in _decisions_said(hop):
-            console.print(f"{name}: {line}")
-        # read from what the freeze recorded, so it is said even when the
-        # target cannot be reached right now
-        from . import cutover, freeze, sourcechange
-        for line in cutover.said_by_doctor(hop):
-            console.print(f"{name} [yellow]cutover[/yellow]: {line}")
-        for line in sourcechange.said_by_doctor(hop):
-            console.print(f"{name} [yellow]source[/yellow]: {line}")
-        if hop.source.configured() and hop.target.configured():
-            try:
-                e = get_engine(hop)
-                _, what = cutover.summary(hop, e,
-                                          hop.databases or e.databases())
-                console.print(f"{name}: {what}")
-            except Exception:  # noqa: BLE001 - a probe never fails doctor
-                pass
-        for d in (hop.databases or []):
-            held = freeze.state(hop, d)
-            if held and held.get("roles"):
-                console.print(f"{name} dst: {d} is kept from the"
-                              " application's writes -"
-                              f" {', '.join(sorted(held['roles']))};"
-                              " tearing the stream down at cutover, or"
-                              " rollback --apply, gives them back")
+            out.append(f"  {said}")
+        said = _leg_said(eng, side, one, ep)
+        bad = said.startswith("[red]FAIL")
+        if said:
+            out.append(f"  {said}")
+        said = _two_way_said(hop, eng, one) if side == "dst" else ""
+        if said:
+            out.append(f"  {_esc(said)}")
+        return out, rtt, True, bad
+    except Exception as e:  # noqa: BLE001 - said, and doctor ends failed
+        out.append(f"{_esc(name)} {side}: [red]FAIL[/red]"
+                   f" {_esc(_clean(e, (ep.password,), raw=True))}")
+        return out, None, False, True
+
+
+def _doctor_hop(name, hop, raw_hop):
+    """(lines, failed) of one hop for doctor: one engine for all it asks,
+    both sides asked at once."""
+    from . import capabilities, hopkeys
+    out, failed = [], False
+    for _, line in hopkeys.said_by_doctor(hop, raw_hop):
+        out.append(f"{_esc(name)}: [yellow]{_esc(line)}[/yellow]")
+    try:
+        eng = get_engine(hop)
+    except Exception as e:  # noqa: BLE001 - said, and doctor ends failed
+        out.append(f"{_esc(name)}: [red]FAIL[/red]"
+                   f" {_esc(_clean(e, (hop.source.password, hop.target.password), raw=True))}")
+        return out, True
+    rtt, reached = {}, []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sides = list(pool.map(
+            lambda sd: (sd[0],) + _doctor_side(name, hop, eng, *sd),
+            (("src", hop.source), ("dst", hop.target))))
+    for side, lines, took, ok, bad in sides:
+        out += lines
+        rtt[side] = took
+        if ok:
+            reached.append(side)
+        failed = failed or bad
+    said = _placement_said(rtt, hop)
+    if said:
+        out.append(f"{_esc(name)}: {said}")
+    if len(reached) == 2:
+        try:
+            _doctor_setup(name, hop, eng, out.append)
+        except Exception as e:  # noqa: BLE001 - a probe never fails it
+            why = (str(e).splitlines() or [type(e).__name__])[-1]
+            out.append(f"{_esc(name)}: what the servers allow could not"
+                       f" be asked - {_esc(_clean(why, raw=True)[:160])}")
+    # what the commands will refuse on this engine, from the table they
+    # refuse by (`capabilities`) - not from the programs installed here
+    cannot = [capabilities.CAPABILITIES[c] for c in capabilities.CAPABILITIES
+              if capabilities.unavailable(hop.engine, c)]
+    known = not str(capabilities.unavailable(hop.engine, "schema")
+                    or "").startswith("migkit does not know")
+    if cannot and known:
+        out.append(f"{_esc(name)}: not on {_esc(hop.engine)} hops - "
+                   + "; ".join(cannot))
+    for line in _decisions_said(hop):
+        out.append(f"{_esc(name)}: {_esc(line)}")
+    # read from what the freeze recorded, so it is said even when the
+    # target cannot be reached right now
+    from . import cutover, freeze, sourcechange
+    for line in cutover.said_by_doctor(hop):
+        out.append(f"{_esc(name)} [yellow]cutover[/yellow]: {_esc(line)}")
+    for line in sourcechange.said_by_doctor(hop):
+        out.append(f"{_esc(name)} [yellow]source[/yellow]: {_esc(line)}")
+    if hop.source.configured() and hop.target.configured():
+        try:
+            _, what = cutover.summary(hop, eng,
+                                      hop.databases or eng.databases())
+            out.append(f"{_esc(name)}: {_esc(what)}")
+        except Exception:  # noqa: BLE001 - a probe never fails doctor
+            pass
+    for d in (hop.databases or []):
+        held = freeze.state(hop, d)
+        if held and held.get("roles"):
+            out.append(f"{_esc(name)} dst: {_esc(d)} is kept from the"
+                       " application's writes -"
+                       f" {_esc(', '.join(sorted(held['roles'])))};"
+                       " tearing the stream down at cutover, or"
+                       " rollback --apply, gives them back")
+    return out, failed
 
 
 def _doctor_config():
@@ -592,20 +983,22 @@ def _decisions_said(hop):
     return out[::-1]
 
 
-def _doctor_setup(name, hop, eng):
+def _doctor_setup(name, hop, eng, say=None):
     """Who runs each side, and whether what the hop's goal needs of the
     two servers is there - asked again each time, the DBA's script
     written again for what is still missing, or taken away."""
     from . import clouds, dba
     from .guide import _looking_at, record
+    say = say or console.print
+    name = _esc(name)
     wheres = {}
     for side in ("source", "target"):
         e, key = _looking_at(eng, hop, side)
         ep = hop.source if side == "source" else hop.target
         wheres[side] = clouds.of(e, key, ep)
         if wheres[side].cloud:
-            console.print(f"{name} {side}: {wheres[side].label} (from"
-                          f" {' and '.join(wheres[side].evidence)})")
+            say(f"{name} {side}: {_esc(wheres[side].label)} (from"
+                f" {_esc(' and '.join(wheres[side].evidence))})")
     record(hop, {s: {"where": w.as_dict()} for s, w in wheres.items()})
     found = dba.needs(hop, eng, None, wheres)
     if not found:
@@ -614,16 +1007,16 @@ def _doctor_setup(name, hop, eng):
     lack = dba.missing(found)
     goal = hop.goal or "copy"
     if not lack:
-        console.print(f"{name}: [green]the servers allow everything goal"
-                      f" {goal} needs[/green]")
+        say(f"{name}: [green]the servers allow everything goal"
+            f" {goal} needs[/green]")
     for n in lack:
-        console.print(f"{name} {n.side}: [red]missing[/red] {n.what}"
-                      f" ({n.now})")
+        say(f"{name} {n.side}: [red]missing[/red] {_esc(n.what)}"
+            f" ({_esc(n.now)})")
     for side, p in written.items():
-        console.print(f"  what the DBA must run on the {side}: {p}")
+        say(f"  what the DBA must run on the {side}: {_esc(p)}")
     for n in (x for x in found if x.ok is None):
-        console.print(f"{name} {n.side}: {n.what} - could not be asked"
-                      f" ({n.now})")
+        say(f"{name} {n.side}: {_esc(n.what)} - could not be asked"
+            f" ({_esc(n.now)})")
 
 
 def _placement_said(rtt, hop=None):
@@ -653,13 +1046,11 @@ def _leg_said(eng, side, db, ep):
     """Whether the connection to a side is encrypted, as the database
     itself says of it, and what carries it: nothing is said of a side on
     this machine, where no row crosses a network."""
-    local = str(ep.host or "") in ("127.0.0.1", "localhost", "::1") and \
-        not (ep.options or {}).get("tunnel_to")
-    if local:
+    from . import tls
+    if tls.on_this_machine(ep):
         return ""
     # whether the certificate is checked is migkit's side of the
     # connection, which no server can say: a failure every run until it is
-    from . import tls
     try:
         pos = tls.posture(ep, eng.ENGINE_FAMILY or eng.CANON_ENGINE)
     except Exception:  # noqa: BLE001 - a probe never fails doctor
@@ -680,10 +1071,15 @@ def _leg_said(eng, side, db, ep):
             ", the certificate verified" if pos
             and pos["state"] == "verified" else "")
     through = (ep.options or {}).get("tunnel_to")
-    if through:
+    if through and tls.tunnel_kind(ep) == "ssh":
         return (f"not encrypted by the database; carried through the"
-                f" hop's tunnel to {through}, which is what protects it on"
-                " the way")
+                f" hop's SSH tunnel to {through}, which is what protects it"
+                " on the way")
+    if through:
+        return (f"[yellow]not encrypted by the database[/yellow]; carried"
+                f" by the tunnel's own command to {through}, which migkit"
+                " cannot vouch for. Ask the server for TLS, or carry it"
+                " through an SSH tunnel")
     return ("[yellow]not encrypted[/yellow]: every row crosses the network"
             " as it is. Ask the server for TLS and verify its certificate"
             " (sslmode verify-full, ssl-mode VERIFY_IDENTITY), or carry the"
@@ -825,69 +1221,135 @@ def _setup_target(hop_name, db):
     console.print(f"target preparation for {hop_name}"
                   f" (dry-run, run these yourself in order):\n")
     for d in dbs:
-        console.print(f"[bold]{d}[/bold]")
+        console.print(f"[bold]{_esc(d)}[/bold]")
         for step in eng.setup_target_plan(d):
-            console.print(f"  {step}")
+            say_raw(f"  {step}")
         console.print("")
     console.print("after this: migkit check --only schema, then start the mover"
                   " (see migkit advise)")
 
 
 def _convert_schema(hop_name, db, do_apply):
-    from . import hopkeys
     hop = get_hop(hop_name)
     _require_configured(hop)
-    if do_apply:
-        hopkeys.refuse_writes(hop, "creating the target's schema")
     eng = get_engine(hop)
     if not hasattr(eng, "convert_ddl"):
         raise SystemExit("--convert is for hetero hops,"
                          " same-engine hops use migkit schema HOP")
-    for d in ([db] if db else eng.databases()):
-        _interlock(hop, eng, d, do_apply)
+    dbs = [db] if db else eng.databases()
+    _guard_write(hop, eng, "creating the target's schema", dbs, do_apply)
+    for d in dbs:
         objects = eng.converted_objects(d)
         stmts = [s for _, s in objects]
         out = hop.report_dir(d) / "converted-schema.sql"
         out.write_text("\n\n".join(stmts) + "\n")
-        console.print(f"[bold]{d}[/bold]: {len(stmts)} statements -> {out}")
+        console.print(f"[bold]{_esc(d)}[/bold]: {len(stmts)} statements ->"
+                      f" {_esc(out)}")
         for stmt in stmts[:3]:
-            chat(f"  {stmt.splitlines()[0]} ...")
+            chat(f"  {_esc(stmt.splitlines()[0])} ...")
         left = [s for s in stmts if s.startswith("--")]
         for s in left:
             # the first line says why; a version kept under it, commented
             # out, is in the file for a person to start from
-            console.print(f"  [yellow]{s.splitlines()[0][3:]}[/yellow]")
+            console.print(f"  [yellow]{_esc(s.splitlines()[0][3:])}"
+                          "[/yellow]")
         from .storedcode import effort
         cost = effort.said(hop, d)
         if cost:
-            console.print(f"  effort: {cost}")
+            console.print(f"  effort: {_esc(cost)}")
         if do_apply:
             have = eng.target_names(d)
-            kept, failed, made = [], [], 0
-            for name, stmt in objects:
-                if stmt.startswith("--"):
-                    continue
-                if name in have:
-                    # the target's own, whatever it holds: `check` asks it
-                    # the same questions as the source instead
-                    kept.append(name)
-                    continue
-                try:
-                    eng.dst_engine.neutral_create_code("dst", d, stmt)
-                    made += 1
-                except Exception as e:  # noqa: BLE001 - listed below
-                    failed.append(f"{name}: "
-                                  f"{(str(e).strip().splitlines() or [''])[0]}")
-            _changelog(hop, {"op": "convert-schema", "db": d, "n": made})
-            console.print(f"  [green]{made} created on the target[/green]")
+            # the target's own, whatever it holds: `check` asks it the
+            # same questions as the source instead
+            kept = [n for n, st in objects if not st.startswith("--")
+                    and n in have]
+            todo = [(n, st) for n, st in objects if not st.startswith("--")
+                    and n not in have]
+            made, failed, whole = _create_converted(eng, d, todo)
+            _record_built(hop, eng, d, made)
+            _changelog(hop, {"op": "convert-schema", "db": d,
+                             "n": len(made)})
+            console.print(f"  [green]{len(made)} created on the"
+                          " target[/green]")
             if kept:
                 console.print(f"  already on the target, left as they are:"
-                              f" {', '.join(kept)}")
+                              f" {_esc(', '.join(kept))}")
             if failed:
-                raise SystemExit(f"{len(failed)} could not be created on the"
-                                 " target:\n  " + "\n  ".join(failed))
+                raise SystemExit(
+                    f"{len(failed)} could not be created on the target"
+                    + ("; nothing else was either - the schema is created"
+                       " in one transaction, whole or not at all" if whole
+                       else "") + ":\n  " + "\n  ".join(failed))
     if not do_apply:
         console.print("\ndry-run, review the file then add --apply")
+
+
+def _create_converted(eng, d, todo):
+    """([name made], [why each failed], whether it was one transaction):
+    the converted statements run on the target. A PostgreSQL target takes
+    them in one transaction on one connection, each under a savepoint so
+    every failure is named, and keeps none of them where one fails - it
+    took each on a connection of its own and kept half a schema. A target
+    whose DDL commits as it runs (MySQL) takes them one by one."""
+    target = eng.dst_engine
+
+    def said(e):
+        return (str(e).strip().splitlines() or [""])[0]
+    if getattr(target, "CANON_ENGINE", "") != "postgres" or \
+            not hasattr(target, "_conn"):
+        made, failed = [], []
+        for name, stmt in todo:
+            try:
+                target.neutral_create_code("dst", d, stmt)
+                made.append(name)
+            except Exception as e:  # noqa: BLE001 - listed by the caller
+                failed.append(f"{name}: {said(e)}")
+        return made, failed, False
+    made, failed = [], []
+    conn = target._conn("dst", target._d("dst", d))
+    try:
+        with conn.cursor() as cur:
+            for i, (name, stmt) in enumerate(todo):
+                cur.execute(f"savepoint migkit_convert_{i}")
+                try:
+                    cur.execute(stmt)
+                    made.append(name)
+                except Exception as e:  # noqa: BLE001 - listed, then undone
+                    cur.execute(f"rollback to savepoint migkit_convert_{i}")
+                    failed.append(f"{name}: {said(e)}")
+        if failed:
+            conn.rollback()
+            made = []
+        else:
+            conn.commit()
+    finally:
+        conn.close()
+    return made, failed, True
+
+
+def _record_built(hop, eng, d, made):
+    """The tables `convert-schema --apply` made, recorded as `move`
+    records those it builds (`built-tables.json`), so the copy after it
+    adds their indexes once the rows are in (`finish_created`): a table
+    it made was no longer missing when the move came, and its indexes
+    were lost for good."""
+    if not made:
+        return
+    try:
+        leaves = {eng._leaf(t): str(t)
+                  for t in eng.src_engine.neutral_tables("src", d)}
+    except Exception:  # noqa: BLE001 - nothing to record then
+        return
+    built = {n: leaves[n] for n in made if n in leaves}
+    if not built:
+        return
+    record = hop.report_dir(d) / "built-tables.json"
+    try:
+        have = json.loads(record.read_text())
+    except (OSError, ValueError):
+        have = {}
+    have.update(built)
+    record.write_text(json.dumps(have))
 
 
 def _gen_migration(hop_name, db, out):
@@ -929,7 +1391,8 @@ def _gen_migration(hop_name, db, out):
 @click.option("--convert", "do_convert", is_flag=True,
               help="transpile source DDL to the target dialect (hetero hops)")
 @click.option("--migration", "do_migration", is_flag=True,
-              help="generate Flyway-style V/U files from the live schema diff")
+              help="generate versioned V/U migration files from the live"
+                   " schema diff")
 @click.option("--apply", "do_apply", is_flag=True,
               help="with --convert: execute the DDL on target")
 @click.option("--out", default="migrations",
@@ -1014,94 +1477,127 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
 
     When counts and data both run, row counts ride along with the checksum
     query, so nothing is scanned twice. Suspect rows are proven in-flight
-    or real via the replication fence (LSN-based) instead of guesswork."""
+    or real via the replication fence (LSN-based) instead of guesswork.
+
+    Ends 0 where the two are the same, 1 where they differ, 3 where the
+    run could not say (an answer not taken, nothing compared, a narrowed
+    run) - `verdict.json` says which and why."""
     if drill:
         return _drill(hop_name, db, table, limit)
     hop = get_hop(hop_name)
     _require_configured(hop)
-    from . import schedule
-    if not schedule.gate(hop, "check", console.print):
-        return _check(hop, db, table, only, do_deep, consistent, workers,
-                      resume, exclude)
-    # a run its schedule started: what it ended as is the schedule's
-    ok = False
-    try:
-        got = _check(hop, db, table, only, do_deep, consistent, workers,
-                     resume, exclude)
-        ok = True
-        return got
-    except SystemExit as e:
-        # a difference found is a check that did its work
-        ok = e.code in (None, 0, 1)
-        raise
-    finally:
-        schedule.finished(hop, ok)
+    got, _ = _check(hop, db, table, only, do_deep, consistent, workers,
+                    resume, exclude)
+    if got.exit:
+        raise SystemExit(got.exit)
 
 
-def _check(hop, db, table, only, do_deep, consistent, workers, resume,
-           exclude):
-    hop_name = hop.name
-    if exclude:
-        hop.exclude = list(hop.exclude) + [p.strip() for p in exclude.split(",") if p.strip()]
-    eng = get_engine(hop)
-    from .engines.base import Engine
-    planned = list(eng.planned_checks())
-    allowed = list(eng.checks) + ["deep", "params"] + planned
-    # smart by default: with no --only, run the full battery including the
-    # deep checks (fk orphans, sequence collisions, drift, boundary). --only
-    # narrows for a fast targeted pass; --deep stays as a no-op alias.
+def _checks_for(eng, only, do_deep=False):
+    """(the checks a run takes, every check this engine has): `--only`'s,
+    each one this engine has - a name it does not have is said as a usage
+    error, where it was dropped and a typo compared nothing and read
+    green - or the whole battery, the deep checks and the server's
+    settings with it."""
+    from .verdict import Usage
+    allowed = list(dict.fromkeys(list(eng.checks) + ["deep", "params"]
+                                 + list(eng.planned_checks())))
     if only:
-        checks = [c for c in only.split(",") if c in allowed]
+        asked = [c.strip() for c in only.split(",") if c.strip()]
+        odd = [c for c in asked if c not in allowed]
+        if odd or not asked:
+            raise Usage(f"--only {', '.join(odd) or only}: not a check of"
+                        f" this hop's engine; its checks are"
+                        f" {', '.join(allowed)}")
+        checks = list(dict.fromkeys(asked))
     else:
-        # server settings too: a timezone, collation or eviction policy
-        # that differs changes what the same data means, and it was only
-        # compared when asked for by name
-        checks = list(eng.checks) + ["deep", "params"] + planned
+        checks = list(allowed)
     if do_deep and "deep" not in checks:
         checks.append("deep")
-    dbs = [db] if db else eng.databases()
-    if workers:
-        # asked for on the command line: a ceiling, as a hop's own is
-        hop.workers, hop.workers_set = int(workers), True
-    if dbs:
-        from . import sizing
-        sizing.fit(hop, eng, dbs[0], lambda m: console.print(f"  {m}"))
-    workers = hop.workers
-    summary_path = hop.report_dir() / "summary.json"
-    prev = {}
-    if resume and summary_path.exists():
-        prev = {(r["check"], r["scope"]): r["status"]
-                for r in json.loads(summary_path.read_text())}
+    return checks, allowed
 
-    merge = ("counts" in checks and "data" in checks and not table
-             and getattr(eng, "counts_from_data", False))
+
+def _loud(line):
+    """Whether a line a check streams is one `-q` keeps: what differs,
+    failed or asks to be read, in whatever case the engine says it."""
+    import re
+    return re.search(r"(?i)\b(diff|differ|error|warn|fail|missing|extra"
+                     r"|mismatch|stale)", str(line)) is not None
+
+
+def _merged(eng, checks, table):
+    """Whether the row counts ride along with the checksum pass."""
+    return ("counts" in checks and "data" in checks and not table
+            and getattr(eng, "counts_from_data", False))
+
+
+def _position(eng, d):
+    """How many changes the source has made in `d`, and over how long, as
+    it counts them (`Engine.changes_made`) - what a resumed answer is held
+    to - or None where it keeps no count."""
+    try:
+        got = eng.changes_made("src", d)
+    except Exception:  # noqa: BLE001 - no count, nothing reused as held
+        return None
+    return [int(got[0]), float(got[1])] if got else None
+
+
+def _held_since(then, now):
+    """Whether the source made no change between two `_position`s: the
+    same count, and no reset of it between (the time it covers grew)."""
+    return bool(then and now) and int(then[0]) == int(now[0]) \
+        and float(now[1]) >= float(then[1])
+
+
+def _said_row(r):
+    st = str(r.get("status", ""))
+    color = {"ok": "green", "diff": "yellow", "error": "red",
+             "warn": "yellow"}.get(st, "white")
+    console.print(f"[{color}]{_esc(str(r.get('check', ''))):8s}"
+                  f" {_esc(r.get('scope', ''))}: {_esc(st.upper())}"
+                  f"[/{color}] {_esc(r.get('detail', ''))}")
+
+
+def run_checks(hop, eng, dbs, checks, table="", consistent=False,
+               workers=1, prev=None, prev_at=None, whole=True, show=None,
+               timer=None):
+    """Every check of `checks` over every database of `dbs`, as many
+    databases at once as `workers`: ([answer], {db: {check: seconds}}).
+    The one run of the checks `check`, `watch --verify` and `sync` share -
+    each database's source shape read before and after it, an answer a
+    DDL overtook taken back (`verdict.mark_stale`), the server's settings
+    compared once where they are the server's, a whole battery's time kept
+    for the next plan. A check that raises is an `error` answer, never a
+    database left out.
+
+    `prev`: {(check, db): answer} of the run being resumed, from
+    `prev_at`; an `ok` of it is reused, marked `reused_from`, and held
+    (`reuse_held`) only where the source has made no change since it was
+    taken (`_position`) - it read as fresh however old it was. `show(answer)`
+    as each database's come in. Ctrl-C lets the databases in flight end,
+    says so, and starts no more."""
+    from . import drift, traces
+    from . import verdict as _verdict
+    from .engines.base import Engine
+    prev = prev or {}
+    merge = _merged(eng, checks, table)
     local_map = {}
     for d in dbs:
         local = list(checks)
-        if merge and prev.get(("data", d)) != "ok":
+        if merge and (prev.get(("data", d)) or {}).get("status") != "ok":
             local.remove("counts")
         local_map[d] = local
-
-    timer = Timer()
-    results = []
+    timings = {}
     total_jobs = sum(len(v) for v in local_map.values())
     done_jobs = 0
 
-    def _stream(d):
+    def stream(d):
         def s(line):
-            if QUIET and "DIFF" not in line and "ERROR" not in line:
+            if QUIET and not _loud(line):
                 return
-            console.print(f"  [{d}] {line}")
+            console.print(f"  {_esc('[' + str(d) + ']')} {_esc(line)}")
         return s
 
-    from . import drift, traces
-    from . import verdict as _verdict
-    #: {db: {check: seconds}} this run's checks took, for `/metrics` and
-    #: the evidence
-    timings = {}
-
     from . import rehearsal, subset
-    rehearsal.mark(hop)
 
     def run_db(d):
         if subset.settings(hop) is not None:
@@ -1110,6 +1606,7 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             return [r.__dict__ for r in subset.check(hop, eng, d)]
         out = []
         began = time.time()
+        position = _position(eng, d)
         # the source's shape before and after this database's checks, where
         # it is one query: an answer a DDL overtook is taken back, and a
         # resumed run reuses nothing the source has changed under since
@@ -1127,15 +1624,23 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             since = drift.changes(saved, before)
             if since:
                 reuse = {}
-                console.print(f"  [{d}] the source's schema changed since"
-                              " the run being resumed ("
-                              + "; ".join(since[:3])
+                console.print(f"  {_esc('[' + str(d) + ']')} the source's"
+                              " schema changed since the run being resumed"
+                              " (" + _esc("; ".join(since[:3]))
                               + ("; ..." if len(since) > 3 else "")
                               + "), so nothing of it is reused")
         for c in local_map[d]:
-            if reuse.get((c, d)) == "ok":
+            old = reuse.get((c, d)) or {}
+            if old.get("status") == "ok":
+                was = old.get("position")
                 out.append({"check": c, "scope": d, "status": "ok",
-                            "detail": "resume: skipped, was ok"})
+                            "detail": "resume: reused, was ok"
+                            + ("" if _held_since(was, position) else
+                               " - the source may have changed since"),
+                            "reused_from": old.get("reused_from")
+                            or prev_at or "an earlier run",
+                            "position": was,
+                            "reuse_held": _held_since(was, position)})
                 continue
             if (c == "params" and d != dbs[0]
                     and not eng.SETTINGS_PER_DATABASE
@@ -1147,11 +1652,11 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                                       f" database; compared under {dbs[0]}"})
                 continue
             fn = getattr(eng, f"check_{c}")
-            began = time.monotonic()
+            t0 = time.monotonic()
             with traces.span(f"check {c}", db=d, check=c) as span:
                 try:
                     if c == "data":
-                        kw = {"stream": _stream(d)}
+                        kw = {"stream": stream(d)}
                         if merge and "counts" not in local_map[d]:
                             kw["with_counts"] = True
                         if consistent and hasattr(eng, "_fast_consistent"):
@@ -1161,10 +1666,14 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                         rs = [r.__dict__ for r in fn(d)]
                 except Exception as e:
                     rs = [{"check": c, "scope": d, "status": "error",
-                           "detail": str(e)}]
+                           "detail": _clean(e, (hop.source.password,
+                                                hop.target.password),
+                                            raw=True)}]
                 traces.answered(span, rs)
-            timings.setdefault(d, {})[c] = round(time.monotonic() - began,
-                                                  3)
+            timings.setdefault(d, {})[c] = round(time.monotonic() - t0, 3)
+            if position is not None:
+                for r in rs:
+                    r.setdefault("position", position)
             out.extend(rs)
         if before is not None:
             after = drift.shape(watch, "src", d)
@@ -1175,35 +1684,87 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                                     + ("; ..." if len(said) > 3 else ""))
                 from . import notify
                 notify.drift(hop, d, said, lambda m: console.print(
-                    f"[yellow]{m}[/yellow]"))
+                    f"[yellow]{_esc(m)}[/yellow]"))
             if after is not None:
                 shape_file.parent.mkdir(parents=True, exist_ok=True)
                 shape_file.write_text(json.dumps(after))
-        if not table and not only and not reuse:
+        if whole and not any(r.get("reused_from") for r in out):
             # the whole battery over the whole database: its time is the
             # check phase of the next plan, this hop's or the one it
             # rehearses (`rehearsal.record_check`)
             rehearsal.record_check(hop, eng, d, time.time() - began)
         return out
 
-    console.print(f"checking {hop_name}: {len(dbs)} dbs x {checks},"
-                  f" {workers} workers"
-                  + (" (counts merged into the checksum pass)" if merge else ""))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(run_db, d): d for d in dbs}
+    results = []
+    pool = ThreadPoolExecutor(max_workers=max(1, int(workers or 1)))
+    futs = {pool.submit(run_db, d): d for d in dbs}
+    try:
         for fut in as_completed(futs):
             d = futs[fut]
             rs = fut.result()
             results.extend(rs)
             done_jobs += len(local_map[d])
             for r in rs:
-                color = {"ok": "green", "diff": "yellow",
-                         "error": "red"}.get(r["status"], "white")
-                console.print(f"[{color}]{r['check']:8s} {r['scope']}:"
-                              f" {r['status'].upper()}[/{color}] {r.get('detail', '')}")
-            chat(f"  progress {done_jobs}/{total_jobs},"
-                 f" elapsed {human_secs(timer.elapsed())},"
-                 f" eta {timer.eta(done_jobs, total_jobs)}")
+                if show is not None:
+                    show(r)
+            if timer is not None:
+                chat(f"  progress {done_jobs}/{total_jobs},"
+                     f" elapsed {human_secs(timer.elapsed())},"
+                     f" eta {timer.eta(done_jobs, total_jobs)}")
+    except KeyboardInterrupt:
+        running = sum(1 for f in futs if f.running())
+        if running:
+            console.print(f"[yellow]stopping: the checks of the {running}"
+                          " databases in flight end first, and no other"
+                          " starts[/yellow]")
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    return results, timings
+
+
+def _check(hop, db, table, only, do_deep, consistent, workers, resume,
+           exclude, hints=True):
+    """`check`: the checks run, their answers kept (`summary.json`,
+    `verdict.json`, the report), said and told - and what they add up to
+    (`verdict.decide`, the one rule), with the answers, for the caller to
+    end on. `hints`: the next steps said where they differ."""
+    from . import verdict as _verdict
+    hop_name = hop.name
+    if exclude:
+        hop.exclude = list(hop.exclude) + [p.strip() for p in exclude.split(",") if p.strip()]
+    eng = get_engine(hop)
+    checks, allowed = _checks_for(eng, only, do_deep)
+    dbs = [db] if db else eng.databases()
+    if workers:
+        # asked for on the command line: a ceiling, as a hop's own is
+        hop.workers, hop.workers_set = int(workers), True
+    if dbs:
+        from . import sizing
+        sizing.fit(hop, eng, dbs[0], lambda m: console.print(f"  {_esc(m)}"))
+    else:
+        console.print("[yellow]the source lists no database this hop"
+                      " covers, so nothing is compared - the user migkit"
+                      " signs in as may not see them[/yellow]")
+    workers = hop.workers
+    summary_path = hop.report_dir() / "summary.json"
+    prev, prev_at = {}, None
+    if resume and summary_path.exists():
+        prev = {(r["check"], r["scope"]): r
+                for r in json.loads(summary_path.read_text())}
+        prev_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
+            summary_path.stat().st_mtime))
+    timer = Timer()
+    from . import rehearsal
+    rehearsal.mark(hop)
+    console.print(f"checking {_esc(hop_name)}: {len(dbs)} dbs x {checks},"
+                  f" {workers} workers"
+                  + (" (counts merged into the checksum pass)"
+                     if _merged(eng, checks, table) else ""))
+    results, timings = run_checks(
+        hop, eng, dbs, checks, table, consistent, workers, prev, prev_at,
+        whole=not table and not only, show=_said_row, timer=timer)
 
     if only and summary_path.exists():
         try:
@@ -1212,9 +1773,12 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             prev_all = []
 
         def keep(r):
+            # the answers of checks this run did not take, and of the
+            # databases it did not look at - by the database the answer is
+            # about, so `--db shop` keeps `shop_archive`'s
             if r.get("check") not in checks:
                 return True
-            return bool(db) and not r.get("scope", "").startswith(db)
+            return bool(db) and _verdict.db_of(r.get("scope", "")) != db
 
         results = [r for r in prev_all if keep(r)] + results
     was_same = _verdict.unchanged_since(hop, results)
@@ -1239,11 +1803,13 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     if exclude:
         coverage["exclude"] = [p.strip() for p in exclude.split(",")
                                if p.strip()]
+    decided = _verdict.decide(results, hop, coverage or None)
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
         load=getattr(eng, "_last_throttle", None), coverage=coverage or None)
     from . import notify
-    notify.verdict(hop, env, lambda m: console.print(f"[yellow]{m}[/yellow]"))
+    notify.verdict(hop, env, lambda m: console.print(
+        f"[yellow]{_esc(m)}[/yellow]"))
     if env.get("findings"):
         from . import assist
         said = assist.explain(hop, env)
@@ -1252,104 +1818,135 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                           " not part of the verdict:")
             console.print(said, markup=False)
     from .report import write_report
-    report_path = write_report(hop, results)
-    from . import workload
-    gated = workload.gate(hop, results)
-    slow = [r for r in results if str(r.get("scope", "")).endswith(
-        " performance") and r["status"] == "warn"]
-    # a slow target holds the same data: said, and it stops the check only
-    # where the hop asks for that (`performance: gate`)
-    bad = [r for r in results if r["status"] not in ("ok", "skip")
-           and (r not in slow or r in gated)]
-    if slow and not gated:
-        console.print(f"[yellow]{len(slow)} databases answer the source's"
+    report_path = write_report(hop, results, decided=decided)
+    notes = [r for r, s in zip(results, decided.severity) if s == "note"]
+    if notes:
+        # a slow target holds the same data: said, and it stops the check
+        # only where the hop asks for that (`performance: gate`)
+        console.print(f"[yellow]{len(notes)} databases answer the source's"
                       " reads more slowly on the target - the data is not"
                       " in question; `performance: gate` in the hop's"
                       " options makes this stop the check[/yellow]")
-    console.print(f"\nverdict: {env['status']}"
+    colour = _verdict.VERDICTS[decided.status].colour
+    console.print(f"\nverdict: [{colour}]{decided.status}[/{colour}]"
                   + (" (identical to the previous run)" if was_same else "")
-                  + f"  {verdict_path}")
+                  + f"  {_esc(verdict_path)}")
+    if decided.why:
+        console.print(f"  {_esc(decided.why)}")
     if env.get("load"):
         ld = env["load"]
         console.print(f"[yellow]the server was under load: backed off"
                       f" {ld['waits']}x ({ld['waited_seconds']}s), concurrency"
                       f" {ld['concurrency_from']} -> {ld['concurrency_to']}"
                       "[/yellow]")
-    console.print(f"report: {report_path}")
+    console.print(f"report: {_esc(report_path)}")
     stale = [r for r in results if r.get("stale")]
     if stale:
         console.print(f"[yellow]{len(stale)} answers were overtaken by a"
                       " schema change on the source while they were being"
                       " taken, so they are not a verdict: "
-                      + ", ".join(sorted({str(r["scope"]) for r in stale})[:6])
+                      + _esc(", ".join(sorted({str(r["scope"])
+                                                for r in stale})[:6]))
                       + ". Check again once the change has settled.[/yellow]")
+    if decided.status == "same":
+        console.print(f"[green]all green ({len(results)} checks,"
+                      f" {human_secs(timer.elapsed())})[/green]")
+        return decided, results
+    bad = [r for r, s in zip(results, decided.severity)
+           if s not in ("same", "not compared", "note")]
     if bad:
-        console.print(f"[yellow]{len(bad)} problems, summary: {summary_path}[/yellow]")
-        data_dbs = sorted({r["scope"].split()[0].split(".")[0] for r in bad
+        console.print(f"[yellow]{len(bad)} problems, summary:"
+                      f" {_esc(summary_path)}[/yellow]")
+    if hints and decided.status == "different":
+        data_dbs = sorted({_verdict.db_of(r["scope"]) for r in bad
                            if r["check"] in ("counts", "autoinc", "data")})
-        schema_dbs = sorted({r["scope"].split()[0].split(".")[0] for r in bad
+        schema_dbs = sorted({_verdict.db_of(r["scope"]) for r in bad
                              if r["check"] == "schema"})
         console.print("\nnext steps:")
         if data_dbs:
             console.print("  # data / sequence diffs (re-check first: many are"
                           " transient replication lag, not real)")
-            console.print(f"  migkit sync {hop_name} --apply"
+            console.print(f"  migkit sync {_esc(hop_name)} --apply"
                           f"            # all diffed dbs at once")
         if schema_dbs:
             console.print("  # schema diffs -> generate reviewable DDL files,"
                           " then apply them yourself")
-            console.print(f"  migkit schema {hop_name} --migration"
+            console.print(f"  migkit schema {_esc(hop_name)} --migration"
                           f"   # writes migrations/V*.sql per db")
-        raise SystemExit(1)
-    if stale:
-        raise SystemExit(1)
-    console.print(f"[green]all green ({len(results)} checks,"
-                  f" {human_secs(timer.elapsed())})[/green]")
+    return decided, results
 
 
-def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
-    from . import hopkeys
+def _on_conflict(hop, given=None):
+    """How a repair settles a row both sides hold differently: the command
+    line's where it says, else the hop's `on_conflict`, else the source's
+    row. `sync` overwrote the hop's with its own default, so a hop's
+    keep-target never held in a repair; and `keep_target`, compared as
+    written, meant source-wins."""
+    from .verdict import Usage
+    got = str(given or (hop.options or {}).get("on_conflict")
+              or "source-wins").strip().lower().replace("_", "-")
+    if got not in ("source-wins", "keep-target"):
+        raise Usage(f"on_conflict: {got} - source-wins or keep-target")
+    hop.options["on_conflict"] = got
+    return got
+
+
+def _repair_wants(kind):
+    """The checks whose differences a repair of `kind` puts right. Grants
+    are reported by the deep check, so a database whose only difference
+    is a missing grant is reached by the repair that fixes it."""
+    want = {"counts", "autoinc", "data"}
+    if kind in ("schema", "all"):
+        want |= {"schema", "deep"}
+    return want
+
+
+def _repair_dbs(results, kind):
+    """The databases a check's answers found different where a repair of
+    `kind` reaches - by the database each answer is about."""
+    from .verdict import db_of
+    want = _repair_wants(kind)
+    return sorted({db_of(r.get("scope", "")) for r in results
+                   if r.get("status") == "diff" and r.get("check") in want})
+
+
+def _repair(hop_name, db, kind, do_apply, on_conflict=None, dbs=None,
+            state=None, guarded=False):
+    """The one repair: the databases the last check found different (or
+    `dbs`, or `--db`), every write guard passed first for all of them
+    (`_guard_write` - the goal, the masking, the approvals, the target's
+    identity), then each database's plan shown and, with `do_apply`,
+    applied with its undo kept. `state` is the restore point `sync --go`
+    took before it, named in the record; `guarded`, that `sync --go` has
+    passed the guards for every database already."""
     hop = get_hop(hop_name)
     _require_configured(hop)
-    if do_apply:
-        hopkeys.refuse_writes(hop, "a repair")
-    hop.options["on_conflict"] = on_conflict
+    _on_conflict(hop, on_conflict)
     eng = get_engine(hop)
-    if db:
+    if dbs is None and db:
         dbs = [db]
-    else:
+    if dbs is None:
         summary = hop.report_dir() / "summary.json"
         if not summary.exists():
             raise SystemExit("run migkit check first, then sync uses its diffs")
-        want = {"counts", "autoinc", "data"}
-        if kind in ("schema", "all"):
-            want.add("schema")
-            # grants are reported by the deep check, so a database whose only
-            # difference is a missing grant used to be skipped here and never
-            # reached the repair that can now fix it
-            want.add("deep")
-        dbs = sorted({r["scope"].split()[0].split(".")[0]
-                      for r in json.loads(summary.read_text())
-                      if r["status"] == "diff" and r["check"] in want})
+        dbs = _repair_dbs(json.loads(summary.read_text()), kind)
         if not dbs:
             console.print("nothing to repair (no matching diffs last check)")
             return
         console.print(f"repairing {len(dbs)} databases with diffs:"
-                      f" {', '.join(dbs)}\n")
+                      f" {_esc(', '.join(dbs))}\n")
+    if not guarded:
+        _guard_write(hop, eng, "a repair", dbs, do_apply, step="repair",
+                     carries_rows=kind in ("rows", "all"))
     for d in dbs:
-        if do_apply:
-            from . import approvals
-            approvals.require(hop, "repair", d,
-                              lambda m: console.print(f"  {m}"))
-        _interlock(hop, eng, d, do_apply)
-        _repair_one(hop, eng, d, kind, do_apply)
+        _repair_one(hop, eng, d, kind, do_apply, state)
 
 
-def _repair_one(hop, eng, db, kind, do_apply):
+def _repair_one(hop, eng, db, kind, do_apply, state=None):
     from . import repairlog
     actions = eng.repair_plan(db, kind)
     if not actions:
-        console.print(f"{db}: nothing to repair")
+        console.print(f"{_esc(db)}: nothing to repair")
         return
     undo_dir = hop.report_dir(db) / "undo"
     undo_dir.mkdir(parents=True, exist_ok=True)
@@ -1357,16 +1954,16 @@ def _repair_one(hop, eng, db, kind, do_apply):
         # what an earlier repair had applied when it stopped is in its
         # record, statement by statement; this one plans from the check
         console.print(f"  [yellow]an earlier repair stopped after statement"
-                      f" {upto} of {planned}: {repairlog.said(path)}"
+                      f" {upto} of {planned}: {_esc(repairlog.said(path))}"
                       "[/yellow]")
     paused = _make_room_for_rows(hop, eng, db, actions) if do_apply else []
     try:
-        _apply_actions(hop, eng, db, actions, do_apply, undo_dir)
+        _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state)
     finally:
         for what in paused:
             eng.resume_writer(db, what)
-            console.print(f"  {what} was asked to resume; it carries on from"
-                          " where it paused, on top of the repair")
+            console.print(f"  {_esc(what)} was asked to resume; it carries"
+                          " on from where it paused, on top of the repair")
 
 
 def _make_room_for_rows(hop, eng, db, actions):
@@ -1388,8 +1985,8 @@ def _make_room_for_rows(hop, eng, db, actions):
     window = int((hop.options or {}).get("repair_window", 300))
     paused = []
     for what in [w for w, _ in writers]:
-        console.print(f"  {what} is running; asking it to pause for the"
-                      " repair")
+        console.print(f"  {_esc(what)} is running; asking it to pause for"
+                      " the repair")
         if not eng.pause_writer(db, what, window):
             for back in paused:
                 eng.resume_writer(db, back)
@@ -1406,17 +2003,59 @@ def _lend_console(eng):
     itself (`Engine._attempt`) and said here."""
     lend = getattr(eng, "lend_log", None)
     if lend is not None:
-        lend(lambda m: console.print(f"  [yellow]{m}[/yellow]"))
+        lend(lambda m: console.print(f"  [yellow]{_esc(m)}[/yellow]"))
 
 
-def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
+def _table_copier(hop, eng, db):
+    """How a repair copies one table again whole (`repairways`): the move's
+    own copier (`_copy_table`) at the move's own chunk, on a checkpoint of
+    its own begun afresh, inside the target's load window."""
+    def copy(sch, t, log):
+        path = hop.report_dir(db) / "repair-reload.json"
+        path.unlink(missing_ok=True)
+        try:
+            with eng.load_window(db, log, {t}):
+                _copy_table(eng, db, sch, t, 500000, _Checkpoint(path), log)
+        finally:
+            path.unlink(missing_ok=True)
+    return copy
+
+
+def _ladder(hop, eng, db, action):
+    """The way a row repair's table goes, climbed for it (`repairways`);
+    None for any other repair, which the engine applies as it is."""
+    if action.kind != "rows" or not action.table:
+        return None
+    from . import repairways
+    return repairways.Ladder(
+        eng, db, action,
+        log=lambda m: console.print(f"  [yellow]{_esc(m)}[/yellow]"),
+        copy_table=_table_copier(hop, eng, db))
+
+
+def _said_outcome(outcome):
+    """A row repair's line: what it did, and what the check after it said."""
+    from . import repairways
+    colour = {"ok": "green", "diff": "yellow"}.get(outcome.proof, "red")
+    head = "applied - " if outcome.way else ""
+    return f"  [{colour}]{head}{repairways.said(outcome)}[/{colour}]"
+
+
+def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
     _lend_console(eng)
     for i, a in enumerate(actions):
-        console.print(f"\n[bold]{a.kind} on {a.scope}[/bold]  {a.note}")
+        console.print(f"\n[bold]{_esc(a.kind)} on {_esc(a.scope)}[/bold]"
+                      f"  {_esc(a.note)}")
+        # the statements as they run, never read as markup: a SQL Server
+        # name in brackets was taken for a tag and cut out of the plan the
+        # operator approved
         for s in a.statements[:20]:
-            console.print(f"  {s}")
+            say_raw(f"  {s}")
         if len(a.statements) > 20:
             console.print(f"  ... {len(a.statements) - 20} more")
+        ladder = _ladder(hop, eng, db, a)
+        if ladder is not None and ladder.ready:
+            console.print(f"  {ladder.foreseen()}")
         if not do_apply:
             continue
         # the fix and its undo, run on a scratch copy first where the
@@ -1424,22 +2063,28 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
         usable, said = (eng.rehearse(db, a) if hasattr(eng, "rehearse")
                         else (True, ""))
         if said:
-            console.print(f"  {said}")
+            console.print(f"  {_esc(said)}")
         if not usable:
             raise SystemExit(f"{db}: {said}")
         ts = time.strftime("%Y%m%d-%H%M%S")
         if a.undo:
             undo_file = undo_dir / f"{ts}-{a.kind}-{i}.sql"
             undo_file.write_text("\n".join(a.undo) + "\n")
-            console.print(f"  undo saved: {undo_file}")
+            console.print(f"  undo saved: {_esc(undo_file)}")
         # the statements themselves, kept beside their undo (encrypted
         # with it where the hop asks), their digest in the record: the
         # repair's statement-level evidence
         applied = undo_dir / f"{ts}-{a.kind}-{i}.applied.sql"
         applied.write_text("\n".join(a.statements) + "\n")
         lk = _lock(hop)
+        outcome = None
         try:
-            eng.apply(db, a)
+            if ladder is not None:
+                # the table checked afresh after its repair: what is said
+                # of it is that check's, never the repair's own word
+                outcome = ladder.run(prove=True)
+            else:
+                eng.apply(db, a)
         finally:
             lk.unlink()
         import hashlib
@@ -1450,85 +2095,82 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
                          "statements": len(a.statements),
                          "applied_sha256": hashlib.sha256(
                              ("\n".join(a.statements) + "\n").encode()
-                         ).hexdigest()},
+                         ).hexdigest(),
+                         **({"repair": outcome.record()} if outcome
+                            else {}),
+                         **({"state": state} if state else {})},
                    eng)
-        console.print("  [green]applied[/green]")
+        console.print(_said_outcome(outcome) if outcome
+                      else "  [green]applied[/green]")
     if not do_apply:
         console.print("\ndry-run only, add --apply to execute")
     else:
         console.print("\nre-run migkit check to confirm")
 
 
-def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
-    from . import hopkeys
+def _sync_go(hop_name, db, tag, on_conflict=None, kind="all"):
+    """`sync --go`: the one check; for every database it finds different,
+    a restore point taken and kept - committed where the state backend
+    keeps them before anything is written, where it waited in a temporary
+    directory until the end and a crash left the target changed and its
+    undo nowhere; the one repair (`_repair`, its approvals and guards, a
+    tail of migkit's paused beside a row repair); and the check again,
+    whose verdict the command ends with. It was a third repair of its own:
+    it read only each check's first answer - a first `ok` repaired nothing
+    and said "data: ok" - asked no approval, never repaired a schema, and
+    ended 0 over a target still different."""
     from .state import get_store
-
     hop = get_hop(hop_name)
     _require_configured(hop)
-    hopkeys.refuse_writes(hop, "a repair")
-    hop.options["on_conflict"] = on_conflict
+    _on_conflict(hop, on_conflict)
     eng = get_engine(hop)
     _lend_console(eng)
     capabilities.require(
         hop.engine, "snapshot",
         "use migkit sync --apply, which repairs without the snapshot --go"
         " takes first")
+    first, results = _check(hop, db, "", "", False, False, 0, False, "",
+                            hints=False)
+    if first.status != "different":
+        return first
+    dbs = _repair_dbs(results, kind)
+    if not dbs:
+        console.print("what differs is nothing a repair of"
+                      f" {kind} puts right")
+        return first
+    _guard_write(hop, eng, "a repair", dbs, True, step="repair",
+                 carries_rows=kind in ("rows", "all"))
     store = get_store(hop)
-    dbs = [db] if db else eng.databases()
+    kept = {}
     for d in dbs:
-        console.print(f"[bold]{d}[/bold]")
-        _interlock(hop, eng, d, True)
+        console.print(f"[bold]{_esc(d)}[/bold]")
         point = store.new_point(d, tag)
         eng.snapshot_state(d, point.dir, kind)
-        journal = point.path("journal.jsonl")
-
-        def log(entry):
-            with journal.open("a") as f:
-                f.write(json.dumps({"ts": time.strftime("%H:%M:%S"), **entry},
-                                   default=str) + "\n")
-
-        log({"db": d, "event": "snapshot"})
-        if kind in ("sequences", "all"):
-            r = eng.check_autoinc(d)[0]
-            console.print(f"  autoinc: {r.status}")
-            if r.status == "diff":
-                for a in eng.repair_plan(d, "sequences"):
-                    point.path("undo-sequences.sql").write_text(
-                        "\n".join(a.undo) + "\n")
-                    lk = _lock(hop)
-                    try:
-                        eng.apply(d, a)
-                    finally:
-                        lk.unlink()
-                    _changelog(hop, {"op": "sync", "db": d,
-                                     "kind": "sequences", "state": point.ts})
-                    again = eng.check_autoinc(d)[0].status
-                    log({"event": "repair-sequences", "n": len(a.statements),
-                         "recheck": again})
-                    console.print(f"  autoinc: repaired {len(a.statements)},"
-                                  f" re-check {again}")
-        if kind in ("rows", "all"):
-            r = eng.check_data(d)[0]
-            console.print(f"  data: {r.status} {r.detail}")
-            log({"event": "check-data", "status": r.status, "detail": r.detail})
-            if r.status == "diff":
-                for a in eng.repair_plan(d, "rows"):
-                    lk = _lock(hop)
-                    try:
-                        eng.apply(d, a)
-                    finally:
-                        lk.unlink()
-                    _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
-                                     "state": point.ts, "note": a.note})
-                    log({"event": "repair-rows", "note": a.note})
-                again = eng.check_data(d)[0]
-                console.print(f"  data re-check: {again.status} {again.detail}")
-                log({"event": "recheck-data", "status": again.status})
+        with point.path("journal.jsonl").open("a") as f:
+            f.write(json.dumps({"ts": time.strftime("%H:%M:%S"), "db": d,
+                                "event": "snapshot", "kind": kind}) + "\n")
         point.set_meta(op="sync", db=d)
-        ts = point.commit(time.strftime("%F %T"))
-        console.print(f"  state saved: {store.kind}:{ts}")
+        kept[d] = point.commit(time.strftime("%F %T"))
+        console.print(f"  state saved before the repair:"
+                      f" {store.kind}:{kept[d]}")
+    for d in dbs:
+        _repair(hop_name, "", kind, True, on_conflict, dbs=[d],
+                state=kept[d], guarded=True)
     console.print(f"\nstate backend: {store.kind}"
                   " (migkit history / rollback to use it)")
+    again, _ = _check(get_hop(hop_name), db, "", "", False, False, 0, False,
+                      "", hints=True)
+    return again
+
+
+def _given(name):
+    """Whether the command line gave the option `name`, not its default."""
+    from click.core import ParameterSource
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return False
+    return ctx.get_parameter_source(name) not in (
+        None, ParameterSource.DEFAULT, ParameterSource.DEFAULT_MAP)
 
 
 @main.command()
@@ -1539,33 +2181,52 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
 @click.option("--mode", type=click.Choice(
     ["reconcile", "verify", "seed", "stream", "migrate"]),
     default="reconcile",
-    help="run a whole flow: verify (read-only assurance), seed (schema +"
-         " initial load + reconcile), stream (follow live changes + delta"
-         " verify), migrate (seed then stream). default reconcile = repair"
-         " the last check's diffs")
+    help="run a whole flow: verify (read-only assurance), seed (initial"
+         " load, then the check and a repair of what differs), stream"
+         " (follow live changes + delta verify), migrate (load and follow,"
+         " then the check). default reconcile = repair the last check's"
+         " diffs")
 @click.option("--apply", "do_apply", is_flag=True,
               help="execute the repair plan, default is dry-run")
 @click.option("--go", is_flag=True,
               help="checkpointed check+repair sweep with rollback state")
 @click.option("--serve", is_flag=True,
-              help="incremental modes: run the verify loop forever (VM/service)")
+              help="stream and migrate: run the verify loop forever (VM/service)")
 @click.option("--interval", default=60, help="--serve: seconds between cycles")
 @click.option("--on-conflict", type=click.Choice(["source-wins", "keep-target"]),
-              default="source-wins",
+              default=None,
               help="rows that differ: source-wins overwrites the target"
-                   " (default, source is truth); keep-target preserves them"
-                   " and fixes only missing/extra")
+                   " (the default, source is truth); keep-target preserves"
+                   " them and fixes only missing/extra. The hop's own"
+                   " on_conflict where not given")
 @click.option("--tag", default="", help="with --go: label this state, e.g. pre-cutover")
-@click.pass_context
-def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval,
+def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
          on_conflict, tag):
-    """Make target equal to source, or run a full DMS-style migration.
+    """Make target equal to source, or run a whole migration flow.
 
     Default (reconcile) shows/repairs the last check's diffs; --apply
     executes, --go checkpoints for rollback. --mode runs the whole flow
     end to end with verification wrapped around every step, so migkit can
-    stand in for a managed migration service on a trusted VM."""
+    stand in for a managed migration service on a trusted VM - the same
+    move, the same repair and the same check as the commands of their
+    own, and the exit code the last check's."""
     from . import subset
+    from .verdict import Usage
+    if kind != "all" and mode != "reconcile" and _given("kind"):
+        raise Usage(f"--kind picks what a repair of the last check's"
+                    f" differences puts right; --mode {mode} runs a whole"
+                    " flow and repairs whatever it finds")
+    if tag and not go:
+        raise Usage("--tag names the restore point --go takes; without"
+                    " --go nothing is saved to name")
+    if _given("interval") and not serve:
+        raise Usage("--interval is the time between the cycles of --serve")
+    if serve and mode not in ("stream", "migrate"):
+        raise Usage("--serve keeps verifying a stream: --mode stream or"
+                    " --mode migrate")
+    if go and do_apply and mode == "reconcile":
+        raise Usage("--apply repairs; --go repairs with a restore point"
+                    " taken first - one or the other")
     if mode != "verify" and subset.settings(get_hop(hop_name)) is not None:
         # a copy for testing holds the rows chosen, masked: made equal to
         # the whole source it would not be one any more
@@ -1575,124 +2236,107 @@ def sync(ctx, hop_name, db, kind, mode, do_apply, go, serve, interval,
                          f" migkit check {hop_name}; sync makes a target"
                          " equal to the whole source. Nothing was written")
     if mode != "reconcile":
-        return _orchestrate(ctx, hop_name, db, mode, do_apply or go,
-                            serve, interval, on_conflict)
-    if go:
-        return _sync_go(hop_name, db, tag, on_conflict, kind)
-    return _repair(hop_name, db, kind, do_apply, on_conflict)
+        got = _orchestrate(hop_name, db, mode, do_apply or go, serve,
+                           interval, on_conflict)
+    elif go:
+        got = _sync_go(hop_name, db, tag, on_conflict, kind)
+    else:
+        return _repair(hop_name, db, kind, do_apply, on_conflict)
+    if got is not None and got.exit:
+        raise SystemExit(got.exit)
 
 
-def _run_check(ctx, hop_name, db, only, consistent=False):
-    """Invoke check, returning True when green (check exits 1 on diff)."""
-    try:
-        ctx.invoke(check, hop_name=hop_name, db=db, only=only,
-                   consistent=consistent)
-        return True
-    except SystemExit as e:
-        return not e.code
+def _settle(hop_name, db, on_conflict):
+    """After a copy: the one check; what it finds different put right by
+    the one repair, behind its guards and approvals; and the check again,
+    whose verdict the flow ends with."""
+    first, results = _check(get_hop(hop_name), db, "", "", False, False, 0,
+                            False, "", hints=False)
+    if first.status != "different":
+        return first
+    dbs = _repair_dbs(results, "all")
+    if not dbs:
+        return first
+    console.print("\n[bold]repair[/bold]: what the check found different")
+    _repair(hop_name, "", "all", True, on_conflict, dbs=dbs)
+    console.print("\n[bold]verify[/bold]: consistent snapshot")
+    again, _ = _check(get_hop(hop_name), db, "", "", False, True, 0, False,
+                      "", hints=True)
+    return again
 
 
-def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
-                 on_conflict="source-wins"):
+def _caught_up(hop, db):
+    """The stream a flow set up, waited for until the target has applied
+    what the source held a moment ago (`fence_wait`), where the engine
+    can prove it - so the check after it does not read a stream still
+    catching up as a difference. Said, not waited on forever."""
+    eng = get_engine(hop)
+    if capabilities.unavailable(hop.engine, "fence") or \
+            not hasattr(eng, "fence_wait"):
+        return
+    for d in ([db] if db else eng.databases()):
+        try:
+            at = eng.src_lsn(d)
+            ok = eng.fence_wait(d, at) if at is not None else None
+        except Exception as e:  # noqa: BLE001 - the check says the rest
+            console.print(f"  {_esc(d)}: whether the target has caught up"
+                          f" could not be asked: {_esc(_clean(e, raw=True))}")
+            continue
+        if ok is False:
+            console.print(f"  {_esc(d)}: the target has not caught up with"
+                          " the source yet; the check reads it as it is")
+
+
+def _orchestrate(hop_name, db, mode, go, serve, interval, on_conflict=None):
+    """`sync --mode`: the whole flow, of the commands' own steps and
+    nothing else - the move (`_move_run`: its position taken before the
+    copy, its guards, its proofs), the one check, the one repair, and the
+    delta loop - so what the flow promises is what the commands do. It
+    had a move and a stream of its own: no position before its seed, a
+    subscription copying again over the tables the seed had loaded, and
+    the guards `move` holds skipped."""
     hop = get_hop(hop_name)
     _require_configured(hop)
-    if go and mode != "verify":
-        from . import hopkeys
-        hopkeys.refuse_writes(hop, f"sync --mode {mode}")
-    eng = get_engine(hop)
-    if go and mode in ("seed", "migrate", "stream"):
-        from . import ready
-        ready.gate(hop, eng, [db] if db else None,
-                   "cdc" if mode == "stream" else
-                   "full+cdc" if mode == "migrate" else "full", False,
-                   lambda m: console.print(f"  {m}"))
-    tail = "  (dry-run; add --apply/--go to execute)" if not go else ""
-    if not go:
+    if not go and mode == "verify":
+        # the other flows' plans are the move's, which says it
         from . import hopkeys
         _say_goal(hop, hopkeys.explain_mode("sync", mode))
-
     if mode == "verify":
         console.print("[bold]verify[/bold]: read-only, consistent snapshot")
-        ok = _run_check(ctx, hop_name, db, "", consistent=True)
-        raise SystemExit(0 if ok else 1)
-
-    if mode in ("seed", "migrate"):
-        console.print(f"[bold]seed[/bold]{tail}")
-        console.print("1/4 schema: align target objects to source")
-        _run_check(ctx, hop_name, db, "schema")
-        _repair(hop_name, db, "schema", go, on_conflict)
-        console.print("2/4 load: bulk copy via the best installed mover")
-        if go:
-            movers_pick_and_run(hop, eng, db, go)
-        else:
-            console.print("   would run: migkit move"
-                          f" {hop_name} --mode full --go")
-        console.print("3/4 reconcile: repair residual rows + sequences")
-        _run_check(ctx, hop_name, db, "counts,autoinc,data")
-        _repair(hop_name, db, "all", go, on_conflict)
-        console.print("4/4 verify: consistent snapshot")
-        ok = _run_check(ctx, hop_name, db, "", consistent=True)
-        console.print(f"[{'green' if ok else 'yellow'}]seed"
-                      f" {'GREEN' if ok else 'has residual diffs'}[/]")
-        if mode == "seed":
-            raise SystemExit(0 if ok else 1)
-
-    if mode in ("stream", "migrate"):
-        console.print(f"[bold]stream[/bold]{tail}")
-        from .engines import ALIASES
-        engine = ALIASES.get(hop.engine, hop.engine)
-        if go:
-            if eng.maps_columns() and db and _tail_pair(eng):
-                _tail(hop, _tail_pair(eng), db, True)
-            elif engine == "postgres" and hasattr(eng, "replicate_sql"):
-                _replicate(hop, eng, db, True, False, True)
-            elif hasattr(eng, "tail_apply") and db:
-                _tail(hop, eng, db, True)
-            else:
-                console.print("   CDC start skipped: use migkit move"
-                              " --mode cdc for this engine")
-        else:
-            console.print("   would start CDC: migkit move"
-                          f" {hop_name} --mode cdc --go")
-        why = capabilities.unavailable(hop.engine, "delta")
-        if why:
-            console.print(f"   {why}")
-            return
-        n = 0
-        while True:
-            n += 1
-            for d in ([db] if db else eng.databases()):
-                try:
-                    rs = eng.delta_verify(d)
-                    head = rs[0]
-                    c = {"ok": "green", "diff": "yellow",
-                         "error": "red"}.get(head.status, "white")
-                    console.print(f"  cycle {n} {d}:"
-                                  f" [{c}]{head.status.upper()}[/] {head.detail}")
-                except Exception as e:
-                    console.print(f"  cycle {n} {d}: [red]error[/] {e}")
-            if not serve:
-                break
-            time.sleep(interval)
-
-
-def movers_pick_and_run(hop, eng, db, go):
-    from . import movers
-    from .engines import ALIASES
-    engine = ALIASES.get(hop.engine, hop.engine)
-    via, _ = movers.for_hop(hop, engine, "", go)
-    # the way the move takes too (`movers.fitted`): the one the pick
-    # names may not carry this hop, or be the fastest measured here
-    via, _ = movers.fitted(hop, engine, via)
-    for d in ([db] if db else eng.databases()):
-        if via == "builtin":
-            _move_full(hop, eng, d, "", 500000, go)
-        elif _keep_out(hop, eng, d, _tables_to_copy(hop, eng, d),
-                       go) is not None:
-            for line in movers.run_via(via, hop, d, hop.workers, go,
-                                       lambda m: chat(f"   {m}")):
-                chat(f"   {line}")
-            _changelog(hop, {"op": f"move-{via}", "db": d})
+        got, _ = _check(hop, db, "", "", False, True, 0, False, "",
+                        hints=False)
+        return got
+    move_mode = {"seed": "full", "migrate": "full+cdc", "stream": "cdc"}[mode]
+    console.print(f"[bold]{mode}[/bold]: migkit move {_esc(hop_name)}"
+                  f" --mode {move_mode}"
+                  + ("" if go else "  (dry-run; add --apply/--go to"
+                     " execute)"))
+    _move_run(hop_name, db, "", move_mode, 500000, False, go)
+    if not go:
+        console.print("with --go: "
+                      + ("the copy, then the check; what it finds"
+                         " different is repaired and checked again"
+                         if mode == "seed" else
+                         "the copy and its stream, then the check"
+                         if mode == "migrate" else
+                         "the stream, then each cycle verifies what"
+                         " changed"))
+        return None
+    if mode == "seed":
+        return _settle(hop_name, db, on_conflict)
+    got = None
+    if mode == "migrate":
+        _caught_up(hop, db)
+        got, _ = _check(get_hop(hop_name), db, "", "", False, False, 0,
+                        False, "", hints=True)
+        if not serve:
+            return got
+    why = capabilities.unavailable(hop.engine, "delta")
+    if why:
+        # no verify of what changed here: the flow ends as its check did
+        console.print(f"   {_esc(why)}")
+        return got
+    return _delta_loop(hop_name, db, interval, 0 if serve else 1, False)
 
 
 def _table_plan(hop, eng, d, via, go=False):
@@ -1773,6 +2417,12 @@ def _where_and_machine(hop, eng, d, via):
         said = ""
     if said:
         out.append(f"  machine: {said}")
+    # the copy over the link against a seed shipped on media, both timed,
+    # where the hop names a carrier or the link would miss its deadline
+    from . import ship
+    seed = ship.plan_line(hop, eng, d, via)
+    if seed:
+        out.append(f"  seed: {seed}")
     return out
 
 
@@ -1782,7 +2432,10 @@ def _record_run(hop, eng, d, via, rows, began, spent):
     machine spent - where the copy ran here and not in a container, whose
     CPU this process does not see."""
     from . import machine, movers, planner, rehearsal, sizing
-    here = movers.PROGRAMS.get(via) != ("docker",)
+    # the programs this machine runs for the way, not the static table: a
+    # local build of the streaming copy was taken for its image, and its
+    # CPU seconds were lost
+    here = movers.programs(via) != ("docker",)
     took = time.time() - began
     planner.record_rate(hop, via, rows, took,
                         machine.size_of(eng, d, hop),
@@ -1937,7 +2590,10 @@ def _copy_table(eng, d, sch, t, chunk, ck, log):
 
 
 def _copy_table_by(eng, d, sch, t, chunk, ck, log):
-    if not eng.through_pair(d, f"{sch}.{t}" if sch else t):
+    from . import ha
+    if not eng.through_pair(d, f"{sch}.{t}" if sch else t) \
+            and (getattr(eng, "src_engine", None) is not None
+                 or ha.copier(eng.hop) == "own"):
         return eng.move_table(d, sch, t, chunk, ck, log)
     pair = eng.columns_pair()
     src = next((n for n in pair.src_engine.neutral_tables("src", d)
@@ -2179,6 +2835,13 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
                 failed = f.exception()
                 for g in futs:
                     g.cancel()
+    except KeyboardInterrupt:
+        # it waited for every table in flight without a word
+        running = sum(1 for g in futs if g.running())
+        if running:
+            log(f"[yellow]stopping: the {running} tables in flight are let"
+                " finish, and no other starts[/yellow]")
+        raise
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
     said = gate.line()
@@ -2280,8 +2943,11 @@ def _move_full(hop, eng, db, table, chunk, go):
         if not go:
             done = sum(1 for sch, t in tables
                        if ck.get(eng.move_key(d, sch, t), {}).get("done"))
-            console.print(f"{d}: {len(tables)} tables, {done} already done"
-                          f" in checkpoint, chunk {chunk:,} rows")
+            console.print(f"{_esc(d)}: {len(tables)} tables, {done} already"
+                          f" done in checkpoint, chunk {chunk:,} rows")
+            _would_stop(lambda: eng.refuse_unfit(
+                d, [f"{s}.{t}" if s else t for s, t in tables
+                    if not ck.get(eng.move_key(d, s, t))]))
             # each table's time from the one table ladder the copy climbs
             # when its turn comes; its way and why go to the decision
             # record (`tableway`)
@@ -2306,6 +2972,11 @@ def _move_full(hop, eng, db, table, chunk, go):
                          + _resource_plan(hop, eng, d, "builtin", None,
                                           _catalogue_names(eng, d, tables))):
                 console.print(line)
+            # where each machine works, where the hop's machines work
+            # together (`ha`)
+            from . import ha
+            for line in ha.plan_lines(hop, eng, d):
+                console.print(f"  {line}")
             continue
         # a value the target would round, cut or refuse stops the move
         # here, before the first table is copied; a table an earlier run
@@ -2318,7 +2989,7 @@ def _move_full(hop, eng, db, table, chunk, go):
         began, rows = time.time(), _source_rows(eng, d)
         from . import machine
         spent = machine.Spent()
-        point = _position_before_copy(eng, d) if not table else None
+        point = _kept_point(hop, eng, d, ck) if not table else None
         _mark_move(hop, eng, d)
         lk = _lock(hop)
         try:
@@ -2333,7 +3004,11 @@ def _move_full(hop, eng, db, table, chunk, go):
                 lk.unlink()
                 lk = None
                 point = _first_point(ck, point)
-                _share_tables(hop, eng, d, tables, chunk, ck, share)
+                from . import claims
+                if claims.shared_ranges(hop):
+                    _share_ranges(hop, eng, d, tables, chunk, ck)
+                else:
+                    _share_tables(hop, eng, d, tables, chunk, ck, share)
                 lk = _finisher(hop, d, ck)
                 if lk is None:
                     continue
@@ -2366,6 +3041,35 @@ def _move_full(hop, eng, db, table, chunk, go):
                       " run migkit check to verify")
     if not go:
         console.print("\ndry-run, add --go to copy")
+
+
+#: where the source's log was before the first run of a copy began
+POINT_FILE = "copy-before.json"
+
+
+def _kept_point(hop, eng, d, ck):
+    """The source's position before the first run of this copy, taken and
+    kept before a row is copied, and read back by every run that resumes
+    it: a resumed copy took a new one, and a `--mode cdc` started from it
+    missed what changed on the ranges the first run had finished. A copy
+    resumed from a run that kept none has none - which the stream says,
+    rather than a guess."""
+    path = hop.report_dir(d) / POINT_FILE
+    shared = _shared(hop, d)
+    begun = any(isinstance(v, dict) for k, v in ck.items()
+                if k not in (BEFORE, COMPLETED))
+    if begun:
+        try:
+            return json.loads(path.read_text()).get("point")
+        except (OSError, ValueError, AttributeError):
+            return None
+    point = _position_before_copy(eng, d)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"point": point, "at": time.strftime(
+        "%Y-%m-%d %H:%M:%S")}, default=str))
+    if shared:
+        shared.push(force=True)
+    return point
 
 
 #: the checkpoint entry holding where the source's log was before the
@@ -2432,6 +3136,63 @@ def _share_tables(hop, eng, d, tables, chunk, ck, remote):
                     " machine stops renewing its lease")
                 said_waiting = True
             time.sleep(min(term() / 3, 5))
+
+
+def _share_ranges(hop, eng, d, tables, chunk, ck):
+    """Every table copied by every machine that runs the move
+    (`share_tables: ranges`, `claims`): a table large enough is split once,
+    by the first machine to reach it, and its ranges taken by every
+    machine's workers; the rest are taken whole, one machine each, and
+    taken over from where their machine left them once it stops renewing.
+    Through the table copier every pair shares, whose every write is held
+    to the number its taker holds (`fencing`). Returns once every table
+    is done, by whichever machines."""
+    from . import claims, ha, shared
+    from .engines.hetero import HeteroEngine
+
+    def log(m):
+        console.print(f"  {m}")
+    pair = eng if isinstance(eng, HeteroEngine) else eng._as_pair()
+    store = shared.store_for(hop, log)
+    there = pair.src_engine.neutral_tables("src", d)
+    names = {t: next((n for n in there if pair._leaf(n) == t), t)
+             for _, t in tables}
+    keys = {t: pair.move_key(d, "", pair._leaf(names[t])) for t in names}
+    # each machine starts at a table of its own, so the tables taken whole
+    # are not all asked for by every machine at once
+    turn = abs(hash(ha.mover())) % max(len(names), 1)
+    said = False
+    while True:
+        ck.reload()
+        left = [t for t in names if not (ck.get(keys[t]) or {}).get("done")]
+        if not left:
+            return
+        left = left[turn % len(left):] + left[:turn % len(left)]
+        moved = False
+        for t in left:
+            src = names[t]
+            psch, _, ptbl = src.rpartition(".")
+            way = claims.way(hop, d, keys[t], store,
+                             lambda s=src: pair.splits_across_machines(d, s))
+
+            def copy(s=src, a=psch, b=ptbl, k=keys[t]):
+                with pair.load_window(d, log, {s}):
+                    pair.move_table(d, a, b, chunk, ck, log)
+                return int((ck.get(k) or {}).get("moved") or 0)
+            if way == "ranges":
+                copy()
+                moved = True
+            elif claims.whole(hop, d, keys[t], store, copy, log):
+                _changelog(hop, {"op": "move", "db": d, "table": src,
+                                 "shared": True})
+                moved = True
+        if not moved:
+            if not said:
+                log(f"{d}: {len(left)} tables are being copied by other"
+                    " machines; waiting for them, and for any whose"
+                    " machine stops renewing its claim")
+                said = True
+            time.sleep(min(ha.term() / 3, 5))
 
 
 def _finisher(hop, d, ck):
@@ -2607,11 +3368,11 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
             plan = [("src", x) for x in sql["src"]] + \
                    [("dst", x) for x in sql["dst"]]
         if sql.get("note"):
-            console.print(f"  note: {sql['note']}")
+            console.print(f"  note: {_esc(sql['note'])}")
         for side, stmt in plan:
             shown = without_secret(stmt, hop.source.password)
             shown = without_secret(shown, secret)
-            console.print(f"  {side}: {shown}")
+            say_raw(f"  {side}: {shown}")
             if not go:
                 continue
             try:
@@ -2752,6 +3513,16 @@ def _copy_record_used(hop, d):
 
 
 def _tail(hop, eng, db, go):
+    from . import ha
+    if go and ha.standby(hop) and ha.held(hop) is None:
+        # the machines shared the copy; the stream is one machine's, the
+        # others standing by
+        return ha.run_led(hop, lambda: _tail_held(hop, eng, db, go),
+                          lambda m: console.print(m))
+    return _tail_held(hop, eng, db, go)
+
+
+def _tail_held(hop, eng, db, go):
     path = _tail_token(hop, db)
     _interlock(hop, eng, db, go)
     shared = _shared(hop, db)
@@ -2887,9 +3658,9 @@ def _stream(hop, eng, db, do_drop, go, engine):
     console.print("starting the streaming pipeline ...")
     movers.stream_up(out, lambda m: chat(f"  {m}"))
     if not movers.stream_wait(log=lambda m: chat(f"  {m}")):
-        raise SystemExit("the streaming pipeline did not come up"
-                         f" (logs: docker compose -f {out}/docker-compose.yml"
-                         " logs)")
+        raise SystemExit("the streaming pipeline did not come up (its stack"
+                         f" is written under {out}); migkit doctor says what"
+                         " this machine is missing")
     movers.stream_register(out, log=lambda m: console.print(f"  {m}"))
     for c in (f"{name}-source", f"{name}-sink"):
         console.print("  " + movers.stream_status(c))
@@ -2929,26 +3700,37 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     the data, migkit verifies it.
 
     Use only over a trusted network (or run migkit on a cloud VM)."""
-    from . import schedule
-    hop = get_hop(hop_name)
-    if not schedule.gate(hop, "move", console.print):
-        return _move_run(hop_name, db, table, mode, chunk, do_drop, go)
-    # a run its schedule started: a follow ends once caught up
-    # (`tailctl.until`), and what it ended as is the schedule's
-    ok = False
-    try:
-        got = _move_run(hop_name, db, table, mode, chunk, do_drop, go)
-        ok = True
-        return got
-    except SystemExit as e:
-        ok = e.code in (None, 0)
-        raise
-    finally:
-        schedule.finished(hop, ok)
+    from .verdict import Usage
+    if do_drop and mode != "cdc":
+        # it asked for the cutover's approval and tore nothing down (full),
+        # or tore the stream down outside the cutover (full+cdc)
+        raise Usage(f"--drop tears the stream down: migkit move {hop_name}"
+                    " --mode cdc --drop")
+    if table and mode == "cdc":
+        raise Usage("--table narrows a copy; a stream follows the whole"
+                    " database (--mode full or full+cdc)")
+    if _given("chunk") and mode == "cdc":
+        raise Usage("--chunk sizes the ranges of a copy; --mode cdc copies"
+                    " nothing")
+    return _move_run(hop_name, db, table, mode, chunk, do_drop, go)
 
 
 def _move_run(hop_name, db, table, mode, chunk, do_drop, go):
-    """`move`, with what stopped it said in migkit's words."""
+    """`move`, with what stopped it said in migkit's words - on a hop with
+    a standby, by the machine that holds it, this one standing by until
+    it does (`ha`). Where the machines share the copy, only the change
+    stream after it is held so (`_tail`)."""
+    from . import ha
+    hop = get_hop(hop_name)
+    if go and not do_drop and ha.standby(hop) \
+            and not (hop.options or {}).get("share_tables"):
+        return ha.run_led(hop, lambda: _move_worded(
+            hop_name, db, table, mode, chunk, do_drop, go),
+            lambda m: console.print(m))
+    return _move_worded(hop_name, db, table, mode, chunk, do_drop, go)
+
+
+def _move_worded(hop_name, db, table, mode, chunk, do_drop, go):
     from . import decide
     try:
         return _move(hop_name, db, table, mode, chunk, do_drop, go)
@@ -3037,6 +3819,17 @@ def _carried_physically(hop, eng, db, mode, go):
     from . import physical
     if mode not in ("full", "full+cdc") or not physical.settings(hop):
         return False
+    from . import ha
+    if go and ha.standby(hop):
+        # a copy of the pages goes around every writer migkit holds to
+        # the holder's number, so a machine that lost the hop could not be
+        # refused on the target
+        raise SystemExit(
+            f"{hop.name}: a seed from a copy of the source's pages cannot"
+            " be held to the number of the machine that holds the hop, so"
+            " it is not run with standby on. Seed it from one machine"
+            " with standby off, then turn standby on for the change stream"
+            " (--mode cdc). Nothing was written")
     import sys
     lk = _lock(hop) if go else None
     try:
@@ -3073,20 +3866,66 @@ def _carried_physically(hop, eng, db, mode, go):
     return True
 
 
+def _carried_on_media(hop, eng, db, mode, go):
+    """The move seeded on media, where the hop names a carrier and the
+    decision engine takes it (`ship`): the export where no sealed seed is
+    found, the load where one is - True where it was, and the move is
+    this one's. A hop without `ship:` never reaches it."""
+    from . import ship
+    if mode not in ("full", "full+cdc") or not ship.settings(hop):
+        return False
+    lk = _lock(hop) if go else None
+    try:
+        console.print("[bold]seed on media[/bold]")
+        done = ship.carry(hop, eng, db, mode, go,
+                          lambda m: console.print(f"  {m}"))
+    finally:
+        if lk:
+            lk.unlink()
+    if not done:
+        return False
+    if not go:
+        console.print("\ndry-run, add --go to execute")
+        return True
+    loaded = []
+    for d, got in done.items():
+        console.print(f"  {d}: {got.said}")
+        if got.half == "export":
+            _changelog(hop, {"op": "move-seed-export", "db": d})
+            console.print(f"  {d}: ship the carrier, then run the same"
+                          " command where the target is: migkit move"
+                          f" {hop.name} --mode {mode} --go")
+            continue
+        _changelog(hop, {"op": "move-seed-load", "db": d})
+        _refuse_if_nothing_arrived(hop, eng, d, "the seed on media",
+                                   lambda m: console.print(f"  {m}"))
+        _record_copy(hop, d, got.position)
+        settled = eng.settle_target(d)
+        if settled:
+            console.print(f"  {settled}")
+        loaded.append(d)
+    if loaded:
+        _protect_target(hop, eng, db)
+    if mode == "full+cdc" and loaded:
+        tailer = eng if hasattr(eng, "tail_apply") else _tail_pair(eng)
+        if db and tailer is not None:
+            _tail(hop, tailer, db, go)
+        else:
+            for d in loaded:
+                console.print(f"  {d}: its changes go on from the seed's"
+                              f" position - migkit move {hop.name} --mode"
+                              f" cdc --db {d} --go")
+    elif loaded:
+        console.print("[green]seeded[/green] - verify: migkit check"
+                      f" {hop.name}")
+    return True
+
+
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from . import cutover, hopkeys, movers
     from . import model as resource_model
     hop = get_hop(hop_name)
     _require_configured(hop)
-    if go:
-        hopkeys.refuse_writes(hop, "a move")
-    if mode != "full" and (hop.options or {}).get("mask_on_write"):
-        # the masking is the dump's; a change read after it is the source's
-        # own row, and would land unmasked
-        raise SystemExit(
-            f"{hop.name} masks columns on the way, and a change stream would"
-            " carry their real values into the target: a hop that masks is"
-            " copied (--mode full), not followed. Nothing has been started")
     eng = get_engine(hop)
     # measured once for this run, and afresh for the next
     resource_model.forget()
@@ -3104,29 +3943,36 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from . import twoway
     two_way = two_way or twoway.settings(hop) is not None
     if mode == "cdc" and do_drop and (cutover.settings(hop) or not two_way):
-        # tearing the stream down is the cutover (`migkit.cutover`); a hop
+        # tearing the stream down is the cutover (`migkit.cutover`), which
+        # holds its own approvals and the target's identity; a hop
         # streaming both ways has no side to move from, and tears down as
         # it always has
+        _guard_write(hop, eng, "a move", None, go, mode=mode, drop=True)
         from .engines import ALIASES
         return _cutover(hop, eng, db, go, ALIASES.get(hop.engine, hop.engine))
-    if go and do_drop:
-        # tearing the stream down is the cutover
-        from . import approvals
-        approvals.require(hop, "cutover", db,
-                          lambda m: console.print(f"  {m}"))
-    from . import ready, rehearsal, subset
+    from . import rehearsal, subset
     rehearsal.mark(hop)
-    if go:
-        # everything known now that would stop this step before its end,
-        # each with its fix, before anything is written (`ready`)
-        ready.gate(hop, eng, [db] if db else None, mode, do_drop,
-                   lambda m: console.print(f"  {m}"))
-    else:
-        # the plan says them where the run would stop on them, and what a
-        # person does before it
-        for i in ready.stops(hop, eng, [db] if db else None, mode,
-                             do_drop):
-            console.print(f"  with --go this stops: {i}")
+    if not go and mode != "cdc":
+        # the case between the two servers first - a fork change, a version
+        # down, an edition change - and the way it decides
+        from . import case as server_case
+        from . import upgrade
+        try:
+            for line in server_case.plan_lines(
+                    hop, eng, db or (eng.databases() or [""])[0]):
+                console.print(f"  {line}")
+        except Exception as e:  # noqa: BLE001 - the plan goes on
+            console.print(f"  the case could not be worked out:"
+                          f" {upgrade._quiet(str(e).strip()[:160])}")
+    # everything that would stop this step - the goal, a hop that masks,
+    # what is known now to stop it before its end, the approval tearing a
+    # stream down is, the target's identity with its grants - before the
+    # target is written to at all (`_guard_write`)
+    _guard_write(hop, eng, "a move", [db] if db else eng.databases(), go,
+                 mode=mode, drop=do_drop,
+                 step="cutover" if do_drop else None, approve=[db],
+                 preflight=mode, db=db)
+    if not go:
         from . import upgrade
         if upgrade.settings(hop) is not None and mode != "cdc":
             # the way the upgrade goes, and what an upgrade in place on the
@@ -3138,15 +3984,15 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
             except Exception as e:  # noqa: BLE001 - the plan goes on
                 console.print(f"  upgrade: the way could not be worked"
                               f" out: {upgrade._quiet(str(e).strip()[:160])}")
-    for d in ([db] if db else eng.databases()):
-        # before the target is written to at all, its grants included
-        _interlock(hop, eng, d, go)
     if subset.settings(hop) is not None:
         return subset.move(hop, eng, [db] if db else eng.databases(),
                            mode, table, go,
                            lambda m: console.print(f"  {m}"))
     if not table and not do_drop and _carried_physically(hop, eng, db, mode,
                                                          go):
+        return
+    if not table and not do_drop and _carried_on_media(hop, eng, db, mode,
+                                                       go):
         return
     if go and not (do_drop and mode == "cdc" and back_at_cutover):
         # before anything is copied, so no write of the application's lands
@@ -3167,6 +4013,12 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         from . import legs
         base, passed = movers.for_hop(hop, engine, table, go)
         v, why = movers.fitted(hop, engine, base)
+        if v != "builtin":
+            # a hop with a standby is copied only by a way whose every
+            # write the target holds to the holder's number (`ha`)
+            from . import ha
+            v = ha.copier(hop, v, "the bulk load",
+                          lambda m: console.print(f"  {m}"))
         if passed and not legs.direct(v) and not table:
             # the hop asked for the servers to pull from each other: why
             # they do not is the first thing the operator reads
@@ -3174,11 +4026,11 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         if why:
             console.print(f"  {why}, so the tables are copied one by one")
         if v != "builtin":
+            # the dry run climbs the ways `--go` climbs, reading what
+            # earlier runs gave up on and writing nothing: it named the
+            # bulk way where `--go` would take the copier (`decide.attempt`)
             for d in dbs:
-                if go:
-                    _bulk_or_copier(hop, eng, d, v, table, chunk, engine)
-                else:
-                    _bulk_db(hop, eng, d, v, chunk, False, engine)
+                _bulk_or_copier(hop, eng, d, v, table, chunk, engine, go)
             return
         return _move_full(hop, eng, db, table, chunk, go)
     has_repl = hasattr(eng, "replicate_sql")
@@ -3202,6 +4054,16 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     # by key, so replaying that stretch converges instead.
     tailer = eng if has_tail else _tail_pair(eng)
     if tailer is not None and hasattr(eng, "move_table"):
+        from . import ha
+        if go and ha.copied(hop, db):
+            # taken over after the copy was finished: the stream goes on
+            # from where the last holder stood, as a restart of it would -
+            # the tables are not checked again against a source that has
+            # moved on since, which would copy them again
+            console.print(f"  {db}: the copy was finished before this"
+                          " machine took the move over; the change stream"
+                          " goes on from where it stood")
+            return _tail(hop, tailer, db, go)
         if go:
             _tail_before_copy(hop, tailer, db)
         _move_full(hop, eng, db, table, chunk, go)
@@ -3229,7 +4091,11 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
     movers.refuse_unpushable_filters(hop, d, v, engine)
     if go:
         eng.refuse_unfit(d)
-    console.print(f"[bold]{d}[/bold] bulk copy:")
+    else:
+        # what `--go` stops on before it writes, said by the plan
+        _would_stop(lambda: eng.refuse_unfit(d))
+        _would_stop(lambda: _programs_ready(hop, d, v))
+    console.print(f"[bold]{_esc(d)}[/bold] bulk copy:")
     before = drift.shape(eng, "src", d) if go else None
     for line in _table_plan(hop, eng, d, v, go):
         console.print(line)
@@ -3268,7 +4134,36 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
                   " check to verify")
 
 
-def _bulk_or_copier(hop, eng, d, v, table, chunk, engine):
+def _would_stop(fn):
+    """A guard `--go` stops on, asked by the plan: what it would say,
+    said, and the plan goes on."""
+    try:
+        fn()
+    except SystemExit as e:
+        if isinstance(e.code, str) and e.code.strip():
+            console.print("  with --go this stops: "
+                          + _esc(e.code.strip().splitlines()[0]))
+
+
+def _programs_ready(hop, d, v):
+    """What `--go` asks of the programs way `v` runs before it starts them
+    (`movers.run_via`), asked here for the plan: one an earlier move
+    started and left running, and options the installed build does not
+    take."""
+    from . import movers
+    left = movers._still_running(hop.report_dir(d) / "running-programs.json")
+    if left:
+        raise SystemExit(f"a program an earlier move of {d} started is"
+                         f" still running (process {left[0][0]}) and"
+                         " writing; a move beside it would empty the"
+                         " tables under it")
+    if movers.options_missing(hop, d, v):
+        raise SystemExit("the programs installed here do not take options"
+                         " the move passes them - migkit doctor --install"
+                         " puts builds that do in place")
+
+
+def _bulk_or_copier(hop, eng, d, v, table, chunk, engine, go=True):
     """One database by the bulk way chosen, or by the table copier where
     that way fails as it runs - a program that exits or crashes, a server
     that refuses it, a connection lost (`decide.attempt`): switched to by
@@ -3279,7 +4174,10 @@ def _bulk_or_copier(hop, eng, d, v, table, chunk, engine):
     left in a table, where another bulk way would load over it. What the
     copy is held to - the filters, the rows the hop keeps, the proofs
     after it - is the same on both. The bulk way is kept given up beside
-    the database's checkpoint until its program's version changes."""
+    the database's checkpoint until its program's version changes.
+
+    Without `go` the plan climbs the same ladder, reading the ways given
+    up and writing nothing (`record`), so it names the way `--go` takes."""
     from . import decide, movers
     ladder = {r.name: r for r in movers._ladder()}
     ran = decide.Need(
@@ -3293,7 +4191,9 @@ def _bulk_or_copier(hop, eng, d, v, table, chunk, engine):
 
     def run(choice):
         if choice.rung.name == "builtin":
-            return _move_full(hop, eng, d, table, chunk, True)
+            return _move_full(hop, eng, d, table, chunk, go)
+        if not go:
+            return _bulk_db(hop, eng, d, v, chunk, False, engine)
         lk = _lock(hop)
         try:
             return _bulk_db(hop, eng, d, v, chunk, True, engine)
@@ -3301,7 +4201,8 @@ def _bulk_or_copier(hop, eng, d, v, table, chunk, engine):
             lk.unlink()
     decide.attempt(f"the copy of {d}", rungs, run, facts,
                    where=hop.report_dir(d) / "move.json",
-                   log=lambda m: console.print(f"  [yellow]{m}[/yellow]"))
+                   log=lambda m: console.print(f"  [yellow]{_esc(m)}[/yellow]"),
+                   record=go)
 
 
 def _cdc(hop, eng, db, do_drop, go, engine):
@@ -3355,11 +4256,13 @@ def _cdc(hop, eng, db, do_drop, go, engine):
                           " streaming pipeline instead[/yellow]")
         return _stream(hop, eng, db, do_drop, go, engine)
     try:
+        # the dry run reads the ways given up here and writes nothing:
+        # it passed `where` over and could name a way `--go` would not take
         return decide.attempt(
             work, rungs, run, facts, costs=facts["costs"],
-            where=where if go else None, undo=undo,
-            log=lambda m: console.print(f"[yellow]{m}[/yellow]"),
-            switch=decide.only_blocked)[1]
+            where=where, undo=undo,
+            log=lambda m: console.print(f"[yellow]{_esc(m)}[/yellow]"),
+            switch=decide.only_blocked, record=go)[1]
     except decide.Exhausted as e:
         if e.__cause__ is not None:
             # ways were tried and each said why
@@ -3774,10 +4677,20 @@ def _pipeline_leg(hop, eng, dbs):
 
 
 def _delta_loop(hop_name, db, interval, cycles, teardown):
+    """`watch --verify --delta`, and the verifying step of `sync --mode
+    stream/migrate`: each cycle verifies what changed since the last
+    verified point, keeps its answers (`delta-summary.json`), tells the
+    hop's receivers, and says SAFE TO CUT OVER for a database only where
+    that cycle verified it the same, the source made no change since the
+    cycle before (`_position`) and the tail - where one runs here - has
+    nothing left to apply. A database whose verify raises is an `error`
+    answer of the cycle: it was left out, and the receivers were told
+    "same". Returns the last cycle's `verdict.Decision`."""
+    from . import tailctl
+    from . import verdict as _verdict
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    capabilities.require(hop.engine, "delta")
     dbs = [db] if db else eng.databases()
     if teardown:
         for d in dbs:
@@ -3785,44 +4698,77 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
                 try:
                     eng.delta_teardown(d)
                 except Exception as e:
-                    console.print(f"{d}: [yellow]{e}[/yellow]")
+                    console.print(f"{_esc(d)}: [yellow]"
+                                  f"{_esc(_clean(e, raw=True))}[/yellow]")
             for f in ("delta-pos.json", "delta-token.json",
                       "pair-delta-token.json"):
                 p = hop.report_dir(d) / f
                 if p.exists():
                     p.unlink()
-            console.print(f"{d}: delta state removed")
-        return
-    n = 0
+            console.print(f"{_esc(d)}: delta state removed")
+        return None
+    capabilities.require(hop.engine, "delta")
+    secrets = (hop.source.password, hop.target.password)
+    n, last, got = 0, {}, None
     while True:
         n += 1
         stamp = time.strftime("%H:%M:%S")
         all_results = []
         for d in dbs:
+            position = _position(eng, d)
             try:
-                rs = eng.delta_verify(d, log=lambda m, d=d:
-                                      chat(f"  [{d}] {m}"))
+                rs = [r.__dict__ for r in eng.delta_verify(
+                    d, log=lambda m, d=d: chat(
+                        f"  {_esc('[' + str(d) + ']')} {_esc(m)}"))]
             except Exception as e:
-                console.print(f"{stamp} {d}: [red]delta error[/red] {e}")
-                continue
+                rs = [{"check": "delta", "scope": d, "status": "error",
+                       "detail": _clean(e, secrets, raw=True)}]
+            if not rs:
+                rs = [{"check": "delta", "scope": d, "status": "error",
+                       "detail": "the verify gave no answer"}]
             head = rs[0]
+            st = str(head.get("status", ""))
             color = {"ok": "green", "diff": "yellow",
-                     "error": "red"}.get(head.status, "white")
-            console.print(f"{stamp} cycle {n} {d}:"
-                          f" [{color}]{head.status.upper()}[/{color}]"
-                          f" {head.detail}")
+                     "error": "red"}.get(st, "white")
+            console.print(f"{stamp} cycle {n} {_esc(d)}:"
+                          f" [{color}]{_esc(st.upper())}[/{color}]"
+                          f" {_esc(head.get('detail', ''))}")
             for r in rs[1:]:
-                if r.status not in ("ok", "skip"):
-                    console.print(f"    [yellow]{r.scope}: {r.detail}[/yellow]"
-                                  + (f"  fix: {r.fix_hint}" if r.fix_hint
-                                     else ""))
-            all_results.extend(r.__dict__ for r in rs)
+                if r.get("status") not in ("ok", "skip"):
+                    console.print(
+                        f"    [yellow]{_esc(r.get('scope', ''))}:"
+                        f" {_esc(r.get('detail', ''))}[/yellow]"
+                        + (f"  fix: {_esc(r['fix_hint'])}"
+                           if r.get("fix_hint") else ""))
+            mine = _verdict.decide(rs, hop)
+            st_tail = tailctl.state(hop.report_dir(d)) \
+                if tailctl.alive(hop.report_dir(d)) else None
+            behind = (st_tail or {}).get("behind")
+            quiet = _held_since(last.get(d), position)
+            if mine.status == "same" and quiet and not behind:
+                console.print(
+                    "    [green]SAFE TO CUT OVER[/green]: verified the same"
+                    " this cycle, the source made no change since the last"
+                    + (", and the tail has nothing left to apply"
+                       if st_tail is not None else ""))
+            elif mine.status == "same":
+                console.print(
+                    "    same as far as verified; "
+                    + ("the tail has changes still to apply" if behind
+                       else "the source is still being written"
+                       if position is not None and last.get(d)
+                       else "whether the source is still being written is"
+                            " known from the next cycle"))
+            last[d] = position
+            all_results.extend(rs)
         (hop.report_dir() / "delta-summary.json").write_text(
             json.dumps(all_results, indent=1, default=str))
         _watched(hop, dbs, all_results)
+        got = _verdict.decide(all_results, hop)
         if cycles and n >= cycles:
             break
         time.sleep(interval)
+    return got
 
 
 def _watched(hop, dbs, results=None):
@@ -3833,57 +4779,77 @@ def _watched(hop, dbs, results=None):
     from . import verdict as _verdict
 
     def say(m):
-        console.print(f"[yellow]{m}[/yellow]")
+        console.print(f"[yellow]{_esc(m)}[/yellow]")
     if results is not None:
         notify.verdict(hop, _verdict.summarize(hop, results), say,
                        key="watch")
     notify.lags(hop, dbs, say)
 
 
+#: what `watch --verify` keeps of its last cycle, beside the check's own
+WATCH_SUMMARY = "watch-summary.json"
+WATCH_REPORT = "watch-report.html"
+
+
 def _monitor(hop_name, db, interval, only, cycles):
+    """`watch --verify`: the check's own run (`run_checks`) each cycle -
+    its answers kept under names of its own, where it wrote a partial
+    cycle over the check's `report.html` while `verdict.json` described
+    the last whole check. Returns the last cycle's `verdict.Decision`."""
+    from . import verdict as _verdict
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    checks = [c for c in only.split(",") if c in eng.checks]
+    checks, _ = _checks_for(eng, only)
     dbs = [db] if db else eng.databases()
-    n = 0
+    n, got = 0, None
     while True:
         n += 1
         stamp = time.strftime("%H:%M:%S")
-        all_results = []
+        all_results, _ = run_checks(hop, eng, dbs, checks,
+                                    workers=hop.workers, whole=False)
         for d in dbs:
             statuses = []
             for c in checks:
-                try:
-                    rs = getattr(eng, f"check_{c}")(d)
-                except Exception as e:
-                    rs = []
-                    statuses.append(f"[red]{c}:ERR[/red] {e}")
-                for r in rs:
-                    all_results.append(r.__dict__)
-                bad = [r for r in rs if r.status not in ("ok", "skip")]
+                rs = [r for r in all_results if r.get("check") == c
+                      and _verdict.db_of(r.get("scope", "")) == d]
+                bad = [r for r in rs if r.get("status") == "error"]
+                odd = [r for r in rs if r.get("status") not in
+                       ("ok", "skip", "error")]
                 if bad:
+                    statuses.append(f"[red]{c}:ERR[/red]"
+                                    f" {_esc(str(bad[0].get('detail'))[:60])}")
+                elif odd:
                     statuses.append(f"[yellow]{c}:DIFF[/yellow]"
-                                    f" {bad[0].detail[:60]}")
+                                    f" {_esc(str(odd[0].get('detail'))[:60])}")
                 elif rs:
                     statuses.append(f"[green]{c}:ok[/green]")
-            console.print(f"{stamp} cycle {n} {d}: " + "  ".join(statuses))
+            console.print(f"{stamp} cycle {n} {_esc(d)}: "
+                          + "  ".join(statuses))
+        got = _verdict.decide(all_results, hop)
         try:
+            (hop.report_dir() / WATCH_SUMMARY).write_text(
+                json.dumps(all_results, indent=1, default=str))
             from .report import write_report
-            write_report(hop, all_results)
-        except Exception:
+            write_report(hop, all_results,
+                         hop.report_dir() / WATCH_REPORT, decided=got)
+        except OSError:
             pass
         _watched(hop, dbs, all_results)
         if cycles and n >= cycles:
             break
         time.sleep(interval)
+    return got
 
 
 def _cutover_verdict(prev, cur, stable_cycles):
-    """Decide, from two consecutive watch samples, whether it is safe to cut
-    over. The trap is a source that looks caught up while a queue/worker keeps
-    writing to it; name the hot tables instead of greenlighting a flip. A
-    green verdict still asks for one consistent check to certify."""
+    """What two consecutive count samples say about a cutover - never that
+    it is safe. The counts are the servers' estimates (MySQL's cached up
+    to a day), a target with extra rows passes `dst >= src`, and an update
+    or a delete moves no count: "SAFE TO CUT OVER" said from them was a
+    guess. SAFE is said only by a cycle that verified what changed
+    (`_delta_loop`). The trap named here is a source that looks caught up
+    while a queue or a worker keeps writing to it: its hot tables."""
     src, dst = cur.get("src_rows", 0), cur.get("dst_rows", 0)
     pt = (prev or {}).get("src_tables") or {}
     hot = [f"{t} +{c - pt[t]}" for t, c in (cur.get("src_tables") or {}).items()
@@ -3892,10 +4858,15 @@ def _cutover_verdict(prev, cur, stable_cycles):
         return ("NOT SAFE", "yellow",
                 "source still HOT (writers active): " + ", ".join(hot[:4])
                 + " - pause them to converge")
-    if dst >= src and src > 0 and stable_cycles >= 2:
-        return ("SAFE TO CUT OVER", "green",
-                f"source stable {stable_cycles} cycles and dst>=src; run"
-                " 'check --consistent' to certify, then flip")
+    if src > 0 and dst > src:
+        return ("counts differ (estimates)", "yellow",
+                "the target counts more rows than the source - migkit"
+                " check says which are extra")
+    if dst == src and src > 0 and stable_cycles >= 2:
+        return ("counts converging (estimates)", "cyan",
+                f"source quiet {stable_cycles} cycles and the counts agree;"
+                " `watch --verify --delta` verifies what changed and says"
+                " when a flip is safe")
     if dst >= src and src > 0:
         return ("converging", "cyan",
                 "dst caught up; waiting for source to settle before verdict")
@@ -3975,17 +4946,35 @@ def _catch_up(hop, eng, d):
                    " only the rows touched since the last verified point"
                    " (WAL slot / binlog / change stream driven)")
 @click.option("--teardown", is_flag=True,
-              help="with --delta: drop the delta slot/position and exit")
+              help="drop the delta slot/position --delta keeps, and exit")
 def watch(hop_name, db, interval, count, verify, only, delta, teardown):
     """Watch a running migration load: row counts, rate, ETA, replication
     state. --verify turns it into a continuous validation loop: transient
     diffs that heal next cycle are replication lag, persistent ones are
     real. --verify --delta verifies only what changed, so it can run
-    forever against billion-row databases."""
-    if delta:
-        return _delta_loop(hop_name, db, interval or 60, count, teardown)
-    if verify:
-        return _monitor(hop_name, db, interval or 300, only, count)
+    forever against billion-row databases, and says when a flip is safe.
+    With --count it ends as its last cycle's verdict does."""
+    from .verdict import Usage
+    if _given("only") and not verify:
+        raise Usage("--only names the checks --verify runs each cycle")
+    if teardown and verify and not delta:
+        raise Usage("--teardown drops what --delta keeps; --verify alone"
+                    " keeps nothing to drop")
+    if delta or teardown:
+        # --teardown alone started an endless count watch, and the delta
+        # slot it was asked to drop kept the source's log growing
+        got = _delta_loop(hop_name, db, interval or 60, count, teardown)
+    elif verify:
+        got = _monitor(hop_name, db, interval or 300, only, count)
+    else:
+        return _sample_watch(hop_name, db, interval, count)
+    if got is not None and got.exit:
+        raise SystemExit(got.exit)
+
+
+def _sample_watch(hop_name, db, interval, count):
+    """`watch` without --verify: the counts sampled, their rate and what
+    they say about a cutover (`_cutover_verdict`)."""
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
@@ -4008,10 +4997,10 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
         for d in dbs:
             s = eng.watch_sample(d)
             if "error" in s:
-                console.print(f"{d}: [red]{s['error']}[/red]")
+                console.print(f"{_esc(d)}: [red]{_esc(s['error'])}[/red]")
                 continue
             src, dst = s.get("src_rows", 0), s.get("dst_rows", 0)
-            line = f"{d}: src~{human_int(src)} dst~{human_int(dst)}"
+            line = f"{_esc(d)}: src~{human_int(src)} dst~{human_int(dst)}"
             if src:
                 line += f" ({dst * 100 // src}%)"
             prev = last.get(d)
@@ -4023,10 +5012,14 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
                              f" (recent {human_int(int(avg))}/s)"
                              f" eta {human_secs(max(src - dst, 0) / avg)}")
             for more in _move_said(hop, d):
-                line += f"\n    {more}"
+                line += f"\n    {_esc(more)}"
+            # the machines that move it, where they work together (`ha`)
+            from . import ha
+            for more in ha.health(hop, d):
+                line += f"\n    {_esc(more)}"
             said = ahead[d].line()
             if said:
-                line += f"\n    {said}"
+                line += f"\n    {_esc(said)}"
             # source hot = it grew (aggregate or any table) since last cycle
             grew = bool(prev) and (
                 src > prev.get("src_rows", 0)
@@ -4035,20 +5028,21 @@ def watch(hop_name, db, interval, count, verify, only, delta, teardown):
                        if t in (prev.get("src_tables") or {})))
             stable[d] = 0 if grew else stable.get(d, 0) + 1
             for slot in s.get("replication_slots", []):
-                line += f"\n    slot {slot}"
+                line += f"\n    slot {_esc(slot)}"
             for conn in s.get("replication_conns", []):
-                line += f"\n    conn {conn}"
+                line += f"\n    conn {_esc(conn)}"
             v = _cutover_verdict(prev, s, stable[d])
             if v:
                 label, style, detail = v
-                line += f"\n    [{style}]{label}[/{style}]: {detail}"
+                line += (f"\n    [{style}]{_esc(label)}[/{style}]:"
+                         f" {_esc(detail)}")
             console.print(line)
             last[d] = s
         if piped:
             said, notes, held = _watch_stream(hop, eng, dbs, piped, notes,
                                               held)
             for one in said:
-                console.print(f"  {one}")
+                console.print(f"  {_esc(one)}")
         _watched(hop, dbs)
         if count and n >= count:
             break
@@ -4077,8 +5071,9 @@ def _watch_stream(hop, eng, dbs, out, seen, held):
 @click.argument("hop_name", required=False)
 @click.option("--open", "do_open", is_flag=True, help="open in browser")
 @click.option("--refresh", is_flag=True,
-              help="re-derive summary from evidence on disk (no re-check):"
-                   " settled checksum flickers become OK")
+              help="render the report again from the last check's answers"
+                   " on disk (no re-check); the answers stay as the check"
+                   " took them")
 @click.option("--serve", is_flag=True,
               help="serve the live dashboard for every hop instead of"
                    " writing a file")
@@ -4092,8 +5087,12 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
     digests and how to take them again, decisions, approvals, repairs,
     outages - HTML, Markdown, JSON, CSV), or --serve the live localhost
     dashboard (with a Prometheus /metrics endpoint)."""
-    import subprocess
-
+    from .verdict import Usage
+    if (serve or metrics) and (refresh or do_open or hop_name):
+        raise Usage("--serve and --metrics are for every hop; --refresh,"
+                    " --open and a hop name are for one hop's report")
+    if _given("port") and not serve:
+        raise Usage("--port is where --serve listens")
     if metrics:
         from .ui import prometheus
         print(prometheus(load_hops()), end="")
@@ -4113,12 +5112,11 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
     hop = get_hop(hop_name)
     summary_path = hop.report_dir() / "summary.json"
     if refresh and summary_path.exists():
-        from .report import _reclassify
-        results = _reclassify(json.loads(summary_path.read_text()))
-        summary_path.write_text(json.dumps(results, indent=1, default=str))
-        still = sum(1 for r in results if r["status"] not in ("ok", "skip"))
-        console.print(f"refreshed from disk: {still} real problems remain"
-                      f" (settled flickers cleared)")
+        # the answers are the check's, and nothing here changes them: it
+        # rewrote a `diff` whose detail said no row differed as an `ok`,
+        # in the file the dashboard and the next repair read
+        console.print("rendered again from the last check's answers, as it"
+                      " took them - `migkit check` takes them afresh")
     from . import export
     from .report import from_summary
     path = None
@@ -4133,7 +5131,8 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
     console.print(f"evidence: {out / 'evidence.html'} (and evidence.md,"
                   " evidence.json, tables.csv beside it)")
     if do_open:
-        subprocess.run(["open", str(path or out / "evidence.html")])
+        # the platform's own opener, not one system's command
+        click.launch(str(path or out / "evidence.html"))
 
 
 @main.command()
@@ -4148,9 +5147,9 @@ def history(hop_name, db, show_ts):
     hop = get_hop(hop_name)
     root = hop.report_dir()
     store = get_store(hop)
-    eng = get_engine(hop) if hop.source.configured() else None
-    dbs = [db] if db else (eng.databases() if eng
-                           and hasattr(eng, "databases") else [])
+    # from what migkit kept, never the source: it connected to list the
+    # databases, and a source that was down stopped the audit trail
+    dbs = [db] if db else _dbs_with_history(hop)
     t = Table("state", "db", "captured", "op", title=f"saved states"
               f" ({store.kind})")
     found = []
@@ -4171,18 +5170,19 @@ def history(hop_name, db, show_ts):
                 sdir = store.fetch(d, m["ts"])
                 jl = sdir / "journal.jsonl" if sdir else None
                 if jl and jl.exists():
-                    console.print(f"\n[bold]{d}/{m['ts']}[/bold]")
-                    console.print(jl.read_text().strip())
+                    console.print(f"\n[bold]{_esc(d)}/{_esc(m['ts'])}"
+                                  "[/bold]")
+                    say_raw(jl.read_text().strip())
     cl = root / "changelog.jsonl"
     if cl.exists():
         from . import audit
         n, chained, broken = audit.verify(cl)
         console.print("\nlocal changelog (last 15):")
         for line in cl.read_text().splitlines()[-15:]:
-            console.print(f"  {line}")
+            say_raw(f"  {line}")
         if broken:
-            console.print(f"[red]the record has been changed: {broken}"
-                          "[/red]")
+            console.print(f"[red]the record has been changed:"
+                          f" {_esc(broken)}[/red]")
         else:
             console.print(f"  {chained} of {n} entries chained, and the"
                           " chain is whole"
@@ -4190,6 +5190,20 @@ def history(hop_name, db, show_ts):
                              if n > chained else ""))
     elif not found:
         console.print("no history yet, nothing has been applied")
+
+
+def _dbs_with_history(hop):
+    """The databases migkit kept anything for - a restore point, a
+    repair's undo - by the hop's reports, and the hop's own list."""
+    got = set(map(str, hop.databases or []))
+    try:
+        for d in hop.report_dir().iterdir():
+            if d.is_dir() and ((d / "state").is_dir()
+                               or (d / "undo").is_dir()):
+                got.add(d.name)
+    except OSError:
+        pass
+    return sorted(got)
 
 
 @main.command()
@@ -4202,28 +5216,17 @@ def rollback(hop_name, db, state_ts, do_apply):
     """Restore target sequences from a saved state, put back the rows the
     repairs since it wrote, where the target still holds what they wrote;
     where the hop streamed back or cut over, the old source's counters
-    raised past the new primary's."""
+    raised past the new primary's. With --apply, under one hold of the
+    hop, the application's writes given back last - after everything they
+    would write over is put back."""
     hop = get_hop(hop_name)
     eng = get_engine(hop)
-    from . import approvals, cutover, freeze, hopkeys, repairlog
-    if do_apply:
-        hopkeys.refuse_writes(hop, "a rollback")
-        approvals.require(hop, "rollback", db,
-                          lambda m: console.print(f"  {m}"))
-    _interlock(hop, eng, db, do_apply)
+    from . import cutover, freeze, repairlog
+    _guard_write(hop, eng, "a rollback", [db], do_apply, step="rollback")
     # read before the target's own counters are put back: the new
     # primary's as they stand clear every key it handed out, even one
     # whose row it deleted since
     back = cutover.back_plan(hop, eng, db, console.print)
-    if freeze.state(hop, db):
-        # what migkit took from the application's roles comes back with
-        # everything else it changed on the target
-        if do_apply:
-            freeze.thaw(hop, eng, db, lambda m: console.print(f"  {m}"))
-        else:
-            console.print("  the application's roles are still kept from"
-                          " writing to the target; --apply gives their"
-                          " writes back")
     # the row repairs since the state gone back to, or the last run's where
     # none was saved, each by its statement-level record (`repairlog`)
     from .state import get_store
@@ -4231,42 +5234,51 @@ def rollback(hop_name, db, state_ts, do_apply):
     chosen = [x for x in states if state_ts in x] if state_ts else states
     rows_back = repairlog.to_reverse(hop.report_dir(db) / "undo",
                                      chosen[-1] if chosen else None)
-    _restore_target(hop, eng, db, state_ts, do_apply,
-                    back is None and not rows_back)
-    if rows_back:
-        console.print("\nrow repairs to put back, newest first:")
-        for path in rows_back:
-            console.print(f"  {repairlog.said(path)}")
-        if do_apply:
-            lk = _lock(hop)
-            try:
+    lk = _lock(hop) if do_apply else None
+    try:
+        _restore_target(hop, eng, db, state_ts, do_apply,
+                        back is None and not rows_back, locked=True)
+        if rows_back:
+            console.print("\nrow repairs to put back, newest first:")
+            for path in rows_back:
+                console.print(f"  {_esc(repairlog.said(path))}")
+            if do_apply:
                 for path in rows_back:
                     repairlog.reverse(
                         path, eng.repair_io(db, repairlog.read(path)[0]),
-                        log=lambda m: console.print(f"  {m}"))
-            finally:
-                lk.unlink()
-    if back is not None:
-        lk = _lock(hop) if do_apply else None
-        try:
+                        log=lambda m: console.print(f"  {_esc(m)}"))
+        if back is not None:
             cutover.back_apply(hop, eng, db, back, do_apply, console.print)
-        finally:
-            if lk:
-                lk.unlink()
+        if freeze.state(hop, db):
+            # what migkit took from the application's roles comes back
+            # last: given back first, they wrote while the rest was put
+            # back under them
+            if do_apply:
+                freeze.thaw(hop, eng, db,
+                            lambda m: console.print(f"  {_esc(m)}"))
+            else:
+                console.print("  the application's roles are still kept"
+                              " from writing to the target; --apply gives"
+                              " their writes back, after the rest")
+    finally:
+        if lk is not None:
+            lk.unlink()
     manifest = None
     if hasattr(eng, "_report"):
         manifest = eng._report(db) / "undo" / "manifest.txt"
     if manifest and manifest.exists():
         console.print("\nrow-level undo (run per manifest line):")
-        console.print(manifest.read_text().strip())
+        say_raw(manifest.read_text().strip())
     if not do_apply:
-        console.print("\ndry-run, add --apply to restore sequences")
+        console.print("\ndry-run, add --apply to put back what is listed"
+                      " above")
 
 
-def _restore_target(hop, eng, db, state_ts, do_apply, required):
+def _restore_target(hop, eng, db, state_ts, do_apply, required,
+                    locked=False):
     """The target's counters put back to a saved state. Without one, an
     error where that was all there was to do; said, where going back also
-    raises the old source's."""
+    raises the old source's. `locked`: the caller holds the hop."""
     from .state import get_store
     store = get_store(hop)
     states = sorted(m.get("ts", "") for m in store.list(db))
@@ -4320,9 +5332,9 @@ def _restore_target(hop, eng, db, state_ts, do_apply, required):
                   f" {len(changed)} differ from current target,"
                   f" {same} already match")
     for s in stmts[:10]:
-        console.print(f"  {s}")
+        say_raw(f"  {s}")
     if do_apply and stmts:
-        lk = _lock(hop)
+        lk = None if locked else _lock(hop)
         try:
             if seqf.exists():
                 eng._psql("dst", db, "\n".join(stmts))
@@ -4331,7 +5343,8 @@ def _restore_target(hop, eng, db, state_ts, do_apply, required):
                 eng.apply(db, RepairAction(db, "sequences", stmts, [],
                                            "rollback restore"))
         finally:
-            lk.unlink()
+            if lk is not None:
+                lk.unlink()
         _changelog(hop, {"op": "rollback", "db": db, "state": ts,
                          "n": len(stmts)})
         console.print("[green]values restored to snapshot[/green]")
@@ -4361,7 +5374,7 @@ def setup_target(hop_name, db):
 @click.option("--apply", "do_apply", is_flag=True)
 def repair(hop_name, db, kind, do_apply):
     """(alias) Now: migkit sync HOP [--apply]."""
-    _repair(hop_name, db, kind, do_apply)
+    return _repair(hop_name, db, kind, do_apply)
 
 
 @main.command(hidden=True)
@@ -4371,14 +5384,13 @@ def repair(hop_name, db, kind, do_apply):
 @click.option("--drop", "do_drop", is_flag=True)
 @click.option("--go", is_flag=True)
 def replicate(hop_name, db, no_copy_data, do_drop, go):
-    """(alias) Now: migkit move HOP --mode cdc / full+cdc."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "replicate_sql"):
-        raise SystemExit(f"replicate not available for {hop.engine},"
-                         " use migkit move --mode cdc or the advise playbook")
-    _replicate(hop, eng, db, not no_copy_data, do_drop, go)
+    """(alias) Now: migkit move HOP --mode cdc / full+cdc.
+
+    The move itself, with every guard it holds: this alias set a stream
+    up on its own - into a hop that masks, a `goal: verify` hop, and torn
+    down with no approval and outside the cutover."""
+    mode = "cdc" if (no_copy_data or do_drop) else "full+cdc"
+    return _move_run(hop_name, db, "", mode, 500000, do_drop, go)
 
 
 @main.command(hidden=True)
@@ -4386,14 +5398,9 @@ def replicate(hop_name, db, no_copy_data, do_drop, go):
 @click.option("--db", required=True)
 @click.option("--go", is_flag=True)
 def tail(hop_name, db, go):
-    """(alias) Now: migkit move HOP --mode cdc --db X."""
-    hop = get_hop(hop_name)
-    _require_configured(hop)
-    eng = get_engine(hop)
-    if not hasattr(eng, "tail_apply"):
-        raise SystemExit("this hop follows its source through"
-                         " migkit move --mode cdc")
-    _tail(hop, eng, db, go)
+    """(alias) Now: migkit move HOP --mode cdc --db X - the move itself,
+    with every guard it holds."""
+    return _move_run(hop_name, db, "", "cdc", 500000, False, go)
 
 
 @main.command("convert-schema", hidden=True)
@@ -4484,7 +5491,8 @@ def users_cmd(hop_name, mode, do_apply, pw_file):
     if mode in ("create", "setpw", "rollback"):
         hop = get_hop(hop_name)
         _require_configured(hop)
-        _interlock(hop, get_engine(hop), "", do_apply)
+        _guard_write(hop, get_engine(hop), "carrying users", [""],
+                     do_apply)
     _users_run(hop_name, mode, do_apply, pw_file)
 
 

@@ -144,11 +144,19 @@ def run(ask, say, path, force=False, env=None):
         raw["target"] = _address(question if ask else None, say,
                                  env.get("MIGKIT_TARGET", ""), ASK_TARGET,
                                  "target")
-    name = env.get("MIGKIT_HOP") or (imported.name if imported else "") \
-        or _hop_name(raw, existing)
-    if name in existing and not force:
-        raise SystemExit(f"{path} already has a hop {name} (use --force to"
-                         " write a new file, or MIGKIT_HOP=<another name>)")
+    # the same two places as a hop the file has: that hop, updated where
+    # it is - it was added again as `shop-2`, and the `--force` suggested
+    # rewrote every other hop out of the file
+    same = None if force else _same_places(raw, existing)
+    name = env.get("MIGKIT_HOP") or same \
+        or (imported.name if imported else "") or _hop_name(raw, existing)
+    if name in existing and not force and name != same:
+        raise SystemExit(f"{path} already has a hop {name} going somewhere"
+                         " else (MIGKIT_HOP=<another name> adds this one"
+                         " beside it)")
+    if same and name == same:
+        say(f"{path} has a hop {name} between these two already: it is"
+            " updated in place")
     # passwords: asked, then kept where the operator says
     typed = {}
     src_e, dst_e, _ = hopkeys.sides(raw)
@@ -214,7 +222,7 @@ def run(ask, say, path, force=False, env=None):
     if goal == "copy":
         # what a hop with no goal does: said by leaving it out
         small.pop("goal", None)
-    _write(path, name, small, force)
+    _write(path, name, small, force, replace=name in existing)
     lines = _lines(small)
     say(f"\nwrote hop {name} to {path} ({lines} lines)")
     for step in hopkeys.GOALS[goal]["next"]:
@@ -307,10 +315,11 @@ def survey(hop, say, imported=None):
             first = ask_dbs[0] if ask_dbs else ""
             cap = sizing.capacity(e, key, first)
             got["replica"] = cap.get("replica")
-            facts = {}
+            facts, by_db = {}, {}
             for d in ask_dbs:
                 try:
-                    for t, f in (e.table_facts(key, d) or {}).items():
+                    by_db[d] = e.table_facts(key, d) or {}
+                    for t, f in by_db[d].items():
                         # qualified as the hop's exclude reads it: by
                         # schema where the engine has them, by database
                         # where the database is the schema
@@ -318,6 +327,9 @@ def survey(hop, say, imported=None):
                 except Exception:  # noqa: BLE001 - a database not there
                     continue
             got["facts"] = facts
+            # as each database answered, for the plan's time (`_eta`),
+            # which read them all again
+            got["by_db"] = by_db
         except SystemExit:
             raise
         except Exception as err:  # noqa: BLE001 - said
@@ -343,6 +355,7 @@ def survey(hop, say, imported=None):
     try:
         out["needs"] = dba.needs(hop, eng, "cutover", wheres,
                                  streaming=True)
+        out["needs_asked"] = True
     except Exception as err:  # noqa: BLE001 - said
         out["needs"] = [dba.Need("source", "ask the server what it allows",
                                  None, dba._last(err))]
@@ -363,7 +376,8 @@ def record(hop, sides):
     except (OSError, ValueError):
         have = {}
     for side, got in sides.items():
-        mine = {k: v for k, v in (got or {}).items() if k != "facts"}
+        mine = {k: v for k, v in (got or {}).items()
+                if k not in ("facts", "by_db")}
         have[side] = {**(have.get(side) or {}), **mine}
     path.write_text(json.dumps(have, indent=1, default=str))
     return path
@@ -440,7 +454,7 @@ def types_needing_care(hop, eng, dbs, canon):
 
 
 def _link(eng, hop, dbs):
-    """The slowest measured rate of the links to the two sides, MB/s, or
+    """The slowest measured rate of the links to the two sides, MiB/s, or
     None. Each carries every byte of the move, so whichever was measured
     bounds its time from below; a side not measured (a target database
     not made yet) bounds nothing."""
@@ -559,7 +573,7 @@ def plan(hop, found, goal, say):
             say(f"  time: {measured}")
         elif rate and size:
             secs = size / (rate * 2 ** 20)
-            say(f"  time: at least {_took(secs)} - {rate} MB/s is what"
+            say(f"  time: at least {_took(secs)} - {rate} MiB/s is what"
                 " the slowest link measured carried; the first copy"
                 " measures the real rate and every plan after it uses"
                 " that")
@@ -573,7 +587,11 @@ def plan(hop, found, goal, say):
     if eng is None:
         return {}
     try:
-        needs = dba.needs(hop, eng, goal, found.get("wheres"))
+        # a cutover's needs are what the survey asked already - with the
+        # change-following checks on - and were asked a second time
+        needs = found["needs"] if goal == "cutover" \
+            and found.get("needs_asked") else \
+            dba.needs(hop, eng, goal, found.get("wheres"))
     except Exception as err:  # noqa: BLE001 - said
         say(f"  what the users may do could not be asked: {dba._last(err)}")
         return {}
@@ -605,9 +623,11 @@ def _eta(hop, found):
     from . import planner, sizing
     eng = found.get("eng")
     out = []
+    seen = ((found.get("sides") or {}).get("source") or {}).get("by_db") \
+        or {}
     for d in (found.get("dbs") or [])[:3]:
         try:
-            facts = eng.table_facts("src", d)
+            facts = seen[d] if d in seen else eng.table_facts("src", d)
             m = resource_model.build(hop, eng, d, facts, write=False)
             n = sizing.estimate(hop, eng, d, None, model=m).start
         except Exception:  # noqa: BLE001 - that database is not said
@@ -656,11 +676,12 @@ def _took(secs):
 # ---- the file ------------------------------------------------------------
 
 def _existing(path, force):
-    """The hop names the file has now, where the new one is added to it."""
+    """{name: the hop as written} of the file now, where the new one is
+    added to it."""
     import yaml
     p = Path(path)
     if force or not p.exists():
-        return set()
+        return {}
     try:
         data = yaml.safe_load(p.read_text()) or {}
     except yaml.YAMLError:
@@ -669,7 +690,43 @@ def _existing(path, force):
     if set(data) - {"hops"}:
         raise SystemExit(f"{p} holds more than hops; add the hop by hand,"
                          " or use --force to write a new file")
-    return set(data.get("hops") or {})
+    return {str(k): v for k, v in (data.get("hops") or {}).items()}
+
+
+def _place(raw_side, side):
+    """Where a side is, whoever signs in: (engine, host, port, databases
+    or file) - an address and a mapping read alike; None where it cannot
+    be read without asking anything."""
+    from . import addresses
+    try:
+        if addresses.is_address(raw_side):
+            engine, ep, dbs = addresses.parse(raw_side, side)
+        elif isinstance(raw_side, dict):
+            engine, ep, dbs = raw_side.get("engine"), raw_side, \
+                raw_side.get("databases") or []
+        else:
+            return None
+    except SystemExit:
+        return None
+    where = ep.get("path") or ep.get("url") or ep.get("hosts") or \
+        ep.get("host")
+    return (str(engine or ""), str(where or "").lower(),
+            str(ep.get("port") or ""), tuple(map(str, dbs or ())))
+
+
+def _same_places(raw, existing):
+    """The name of the hop in the file between the same two places as
+    `raw`, or None."""
+    want = (_place(raw.get("source"), "source"),
+            _place(raw.get("target"), "target"))
+    if None in want:
+        return None
+    for name, hop in existing.items():
+        if isinstance(hop, dict) and (
+                _place(hop.get("source"), "source"),
+                _place(hop.get("target"), "target")) == want:
+            return name
+    return None
 
 
 HEADER = """\
@@ -691,7 +748,34 @@ def _lines(small):
     return len(_dump("x", small).splitlines())
 
 
-def _write(path, name, small, force):
+def _replaced(text, name, body):
+    """`text` with the hop `name`'s block - its line under `hops:` and the
+    lines indented under it - replaced by `body`; None where it cannot be
+    found as one block."""
+    import re
+    lines = text.splitlines(keepends=True)
+    head = re.compile(rf"^(\s+){re.escape(name)}\s*:\s*(#.*)?$")
+    for i, line in enumerate(lines):
+        m = head.match(line.rstrip("\n"))
+        if not m:
+            continue
+        indent = len(m.group(1))
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            # a line - a comment too - no deeper than the hop's name is
+            # what comes after the hop
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            j += 1
+        return "".join(lines[:i]) + body + "".join(lines[j:])
+    return None
+
+
+def _write(path, name, small, force, replace=False):
+    """The hop written: added to the file, or - `replace` - put in the
+    place of the hop of that name, every other line of the file as it
+    was."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     body = _dump(name, small)
@@ -699,9 +783,11 @@ def _write(path, name, small, force):
         text = p.read_text()
         if not text.endswith("\n"):
             text += "\n"
-        if "hops:" not in text:
-            text += "hops:\n"
-        new = text + body
+        new = _replaced(text, name, body) if replace else None
+        if new is None:
+            if "hops:" not in text:
+                text += "hops:\n"
+            new = text + body
     else:
         new = HEADER + "hops:\n" + body
     tmp = p.with_suffix(p.suffix + ".tmp")

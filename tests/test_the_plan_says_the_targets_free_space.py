@@ -24,10 +24,10 @@ def test_the_line_says_free_space_and_when_it_is_short():
     decisions = [planner.Decision("t", planner.BULK, "x")]
     facts = {"t": {"bytes": 3 * 2 ** 30, "index_bytes": 2 ** 30}}
     roomy = planner.size_line(decisions, facts, "mongodb", free=10 * 2 ** 30)
-    assert "and has 10.0 GB free" in roomy, roomy
+    assert "and has 10.0 GiB free" in roomy, roomy
     assert "NOT ENOUGH" not in roomy
     short = planner.size_line(decisions, facts, "mongodb", free=2 ** 30)
-    assert "has 1.0 GB free - NOT ENOUGH" in short, short
+    assert "has 1.0 GiB free - NOT ENOUGH" in short, short
     silent = planner.size_line(decisions, facts, "postgres")
     assert "free" not in silent, silent
 

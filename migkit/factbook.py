@@ -132,6 +132,9 @@ for _name, _what, _group, _how in (
     ("p99_row", "the 99th percentile row, bytes", "table", READ),
     ("lob_share", "the share of a table's bytes in large values", "table",
      READ),
+    ("past a piece", "whether a batch holds a value past a piece"
+     " (`pieces.PIECE`), which is written a piece a statement", "table",
+     READ),
     ("key", "whether a table has a key, and its columns", "table", READ),
     ("keyed", "tables with an auto-increment key", "table", READ),
     ("keyless", "whether a table lacks a key", "table", READ),
@@ -199,6 +202,14 @@ for _name, _what, _group, _how in (
     ("written", "whether the source was written while a table was read",
      "table", MEASURED),
     ("same_shape", "whether a table has the shape it had", "table", READ),
+    ("lobs", "whether a table holds a large object, JSON or XML, which a"
+     " bulk read carries none of", "table", READ),
+    ("odd", "the columns of a batch whose types a bulk load carries none"
+     " of", "table", READ),
+    ("sessions", "whether migkit's user may read the list of sessions a"
+     " system's parallel sessions need", "side", READ),
+    ("filterable", "whether a service filters every field of a key",
+     "table", READ),
     # --- the changes --------------------------------------------------------
     ("publication_risk", "whether the source's publication would lose a"
      " table's changes", "change", READ),
@@ -296,6 +307,29 @@ for _name, _what, _group, _how in (
      " nothing", "side", READ),
     ("arms", "whether the stream back's engine lets it wait idle", "side",
      READ),
+    # --- a table's repair (`repairways`) and how rows are written ----------
+    ("named", "the rows the last check named that differ", "table", READ),
+    ("int key", "whether a table's key is one integer column on both"
+     " sides", "table", READ),
+    ("per row", "why the hop decides a table's rows one by one, or"
+     " nothing", "context", GIVEN),
+    ("filter", "whether the hop filters a table's rows", "context", GIVEN),
+    ("replace", "whether the hop lets a copy replace what a table holds",
+     "context", GIVEN),
+    ("range", "why a span of a table's key cannot be copied again the"
+     " move's way, or nothing", "table", READ),
+    ("spans", "the spans of a table's key that differ enough to copy"
+     " again", "table", READ),
+    ("spans why", "why no span of a table's key is copied again, or"
+     " nothing", "table", READ),
+    ("writers", "what else writes the target, or nothing", "side", READ),
+    ("copier", "whether the move copies the table", "table", READ),
+    ("copier why", "why the move cannot copy the table, or nothing",
+     "table", READ),
+    ("quiet", "how the target's user may keep its triggers and foreign"
+     " keys quiet while rows are written", "side", READ),
+    ("write refused", "why rows may not be written into the target's"
+     " tables at all, or nothing", "side", READ),
 ):
     declare(_name, _what, _group, _how)
 

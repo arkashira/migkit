@@ -194,7 +194,7 @@ def test_large_values_are_sized_before_a_move(pg_pair, mysql_pair):
     item = [i for i in _pg(pg_pair).assess()
             if i["item"] == "values stored outside the rows sized"]
     assert item and item[0]["detail"].startswith("3 large objects in"), item
-    assert "MB of values stored out of line" in item[0]["detail"], item
+    assert "MiB of values stored out of line" in item[0]["detail"], item
     my("drop database if exists app; create database app; create database"
        " if not exists app_copy; create table app.files (id int primary"
        " key, body longblob); set session cte_max_recursion_depth = 10000;"
@@ -204,5 +204,5 @@ def test_large_values_are_sized_before_a_move(pg_pair, mysql_pair):
     item = [i for i in _my_eng().assess() if i["item"] == "large values"
             " sized" and i["scope"] == "app"]
     assert item, item
-    assert "the largest value seen is 29.3 KB, in files.body" in \
+    assert "the largest value seen is 29.3 KiB, in files.body" in \
         item[0]["detail"], item

@@ -2849,9 +2849,9 @@ is migrated." The cases, what migkit has (at fb5c988), what is missing:
 | Case | Has | Missing |
 |---|---|---|
 | Major version up (same engine) | `goal: upgrade` (pages copied, upgraded on the target, followed; or logical into the new version; removed settings, defaults, extensions, collations checked first) | thin checks on MongoDB and SQL Server |
-| Version DOWN (rollback plan, an older target) | a logical move works | no check of what the newer source uses that the older target lacks (types, collations such as utf8mb4_0900, syntax, features), no physical refusal said up front |
-| **Edition change** (SQL Server Express/Web/Standard/Enterprise/Developer, Oracle SE2/EE, MySQL Community/Enterprise, MongoDB Community/Enterprise, Redis OSS/Enterprise) | nothing edition-aware | read each side's edition; features the source's database uses that the target's edition lacks (SQL Server `sys.dm_db_persisted_sku_features`, Oracle `dba_feature_usage_statistics`, MySQL enterprise plugins, MongoDB enterprise modules) refused up front with the fix; the target edition's caps checked against the source (Express 10 GB a database, Standard/Web memory and core caps); the way chosen (same version up-edition: native backup/restore where the target may take it; down-edition or with features persisted: logical with the features stripped or refused); licence-driven moves said as such |
-| Fork or distribution (MySQL/MariaDB/Percona, PostgreSQL/Aurora/AlloyDB/Citus/Yugabyte, Redis/Valkey/KeyDB/Dragonfly, Elasticsearch/OpenSearch, MongoDB/DocumentDB/Cosmos Mongo API/FerretDB, Kafka/Redpanda/MSK) | MySQL brands read; DocumentDB->MongoDB proved in production; OpenSearch | each fork's differences as facts (GTID flavours, JSON as text in MariaDB, collations, unsupported commands and operators), Elasticsearch as a side, the Mongo-compatible services' gaps named, a fork change explained in the plan |
+| Version DOWN (rollback plan, an older target) | BUILT (`case`, `lacks`): the case named in the plan; a copy of the pages refused up front with the reason and the logical copy chosen; what the newer source uses that the older target has not, asked of the target where it answers (PostgreSQL types, collations, extensions; MySQL collations used in an expression; SQL Server types and collations) and from a table of each release elsewhere (PostgreSQL identity, partitioning, generated columns, SQL bodies, lz4, NULLS NOT DISTINCT, security_invoker, WITHOUT OVERLAPS; MySQL invisible columns, indexes on expressions, multi-valued indexes, CHECK, expression defaults, SRID, VECTOR, window functions/CTE/JSON_TABLE/LATERAL in code, caching_sha2 users, roles; MongoDB time-series, clustered, encrypted, collations, wildcard, compound hashed; Oracle BOOLEAN/VECTOR/JSON, names over 30 bytes, identity, extended strings against the target's max_string_size); SQL Server's compatibility level and MongoDB's feature compatibility said | Oracle's and SQL Server's version tables are proved on the x86 VM only |
+| **Edition change** (SQL Server Express/Web/Standard/Enterprise/Developer, Oracle SE2/EE, MySQL Community/Enterprise, MongoDB Community/Enterprise, Redis OSS/Enterprise) | BUILT (`editions`, `backupseed`): each side's edition read from its server; what the source's databases use that the target's edition lacks - stripped (the logical copy makes tables from columns and key), lost (refused unless `edition: {accept: [...]}`), refused - with the fix; Express/XE/Free size caps refuse, memory and core caps said; SQL Server's own copy-only backup restored as a physical rung (`physical: {backup: DIR}`) that holds only where the target's edition takes what the database holds and its caps its files, MySQL's clone needing every plugin its source runs on the target; `goal: upgrade` takes an edition up (`upgrade.edition_only`); an edition down said as licence-driven | Redis Enterprise is not told apart from open source (no server-side field known without measuring one); Oracle's options on XE 18c+ taken from its licensing guide, not measured |
+| Fork or distribution (MySQL/MariaDB/Percona, PostgreSQL/Aurora/AlloyDB/Citus/Yugabyte, Redis/Valkey/KeyDB/Dragonfly, Elasticsearch/OpenSearch, MongoDB/DocumentDB/Cosmos Mongo API/FerretDB, Kafka/Redpanda/MSK) | BUILT (`case`, `lacks`, `variants`): one brand a side from the server (Citus by its loaded settings, Cosmos DB by its own request-charge command, Percona Server for MongoDB by `psmdbVersion`, Elasticsearch and OpenSearch by `GET /`, Aurora/AlloyDB by `clouds`' server evidence); a fork change named in the plan; MariaDB's transaction ids and JSON-as-text said; Citus's distributed tables said; Redis forks asked for every command migkit sends and every module type the source holds; views' pipelines and validators run on a Mongo-compatible target against a collection that is not there; Elasticsearch/OpenSearch field types each lacks; Elasticsearch as a side, its own security API for users and roles | DocumentDB still has no server-side signature (none known that is not an absence); MSK cannot be told from Kafka by a client |
 | Platform: on-prem<->cloud, cloud<->cloud, region, account | proved AWS<->Tencent; cloud snapshots across accounts; physical seeds | Tencent Cloud and Alibaba Cloud APIs beside AWS/Azure/GCP in `cloudseed`: snapshots as restore points before cutover (a real run had to script it by hand), clones and restores, credentials resolved the way the provider's own CLI does |
 | Self-managed<->managed, managed<->managed (EC2->RDS, RDS->Aurora, single->flexible server) | physical and logical rungs, cloud clones | the managed service's own blue/green or upgrade path as a rung where it exists |
 | Hardware / OS / architecture (x86->ARM, Windows->Linux SQL Server) | a logical move | said as its own case; byte-order and collation facts where they differ |
@@ -3309,6 +3309,20 @@ once (P0, L).** Files: `migkit/engines/base.py`, `migkit/engines/hetero.py`
   exact-match test; the environment reference from `envkeys`; the exit-code
   table from `verdict`; the metric families from `ui`; command lists from
   the CLI; the hook regenerates and fails on a stale doc (LG15, LG16).
+* Done 2026-10-01 (not merged yet): `tools/gen_docs.py` writes
+  `docs/site/` (front page, quickstart, engines with the matrix, shapes,
+  stored-code pairs and managed services, goals and modes, recipes as
+  source -> target pairs each checked by `hopkeys.check` and held to the
+  matrix, options, environment, commands with every option and the metric
+  families, troubleshooting, evidence, releases per tag), `docs/index.html`,
+  the README's and `goals-and-modes.md`'s parts between `gen_docs`
+  markers and `docs/troubleshooting.md` (grouped by area, no module path);
+  `engines.TITLES`; `--help`'s engines from `NAMES`; the pre-commit hook
+  checks and writes again (exit 3 = behind). Tests:
+  `test_the_manual_is_generated_from_the_code.py`. The environment page is
+  `envkeys.VARS`. Waiting on others: the managed services come from the
+  catalogue (`managed`) once it merges (until then `clouds.LABELS`); the
+  exit-code table from AUD-A's one verdict table, which is not on master.
 
 ### Wave 3 (last, nothing else editing tests)
 
@@ -3367,6 +3381,33 @@ fallback and the source-change offer. Flat, to be made smart:
    which), the table reloaded by the fastest mover - chosen by predicted
    cost and the size of the drift, with the same statement record, undo
    and proof after.
+   **Built 2026-10-01 (tests written, the full run to come),
+   `migkit/repairways.py`:** every row repair naming its table
+   (`RepairAction.table`) climbs three rungs through `decide.attempt`:
+   the rows by key (the engine's own repair, as before); the spans of
+   one integer key that differ heavily copied again the move's way
+   (PostgreSQL's and MySQL's range copy, one transaction a span; the
+   pair's `copy_range` across engines), the rows named outside them by
+   key; the table copied again whole by `move_table`, only with
+   `target_rows: replace` and nothing else writing the target. Ranked by
+   P0-SMART's cost model (`repairways.RepairCosts`, a
+   `costmodel.CostModel`): each way costed on its own work (rows named;
+   rows in the spans and the rows named outside them; the table's rows),
+   fitted from every repair on the hop and learned across hops, a prior
+   from the move's own measured rate where a way never ran - and switched
+   from at run time. The check's leaves keep which spans differ and their
+   rows (`data-<t>.leaves`, `leaves.kept_leaves`), so a table whose rows
+   were too many places to name is repaired by spans or whole instead of
+   left out of the plan. Spans record every differing row before they
+   land (the pre-image); the reload keeps a snapshot of the table and its
+   digest before and after (`repairlog` form `snapshot`); rollback puts
+   either back only where the target still holds what the repair wrote.
+   Every table is checked afresh after its repair and the console says
+   that check's verdict. PostgreSQL's row repair writes by the load's rule
+   now (`load_window`, `WRITE_WAYS`): as a replica, or as the tables are
+   only without triggers and foreign keys, else refused - it used to fall
+   back to writing with triggers firing. Not done: the priors (`PRIOR`,
+   `BULK`) are set, not measured - the final run times each way.
 2. **Two-way conflicts are five whole-row policies** (error, apply_remote,
    keep_local, last_update_wins, source_priority) plus counters. Add: the
    changed-columns merge when the two sides touched different columns
@@ -3454,6 +3495,23 @@ they are three cross-cutting gaps, not 26 engine problems:
   Oracle): values read, written and hashed in pieces, memory sized from
   the widest row (R22 `model.row_sizes`), wide values digested where
   they lie (`canon.WIDE`) - one mechanism, an adapter per engine.
+  **Built (2026-10-01): `migkit/pieces.py`**, each engine's adapter its
+  `LARGE_VALUES`. Rows sized where they lie (`sql_row_sizes`; `$bsonSize`,
+  `MEMORY USAGE`, the file's own lengths), every read ending at
+  `BATCH_BYTES` or one row (`fetch_until`, `by_bytes`, `arrow_rows`), byte
+  values past `PIECE` read in pieces by key on SQL Server and Db2
+  (`ReadPlan`) and `(max)` values written a piece a statement on SQL Server
+  (`written_in_pieces`), Redis keys past a piece read, written and compared
+  by their type's own commands, wide values hashed where they lie in every
+  warehouse dialect's digest and in each fold (`DigestPlan`, `Hashed`), the
+  pair comparing a read-back batch by digest texts, Kafka's producer sized
+  to the topic's bound with every send checked, ASE sessions taking whole
+  text values (32 KB cut otherwise). Not applicable with the bound as the
+  reason: DynamoDB (400 KB item), Cassandra (a mutation, 16 MB), Redshift
+  (16 MB value). Left: the generic engine (it moves nothing; item 33),
+  and the per-row factors of `PAIR_MEMORY`, `KafkaEngine.COPY_MEMORY`
+  counted from the code, measured by `CAP_CALIBRATE=1` on
+  `tests/test_large_values_on_every_engine.py`.
 * **Partitioned** - not yet on 15: copy by partition (the partition as
   the range), partition coverage checked (deep checks did it for
   PostgreSQL and MySQL), partition-aware workers.
@@ -4263,6 +4321,50 @@ the deep check. Test written, not run:
 `test_cosmosdb_as_a_side_of_a_pair.py` (the vNext emulator, arm64).
 Still open: bulk paths (container copy jobs), point-in-time snapshots.
 
+**Done 2026-10-01: ER3, ER6, ER7.**
+* **ER3 Teradata** (`engines/teradata.py`): Teradata's driver, installed by
+  `doctor --install` once its terms are accepted; ANSI sessions (a value
+  too long is refused, never cut), data encrypted, TLS by `sslmode`. Read
+  in FastExport's parallel sessions from 100,000 rows where the user may
+  read `DBC.SessionInfoV`, one statement otherwise, a FastExport that
+  cannot start switched from; tables read in one pass or by `HASHBUCKET`
+  buckets, never in key order (rows lie by hash on the AMPs); key pages
+  ordered and resumed CASESPECIFIC alike. Batches bulk-loaded by FastLoad
+  into a table of their own and merged in, its errors, warnings and row
+  count held to what was sent (it drops a duplicate row without failing),
+  statements otherwise; a tail's batch one transaction with its line in
+  `migkit_origin`. PERIOD as `[begin, end)`, INTERVAL as its parts, TIME
+  and TIMESTAMP WITH TIME ZONE as the instant, NUMBER by value. Two
+  systems compared on the servers: `HASHROW` of each row's salted values
+  (text as `CHAR2HEXINT`, NULLs marked) into `HASHBUCKET` under four
+  salts, summed; users, roles and rights from `DBC.AllRightsV`; the DBA's
+  script; `COLLECT STATISTICS` after a load; the deep check finds a table
+  left mid-load. Cannot prove: nothing is followed (no change log a
+  client reads); a LOB, JSON or XML column is folded in this process;
+  written without a system.
+* **ER6 SAP ODP over OData** (`engines/sapodp.py`): a service is a
+  database, an entity set a table, pyodata for the metadata. The copy a
+  follow starts from is the delta initialisation (no data-less start
+  exists over OData); deltas by token, a before image passed over; the
+  fence by the queue's own request times; a follow of an entity set with
+  no delta links refused. Verify: a full read compared row by row, and the
+  service's own `$count` - and an aggregate's sums - before and after it
+  held to the rows read. Cannot prove: a digest on the SAP side (there is
+  none); an extractor delivering additive deltas; users (PFCG roles); the
+  delta subscription is the SAP user's and is ended in ODQMON.
+* **ER7 SaaS as programs** (`engines/saas.py`, `saas_salesforce.py`): one
+  adapter - catalogue, read from a state, the state reached - for Singer
+  taps, Airbyte-protocol connectors (ELv2, terms accepted at install) and
+  dlt sources; each kind's state the position; what a read hands over held
+  to the hashes of what the target was given, moved on only once the
+  tail's position after it is handed back; deletes carried where a stream
+  is read whole or the program marks them. Salesforce read by a Bulk API
+  2.0 job (REST pages where refused) and followed through the Pub/Sub API
+  with Avro payloads. Verify by a second read, and by the application's
+  own count where it keeps one. Cannot prove: a delete in a stream read
+  incrementally with no mark (check finds it); a formula field's change
+  (no event carries it); a file's bytes (`base64`).
+
 ### Leapfrog: a live tail's table set, raw logs, closed capabilities rebuilt (docs/research/leapfrog-live-tail-and-raw-logs-2026-09-28.md)
 
 26 items with an order in the report (start: L7, L2, L8, R1, R7).
@@ -4386,6 +4488,36 @@ the gaps nothing above covers yet, now items of their own.
   `test_another_machine_takes_the_run_over.py`), and one table's ranges
   spread across machines with a conditional-write checkpoint (R5, looked
   at and left). Paid peers: GoldenGate HA, Striim clusters, DMS Multi-AZ.
+  *Built (2026-10-01, tests written, not yet run):* `standby: true` runs
+  the same move on two or more machines; one holds the hop's lease and
+  moves it, the others stand by and take it over within the term
+  (`MIGKIT_STANDBY_SECONDS`, 15) of its last renewal (`ha`). The lease
+  carries a number one higher at every taking (`lease`), raised on every
+  target database before the taker reads anything, and held by the target
+  in every transaction a writer commits, last before its commit, under a
+  shared lock the raise must wait for (`fencing`, a row of
+  `migkit_origin`; proved on each target first) - a machine that lost the
+  hop is refused by the target itself. The tail's files (position and
+  batch number, shape, tables' states, spools, kept proof, ways, copy
+  position) are pushed to the machines' store before every commit and
+  every two seconds, only over no newer number's, so the store is at
+  most the one batch behind the target that `committed_ahead` already
+  resolves: a takeover is a restart from another machine. The store is
+  chosen from the hop file alone and proved (`shared`: the run state's
+  bucket by If-Match/If-None-Match, a shared directory under a lock, or
+  rows of `migkit_origin` on the target). `share_tables: ranges`: a large
+  table's ranges claimed by every machine's workers through one record
+  written only over the version read (`claims`), each claim under a
+  number the target holds in the range's own row, each machine sized
+  from its share of the servers; the other tables claimed whole. Health
+  in `watch`, the ledger of holdings and `one_writer`'s proof (numbers
+  rising, each holding going on from the last one's saved position, the
+  target holding the newest number, the last batch's mark under its
+  owner) in `watch` and the evidence's "who wrote what". Not built: the
+  engines' own copiers and bulk programs carry no number, so a hop with
+  a standby is copied by the pair's table copier; a physical seed is
+  refused with a standby; targets other than PostgreSQL and MySQL
+  (MariaDB) cannot hold a number yet, and a standby is refused over them.
 * **W2. The estate, not the hop.** Discovery of every database on a
   network or account, target sizing from the source's performance
   history (Azure's SKU recommendations, Fleet Advisor), cost of the

@@ -9,6 +9,7 @@ Receivers come from two places, and both are used:
         events: [verdict, drift, lag, cutover, approval, failure,
                  fallback, conflict, done]    # all of them when left out
         lag: 300                        # seconds behind before it is said
+        detail: false                   # an error's words, not its kind
 
 * `MIGKIT_NOTIFY`: addresses separated by commas, for every hop
 
@@ -34,9 +35,12 @@ What each address is:
   beside it (`event`, `hop`, `status`, ...) for anything that reads JSON
 
 What is told, each an event a hop may keep or leave out (`events`):
-* `verdict`: a check's verdict moving between `same`, `different` and
-  `error`, compared with what was last told (`notified.json`); a run that
-  says `incomplete` is no answer either way, and tells nothing
+* `verdict`: a check's verdict moving between the verdicts every output
+  says (`verdict.VERDICTS`: same, different, incomplete, could not
+  verify), in their words, compared with what was last told
+  (`notified.json`); an incomplete run is told as one, with what it did
+  not look at - before, it told nothing, and a narrowed or overtaken run
+  after a difference read as quiet
 * `drift`: the source's schema changing under a check or a move, and a
   continuous check (`watch --verify`) finding a difference or losing one
 * `lag`: a change tail further behind the source than `lag` seconds, and
@@ -54,15 +58,21 @@ What is told, each an event a hop may keep or leave out (`events`):
 * `done`: a command that wrote (`--go`, `--apply`) finishing
 
 What is sent never carries a row's values: a check, a scope, a status, a
-table's name, never a finding's detail; an error that stopped something is
-named only by its kind where the hop masks values (`mask`), and never with
-a password or a program migkit drives in it. A receiver that cannot be
-reached is said, and the run goes on: the run's answer is its own, not the
-delivery of it.
+table's name, never a finding's detail. An error that stopped something,
+or made a way give up for another, is named by its kind only - its words
+can quote the row it was writing (PostgreSQL's `DETAIL: Key (...)=(...)`)
+- and they stay in the run's log on this machine; `detail: true` sends
+them too, except where the hop masks values (`mask`). Everything sent
+goes through the one gate of what leaves the machine (`egress`): the
+hop's and the environment's egress settings say whether it goes and to
+which hosts, and no password or program migkit drives is in it. A
+receiver that cannot be reached is said, and the run goes on: the run's
+answer is its own, not the delivery of it.
 """
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -70,8 +80,6 @@ import urllib.request
 
 PAGERDUTY = "https://events.pagerduty.com/v2/enqueue"
 TIMEOUT = 10
-#: the verdicts a receiver is told about; `incomplete` is not an answer
-TOLD = ("same", "different", "error")
 #: every event a hop may be told of
 EVENTS = ("verdict", "drift", "lag", "cutover", "approval", "failure",
           "fallback", "conflict", "done")
@@ -95,9 +103,10 @@ _ALREADY = set()
 
 
 def settings(hop):
-    """{"to": [address as written], "events": {event}, "lag": seconds}."""
+    """{"to": [address as written], "events": {event}, "lag": seconds,
+    "detail": an error's words sent, not only its kind}."""
     got = (hop.options or {}).get("notify") if hop else None
-    events, lag = set(EVENTS), LAG
+    events, lag, detail = set(EVENTS), LAG, False
     if isinstance(got, dict):
         if got.get("events"):
             events = {str(e) for e in got["events"]} & set(EVENTS)
@@ -105,6 +114,7 @@ def settings(hop):
             lag = float(got.get("lag", LAG))
         except (TypeError, ValueError):
             lag = LAG
+        detail = got.get("detail") is True
         got = got.get("to")
     if isinstance(got, str):
         got = [got]
@@ -113,7 +123,7 @@ def settings(hop):
         r = str(r).strip()
         if r and r not in out:
             out.append(r)
-    return {"to": out, "events": events, "lag": lag}
+    return {"to": out, "events": events, "lag": lag, "detail": detail}
 
 
 def receivers(hop):
@@ -181,11 +191,18 @@ def _title(hop, facts):
 
 def send(hop, text, facts, trouble, dedup, log, severity="error",
          event=None):
-    """Sends to every receiver the hop's `events` let hear `event`; how
-    many took it."""
+    """Sends to every receiver the hop's `events` let hear `event`, and
+    the egress lets reach; how many took it. The text and the facts are
+    cleaned at the gate (`egress.words`, `egress.facts`), and whether
+    anything may go asked, before any receiver is read."""
+    from . import egress
     conf = settings(hop)
     if event is not None and event not in conf["events"]:
         return 0
+    if not conf["to"] or not egress.allows(hop, "notify", log):
+        return 0
+    text = egress.words(hop, text)
+    facts = egress.facts(hop, facts)
     sent = 0
     kind = "ok" if not trouble else severity
     for i, receiver in enumerate(conf["to"], 1):
@@ -202,11 +219,32 @@ def send(hop, text, facts, trouble, dedup, log, severity="error",
                 log(f"notify receiver {i} is not an address migkit can send"
                     " to, so nothing was sent to it")
                 continue
+            if not egress.permit(hop, "notify", host=_channel_host(channel),
+                                 log=_numbered(log, i)):
+                continue
             sent += _by_channel(channel, i, _title(hop, facts), text, kind,
                                 log)
             continue
+        if not egress.permit(hop, "notify", got[0], log=_numbered(log, i)):
+            continue
         sent += _posted(i, *got, log)
     return sent
+
+
+def _numbered(log, i):
+    return lambda said: log(f"notify receiver {i}: {said}")
+
+
+def _channel_host(channel):
+    """The host a channel's messages go to, where its address names one
+    (a webhook, a Mattermost, a Matrix, a mail relay); None for a service
+    reached by a token alone, whose host is its vendor's - which an egress
+    naming its hosts refuses."""
+    tokens = getattr(type(channel), "template_tokens", None) or {}
+    if "host" not in tokens:
+        return None
+    host = getattr(channel, "host", None)
+    return str(host).lower() if host else None
 
 
 def _by_channel(channel, i, title, text, kind, log):
@@ -263,21 +301,33 @@ def _remember(hop, **kept):
     _told(hop).write_text(json.dumps(got, default=str))
 
 
+#: an error's kind, where its words begin with one: `IntegrityError: ...`
+_KIND = re.compile(r"\s*([A-Za-z_][\w.]*(?:Error|Exception|Timeout|Refused"
+                   r"|Failure|Interrupt|Exit|Warning|Denied))\s*(?::|$)")
+
+
+def kind_of(text):
+    """The kind an error's words name first, or None where they are
+    migkit's own (a refusal says what to do, not a class)."""
+    m = _KIND.match(str(text or ""))
+    return m.group(1).rsplit(".", 1)[-1] if m else None
+
+
 def _clean(hop, text):
-    """An error's words as a receiver may read them: never a password or a
-    program migkit drives, and only its kind where the hop masks values
-    (the words of an error can quote the row it was writing)."""
+    """An error's words as a receiver may read them: its kind only - its
+    words can quote the row it was writing - unless the hop's `notify`
+    asks for them (`detail`) and it masks no value. What is sent is
+    cleaned again at the gate (`egress`)."""
     from . import masking
-    from .util import without_secret
     text = str(text or "")
+    kind = kind_of(text) or ("an error" if ":" in text else "a refusal")
     if masking.active(hop):
-        kind = text.split(":", 1)[0].strip() if ":" in text else "an error"
         return (f"{kind}; the hop masks values, so what it said is only in"
                 " migkit's own output")
-    for secret in (hop.source.password, hop.target.password):
-        text = without_secret(text, secret)
-    from .export import words
-    return words(text)
+    if not settings(hop)["detail"]:
+        return (f"{kind}; what it said stays in the run's log on this"
+                " machine (notify: detail sends it)")
+    return text
 
 
 # ---- the events --------------------------------------------------------------
@@ -287,8 +337,9 @@ def verdict(hop, env, log, key="verdict"):
     ("watch", told as `drift`): sends when the verdict is not what
     receivers were last told. Returns how many receivers took it (0 when
     nothing was due)."""
+    from .verdict import VERDICTS
     now = env.get("status")
-    if now not in TOLD or not receivers(hop):
+    if now not in VERDICTS or not receivers(hop):
         return 0
     memory = _memory(hop)
     told = (memory.get("status") if key == "verdict"
@@ -299,10 +350,12 @@ def verdict(hop, env, log, key="verdict"):
     findings = env.get("findings") or []
     listed = "; ".join(f"{f.get('status')} {f.get('check')}"
                        f" {f.get('scope')}" for f in findings[:5])
-    what = "is" if key == "verdict" else "is now, as the watch checks it,"
-    text = (f"migkit: {hop.name} {what} {now}"
-            + (f", was {told}" if told else "")
-            + (f": {listed}" if listed else "")
+    was = VERDICTS[told].word if told in VERDICTS else told
+    text = (f"migkit: {hop.name} - {VERDICTS[now].word}"
+            + ("" if key == "verdict" else ", as the watch checks it")
+            + (f" (was {was})" if told else "")
+            + (f": {listed}" if listed else
+               f": {env['why']}" if env.get("why") else "")
             + (f" and {len(findings) - 5} more" if len(findings) > 5
                else ""))
     facts = {"event": "verdict" if key == "verdict" else "drift",
@@ -314,6 +367,7 @@ def verdict(hop, env, log, key="verdict"):
     sent = send(hop, text, facts, now != "same",
                 f"migkit-{hop.name}" + ("" if key == "verdict"
                                         else f"-{key}"), log,
+                severity="warning" if now == "incomplete" else "error",
                 event=facts["event"])
     if sent:
         # only what somebody was told: a receiver that was down hears
@@ -501,16 +555,15 @@ def _stderr(message):
 
 
 def tail_stopped(hop, db, stopped, log):
-    """`stopped` is what the tail kept (`tailctl.stopped`)."""
-    from . import masking
-    why = stopped.get("why") or stopped.get("kind") or "an error"
-    if masking.active(hop):
-        # an error from the target can quote the row it was writing
-        why = (f"{stopped.get('kind') or 'an error'}; the hop masks values,"
-               " so what it said is only in the tail's own output")
+    """`stopped` is what the tail kept (`tailctl.stopped`): its kind, and
+    its words where the hop's `notify` asks for them (`_clean`)."""
+    said = str(stopped.get("why") or "")
+    kind = stopped.get("kind")
+    why = _clean(hop, f"{kind}: {said}" if kind and not kind_of(said)
+                 else said or kind or "an error")
     text = f"migkit: the change tail of {hop.name} {db} stopped: {why}"
-    return send(hop, text, {"event": "tail stopped", "hop": hop.name,
-                            "db": db, "why": why},
+    return send(hop, text, {"event": "failure", "what": "tail stopped",
+                            "hop": hop.name, "db": db, "why": why},
                 True, f"migkit-{hop.name}-{db}-tail", log, event="failure")
 
 
@@ -518,12 +571,13 @@ def table_parked(hop, db, table, why, log):
     """One table of a running tail set aside (`tailtables`): the tail goes
     on for every other table, and this one waits for its target."""
     from . import masking
-    if masking.active(hop):
+    if masking.active(hop) or not settings(hop)["detail"]:
         why = "its target does not follow its source's shape"
     text = (f"migkit: the change tail of {hop.name} {db} parked {table}:"
             f" {why}. The other tables go on")
-    return send(hop, text, {"event": "table parked", "hop": hop.name,
-                            "db": db, "table": table, "why": why},
+    return send(hop, text, {"event": "failure", "what": "table parked",
+                            "hop": hop.name, "db": db, "table": table,
+                            "why": why},
                 True, f"migkit-{hop.name}-{db}-{table}-parked", log,
                 event="failure")
 
@@ -567,8 +621,8 @@ def conflicts(hop, db, kinds, parked, log):
 def tail_started(hop, db, log):
     """A tail that had stopped with an error is running again."""
     text = f"migkit: the change tail of {hop.name} {db} is running again"
-    return send(hop, text, {"event": "tail started", "hop": hop.name,
-                            "db": db},
+    return send(hop, text, {"event": "failure", "what": "tail started",
+                            "hop": hop.name, "db": db},
                 False, f"migkit-{hop.name}-{db}-tail", log,
                 event="failure")
 

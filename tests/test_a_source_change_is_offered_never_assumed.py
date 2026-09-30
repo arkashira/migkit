@@ -46,7 +46,8 @@ def _facts(hop, **over):
              src=dict(about), dst=dict(about), not_innodb=[], dst_tables=[],
              src_backup_admin=True, dst_clone_admin=True, src_plugin="",
              dst_plugin="ACTIVE", log_bin=True, gtid_mode="ON",
-             src_users={"app"}, plugin_rights=True, dynamic_loading=True)
+             src_users={"app"}, plugin_rights=True, dynamic_loading=True,
+             src_active={"InnoDB"}, dst_active={"InnoDB", "clone"})
     f.update(over)
     return f
 

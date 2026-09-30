@@ -67,7 +67,7 @@ def test_no_rate_or_time_left_is_invented():
 
 def test_sizes_read_as_sizes():
     assert progress.human_bytes(512) == "512 bytes"
-    assert progress.human_bytes(13_314_398_618) == "12.4 GB"
+    assert progress.human_bytes(13_314_398_618) == "12.4 GiB"
 
 
 @pytest.mark.parametrize("argv,secrets,hidden", [

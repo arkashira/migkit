@@ -10,6 +10,8 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "cockroach": "cockroachdb", "crdb": "cockroachdb",
            "aurora-dsql": "dsql", "cosmos": "cosmosdb",
            "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb",
+           "td": "teradata", "vantage": "teradata",
+           "sap-odp": "sapodp", "odp": "sapodp", "program": "saas",
            # the cloud-native services (P0-CLOUDS part 2)
            "cloud-spanner": "spanner", "spanner-pg": "spanner",
            "cloud-bigtable": "bigtable", "firestore-native": "firestore",
@@ -67,6 +69,12 @@ SCHEMES = {
     "iceberg": "iceberg", "iceberg+http": "iceberg",
     "iceberg+https": "iceberg",
     "delta": "delta", "delta+s3": "delta",
+    "teradata": "teradata",
+    # an SAP system's OData services, https or - a sandbox's - http
+    "sapodp": "sapodp", "sapodp+http": "sapodp",
+    # a program source: the scheme is its kind (`engines.saas`)
+    "dlt": "saas", "singer": "saas", "airbyte": "saas",
+    "salesforce": "saas",
     "trino": "generic", "presto": "generic", "vertica": "generic",
     "tidb": "tidb",
     "cockroachdb": "cockroachdb", "cockroach": "cockroachdb",
@@ -168,6 +176,15 @@ def _class_for(name):
     if name == "db2zos":
         from .db2zos import Db2ZosEngine
         return Db2ZosEngine
+    if name == "teradata":
+        from .teradata import TeradataEngine
+        return TeradataEngine
+    if name == "sapodp":
+        from .sapodp import SapOdpEngine
+        return SapOdpEngine
+    if name == "saas":
+        from .saas import SaasEngine
+        return SaasEngine
     if name == "tidb":
         from .tidb import TiDBEngine
         return TiDBEngine
@@ -234,7 +251,7 @@ def same_engine(eng):
 #: every canonical engine name, in the order a report lists them
 NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "parquet", "clickhouse", "dynamodb", "oracle", "db2", "db2i",
-         "db2zos", "ase",
+         "db2zos", "ase", "teradata",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
          "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
          "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
@@ -242,7 +259,43 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "oceanbase", "oceanbase-oracle", "polardbx", "dcdb", "keyspaces",
          "neptune", "timestream", "lindorm", "geminidb-cassandra",
          "geminidb-redis", "geminidb-mongo",
-         "hetero", "generic")
+         "sapodp", "saas", "hetero", "generic")
+
+#: what each engine is called where a person reads it - the manual, the
+#: site (`tools/gen_docs.py`) and the troubleshooting guide's headings; a
+#: name added to `NAMES` without one here fails
+#: `tests/test_the_manual_is_generated_from_the_code.py`
+TITLES = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
+          "mssql": "SQL Server", "redis": "Redis", "kafka": "Kafka",
+          "sqlite": "SQLite", "parquet": "Parquet files",
+          "clickhouse": "ClickHouse", "dynamodb": "DynamoDB",
+          "oracle": "Oracle Database", "db2": "Db2 (Linux, UNIX, Windows)",
+          "db2i": "Db2 for i", "db2zos": "Db2 for z/OS", "ase": "SAP ASE",
+          "teradata": "Teradata", "opensearch": "OpenSearch",
+          "cassandra": "Cassandra", "redshift": "Amazon Redshift",
+          "snowflake": "Snowflake", "bigquery": "BigQuery",
+          "kinesis": "Kinesis Data Streams", "pubsub": "Google Pub/Sub",
+          "duckdb": "DuckDB", "copybook": "Files described by COBOL copybooks",
+          "iceberg": "Iceberg tables", "delta": "Delta tables",
+          "tidb": "TiDB", "cockroachdb": "CockroachDB",
+          "dsql": "Aurora DSQL", "couchbase": "Couchbase",
+          "cosmosdb": "Cosmos DB for NoSQL",
+          "spanner": "Google Cloud Spanner", "bigtable": "Google Cloud Bigtable",
+          "firestore": "Firestore (native mode)",
+          "datastore": "Firestore in Datastore mode",
+          "gaussdb": "GaussDB (openGauss)",
+          "oceanbase": "OceanBase (MySQL mode)",
+          "oceanbase-oracle": "OceanBase (Oracle mode)",
+          "polardbx": "PolarDB-X", "dcdb": "TDSQL (distributed)",
+          "keyspaces": "Amazon Keyspaces", "neptune": "Amazon Neptune",
+          "timestream": "Amazon Timestream", "lindorm": "Lindorm",
+          "geminidb-cassandra": "GeminiDB (Cassandra API)",
+          "geminidb-redis": "GeminiDB (Redis API)",
+          "geminidb-mongo": "GeminiDB (MongoDB API)",
+          "sapodp": "SAP application data (ODP)",
+          "saas": "SaaS applications, read by a connector program",
+          "hetero": "Any pair of two engines",
+          "generic": "Any other SQL engine"}
 
 
 def engines_with(method):

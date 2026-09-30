@@ -51,11 +51,13 @@ CONNECTS_TO = {"oracle": "service", "db2": "database", "db2zos": "database",
                "spanner": "instance"}
 #: engines that sign in without a user and password of the address's own
 NO_SIGN_IN = ("sqlite", "duckdb", "parquet", "copybook", "bigquery",
-              "pubsub", "iceberg", "delta", "spanner", "bigtable",
+              "pubsub", "iceberg", "delta", "saas", "spanner", "bigtable",
               "firestore", "datastore")
 #: engines whose address's host is the region a service is in, or an
 #: endpoint of its own (`dynamodb://us-east-1/table`)
 REGIONAL = ("dynamodb", "kinesis", "timestream")
+#: a program source's scheme is its kind, and what follows it the program
+#: (`engines.saas`): `singer://tap-github?config=...`
 #: an AWS region, as a host naming where a service is rather than a server
 REGION = re.compile(r"^[a-z]{2}(-gov|-iso[a-z]*)?-[a-z]+-\d$")
 
@@ -157,6 +159,13 @@ def parse(text, side="source"):
                 + r")", str(text)):
             _refuse_password(side, text, "")
         return engine, {"url": str(text).strip()}, []
+    if engine == "saas":
+        from .engines.saas import database_name
+        if not rest:
+            raise SystemExit(f"the {side} address {text!r} names no program")
+        program = unquote(rest)
+        return engine, {"kind": scheme, "program": program, **_options(
+            engine, params, side)}, [database_name(scheme, program)]
     if engine == "iceberg":
         if not rest:
             raise SystemExit(f"the {side} address {text!r} names no catalog")
@@ -239,6 +248,10 @@ def parse(text, side="source"):
         # Redis's and Couchbase's own word for TLS, the certificate
         # checked (`Endpoint.redis_tls`, `CouchbaseEngine._cluster`)
         endpoint["tls"] = True
+    if scheme == "sapodp+http":
+        # an SAP service over plain HTTP: a sandbox's, never a system's
+        # own unless it says so
+        endpoint["tls"] = False
     return engine, endpoint, [d for d in dbs if d]
 
 
@@ -349,6 +362,17 @@ def render(engine, endpoint, dbs=(), default_port=0):
     if engine in ("redis", "couchbase") and ep.get("tls") is True:
         scheme = "rediss" if engine == "redis" else "couchbases"
         ep.pop("tls")
+    if engine == "sapodp" and ep.get("tls") is False:
+        scheme = "sapodp+http"
+        ep.pop("tls")
+    if engine == "saas":
+        kind, program = ep.pop("kind", ""), ep.pop("program", "")
+        if kind not in SCHEMES or SCHEMES[kind] != "saas" or not program \
+                or ep.pop("host", "") or ep.pop("user", ""):
+            return None
+        query = _query(engine, ep)
+        return None if query is None else (
+            f"{kind}://{quote(str(program), safe='/:.@_-')}{query}")
     if scheme is None or engine == "generic":
         return None
     user = str(ep.pop("user", "") or "")

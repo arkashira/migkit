@@ -63,6 +63,7 @@ a value the target would not keep as it is - rounded, cut, turned into a
 double or a default - is counted on the source and refused before the move
 (`unfit`), rather than found by the digest after it.
 """
+from .pieces import Hashed as _Hashed
 
 # Neutral classes. An engine's declared type is mapped onto one of these and
 # the rendering is chosen from the class, so adding an engine is a mapping
@@ -203,7 +204,10 @@ def wide_text(value):
 
 def digest_value(cls, value):
     """A value's text in a digest's row: `render_value`'s, except a text or
-    byte value wider than `WIDE`, which is its length and md5."""
+    byte value wider than `WIDE`, which is its length and md5 - and one a
+    server hashed where it lies (`pieces.Hashed`), which is what it wrote."""
+    if type(value) is _Hashed:
+        return value.text()
     if cls == "bytes" and isinstance(value, (bytes, bytearray, memoryview)) \
             and len(value) > WIDE:
         return wide_bytes(value)
@@ -568,6 +572,45 @@ TYPES = {
         "binary decimal": "decimal", "native decimal": "decimal",
         "hex float": "float", "long hex float": "decimal",
         "condition": "boolean",
+    },
+    # Teradata, by the declared types `engines.teradata` writes from
+    # `DBC.ColumnsV`. NUMBER with no precision is a floating decimal of up
+    # to 38 digits, compared by its value; a PERIOD is carried as the text
+    # `[begin, end)`; an INTERVAL keeps its months apart from its days and
+    # time. A UDT, an ARRAY and a VECTOR stay unmapped
+    "teradata": {
+        "byteint": "integer", "smallint": "integer", "integer": "integer",
+        "bigint": "integer",
+        "decimal": "decimal", "number": "decimal", "float": "float",
+        "char": "text", "varchar": "text", "clob": "text",
+        "byte": "bytes", "varbyte": "bytes", "blob": "bytes",
+        "date": "date", "time": "time", "timestamp": "timestamp",
+        "interval year": "interval", "interval month": "interval",
+        "interval day": "interval", "interval hour": "interval",
+        "interval minute": "interval", "interval second": "interval",
+        "period": "text", "json": "json", "xml": "xml",
+    },
+    # An SAP system's extractors and CDS views, by the OData types their
+    # services give each property (`engines.sapodp`); an ABAP date is an
+    # `Edm.DateTime` its service marks as a date, declared `Edm.Date` here
+    "sapodp": {
+        "edm.string": "text", "edm.guid": "uuid",
+        "edm.byte": "integer", "edm.sbyte": "integer",
+        "edm.int16": "integer", "edm.int32": "integer",
+        "edm.int64": "integer", "edm.decimal": "decimal",
+        "edm.double": "float", "edm.single": "float", "edm.float": "float",
+        "edm.boolean": "boolean", "edm.binary": "bytes",
+        "edm.date": "date", "edm.datetime": "timestamp",
+        "edm.datetimeoffset": "timestamp", "edm.time": "time",
+    },
+    # A SaaS application read by a program (`engines.saas`): each kind's
+    # field types are said in these words by the engine, from a JSON
+    # schema, a resource's hints or an object's description
+    "saas": {
+        "text": "text", "integer": "integer", "decimal": "decimal",
+        "number": "decimal", "float": "float", "boolean": "boolean",
+        "date": "date", "timestamp": "timestamp", "timestamptz": "timestamp",
+        "time": "time", "json": "json", "bytes": "bytes", "uuid": "uuid",
     },
     # DuckDB, by `information_schema.columns` type names
     "duckdb": {
@@ -1647,7 +1690,10 @@ DDL = {
         "text": ("VARCHAR(4000)", "VARCHAR({0})"),
         "uuid": ("CHAR(36)", "CHAR(36)"),
         "inet": ("VARCHAR(49)", "VARCHAR(49)"),
-        "bytes": ("BLOB", "VARBINARY({0})"),
+        # a byte value of no declared size as a LOB of the most Db2 logs:
+        # a BLOB with no size is 1 MB, and a larger value was refused
+        # halfway through the load
+        "bytes": ("BLOB(1G)", "VARBINARY({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),
@@ -1665,12 +1711,35 @@ DDL = {
         "text": ("VARCHAR(4000)", "VARCHAR({0})"),
         "uuid": ("CHAR(36)", "CHAR(36)"),
         "inet": ("VARCHAR(49)", "VARCHAR(49)"),
-        "bytes": ("BLOB", "VARBINARY({0})"),
+        "bytes": ("BLOB(1G)", "VARBINARY({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),
         "bson": ("CLOB", "CLOB"),
     } for name in ("db2i", "db2zos")},
+    # Teradata: no BOOLEAN, so the BYTEINT whose 0 and 1 render the same;
+    # text CASESPECIFIC, as ANSI mode makes it, so two values that differ
+    # in case are two values; a key's text at most 4,000 characters
+    # (`KEY_TEXT`)
+    "teradata": {
+        OWN: ("CLOB CHARACTER SET UNICODE", "CLOB CHARACTER SET UNICODE"),
+        "integer": ("BIGINT", "BIGINT"),
+        "decimal": ("DECIMAL(38,10)", "DECIMAL({0},{1})"),
+        "float": ("FLOAT", "FLOAT"),
+        "boolean": ("BYTEINT", "BYTEINT"),
+        "text": ("VARCHAR(32000) CHARACTER SET UNICODE CASESPECIFIC",
+                 "VARCHAR({0}) CHARACTER SET UNICODE CASESPECIFIC"),
+        "uuid": ("CHAR(36) CHARACTER SET LATIN CASESPECIFIC",
+                 "CHAR(36) CHARACTER SET LATIN CASESPECIFIC"),
+        "inet": ("VARCHAR(49) CHARACTER SET LATIN CASESPECIFIC",
+                 "VARCHAR(49) CHARACTER SET LATIN CASESPECIFIC"),
+        "bytes": ("BLOB", "VARBYTE({0})"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
+        "time": ("TIME(6)", "TIME({0})"),
+        "json": ("JSON CHARACTER SET UNICODE", "JSON CHARACTER SET UNICODE"),
+        "xml": ("XML", "XML"),
+    },
     "duckdb": {
         # a type of the same engine is made as the source declares it:
         # measured, DuckDB to DuckDB built every column VARCHAR, and the
@@ -1934,7 +2003,9 @@ def ddl_numbers(engine, declared, cls):
 #: utf8mb4 (measured on 8.4, a `varchar(1024)` key was `Specified key was
 #: too long; max key length is 3072 bytes`, so a PostgreSQL `text` key could
 #: not be moved at all), and SQL Server keys no `max` and 900 bytes.
-KEY_TEXT = {"mysql": "varchar(768)", "mssql": "nvarchar(450)"}
+KEY_TEXT = {"mysql": "varchar(768)", "mssql": "nvarchar(450)",
+            "teradata": "VARCHAR(4000) CHARACTER SET UNICODE"
+                        " CASESPECIFIC"}
 
 
 def ddl_type(engine, cls, numbers=(), key=False):
@@ -2538,6 +2609,16 @@ TIME_MEANING = {
                 "timestamptz": INSTANT, "timestamptz_ns": INSTANT,
                 "date": WALL, "time": WALL},
     "delta": {"timestamp": INSTANT, "timestamp_ntz": WALL, "date": WALL},
+    # by Teradata's definition of its types, OData's (a DateTime has no
+    # zone, a DateTimeOffset is an instant) and the words `engines.saas`
+    # gives each kind's fields
+    "teradata": {"timestamp": WALL, "timestamp with time zone": INSTANT,
+                 "time": WALL, "time with time zone": INSTANT,
+                 "date": WALL},
+    "sapodp": {"edm.datetime": WALL, "edm.date": WALL, "edm.time": WALL,
+               "edm.datetimeoffset": INSTANT},
+    "saas": {"timestamp": WALL, "timestamptz": INSTANT, "date": WALL,
+             "time": WALL},
 }
 
 
@@ -2618,6 +2699,10 @@ INT_RANGES.update({
     "sqlite": {n: _I64 for n in ("int", "integer", "tinyint", "smallint",
                                  "mediumint", "bigint", "int2", "int8")},
     "mongodb": {"int": _I32, "long": _I64},
+    "teradata": {"byteint": (-128, 127), "smallint": _I16, "integer": _I32,
+                 "bigint": _I64},
+    "sapodp": {"edm.byte": (0, 255), "edm.sbyte": (-128, 127),
+               "edm.int16": _I16, "edm.int32": _I32, "edm.int64": _I64},
 })
 
 CHAR_TYPES = {
@@ -2820,7 +2905,7 @@ UNFIT_WORDS = {
 #: the most digits after the second each engine's types keep, whatever a
 #: declaration asks for: PostgreSQL takes `timestamp(9)` and keeps six
 MOST_DIGITS = {"postgres": 6, "mysql": 6, "mssql": 7, "redshift": 6,
-               "bigquery": 6, "parquet": 6, "db2": 12}
+               "bigquery": 6, "parquet": 6, "db2": 12, "teradata": 6}
 
 
 def _temporal_digits(engine, declared):
@@ -2908,7 +2993,7 @@ def written_as(src, declared, dst):
 DECIMAL_MOST = {"mysql": (65, 30), "mssql": (38, 38), "clickhouse": (76, 76),
                 "db2": (31, 31), "duckdb": (38, 38), "ase": (38, 38),
                 "redshift": (38, 37), "snowflake": (38, 37),
-                "bigquery": (76, 38)}
+                "bigquery": (76, 38), "teradata": (38, 38)}
 
 #: decimal types that hold at most this many significant digits and keep
 #: no scale of their own
@@ -2917,7 +3002,7 @@ SIGNIFICANT = {"dynamodb": 38, "mongodb": 34, "oracle": 38,
 
 #: engines that refuse a float's NaN and infinities
 NO_NONFINITE_FLOAT = {"mysql", "mssql", "dynamodb", "db2", "ase",
-                      "opensearch"}
+                      "opensearch", "teradata"}
 
 #: engines whose decimal holds NaN and the infinities
 NONFINITE_DECIMAL = {"postgres", "mongodb"}
@@ -3689,7 +3774,8 @@ IN_PROCESS = {"mongodb", "sqlite", "mssql", "parquet", "clickhouse",
               "dynamodb", "oracle", "db2", "opensearch", "cassandra",
               "redshift", "snowflake", "bigquery", "ase", "duckdb",
               "copybook", "db2i", "db2zos", "iceberg", "delta",
-              "cockroachdb", "dsql", "couchbase", "cosmosdb"}
+              "cockroachdb", "dsql", "couchbase", "cosmosdb", "teradata",
+              "sapodp", "saas"}
 
 
 def renders(engine):
