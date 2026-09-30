@@ -3,9 +3,8 @@
 No warehouse runs here - each needs an account this machine has none of -
 so what is pinned is what migkit would say to one: the tables it would
 create, how it reads a page of rows, how Snowflake's catalogue is read
-back, and the rows BigQuery's load job would be given.
+back, and the Parquet BigQuery's stage is loaded from.
 """
-import base64
 import datetime
 from decimal import Decimal
 
@@ -82,48 +81,40 @@ def test_snowflake_reads_its_catalogue_in_small_letters():
                                       "timestamp"]
 
 
-def test_bigquery_is_given_a_load_job_after_the_keys_go():
+def test_bigquerys_stage_holds_each_value_as_its_column_takes_it():
+    """The Parquet a BigQuery stage is loaded from: an instant given to a
+    DATETIME as UTC reads it (a DATETIME refuses an offset), to a TIMESTAMP
+    as the instant it is; bytes as bytes; a decimal at NUMERIC's nine
+    places; a field that is not there as NULL."""
+    from google.cloud.bigquery import SchemaField
+
     from migkit import canon
     eng = _engine("bigquery")
-    eng.neutral_key = lambda side, db, table: ["id"]
-    ran, loaded = [], []
-
-    class Cursor:
-        def execute(self, sql, args=None):
-            ran.append((sql, args))
-
-    class Conn:
-        def cursor(self):
-            return Cursor()
-
-        def close(self):
-            pass
-
-    class Job:
-        def result(self):
-            return None
-
-    class Client:
-        def load_table_from_json(self, records, ref, job_config):
-            loaded.append((ref, records, job_config.write_disposition))
-            return Job()
-    eng._connect = lambda side, db: Conn()
-    eng._client = lambda side: Client()
     at = datetime.datetime(2024, 2, 29, 7, 5, tzinfo=datetime.timezone(
         datetime.timedelta(hours=7)))
-    n = eng.neutral_write("dst", "sales", "orders",
-                          [("id", "integer"), ("amount", "decimal"),
-                           ("raw", "bytes"), ("at", "timestamp"),
-                           ("note", "text")],
-                          [[1, Decimal("1.50"), b"\x00\xff", at,
-                            canon.ABSENT],
-                           [2, None, None, None, "b"]])
-    assert n == 2
-    assert ran == [("delete from `sales`.`orders` where (`id` = %s) or"
-                    " (`id` = %s)", (1, 2))]
-    assert loaded == [("analytics.sales.orders", [
-        {"id": 1, "amount": "1.50",
-         "raw": base64.b64encode(b"\x00\xff").decode(),
-         "at": "2024-02-29T00:05:00"},
-        {"id": 2, "amount": None, "raw": None, "at": None, "note": "b"}],
-        "WRITE_APPEND")]
+    fields = [SchemaField("id", "INT64"), SchemaField("amount", "NUMERIC"),
+              SchemaField("raw", "BYTES"), SchemaField("at", "DATETIME"),
+              SchemaField("seen", "TIMESTAMP"), SchemaField("note", "STRING")]
+    names = [f.name for f in fields]
+    rows = [[1, Decimal("1.50"), b"\x00\xff", at, at, None],
+            [2, None, None, None, None, "b"]]
+    body = eng._arrow(fields, names, rows)
+    got = body.to_pylist()
+    assert got[0] == {
+        "id": 1, "amount": Decimal("1.500000000"), "raw": b"\x00\xff",
+        "at": datetime.datetime(2024, 2, 29, 0, 5),
+        "seen": datetime.datetime(2024, 2, 29, 0, 5,
+                                  tzinfo=datetime.timezone.utc),
+        "note": None}
+    assert got[1]["note"] == "b" and got[1]["amount"] is None
+    assert str(body.schema.field("at").type) == "timestamp[us]"
+    assert str(body.schema.field("seen").type) == "timestamp[us, tz=UTC]"
+    # a row a document store left a field out of is written with it NULL
+    written = []
+    eng.neutral_key = lambda side, db, table: ["id"]
+    eng._load_batch = lambda side, db, table, columns, rows, key: \
+        written.append(rows)
+    eng.neutral_write("dst", "sales", "orders", [("id", "integer"),
+                                                 ("note", "text")],
+                      [[3, canon.ABSENT]])
+    assert written == [[[3, None]]]

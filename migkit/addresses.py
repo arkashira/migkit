@@ -37,14 +37,19 @@ REFERENCES = ("env:", "${", "file:", "vault:", "aws-sm:", "gcp-sm:",
               "azure-kv:", "keyring:")
 
 #: engines whose address is a file or a place, not a server
-PLACES = ("sqlite", "duckdb", "parquet", "copybook")
+PLACES = ("sqlite", "duckdb", "parquet", "copybook", "delta")
+#: schemes whose place is an S3 prefix
+ON_S3 = ("parquet+s3", "delta+s3")
+#: an Iceberg side's catalog: a SQLite file (`iceberg:///c.db`) or a REST
+#: catalog (`iceberg+https://host/path`)
+ICEBERG_REST = ("iceberg+http", "iceberg+https")
 #: engines whose first path segment names what to connect to, and the
 #: second the hop's databases (their schemas)
 CONNECTS_TO = {"oracle": "service", "db2": "database", "db2zos": "database",
                "redshift": "database", "snowflake": "database"}
 #: engines that sign in without a user and password of the address's own
 NO_SIGN_IN = ("sqlite", "duckdb", "parquet", "copybook", "bigquery",
-              "pubsub")
+              "pubsub", "iceberg", "delta")
 #: an AWS region, as a host naming where a service is rather than a server
 REGION = re.compile(r"^[a-z]{2}(-gov|-iso[a-z]*)?-[a-z]+-\d$")
 
@@ -146,8 +151,15 @@ def parse(text, side="source"):
                 + r")", str(text)):
             _refuse_password(side, text, "")
         return engine, {"url": str(text).strip()}, []
+    if engine == "iceberg":
+        if not rest:
+            raise SystemExit(f"the {side} address {text!r} names no catalog")
+        catalog = (f"{scheme.split('+')[1]}://{rest}"
+                   if scheme in ICEBERG_REST else f"sqlite:///{unquote(rest)}")
+        return engine, {"catalog": catalog, **_options(
+            engine, params, side)}, []
     if engine in PLACES:
-        if scheme == "parquet+s3":
+        if scheme in ON_S3:
             return engine, {"url": "s3://" + rest, **_options(
                 engine, params, side)}, []
         if not rest:
@@ -324,8 +336,8 @@ def render(engine, endpoint, dbs=(), default_port=0):
     if password and not is_reference(password):
         return None
     scheme = next((s for s, e in SCHEMES.items() if e == engine
-                   and s not in ("parquet+s3", "mongodb+srv", "rediss")),
-                  None)
+                   and s not in ON_S3 + ICEBERG_REST
+                   + ("mongodb+srv", "rediss")), None)
     if engine == "redis" and ep.get("tls") is True:
         scheme = "rediss"
         ep.pop("tls")
@@ -339,9 +351,22 @@ def render(engine, endpoint, dbs=(), default_port=0):
         auth = quote(user, safe="") + (
             ":" + quote(password, safe=":${}") if password else "") + "@"
     path = ""
+    if engine == "iceberg":
+        catalog = str(ep.pop("catalog", "") or "")
+        if host or port or auth:
+            return None
+        if catalog.startswith("sqlite:///"):
+            where = f"iceberg://{catalog[len('sqlite:///'):]}"
+        elif catalog.startswith(("http://", "https://")):
+            where = f"iceberg+{catalog}"
+        else:
+            return None
+        query = _query(engine, ep)
+        return None if query is None else where + query
     if engine in PLACES:
-        if engine == "parquet" and str(ep.get("url", "")).startswith("s3://"):
-            return (f"parquet+s3://{ep.pop('url')[5:]}"
+        if engine in ("parquet", "delta") and str(
+                ep.get("url", "")).startswith("s3://"):
+            return (f"{engine}+s3://{ep.pop('url')[5:]}"
                     + _query(engine, ep))
         where = ep.pop("path", "") or host
         if not where or auth:

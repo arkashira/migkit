@@ -34,7 +34,8 @@ FILE_ENGINE = {"postgres.py": ("postgres",), "mysql.py": ("mysql",),
                "duckdb.py": ("duckdb",), "hetero.py": ("hetero",),
                "copybook.py": ("copybook",), "db2i.py": ("db2i",),
                "db2zos.py": ("db2zos",),
-               "warehouse.py": ("redshift", "snowflake", "bigquery")}
+               "warehouse.py": ("redshift", "snowflake", "bigquery"),
+               "lake.py": ("iceberg", "delta")}
 
 #: reads by a key held in a variable, where it comes from, and the keys
 #: it stands for - a new one is a read this test cannot follow, and fails
@@ -45,7 +46,12 @@ DYNAMIC = {
                                               "sslcrl")),
     ("config.py", "mysql_tls"): ("endpoint", ("ssl_cert", "ssl_key")),
     ("mysql.py", "_client_tls"): ("endpoint", ("ssl_cert", "ssl_key")),
-    ("warehouse.py", "_connect"): ("endpoint", ("warehouse", "role")),
+    ("warehouse.py", "_connect"): ("endpoint", ("warehouse", "role",
+                                                "authenticator",
+                                                "cluster_identifier",
+                                                "serverless_work_group",
+                                                "region", "profile",
+                                                "db_user")),
     ("config.py", "redis_tls"): ("endpoint", ("tls_cert_file",
                                               "tls_key_file")),
     ("tls.py", "_direct"): ("endpoint", ("tls_ca_file", "tls",

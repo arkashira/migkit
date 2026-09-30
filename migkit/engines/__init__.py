@@ -6,7 +6,7 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "sybase": "ase", "sap-ase": "ase", "vsam": "copybook",
            "cobol": "copybook", "ibmi": "db2i", "as400": "db2i",
            "iseries": "db2i", "db2-for-i": "db2i", "db2-zos": "db2zos",
-           "db2z": "db2zos"}
+           "db2z": "db2zos", "delta-lake": "delta"}
 
 #: an address's scheme and the engine it names - `source:
 #: postgres://app@db1/shop` in a hop (`migkit.addresses`). The one place a
@@ -38,6 +38,9 @@ SCHEMES = {
     "kinesis": "kinesis",
     "pubsub": "pubsub",
     "parquet": "parquet", "parquet+s3": "parquet",
+    "iceberg": "iceberg", "iceberg+http": "iceberg",
+    "iceberg+https": "iceberg",
+    "delta": "delta", "delta+s3": "delta",
     "trino": "generic", "presto": "generic", "vertica": "generic",
 }
 
@@ -110,6 +113,12 @@ def _class_for(name):
     if name == "duckdb":
         from .duckdb import DuckDBEngine
         return DuckDBEngine
+    if name == "iceberg":
+        from .lake import IcebergEngine
+        return IcebergEngine
+    if name == "delta":
+        from .lake import DeltaEngine
+        return DeltaEngine
     if name == "copybook":
         from .copybook import CopybookEngine
         return CopybookEngine
@@ -130,7 +139,8 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "parquet", "clickhouse", "dynamodb", "oracle", "db2", "db2i",
          "db2zos", "ase",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
-         "kinesis", "pubsub", "duckdb", "copybook", "hetero", "generic")
+         "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
+         "hetero", "generic")
 
 
 def engines_with(method):

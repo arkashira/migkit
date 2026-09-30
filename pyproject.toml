@@ -47,6 +47,14 @@ dependencies = [
     "opensearch-py>=3.0",
     "snowflake-connector-python>=3.6",
     "google-cloud-bigquery>=3.11",
+    # the warehouses' exactly-once paths: BigQuery's committed write
+    # streams, Snowflake's streaming channels, Redshift's IAM sign-in
+    "google-cloud-bigquery-storage>=2.41",
+    "snowpipe-streaming>=1.8",
+    "redshift_connector>=2.1",
+    # Iceberg and Delta tables as sides of a pair
+    "pyiceberg[sql-sqlite,pyarrow]>=0.12",
+    "deltalake>=1.6",
     "zstandard>=0.22",
     "mysql-replication>=1.0",
     "pymongo>=4.6",

@@ -187,13 +187,30 @@ class Side:
     @property
     def sql(self):
         """Whether the server hashes (PostgreSQL and MySQL render canon's
-        text in SQL); elsewhere the rows are hashed in this process, as
-        `neutral_digest` folds them there - and on those two as well where
-        a column's class is one whose SQL rendering is not the one this
-        process writes (`canon.FOLDED_HERE`), as `neutral_digest` does."""
+        text in SQL, and so do the warehouses and DuckDB where every column
+        of the table is one their SQL renders, proved on its first rows -
+        `warehouse_sql.DigestsInSQL.leaf_ready`); elsewhere the rows are
+        hashed in this process, as `neutral_digest` folds them there - and
+        on those as well where a column's class is one whose SQL rendering
+        is not the one this process writes (`canon.FOLDED_HERE`), as
+        `neutral_digest` does."""
+        if any(c in canon.FOLDED_HERE for _, c in self.cols):
+            return False
+        if self.dialect:
+            if "_in_sql" not in self.__dict__:
+                self.__dict__["_in_sql"] = bool(self.eng.leaf_ready(
+                    self.side, self.db, self.table, self.cols))
+            return self.__dict__["_in_sql"]
         return (getattr(self.eng, "CANON_ENGINE", None) in SQL_ENGINES
-                and bool(getattr(self.eng, "SQL_DIALECT", None))
-                and not any(c in canon.FOLDED_HERE for _, c in self.cols))
+                and bool(getattr(self.eng, "SQL_DIALECT", None)))
+
+    @property
+    def dialect(self):
+        """The warehouse dialect a side's leaves are written in
+        (`warehouse_sql`), or None for PostgreSQL's and MySQL's own."""
+        if getattr(self.eng, "CANON_ENGINE", None) in SQL_ENGINES:
+            return None
+        return getattr(self.eng, "DIGEST_DIALECT", None)
 
     @property
     def engine(self):
@@ -249,15 +266,27 @@ def _q(s, name):
     return s.eng._quote_ident(name)
 
 
+def _row_hash(s, cols, salt):
+    """SQL for a row's (or a key's) salted hash on this side."""
+    if s.dialect:
+        return s.eng.leaf_hash(
+            s.eng.leaf_row(s.side, s.db, s.table, cols), salt)
+    return _h(s.engine, canon.row_expr(s.engine, cols), salt)
+
+
+def _shift(s, value, bits):
+    return (s.eng.leaf_shift(value, bits) if s.dialect
+            else f"({value} >> {bits})")
+
+
 def _inner(s, spec, extra=None, keys=False):
     """The rows as (rh[, kh][, k0, k1 ...]): what every query here reads,
     the key's raw values where `keys` or the leaves are key ranges."""
-    e = s.engine
     cls = dict(s.cols)
-    parts = [f"{_h(e, canon.row_expr(e, s.cols), spec.salt)} as rh"]
+    parts = [f"{_row_hash(s, s.cols, spec.salt)} as rh"]
     if s.key:
-        key = canon.row_expr(e, [(k, cls[k]) for k in s.key])
-        parts.append(f"{_h(e, key, spec.salt)} as kh")
+        key = [(k, cls[k]) for k in s.key]
+        parts.append(f"{_row_hash(s, key, spec.salt)} as kh")
         if keys or spec.kind == "range":
             parts += [f"{_q(s, k)} as k{i}" for i, k in enumerate(s.key)]
     where = [w for w in (s.where, extra) if w]
@@ -279,8 +308,12 @@ def _fenced(s, inner):
 def _bucket_sql(s, spec):
     kh = "kh" if s.key else "rh"
     if spec.kind != "range":
-        return f"({kh} >> {BITS - spec.bits})"
+        return _shift(s, kh, BITS - spec.bits)
     lo, w = spec.base, spec.width
+    if s.dialect:
+        div = s.eng.leaf_div
+        return (f"(case when k0 >= {lo} then {div(f'k0 - ({lo})', w)}"
+                f" else -1 - {div(f'({lo - 1}) - k0', w)} end)")
     if s.engine == "postgres":
         v = "k0::numeric"
         return (f"(case when {v} >= {lo} then div({v} - ({lo}), {w})"
@@ -292,7 +325,9 @@ def _bucket_sql(s, spec):
 
 def _scan_sql(s, spec, extra=None, only=None):
     kh = "kh" if s.key else "rh"
-    return (f"select b, count(*), sum(rh), sum({kh}) from"
+    # sums that do not wrap where an engine's own integer sum would
+    total = s.eng.leaf_sum if s.dialect else (lambda v: f"sum({v})")
+    return (f"select b, count(*), {total('rh')}, {total(kh)} from"
             f" (select {_bucket_sql(s, spec)} as b, rh"
             + (", kh" if s.key else "") +
             f" from {_fenced(s, _inner(s, spec, extra))} x) y"
@@ -494,13 +529,15 @@ def leaf_rows(s, spec, buckets):
             names = ", ".join(f"k{j}" for j in range(len(s.key)))
             sql = (f"select rh, kh, {names} from"
                    f" {_fenced(s, _inner(s, spec, keys=True))} x"
-                   f" where (kh >> {BITS - spec.bits}) in ({part})")
+                   f" where {_shift(s, 'kh', BITS - spec.bits)}"
+                   f" in ({part})")
             for rh, kh, *key in s.eng.run_rule(s.side, s.db, sql):
                 rh, kh = int(rh), int(kh)
                 _keep(out, s, key, rh, kh, spec.bucket(kh))
         else:
             sql = (f"select rh, count(*) from {_fenced(s, _inner(s, spec))} x"
-                   f" where (rh >> {BITS - spec.bits}) in ({part})"
+                   f" where {_shift(s, 'rh', BITS - spec.bits)}"
+                   f" in ({part})"
                    " group by rh")
             for rh, n in s.eng.run_rule(s.side, s.db, sql):
                 rh = int(rh)
@@ -755,6 +792,11 @@ def _int_key(s):
 
 
 def _sketch_sql(s, spec, w):
+    if s.dialect:
+        # a cell's squared lane passes what NUMBER(38), DECIMAL(38) and
+        # HUGEINT hold within a few hundred rows: the leaves are read instead
+        raise ValueError("the sums a warehouse keeps are too narrow for the"
+                         " sketch's squared lane")
     e = s.engine
     kel = "k0" if _int_key(s) else ("kh" if s.key else "rh")
     inner = _inner(s, spec, keys=_int_key(s))
@@ -948,6 +990,10 @@ PASSES = (
                      and 0 < f["expected"] <= SKETCH_MOST,
                      "{rung} needs few differences expected, and nothing"
                      " says how many there are"),
+                  _N("sums wide enough for its squares",
+                     lambda f: f.get("wide sums", True),
+                     "a side's leaves are computed in a warehouse's SQL,"
+                     " whose sums are too narrow for {rung}'s squares"),
                   _N("a link that is the limit",
                      lambda f: (f.get("rtt_ms") or 0) >= SLOW_RTT_MS,
                      "the link is not the limit (round trip under"
@@ -1186,6 +1232,9 @@ def _facts(pair, db, a, b, digests):
                                                    else None),
          "kept": False, "expected": expected, "disagreed": True,
          "sql": a.sql and b.sql,
+         # a side whose leaves a warehouse's SQL computes cannot hold the
+         # sketch's squared sums (`_sketch_sql`)
+         "wide sums": not any(s.sql and s.dialect for s in (a, b)),
          "same engine": pair.src_name == pair.dst_name and bool(digests),
          "same key": bool(a.key) and a.key == b.key,
          "two readings": bool(opts.get("two_readings"))},

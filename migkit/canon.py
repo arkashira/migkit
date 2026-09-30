@@ -550,6 +550,23 @@ TYPES = {
         "bytes": "bytes", "date": "date", "datetime": "timestamp",
         "timestamp": "timestamp", "time": "time", "json": "json",
     },
+    # Apache Iceberg, by the names its schema gives its types
+    "iceberg": {
+        "long": "integer", "int": "integer", "decimal": "decimal",
+        "double": "float", "float": "float", "boolean": "boolean",
+        "string": "text", "binary": "bytes", "fixed": "bytes",
+        "date": "date", "timestamp": "timestamp", "timestamptz": "timestamp",
+        "timestamp_ns": "timestamp", "timestamptz_ns": "timestamp",
+        "time": "time",
+    },
+    # Delta Lake. `timestamp` is an instant, `timestamp_ntz` a wall clock
+    "delta": {
+        "long": "integer", "integer": "integer", "short": "integer",
+        "byte": "integer", "decimal": "decimal", "double": "float",
+        "float": "float", "boolean": "boolean", "string": "text",
+        "binary": "bytes", "date": "date", "timestamp": "timestamp",
+        "timestamp_ntz": "timestamp",
+    },
     # OpenSearch: an index migkit made keeps each column's class in its
     # mapping's `_meta`; one it did not make is read by the class each kind
     # of field holds. Either way the names are the classes themselves.
@@ -1561,7 +1578,7 @@ DDL = {
         "time": ("bigtime", "bigtime"),
     },
     "redshift": {
-        OWN: ("varchar(65535)", "varchar(65535)"),
+        OWN: ("varchar(65535)", "{0}"),
         "integer": ("bigint", "bigint"),
         "decimal": ("numeric(38,10)", "numeric({0},{1})"),
         "float": ("double precision", "double precision"),
@@ -1577,7 +1594,7 @@ DDL = {
         "bson": ("super", "super"),
     },
     "snowflake": {
-        OWN: ("VARCHAR", "VARCHAR"),
+        OWN: ("VARCHAR", "{0}"),
         "integer": ("NUMBER(38,0)", "NUMBER(38,0)"),
         "decimal": ("NUMBER(38,10)", "NUMBER({0},{1})"),
         "float": ("FLOAT", "FLOAT"),
@@ -1593,7 +1610,7 @@ DDL = {
         "bson": ("VARIANT", "VARIANT"),
     },
     "bigquery": {
-        OWN: ("STRING", "STRING"),
+        OWN: ("STRING", "{0}"),
         "integer": ("INT64", "INT64"),
         "decimal": ("BIGNUMERIC", "BIGNUMERIC({0},{1})"),
         "float": ("FLOAT64", "FLOAT64"),
@@ -1607,6 +1624,34 @@ DDL = {
         "time": ("TIME", "TIME"),
         "json": ("JSON", "JSON"),
         "bson": ("JSON", "JSON"),
+    },
+    # the lakes take the source's own type between two tables of one
+    # format. Iceberg's `timestamp` is a wall clock, as the other
+    # warehouses make one; Delta's is an instant, since its wall clock
+    # (`timestamp_ntz`) is a table feature not every reader has - either
+    # way an instant is carried as its UTC clock (`TIME_MEANING`)
+    "iceberg": {
+        OWN: ("string", "{0}"),
+        "integer": ("long", "long"),
+        "decimal": ("decimal(38,10)", "decimal({0},{1})"),
+        "float": ("double", "double"),
+        "boolean": ("boolean", "boolean"),
+        "text": ("string", "string"),
+        "bytes": ("binary", "binary"),
+        "date": ("date", "date"),
+        "timestamp": ("timestamp", "timestamp"),
+        "time": ("time", "time"),
+    },
+    "delta": {
+        OWN: ("string", "{0}"),
+        "integer": ("long", "long"),
+        "decimal": ("decimal(38,10)", "decimal({0},{1})"),
+        "float": ("double", "double"),
+        "boolean": ("boolean", "boolean"),
+        "text": ("string", "string"),
+        "bytes": ("binary", "binary"),
+        "date": ("date", "date"),
+        "timestamp": ("timestamp", "timestamp"),
     },
     "cassandra": {
         # the source's own type between two Cassandra clusters: as text,
@@ -2316,6 +2361,13 @@ TIME_MEANING = {
     "db2": {"timestamp": WALL, "date": WALL, "time": WALL},
     "db2i": {"timestamp": WALL, "date": WALL, "time": WALL},
     "db2zos": {"timestamp": WALL, "date": WALL, "time": WALL},
+    # by each format's specification: Iceberg's `timestamp` has no zone
+    # and `timestamptz` is adjusted to UTC; Delta's `timestamp` is
+    # adjusted to UTC and `timestamp_ntz` has no zone
+    "iceberg": {"timestamp": WALL, "timestamp_ns": WALL,
+                "timestamptz": INSTANT, "timestamptz_ns": INSTANT,
+                "date": WALL, "time": WALL},
+    "delta": {"timestamp": INSTANT, "timestamp_ntz": WALL, "date": WALL},
 }
 
 
@@ -3397,7 +3449,7 @@ def comparable(engine, declared):
 IN_PROCESS = {"mongodb", "sqlite", "mssql", "parquet", "clickhouse",
               "dynamodb", "oracle", "db2", "opensearch", "cassandra",
               "redshift", "snowflake", "bigquery", "ase", "duckdb",
-              "copybook", "db2i", "db2zos"}
+              "copybook", "db2i", "db2zos", "iceberg", "delta"}
 
 
 def renders(engine):

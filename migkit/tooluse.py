@@ -45,7 +45,8 @@ READ_OFF = "read off the code that drives it"
 #: adds itself here, so `tools_used` sees every tool without importing
 #: all of migkit
 CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
-                "migkit.engines.oracle_redo", "migkit.engines.db2i"]
+                "migkit.engines.oracle_redo", "migkit.engines.db2i",
+                "migkit.engines.warehouse", "migkit.engines.lake"]
 
 _HERE = Path(__file__).parent
 

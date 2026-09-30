@@ -3778,6 +3778,9 @@ class Engine:
         here; False: the rows pass through migkit and are read back."""
         return False
 
+    #: every read billed by the bytes it scans, whatever its LIMIT
+    READS_BILLED = False
+
     def probe_read(self, side, db, table, part=0, parts=1,
                    budget=16 * 2 ** 20, seconds=1.5, keep=0):
         """One short read of `table` the way the table copier reads it:
@@ -3786,9 +3789,11 @@ class Engine:
         is which slice, so streams read side by side read apart; a slice
         this engine cannot find is None. Read-only, and bounded by `budget`
         bytes and `seconds`. Here: the neutral reader from the start, the
-        first slice only."""
+        first slice only. None where the engine bills every read by the
+        bytes it scans (`READS_BILLED`): a probe of each table would be a
+        bill of each, and the pace finds the rate while it runs."""
         import time
-        if part:
+        if part or self.READS_BILLED:
             return None
         cols = self.neutral_columns(side, db, table)
         began, rows, size, after, kept = time.monotonic(), 0, 0, None, []

@@ -660,6 +660,54 @@ def _mssql(hop, e, key, side, dbs, where, read, write, follow, native):
     return out
 
 
+def _redshift(hop, e, key, side, dbs, where, read, write, follow, native):
+    """A cluster's privileges, asked in the PostgreSQL functions Redshift
+    keeps: reading every table of the hop's schemas, and on the target
+    making tables and writing them - with, where the target stages its
+    batches in S3, the role the cluster reads the bucket as. A warehouse
+    keeps no change log, so a follow asks nothing of it."""
+    from .engines.dbapi import MARK
+    out = []
+    me = e._rows(key, dbs[0] if dbs else "", "select current_user")[0][0]
+    who = _pgi(me)
+    for db in dbs:
+        schema = e._d(key, db)
+        if read:
+            gaps = [t for (t,) in e._rows(
+                key, db, "select tablename from pg_tables where schemaname ="
+                         f" {MARK} and not has_table_privilege(current_user,"
+                         " quote_ident(schemaname) || '.' ||"
+                         " quote_ident(tablename), 'SELECT')", (schema,))
+                    if not hop.excluded(db, t)]
+            out.append(Need(side, f"read every table of {schema}", not gaps,
+                            f"{len(gaps)} tables it may not read" if gaps
+                            else "every one",
+                            [f"grant usage on schema {_pgi(schema)} to"
+                             f" {who};",
+                             f"grant select on all tables in schema"
+                             f" {_pgi(schema)} to {who};"]))
+        if key == "dst" and write:
+            ok = bool(e._rows(
+                key, db, f"select has_schema_privilege(current_user, {MARK},"
+                         " 'CREATE') and has_schema_privilege(current_user,"
+                         f" {MARK}, 'USAGE')", (schema, schema))[0][0])
+            out.append(Need(side, f"create and write tables in {schema}", ok,
+                            "may" if ok else "may not",
+                            [f"grant usage, create on schema {_pgi(schema)}"
+                             f" to {who};",
+                             "grant select, insert, update, delete on all"
+                             f" tables in schema {_pgi(schema)} to {who};"]))
+    stage = e._stage(key) if key == "dst" and write else None
+    if stage:
+        bucket, prefix, role = stage
+        out.append(Need(side, "a COPY reads the stage", None,
+                        "asked of the cluster only by a COPY",
+                        [], outside=[
+                            f"associate {role} with the cluster, and let it"
+                            f" read s3://{bucket}/{prefix}"]))
+    return out
+
+
 def _cl(command):
     """A CL command as the SQL statement that runs it on IBM i."""
     return "call qsys2.qcmdexc('" + command.replace("'", "''") + "');"
@@ -868,12 +916,13 @@ def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
 
 #: the engines whose servers can be asked, by canonical name
 ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
-       "db2i": _db2i, "oracle": _oracle}
+       "redshift": _redshift, "db2i": _db2i, "oracle": _oracle}
 
 #: how each writes a comment, and its script's file suffix
 SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
           "mongodb": ("//", "js"), "mssql": ("--", "sql"),
-          "db2i": ("--", "sql"), "oracle": ("--", "sql")}
+          "redshift": ("--", "sql"), "db2i": ("--", "sql"),
+          "oracle": ("--", "sql")}
 
 
 def script(hop, eng, side, found, where=None):

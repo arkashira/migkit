@@ -48,6 +48,8 @@ _STREAM_ONLY = ("{} is where a pair delivers its changes (engine:"
                 " holds a stream of changes, not a copy to compare")
 _FILES = ("Parquet files are data at rest, with no server, settings or"
           " change log of their own")
+_LAKE = ("an Iceberg or Delta table is files and a log of commits, with no"
+         " server, settings or sequences of its own")
 _ZOS_LOG = ("Db2 for z/OS hands its log out only to licensed code - a load"
             " module on the host reading it, or the change tables IBM's"
             " replication product fills - and no open reader of either"
@@ -214,6 +216,23 @@ GAPS = {
         "statistics": (NOT_YET, "33"),
         "snapshot": (NOT_YET, "33"),
     } for name in ("redshift", "snowflake", "bigquery")},
+    **{name: {
+        "sequences": (NOT_APPLICABLE, _LAKE),
+        "params": (NOT_APPLICABLE, _LAKE),
+        "users": (NOT_APPLICABLE, "who may read the table is the catalog's"
+                                  " and the storage's own access control,"
+                                  " not the table's"),
+        "statistics": (NOT_APPLICABLE, "the table's statistics are its own"
+                                       " files' footers and manifests,"
+                                       " written with each commit"),
+        "deep": (NOT_YET, "33"),
+        "bulk-move": (NOT_YET, "33"),
+        "stream": (NOT_YET, "33"),
+        "fence": (NOT_YET, "33"),
+        "confirm": (NOT_YET, "33"),
+        "delta": (NOT_YET, "33"),
+        "snapshot": (NOT_YET, "33"),
+    } for name in ("iceberg", "delta")},
     "kinesis": {cap: (NOT_APPLICABLE, _STREAM_ONLY.format("Kinesis",
                                                           "kinesis"))
                 for cap in CAPABILITIES},

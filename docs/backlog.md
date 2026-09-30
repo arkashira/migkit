@@ -3995,6 +3995,48 @@ back, and the rows BigQuery's load job is given
 from staged Parquet through each warehouse's own bulk command, and a run
 against real accounts.
 
+*Warehouses as exact sides, built (2026-09-30; Leapfrog engine reach 1,
+F7):*
+* **The digest in each warehouse's SQL** (`engines/warehouse_sql.py`):
+  canon's row text, hashed and summed without wrapping in BigQuery,
+  Snowflake, Redshift and DuckDB - the hash read off `canon.digest_step`
+  (MD5 today, SHA-256 in every dialect the day the fold moves). A class a
+  dialect does not render, or a table whose first 64 rows the server
+  renders differently from this process, or SQL the server refuses, is
+  folded here and said. The leaves of a differing table (`leaves.py`) are
+  computed in the same SQL. DuckDB's rendering held to canon's on 6,000
+  rows of every class, floats from random bit patterns included; DuckDB
+  files digest a million rows in 0.81 s where the fold took 4.27 s.
+* **A copy's batch, staged and merged by its key once**: BigQuery by a
+  Parquet load job into a stage table of its own (the target takes only
+  a MERGE; the Storage Write API once the project's load jobs of the day
+  run out, read from its job history), Snowflake by a staged file of text
+  cast by type and COPY (its 64-day load history skips a file loaded),
+  Redshift by COPY from S3 a file a slice or by statements, whichever did
+  a row in less time (`STAGE_WAYS`), with `STL_LOAD_COMMITS` asked when a
+  keyless batch's commit goes unanswered.
+* **A tail's batch applied exactly once** (`EXACT_BATCHES`): journal rows
+  landed through BigQuery's committed stream at offsets (a replay is
+  refused at its offset), Snowflake's channel with the batch as its offset
+  token (a staged file without a key pair), or Redshift's own
+  transaction; merged with the ledger's line in one transaction, which
+  the tail asks after a stop.
+* **Iceberg and Delta tables as sides** (`engines/lake.py`): each batch
+  one commit naming it (snapshot properties; Delta's `txn` version for a
+  tail), a replay passed over; digests by DuckDB over the table's Arrow.
+  What each lake's clock means is in `canon.TIME_MEANING` (Iceberg's
+  `timestamp` a wall clock, Delta's an instant), so a pair's deep check
+  says a clock that changed meaning.
+* **In a pair as alone**: `assess` names migkit's own tables and
+  BigQuery's load jobs left for a warehouse target of a pair
+  (`reach_items`); the resource model sizes a BigQuery table's rows by
+  listing them, unbilled, not by a query billed by every byte it reads.
+* Proved on BigQuery's emulator (its gaps listed in
+  `tests/test_bigquery_on_its_emulator.py`), on PostgreSQL where
+  Redshift's SQL is its own, and on disk for the lakes; Snowflake, and
+  COPY, slices and load history, only against recorded shapes until a
+  real account runs them.
+
 **34. More engines to move, not only to verify.**
 * **Sources DMS takes that migkit cannot:** Db2, SAP ASE, SQL Server at
   full depth.

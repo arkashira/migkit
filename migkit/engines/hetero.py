@@ -11,6 +11,14 @@ def _stop_on_term(signum, frame):
     raise KeyboardInterrupt
 
 
+def _digests_ranges(engine):
+    """Whether a digest of a key range is the server's to answer: an
+    engine with a SQL dialect, or a warehouse, whose digest is computed in
+    its SQL where the table's columns allow (`DIGESTS_IN_SERVER`)."""
+    return bool(engine.SQL_DIALECT
+                or getattr(engine, "DIGESTS_IN_SERVER", False))
+
+
 #: new objects between two young passes of the collector while a tail runs
 GC_YOUNG = 50_000
 _GC = {"tails": 0, "was": None}
@@ -567,7 +575,10 @@ class HeteroEngine(Engine):
         remote, local = [], []
         for name, engine in ((self.src_name, self.src_engine),
                              (self.dst_name, self.dst_engine)):
-            if engine.CANON_ENGINE not in canon.IN_PROCESS:
+            # a warehouse folds a table here only where its SQL could not
+            # (`folded_last`, set by the digest just taken)
+            if engine.CANON_ENGINE not in canon.IN_PROCESS or \
+                    not getattr(engine, "folded_last", True):
                 continue
             # an engine that sums in its server where the table allows it
             # (Oracle) folded nothing here when every table allowed it
@@ -1300,7 +1311,7 @@ class HeteroEngine(Engine):
                                                                       None)
         if (len(key) != 1 or dict(sc).get(key[0]) != "integer"
                 or dict(dc).get(dst_key[0]) != "integer"
-                or not self.dst_engine.SQL_DIALECT):
+                or not _digests_ranges(self.dst_engine)):
             return None
         where = [n for n, _ in sc].index(key[0])
         ks = [r[at[where]] for r in rows if r[at[where]] is not None]
@@ -1320,7 +1331,7 @@ class HeteroEngine(Engine):
             return int(got[0]), str(got[1])
 
         def ours():
-            if src_t and self.src_engine.SQL_DIALECT:
+            if src_t and _digests_ranges(self.src_engine):
                 got = self.src_engine.neutral_digest(
                     "src", db, src_t, sc, where=rng(self.src_engine, key[0],
                                                     src_where))
@@ -3389,6 +3400,10 @@ class HeteroEngine(Engine):
         # how what it applies is marked on the target, kept in the token
         rung = marks.settle(self, db, token_path, exact, log) \
             if go and two_way else None
+        # and for a target that keeps a ledger of the batches it committed
+        # (`EXACT_BATCHES`, the warehouses and the lakes), whatever the hop
+        exact = exact or (go and getattr(self.dst_engine, "EXACT_BATCHES",
+                                         False))
         batch = self._saved_batch(token_path, token) if exact else 0
         if exact:
             token, batch = self._committed_ahead(db, token, batch,
@@ -3527,7 +3542,7 @@ class HeteroEngine(Engine):
                             self.dst_engine._batch_seen = _json.dumps(
                                 {"token": token, "batch": batch + 1},
                                 default=str)
-                            if rung != "table":
+                            if rung not in (None, "table"):
                                 # where the batch ends, written before it
                                 # is applied: a rung that says only that it
                                 # was committed cannot say where

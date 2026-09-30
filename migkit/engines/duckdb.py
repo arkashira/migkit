@@ -9,12 +9,19 @@ time: DuckDB lets one process write a file.
 """
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
+from .warehouse_sql import DigestsInSQL
 
 
-class DuckDBEngine(DbapiRows, Engine):
+class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "duckdb"
     SQL_DIALECT = None
+    #: the digest is computed in DuckDB's SQL (`warehouse_sql`), which runs
+    #: in this process too, where the table's columns allow. Measured, a
+    #: million rows of an integer, a text, a decimal, a float and a time:
+    #: 0.81 s, where reading them out and folding them here took 4.27 s,
+    #: to the same number
+    DIGEST_DIALECT = "duckdb"
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer, as every"
                       " file-based engine's is")
     OVER_NETWORK = False
@@ -87,6 +94,21 @@ class DuckDBEngine(DbapiRows, Engine):
         finally:
             conn.close()
         return ""
+
+    def run_rule(self, side, db, sql):
+        """The SQL in a transaction begun here and always rolled back:
+        DuckDB opens none of its own for a read, and the rollback the
+        other engines' rules end on was refused - "no transaction is
+        active" - which stopped every rule and every leaf read."""
+        conn = self._connect(side, db)
+        try:
+            conn.execute("begin")
+            try:
+                return [list(r) for r in conn.execute(sql).fetchall()]
+            finally:
+                conn.execute("rollback")
+        finally:
+            conn.close()
 
     def neutral_tables(self, side, db):
         return [n for (n,) in self._rows(

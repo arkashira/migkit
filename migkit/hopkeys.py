@@ -283,7 +283,8 @@ ENDPOINT_OPTIONS = {
                  ("mongodb", "kafka")),
     "uri_options": Key("the driver's own options", "str", ("mongodb",)),
     "path": Key("the file or directory", "str",
-                ("sqlite", "duckdb", "parquet", "copybook")),
+                ("sqlite", "duckdb", "parquet", "copybook",
+                 "delta")),
     "tables": Key("each table of a directory of files described by COBOL"
                   " copybooks: its file, copybook, record, recfm, lrecl,"
                   " codepage, key, segment, redefines, odo, bytes and"
@@ -298,8 +299,9 @@ ENDPOINT_OPTIONS = {
     "odo": Key("actual (the default) or max: whether a table OCCURS"
                " DEPENDING ON its count takes the room of its count or"
                " of its most", "str", ("copybook",)),
-    "url": Key("the whole connection address", "str",
-               ("generic", "opensearch", "parquet")),
+    "url": Key("the whole connection address (Snowflake's account URL a"
+               " streaming channel signs in at)", "str",
+               ("generic", "opensearch", "parquet", "delta", "snowflake")),
     "secure": Key("TLS", "bool", ("clickhouse",)),
     "address_from_target": Key("host:port the target reaches the source"
                                " at, where it knows it by another name",
@@ -330,17 +332,56 @@ ENDPOINT_OPTIONS = {
                     ("db2", "db2i", "db2zos", "redshift", "snowflake",
                      "bigquery")),
     "account": Key("the account identifier", "str", ("snowflake",)),
-    "warehouse": Key("the warehouse queries run in", "str",
-                     ("snowflake",)),
+    "warehouse": Key("the warehouse queries run in (Snowflake), where new"
+                     " tables' files go (Iceberg)", "str",
+                     ("snowflake", "iceberg")),
     "role": Key("the role queries run as", "str", ("snowflake",)),
+    "authenticator": Key("how the side signs in, where not by password",
+                         "str", ("snowflake",)),
+    "private_key_file": Key("a key pair's private key file, which a"
+                            " streaming channel signs in with", "str",
+                            ("snowflake",)),
+    "private_key_passphrase": Key("the private key's passphrase", "str",
+                                  ("snowflake",)),
     "location": Key("the datasets' region", "str", ("bigquery",)),
     "credentials_file": Key("a service account's key file", "str",
                             ("bigquery", "pubsub")),
+    "anonymous": Key("sign in as nobody, which only an emulator takes",
+                     "bool", ("bigquery",)),
+    "api_endpoint": Key("the API's address, a private one or an"
+                        " emulator's", "str", ("bigquery",)),
+    "write_endpoint": Key("the Storage Write API's host:port", "str",
+                          ("bigquery",)),
+    "stage": Key("an S3 prefix the cluster reads staged files from", "str",
+                 ("redshift",)),
+    "iam_role": Key("the role the cluster reads the stage as", "str",
+                    ("redshift",)),
+    "stage_region": Key("the stage bucket's region", "str", ("redshift",)),
+    "stage_endpoint_url": Key("the stage's S3-compatible endpoint", "str",
+                              ("redshift",)),
+    "iam": Key("sign in by IAM rather than a password", "bool",
+               ("redshift",)),
+    "cluster_identifier": Key("the provisioned cluster an IAM sign-in is"
+                              " for", "str", ("redshift",)),
+    "serverless_work_group": Key("the Serverless workgroup an IAM sign-in"
+                                 " is for", "str", ("redshift",)),
+    "profile": Key("the AWS profile an IAM sign-in uses", "str",
+                   ("redshift",)),
+    "db_user": Key("the database user an IAM sign-in becomes", "str",
+                   ("redshift",)),
+    "catalog": Key("the Iceberg catalog: sqlite:///... or another SQL"
+                   " database's URL, or a REST catalog's http(s) address",
+                   "str", ("iceberg",)),
+    "catalog_name": Key("the name the catalog keeps its tables under",
+                        "str", ("iceberg",)),
+    "catalog_properties": Key("anything else the catalog takes", "dict",
+                              ("iceberg",)),
     "project": Key("the project", "str", ("pubsub",)),
-    "region": Key("the region", "str", ("dynamodb", "kinesis", "parquet")),
+    "region": Key("the region", "str", ("dynamodb", "kinesis", "parquet",
+                                        "redshift", "delta")),
     "endpoint_url": Key("an endpoint of its own (a local one, a"
                         " compatible store)", "str",
-                        ("dynamodb", "kinesis", "parquet")),
+                        ("dynamodb", "kinesis", "parquet", "delta")),
     "table_prefix": Key("the table names' template", "str",
                         ("dynamodb",)),
     "index_prefix": Key("the index names' template", "str",
