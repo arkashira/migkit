@@ -298,9 +298,14 @@ HOP_OPTIONS = {
                         " true, or rows, sample and case_insensitive",
                         "bool|dict",
                         subs=("rows", "sample", "case_insensitive")),
-    "two_way": Key("migkit's own tails both ways", "dict|bool",
+    "two_way": Key("migkit's own tails both ways, a row both sides"
+                   " changed settled column by column: the rule of a"
+                   " column nothing names (on_conflict), each table's"
+                   " rules by column (tables), and what settles a row one"
+                   " side deleted", "dict|bool",
                    subs=("on_conflict", "column", "source_rank",
-                         "target_rank", "delta")),
+                         "target_rank", "delta", "tables",
+                         "delete_vs_update", "delete_missing")),
     "types_from_data": Key("a column whose declaration leaves its domain"
                            " open (a bare decimal, a text of no length) is"
                            " built sized from the data it holds, each"
@@ -600,9 +605,10 @@ GOALS = {
                 "target": "written the same way: the source's changes"
                           " carried to it",
                 "guarantees": "a change made on either side arrives on the"
-                              " other once; two changes to one row are"
-                              " settled by the hop's rule (on_conflict,"
-                              " newer_wins)"},
+                              " other once; where both sides changed one"
+                              " row, what only one side changed is kept"
+                              " and a column both changed is settled by"
+                              " its rule, alike on both sides (two_way)"},
     "keep-in-sync": {"what": "a copy that follows the source for as long"
                              " as it runs, the application kept off it",
                      "options": {"protect_target": SUPPORTED},
@@ -1041,6 +1047,7 @@ def check(data):
         return [Problem("error", "hops", "is not a mapping of hops")]
     for name, raw in hops.items():
         out += check_hop(str(name), raw)
+    out += _two_way_pairs(hops)
     return sorted(out, key=lambda p: p.level != "error")
 
 
@@ -1075,6 +1082,7 @@ def check_hop(name, raw):
     _keys(out, f"{where}.options", opts, HOP_OPTIONS)
     if isinstance(opts, dict):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
+        out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
         if got is None:
@@ -1157,6 +1165,44 @@ def _notify(where, got):
             " in the file, and an address is its own password - keep it in"
             " this machine's keychain or write a reference: env:NAME,"
             " keyring:name, file:/path, vault:path#key"))
+    return out
+
+
+def _two_way(where, got):
+    """A two-way hop's rules read whole (`twoway.rules`): a rule migkit
+    does not know, a `newest` with no column, a group settled by a value
+    it does not name, `source_priority` with no ranks - before anything
+    runs rather than when the tail starts."""
+    from . import twoway
+    if not isinstance(got, dict):
+        return []
+    try:
+        twoway.Rules(got, twoway._ranks_of(got))
+    except SystemExit as e:
+        return [Problem("error", where, str(e))]
+    return []
+
+
+def _two_way_pairs(hops):
+    """Two hops of the file that are each other's way back, both two-way:
+    every conflict is settled at both ends, so a rule that would settle
+    one apart - `overwrite` both ways, ranks turned the same way on both -
+    leaves the two sides different for good (`twoway.apart`)."""
+    from . import twoway
+    both = [(str(n), r) for n, r in hops.items() if isinstance(r, dict)
+            and isinstance(r.get("options"), dict)
+            and r["options"].get("two_way")]
+    out = []
+    for i, (a, ra) in enumerate(both):
+        for b, rb in both[i + 1:]:
+            if ra.get("source") is None or ra.get("source") != \
+                    rb.get("target") or ra.get("target") != rb.get("source"):
+                continue
+            ga, gb = (r["options"]["two_way"] for r in (ra, rb))
+            for said in twoway.apart(ga if isinstance(ga, dict) else {},
+                                     gb if isinstance(gb, dict) else {}):
+                out.append(Problem("error", f"hops.{a} and hops.{b}",
+                                   f"each is the other's way back: {said}"))
     return out
 
 

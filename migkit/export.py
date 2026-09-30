@@ -19,7 +19,9 @@ digests here, their contents where the hop keeps them - encrypted where
 it asks); where a run report gives phases, this gives the ways the engine
 chose for each unit of work and why every other was passed over, the
 positions each copy and follow was fenced at, the seconds each phase of a
-cutover took and the write outage measured, and who approved each step.
+cutover took and the write outage measured, who approved each step, and
+every row a two-way tail found both sides had changed - both versions,
+the row before, the rule each column was settled by and what it took.
 
 One bundle per run, written at the end of every command that left
 anything (`write_run`, under `evidence/<run>/`), and one for the hop's
@@ -537,6 +539,57 @@ def _cutovers(root, entries, session):
     return out
 
 
+#: the conflicts the human views list one by one; the JSON carries all
+CONFLICTS_SHOWN = 500
+
+
+def _conflicts(hop, root, session):
+    """Every row a two-way tail found both sides had changed (`twoway`):
+    its kind, the row before, both sides' versions, each settled column's
+    rule and what it took, what the row ended as and what was decided -
+    values masked where the hop masks them - and the rows parked now."""
+    from . import masking, twoway
+
+    def shown(table, row):
+        if not isinstance(row, dict):
+            return row
+        return {k: masking.shown(hop, table, k, v) for k, v in row.items()}
+    rows, parked, sealed = [], {}, 0
+    for d in _dbs(root):
+        try:
+            got = _lines(d / twoway.RECORD)
+        except SystemExit:
+            # sealed to the hop's recipients, and no key here to open it
+            got, sealed = [], sealed + 1
+        for rec in got:
+            if session and rec.get("session") != session:
+                continue
+            t = rec.get("table")
+            key = rec.get("key") or {}
+            if masking.keys(hop, t):
+                key = {k: masking.token(hop, v) for k, v in key.items()}
+            rows.append({"db": d.name, "table": t, "key": key,
+                         "kind": rec.get("kind"), "ops": rec.get("ops"),
+                         "rule": rec.get("policy"),
+                         "decision": rec.get("decision"),
+                         "columns": [{"columns": r.get("columns"),
+                                      "rule": r.get("rule"),
+                                      "took": r.get("took"),
+                                      "tie": r.get("tie")}
+                                     for r in rec.get("rules") or []],
+                         "before": shown(t, rec.get("remote_before")),
+                         "source": shown(t, rec.get("remote")),
+                         "target": shown(t, rec.get("local")),
+                         "result": shown(t, rec.get("result")),
+                         "at": rec.get("at")})
+        counts = _json(d / twoway.COUNTS, {}) or {}
+        for t, n in (counts.get("parked") or {}).items():
+            if n:
+                parked[f"{d.name}.{t}"] = n
+    return {"rows": rows, "parked": parked,
+            "unreadable": sealed}
+
+
 def _when(epoch):
     try:
         return time.strftime("%Y-%m-%dT%H:%M:%S",
@@ -591,6 +644,7 @@ def gather(hop, session=None):
         "approvals": _approvals(root, entries),
         "repairs": _repairs(root, entries),
         "cutovers": _cutovers(root, entries, session),
+        "conflicts": _conflicts(hop, root, session),
         "timings": _timings(root, session),
         "removed": [{"op": _op(e), "db": e.get("db"), "at": e.get("at")}
                     for e in entries if e.get("op") in REMOVALS],
@@ -689,6 +743,22 @@ def _sections(doc):
                   c["budget_seconds"], ", ".join(
                       f"{p} {s}" for p, s in c["phases_seconds"].items()),
                   ", ".join(c["approvers"])) for c in doc["cutovers"]]))
+    conflicts = doc.get("conflicts") or {}
+    listed = conflicts.get("rows") or []
+    rows = [(c["db"], c["table"], c["kind"], "; ".join(
+                f"{', '.join(r['columns'] or [])}: {r['rule']} took"
+                f" {r['took']}" + (" (a tie)" if r.get("tie") else "")
+                for r in c["columns"]) or c["rule"], c["decision"], c["at"])
+            for c in listed[:CONFLICTS_SHOWN]]
+    if len(listed) > CONFLICTS_SHOWN:
+        rows.append(("", "", f"and {len(listed) - CONFLICTS_SHOWN:,} more,"
+                     " every one in evidence.json", "", "", ""))
+    rows += [(k.partition(".")[0], k.partition(".")[2],
+              f"{n:,} row(s) parked now", "", "parked", "")
+             for k, n in sorted((conflicts.get("parked") or {}).items())]
+    out.append(("rows both sides changed, and how each was settled",
+                ["db", "table", "kind", "columns: rule took", "decided",
+                 "at"], rows))
     out.append(("stored code", ["db", "routine", "status", "why",
                                 "counterexample"],
                 [(c["db"], c["routine"], c.get("status") or c.get("class"),

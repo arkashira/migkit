@@ -1556,11 +1556,18 @@ class PostgresEngine(Engine):
         row = {**key, **values}
         names = [n for n in sorted(row)
                  if n not in self._unwritable_columns(side, db, table)]
-        made = [canon.sql_value(row[n].to if isinstance(row[n], canon.Added)
-                                else row[n]) for n in names]
+        # an array column takes its list as the array, as an upsert writes
+        # it (`_apply_upserts`); `sql_value` would make it JSON text, which
+        # an array refuses - a two-way row the target kept a column of
+        # goes this way, arrays and all
+        arrays = self._array_columns(side, db, table)
+        made = []
+        for n in names:
+            v = row[n].to if isinstance(row[n], canon.Added) else row[n]
+            made.append(v if n in arrays else canon.sql_value(v))
         sets, by = [], []
         for n in names:
-            if n in key:
+            if n in key or isinstance(row[n], canon.Kept):
                 continue
             if isinstance(row[n], canon.Added):
                 sets.append(f'"{n}" = t0."{n}" + %s')

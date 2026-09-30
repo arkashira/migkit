@@ -8,7 +8,8 @@ encrypted where the hop asks (backlog R17b):
           - age1...
 
 A drilldown's keys (`data-*`), a repair's undo statements (`undo*`), a
-two-way tail's conflicts (`conflicts.jsonl`) and the evidence export
+two-way tail's conflicts (`conflicts.jsonl`) and the rows it parked
+(`conflicts-parked.json`), and the evidence export
 (`export.FILES`: a finding's words can quote a key) are written through
 the hop's report directory as age files to those recipients, and read
 back with the operator's own key (`MIGKIT_IDENTITY`: a private SSH key or
@@ -25,8 +26,8 @@ import pathlib
 
 #: the names of the files that hold values
 HOLDS_VALUES = ("data-*", "undo*", "*.undo.sql", "conflicts.jsonl",
-                "evidence.json", "evidence.html", "evidence.md",
-                "tables.csv")
+                "conflicts-parked*", "evidence.json", "evidence.html",
+                "evidence.md", "tables.csv")
 
 AGE = b"age-encryption.org/v1"
 #: one line of a file written a line at a time, encrypted on its own

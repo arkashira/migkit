@@ -31,8 +31,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## `migkit/approvals.py`
 
-* <...> needs <...> approval<...> and has <...> (<...>) | <...>. Nothing was done. An approver runs, until <...>: ssh-keygen -Y sign -n <...> -f ~/.ssh/id_ed25519 < <...> > <...>.$(whoami).sig then this is run again.
-
 * <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there
 
 ## `migkit/assist.py`
@@ -42,6 +40,34 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * MIGKIT_AI=<...> needs MIGKIT_AI_MODEL: migkit does not choose a model for this provider
 
 * the model provider <...> is not one of <...>
+
+## `migkit/changetopic.py`
+
+* format: <...> - migkit reads <...>
+
+* the TiCDC changefeed's messages carry no commit timestamp, and without it no change can be put in the order it was committed: create the changefeed's sink with enable-tidb-extension=true
+
+* the changefeed's messages carry no commit timestamp: make it WITH updated, resolved
+
+* the Couchbase topic's messages are not the connector's default envelope (no mutation/deletion event): set the connector's source handler to its default, which carries each change's vBucket and sequence number
+
+* a DSQL change to <...> came in pieces that do not add up to what it says it holds (CRC32C): nothing of it is applied
+
+* a delete from <...> names no key: DSQL sends a deleted row's key only for a table with a primary key, and without one the row cannot be found on the target
+
+* changes: name the Kafka cluster the changes are published to (servers: host:9092)
+
+* changes: name the topic the changes are published to (topic:, or topics: [...])
+
+* the change topic <...> is not on the cluster the hop names
+
+* changes: name the Kinesis stream the changes are published to (stream: name or ARN)
+
+* the shards of <...> name each other as parents
+
+* a change to <...> cannot be carried as the feed wrote it, and its source cannot be read back
+
+* <...> changes are held and the feed has not said for <...> minutes that anything older is past (nothing from <...>) | <...>: without its marks a change cannot be put in commit order. <...>
 
 ## `migkit/cli.py`
 
@@ -77,13 +103,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...>
 
+* <...> is a copy for testing (goal subset): it is taken afresh by migkit move <...> --mode full --go, and proved by migkit check <...>; sync makes a target equal to the whole source. Nothing was written
+
 * <...>: not started - <...>
 
 * <...> reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
 
 * the bulk copy finished and <...> of <...>'s tables do not hold what the source does: <...> ... | <...>. Nothing has been marked as moved. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
-
-* <...>: the source's schema changed while it was being moved - <...> ... | <...>. The rows moved before and after it may not line up. Bring the target's schema level with the source's, then move again and run migkit check.
 
 * reverse: <...> - the one there is, is at_cutover
 
@@ -114,6 +140,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...> masks columns on the way, and a change stream would carry their real values into the target: a hop that masks is copied (--mode full), not followed. Nothing has been started
 
 * no way to follow a <...> source is set up on this machine - <...> | ; migkit doctor says what is missing
+
+* <...>: the change tail did not end
 
 * <...>: the change tail did not pause
 
@@ -147,7 +175,15 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is <...>
 
+* <...> is <...> after its upgrade
+
+* <...> runs <...> version after its upgrade to <...>
+
 * the clone failed: <...>
+
+* <...> runs <...> after its upgrade to <...>
+
+* the upgrade failed: <...>
 
 ## `migkit/config.py`
 
@@ -197,6 +233,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * cutover: jobs is move or leave
 
+* cutover: no_return is later (its own run of the command, once the flip is done) or at_flip
+
 * cutover: budget and start_below are seconds
 
 * cutover: pooler is {kind: pgbouncer or pgcat, host, port, user, password, databases}
@@ -211,9 +249,15 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the stream was left up: it has not carried everything the source has (<...> at <...>). Tearing it down now would lose that; run this again once it has caught up
 
-* the cutover was undone (<...>); the source is writable and has what it had - <...>s of write outage | <...>
+* <...> has no cutover past its flip to take past the point of no return
+
+* the point of no return was undone (<...>): the old source is frozen as the cutover left it, and going back is still possible
+
+* the point of no return stopped at the stream back's drop (<...>): <...> dropped already; the old source is frozen again. `migkit move <...> --mode cdc --drop --go` goes on from there
 
 * the cutover could not be fully undone: <...>. What is left is recorded; `migkit move <...> --mode cdc --drop --go` tries it again
+
+* <...> is past the point of no return (approved by <...>): the stream back is dropped and the old source takes its own writes, so nothing the target took since is on it. Nothing was done
 
 ## `migkit/decide.py`
 
@@ -279,9 +323,23 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
 
-* <...>: partition <...> could not be copied: <...>
-
 * <...>: partition <...> <...>
+
+## `migkit/engines/cockroachdb.py`
+
+* <...>: no table in scope to follow
+
+* the cluster has rangefeeds off, and a changefeed reads through them: SET CLUSTER SETTING kv.rangefeed.enabled = true (migkit does not change a cluster's settings)
+
+* the changefeed's position is lost; move again with --mode full+cdc
+
+* changes: via <...> - a CockroachDB source is followed by a changefeed streamed to migkit (changefeed) or one publishing to Kafka (kafka)
+
+* <...>: the changefeed keys its rows by <...> values, and its primary key has <...> columns - the feed's table is not the table here
+
+* <...>.<...>: the changefeed says the row keyed <...> was <...> by <...>, and the cluster as it stood then <...> it: the key as the feed names it is not the key here. Nothing of this batch was applied
+
+* the <...> is not CockroachDB (<...>)
 
 ## `migkit/engines/copybook.py`
 
@@ -317,6 +375,48 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the target describes it differently from the source, so its file cannot be copied as it is
 
+## `migkit/engines/cosmosdb.py`
+
+* <...> is partitioned by <...>, a field inside an object, which no other side has a column for
+
+* <...> moves under a row filter, which is SQL, and a container is read whole
+
+* <...>: a row filter is SQL, and a container takes none
+
+* <...> has no key, and an item is kept by its id: a table without one has no container to go to
+
+* <...> has a column named id outside its key, and a Cosmos DB item's id is made from its key: rename the column with mapping.columns
+
+* <...> already exists on the target - migkit will not alter or replace a container that is already there
+
+* the account does not serve the all-versions-and-deletes change feed (<...>), and the latest-version one carries no delete: turn on continuous backup and the all-versions-and-deletes feature, or say change_feed: latest in the source's options - every delete is then found by check instead of followed
+
+## `migkit/engines/couchbase.py`
+
+* a Couchbase data node answered in a protocol migkit does not read
+
+* the data node refused the sign-in (<...>)
+
+* the data node has no bucket <...> this user may read
+
+* the data node offers no sign-in migkit makes (<...>)
+
+* the data node would not give its <...> statistics (<...>)
+
+* the data node refused the sign-in
+
+* <...> moves under a row filter, which is SQL, and a collection is read by its keys
+
+* <...>: a row filter is SQL, and a collection takes none
+
+* <...> has no key, and a document is kept by its key: a table without one has no collection to go to
+
+* <...> already exists on the target - migkit will not alter or replace a collection that is already there
+
+* <...>: the document <...> was not written (<...>)
+
+* Couchbase hands its changes out through its Kafka connector: say which topic it publishes to in the source's options - changes: {servers: host:9092, topic: <topic>} - with the connector's default source handler
+
 ## `migkit/engines/db2.py`
 
 * the <...> needs `database`, the Db2 database to connect to; the hop's databases are its schemas
@@ -346,6 +446,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 ## `migkit/engines/dbapi.py`
 
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
+
+## `migkit/engines/dsql.py`
+
+* <...>: say the DSQL cluster's region (region: in the side's options)
+
+* DSQL keeps no log a client reads: its changes are read from the Kinesis stream its CDC stream publishes to. Say which in the source's options - changes: {stream: <name or ARN>, region: <region>, cdc_stream: <the CDC stream's id>}
 
 ## `migkit/engines/duckdb.py`
 
@@ -447,7 +553,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the source's schema changed under the tail - <...> ... | <...>. The target does not have <...> yet, so nothing after <...> was applied. Bring the target's schema level with the source's, then run the tail again; it resumes from there.
 
-* <...>.<...>: the tail read <...> changes and accounts for <...> - <...> to apply, <...> left out. Nothing of the batch was applied, and the position stays at <...>: the batch is read again when the tail starts
+* <...>.<...>: the tail read <...> changes and took back <...> set aside | <...> and accounts for <...> - <...> to apply, <...> left out. Nothing of the batch was applied, and the position stays at <...>: the batch is read again when the tail starts
 
 ## `migkit/engines/kafka.py`
 
@@ -627,6 +733,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: a row filter is SQL, and Parquet files take none
 
+## `migkit/engines/pgwire.py`
+
+* <...>: <...> <...> no primary key, and <...>: give each a primary key, or leave it out of the hop and move it with a copy
+
 ## `migkit/engines/postgres.py`
 
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
@@ -640,6 +750,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the slot <...> was made with the <...> plugin and migkit reads <...>. Reading one plugin's output as another's does not fail, it mis-parses - drop the slot and let migkit make it, or point this hop at another name
 
 * wal_level is <...> on this server and a logical slot needs 'logical'. Nothing migkit does client-side can make the WAL carry row images it was not told to carry. alter system set wal_level = 'logical'; -- then restart rds.logical_replication = 1 -- parameter group, then reboot <...>
+
+* <...> transactions committed are still out of sight of any read after <...>s (transaction ids <...>) - a synchronous standby that does not answer holds a commit this way. A table added to the tail is not copied around them; make the standby answer
 
 * <...> transactions committed before the change position are still out of sight of any read after <...>s (transaction ids <...>) - a synchronous standby that does not answer holds a commit this way. A copy read now would miss them and the change tail starts after them, so nothing was copied. Make the standby answer, or take it out of synchronous_standby_names, and move again.
 
@@ -693,6 +805,20 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * sqlite cannot apply a <...> action
 
+## `migkit/engines/tidb.py`
+
+* the <...> is not TiDB (<...>): name its engine mysql
+
+* TiDB keeps no binlog: its changes are read from the Kafka topic TiCDC publishes them to. Say where in the source's options - changes: {servers: host:9092, topic: <topic>, format: canal-json} - with a changefeed made with enable-tidb-extension=true
+
+* format: <...> - TiCDC's changes are read as canal-json or simple
+
+* <...>: <...> <...> no primary key, and a change TiCDC publishes for such a table names its hidden row id, which no other server holds: give each a primary key, or leave it out of the hop and move it with a copy
+
+* <...>.<...>: TiCDC says the row keyed <...> was <...> by <...>, and TiDB as it stood then <...> it: the key as the feed names it is not the key here. Nothing of this batch was applied
+
+* <...>: TiCDC names its changes by <...>, and its primary key is <...>: the changefeed's table is not the table here
+
 ## `migkit/engines/warehouse.py`
 
 * the <...> needs `database`, the database to connect to; the hop's databases are its schemas
@@ -735,7 +861,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## `migkit/freeze.py`
 
-* a <...> source is not frozen by migkit
+* the <...> is not held by migkit here: <...>
+
+* a <...> side is not held by migkit
+
+## `migkit/fromsnapshot.py`
+
+* this way needs a component this machine does not have - migkit doctor --install puts it in place
 
 ## `migkit/guide.py`
 
@@ -756,6 +888,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the hop could not be added to <...> as it is written (<...>); nothing was changed - use --force to write a new file
 
 ## `migkit/hopkeys.py`
+
+* origin_table: <...> - keep, or drop
 
 * <...>: goal <...> - <...> - so <...> is not run. Change the hop's goal to copy or cutover to move data.
 
@@ -793,6 +927,18 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...>. Nothing was written. Use target_rows: replace, or empty them
 
+## `migkit/jointplan.py`
+
+* limits: <...> <...> is not between 0 and 100%
+
+* limits: <...> <...> is not a share (0.3 or 30%)
+
+* limits: <...> <...> is below zero
+
+* limits: <...> <...> is not a number
+
+* limits: <...> <...> is not a size (8GB)
+
 ## `migkit/lease.py`
 
 * MIGKIT_LEASE_SECONDS is not a number of seconds
@@ -812,6 +958,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * two_way: this tail numbers its batches on the target by <...>, and the target no longer allows it: <...>. Which batch it last committed is kept there, so put that right and start the tail again
 
 * two_way: no way of marking migkit's own writes proved itself on the target, so what it applies would come back to where it began. <...> | None of them is allowed there.
+
+## `migkit/mirror.py`
+
+* this bulk path needs a component this machine does not have - migkit doctor --install puts it in place
+
+* <...>. Nothing has been copied
+
+* <...> has fewer partitions on the target than on the source: a key's messages would land in another partition, out of the order its consumers read them
+
+* the cluster mirror carried nothing for <...>s with <...> partitions still short of where the source stood: <...>
 
 ## `migkit/movers.py`
 
@@ -907,6 +1063,20 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the clone's position is not exact: <...>
 
+## `migkit/ready.py`
+
+* <...>: nothing was written - <...> thing<...> known now would stop this before its end: <...>. `migkit assess <...>` lists everything the goal needs; MIGKIT_PREFLIGHT=warn goes on regardless
+
+## `migkit/redisshake.py`
+
+* db<...>: no way to read the source here - <...>
+
+* db<...>: <...>. Nothing has been copied
+
+* db<...>: the hop checks the servers' certificates, and this way of copying cannot. Nothing has been copied
+
+* this bulk path needs a program this machine does not have - migkit doctor --install puts it in place
+
 ## `migkit/report.py`
 
 * no summary at <...>, run migkit check first
@@ -941,13 +1111,51 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * format: avro is written through a schema registry, which a Kafka target has and this stream does not - one of <...>
 
+## `migkit/subset.py`
+
+* subset: most is a number of rows, not <...>
+
+* subset: <...>: no rule - a condition, a share like 10% or a number of rows
+
+* subset: <...>: <...> rows - more than 0
+
+* subset: <...>: <...> - a share is more than 0% and no more than 100%
+
+* <...>: the subset would hold more than <...> rows (<...> alone <...>), and the hop allows <...> (subset: most). Choose fewer rows to start from, or raise the bound; nothing was written
+
+* <...>: its goal is not subset
+
+* <...>: the subset cannot be taken, nothing was written: <...>
+
+* <...>: <...> refers to <...> through <...>, which cannot be read on the source; nothing was written
+
+* <...>: nothing was written - <...>
+
+* <...>: a copy for testing is taken once (--mode full) and not followed - its rows are masked and chosen, and a change of the source's would carry neither. Nothing has been started
+
+* <...>: a subset is taken whole - its tables refer to each other, and one of them alone would not be complete. Leave out --table
+
+* <...>: <...> has no table on the target to write into; nothing was written
+
+* <...>: the copy is not what it was to hold - <...>
+
 ## `migkit/tailctl.py`
+
+* follow_until: <...> is not one of <...> - run until asked to stop, or until caught up with the source
 
 * <...>: <...>. Nothing was applied. Move again with --mode full+cdc.
 
 * <...>: the saved change position belongs to another source (<...>); the source is now <...>. A failover or a rebuilt server gives the same address a log of its own, and resuming in it skips what the old one held. Nothing was applied. Move again with --mode full+cdc, or remove <...> and <...> once the target is known to be level with the new source.
 
 * the saved position in <...> cannot be read, and a follow started from anywhere else either skips changes or cannot say it did not. Remove the file and move again with --mode full+cdc
+
+## `migkit/tailtables.py`
+
+* ddl: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
+
+* spool_limit: the bytes a parked table's changes may take on this machine, a whole number
+
+* <...>: <...> was <...> on the source at <...> or after, and nothing after that position was applied. The hop's `ddl` is stop: set `ddl: apply` to carry what can be carried at its place, or `ddl: park` to set only that table aside, and run the tail again; it resumes from there
 
 ## `migkit/tunnel.py`
 
@@ -957,11 +1165,15 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## `migkit/twoway.py`
 
-* two_way.on_conflict: <...> is not one of <...>
+* <...>: <...> is not one of <...><...>
+
+* <...>: <...> compares no column, so it names none
+
+* <...>: one rule - a name, or {newest|max|min: the column it compares}
+
+* <...>: newest compares a column each row carries its last change's time in - name it as {newest: column}, or the table's or the hop's `column`
 
 * two_way.on_conflict: last_update_wins compares a column each row carries its last change's time in - name it as two_way.column
-
-* two_way.on_conflict: source_priority keeps the row of the side ranked higher - give both as two_way.source_rank and two_way.target_rank, apart
 
 * two_way: the <...> (<...>) cannot mark what migkit applies or leave it out when read, so every change would come back to where it began. Two ways run through migkit between PostgreSQL and MySQL (or MariaDB) sides
 
@@ -969,7 +1181,41 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way.delta: <...>.<...> is <...>, not a number - a counter is added to on both sides, so it has to be one
 
-* two_way: <...> on <...> <...>: the target's row changed there too, and on_conflict is error. Both versions are in conflicts.jsonl; decide the row on both sides, then run the tail again
+* two_way: <...> on <...> compares <...>, which <...> does not have
+
+* two_way: union keeps both sides' members, and <...>.<...> is <...> - a set, an array or a JSON array holds members
+
+* two_way: <...> on <...> <...>: <...>, and the rule for <...> is error. Both versions are in conflicts.jsonl; decide the row on both sides, then run the tail again
+
+* two_way.tables: a mapping of each table's rules by its name
+
+* two_way.on_conflict: source_priority keeps the row of the side ranked higher - give both as two_way.source_rank and two_way.target_rank, apart
+
+* <...>: a mapping of <...>
+
+* <...>.columns: a mapping of a column (or columns settled together, "a, b") to its rule
+
+* <...>.<...>: not a key of a table's rules - <...><...>
+
+* <...>: <...> settles one column - give each its own line
+
+* <...>: columns settled together are settled by one column's value - name it as {<...>: column}
+
+* <...>: <...> already has a rule | names no column
+
+## `migkit/upgrade.py`
+
+* the copy of the pages is at the source's version and the hop does not say how to upgrade it: physical: {upgrade: {...}} needs <...> - the new version's programs, the old one's, the new data directory and how its server starts
+
+* the new version's own upgrade refuses this copy, and nothing was changed on the source; the target's old server is left stopped with the copy as it was: <...>
+
+* the new version's own upgrade failed on the target, and the source is as it was; the target's old server is left stopped with the copy as it was. What it said: <...>
+
+* the target's server answers <...> after the upgrade, and the new version is <...>
+
+* the clone is at the source's version and the hop does not say how to upgrade it: physical: {upgrade: {...}} needs <...> - how the old server stops and how the new version's server starts on the same data
+
+* the cloud's copy is at the source's version and the hop does not name the version to upgrade it to: physical: {upgrade: {version: ...}}
 
 ## `migkit/users.py`
 

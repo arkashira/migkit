@@ -814,7 +814,7 @@ class MySQLEngine(Engine):
                                 else row[n]) for n in names]
         sets, by = [], []
         for n in names:
-            if n in key:
+            if n in key or isinstance(row[n], canon.Kept):
                 continue
             if isinstance(row[n], canon.Added):
                 # the row's own value, as it stands, on the right
