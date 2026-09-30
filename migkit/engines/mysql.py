@@ -5563,7 +5563,7 @@ class MySQLEngine(Engine):
         except ValueError as e:
             raise SystemExit(
                 f"{path} is not in the form this migkit reads ({e}). Re-run"
-                " `migkit check --check data` to write it again before"
+                " `migkit check --only data` to write it again before"
                 " syncing")
 
     def _apply_rows_native(self, db, t, undo_dir=None):

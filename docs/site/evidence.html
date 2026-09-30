@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The evidence of a migration - migkit 0.2.0</title>
+<meta name="description" content="What `migkit report` exports for a hop, and every run for its own run: what was done and what was measured.">
+<style>
+:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+--line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
+--code:#f3f4f6;--codeink:#1d232b}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
+--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
+--warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--code);color:var(--codeink);padding:.1em .35em;
+border-radius:4px;font-size:.9em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+.layout{display:flex;max-width:1240px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
+overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;font-size:19px}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
+nav a.here{color:var(--ink);font-weight:600}
+nav a.sub{padding-left:12px;font-size:12.5px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+h1{font-size:30px;margin:.2em 0 .1em}
+h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
+border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.6em 0 .4em}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
+.rule{background:var(--panel);border-left:3px solid var(--acc);
+border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.mut{color:var(--mut);font-size:13px}
+.wide{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
+vertical-align:top}
+th{background:var(--panel);font-weight:600}
+.wide table{font-size:12.5px}
+.wide td,.wide th{padding:4px 6px}
+td.y{color:var(--ok);font-weight:600}
+td.p{color:var(--warn);font-weight:600}
+td.na{color:var(--mut)}
+.pill{display:inline-block;background:var(--panel);
+border:1px solid var(--line);
+color:var(--mut);border-radius:20px;padding:2px 10px;font-size:12px;
+margin:2px 4px 2px 0}
+footer{color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);
+margin-top:40px;padding-top:16px}
+@media(max-width:820px){nav{display:none}main{padding:24px 18px 80px}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+<div class="brand">migkit</div>
+<div class="tag">version 0.2.0</div>
+<a href="index.html">Overview</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="engines.html">Engines</a>
+<a href="goals.html">Goals and modes</a>
+<a href="recipes.html">Recipes</a>
+<a href="options.html">Hop options</a>
+<a href="environment.html">Environment</a>
+<a href="commands.html">Commands</a>
+<a href="troubleshooting.html">Troubleshooting</a>
+<a href="evidence.html" class="here">Evidence</a>
+<a class="sub" href="#files">The files</a>
+<a class="sub" href="#sections">What the page and the text show</a>
+<a class="sub" href="#keys">The record's keys</a>
+<a class="sub" href="#csv">The numbers of every table</a>
+<a href="releases.html">Releases</a>
+</nav>
+<main>
+<h1>The evidence of a migration</h1>
+<p class="lede">What <code>migkit report</code> exports for a hop, and every run for its own run: what was done and what was measured.</p>
+<p>What migkit did on this hop and what it measured: what was moved, every verdict with the counts and digests of both sides and the way to take each again, the positions, the ways the engine chose and why, approvals, repairs, timings and outages, and the record they are chained in. Not a certificate: it claims only what was measured, and anyone can take each number again.</p>
+<h2 id="files">The files</h2>
+<table><tr><th>File</th><th>What it is</th></tr><tr><td><code>evidence.json</code></td><td>the whole record, for tools</td></tr><tr><td><code>evidence.html</code></td><td>the page, for people</td></tr><tr><td><code>evidence.md</code></td><td>the same as text</td></tr><tr><td><code>tables.csv</code></td><td>every table's numbers, a row each</td></tr></table>
+<h2 id="sections">What the page and the text show</h2>
+<table><tr><th>Part</th><th>Columns</th></tr><tr><td>what was moved</td><td>db, tables, done, rows</td></tr><tr><td>copies timed</td><td>way, rows, seconds, rows a second, at</td></tr><tr><td>checks</td><td>check, scope, status, what was found</td></tr><tr><td>tables: counts and digests of both sides</td><td>db, table, status, source rows, source digest, target rows, target digest, method</td></tr><tr><td>ways the engine chose</td><td>work, way, why, passed over</td></tr><tr><td>approvals</td><td>step, db, approved by, at, signatures</td></tr><tr><td>repairs</td><td>what, db, kind, at, statements, applied (sha256), undo (sha256)</td></tr><tr><td>cutovers and the write outage measured</td><td>run, state, began, outage (s), budget (s), phases (s), approved by</td></tr><tr><td>rows both sides changed, and how each was settled</td><td>db, table, kind, columns: rule took, decided, at</td></tr><tr><td>stored code</td><td>db, routine, status, why, counterexample</td></tr><tr><td>assessment before the move</td><td>level, scope, item, detail</td></tr><tr><td>who wrote what</td><td>db, what, machine, number, from, to</td></tr><tr><td>left and removed</td><td>what, db, at</td></tr><tr><td>the record</td><td>at, op, db, who, host</td></tr></table>
+<h2 id="keys">The record's keys</h2>
+<p><code>evidence.json</code> holds, at its top level: <code>format_version</code>, <code>what</code>, <code>tool</code>, <code>tool_version</code>, <code>hop</code>, <code>goal</code>, <code>scope</code>, <code>session</code>, <code>generated</code>, <code>route</code>, <code>assessment</code>, <code>moved</code>, <code>verdict</code>, <code>checks</code>, <code>tables</code>, <code>method</code>, <code>code</code>, <code>positions</code>, <code>decisions</code>, <code>approvals</code>, <code>repairs</code>, <code>cutovers</code>, <code>conflicts</code>, <code>timings</code>, <code>removed</code>, <code>steps</code>, <code>movers</code>, <code>record</code>, <code>at_rest</code>.</p>
+<h2 id="csv">The numbers of every table</h2>
+<p><code>tables.csv</code>, a row for each table: <code>db</code>, <code>table</code>, <code>where</code>, <code>status</code>, <code>method</code>, <code>src_engine</code>, <code>src_rows</code>, <code>src_digest</code>, <code>src_keys</code>, <code>dst_engine</code>, <code>dst_rows</code>, <code>dst_digest</code>, <code>dst_keys</code>, <code>salt</code>, <code>at</code>, <code>session</code>.</p>
+<footer>migkit 0.2.0 - this page is written from the code by
+<code>tools/gen_docs.py</code>, so it says what this version does.
+Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migkit</a>.
+AGPL-3.0-or-later.</footer>
+</main>
+</div>
+</body>
+</html>

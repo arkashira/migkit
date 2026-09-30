@@ -2,11 +2,13 @@
 
 > Verify, repair, and move databases across engines - without trusting the mover.
 
+<!-- gen_docs: badge -->
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
-[![engines](https://img.shields.io/badge/engines-postgres,%20mysql,%20mongodb,%20mssql,%20sqlite,%20redis,%20kafka,%20parquet,%20clickhouse,%20dynamodb,%20opensearch,%20cassandra-2a78d6)](#supported-engines)
-[![cross-engine](https://img.shields.io/badge/cross--engine-mysql_to_postgres-0ca30c)](#cross-engine-hetero)
+[![engines](https://img.shields.io/badge/engines-34-2a78d6)](#supported-engines)
+[![pairs](https://img.shields.io/badge/cross--engine-any_pair-0ca30c)](#cross-engine-hetero)
 [![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-0ca30c)](LICENSE)
+<!-- /gen_docs: badge -->
 
 migkit does everything *around* a database migration: it prepares the target,
 tells you exactly when to start the mover, watches the load, validates the
@@ -137,14 +139,37 @@ already reported as consistent:
 
 ## Quickstart
 
-```bash
-uv tool install migkit   # or: pipx install migkit
-migkit doctor            # what this machine can do (no config needed)
-migkit init              # asks for two addresses, connects, writes the hop
-migkit assess  my-hop    # readiness before anything moves
-migkit check   my-hop    # read-only, exit 1 on any difference
-migkit report --serve    # dashboard at localhost:8899
+Two addresses to a cutover; every command that writes shows its plan
+first and does nothing until `--go`:
+
+<!-- gen_docs: quickstart -->
 ```
+uv tool install migkit
+migkit doctor --install
+migkit init
+migkit assess shop
+migkit move shop --mode full+cdc
+migkit move shop --mode full+cdc --go
+migkit check shop
+migkit move shop --mode cdc --drop --go
+```
+<!-- /gen_docs: quickstart -->
+
+What a hop can be for - its `goal`, one word
+([what each does on each side](docs/goals-and-modes.md)):
+
+<!-- gen_docs: goals -->
+| Goal | What it is for |
+|---|---|
+| `copy` | move the data once and prove every row arrived |
+| `cutover` | move, follow the source's changes, prove both equal, and switch with the least downtime - a stream back ready from the moment of the switch |
+| `verify` | prove two databases hold the same; nothing is written to either |
+| `two-way` | both sides written, each side's changes carried to the other |
+| `keep-in-sync` | a copy that follows the source for as long as it runs, the application kept off it |
+| `rehearse` | the whole path the real run will take - copy, follow, prove, cut over - on a copy or a sample of the source into a target of its own, every phase timed, so the hop it rehearses (rehearses:) is forecast from what it measured |
+| `upgrade` | the same engine at a newer version, a higher edition (SQL Server Web to Enterprise), or both, with the least downtime: what the new version or edition changes checked first, then the data moved into it and followed, or a copy of its pages taken to the target where the hop allows it - upgraded there where the version moves - and switched over |
+| `subset` | a copy for testing: the rows chosen and every row they refer to, masked where the hop says, into a staging or developer database, proved row by row |
+<!-- /gen_docs: goals -->
 
 ## Install
 
@@ -216,21 +241,23 @@ off for a hop where the time matters more.
 
 ## Commands
 
-Eleven commands cover the whole lifecycle:
-
+<!-- gen_docs: commands -->
 | Command | What it does |
 |---|---|
-| `doctor` | configured hops, local tools, connectivity |
-| `assess` | premigration readiness (CDC prereqs, no-PK tables, encoding, accounts) |
-| `advise` | playbook for the hop's mover, phase by phase |
-| `schema` | target schema plan; `--convert` transpiles cross-engine DDL, `--migration` writes Flyway-style `V__/U__` files |
-| `check` | layered read-only validation, exit 1 on diff; `--consistent` = one repeatable-read txn per side + LSN fence; `--deep` adds FK-orphan/drift/render/boundary checks; `--drill` = column-level sample diff |
-| `move` | moves the data; migkit picks the fastest available path and falls back to a crash-resumable copy. `--mode cdc` streams changes, natively or through migkit's own pipeline |
-| `watch` | live load progress: counts, rate, ETA, replication state; `--verify` = continuous re-check loop; `--verify --delta` = O(changes) verification off the WAL/binlog/change stream |
-| `sync` | make target equal source: dry-run plan, `--apply` executes with undo, `--go` checks + repairs with rollback checkpoints |
-| `rollback` | restore any saved state, with a plan preview |
-| `history` | saved rollback states + the local changelog ledger |
-| `report` | HTML report from the last check; `--serve` runs the live dashboard |
+| `init` | Set up a hop: in a terminal, asks for the two addresses and the passwords, connects, says what it found and what it will do, and writes the hop. |
+| `doctor` | What this machine can do, and whether the configured hops connect. |
+| `advise` | Show the migration playbook for this hop's service. |
+| `assess` | Premigration readiness check: CDC prerequisites, risky tables, encoding, extensions, accounts. |
+| `schema` | Target schema workflows: preparation plan (default), cross-engine DDL conversion (--convert), versioned migration files (--migration). |
+| `check` | Read-only validation of target vs source. |
+| `sync` | Make target equal to source, or run a full DMS-style migration. |
+| `move` | Move data for this hop. |
+| `watch` | Watch a running migration load: row counts, rate, ETA, replication state. |
+| `report` | Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the live localhost dashboard (with a Prometheus /metrics endpoint). |
+| `history` | Audit trail: saved rollback states and every write migkit made, read from the local changelog and state journals. |
+| `rollback` | Restore target sequences from a saved state, put back the rows the repairs since it wrote, where the target still holds what they wrote; where the hop streamed back or cut over, the old source's counters raised past the new primary's. |
+| `users` | Sync logins source -> target keeping the same password. |
+<!-- /gen_docs: commands -->
 
 Every check is read-only and rerunnable. Every repair is dry-run unless
 `--apply`/`--go`, saves an undo first, and converges to the same end state on
@@ -278,19 +305,21 @@ engine produced it.
 
 ## Supported engines
 
-| Tier | Engines |
-|---|---|
-| Native | postgres, mysql, mssql, mongodb, sqlite, redis, kafka |
-| Either side of a pair (move and verify) | parquet (disk or S3), clickhouse, dynamodb, opensearch, cassandra; copybook (mainframe files described by COBOL copybooks, also `vsam`: EBCDIC, packed and zoned decimals, REDEFINES, OCCURS DEPENDING ON, F/V/VB); oracle, db2 and ase (SAP ASE, also `sybase`) written, not yet run against a server; db2i (IBM i, its journal followed; also `ibmi`, `as400`) and db2zos (Db2 for z/OS, copied and verified, never followed: no open log reader exists) written, not yet run against a system; redshift, snowflake and bigquery written, not yet run against an account; tidb (followed through TiCDC's topic), cockroachdb (through a changefeed), dsql (Aurora DSQL, through its CDC stream), couchbase (through its Kafka connector's topic) and cosmosdb (Cosmos DB for NoSQL, through its change feed) written, not yet run; teradata (also `td`, `vantage`: parallel sessions for large reads and bulk-loaded batches, compared on the servers between two systems) written, not yet run against a system |
-| Sources read, never written | sapodp (SAP extractors and CDS views through their ODP OData services, followed through the delta queue, counted by the service); saas (a program source: a Singer tap, an Airbyte-protocol connector, a dlt source, or Salesforce followed through its change events - `singer://`, `airbyte://`, `dlt://`, `salesforce://`) |
-| Change streams delivered into | kafka (Azure Event Hubs through its Kafka endpoint), kinesis, pubsub (json, debezium or canal messages) |
-| Alias | mariadb, percona, tdsql, aurora-mysql/postgres, alloydb, documentdb, cosmosdb-mongo, azure-sql, elasticsearch, scylladb |
-| Row comparison | snowflake, bigquery, redshift, clickhouse, oracle, trino, duckdb, vertica, databricks |
-| Schema comparison (JDBC) | db2, h2, firebird, informix, sybase - drop the driver jar |
+<!-- gen_docs: engines -->
+34 engines, any two of them as a pair; migkit's own decision engine finds the fastest, exact, consistent way for each source -> target pair. What each can do, cell by cell, is on [the engines page](https://migkit.axentx.cloud/site/engines.html).
 
-Managed services on any cloud (RDS/Aurora, Cloud SQL/AlloyDB, Azure Database,
-TencentDB) work over the standard wire protocol; provider quirks (DocumentDB
-without dbHash, TencentDB unlogged rules) are handled by built-in fallbacks.
+| Role | Engines |
+|---|---|
+| either side | PostgreSQL (`postgres`), MySQL (`mysql`), MongoDB (`mongodb`), SQL Server (`mssql`), Redis (`redis`), Kafka (`kafka`), SQLite (`sqlite`), Parquet files (`parquet`), ClickHouse (`clickhouse`), DynamoDB (`dynamodb`), Oracle Database (`oracle`), Db2 (Linux, UNIX, Windows) (`db2`), Db2 for i (`db2i`), Db2 for z/OS (`db2zos`), SAP ASE (`ase`), Teradata (`teradata`), OpenSearch (`opensearch`), Cassandra (`cassandra`), Amazon Redshift (`redshift`), Snowflake (`snowflake`), BigQuery (`bigquery`), DuckDB (`duckdb`), Files described by COBOL copybooks (`copybook`), Iceberg tables (`iceberg`), Delta tables (`delta`), TiDB (`tidb`), CockroachDB (`cockroachdb`), Aurora DSQL (`dsql`), Couchbase (`couchbase`), Cosmos DB for NoSQL (`cosmosdb`) |
+| a stream a pair delivers its changes into | Kinesis Data Streams (`kinesis`), Google Pub/Sub (`pubsub`) |
+| a source, read and never written | SAP application data (ODP) (`sapodp`), SaaS applications, read by a connector program (`saas`) |
+| the pair: a source of one engine, a target of another | Any pair of two engines (`hetero`) |
+| either side, compared by the tables the hop lists | Any other SQL engine (`generic`) |
+
+Also written: `alloydb`, `as400`, `aurora-dsql`, `aurora-mysql`, `aurora-postgres`, `azure-cosmos`, `azure-sql`, `cobol`, `cockroach`, `cosmos`, `cosmosdb-mongo`, `cosmosdb-nosql`, `crdb`, `db2-for-i`, `db2-zos`, `db2z`, `delta-lake`, `documentdb`, `elasticsearch`, `ibmi`, `iseries`, `mariadb`, `odp`, `percona`, `program`, `sap-ase`, `sap-odp`, `scylladb`, `sybase`, `td`, `tdsql`, `vantage`, `vsam`.
+
+Managed services recognised: Alibaba ApsaraDB (Alibaba Cloud); Alibaba PolarDB (Alibaba Cloud); AlloyDB (Google Cloud); Amazon Aurora (Amazon Web Services); Amazon Aurora (its reader endpoint) (Amazon Web Services); Amazon Aurora DSQL (Amazon Web Services); Amazon DocumentDB (Amazon Web Services); Amazon DynamoDB (Amazon Web Services); Amazon ElastiCache (Amazon Web Services); Amazon MSK (Amazon Web Services); Amazon MemoryDB (Amazon Web Services); Amazon OpenSearch Service (Amazon Web Services); Amazon RDS (Amazon Web Services); Amazon RDS Proxy (Amazon Web Services); Amazon Redshift (Amazon Web Services); Azure Cache for Redis (Microsoft Azure); Azure Cosmos DB (Microsoft Azure); Azure Cosmos DB for NoSQL (Microsoft Azure); Azure Database (flexible server) (Microsoft Azure); Azure Event Hubs (Microsoft Azure); Azure SQL Database (Microsoft Azure); Google Cloud SQL (Google Cloud); TencentDB (Tencent Cloud).
+<!-- /gen_docs: engines -->
 
 ## Cross-engine (hetero)
 
@@ -309,12 +338,12 @@ the hop's options name any two of the engines above.
 
 ## How it compares
 
-migkit does not try to out-move the movers. It drives the best of them and
-adds the layer they all skip: proving the result is correct and repairing what
-is not. The comparison below is feature-by-feature; migkit's column counts what
-you get *through* migkit, including the tools it wraps at full capability.
+migkit's own decision engine finds the fastest, exact, consistent way for
+each source -> target pair, and adds the layer movers skip: proving the
+result is correct and repairing what is not. The comparison below is
+feature-by-feature, by the kind of tool rather than any one of them.
 
-| Capability | migkit | AWS DMS / Tencent DTS | Debezium | pt-table-sync | GoldenGate + Veridata |
+| Capability | migkit | AWS DMS / Tencent DTS | a change-capture connector | a table-sync script | GoldenGate + Veridata |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Bulk load (drives best mover) | yes | yes | no | partial | yes |
 | Change data capture | yes | yes | yes | no | yes |
@@ -329,11 +358,8 @@ you get *through* migkit, including the tools it wraps at full capability.
 | Rollback / state snapshots | yes | no | no | no | partial |
 | Self-hosted, no vendor lock-in | yes | no | yes | yes | partial |
 | Zero footprint on the target | yes | no | yes | yes | partial |
-| Engines | 9 + cross | cloud-scoped | 8 | mysql | oracle-centric |
+| Engines | [every one below](#supported-engines), and any pair | cloud-scoped | several | one | oracle-centric |
 | License | free (AGPL-3.0) | paid | free | free | commercial |
-
-<sub>"Through migkit" = the wrapped tool driven under a single command,
-plus migkit's own verify/repair layer.</sub>
 
 ### Silent-corruption detection
 
@@ -342,7 +368,7 @@ failure classes migkit detects on its own - `check` auto-discovers what applies
 to the hop and runs every relevant one, no flags to choose. Sourced from
 real-world DMS/DTS/GoldenGate post-mortems, not guesses.
 
-| Silent failure (data looks "present", is wrong) | migkit | DMS/DTS | Veridata | data-diff | pt-sync |
+| Silent failure (data looks "present", is wrong) | migkit | DMS/DTS | Veridata | a row-diff tool | a table-sync script |
 |---|:--:|:--:|:--:|:--:|:--:|
 | Sequence / identity collision (`nextval <= max(pk)`) | yes | no | no | no | no |
 | Type-narrowing / silent truncation (varchar, scale, int) | yes | no | no | no | no |
@@ -359,13 +385,14 @@ real-world DMS/DTS/GoldenGate post-mortems, not guesses.
 | Extensions + sequence-level grant parity | yes | no | no | no | no |
 | Replication slot bloat / abandoned slot / long-txn | yes | partial | no | no | no |
 
-<sub>Postgres and MySQL have the full set; MongoDB/MSSQL have the base layer
-with the smart set landing engine by engine. Full usage reference:
+<sub>Postgres and MySQL have the full set; what every other engine does is on
+the engines page of the usage reference, cell by cell. Full usage reference:
 <b><a href="https://migkit.axentx.cloud/">migkit.axentx.cloud</a></b>.</sub>
 
 The managed services move data well but validate weakly and cannot repair a
-single row or carry a sequence. Debezium and pt-table-sync are excellent at one
-job each; migkit adds the verification neither performs.
+single row or carry a sequence. A change-capture connector and a table-sync
+script are excellent at one job each; migkit adds the verification neither
+performs.
 Veridata is the closest match on verify-and-repair, and is commercial and
 Oracle-centric. migkit is the one place that combines move, provable verify,
 row-and-schema repair with undo, and rollback, across engines, for free.
@@ -376,8 +403,11 @@ row-and-schema repair with undo, and rollback, across engines, for free.
   are read-only and can run anytime.
 - `sync`, `move` (all modes), `schema --convert` write to the target; all are
   dry-run by default and require `--apply`/`--go`.
-- The source is never written by migkit, and neither is anything on the target
-  beyond the migrated data itself - no bookkeeping tables.
+- The source is written only where the hop asks for it itself: the `two-way`
+  goal, the cutover migkit drives (`cutover:`), or a change on the source a
+  faster way needs and the operator agreed to (`source_changes`). What each
+  goal does on each side is said before it runs
+  ([goals and modes](docs/goals-and-modes.md)).
 - A lock file prevents concurrent writes; every write is recorded in the local
   changelog ledger.
 - Movers are self-hosted only on a trusted network (or a cloud VM); managed
@@ -391,7 +421,7 @@ pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
 ```
 
-100+ tests: pure-logic units, CLI-surface tests (11 visible commands, legacy
+100+ tests: pure-logic units, CLI-surface tests (every visible command, legacy
 aliases stay invocable), mover and pipeline selection, test_decoding
 parsing, end-to-end integration against throwaway Postgres containers
 (including the full delta-verify loop: touch -> flag -> replay -> repair ->

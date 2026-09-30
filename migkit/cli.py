@@ -283,10 +283,7 @@ def main(quiet):
     watch the load, prove every row landed, and repair what did not.
 
     \b
-    engines: postgres mysql mssql mongodb redis kafka sqlite
-             any pair of those across engines (hetero)
-             generic (warehouses and other SQL engines: snowflake,
-             bigquery, redshift, clickhouse, oracle, trino, duckdb, ...)
+    {engines}
 
     \b
     typical flow:
@@ -305,6 +302,27 @@ def main(quiet):
     replicate, tail, setup-target, ui, state, monitor, ...) still work."""
     global QUIET
     QUIET = quiet
+
+
+def _engine_lines():
+    """The engines of `migkit --help`, read off `engines.NAMES`: the
+    lines written by hand named 7 engines and put ClickHouse and Oracle
+    under the generic one while the code had 34 (audit LG16)."""
+    from .engines import NAMES
+    lines, line = [], "engines:"
+    for name in (n for n in NAMES if n not in ("hetero", "generic")):
+        if len(line) + 1 + len(name) > 72:
+            lines.append(line)
+            line = " " * 12
+        line += " " + name
+    # the docstring's lines keep their indent until click takes it off
+    return "\n".join(lines + [line,
+                              " " * 13 + "any two of them as a pair (hetero),"
+                              " and any other SQL",
+                              " " * 13 + "engine by its URL (generic)"])
+
+
+main.help = main.help.replace("{engines}", _engine_lines())
 
 
 def _hops_table(required=True):
