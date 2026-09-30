@@ -54,9 +54,11 @@ dependencies = [
     "duckdb>=1.1",
     # PostgreSQL structural diff. psycopg3 is pulled with the binary wrapper
     # on purpose: `results` asks only for psycopg[pool], which installs
-    # without a libpq wrapper and then fails at import.
+    # without a libpq wrapper and then fails at import. It also writes the
+    # rows: pipeline mode, client-side binding and COPY rendered to memory
+    # came with 3.1.
     "results",
-    "psycopg[binary,pool]",
+    "psycopg[binary,pool]>=3.1",
     # how much this machine can give a move (sizing)
     "psutil>=5.9",
     # the files that hold values, encrypted to the hop's recipients

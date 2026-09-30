@@ -109,6 +109,122 @@ def _copy_text(rows):
     out.seek(0)
     return out
 
+
+def _binary_kinds():
+    """{target type: (the type its value is packed as, the Python types
+    it takes, a further test or None)} - the columns a run goes to binary
+    COPY for, each taking only a value it lands exactly as `_copy_text`
+    lands it. Left to text: `real` (a double packed to single precision
+    and the double's shortest text read as one can round apart), a time
+    or instant of the other kind (text reads an offset into a `timestamp`
+    and drops it), `interval`, `money`, arrays, enums, domains, ranges,
+    network and geometric types, and every value not of the one Python
+    type its column is listed with here. json and jsonb go as their own
+    bytes: a string handed to the driver for them is quoted as a JSON
+    string."""
+    import datetime
+    import decimal
+    import uuid
+
+    def ints(bits):
+        top = 1 << (bits - 1)
+        return lambda v: -top <= v < top
+    text = ("text", (str,), None)
+    return {
+        "int2": ("int2", (int,), ints(16)),
+        "int4": ("int4", (int,), ints(32)),
+        "int8": ("int8", (int,), ints(64)),
+        "numeric": ("numeric", (int, decimal.Decimal), None),
+        "float8": ("float8", (float,), None),
+        "bool": ("bool", (bool,), None),
+        "text": text, "varchar": text, "bpchar": text,
+        "bytea": ("bytea", (bytes,), None),
+        "json": ("bytea", (str,), None), "jsonb": ("bytea", (str,), None),
+        "date": ("date", (datetime.date,), None),
+        "timestamp": ("timestamp", (datetime.datetime,),
+                      lambda v: v.tzinfo is None),
+        "timestamptz": ("timestamptz", (datetime.datetime,),
+                        lambda v: v.tzinfo is not None),
+        "time": ("time", (datetime.time,), lambda v: v.tzinfo is None),
+        "uuid": ("uuid", (uuid.UUID,), None),
+    }
+
+
+_BINARY = []
+
+
+def _copy_binary(conn, types, rows):
+    """Rows as binary COPY for columns of `types` (their names), rendered
+    whole in memory before the COPY starts, or None where a column or a
+    value is not one `_binary_kinds` sends exactly - the caller then sends
+    text, and the server has been sent nothing. Each field goes as the
+    server stores it, so it reads no text back into a value."""
+    import io
+
+    import psycopg
+    from psycopg import Copy
+    from psycopg.copy import FileWriter
+    if not _BINARY:
+        _BINARY.append(_binary_kinds())
+    kinds = [_BINARY[0].get(t) for t in types]
+    if not rows or None in kinds:
+        return None
+    width = len(kinds)
+    ok = [k[1] for k in kinds]
+    more = [k[2] for k in kinds]
+    for r in rows:
+        for i in range(width):
+            v = r[i]
+            if v is not None and (type(v) not in ok[i]
+                                  or more[i] is not None
+                                  and not more[i](v)):
+                return None
+    own = [i for i, t in enumerate(types) if t in ("json", "jsonb")]
+    try:
+        if own:
+            enc = conn.info.encoding
+            lead = [b"\x01" if types[i] == "jsonb" else b"" for i in own]
+            rows = [list(r) for r in rows]
+            for r in rows:
+                for i, head in zip(own, lead):
+                    if r[i] is not None:
+                        r[i] = head + r[i].encode(enc)
+        buf = io.BytesIO()
+        with conn.cursor() as cur:
+            copy = Copy(cur, binary=True, writer=FileWriter(buf))
+            copy.set_types([k[0] for k in kinds])
+            for r in rows:
+                copy.write_row(r)
+            copy.finish(None)
+    except (UnicodeEncodeError, ValueError, TypeError, OverflowError,
+            psycopg.Error):
+        return None
+    return buf.getvalue()
+
+
+class _Piped:
+    """The applier's statements sent on a connection without waiting for
+    each one's answer (pipeline mode), the answers read once, where the
+    batch ends - left while a COPY runs, which the protocol does not allow
+    inside it, and taken again after."""
+
+    def __init__(self, conn):
+        self.conn, self.now = conn, None
+
+    def on(self):
+        if self.now is None:
+            self.now = self.conn.pipeline()
+            self.now.__enter__()
+
+    def off(self, failed=None):
+        """Every answer read; the first error among them raised, unless
+        the batch is already failing with `failed`."""
+        now, self.now = self.now, None
+        if now is not None:
+            now.__exit__(type(failed) if failed else None, failed,
+                         failed.__traceback__ if failed else None)
+
+
 #: What every session migkit opens on PostgreSQL is pinned to, whatever the
 #: server, the database or the role was set to: a double printed with every
 #: digit it takes to read back as itself, and bytes as hex. Measured on 16
@@ -122,6 +238,17 @@ SESSION = "-c extra_float_digits=3 -c bytea_output=hex"
 
 def _first_line(e):
     return (str(e).strip().splitlines() or [type(e).__name__])[0][:200]
+
+
+def _sqlstate(e):
+    """The server's code for an error, from either driver: the rows are
+    written through one (`_conn3`) and everything else read through the
+    other (`_conn`)."""
+    return getattr(e, "sqlstate", None) or getattr(e, "pgcode", None)
+
+
+#: an object the statement names is not there; one another session holds
+UNDEFINED_OBJECT, OBJECT_IN_USE = "42704", "55006"
 
 
 def _tls_query(ep):
@@ -466,6 +593,26 @@ class PostgresEngine(Engine):
         self._read_hstore(conn, side, db)
         self._read_json(conn)
         return conn
+
+    def _conn3(self, side, db):
+        """A connection of the driver that sends statements without
+        waiting for each one's answer and COPY binary - the one rows are
+        written through. Each value is put into its statement here as a
+        literal, as the other driver puts it (its type cast after it where
+        the other driver casts), so a column reads what it always read,
+        and a statement holds as many values as it has, where values sent
+        apart stop at 65,535; nothing is prepared on a server a pooler may
+        hand to another client."""
+        import psycopg
+        ep = self.hop.source if side == "src" else self.hop.target
+        options = SESSION
+        if side == "dst" and db in self.__dict__.get("_as_replica", ()):
+            options += " -c session_replication_role=replica"
+        return psycopg.connect(host=ep.host, port=ep.port, user=ep.user,
+                               password=ep.password, dbname=db,
+                               connect_timeout=15, **ep.libpq_tls(),
+                               cursor_factory=psycopg.ClientCursor,
+                               prepare_threshold=None, options=options)
 
     @staticmethod
     def _read_json(conn):
@@ -904,8 +1051,6 @@ class PostgresEngine(Engine):
         200,000 rows differed)."""
         if not rows:
             return 0
-        import psycopg
-
         from .. import canon
         self._target_only(side, "write rows")
         sch, tbl = self._split(table)
@@ -914,15 +1059,7 @@ class PostgresEngine(Engine):
         cols = ", ".join(f'"{n}"' for n in names)
         key = self.neutral_key(side, db, table)
         keyed = bool(key) and all(k in names for k in key)
-        ep = self.hop.source if side == "src" else self.hop.target
-        name = self._d(side, db)
-        extra = ({"options": "-c session_replication_role=replica"}
-                 if side == "dst" and name in self.__dict__.get(
-                     "_as_replica", ()) else {})
-        with psycopg.connect(host=ep.host, port=ep.port, user=ep.user,
-                             password=ep.password, dbname=name,
-                             connect_timeout=15, **ep.libpq_tls(),
-                             **extra) as conn:
+        with self._conn3(side, self._d(side, db)) as conn:
             with conn.cursor() as cur:
                 into = quoted
                 if keyed:
@@ -1192,8 +1329,6 @@ class PostgresEngine(Engine):
         self._apply_upserts(side, db, table, [(key, values)])
 
     def _apply_upserts(self, side, db, table, rows):
-        from psycopg2.extras import execute_values
-
         from .. import canon
         table = self.local_table(table)
         sch, tbl = self._split(table)
@@ -1207,64 +1342,183 @@ class PostgresEngine(Engine):
         conflict = ", ".join(f'"{k}"' for k in sorted(key))
         tail = (f" on conflict ({conflict}) do update set {sets}" if sets
                 else f" on conflict ({conflict}) do nothing")
-        override = self._insert_override(side, db, table, names)
+        into = (f'insert into "{sch}"."{tbl}" ({cols})'
+                + self._insert_override(side, db, table, names))
         arrays = self._array_columns(side, db, table)
         values = [[r[n] if n in arrays else canon.sql_value(r[n])
                    for n in names] for r in full]
         with self._writer(side, db) as conn:
-            with conn.cursor() as cur:
-                # COPY is refused while a wait callback is set for the whole
-                # process - which the diff library does when it is loaded
-                # (measured in the suite: `copy_expert cannot be used with
-                # an asynchronous callback`); the statements work either way
-                import psycopg2.extensions
-                text = (_copy_text(values)
-                        if len(values) >= self.STAGE_FROM and
-                        psycopg2.extensions.get_wait_callback() is None
-                        else None)
-                if text is not None:
-                    stage = self._stage(conn, cur, sch, tbl)
-                    cur.copy_expert(f"copy {stage} ({cols}) from stdin",
-                                    text)
-                    # one round trip: the rows on, and the stage emptied
-                    cur.execute(f'insert into "{sch}"."{tbl}" ({cols})'
-                                f"{override} select {cols} from {stage}"
-                                f"{tail}; truncate {stage}")
-                    return
-                execute_values(cur, f'insert into "{sch}"."{tbl}" ({cols})'
-                                    f"{override} values %s{tail}", values,
-                               page_size=self.APPLY_ROWS)
+            key = None
+            if len(values) >= self.STAGE_FROM:
+                # staged or as statements, whichever did a row in less
+                # time here: piped, the statements wait for nothing, and
+                # on a long link that can outweigh the stage's own waits
+                key = self._work_key("upserts", f"{sch}.{tbl}",
+                                     len(values))
+                began = time.monotonic()
+                if self._cheaper(key, self.UPSERT_WAYS) == "staged":
+                    if self._staged(conn, sch, tbl, names, values, into,
+                                    tail):
+                        self._answered()
+                        self._took(key, "staged", time.monotonic() - began,
+                                   len(values))
+                        return
+                    key = None
+            began = time.monotonic()
+            self._in_statements(conn, f"{into} values ", tail, values)
+            if key:
+                self._answered()
+                self._took(key, "statements", time.monotonic() - began,
+                           len(values))
 
-    #: rows from which a run of upserts goes by COPY into a staging table
-    #: and one `insert ... select ... on conflict`: measured, 5,000 rows in
-    #: 24 ms against 51 ms as multi-row statements, 20,000 in 91 against
-    #: 166 - and one round trip for the rows, not one per thousand
+    #: rows from which a run of upserts may go by COPY into a staging table
+    #: and one `insert ... select ... on conflict` (`_staged`): measured,
+    #: 5,000 rows in 24 ms against 51 ms as multi-row statements, 20,000 in
+    #: 91 against 166 - and one round trip for the rows, not one per
+    #: thousand. Past it, the way measured cheaper here is taken
     STAGE_FROM = 1000
+
+    #: how a run of upserts that long is written (`_apply_upserts`)
+    UPSERT_WAYS = (Rung("staged", "the rows copied into a temporary table"
+                                  " and moved on in one statement",
+                        footprint=1),
+                   Rung("statements", "the rows as multi-row upserts, sent"
+                                      " without waiting"))
+    #: how a staged run is copied (`_staged`)
+    STAGE_WAYS = (Rung("binary", "the rows copied as the server stores"
+                                 " them"),
+                  Rung("text", "the rows copied as text"))
+
+    def _answered(self):
+        """The batch's piped statements answered, so a way timed is timed
+        to the end of its work and not to the end of its sending."""
+        piped = getattr(self._apply_held(), "piped", None)
+        if piped is not None:
+            piped.off()
+
+    def _piping(self):
+        """Pipeline mode entered only when a statement is about to be
+        sent: a batch that is one staged run pays no sync for it."""
+        piped = getattr(self._apply_held(), "piped", None)
+        if piped is not None:
+            piped.on()
+
+    def _in_statements(self, conn, head, tail, values):
+        """`values` as rows of `head (...), (...) tail`, `APPLY_ROWS` a
+        statement. Where the batch's statements are piped (`_apply_net`)
+        none of them waits for its answer."""
+        mark = "(" + ", ".join(["%s"] * len(values[0])) + ")"
+        self._piping()
+        with conn.cursor() as cur:
+            for at in range(0, len(values), self.APPLY_ROWS):
+                part = values[at:at + self.APPLY_ROWS]
+                cur.execute(head + ", ".join([mark] * len(part)) + tail,
+                            [v for r in part for v in r])
+
+    def _staged(self, conn, sch, tbl, names, values, into, tail):
+        """A run into the stage (`_stage`) by one COPY, then onto the
+        table - with the stage emptied - by one `insert ... select`. The
+        COPY is binary where every column and value is one `_copy_binary`
+        sends exactly, else text (`_copy_text`); of the two, the one
+        measured cheaper for this table and runs this long (`_cheaper`).
+        False, with nothing sent, where neither carries every value
+        exactly: the run then goes as statements.
+
+        A batch's statements sent before it are answered first: COPY
+        cannot run while statements are piped. Its own statements go
+        after it in one round trip, as before, and those after them are
+        piped again (`_piping`).
+
+        Measured on postgres:16, 200,000 rows of eight columns (integer,
+        numeric, timestamptz, bytea, jsonb, two texts, a boolean) in runs
+        of 20,000: 2.26s binary, 2.36s as text and 3.21s as statements
+        (before: 2.18s staged as text, 3.60s as statements each waited
+        for); with a round trip of 10 ms 4.07s, 4.54s and 4.84s (before
+        4.08s and 8.28s); with 50 ms, 60,000 rows, 2.67s, 2.70s and 2.44s
+        (before 3.07s and 7.20s) - piped, the statements wait for nothing,
+        and on a long link the stage's own round trips are what costs.
+        Binary and text are close on these rows; each is timed per table
+        and run size, and the cheaper taken (`_cheaper`), as the stage and
+        the statements are. (The round trip was added by a proxy that
+        holds each packet: `tc` and `pfctl` need root.)"""
+        piped = getattr(self._apply_held(), "piped", None)
+        if piped is not None:
+            piped.off()
+        cols = ", ".join(f'"{n}"' for n in names)
+        with conn.cursor() as cur:
+            stage, types = self._stage(conn, cur, sch, tbl)
+            key = self._work_key("stage", f"{sch}.{tbl}", len(values))
+            began = time.monotonic()
+            data, way, how = None, "text", ""
+            if self._cheaper(key, self.STAGE_WAYS) == "binary":
+                data = _copy_binary(conn, [types.get(n) for n in names],
+                                    values)
+                way, how = ("binary", " (format binary)") if data \
+                    else ("text", "")
+            if data is None:
+                text = _copy_text(values)
+                if text is None:
+                    return False
+                data = text.getvalue()
+            with cur.copy(f"copy {stage} ({cols}) from stdin{how}") as cp:
+                cp.write(data)
+            self._took(key, way, time.monotonic() - began, len(values))
+            # one round trip: the rows on, and the stage emptied
+            cur.execute(f"{into} select {cols} from {stage}{tail};"
+                        f" truncate {stage}")
+        return True
 
     def _stage(self, conn, cur, sch, tbl):
         """A temporary table shaped as the target one, made the first time
-        a session needs it, emptied after each use."""
+        a session needs it, emptied after each use; with the type of each
+        of its columns, which says what can go into it binary. Kept on the
+        connection, so a stage is never taken for made on another."""
         import hashlib
         name = "migkit_stage_" + hashlib.md5(
             f"{sch}.{tbl}".encode(), usedforsecurity=False).hexdigest()[:12]
-        made = self.__dict__.setdefault("_staged", set())
-        if len(made) > 10_000:
-            # sessions long closed; a stage not remembered is only made
-            # again (`if not exists`)
-            made.clear()
-        session = (id(conn), conn.get_backend_pid(), name)
-        if session not in made:
+        made = conn.__dict__.setdefault("migkit_stages", {})
+        if name not in made:
             cur.execute(f'create temp table if not exists "{name}" (like'
-                        f' "{sch}"."{tbl}" including defaults)')
-            made.add(session)
-        return f'"{name}"'
+                        f' "{sch}"."{tbl}" including defaults);'
+                        " select a.attname, t.typname from pg_attribute a"
+                        " join pg_type t on t.oid = a.atttypid"
+                        f" where a.attrelid = 'pg_temp.\"{name}\"'::regclass"
+                        " and a.attnum > 0 and not a.attisdropped"
+                        " and t.typtype = 'b'")
+            cur.nextset()
+            made[name] = {str(n): str(t) for n, t in cur.fetchall()}
+        return f'"{name}"', made[name]
+
+    def _added_row(self, side, db, table, key, values):
+        from .. import canon
+        sch, tbl = self._split(table)
+        row = {**key, **values}
+        names = [n for n in sorted(row)
+                 if n not in self._unwritable_columns(side, db, table)]
+        made = [canon.sql_value(row[n].to if isinstance(row[n], canon.Added)
+                                else row[n]) for n in names]
+        sets, by = [], []
+        for n in names:
+            if n in key:
+                continue
+            if isinstance(row[n], canon.Added):
+                sets.append(f'"{n}" = t0."{n}" + %s')
+                by.append(canon.sql_value(row[n].by))
+            else:
+                sets.append(f'"{n}" = excluded."{n}"')
+        conflict = ", ".join(f'"{k}"' for k in sorted(key))
+        return (f'insert into "{sch}"."{tbl}" as t0 ('
+                + ", ".join(f'"{n}"' for n in names) + ")"
+                + self._insert_override(side, db, table, names)
+                + " values (" + ", ".join(["%s"] * len(names)) + ")"
+                + f" on conflict ({conflict}) do "
+                + (f"update set {', '.join(sets)}" if sets else "nothing"),
+                made + by)
 
     def _apply_delete(self, side, db, table, key):
         self._apply_deletes(side, db, table, [key])
 
     def _apply_deletes(self, side, db, table, keys):
-        from psycopg2.extras import execute_values
-
         from .. import canon
         table = self.local_table(table)
         sch, tbl = self._split(table)
@@ -1273,16 +1527,39 @@ class PostgresEngine(Engine):
         # a list of rows rather than `in (values ...)`: those values are
         # typed as text and do not compare with an integer key
         with self._writer(side, db) as conn:
-            with conn.cursor() as cur:
-                execute_values(cur, f'delete from "{sch}"."{tbl}"'
-                                    f" where ({cols}) in (%s)",
-                               [[canon.sql_value(k[n]) for n in names]
-                                for k in keys],
-                               page_size=self.APPLY_ROWS)
+            self._in_statements(conn, f'delete from "{sch}"."{tbl}" where'
+                                      f" ({cols}) in (", ")",
+                                [[canon.sql_value(k[n]) for n in names]
+                                 for k in keys])
 
     def _open_writer(self, side, db):
         self._target_only(side, "apply changes")
-        return self._conn(side, self._d(side, db))
+        return self._conn3(side, self._d(side, db))
+
+    def _apply_net(self, side, db, rows):
+        """The batch's runs piped (`_Piped`): each statement is sent
+        without waiting for the one before it to be answered, and the
+        answers are read once, where the batch ends - the first error
+        among them fails the batch as a statement's own error did. On a
+        link with a round trip of R, a batch of N statements took N x R
+        and takes about R. Measured on postgres:16, a parent and its child
+        in turn - a statement a change, as a key between them asks: 2,000
+        in 0.46s before and 0.04s piped; 400 with a round trip of 10 ms,
+        5.83s and 0.14s; with 50 ms, 24.50s and 0.44s."""
+        held = self._apply_held()
+        conn = getattr(held, "conn", None)
+        if conn is None or getattr(held, "piped", None) is not None \
+                or not callable(getattr(conn, "pipeline", None)):
+            return super()._apply_net(side, db, rows)
+        held.piped = piped = _Piped(conn)
+        try:
+            super()._apply_net(side, db, rows)
+            piped.off()
+        except BaseException as e:
+            piped.off(e)
+            raise
+        finally:
+            held.piped = None
 
     PLUGIN = "test_decoding"
 
@@ -1361,8 +1638,6 @@ class PostgresEngine(Engine):
         origin another holds is refused (`already active for PID`)."""
         import time
 
-        import psycopg2
-
         from .. import marks
         first = self.twoway_origin()
         names = [first] if batch is not None else [first] + [
@@ -1377,15 +1652,17 @@ class PostgresEngine(Engine):
                         cur.execute("select"
                                     " pg_replication_origin_session_setup(%s)",
                                     (name,))
-                    except psycopg2.errors.UndefinedObject:
+                    except Exception as e:  # noqa: BLE001 - by its code
+                        code = _sqlstate(e)
+                        if code not in (UNDEFINED_OBJECT, OBJECT_IN_USE):
+                            raise
                         cur.execute("rollback to savepoint migkit_origin")
+                        if code == OBJECT_IN_USE:
+                            continue
                         self._origin_named(side, db, name)
                         cur.execute("select"
                                     " pg_replication_origin_session_setup(%s)",
                                     (name,))
-                    except psycopg2.errors.ObjectInUse:
-                        cur.execute("rollback to savepoint migkit_origin")
-                        continue
                     cur.execute("release savepoint migkit_origin")
                     if batch is not None:
                         cur.execute("select pg_replication_origin_xact_setup"

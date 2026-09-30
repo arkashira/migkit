@@ -4211,7 +4211,10 @@ statements (`test_runs_of_rows_apply_as_one_statement.py`). Still to
 build: 4 on SQL Server; on MySQL measured and not adopted (2026-09-27):
 5,000 upserts 36 ms as multi-row statements and 55 ms by the pinned load
 into a temporary table and one `insert ... select`, 20,000 86 against 84 -
-and five round trips against three. 5 done (2026-09-27,
+and five round trips against three. Built after all (2026-09-28, R19.6
+and R19.10): four round trips a run now, and on both engines the stage
+or the statements taken by what each cost on that server for runs of
+that size - neither wins everywhere. 5 done (2026-09-27,
 `test_keys_off_where_every_parent_comes_too.py`): where every parent a
 table in scope points at is in scope too, MySQL's apply sessions turn
 foreign key checks off, and PostgreSQL's - running as a replica already -
@@ -5180,7 +5183,23 @@ it is measured against before it is claimed.
    aside because `local_infile` lets the server ask the client for any
    file. The client answers only with the chunk migkit prepared and
    refuses every other name - the same guard MySQL Shell's copy uses -
-   so the 36% is taken.
+   so the 36% is taken. Done (2026-09-28): the pin was already there
+   for the copiers; the applier's runs now go through it too, into a
+   temporary table of the written columns and on by one `insert ...
+   select ... on duplicate key update`, and the load's warnings are
+   read from its own answer (a round trip less). Used only where the
+   server has `local_infile` on (never set) and where it measured
+   cheaper than the statements for that table and run size (`_cheaper`,
+   the costs readable as data by `measured_ways`). Measured on
+   mysql:8.4, 200,000 rows in runs of 16,000: 2.62s staged against
+   3.03s, and 6.28s against 9.74s with a round trip of 10 ms; runs of
+   1,000 over 10 ms, 5.84s staged against 4.53s - the statements win
+   there, and are taken. The shared copier's batches of 10,000: 2.21s
+   loaded against 1.91s as inserts, 8.04s against 8.40s over 10 ms.
+   The guard is proved on the handler with a server's packets faked
+   (`test_the_load_answers_only_the_file_it_offered.py`), the writes
+   against the statements' byte for byte
+   (`test_a_mysql_run_goes_through_the_pinned_load.py`).
 
 **Changes**
 
@@ -5242,7 +5261,26 @@ it is measured against before it is claimed.
     mode and binary COPY for the runs too small for the staging path
     (100 statements at 300 ms RTT: 30 s to 0.3 s, per its docs); on
     MySQL, the staging path through the safe LOAD DATA of lever 6 and
-    `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`.
+    `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`. Done (2026-09-28):
+    PostgreSQL's applier writes through psycopg3, each value put into its
+    statement as psycopg2 put it (so a column reads what it read, and a
+    statement is not held to 65,535 bound values), statements piped
+    until the batch ends; a staged run's COPY binary where every column
+    and value is of a kind sent exactly (`_binary_kinds`, the rest as
+    text), and past 1,000 rows the stage or the statements, binary or
+    text, taken by what each cost for that table and run size. A counter
+    of a two-way hop is one `insert ... on conflict/duplicate key update
+    n = n + by` a row, no longer a count and then a write (which also
+    wrote over a row the target's own side made between them). Measured
+    on postgres:16: a parent and its child in turn, a statement a change,
+    2,000 in 0.46s before and 0.04s; 400 with a round trip of 10 ms,
+    5.83s and 0.14s; with 50 ms, 24.50s and 0.44s. 200,000 rows in runs
+    of 20,000: staged 2.18s before, 2.26s binary now; over 10 ms 4.08s
+    and 4.07s; over 50 ms (60,000) 3.07s staged before, 2.44s now as
+    piped statements. Binary and text were close on these rows. The
+    round trip was added by a proxy that holds each packet (`tc` and
+    `pfctl` need root on the machine measured on)
+    (`test_rows_are_written_in_fewer_round_trips.py`).
 11. **Exact batches make idempotence cheaper, not dearer.** Because the
     target says which batch it last committed (R3), the tail after a
     stop resumes after it instead of replaying a window of changes it

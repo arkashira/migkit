@@ -208,9 +208,9 @@ class _Counted:
                 sent.append(1)
                 return real.execute(*a, **k)
 
-            def copy_expert(self, *a, **k):
+            def copy(self, *a, **k):
                 sent.append(1)
-                return real.copy_expert(*a, **k)
+                return real.copy(*a, **k)
         return Cursor()
 
 
@@ -233,6 +233,11 @@ def test_postgres_sends_a_statement_a_run_not_a_row(pg_pair, monkeypatch):
             monkeypatch.setattr(PostgresEngine, "_open_writer",
                                 lambda self, side, db, how=how:
                                 _Counted(real(self, side, db), sent[how]))
+            # every lane's run staged: which lane's cost is kept first -
+            # and so whether the others try the statements - is the
+            # threads' order
+            monkeypatch.setattr(PostgresEngine, "_cheaper",
+                                lambda self, key, ways: ways[0].name)
             if how == "one a row":
                 _one_a_row(monkeypatch)
             batch = [{"op": "insert", "table": "public.s",
@@ -402,17 +407,27 @@ def test_mysql_a_second_unique_index_never_moves_a_row_under_another(
 
 
 @needs_docker
-def test_postgres_runs_land_under_a_wait_callback(pg_pair):
+def test_postgres_runs_land_under_a_wait_callback(pg_pair, monkeypatch):
     """Measured in the suite: once the diff library had been loaded in the
-    process it set a wait callback for every psycopg2 connection, and the
-    staged run stopped on `copy_expert cannot be used with an asynchronous
-    callback`. The run goes as statements then."""
+    process it set a wait callback for every connection of the driver it
+    uses, and the staged run stopped on `copy_expert cannot be used with
+    an asynchronous callback`; the run went as statements then. The rows
+    are written through the other driver now, which the callback does not
+    reach: the run is staged whether it is set or not."""
     import psycopg2.extensions
     import psycopg2.extras
+
+    from migkit.engines.postgres import PostgresEngine
     eng = _pg(pg_pair)
+    # one lane: four would each hold fewer rows than a run is staged from
+    eng.hop.workers = 1
     port = pg_pair["dst"]
     _one(port, "drop table if exists public.cb;"
                " create table public.cb (id int primary key, v text)")
+    staged, real = [], PostgresEngine._staged
+    monkeypatch.setattr(PostgresEngine, "_staged",
+                        lambda self, *a: staged.append(real(self, *a))
+                        or staged[-1])
     psycopg2.extensions.set_wait_callback(psycopg2.extras.wait_select)
     try:
         eng.neutral_apply("dst", "postgres", [
@@ -420,5 +435,6 @@ def test_postgres_runs_land_under_a_wait_callback(pg_pair):
              "values": {"id": i, "v": "x"}} for i in range(3000)])
     finally:
         psycopg2.extensions.set_wait_callback(None)
+    assert staged == [True], staged
     assert _one(port, "select count(*) from public.cb") == "3000"
     _one(port, "drop table public.cb")

@@ -110,7 +110,12 @@ def _fingerprint(db):
 
 
 def _counting(monkeypatch):
+    """The rows each load took. Every batch is offered to the load: the
+    choice by measured cost would send a table's second batch as inserts,
+    to time them once."""
     from migkit.engines import mysql
+    monkeypatch.setattr(mysql.MySQLEngine, "_cheaper",
+                        lambda self, key, ways: ways[0].name)
     real, used = mysql._load, []
 
     def counted(*a, **k):

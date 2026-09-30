@@ -671,22 +671,158 @@ class MySQLEngine(Engine):
                 " on duplicate key update " + ", ".join(
                     f"`{k}` = `{k}`" for k in sorted(key)))
         mark = "(" + ", ".join(["%s"] * len(names)) + ")"
+        ddb = self._d(side, db)
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
+                values = [tuple(canon.sql_value(r[n]) for n in names)
+                          for r in full]
                 if self._uniques(side, db, table) > 1:
-                    self._write_by_key(
-                        cur, self._d(side, db), table, names, sorted(key),
-                        [tuple(canon.sql_value(r[n]) for n in names)
-                         for r in full])
+                    self._write_by_key(cur, ddb, table, names, sorted(key),
+                                       values)
                     return
-                for at in range(0, len(full), self.APPLY_ROWS):
-                    part = full[at:at + self.APPLY_ROWS]
+                work = (self._work_key("upserts", f"{ddb}.{table}",
+                                       len(values))
+                        if len(values) >= self.STAGE_FROM
+                        and self._loads(conn)
+                        and not getattr(_PLAIN, "on", False) else None)
+                if work and self._cheaper(
+                        work, self.UPSERT_WAYS) == "staged":
+                    began = time.monotonic()
+                    if self._staged(cur, ddb, table, names, values, key):
+                        self._took(work, "staged", time.monotonic() - began,
+                                   len(values))
+                        return
+                    work = None
+                began = time.monotonic()
+                for at in range(0, len(values), self.APPLY_ROWS):
+                    part = values[at:at + self.APPLY_ROWS]
                     cur.execute(
-                        f"insert into `{self._d(side, db)}`.`{table}`"
+                        f"insert into `{ddb}`.`{table}`"
                         f" ({cols}) values "
                         + ", ".join([mark] * len(part)) + tail,
-                        [canon.sql_value(r[n]) for r in part
-                         for n in names])
+                        [v for r in part for v in r])
+                if work:
+                    self._took(work, "statements", time.monotonic() - began,
+                               len(values))
+
+    def _added_row(self, side, db, table, key, values):
+        """None where a unique index besides the key could take the
+        row's collision (`_write_by_key`)."""
+        from .. import canon
+        if self._uniques(side, db, table) > 1:
+            return None
+        q = self._my_ident
+        row = {**key, **values}
+        names = [n for n in sorted(row)
+                 if n not in self._unwritable_columns(side, db, table)]
+        made = [canon.sql_value(row[n].to if isinstance(row[n], canon.Added)
+                                else row[n]) for n in names]
+        sets, by = [], []
+        for n in names:
+            if n in key:
+                continue
+            if isinstance(row[n], canon.Added):
+                # the row's own value, as it stands, on the right
+                sets.append(f"{q(n)} = {q(n)} + %s")
+                by.append(canon.sql_value(row[n].by))
+            else:
+                sets.append(f"{q(n)} = values({q(n)})")
+        return (f"insert into {q(self._d(side, db))}.{q(table)} ("
+                + ", ".join(q(n) for n in names) + ") values ("
+                + ", ".join(["%s"] * len(names)) + ") on duplicate key"
+                " update " + ", ".join(
+                    sets or [f"{q(k)} = {q(k)}" for k in sorted(key)]),
+                made + by)
+
+    #: a run of upserts this long may go by the load into a stage and one
+    #: `insert ... select` (`_staged`), where that was measured cheaper
+    STAGE_FROM = 1000
+
+    #: how a run of upserts that long is written (`_apply_upserts`)
+    UPSERT_WAYS = (Rung("staged", "the rows loaded into a temporary table"
+                                  " and moved on in one statement",
+                        footprint=1),
+                   Rung("statements", "the rows as multi-row upserts"))
+
+    def _staged(self, cur, db, table, names, values, key):
+        """A run of upserts through the server's bulk load: into a
+        temporary table of the columns written (`_stage`), then onto the
+        table by one `insert ... select ... on duplicate key update`, and
+        the stage emptied - four round trips a run however long it is,
+        where statements take one a thousand rows. The load is the pinned
+        one (`_loading`): the server is sent these rows and nothing else.
+
+        False, with nothing written, where the stage cannot be made, the
+        load's text cannot carry a value exactly (`_Unfit`) or the server
+        took the load with a warning: the run then goes as statements,
+        which stop on a value the column cannot hold.
+
+        Measured on mysql:8.4, a batch a run, rows of eight columns (bytes,
+        text, decimal, datetime, JSON), staged against statements: 200,000
+        rows in runs of 16,000, 2.62s against 3.03s, and with a round trip
+        of 10 ms 6.28s against 9.74s; 100,000 in runs of 5,000, 1.38s
+        against 1.59s and 7.10s against 7.56s; 20,000 in runs of 1,000,
+        0.46s against 0.48s - and 5.84s against 4.53s over 10 ms, where the
+        stage's four round trips cost more than one statement's one. So
+        the way is chosen by what it cost here, for runs of that size
+        (`_cheaper`), not by a rule. (The round trip was added by a proxy
+        that holds each packet: `tc` and `pfctl` need root.)"""
+        q = self._my_ident
+        stage = self._stage(cur, db, table, names)
+        if stage is None:
+            return False
+        at = f"{q(db)}.{q(stage)}"
+        try:
+            _load(cur, db, stage, names, values,
+                  self._load_types(cur, db, table))
+        except _Unfit:
+            return False
+        except _LoadRefused:
+            cur.execute(f"delete from {at}")
+            return False
+        except _loading_off() as e:
+            if e.args and e.args[0] in _LOAD_OFF:
+                self._loads_ok = False
+                return False
+            raise
+        cols = ", ".join(q(n) for n in names)
+        # a column of both tables is named with its table on the right of
+        # an assignment, or the server calls it ambiguous
+        sets = (", ".join(f"{q(n)} = values({q(n)})"
+                          for n in names if n not in key)
+                or ", ".join(f"{q(k)} = {q(db)}.{q(table)}.{q(k)}"
+                             for k in sorted(key)))
+        cur.execute(f"insert into {q(db)}.{q(table)} ({cols}) select {cols}"
+                    f" from {at} on duplicate key update {sets}")
+        cur.execute(f"delete from {at}")
+        return True
+
+    def _stage(self, cur, db, table, names):
+        """A temporary table of `names` typed as `table` has them, without
+        its indexes, made the first time a session needs it: a load into
+        it converts each value as a load into the table would, and a row a
+        run carries twice cannot collide in it. A temporary table is made
+        and emptied without ending the transaction. None where the server
+        will not make one (a type a temporary table cannot hold): the runs
+        go as statements. Kept on the connection, as the table is."""
+        import hashlib
+
+        import pymysql
+        q = self._my_ident
+        name = "migkit_stage_" + hashlib.md5(
+            f"{db}.{table}.{names}".encode(),
+            usedforsecurity=False).hexdigest()[:12]
+        made = cur.connection.__dict__.setdefault("migkit_stages", {})
+        if name not in made:
+            try:
+                cur.execute(f"create temporary table if not exists"
+                            f" {q(db)}.{q(name)} as select "
+                            + ", ".join(q(n) for n in names)
+                            + f" from {q(db)}.{q(table)} limit 0")
+                made[name] = name
+            except pymysql.err.MySQLError:
+                made[name] = None
+        return made[name]
 
     def _uniques(self, side, db, table):
         """How many unique indexes the table has, its key included - asked
@@ -5875,6 +6011,11 @@ class MySQLEngine(Engine):
     #: trips cost more than they save on a handful
     LOAD_FROM = 500
 
+    #: how a batch that long is written (`_put_rows`)
+    ROWS_WAYS = (Rung("load", "the server's bulk load, sent only the rows"
+                              " made for it"),
+                 Rung("statements", "the rows as multi-row inserts"))
+
     def _put_rows(self, cur, db, table, names, rows, insert):
         """Rows onto the target, in the cursor's transaction: as the
         server's own bulk load (`load data local`) where the server takes
@@ -5887,20 +6028,41 @@ class MySQLEngine(Engine):
         used before. A load also turns what an insert refuses (a value too
         long, a key already there) into warnings and goes on, so a load
         that raised any is `_LoadRefused`: the caller rolls it back and
-        writes the rows as inserts, which stop on the row as before."""
+        writes the rows as inserts, which stop on the row as before.
+
+        Which of the two a batch goes by is the one measured cheaper on
+        this server, for this table and batches of this size
+        (`_cheaper`). Measured on mysql:8.4, the shared copier's 200,000
+        rows of eight columns in batches of 10,000, a connection a batch:
+        2.21s loaded against 1.91s as inserts, and 8.04s against 8.40s
+        with a round trip of 10 ms - where the table copier's million rows
+        had gone from 15.6s to 10.9s by the load and the read ahead
+        together. Neither wins everywhere, so neither is assumed."""
+        key = None
         if len(rows) >= self.LOAD_FROM and self._loads(cur.connection) \
                 and not getattr(_PLAIN, "on", False):
-            try:
-                return _load(cur, db, table, names, rows,
-                             self._load_types(cur, db, table))
-            except _Unfit:
-                pass
-            except _loading_off() as e:
-                if e.args and e.args[0] in _LOAD_OFF:
-                    self._loads_ok = False
-                else:
-                    raise
+            key = self._work_key("rows", f"{db}.{table}", len(rows))
+            if self._cheaper(key, self.ROWS_WAYS) == "load":
+                began = time.monotonic()
+                try:
+                    got = _load(cur, db, table, names, rows,
+                                self._load_types(cur, db, table))
+                    self._took(key, "load", time.monotonic() - began,
+                               len(rows))
+                    return got
+                except _Unfit:
+                    key = None
+                except _loading_off() as e:
+                    if e.args and e.args[0] in _LOAD_OFF:
+                        self._loads_ok = False
+                        key = None
+                    else:
+                        raise
+        began = time.monotonic()
         cur.executemany(insert, rows)
+        if key:
+            self._took(key, "statements", time.monotonic() - began,
+                       len(rows))
         return len(rows)
 
     def _load_types(self, cur, db, table):
@@ -6923,8 +7085,9 @@ def _load(cur, db, table, names, rows, types=None):
             + (f" set {', '.join(sets)}" if sets else ""))
     finally:
         cur.connection.feed = None
-    cur.execute("show count(*) warnings")
-    warned = int(cur.fetchone()[0])
+    # the load's own answer counts its warnings - no statement more to
+    # ask; measured, 70,000 of them are answered as 65,535, never as 0
+    warned = int(cur.warning_count or 0)
     if warned or got != len(rows):
         raise _LoadRefused(f"{got:,} of {len(rows):,} rows taken,"
                            f" {warned:,} warnings")

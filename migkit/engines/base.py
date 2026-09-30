@@ -4145,6 +4145,51 @@ class Engine:
                 conn.close()
         return one()
 
+    @staticmethod
+    def _work_key(work, table=None, run=None):
+        """What a way's cost is kept under: the kind of work, the table,
+        and the run's size in powers of two - a way whose cost is mostly a
+        fixed number of round trips is not held to a cost a row measured
+        on runs ten times as long."""
+        return (work, table, 1 << (int(run).bit_length() - 1) if run else None)
+
+    def _cheaper(self, key, ways):
+        """The name of the way to do the work `key` names (`_work_key`),
+        of the `decide.Rung`s in `ways`: climbed in `decide` on this
+        engine's own costs for that work (`_took`) - each tried once, in
+        order, then the one that did a row in less time, a tie going to the
+        one that leaves less behind. Only the way taken is timed again, so
+        one that grows dearer than the other's last cost gives way to it."""
+        from ..decide import Costs, climb
+        self.__dict__.setdefault("_way_rungs", {})[key] = tuple(ways)
+        costs = self.__dict__.setdefault("_way_cost", {}).setdefault(
+            key, Costs())
+        return climb(key[0], ways, costs=costs).path
+
+    def _took(self, key, way, seconds, rows):
+        from ..decide import Costs
+        self.__dict__.setdefault("_way_cost", {}).setdefault(
+            key, Costs()).saw(way, rows, seconds)
+
+    def measured_ways(self):
+        """What each way of a piece of work cost here, in seconds a row,
+        and the one taken now: [{"work", "table", "rows_from",
+        "seconds_a_row", "chosen"}], for the decision layer to read what
+        was measured. "chosen" is None while a way is still to be tried
+        once."""
+        from ..decide import climb
+        rungs = self.__dict__.get("_way_rungs", {})
+        out = []
+        for key, at in sorted(self.__dict__.get("_way_cost", {}).items(),
+                              key=lambda kv: str(kv[0])):
+            ways = rungs.get(key, ())
+            done = bool(ways) and all(w.name in at for w in ways)
+            out.append({"work": key[0], "table": key[1],
+                        "rows_from": key[2], "seconds_a_row": dict(at),
+                        "chosen": climb(key[0], ways, costs=at).path
+                        if done else None})
+        return out
+
     def _apply_each(self, side, db, changes):
         """Consecutive rows of one table, one kind and one set of columns
         go to the engine together, in the order the batch left them.
@@ -4207,6 +4252,17 @@ class Engine:
         q = self._quote_ident
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
+                one = [self._added_row(side, db, local, k, v)
+                       for k, v in rows]
+                if all(one):
+                    # a statement a row that the server reads and writes in
+                    # one step: nothing waits on a count, and a row the
+                    # target's own side makes between them is added to,
+                    # not written over
+                    self._piping()
+                    for sql, args in one:
+                        cur.execute(sql, args)
+                    return
                 for key, values in rows:
                     names = sorted(key)
                     where = " and ".join(f"{q(k)} = %s" for k in names)
@@ -4231,6 +4287,17 @@ class Engine:
                     if sets:
                         cur.execute(f"update {at} set {', '.join(sets)}"
                                     f" where {where}", args + found)
+
+    def _added_row(self, side, db, table, key, values):
+        """(sql, args): one counter row (`_apply_added`) as one statement -
+        made with what the source ended with where the target has no row,
+        else each counter moved where it stands and the rest set - or None
+        where this engine has no such statement."""
+        return None
+
+    def _piping(self):
+        """The statements the batch sends next need not wait for each
+        one's answer, where the engine can send them so."""
 
     def _apply_upserts(self, side, db, table, rows):
         """[(key, values)] of one table and one set of columns: one
