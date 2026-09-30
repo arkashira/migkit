@@ -136,6 +136,14 @@ def typed(server):
     my(ROWS, "s")
 
 
+def _rows_way(monkeypatch):
+    """The table copier's own rows, where the source's client could pass
+    them server to server instead (`my_pass`): what these tests are of."""
+    from migkit.engines.mysql import MySQLEngine
+    monkeypatch.setattr(MySQLEngine, "TABLE_WAYS", tuple(
+        r for r in MySQLEngine.TABLE_WAYS if r.name == "rows"))
+
+
 def _move(eng, tmp_path, said=None):
     from migkit.cli import _Checkpoint
     eng.move_table("s", "t", "", 500_000, _Checkpoint(tmp_path / "m.json"),
@@ -237,6 +245,7 @@ def test_ranges_in_processes_load_and_read_back(server, tmp_path,
                                                monkeypatch):
     from migkit import ranges
     monkeypatch.setattr(ranges, "LEAST", 10_000)
+    _rows_way(monkeypatch)
     my("drop database if exists s; drop database if exists s2;"
        " create database s; create database s2;")
     table = ("create table t (id bigint primary key, payload varchar(64),"
@@ -371,6 +380,7 @@ def test_rows_of_large_values_are_read_a_few_at_a_time(server, tmp_path,
     """A fixed ten thousand rows a read, whatever they held: of
     twenty-megabyte values, far more than the machine has."""
     from migkit.engines import mysql
+    _rows_way(monkeypatch)
     my("drop database if exists s; drop database if exists s2;"
        " create database s; create database s2;")
     table = "create table t (id int primary key, body longblob)"

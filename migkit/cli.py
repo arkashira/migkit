@@ -1653,10 +1653,13 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
         # indexes a copy that was killed had set aside, built again at the
         # end of this one - whichever tables it copies
         window = getattr(target, "table_index_window", None)
+        from . import movers
         with (window(d, None, log) if window
               else contextlib.nullcontext()):
-            _copy_tables_in(hop, eng, d, tables, chunk, ck,
-                            min(most, len(tables)))
+            # a finished table's indexes are built while the next copies
+            with movers.builds_beside(log):
+                _copy_tables_in(hop, eng, d, tables, chunk, ck,
+                                min(most, len(tables)))
     finally:
         ranges.active = before
         said = pace.line()

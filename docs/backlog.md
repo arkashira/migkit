@@ -5518,6 +5518,52 @@ Order: 8 and 9 (the proof nearly free), 1 (pass-through), 13, 14, 10, 11, 4,
 PeerDB for moving, Veridata/DVT/pgCompare for verifying), numbers in
 the docstrings.
 
+*Built 2026-09-30, items 1, 4 and 5 for the same-engine table copier; not
+yet measured and its tests not yet run (the owner's rule of 2026-09-30:
+every test once, at the end of the backlog).*
+* **PostgreSQL** (`engines/pg_pass.py`): each range read by the source's
+  client as COPY's binary encoding under one snapshot exported for the
+  table and imported by every read (`pg_export_snapshot` / `SET
+  TRANSACTION SNAPSHOT`, held no longer than `snapshot_limit`), written
+  into the target's COPY 64 KB at a time with the range's delete in one
+  transaction, through the relay beside the source (compressed) where
+  there is one; both servers' digests of the range (the data check's own
+  row hash, so ranges fold to the table's number) read at the same moment
+  beside the next range's load, the source's under the copy's snapshot;
+  the range recorded only once they agree. The snapshot's own
+  `pg_current_snapshot()` is the mark the tail holds changes to. The
+  table's one range is loaded `TRUNCATE` + `COPY ... FREEZE`; `pass-through
+  unawaited` commits with `synchronous_commit = off` and records a range
+  only once `pg_current_wal_flush_lsn()` has passed its commit, so a target
+  crash loses nothing recorded (test: the target killed after a commit
+  returned; the range is gone after the restart, unrecorded, `check` says
+  different, the next run repairs it). Rungs `COPY_WAYS` (pass-through,
+  pass-through unawaited, the pipe as before) climbed per range on the
+  table's own costs (`decide.Trials`: each way timed on one range, then
+  the cheapest a row); `TABLE_WAYS` (the ranges, the streaming copy of the
+  whole table under the table's snapshot, proved by both digests) climbed
+  per table a byte, this run's costs before the hop's.
+* **MySQL** (`engines/my_pass.py`): each range rendered by the source's own
+  client, in SQL, as the line the pinned `load data local` reads, under a
+  consistent snapshot that digests the range first; the lines streamed
+  into the load (`_load_feed` now takes a stream); committed only where
+  both digests, the counts and the load's silence agree, else the range
+  goes as rows. `unique_checks = 0` only for a table emptied in the loading
+  transaction whose target unique indexes the source enforces;
+  `sql_log_bin = 0` (and myloader's binlog left off) only where the hop
+  says `target_has_replicas: false`. `TABLE_WAYS`: pass-through, the rows,
+  the parallel dump and load of the table (`movers.mydumper_table`).
+* **Phases:** a finished table's index builds run beside the next table's
+  copy (`movers.Beside`, PostgreSQL and MySQL windows alike), each
+  PostgreSQL build under `maintenance_work_mem` and
+  `max_parallel_maintenance_workers` for the session from the target's
+  `shared_buffers` and CPUs (`_pg_build_settings`); a range's check runs
+  beside the next range's load.
+* **Still to do:** run the tests written with it and
+  `bench/same_engine_copy.py` (1 GB and 5 GB, every way, both engines),
+  put the numbers in the docstrings, order the rung lists by them and set
+  `STREAM_FROM` from them.
+
 ### R21. Easy enough to use without thinking (added 2026-09-29, the owner: "however good the tool, nobody uses it if it is hard and full of things they do not understand - configuring it must take no thought, with helpers that do it for them")
 
 Measured on the code the same day: 13 commands (fine); the starter

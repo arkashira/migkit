@@ -157,6 +157,19 @@ cut from `master` and versions are tagged as features stabilize.
   verified keys; a built-in path is the fallback.
 
 ### Movers and CDC
+- A PostgreSQL-to-PostgreSQL table copy passes its rows server to server:
+  each range read in COPY's binary encoding under one snapshot the table's
+  workers share and written into the target's COPY as the bytes arrive,
+  proved by both servers' digests of the range read beside the next
+  range's load, recorded only once they agree. A table in one range loads
+  with `FREEZE`; a range whose commit did not wait for the target's disk is
+  recorded only once it is there. MySQL to MySQL does the same through the
+  source's own client and the pinned bulk load, with `unique_checks` and
+  (where the hop says `target_has_replicas: false`) the binlog off for the
+  load's sessions only where that cannot change what lands. Each table's
+  ranges time the ways against each other and keep the cheapest; the
+  whole-table streaming copy and dump are timed against them table by
+  table. A finished table's indexes are built while the next one copies.
 - `move` has no tool to choose. It uses the fastest bulk path installed for
   the engine (parallel dump/restore, parallel MySQL load, cross-engine load,
   collection dump/restore) and falls back to a resumable chunked copy; a

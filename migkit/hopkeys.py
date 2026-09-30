@@ -182,6 +182,10 @@ HOP_OPTIONS = {
     "tables": Key("the tables of a generic hop", "list", ("generic",)),
     "target_engine": Key("the target's engine of a hetero hop", "str",
                          ("hetero",)),
+    "target_has_replicas": Key("false: the target has no replicas and no"
+                               " restore replays its binlog, so a load"
+                               " may leave the binlog off", "bool",
+                               ("mysql",)),
     "tombstones": Key("carry deletes' empty messages", "bool", ("kafka",)),
     "topic": Key("the stream name template", "str", STREAMS),
     "topology": Key("one_way or two_way", "str"),

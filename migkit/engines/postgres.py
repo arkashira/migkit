@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..config import REPORTS
-from ..decide import Rung
+from ..decide import Need, Rung
 from ..util import run, tool_env, which
 from .base import Engine, RepairAction, Result
 
@@ -8448,6 +8448,56 @@ class PostgresEngine(Engine):
         sql = f"select {what} from {qt}"
         return f"{sql} where {pred}" if pred else sql
 
+    def _load_options(self, db, qt):
+        """The session options a load into `qt` runs under: as a replica,
+        which a trigger does not fire for - the way the bulk paths load.
+        Measured before: a `BEFORE INSERT` trigger stamping `now()`
+        rewrote every row this copied. Asked once per database, and
+        refused where the user may not and the table has triggers."""
+        got = self.replica_env(db).get("PGOPTIONS", "")
+        if got:
+            return got
+        cache = self.__dict__.setdefault("_quiet_triggers", {})
+        name = qt.replace('"', "")
+        if (db, name) not in cache:
+            from .. import movers
+            cache[(db, name)] = movers._pg_quiet_triggers(self.hop, db,
+                                                          [name])
+        if cache.get((db, name)) in ("flag", "session"):
+            return "-c session_replication_role=replica"
+        return ""
+
+    def _source_copy(self, db, commands):
+        """(process, stream, beside the source) reading what the source's
+        client writes for `commands`: beside the source through the relay
+        and compressed where there is one (`_relay`), here otherwise."""
+        relay = self._relay(None, db, commands)
+        if relay is not None:
+            proc, stream = relay
+            return proc, stream, True
+        s = self.hop.source
+        env = tool_env({**s.libpq_env(),
+                        "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15",
+                        "PGOPTIONS": SESSION})
+        args = ["psql", "-h", s.host, "-p", str(s.port), "-U", s.user,
+                "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1"]
+        for c in commands:
+            args += ["-c", c]
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env)
+        return proc, proc.stdout, False
+
+    def _range_digest_sql(self, db, table, where=""):
+        """The one statement both servers answer for a range of a table:
+        its rows and the fold of their hashes, summed as the data check
+        sums a table (`_row_hash_expr`, `_summed`), so a table's ranges
+        fold to the table's own number."""
+        sch, tbl = self._split(table)
+        h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
+        return (f"select count(*)::text || '|' || {self._summed(h)}::text"
+                f' from "{sch}"."{tbl}" t'
+                + (f" where {where}" if where else ""))
+
     def _copy_pipe(self, db, select_sql, qt, pre_sql="", columns=None):
         """Stream rows from source to target through a COPY pipe.
 
@@ -8469,19 +8519,9 @@ class PostgresEngine(Engine):
                           "PGOPTIONS": SESSION})
         quiet = {**t.libpq_env(),
                  "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
-        # as a replica, which a trigger does not fire for - the way the bulk
-        # paths load. Measured before: a `BEFORE INSERT` trigger stamping
-        # `now()` rewrote every row this copied. Asked once per database,
-        # and refused where the user may not and the table has triggers.
-        cache = self.__dict__.setdefault("_quiet_triggers", {})
-        name = qt.replace('"', "")
-        quiet.update(self.replica_env(db))
-        if not quiet.get("PGOPTIONS") and (db, name) not in cache:
-            from .. import movers
-            cache[(db, name)] = movers._pg_quiet_triggers(self.hop, db,
-                                                          [name])
-        if cache.get((db, name)) in ("flag", "session"):
-            quiet["PGOPTIONS"] = "-c session_replication_role=replica"
+        options = self._load_options(db, qt)
+        if options:
+            quiet["PGOPTIONS"] = options
         env_t = tool_env(quiet)
         collist = ""
         if columns:
@@ -8547,14 +8587,16 @@ class PostgresEngine(Engine):
             raise RuntimeError((err_o + err_i).decode()[-300:])
         return tally.end()
 
-    def _relay(self, select_sql, db):
+    def _relay(self, select_sql, db, commands=None):
         """(process, stream) reading `select_sql` beside the source: where
         the source is reached through an ssh tunnel whose machine has psql
         and zstd, the rows are read there, next to the database, and cross
         the link once, compressed, inside the ssh connection - instead of
         COPY's text crossing it as it is (R17d). Measured, 200,000 rows
         over a link held to 5 MB/s and 10 ms: 7.1s as text, 4.3s read
-        beside the source. None where they cannot.
+        beside the source. None where they cannot. `commands`, where
+        given, are what the far client runs instead - the pass-through's
+        read under a shared snapshot, in COPY's binary encoding.
 
         The password is written to the far read's standard input, never on
         its command line; the read's own exit status comes back on its
@@ -8574,7 +8616,8 @@ class PostgresEngine(Engine):
         read = " ".join(shlex.quote(a) for a in [
             "psql", "-h", host, "-p", str(port), "-U", s.user, "-d", db,
             "-X", "-q", "-v", "ON_ERROR_STOP=1",
-            "-c", f"\\copy ({select_sql}) to stdout"])
+            *[a for c in (commands or [f"\\copy ({select_sql}) to stdout"])
+              for a in ("-c", c)]])
         line = ("IFS= read -r PGPASSWORD; export PGPASSWORD; "
                 + (f"export {env}; " if env else "")
                 + "{ " + read + "; echo \"migkit-read:$?\" >&2; }"
@@ -8663,7 +8706,103 @@ class PostgresEngine(Engine):
             raise RuntimeError(err.decode()[-300:])
         return tally.end()
 
-    def _copy_checked(self, db, qt, cols, where, pre_sql, what, log):
+    def _copy_checked(self, db, qt, cols, where, pre_sql, what, log,
+                      way=None, proved=None):
+        """One range copied and held to what the source holds, then
+        `proved()`: here, through the pipe (`_piped`), or beside the next
+        range's load where the table's trials sent the range server to
+        server (`way`, `_passed`). Returns what it moved - the pipe's
+        tally, or the rows the pass-through wrote - for the move's pace."""
+        import time
+        began = time.monotonic()
+        if way is not None and way.passes:
+            return self._passed(db, qt, cols, where, pre_sql, what, log, way,
+                                proved, began)
+        sent = self._piped(db, qt, cols, where, pre_sql, what, log)
+        if way is not None:
+            way.took(sent.n, time.monotonic() - began)
+        if proved is not None:
+            proved()
+        return sent
+
+    def _passed(self, db, qt, cols, where, pre_sql, what, log, way, proved,
+                began):
+        """The range through the pass-through (`pg_pass.TableCopy.copy`)
+        and checked beside the next range's load: both servers' digests
+        read at the same moment, the source's under the snapshot the copy
+        read, and where the commit did not wait for the target's disk, the
+        target's log flushed past it - then `proved()`. A range emptied
+        whole (`truncate`) is loaded `FREEZE`: its rows are written
+        already visible to every later reader, so neither the digest right
+        after nor the target's first reader writes each page again to mark
+        them.
+
+        A range whose digests differ was changed by the target, never by
+        the source moving on - the source's digest reads what the copy
+        read. It is copied again as text, where `_piped` reads it back and
+        stops the copy on it if it still differs, and the pass-through is
+        not tried again on the table. A snapshot that ended before a read
+        could import it is let go, and the range read under a new one."""
+        import time
+
+        from . import pg_pass
+        ctx = way.ctx
+        try:
+            rows, lsn = ctx.copy(
+                way.export, where, pre_sql, what,
+                freeze=pre_sql.lower().startswith("truncate"),
+                unawaited=way.name == "pass-through unawaited")
+        except pg_pass.SnapshotLost:
+            ctx.snapshot.lost(way.export)
+            ctx.snapshot.release(way.export)
+            return self._copy_checked(db, qt, cols, where, pre_sql, what,
+                                      log, way=way.ways.pick(way.begin),
+                                      proved=proved)
+        except Exception as e:  # noqa: BLE001 - said, and the pipe goes
+            # a server that refused the binary encoding (a type whose
+            # form differs between the two), or one that is gone - which
+            # the pipe then finds too, and raises
+            ctx.snapshot.release(way.export)
+            why = str(e).strip().splitlines()[-1][:200] if str(e) else e
+            log(f"{what}: could not pass server to server ({why}) -"
+                " copying it as text")
+            return self._copy_checked(
+                db, qt, cols, where, pre_sql, what, log,
+                way=way.instead(f"a range could not pass server to server:"
+                                f" {why}"), proved=proved)
+        except BaseException:
+            ctx.snapshot.release(way.export)
+            raise
+        checked = (self.hop.options or {}).get("verify_batches", True)
+
+        def check():
+            why = ("both servers digest it differently: the target changes"
+                   " what it is given")
+            try:
+                same = ctx.same(way.export, where) if checked else True
+            except pg_pass.SnapshotLost as e:
+                same = False
+                why = f"its snapshot ended before it was digested ({e})"
+            finally:
+                ctx.snapshot.release(way.export)
+            if same:
+                if lsn is not None:
+                    ctx.durable(lsn)
+                way.took(rows, time.monotonic() - began)
+                if proved is not None:
+                    proved()
+                return
+            log(f"{what}: passed server to server, {why} - copying it again"
+                " as text")
+            self._copy_checked(db, qt, cols, where, pre_sql, what, log,
+                               way=way.instead(
+                                   "a range passed server to server was"
+                                   f" held different: {why}"),
+                               proved=proved)
+        ctx.check(check)
+        return rows
+
+    def _piped(self, db, qt, cols, where, pre_sql, what, log):
         """One range copied through the pipe, then read back from the
         target and held to what passed: a copy that says it moved a range
         has moved exactly those rows. Where the two differ, the range is
@@ -8719,6 +8858,208 @@ class PostgresEngine(Engine):
 
     def move_key(self, db, sch, tbl):
         return f"{sch or 'public'}.{tbl}"
+
+    #: how one range of a table goes from a PostgreSQL source into a
+    #: PostgreSQL target, climbed per range on the table's own costs
+    #: (`_copy_ways`, `pg_pass.Ways`)
+    COPY_WAYS = (
+        Rung("pass-through",
+             "the rows passed server to server in COPY's binary encoding,"
+             " each range digested by both servers under one snapshot",
+             gives=frozenset({"row filter", "resume by chunk",
+                              "consistent as of"}),
+             needs=(Need("the same columns of the same types on both sides,"
+                         " each with a binary encoding",
+                         lambda f: not f["binary"],
+                         lambda f: f["binary"]),),
+             because="no row passes through migkit, and a range is proved"
+                     " by two numbers read under the snapshot it was copied"
+                     " from"),
+        Rung("pass-through unawaited",
+             "the rows passed server to server, each range's commit not"
+             " waiting for the target's disk - recorded once it is there",
+             gives=frozenset({"row filter", "resume by chunk",
+                              "consistent as of"}),
+             needs=(Need("the same columns of the same types on both sides,"
+                         " each with a binary encoding",
+                         lambda f: not f["binary"],
+                         lambda f: f["binary"]),
+                    Need("a target that says how far its log is on disk",
+                         lambda f: (f["dst_version"] or 0) >= 100000,
+                         "{rung} needs a target of PostgreSQL 10 or later,"
+                         " which says how far its log is on disk"))),
+        Rung("pipe", "the rows passed through migkit as text and tallied",
+             gives=frozenset({"row filter", "resume by chunk"})),
+    )
+
+    BINARY_SQL = (
+        "select a.attname || chr(31) || format_type(a.atttypid, null)"
+        " || chr(31) || (t.typsend::oid <> 0 and t.typreceive::oid <> 0)::int"
+        " from pg_attribute a join pg_class c on c.oid = a.attrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " join pg_type t on t.oid = a.atttypid"
+        " where n.nspname = '{sch}' and c.relname = '{tbl}'"
+        " and a.attnum > 0 and not a.attisdropped")
+
+    def _binary_unfit(self, db, sch, tbl, cols):
+        """Why the columns a copy carries cannot pass in COPY's binary
+        encoding, or "": it names no type, so each value is read on the
+        target as the target's column type - both sides must hold each
+        column as the same type, one with a binary form."""
+        def read(side):
+            out = {}
+            sql = self.BINARY_SQL.format(sch=sch.replace("'", "''"),
+                                         tbl=tbl.replace("'", "''"))
+            for line in self._psql(side, db, sql).splitlines():
+                name, typ, ok = line.split("\x1f")
+                out[name] = (typ, ok == "1")
+            return out
+        try:
+            src, dst = read("src"), read("dst")
+        except Exception as e:  # noqa: BLE001 - said as the reason
+            return ("the columns' types could not be read: "
+                    + str(e).strip().splitlines()[-1][:100])
+        # every column of the source's, the ones computed there too: the
+        # range's digest reads them all on both sides (`_range_digest_sql`)
+        for c in list(cols) + sorted(set(src) - set(cols)):
+            if c not in dst:
+                return f"the target has no column {c}"
+            (ts, bs), (td, bd) = src.get(c, (None, False)), dst[c]
+            if ts != td:
+                return f"{c} is {ts} on the source and {td} on the target"
+            if c in cols and not (bs and bd):
+                return f"{c} ({ts}) has no binary encoding"
+        return ""
+
+    #: bytes from which a table is large enough for the streaming copy to
+    #: be timed against the table copier's ranges. The program's start and
+    #: its reads of the catalogue are paid once a table, and on a small
+    #: table they are most of what it costs; set, not measured -
+    #: `bench/same_engine_copy.py` times both ways at 1 and 5 GB
+    STREAM_FROM = 256 * 2 ** 20
+
+    #: how a whole table goes into a PostgreSQL target from a PostgreSQL
+    #: source, climbed per table on the seconds a byte each has measured -
+    #: this run's first, the hop's kept ones after (`_table_way`)
+    TABLE_WAYS = (
+        Rung("ranges", "the table copier's ranges",
+             gives=frozenset({"resume by chunk", "row filter"})),
+        Rung("streaming", "the streaming copy of the whole table, read"
+                          " under the table's snapshot and proved by both"
+                          " servers' digests of it",
+             needs=(Need("the streaming copy installed",
+                         lambda f: f["streaming"]),
+                    Need("a table large enough to repay starting it",
+                         lambda f: (f["bytes"] or 0)
+                         >= PostgresEngine.STREAM_FROM,
+                         "the table is small enough that starting the"
+                         " streaming copy costs more than it could save"),
+                    Need("a table no foreign key points at",
+                         lambda f: f["truncatable"],
+                         "{rung} empties the table first, which the target"
+                         " refuses while a foreign key points at it"),
+                    Need("the same columns of the same types on both sides",
+                         lambda f: not f["binary"],
+                         lambda f: f["binary"]))),
+    )
+
+    def _table_way(self, db, key, qt, cols, st, rf):
+        """The `Choice` of how the whole table goes (`TABLE_WAYS`): its
+        ranges where it has to resume by them or apply a row filter, and
+        otherwise the way measured cheaper a byte."""
+        from .. import movers
+        from ..decide import Facts, climb
+        need = []
+        if rf:
+            need.append("row filter")
+        if (st.get("ranges_done") or st.get("spans_done")
+                or st.get("last") is not None):
+            need.append("resume by chunk")
+        sch, tbl = self._split(key)
+        facts = Facts(
+            streaming=lambda: bool(movers.pgcopydb_runner())
+            and "streaming" not in self.__dict__.get("_ways_failed", {}),
+            bytes=lambda: (self.table_facts("src", db).get(key) or {}
+                           ).get("bytes"),
+            truncatable=lambda: self._truncatable(db, qt),
+            binary=lambda: self._binary_unfit(db, sch, tbl, cols or []))
+        costs = self._layered(self._work_key(self.TABLE_WORK), self.TABLE_WAYS,
+                              facts, "table way/")
+        return climb(key, self.TABLE_WAYS, facts, need, costs), costs, facts
+
+    def _stream_table(self, db, key, qt, cols, st, ck, log, way, costs,
+                      facts):
+        """The whole table through the streaming copy
+        (`movers.pgcopydb_table`) under a snapshot held here, then both
+        servers' digests of the whole table - the source's under that same
+        snapshot. True once they agree; False where the copy failed or the
+        digests differ, with why, and the table goes by its ranges."""
+        import time
+
+        from .. import movers
+        from . import pg_pass
+        snap = pg_pass.Snapshot(self, db)
+        began = time.monotonic()
+        try:
+            export = snap.lease()
+            ctx = pg_pass.TableCopy(self, db, key, qt, cols or [], "", 1)
+            try:
+                movers.pgcopydb_table(
+                    self.hop, db, key, export.id,
+                    max(1, int(getattr(self.hop, "workers", 1) or 1)),
+                    facts["bytes"], log)
+                same = (ctx.same(export, "") if (self.hop.options or {}).get(
+                    "verify_batches", True) else True)
+            finally:
+                snap.release(export)
+                ctx.close()
+        except Exception as e:  # noqa: BLE001 - said, and the ranges go
+            self.__dict__.setdefault("_ways_failed", {})["streaming"] = e
+            log(f"{key}: {way.said} did not finish"
+                f" ({str(e).strip().splitlines()[-1][:160] if str(e) else e})"
+                " - copying it by its ranges")
+            return False
+        finally:
+            snap.close()
+        if not same:
+            log(f"{key}: {way.said} left the target holding other rows than"
+                " the source's snapshot - copying it by its ranges")
+            return False
+        costs.saw("streaming", facts["bytes"] or 1, time.monotonic() - began)
+        st["done"] = True
+        ck.save()
+        log(f"{key}: copied whole by {way.said}")
+        return True
+
+    def _truncatable(self, db, qt):
+        """Whether the target lets `qt` be emptied by TRUNCATE: no foreign
+        key of any table points at it, which TRUNCATE refuses whatever
+        role the session loads as."""
+        name = qt.replace("'", "''")
+        return self._psql("dst", db, "select count(*) from pg_constraint"
+                                     " where contype = 'f' and confrelid ="
+                                     f" '{name}'::regclass").strip() == "0"
+
+    def _copy_ways(self, db, key, qt, cols, log):
+        """The table's ways (`pg_pass.Ways`): each range climbs `COPY_WAYS`
+        on this table's own measurements, so the pass-through is timed
+        against the pipe on the table itself and the cheaper per row taken
+        from then on; said once a table. None where the source's columns
+        could not be read: the pipe, as it always was."""
+        if not cols:
+            return None
+        from .. import ranges
+        from ..decide import Facts
+        from . import pg_pass
+        sch, tbl = self._split(key)
+        ctx = pg_pass.TableCopy(self, db, key, qt, cols,
+                                self._load_options(db, qt),
+                                ranges.active.workers)
+        facts = Facts(
+            binary=lambda: self._binary_unfit(db, sch, tbl, cols),
+            dst_version=lambda: self._server_version("dst",
+                                                     self._d("dst", db)))
+        return pg_pass.Ways(self, db, key, self.COPY_WAYS, facts, ctx, log)
 
     #: how a range the copier wrote is proved (`_copy_checked`)
     VERIFY_WAYS = (Rung("digest", "digesting the range on both servers"),
@@ -8846,15 +9187,44 @@ class PostgresEngine(Engine):
                                self._rows_of("src", db, key), log)
         pk = self._int_pk(db, sch, tbl)
         st["key"] = pk
+        cols = self._copy_cols(db, sch, tbl)
+        fresh = not (st.get("ranges_done") or st.get("spans_done")
+                     or st.get("last") is not None)
+        table_way, tcosts, tfacts = self._table_way(db, key, qt, cols, st,
+                                                    rf)
+        if len(table_way.ranked) > 1 \
+                or table_way.path != self.TABLE_WAYS[0].name:
+            log(f"{key}: {table_way.said} - {table_way.reason}")
+        if table_way.path == "streaming" and self._stream_table(
+                db, key, qt, cols, st, ck, log, table_way.rung, tcosts,
+                tfacts):
+            return
+        import time
+        began = time.monotonic()
+
+        def timed():
+            # the ranges' own rate a byte, where the table was large enough
+            # for the streaming copy to be timed against them
+            if fresh and (tfacts["bytes"] or 0) >= self.STREAM_FROM:
+                tcosts.saw("ranges", tfacts["bytes"],
+                           time.monotonic() - began)
         if not pk:
-            cols = self._copy_cols(db, sch, tbl)
             if self._copy_in_spans(db, key, qt, cols, rf, st, ck, log):
+                timed()
                 return
             log(f"{key}: no single int pk, single-shot copy")
+            ways = self._copy_ways(db, key, qt, cols, log)
+            if ways is not None:
+                later.callback(ways.close)
             self._copy_checked(db, qt, cols, rf or "",
                                f"delete from {qt} where {rf}" if rf
-                               else f"truncate {qt}", key, log)
+                               else f"truncate {qt}", key, log,
+                               way=(ways.pick(lambda mark: None)
+                                    if ways is not None else None))
+            if ways is not None:
+                ways.wait()
             st["done"] = True
+            timed()
             return
         mm = self._psql("src", db,
                         f'select coalesce(min("{pk}"), 0)||\'|\'||'
@@ -8876,40 +9246,78 @@ class PostgresEngine(Engine):
                 self._quote_ident, qt, pk, every, rf))]
         todo = (ranges.plan(st, lo, hi, edges, ck.save, table=key)
                 if has == "1" else [])
-        cols = self._copy_cols(db, sch, tbl)
+        ways = self._copy_ways(db, key, qt, cols, log) if todo else None
+        if ways is not None:
+            later.callback(ways.close)
+        # the table's one range, not begun: the whole table in one
+        # transaction, which the pass-through empties and loads FREEZE
+        whole = (not rf and len(todo) == 1
+                 and len(st.get("ranges") or ()) == 1)
+
+        def sweep():
+            # Each chunk replaces its own key range, so a target row whose
+            # key lies outside the source's whole range was never in any
+            # chunk and stayed - a target carrying an earlier attempt kept
+            # its strays.
+            outside = (f'not ("{pk}" between {lo} and {hi})' if has == "1"
+                       else "true")
+            if rf:
+                outside = f"({outside}) and ({rf})"
+            gone = self._psql("dst", db, f"with d as (delete from {qt} where"
+                                         f" {outside} returning 1)"
+                                         " select count(*) from d")
+            if gone and gone != "0":
+                log(f"{key}: removed {int(gone):,} target rows the source"
+                    " does not have")
 
         def one(rng):
             after, upto = rng
-            ranges.started(st, after, self.snapshot_mark("src", db), ck.save)
+            if ways is not None:
+                ways.ctx.raise_failed()
             pred = f'"{pk}" > {after} and "{pk}" <= {upto}'
             if rf:
                 pred = f"({pred}) and ({rf})"
-            sent = self._copy_checked(db, qt, cols, pred,
-                                      f"delete from {qt} where {pred}",
-                                      f"{key} {pk} {after + 1:,} to"
-                                      f" {upto:,}", log)
-            ranges.finished(st, after, ck.save)
-            log(f"{key}: {pk} {after + 1:,} to {upto:,} copied"
-                f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
-                " ranges)")
+            what = f"{key} {pk} {after + 1:,} to {upto:,}"
+
+            def proved():
+                ranges.finished(st, after, ck.save)
+                log(f"{key}: {pk} {after + 1:,} to {upto:,} copied"
+                    f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
+                    " ranges)")
+
+            def begin(mark):
+                ranges.started(st, after, mark, ck.save)
+            pre = f"delete from {qt} where {pred}"
+            if ways is None:
+                begin(self.snapshot_mark("src", db))
+                way = None
+            else:
+                way = ways.pick(begin)
+                if whole and way.passes and self._truncatable(db, qt):
+                    # what the table held beyond the source's rows is said
+                    # before TRUNCATE takes it with the rest
+                    sweep()
+                    pre = f"truncate {qt}"
             # the rows it moved, for the move's pace
-            return sent
-        slots.each(todo, one)
-        # Each chunk replaces its own key range, so a target row whose key
-        # lies outside the source's whole range was never in any chunk and
-        # stayed - a target carrying an earlier attempt kept its strays.
-        outside = (f'not ("{pk}" between {lo} and {hi})' if has == "1"
-                   else "true")
-        if rf:
-            outside = f"({outside}) and ({rf})"
-        gone = self._psql("dst", db, f"with d as (delete from {qt} where"
-                                     f" {outside} returning 1)"
-                                     " select count(*) from d")
-        if gone and gone != "0":
-            log(f"{key}: removed {int(gone):,} target rows the source does"
-                " not have")
+            return self._copy_checked(db, qt, cols, pred, pre, what, log,
+                                      way=way, proved=proved)
+        failed = None
+        try:
+            slots.each(todo, one)
+        except BaseException as e:  # noqa: BLE001 - raised once all is kept
+            failed = e
+        if ways is not None:
+            # the ranges copied before a failure are kept once proved
+            try:
+                ways.wait()
+            except BaseException as e:  # noqa: BLE001 - the first is raised
+                failed = failed or e
+        if failed is not None:
+            raise failed
+        sweep()
         st["done"] = True
         ck.save()
+        timed()
 
     def _repl_name(self):
         return "migkit_" + self.hop.name.replace("-", "_")

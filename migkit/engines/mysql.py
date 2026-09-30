@@ -6020,17 +6020,44 @@ class MySQLEngine(Engine):
         # doubled where the statement also carries parameters, or a
         # `like 'a%'` filter would be read as a placeholder.
         rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
+        fresh = not (st.get("ranges_done") or st.get("last") is not None)
+        way, tcosts, tfacts = self._table_way(db, t, key, st, rf)
+        if len(way.ranked) > 1 or way.path != self.TABLE_WAYS[0].name:
+            log(f"{key}: {way.said} - {way.reason}")
+        if way.path == "dump" and self._dump_table(db, t, key, st, ck, log,
+                                                   way.rung, tcosts, tfacts):
+            return
+        ctx = self._pass_ctx(db, t, log) if way.path == "pass-through" \
+            else None
+        if ctx is not None:
+            later.callback(ctx.close)
+        began = time.monotonic()
+
+        def timed():
+            # the way's own rate a byte, where the table was large enough
+            # for the ways to be timed against each other
+            if fresh and (tfacts["bytes"] or 0) >= self.STREAM_FROM \
+                    and not getattr(ctx, "given_up", None):
+                tcosts.saw(way.path, tfacts["bytes"],
+                           time.monotonic() - began)
         sconn, dconn = self._conn("src"), self._conn("dst")
         try:
             if not intpk:
                 log(f"{key}: no single int pk, single-shot copy")
-                self._range_checked(
-                    sconn, dconn, db, t, collist, ph,
-                    f" where ({rf})" if rf else "", (),
-                    (f"delete from `{ddb}`.`{t}` where ({rf})" if rf
-                     else f"truncate `{ddb}`.`{t}`"), rf, key, log)
+                clear = (f"delete from `{ddb}`.`{t}` where ({rf})" if rf
+                         else f"truncate `{ddb}`.`{t}`")
+                if ctx is None or self._passed(
+                        ctx, f"({rf})" if rf else "",
+                        f"delete from `{ddb}`.`{t}`"
+                        + (f" where ({rf})" if rf else ""), None, key,
+                        not rf, log) is None:
+                    self._range_checked(
+                        sconn, dconn, db, t, collist, ph,
+                        f" where ({rf})" if rf else "", (), clear, rf, key,
+                        log)
                 st["done"] = True
                 ck.save()
+                timed()
                 return
             mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
                          f" coalesce(max(`{intpk}`), 0),"
@@ -6057,6 +6084,26 @@ class MySQLEngine(Engine):
             # own transaction on the target
             local = threading.local()
 
+            # the table's one range, not begun: emptied whole in the
+            # transaction that loads it (`my_pass`)
+            whole = (not rf and len(todo) == 1
+                     and len(st.get("ranges") or ()) == 1)
+
+            def sweep():
+                # each chunk replaces its own key range, so a target row
+                # outside the source's whole range was in none of them
+                outside = (f"not (`{intpk}` between {lo} and {hi})" if has
+                           else "true")
+                if rf:
+                    outside = f"({outside}) and ({rf})"
+                with dconn.cursor() as dcur:
+                    gone = dcur.execute(f"delete from `{ddb}`.`{t}`"
+                                        f" where {outside}")
+                dconn.commit()
+                if gone:
+                    log(f"{key}: removed {gone:,} target rows the source"
+                        " does not have")
+
             def one(rng):
                 after, upto = rng
                 if not hasattr(local, "conns"):
@@ -6066,6 +6113,23 @@ class MySQLEngine(Engine):
                                ck.save)
                 rng_sql = (f"`{intpk}` > {int(after)} and `{intpk}` <="
                            f" {int(upto)}")
+                where = f"({rng_sql}) and ({rf})" if rf else rng_sql
+                if ctx is not None:
+                    if whole:
+                        # what the table held beyond the source's rows is
+                        # said before the load empties it with the rest
+                        sweep()
+                    n = self._passed(
+                        ctx, where, f"delete from `{ddb}`.`{t}`" + (
+                            "" if whole else f" where {where}"), intpk,
+                        f"{key} {intpk} {after + 1:,} to {upto:,}", whole,
+                        log)
+                    if n is not None:
+                        ranges.finished(st, after, ck.save)
+                        log(f"{key}: {intpk} {after + 1:,} to {upto:,}"
+                            f" copied ({len(st['ranges_done'])} of"
+                            f" {len(st['ranges'])} ranges)")
+                        return n
                 sent = self._range_checked(
                     local.conns[0], local.conns[1], db, t, collist, ph,
                     f" where `{intpk}` > %s and `{intpk}` <= %s" + rfp,
@@ -6081,7 +6145,10 @@ class MySQLEngine(Engine):
                 # the rows it moved, for the move's pace
                 return sent
             opened = []
-            hop = self._picklable_hop() if slots.workers > 1 else None
+            # a range passed server to server has no work per row here, so
+            # threads; the rows' own way is the driver's and Python's
+            hop = (self._picklable_hop() if slots.workers > 1
+                   and ctx is None else None)
             try:
                 if hop is not None and len(todo) > 1:
                     # a process a range: the copier's work per row is the
@@ -6108,24 +6175,208 @@ class MySQLEngine(Engine):
                 for a, b in opened:
                     a.close()
                     b.close()
-            # each chunk replaces its own key range, so a target row
-            # outside the source's whole range was in none of them
-            outside = (f"not (`{intpk}` between {lo} and {hi})" if has
-                       else "true")
-            if rf:
-                outside = f"({outside}) and ({rf})"
-            with dconn.cursor() as dcur:
-                gone = dcur.execute(f"delete from `{ddb}`.`{t}`"
-                                    f" where {outside}")
-            dconn.commit()
-            if gone:
-                log(f"{key}: removed {gone:,} target rows the source"
-                    " does not have")
+            sweep()
             st["done"] = True
             ck.save()
+            timed()
         finally:
             sconn.close()
             dconn.close()
+
+    #: bytes from which a table is large enough for its ways to be timed
+    #: against each other. The dump's and the load's starts are paid once a
+    #: table, and on a small table they are most of what it costs; set, not
+    #: measured - `bench/same_engine_copy.py` times every way at 1 and 5 GB
+    STREAM_FROM = 256 * 2 ** 20
+
+    #: how a whole table goes into a MySQL target from a MySQL source,
+    #: climbed per table on the seconds a byte each has measured - this
+    #: run's first, the hop's kept ones after (`_table_way`)
+    TABLE_WAYS = (
+        Rung("pass-through",
+             "the rows rendered by the source as the target's bulk load"
+             " reads them and passed straight into it, each range digested"
+             " by both servers",
+             gives=frozenset({"row filter", "resume by chunk"}),
+             needs=(Need("the source's own client installed",
+                         lambda f: f["client"]),
+                    Need("a target that takes a bulk load",
+                         lambda f: f["loads"],
+                         "{rung} needs the target to take a bulk load"
+                         " (local_infile on, and a driver it can be pinned"
+                         " in)"),
+                    Need("columns the load reads back as they were",
+                         lambda f: not f["unfit"],
+                         lambda f: f["unfit"])),
+             because="no row passes through migkit, and a range is proved"
+                     " by two numbers each server computes"),
+        Rung("rows", "the table copier's rows",
+             gives=frozenset({"row filter", "resume by chunk"})),
+        Rung("dump", "the parallel dump and load of the whole table",
+             needs=(Need("the dump and load programs installed",
+                         lambda f: f["dump"]),
+                    Need("a table large enough to repay starting them",
+                         lambda f: (f["bytes"] or 0)
+                         >= MySQLEngine.STREAM_FROM,
+                         "the table is small enough that starting the dump"
+                         " costs more than it could save"))),
+    )
+
+    def _table_way(self, db, t, key, st, rf):
+        """The `Choice` of how the whole table goes (`TABLE_WAYS`): by
+        ranges where it has to resume by them or apply a row filter, and
+        otherwise the way measured cheaper a byte."""
+        from .. import movers
+        from ..decide import Facts, climb
+        need = []
+        if rf:
+            need.append("row filter")
+        if st.get("ranges_done") or st.get("last") is not None:
+            need.append("resume by chunk")
+        facts = Facts(
+            client=lambda: bool(which("mysql")),
+            loads=lambda: self._loads_here(),
+            unfit=lambda: self._pass_unfit(db, t),
+            dump=lambda: bool(which("mydumper") and which("myloader"))
+            and "dump" not in self.__dict__.get("_ways_failed", {}),
+            bytes=lambda: (self.table_facts("src", db).get(t) or {}
+                           ).get("bytes"))
+        costs = self._layered(self._work_key(self.TABLE_WORK), self.TABLE_WAYS,
+                              facts, "table way/")
+        return climb(key, self.TABLE_WAYS, facts, need, costs), costs, facts
+
+    def _loads_here(self):
+        """Whether the target takes the pinned bulk load."""
+        if _loading() is None:
+            return False
+        conn = self._conn("dst")
+        try:
+            return self._loads(conn)
+        finally:
+            conn.close()
+
+    def _pass_columns(self, db, t):
+        """[(name, kind)] of the columns the pass-through carries - every
+        stored column, in the source's order - or a reason it cannot."""
+        from . import my_pass
+        rows = self._q("src", "select column_name, data_type, extra from"
+                              " information_schema.columns where"
+                              " table_schema = %s and table_name = %s"
+                              " order by ordinal_position", (db, t))
+        there = {r[0]: str(r[1]).lower() for r in self._q(
+            "dst", "select column_name, data_type from"
+                   " information_schema.columns where table_schema = %s"
+                   " and table_name = %s", (self._d("dst", db), t))}
+        out = []
+        for name, typ, extra in rows:
+            if "GENERATED" in str(extra).upper():
+                continue
+            typ = str(typ).lower()
+            k = my_pass.kind(typ)
+            if k is None:
+                return f"{name} ({typ}) has no text the load reads back"
+            if name not in there:
+                return f"the target has no column {name}"
+            if there[name] != typ:
+                return f"{name} is {typ} on the source and {there[name]} on" \
+                       " the target"
+            out.append((name, k))
+        return out
+
+    def _pass_unfit(self, db, t):
+        got = self._pass_columns(db, t)
+        if isinstance(got, str):
+            return got
+        sc, _, _ = self._comparable_columns(db, self, t, self, t)
+        missing = sorted({n for n, _ in got} - {n for n, _ in sc})
+        if missing:
+            return (f"{', '.join(missing[:3])} cannot be digested, so a"
+                    " range could not be proved")
+        return ""
+
+    def _range_digest_sql(self, side, db, t, where="", columns=None):
+        """The one statement both servers answer for a range of a table:
+        its rows and the digest `neutral_digest` takes of them, over the
+        columns both render (`_comparable_columns`, read once a table's
+        copy where the caller keeps them)."""
+        from .. import canon
+        sc, dc, _ = columns or self._comparable_columns(db, self, t, self, t)
+        row = canon.row_expr("mysql", sc if side == "src" else dc)
+        return (f"select count(*), {canon.digest_expr('mysql', row)}"
+                f" from `{self._d(side, db)}`.`{t}`"
+                + (f" where {where}" if where else ""))
+
+    def _client_tls(self, side):
+        """The endpoint's TLS options (`mysql_tls`) as the client's own
+        flags."""
+        o = (self.hop.source if side == "src" else self.hop.target
+             ).options or {}
+        if o.get("ssl_ca"):
+            out = [f"--ssl-ca={o['ssl_ca']}",
+                   "--ssl-mode=" + ("VERIFY_IDENTITY"
+                                    if o.get("ssl_verify_identity", True)
+                                    else "VERIFY_CA")]
+            out += [f"--{k.replace('_', '-')}={o[k]}"
+                    for k in ("ssl_cert", "ssl_key") if o.get(k)]
+            return out
+        return ["--ssl-mode=REQUIRED"] if o.get("ssl") else []
+
+    def _pass_ctx(self, db, t, log):
+        from . import my_pass
+        got = self._pass_columns(db, t)
+        if isinstance(got, str):
+            return None
+        return my_pass.TableCopy(self, db, t, got, log)
+
+    def _passed(self, ctx, where, clear, order, what, whole, log):
+        """One range through the pass-through (`my_pass.TableCopy.copy`):
+        its rows, or None where the target did not take it as the source
+        read it - said, the pass-through given up on for the table, and the
+        range left to the rows' way, which reads it back and stops the
+        copy on it if it still differs."""
+        from . import my_pass
+        if getattr(ctx, "given_up", None):
+            return None
+        try:
+            return ctx.copy(where, clear, order, what, whole=whole)
+        except my_pass.Different as e:
+            ctx.given_up = str(e)
+            log(f"{what}: passed server to server, {e} - copying it again"
+                " as rows")
+        except Exception as e:  # noqa: BLE001 - said, and the rows go
+            ctx.given_up = str(e)
+            log(f"{what}: could not pass server to server"
+                f" ({str(e).strip().splitlines()[-1][:160] if str(e) else e})"
+                " - copying it as rows")
+        return None
+
+    def _dump_table(self, db, t, key, st, ck, log, rung, costs, facts):
+        """The whole table through the parallel dump and load
+        (`movers.mydumper_table`), then both servers' digests of it. True
+        once they agree; False where the programs failed or the source
+        moved on while it was dumped, with why, and the table goes by its
+        ranges, each proved."""
+        from .. import movers
+        began = time.monotonic()
+        try:
+            movers.mydumper_table(self.hop, db, t,
+                                  max(1, int(self.hop.workers or 1)),
+                                  self._rows_of("src", db, t), log)
+        except Exception as e:  # noqa: BLE001 - said, and the ranges go
+            self.__dict__.setdefault("_ways_failed", {})["dump"] = e
+            log(f"{key}: {rung.said} did not finish"
+                f" ({str(e).strip().splitlines()[-1][:160] if str(e) else e})"
+                " - copying it by its ranges")
+            return False
+        if not self._range_same(db, t, None):
+            log(f"{key}: {rung.said} left the target holding other rows"
+                " than the source now does - copying it by its ranges")
+            return False
+        costs.saw("dump", facts["bytes"] or 1, time.monotonic() - began)
+        st["done"] = True
+        ck.save()
+        log(f"{key}: copied whole by {rung.said}")
+        return True
 
     #: rows a read of the table copier takes from the source at a time,
     #: and the bytes it holds at most: rows of large values are read fewer
@@ -7063,8 +7314,16 @@ def _loading():
                     step = max(16 * 1024,
                                min(conn.max_allowed_packet, 1 << 20) - 1024)
                     data = feed[1]
-                    for at in range(0, len(data), step):
-                        conn.write_packet(data[at:at + step])
+                    if hasattr(data, "read"):
+                        # a stream: sent as it arrives, never held whole
+                        while True:
+                            chunk = data.read(step)
+                            if not chunk:
+                                break
+                            conn.write_packet(chunk)
+                    else:
+                        for at in range(0, len(data), step):
+                            conn.write_packet(data[at:at + step])
             finally:
                 conn.write_packet(b"")
                 ok = conn._read_packet()
@@ -7190,17 +7449,37 @@ def _load_text(conn, rows, width, types=()):
 
 
 def _load(cur, db, table, names, rows, types=None):
+    kinds, data = _load_text(cur.connection, rows, len(names),
+                             [(types or {}).get(n) for n in names])
+    got = _load_feed(cur, db, table, names, kinds, data)
+    # the load's own answer counts its warnings - no statement more to
+    # ask; measured, 70,000 of them are answered as 65,535, never as 0
+    warned = int(cur.warning_count or 0)
+    if warned or got != len(rows):
+        raise _LoadRefused(f"{got:,} of {len(rows):,} rows taken,"
+                           f" {warned:,} warnings")
+    return got
+
+
+def _load_feed(cur, db, table, names, kinds, data):
+    """The pinned `load data local` of `data` - bytes, or a stream sent as
+    it arrives - into `names`, a column's text turned back as its kind
+    says: `hex` through `unhex`, `number` through a cast to unsigned (a
+    BIT, which the load reads as characters otherwise). Returns the rows
+    the server says it took; its warnings are the load's own answer's
+    (`cur.warning_count`)."""
     import uuid
 
     def q(n):
         return "`" + str(n).replace("`", "``") + "`"
-    kinds, data = _load_text(cur.connection, rows, len(names),
-                             [(types or {}).get(n) for n in names])
     cols, sets = [], []
     for i, (n, k) in enumerate(zip(names, kinds)):
         if k == "hex":
             cols.append(f"@v{i}")
             sets.append(f"{q(n)} = unhex(@v{i})")
+        elif k == "number":
+            cols.append(f"@v{i}")
+            sets.append(f"{q(n)} = cast(@v{i} as unsigned)")
         else:
             cols.append(q(n))
     name = f"rows-{uuid.uuid4().hex}"
@@ -7214,10 +7493,4 @@ def _load(cur, db, table, names, rows, types=None):
             + (f" set {', '.join(sets)}" if sets else ""))
     finally:
         cur.connection.feed = None
-    # the load's own answer counts its warnings - no statement more to
-    # ask; measured, 70,000 of them are answered as 65,535, never as 0
-    warned = int(cur.warning_count or 0)
-    if warned or got != len(rows):
-        raise _LoadRefused(f"{got:,} of {len(rows):,} rows taken,"
-                           f" {warned:,} warnings")
     return got

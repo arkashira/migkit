@@ -210,6 +210,92 @@ class HopCosts:
         planner.record_rate(self.hop, self.prefix + name, units, seconds)
 
 
+class Layered:
+    """Costs read from the first mapping that has them - this run's own
+    before the hop's kept ones - and each measurement written into
+    every one, so a later run starts from what this one saw."""
+
+    def __init__(self, *layers):
+        self.layers = [c for c in layers if c is not None]
+
+    def get(self, name, default=None):
+        for c in self.layers:
+            got = c.get(name)
+            if got is not None:
+                return got
+        return default
+
+    def saw(self, name, units, seconds):
+        for c in self.layers:
+            c.saw(name, units, seconds)
+
+
+#: the cost a rung being timed for the first time stands at, so the next
+#: unit tries the next rung never timed rather than a second of the same
+_TIMING = 1e18
+
+
+class _InFlight:
+    """A work's costs with its rungs being timed now ranked last."""
+
+    def __init__(self, costs, timing):
+        self.costs, self.timing = costs, timing
+
+    def get(self, name, default=None):
+        got = self.costs.get(name)
+        if got is not None:
+            return got
+        return _TIMING if name in self.timing else default
+
+
+class Trials:
+    """One climb for each unit of a larger work - the ranges of one table -
+    on that work's own measurements, from threads copying units side by
+    side. A rung never timed is tried on one unit; the units started
+    before it finishes go on to the next rung never timed, not to a second
+    trial of the same one, and once every rung holding is timed each unit
+    takes the cheapest. A rung that failed on this work (`give_up`) is
+    passed over for the rest of it, and the reason is said the way any
+    other rung's is."""
+
+    def __init__(self, work, rungs, facts=None, need=(), costs=None):
+        import dataclasses
+        import threading
+        self.work, self.need = work, need
+        self.facts = facts if facts is not None else Facts()
+        self.costs = costs if costs is not None else Costs()
+        self.given_up = {}
+        self._timing = set()
+        self._lock = threading.Lock()
+        self.rungs = tuple(dataclasses.replace(r, needs=tuple(r.needs) + (
+            Need("not given up on here",
+                 lambda f, n=r.name: n not in self.given_up,
+                 lambda f, n=r.name: self.given_up.get(n)),))
+            for r in rungs)
+
+    def pick(self):
+        """The `Choice` for the next unit."""
+        with self._lock:
+            got = climb(self.work, self.rungs, self.facts, self.need,
+                        _InFlight(self.costs, self._timing))
+            if got.rung is not None and \
+                    self.costs.get(got.rung.name) is None:
+                self._timing.add(got.rung.name)
+            return got
+
+    def took(self, name, units, seconds):
+        """A unit done on `name`: `units` of work in `seconds`."""
+        with self._lock:
+            self.costs.saw(name, units, seconds)
+            self._timing.discard(name)
+
+    def give_up(self, name, why):
+        """`name` failed here and is not tried again on this work."""
+        with self._lock:
+            self.given_up.setdefault(name, why)
+            self._timing.discard(name)
+
+
 def _tied(a, b):
     return abs(a - b) <= TIE * max(abs(a), abs(b))
 

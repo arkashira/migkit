@@ -4182,6 +4182,10 @@ class Engine:
                 conn.close()
         return one()
 
+    #: the work a whole table's copy is timed as, a byte of the source's
+    #: table a unit, so tables of every size are held to one another
+    TABLE_WORK = "table copy, a byte"
+
     @staticmethod
     def _work_key(work, table=None, run=None):
         """What a way's cost is kept under: the kind of work, the table,
@@ -4208,6 +4212,38 @@ class Engine:
         self.__dict__.setdefault("_way_cost", {}).setdefault(
             key, Costs()).saw(way, rows, seconds)
 
+    def _trials(self, key, ways, facts=None):
+        """`_cheaper` for work whose units run side by side - the ranges of
+        one table: a `decide.Trials` on the same costs `_cheaper` climbs and
+        `measured_ways` reports, so a way being timed on one unit is not
+        tried on every unit started meanwhile, a way that failed on the
+        work is passed over for the rest of it, and `ways` may need facts
+        (`facts`, read once each). Kept for the engine's life, a later
+        copy of the table standing on what the first measured."""
+        from ..decide import Costs, Trials
+        kept = self.__dict__.setdefault("_way_trials", {})
+        if key not in kept:
+            kept[key] = Trials(key[0], ways, facts, costs=self.__dict__
+                               .setdefault("_way_cost", {})
+                               .setdefault(key, Costs()))
+            self.__dict__.setdefault("_way_rungs", {})[key] = \
+                kept[key].rungs
+        elif facts is not None:
+            kept[key].facts = facts
+        self.__dict__.setdefault("_way_facts", {})[key] = kept[key].facts
+        return kept[key]
+
+    def _layered(self, key, ways, facts, prefix):
+        """The costs a climb of `ways` for the work `key` names reads: this
+        engine's own for that work (`_cheaper`'s, which `measured_ways`
+        reports) before the hop's kept ones under `prefix` - and a
+        measurement written into both, so the next run starts from it."""
+        from ..decide import Costs, HopCosts, Layered
+        self.__dict__.setdefault("_way_rungs", {})[key] = tuple(ways)
+        self.__dict__.setdefault("_way_facts", {})[key] = facts
+        return Layered(self.__dict__.setdefault("_way_cost", {})
+                       .setdefault(key, Costs()), HopCosts(self.hop, prefix))
+
     def measured_ways(self):
         """What each way of a piece of work cost here, in seconds a row,
         and the one taken now: [{"work", "table", "rows_from",
@@ -4216,6 +4252,7 @@ class Engine:
         once."""
         from ..decide import climb
         rungs = self.__dict__.get("_way_rungs", {})
+        facts = self.__dict__.get("_way_facts", {})
         out = []
         for key, at in sorted(self.__dict__.get("_way_cost", {}).items(),
                               key=lambda kv: str(kv[0])):
@@ -4223,7 +4260,8 @@ class Engine:
             done = bool(ways) and all(w.name in at for w in ways)
             out.append({"work": key[0], "table": key[1],
                         "rows_from": key[2], "seconds_a_row": dict(at),
-                        "chosen": climb(key[0], ways, costs=at).path
+                        "chosen": climb(key[0], ways, facts.get(key),
+                                        costs=at).path
                         if done else None})
         return out
 

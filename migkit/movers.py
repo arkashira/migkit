@@ -887,6 +887,96 @@ def _rebuild(names, build, workers, log):
 _SET_ASIDE_CLAIM = threading.Lock()
 
 
+class Beside:
+    """Index builds of a finished table run while the next tables copy.
+
+    A table's copier set its secondary indexes aside and built them on its
+    way out, holding its place among the tables copied at once until the
+    last index was built - so the next table waited for another table's
+    index builds, and the target's cores the builds left idle went
+    unused. Handed here, a table's builds run on a thread of their own,
+    one table's at a time, and the copier goes on to the next table; the
+    copy of the database waits for them before it ends (`wait`), and a
+    build that failed is said and left to the record the window keeps, as
+    it was when it ran inline. A move stopped meanwhile leaves the
+    indexes to that record: the next run builds them.
+    """
+
+    def __init__(self, log=None):
+        from concurrent.futures import ThreadPoolExecutor
+        self.log = log
+        self._pool = ThreadPoolExecutor(1, thread_name_prefix="migkit-index")
+        self._futs = []
+
+    def run(self, fn):
+        self._futs.append(self._pool.submit(fn))
+
+    def wait(self):
+        self._pool.shutdown(wait=True)
+        failed = None
+        for f in self._futs:
+            if f.exception() is not None and failed is None:
+                failed = f.exception()
+        if failed is not None:
+            raise failed
+
+
+#: the builds of the copy in progress, seen from every thread copying it
+_BESIDE = {"active": None}
+
+
+class builds_beside:
+    """The context a database's tables are copied in with their index
+    builds beside the copy (`Beside`)."""
+
+    def __init__(self, log=None):
+        self.log = log
+        self.beside = None
+        self._before = None
+
+    def __enter__(self):
+        self._before = _BESIDE["active"]
+        self.beside = _BESIDE["active"] = Beside(self.log)
+        return self.beside
+
+    def __exit__(self, *exc):
+        try:
+            self.beside.wait()
+        finally:
+            _BESIDE["active"] = self._before
+        return False
+
+
+def _pg_build_settings(hop, db, at_once):
+    """The session settings each index build on a PostgreSQL target runs
+    under, from what the target says of itself - never a server setting.
+    `max_parallel_maintenance_workers`: the target's CPUs shared among the
+    builds running at once, the leader counted, where its CPUs can be read
+    (`capacity`); `maintenance_work_mem`: a share of `shared_buffers` - the
+    memory the server was sized with - for each build at once, never below
+    what the session already has and at most 2 GB. "" where neither can
+    be told."""
+    from .engines.postgres import PostgresEngine
+    try:
+        got = _pg_psql(hop, db, "select pg_size_bytes(current_setting("
+                                "'maintenance_work_mem')) || '|' ||"
+                                " pg_size_bytes(current_setting("
+                                "'shared_buffers'))").strip()
+        mwm, shared = (int(x) for x in got.split("|"))
+        cpus = PostgresEngine(hop).capacity("dst", db).get("cpus")
+    except Exception:  # noqa: BLE001 - the server's own defaults, then
+        return ""
+    at_once = max(1, int(at_once))
+    out = []
+    share = min(2 * 2 ** 30, shared // (2 * at_once))
+    if share > mwm:
+        out.append(f"set maintenance_work_mem = '{share // 1024}kB'")
+    if cpus:
+        out.append("set max_parallel_maintenance_workers ="
+                   f" {max(0, int(cpus) // at_once - 1)}")
+    return "; ".join(out) + ("; " if out else "")
+
+
 def _before_last(sql, anchor, text):
     at = sql.rindex(anchor)
     return sql[:at] + text + sql[at:]
@@ -984,10 +1074,26 @@ class _IndexWindow:
         return self
 
     def __exit__(self, *exc):
+        # one table's: built beside the next tables' copy where the
+        # database's copy runs them there (`Beside`)
+        beside = _BESIDE["active"]
+        if beside is not None and self.table and self.dropped:
+            beside.run(self._put_back)
+            return False
+        self._put_back()
+        return False            # never swallow the load's own exception
+
+    def _put_back(self):
+        """Every index set aside built again, each build under the
+        session settings the target's size gives (`_pg_build_settings`)."""
         from . import indexes as _ix
+        settings = (_pg_build_settings(self.hop, self.db,
+                                       min(int(self.workers or 1),
+                                           len(self.dropped)))
+                    if self.dropped else "")
         rebuilt, failed = _rebuild(
             self.dropped, lambda name: _pg_psql(self.hop, self.db,
-                                                self.ddl[name]),
+                                                settings + self.ddl[name]),
             self.workers, self.log)
         # a table's own window, or one that only looked for what a dead
         # load left, says something only where it did something
@@ -995,7 +1101,6 @@ class _IndexWindow:
             self.log(_ix.summary(self.dropped, rebuilt, failed))
         if not failed:
             self.record.done()
-        return False            # never swallow the load's own exception
 
 
 def pgdump_move(hop, db, workers, go, log):
@@ -1728,6 +1833,16 @@ class _MyIndexWindow:
         return self
 
     def __exit__(self, *exc):
+        # one table's: built beside the next tables' copy where the
+        # database's copy runs them there (`Beside`)
+        beside = _BESIDE["active"]
+        if beside is not None and self.table and self.dropped:
+            beside.run(self._put_back)
+            return False
+        self._put_back()
+        return False
+
+    def _put_back(self):
         from . import indexes as _ix
         # a table's indexes in one statement: InnoDB reads the table once
         # for all of them, where an ALTER each read it once each and waited
@@ -1752,7 +1867,6 @@ class _MyIndexWindow:
             self.log(_ix.summary(self.dropped, rebuilt, failed))
         if not failed:
             self.record.done()
-        return False
 
 
 def excluded_tables(hop, db, tables, qualifier="public"):
@@ -2218,12 +2332,14 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
     load = ["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
             "-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
             "--threads", str(workers)]
-    if _my_target_logs(hop):
+    if (hop.options or {}).get("target_has_replicas", True) is not False \
+            and _my_target_logs(hop):
         # the loader turns the binlog off for its own sessions unless told
         # otherwise. Measured on 8.4: a replica of the target received the
         # tables the move created and none of their 300,000 rows, and said
         # nothing - and a point-in-time restore of the target, which
-        # replays the same log, would not have them either
+        # replays the same log, would not have them either. Left off only
+        # where the hop states its target has no replicas
         load.append(tool_flag("myloader", "--enable-binlog"))
     # one JSON object per event, table by table - what the progress lines
     # are read from. A build without it just gives no per-table lines.
@@ -2231,6 +2347,41 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
         if "--machine-log-json" in _long_options(program):
             cmd += ["--machine-log-json", "-v", "3"]
     return dump, load
+
+
+def mydumper_table(hop, db, table, workers, rows, log=None):
+    """One table through the parallel dump and load: the target's table
+    emptied, the source's dumped in chunks for `workers` threads, loaded.
+    Raises where either program fails; the caller proves the rest.
+
+    What the table copier's own pass-through is timed against, table by
+    table (`MySQLEngine.TABLE_WAYS`)."""
+    import shutil
+
+    from .engines.mysql import MySQLEngine
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", table)
+    outdir = hop.report_dir(db) / f"dump-table-{safe}"
+    shutil.rmtree(outdir, ignore_errors=True)
+    dump, load = _mydumper_commands(hop, db, workers, outdir)
+    from . import ranges
+    per = max(ranges.LEAST, int(rows or 0) // max(1, int(workers)))
+    dump += ["-T", f"{db}.{table}", "--rows", str(per)]
+    eng = MySQLEngine(hop)
+    conn = eng._conn("dst")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("set foreign_key_checks = 0")
+            cur.execute(f"truncate table `{eng._d('dst', db)}`"
+                        f".`{table.replace('`', '``')}`")
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        with _LocalCopy(outdir):
+            _sh(dump, {"MYSQL_PWD": hop.source.password}, log)
+            _sh(load, {"MYSQL_PWD": hop.target.password}, log)
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
 
 
 def _my_target_logs(hop):
@@ -3160,6 +3311,63 @@ def pgcopydb_move(hop, db, workers, go, log):
     _pg_finish_created(hop, db, log)
     _pg_carry_sequences(hop, db, log)
     return steps
+
+
+def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
+    """One table through the streaming copy, read under `snapshot` - an
+    export the caller holds open, so the caller's digest of the source
+    reads exactly what was copied - and split for `workers` jobs where it
+    is larger than a share of `size` bytes. The table is emptied by the
+    copy itself. Raises where the copy fails; the caller proves the rest.
+
+    What the table copier's own pass-through is timed against, table by
+    table (`PostgresEngine.TABLE_WAYS`)."""
+    import os
+    import shutil
+    from urllib.parse import quote
+    s, t = hop.source, hop.target
+    ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
+    how = pgcopydb_runner()
+    if not how:
+        raise RuntimeError("the streaming copy is not installed here")
+    base = hop.report_dir(db)
+    work = base / f"streaming-table-{re.sub(r'[^A-Za-z0-9_.-]', '_', table)}"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    filters = work / "filters.ini"
+    filters.write_text(f"[include-only-table]\n{table}\n")
+    part = max(1, int(size or 0) // max(1, int(workers)) // 1024)
+    args = ["copy", "table-data", "--table-jobs", str(workers),
+            "--split-tables-larger-than", f"{part}kB",
+            "--snapshot", snapshot]
+    passfile = base / "streaming-table.pgpass"
+    uris = {}
+    if how == "local":
+        src = (f"postgresql://{quote(s.user or '', safe='')}"
+               f"@{s.host}:{s.port}/{db}")
+        dst = (f"postgresql://{quote(t.user or '', safe='')}"
+               f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
+        cmd = ["pgcopydb", *args, "--dir", str(work / "state"),
+               "--filters", str(filters), "--source", src, "--target", dst]
+    else:
+        def full(ep, name, tail=""):
+            return (f"postgresql://{quote(ep.user or '', safe='')}"
+                    f":{quote(ep.password or '', safe='')}"
+                    f"@{ep.host}:{ep.port}/{name}{tail}")
+        uris = {"PGCOPYDB_SOURCE_PGURI": full(s, db),
+                "PGCOPYDB_TARGET_PGURI": full(t, ddb, QUIET_TRIGGERS)}
+        net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
+        cmd = ["docker", "run", "--rm", "--network", net,
+               "-e", "PGCOPYDB_SOURCE_PGURI", "-e", "PGCOPYDB_TARGET_PGURI",
+               "-v", f"{filters}:/tmp/migkit-filters.ini:ro",
+               PGCOPYDB_IMAGE, "pgcopydb", *args,
+               "--filters", "/tmp/migkit-filters.ini"]
+    _pgpass(passfile, hop, db, ddb)
+    try:
+        _sh(cmd, {"PGPASSFILE": str(passfile), **uris}, log)
+    finally:
+        passfile.unlink(missing_ok=True)
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _streaming_work(hop, db):
