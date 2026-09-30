@@ -2806,6 +2806,15 @@ store). What was still nowhere:
   change on a production source - DMS/DTS do not make one - so no is a
   normal answer, not an error. One mechanism for every such change
   (decide.py rung needs + approvals + dba.py), not one per engine.
+* **A way that is blocked or fails is left for the next one by itself.**
+  No prompt - one line in the log says what failed, what migkit switched
+  to and what it costs. One runtime fallback in decide.py for every
+  choice (the failed rung given up and recorded, its partial effect
+  undone or proved away, the next rung that still holds taken). Never on
+  a verdict: a difference found is the answer, not a failure of the way,
+  and no fallback ever climbs to a rung weaker than the hop needs. The
+  source-change offer is the only thing that asks; its "no" then
+  switches like any blocked way.
 * **Target interlock default stands:** a move into tables that already
   hold rows refuses unless the hop sets `target_rows` (refuse, replace,
   keep).
