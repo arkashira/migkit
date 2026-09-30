@@ -4954,14 +4954,201 @@ class PostgresEngine(Engine):
                 try:
                     tree = sqlglot.parse_one(src.strip().rstrip(";"),
                                              read="postgres")
+                    # one expression and no clause: the translator names
+                    # a select's FROM `from_` (30.x), and a body reading
+                    # a table was taken for its select list alone
                     if isinstance(tree, exp.Select) and \
-                            len(tree.expressions) == 1 and \
-                            not tree.args.get("from") and \
-                            not tree.args.get("where"):
+                            len(tree.expressions) == 1 and not any(
+                                tree.args.get(k) for k in (
+                                    "from", "from_", "where", "group",
+                                    "having", "order", "limit", "offset",
+                                    "joins", "with", "distinct")):
                         one = tree.expressions[0].unalias().sql("postgres")
                 except Exception:  # noqa: BLE001 - not one expression
                     one = None
             out.append((fn, params, returns, one))
+        return out
+
+    #: the bits of `pg_trigger.tgtype`
+    TG_ROW, TG_BEFORE, TG_INSERT, TG_DELETE, TG_UPDATE, TG_TRUNCATE, \
+        TG_INSTEAD = 1, 2, 4, 8, 16, 32, 64
+
+    def _catalog(self, side, db, sql):
+        conn = self._conn(side, self._d(side, db))
+        try:
+            conn.set_session(readonly=True)
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return cur.fetchall()
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def code_routines(self, side, db):
+        """Every function, procedure and trigger written in the database -
+        not an extension's, which the target gets from the extension. A
+        function a trigger runs is the trigger's, not a function of its
+        own: it cannot be called."""
+        from ..storedcode.routines import Param, Routine
+        out = []
+        for oid, name, kind, lang, setof, ret, names, modes, types, src, \
+                made, sch, volatile in self._catalog(side, db, """
+                select p.oid, p.proname, p.prokind, l.lanname, p.proretset,
+                       format_type(p.prorettype, null),
+                       coalesce(p.proargnames, '{}'),
+                       coalesce(p.proargmodes::text[], '{}'),
+                       array(select format_type(t, null) from unnest(
+                             coalesce(p.proallargtypes,
+                                      p.proargtypes::oid[])) t),
+                       p.prosrc, pg_get_functiondef(p.oid), n.nspname,
+                       p.provolatile
+                  from pg_proc p
+                  join pg_namespace n on n.oid = p.pronamespace
+                  join pg_language l on l.oid = p.prolang
+                 where n.nspname not in ('pg_catalog', 'information_schema')
+                   and n.nspname not like 'pg_toast%'
+                   and p.prokind in ('f', 'p')
+                   and p.prorettype <> 'trigger'::regtype
+                   and not exists (select 1 from pg_depend d
+                                    where d.classid = 'pg_proc'::regclass
+                                      and d.objid = p.oid
+                                      and d.deptype = 'e')
+                 order by 2"""):
+            if self.hop.excluded(db, sch, name):
+                continue
+            params = []
+            for i, t in enumerate(types):
+                mode = {"i": "in", "o": "out", "b": "inout", "v": "in",
+                        "t": "table"}.get(modes[i] if i < len(modes)
+                                          else "i", "in")
+                if mode != "table":
+                    params.append(Param(names[i] if i < len(names) else "",
+                                        t, mode))
+            k = "procedure" if kind == "p" else "function"
+            out.append(Routine(
+                kind=k, name=str(name), params=params,
+                returns=None if k == "procedure" else str(ret),
+                returns_set=bool(setof), body=src, definition=made,
+                language=str(lang), settings={
+                    "schema": sch, "oid": int(oid),
+                    "data": {"i": "NO SQL", "s": "READS SQL DATA"}.get(
+                        volatile, "MODIFIES SQL DATA")}))
+        for name, table, sch, tgtype, fn, made, src, fmade, lang, foid in \
+                self._catalog(side, db, """
+                select t.tgname, c.relname, n.nspname, t.tgtype, p.proname,
+                       pg_get_triggerdef(t.oid), p.prosrc,
+                       pg_get_functiondef(p.oid), l.lanname, p.oid
+                  from pg_trigger t
+                  join pg_class c on c.oid = t.tgrelid
+                  join pg_namespace n on n.oid = c.relnamespace
+                  join pg_proc p on p.oid = t.tgfoid
+                  join pg_language l on l.oid = p.prolang
+                 where not t.tgisinternal
+                   and n.nspname not in ('pg_catalog', 'information_schema')
+                 order by 2, 1"""):
+            if self.hop.excluded(db, sch, table):
+                continue
+            events = tuple(e for bit, e in (
+                (self.TG_INSERT, "INSERT"), (self.TG_UPDATE, "UPDATE"),
+                (self.TG_DELETE, "DELETE"), (self.TG_TRUNCATE, "TRUNCATE"))
+                if tgtype & bit)
+            timing = ("INSTEAD OF" if tgtype & self.TG_INSTEAD else
+                      "BEFORE" if tgtype & self.TG_BEFORE else "AFTER")
+            out.append(Routine(
+                kind="trigger", name=str(name), table=f"{sch}.{table}",
+                timing=timing, events=events,
+                level="row" if tgtype & self.TG_ROW else "statement",
+                body=src, definition=f"{fmade.rstrip().rstrip(';')};\n"
+                                     f"{made};",
+                language=str(lang), settings={"function": str(fn),
+                                              "schema": sch,
+                                              "oid": int(foid)}))
+        return out
+
+    def table_ddl(self, side, db, table):
+        """The statements that make this table as it is - columns with
+        their declared types, defaults (a sequence's as identity), NOT
+        NULL, the key, unique and check constraints and the enum types it
+        uses - for a copy on another PostgreSQL (the proof's sandbox).
+        Foreign keys are left to `foreign_keys`, added once rows are in."""
+        sch, tbl = self._split(table)
+        rows = self._catalog(side, db, f"""
+            select a.attname, format_type(a.atttypid, a.atttypmod),
+                   a.attnotnull, pg_get_expr(d.adbin, d.adrelid),
+                   a.attidentity, a.attgenerated, t.typtype,
+                   format_type(a.atttypid, null),
+                   (select string_agg(quote_literal(e.enumlabel), ', '
+                                      order by e.enumsortorder)
+                      from pg_enum e where e.enumtypid = a.atttypid)
+              from pg_attribute a
+              join pg_class c on c.oid = a.attrelid
+              join pg_namespace n on n.oid = c.relnamespace
+              join pg_type t on t.oid = a.atttypid
+              left join pg_attrdef d on d.adrelid = a.attrelid
+                                    and d.adnum = a.attnum
+             where n.nspname = {self._lit(sch)} and c.relname = {self._lit(tbl)}
+               and a.attnum > 0 and not a.attisdropped
+             order by a.attnum""")
+        before, cols = [], []
+        for name, typ, notnull, default, ident, gen, kind, bare, labels in \
+                rows:
+            if kind == "e" and labels:
+                before.append(f"do $$ begin create type {bare} as enum"
+                              f" ({labels}); exception when duplicate_object"
+                              " then null; end $$")
+            one = f"{self._quote_ident(name)} {typ}"
+            if gen == "s" and default:
+                one += f" generated always as ({default}) stored"
+            elif ident or (default and default.startswith("nextval(")):
+                one += " generated by default as identity"
+            elif default is not None:
+                one += f" default {default}"
+            if notnull:
+                one += " not null"
+            cols.append(one)
+        for (con,) in self._catalog(side, db, f"""
+                select pg_get_constraintdef(o.oid) from pg_constraint o
+                  join pg_class c on c.oid = o.conrelid
+                  join pg_namespace n on n.oid = c.relnamespace
+                 where n.nspname = {self._lit(sch)}
+                   and c.relname = {self._lit(tbl)}
+                   and o.contype in ('p', 'u', 'c')
+                 order by o.contype, o.conname"""):
+            cols.append(con)
+        made = (f"create table {self._quote_ident(sch)}."
+                f"{self._quote_ident(tbl)} ({', '.join(cols)})")
+        return ";\n".join(
+            [f"create schema if not exists {self._quote_ident(sch)}"]
+            + before + [made])
+
+    @staticmethod
+    def _lit(text):
+        return "'" + str(text).replace("'", "''") + "'"
+
+    def foreign_keys(self, side, db):
+        """[(child, [its columns], parent, [the parent's columns])], each
+        table as `neutral_tables` names it."""
+        out = []
+        for child, parent, cols, pcols in self._catalog(side, db, """
+                select cn.nspname || '.' || c.relname,
+                       pn.nspname || '.' || p.relname,
+                       array(select a.attname from unnest(o.conkey)
+                             with ordinality k(n, i) join pg_attribute a
+                             on a.attrelid = o.conrelid and a.attnum = k.n
+                             order by k.i),
+                       array(select a.attname from unnest(o.confkey)
+                             with ordinality k(n, i) join pg_attribute a
+                             on a.attrelid = o.confrelid and a.attnum = k.n
+                             order by k.i)
+                  from pg_constraint o
+                  join pg_class c on c.oid = o.conrelid
+                  join pg_namespace cn on cn.oid = c.relnamespace
+                  join pg_class p on p.oid = o.confrelid
+                  join pg_namespace pn on pn.oid = p.relnamespace
+                 where o.contype = 'f'
+                   and cn.nspname not in ('pg_catalog',
+                                          'information_schema')"""):
+            out.append((child, list(cols), parent, list(pcols)))
         return out
 
     def code_definition(self, side, db, kind, name):

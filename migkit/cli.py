@@ -722,7 +722,9 @@ def _convert_schema(hop_name, db, do_apply):
             chat(f"  {stmt.splitlines()[0]} ...")
         left = [s for s in stmts if s.startswith("--")]
         for s in left:
-            console.print(f"  [yellow]{s[3:]}[/yellow]")
+            # the first line says why; a version kept under it, commented
+            # out, is in the file for a person to start from
+            console.print(f"  [yellow]{s.splitlines()[0][3:]}[/yellow]")
         if do_apply:
             have = eng.target_names(d)
             kept, failed, made = [], [], 0

@@ -43,7 +43,8 @@ TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "myloader", "pgloader", "mongodump", "debezium", "redpanda",
          "atlas", "liquibase", "pg_dump", "pg_restore", "mongorestore",
          "mongosync", "mysqldump", "sqlcmd", "riot", "redis-shake",
-         "mirrormaker", "pgcompare")
+         "mirrormaker", "pgcompare", "ora2pg", "sqlines", "plpgsql_check",
+         "sqlglot", "pglast")
 
 
 def _engine(tmp_path):
@@ -149,7 +150,8 @@ def test_what_the_line_still_tells_them(tmp_path):
 
 
 #: call sites whose strings a person driving migkit reads
-FACING = {"Result", "SystemExit", "print", "log", "chat", "say"}
+FACING = {"Result", "SystemExit", "print", "log", "chat", "say", "Refused",
+          "Verdict", "NoSandbox", "HarnessError"}
 
 
 def _facing_strings():

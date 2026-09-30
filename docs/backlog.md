@@ -2637,10 +2637,10 @@ fails on the old code):**
   2.9 or NumberLong -> Double hash alike; a collection whose `dbHash`
   differs and whose drilldown finds nothing is reported ok. Re-walk with
   the raw-BSON hash. (diff-algorithms)
-* `prove_converted` (`engines/hetero.py`) says ok when every routine is
-  a procedure it never ran; triggers and events are not checked; one
-  failing call fails its whole side without naming the input.
-  (stored-code-conversion)
+* Done 2026-09-28 (R11): `prove_converted` (`engines/hetero.py`) said ok
+  when every routine was a procedure it never ran; triggers and events
+  were not checked; one failing call failed its whole side without
+  naming the input. (stored-code-conversion)
 * SQL Server Change Tracking read outside a SNAPSHOT transaction - the
   cleanup can drop changes silently; `rowversion` in the row hash makes
   every copied row differ; CLR types (`geography`) fail the hash query
@@ -4691,14 +4691,65 @@ or LOB locator in steps and appended on the target. As planned:
   locators read by chunk size, MySQL `SUBSTRING` in steps; the planner
   routes a table with large values through that reader.
 
-### R11. Stored code converted and proved (todo; Oracle part waits on R12)
+### R11. Stored code converted and proved (in progress)
 
-* Ora2Pg run as a program for Oracle, MySQL and SQL Server sources, its
-  cost units turned into the effort estimate (item 40).
-* Behaviour proved by a differential harness: inputs generated from each
-  routine's parameters and real rows, the routine run on both sides in a
-  transaction rolled back, results, errors and the digests of the tables it
-  touched compared; kept as tests on the target.
+Done (2026-09-28, `migkit/storedcode/`):
+* The proof never says `ok` for code nobody ran: every function,
+  procedure, trigger and event is run - procedures, triggers and events
+  only in a sandbox (hop option `proof_sandbox`: two scratch servers, or
+  `docker`), functions also read-only on the hop's own servers - with one
+  outcome per call (value, OUT values, result sets, error class, rows
+  changed, counters) and the first differing input named, shrunk. The
+  sandbox holds a key-closed sample of the source carried by migkit's own
+  move and held to migkit's own check first. Coverage: the target's
+  PL/pgSQL by the static check's profiler (which also gates, fail
+  closed), the MySQL source by probes in its sandbox copy; `ok` only with
+  every statement and branch reached, else `warn` naming the line.
+  Inputs: class pools, the body's constants and their neighbours, the
+  fixture's values, a property search, a solver for the branches none of
+  those reached, and a counterexample bank re-run first on every version.
+  (`test_stored_code_is_proved_by_running_it.py`)
+* The query translator's silent passes refused or rewritten: `CONNECT BY`
+  refused, `(+)` rewritten into ANSI joins, `TRY_CAST` to a NULL-on-failure
+  form per target, bodies of statements refused
+  (`test_the_translator_refuses_what_it_would_pass_through.py`).
+* Per routine, candidates (the decision engine's rungs, pruned and
+  ranked there) ranked by the share of their versions that proved on this
+  hop (`code-rungs.json`): the operator's own file, the
+  translator, migkit's rules (MySQL and T-SQL procedural code into
+  PL/pgSQL), an emulation of Oracle's functions where the target runs
+  one, the PL/SQL and multi-dialect converters (built by `doctor
+  --install`, run as programs), a model last in a capped loop fed each
+  failure. Accepted only when proved; the residue in three classes in
+  `code-conversion.json`; a person's fix learned as a rule when it proves
+  on the other routines with no regression; the proof's own mutation
+  score; the proved calls kept as SQL tests on the target.
+* SQL Server (SQL Edge) and Oracle (Free) as far as the sandbox goes:
+  catalogue, sandbox, harness, no coverage on either yet
+  (`test_sql_server_code_converted_and_proved.py`,
+  `test_oracle_code_converted_and_proved.py`, `--vm migkit`).
+
+* Found on the way and fixed: a batch written to Oracle was read back by
+  its keys without the scale its column declares, so `0.10` came back
+  `0.1` and every move into Oracle of such a value stopped as a
+  difference; SQL Server's identity seed came back as bytes and made
+  the copied table's statement unreadable; the static check read a T-SQL
+  trigger's transition tables as missing relations; a table the target's
+  emulation makes itself was made again in the sandbox. Measured on the
+  way: a MySQL source's event runs on the source as soon as it is made
+  (every hour from now), so a proof's fixture is what the source holds
+  after it ran; and MySQL wrote 0 where an UPDATE in a procedure made a
+  NOT NULL column NULL, and kept it when a later statement failed, where
+  PostgreSQL refuses the NULL and its call writes nothing - no candidate
+  matches it, the proof says so with the one statement that differs,
+  and the routine is left for a person.
+
+Still to do: MySQL-side coverage with the diagnostics area or
+`ROW_COUNT()` in the body; the clock pinned under both servers
+(time values are compared within five seconds and said); Oracle coverage
+and counters; the converters' cost units as the effort estimate (item 40);
+PostgreSQL to MySQL procedural rules; statement-level reduction beyond
+MySQL sources.
 
 ### R12. Engines the sandbox can now run (todo)
 

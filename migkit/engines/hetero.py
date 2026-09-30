@@ -2622,261 +2622,29 @@ class HeteroEngine(Engine):
                 | {n for n, *_ in
                    self.dst_engine.neutral_functions("dst", db)})
 
-    def converted_code(self, db, propose=True):
+    def converted_code(self, db, propose=True, climb=True):
         """[(name, the target's statement or a comment, why not)] for the
-        source's views and single-expression functions, in the target's
-        SQL (backlog 39). What SQL alone cannot carry - a function with a
-        body of statements, a construct the target's dialect lacks - is a
-        comment naming it, never a guess."""
-        import sqlglot
-        from sqlglot import exp
-        src = self.src_engine.SQL_DIALECT
-        dst = self.dst_engine.SQL_DIALECT
-        if not (src and dst):
-            return []
-        here = self.src_engine._d("src", db) \
-            if hasattr(self.src_engine, "_d") else db
+        source's views, functions, procedures, triggers and events, in the
+        target's SQL (backlog 39, R11): each routine by whichever candidate
+        proves itself on it in the sandbox, or - where no sandbox is named
+        - as the query translator carries it, the rest named, never a
+        guess (`storedcode.convert`)."""
+        from ..storedcode import convert
         self._db = db
-        source_views = self.src_engine.neutral_views("src", db)
-        carried = set(self.src_engine.neutral_tables("src", db)) | \
-            {n for n, _ in source_views}
-        out = []
-
-        def local(tree):
-            # the source's database named in the SQL is not a schema the
-            # target has; tables go by the names the move gave them
-            renamed = {}
-            for t in tree.find_all(exp.Table):
-                # a qualifier naming the source's own database, or a
-                # schema holding something this move carries, is not a
-                # schema the target has; any other stays, and fails
-                # there rather than meaning a table of the same name
-                if t.text("catalog") in ("", here):
-                    t.set("catalog", None)
-                    if t.text("db") == here or \
-                            f"{t.text('db')}.{t.name}" in carried:
-                        t.set("db", None)
-                new = self._leaf(self._rename(t.name))
-                if new != t.name and not t.alias:
-                    renamed[t.name] = new
-                t.set("this", exp.to_identifier(new))
-            for c in tree.find_all(exp.Column):
-                if c.args.get("db"):
-                    c.set("db", None)
-                if c.args.get("catalog"):
-                    c.set("catalog", None)
-                if c.table in renamed:
-                    c.set("table", exp.to_identifier(renamed[c.table]))
-            return tree
-
-        views, needs = [], {}
-        for name, sql in source_views:
-            leaf = self._leaf(name)
-            try:
-                tree = local(sqlglot.parse_one(sql, read=src))
-                body = tree.sql(dialect=dst,
-                                unsupported_level=sqlglot.ErrorLevel.RAISE)
-                needs[leaf] = {t.name for t in tree.find_all(exp.Table)}
-                views.append((leaf, f"create view {leaf} as {body};", ""))
-            except Exception as e:  # noqa: BLE001 - named, not carried
-                why = (str(e).splitlines() or [""])[0][:100]
-                views.append(self._proposed("view", name, leaf, why)
-                             if propose else
-                             (leaf, f"-- view {leaf} not converted: {why}",
-                              why))
-        # a view on a view is created after the one it reads
-        placed = set()
-        while views:
-            ready = [v for v in views
-                     if not (needs.get(v[0], set()) & set(needs) - placed
-                             - {v[0]})] or views[:1]
-            for v in ready:
-                out.append(v)
-                placed.add(v[0])
-                views.remove(v)
-        from .. import canon
-        def there(declared, what):
-            cls, _ = canon.comparable(self.src_name, declared)
-            if not cls:
-                raise ValueError(f"{what} is {declared}, which has no"
-                                 f" counterpart on {self.dst_name}")
-            return cls, canon.ddl_type(self.dst_name, cls,
-                                       canon.params(declared))
-
-        def exact(node, cls, typ):
-            # a decimal's declared scale is where its rounding happens;
-            # PostgreSQL ignores it on a function's arguments and result,
-            # so it is said in the body instead
-            if cls != "decimal" or "(" not in typ:
-                return node
-            return exp.cast(node, exp.DataType.build(typ, dialect=dst))
-
-        for name, params, returns, expr_text in \
-                self.src_engine.neutral_functions("src", db):
-            try:
-                if expr_text is None:
-                    raise ValueError("its body is statements, not one"
-                                     " expression")
-                if not all(p for p, _ in params):
-                    raise ValueError("an argument has no name")
-                typed = {p: there(t, f"argument {p}") for p, t in params}
-                ret_cls, ret = there(returns, "what it returns")
-                tree = local(sqlglot.parse_one(expr_text, read=src))
-                for col in list(tree.find_all(exp.Column)):
-                    if col.name in typed and not col.table:
-                        # quoted as the declaration quotes it, so a name in
-                        # capitals is the same name in both
-                        col.replace(exact(exp.column(col.name, quoted=True),
-                                          *typed[col.name]))
-                tree = exact(tree, ret_cls, ret)
-                body = tree.sql(dialect=dst,
-                                unsupported_level=sqlglot.ErrorLevel.RAISE)
-                out.append((name, self.dst_engine.neutral_function_sql(
-                    name, [(p, typed[p][1]) for p, _ in params], ret,
-                    body) + ";", ""))
-            except Exception as e:  # noqa: BLE001 - named, not carried
-                why = (str(e).splitlines() or [""])[0][:100]
-                kind = "function" if returns else "procedure"
-                out.append(self._proposed(kind, name, name, why) if propose
-                           else (name, f"-- {kind} {name} not converted:"
-                                       f" {why}", why))
-        return out
+        return convert.converted(self, db, propose=propose, climb=climb)
 
     #: the line a statement a model proposed is marked with
     PROPOSED = "-- proposed by a model, not by the translator: check holds" \
                " it to the source's answers"
 
-    def _proposed(self, kind, name, leaf, why):
-        """(name, statement, why not) for what the translator could not
-        carry: a model's proposal where one is configured and may see the
-        code, marked as a proposal, else the comment naming it."""
-        from .. import assist
-        try:
-            definition = self.src_engine.code_definition("src", self._db,
-                                                         kind, name)
-        except Exception:  # noqa: BLE001 - no definition, no proposal
-            definition = None
-        made = assist.propose(self.src_name, self.dst_name, kind, leaf,
-                              definition)
-        if made:
-            return (leaf, f"{made.rstrip().rstrip(';')}; {self.PROPOSED}",
-                    "")
-        return (leaf, f"-- {kind} {leaf} not converted: {why}", why)
-
-    #: what each argument is tried with in the behavioural proof, by
-    #: class: a null, the edges, a value that rounds, and text where the
-    #: engines are known to part - case, and a character wider than a byte
-    PROOF_INPUTS = {"integer": ["null", "0", "1", "-7", "42"],
-                    "decimal": ["null", "0", "1.555", "-2.25"],
-                    "float": ["null", "0", "1.5"],
-                    "text": ["null", "''", "'a'", "'A'", "'a '", "'Ab c'",
-                             "'\u00e9'"],
-                    "date": ["null", "'2024-02-29'", "'1999-12-31'"],
-                    "timestamp": ["null", "'2024-02-29 23:59:59'",
-                                  "'2000-01-01 00:00:00'"]}
-    #: calls per function, at most, whatever its number of arguments
-    PROOF_CALLS = 200
-
     def prove_converted(self, db):
-        """Every view and function of the source held to the same inputs
-        and the same outputs on the target (plan 20): a view by its rows,
-        digested as a table's are; a function by its answers to the same
-        arguments. Whoever wrote the target's - the translator, a model, a
-        person - it is asked the same. One the target does not have yet is
-        said, not passed, and so is a procedure, which answers nothing to
-        compare."""
-        from .base import Result
-        views = {self._leaf(n): n for n, _ in
-                 self.src_engine.neutral_views("src", db)}
-        fns = {n: (p, r) for n, p, r, _ in
-               self.src_engine.neutral_functions("src", db)}
-        if not views and not fns:
-            return None
-        by_hand = {n for n, _, why in self.converted_code(db, propose=False)
-                   if why}
-        there = self.target_names(db)
-        same, diff, missing, unread, procedures = [], [], [], [], []
-        for name in list(views) + sorted(fns):
-            if name not in there:
-                missing.append(name)
-                continue
-            if name in views:
-                sc, dc, _ = self._comparable_columns(
-                    db, self.src_engine, views[name], self.dst_engine, name)
-                if not sc:
-                    unread.append(name)
-                    continue
-
-                def answer(eng, side, n, cols):
-                    return eng.neutral_digest(side, db, n, cols)
-                ask = ((self.src_engine, "src", views[name], sc),
-                       (self.dst_engine, "dst", name, dc))
-            elif fns[name][1] is None:
-                procedures.append(name)
-                continue
-            else:
-                def answer(eng, side, n, shape):
-                    return self._call(eng, side, db, n, *shape)
-                ask = ((self.src_engine, "src", name, fns[name]),
-                       (self.dst_engine, "dst", name, fns[name]))
-            try:
-                a = answer(*ask[0])
-            except Exception:  # noqa: BLE001 - said as not compared
-                unread.append(name)
-                continue
-            try:
-                b = answer(*ask[1])
-            except Exception as e:  # noqa: BLE001 - answered by failing
-                b = ("failed", (str(e).splitlines() or [""])[0])
-            (same if a == b else diff).append(name)
-        if diff:
-            return Result("schema", f"{db} converted code", "diff",
-                          f"{len(diff)} views and functions answer"
-                          " differently on the target:"
-                          f" {', '.join(diff[:6])}", "",
-                          "the conversion changed what it means: rewrite"
-                          " it by hand and check again")
-        if missing:
-            return Result("schema", f"{db} converted code", "warn",
-                          f"{len(missing)} views and functions of the"
-                          " source are not on the target yet:"
-                          f" {', '.join(missing[:6])}", "",
-                          f"migkit schema {self.hop.name} --convert --apply,"
-                          " and write by hand what it names as not"
-                          " converted")
-        if unread:
-            return Result("schema", f"{db} converted code", "skip",
-                          f"{len(unread)} views and functions could not be"
-                          f" asked on the source: {', '.join(unread[:6])};"
-                          f" {len(same)} others answer the same")
-        others = sorted(set(same) & by_hand)
-        return Result("schema", f"{db} converted code", "ok",
-                      f"{len(same)} views and functions answer the same"
-                      " inputs with the same outputs on both sides"
-                      + (f" ({len(others)} of them written by a model or a"
-                         " person, not by the translator)" if others else "")
-                      + (f"; {len(procedures)} procedure"
-                         f"{'s are' if len(procedures) != 1 else ' is'} on"
-                         " the target, and answer nothing to compare"
-                         if procedures else ""))
-
-    def _call(self, eng, side, db, name, params, returns):
-        """The function's answers to the proof's inputs, as canonical text,
-        from one read-only query on the side."""
-        import itertools
-
-        from .. import canon
-        pools = []
-        for _, t in params:
-            cls, _ = canon.comparable(self.src_name, t)
-            pools.append(self.PROOF_INPUTS.get(cls, ["null"]))
-        calls = list(itertools.islice(itertools.product(*pools),
-                                      self.PROOF_CALLS))
-        fn = eng._quote_ident(name)
-        got = eng.run_rule(side, db, "select " + ", ".join(
-            f"{fn}({', '.join(args)})" for args in calls))
-        cls, _ = canon.comparable(self.src_name, returns)
-        return [canon.render_value(cls, v) for v in got[0]]
+        """Every view and routine of the source held to the target's by
+        what it does (plan 20, R11): a view by its rows on the hop's own
+        servers; every function, procedure, trigger and event by running
+        both on the same fixture in the sandbox and comparing everything
+        each did - never `ok` for one nobody ran (`storedcode.prove`)."""
+        from ..storedcode import prove
+        return prove.prove_database(self, db)
 
     def setup_target_plan(self, db):
         """The steps for this pair, rather than for the pair it was written

@@ -21,7 +21,7 @@ from migkit.config import Endpoint, Hop
 pytestmark = [pytest.mark.docker]
 
 MY, PG = "migkit-test-code-my", "migkit-test-code-pg"
-MY_PORT, PG_PORT = 15812, 15813
+MY_PORT, PG_PORT = 16080, 16081
 
 
 def _docker():
@@ -120,6 +120,12 @@ def _engine(tmp_path):
     return HeteroEngine(hop)
 
 
+def _verdicts(tmp_path):
+    import json
+    got = json.loads((tmp_path / "code-proof.json").read_text())
+    return {v["routine"]: v for v in got["verdicts"]}
+
+
 def test_carried_in_order_and_the_rest_named(pair, tmp_path):
     stmts = _engine(tmp_path).convert_ddl("cx")
     heads = [s.split("(")[0].split(" as ")[0] for s in stmts]
@@ -129,12 +135,19 @@ def test_carried_in_order_and_the_rest_named(pair, tmp_path):
     assert sorted(s.split("(")[0] for s in made) == [
         'create function "add_tax"', 'create function "name_len"',
         'create function "shout"'], made
+    # the first line says why; migkit's rules have a version of each, kept
+    # under it commented out - no sandbox is named to prove it in, and
+    # nothing unproved is applied
     named = [s for s in stmts if s.startswith("--")]
-    assert sorted(named) == [
+    assert sorted(s.splitlines()[0] for s in named) == [
         "-- function steps not converted: its body is statements, not one"
         " expression",
         "-- procedure ping not converted: its body is statements, not one"
         " expression"], named
+    assert all(ln.startswith("--") for s in named for ln in s.splitlines()), \
+        named
+    assert "-- create function \"steps\"(x integer) returns integer" in \
+        "\n".join(named), named
 
 
 def test_the_proof_finds_the_translation_that_changed_meaning(pair,
@@ -145,8 +158,7 @@ def test_the_proof_finds_the_translation_that_changed_meaning(pair,
         " amount numeric(10,2), cust varchar(20))")
     got = eng.prove_converted("cx")
     assert got.status == "warn", got.__dict__
-    assert "7 views and functions of the source are not on the target" \
-        in got.detail, got.detail
+    assert got.detail.startswith("7 missing;"), got.detail
 
     for s in eng.convert_ddl("cx"):
         if not s.startswith("--") and not s.startswith("create table"):
@@ -155,10 +167,13 @@ def test_the_proof_finds_the_translation_that_changed_meaning(pair,
         " (3, 10.00, 'Céline'), (4, 99.99, null)")
     got = eng.prove_converted("cx")
     # length: bytes on one side, characters on the other, and only the
-    # input wider than a byte tells them apart
+    # input wider than a byte tells them apart - and the verdict names it
     assert got.status == "diff", got.__dict__
-    assert got.detail.endswith("answer differently on the target:"
-                               " name_len"), got.detail
+    by = _verdicts(tmp_path)
+    assert [n for n, v in by.items() if v["status"] == "diff"] == [
+        "function name_len"], by
+    assert by["function name_len"]["reason"] == (
+        "called with (s='é'): returned '2' against '1'"), by
 
     # the one a person rewrites, and the two the translator could not
     # carry, written by hand: then everything answers the same, and what
@@ -167,18 +182,26 @@ def test_the_proof_finds_the_translation_that_changed_meaning(pair,
         " language sql as $$ select octet_length(s) $$")
     got = eng.prove_converted("cx")
     assert got.status == "warn", got.__dict__
-    assert got.detail.endswith("not on the target yet: ping, steps"), \
-        got.detail
-    _pg("create function steps(x bigint) returns bigint language plpgsql"
+    by = _verdicts(tmp_path)
+    assert sorted(n for n, v in by.items() if v["status"] == "missing") == \
+        ["function steps", "procedure ping"], by
+    # an INT stays 32 bits: the proof calls it with 2147483647, where
+    # MySQL's `x + 1` fails and a bigint's would not
+    _pg("create function steps(x integer) returns integer language plpgsql"
         " as $$ begin return x + 1; end $$;"
         " create procedure ping() language sql as $$ select 1 $$")
     got = eng.prove_converted("cx")
-    assert got.status == "ok", got.__dict__
-    assert got.detail == (
-        "6 views and functions answer the same inputs with the same"
-        " outputs on both sides (1 of them written by a model or a person,"
-        " not by the translator); 1 procedure is on the target, and answer"
-        " nothing to compare"), got.detail
+    # a procedure nobody ran is not the same as one that answered the same:
+    # no sandbox is named here, so it is not proved, and the line says so
+    assert got.status == "warn", got.__dict__
+    by = _verdicts(tmp_path)
+    assert by["procedure ping"]["status"] == "not proved", by
+    assert by["function name_len"]["status"] == "ok", by
+    # a function of statements answers the same on the hop's own servers,
+    # read-only, but which of its statements ran is not measured there
+    assert by["function steps"]["status"] == "warn", by
+    assert "not measured: no sandbox is named" in by["function steps"]["reason"], by
+    assert sum(v["status"] == "ok" for v in by.values()) == 5, by
 
 
 def test_a_decimal_rounds_where_the_source_rounds(pair, tmp_path):
@@ -192,11 +215,14 @@ def test_a_decimal_rounds_where_the_source_rounds(pair, tmp_path):
     try:
         got = eng.prove_converted("cx")
         assert got.status == "diff", got.__dict__
-        assert got.detail.endswith(": add_tax"), got.detail
+        by = _verdicts(tmp_path)
+        assert [n for n, v in by.items() if v["status"] == "diff"] == [
+            "function add_tax"], by
     finally:
         _pg("drop function add_tax(numeric)")
         eng.dst_engine.neutral_create_code("dst", "cx", made[0])
-    assert eng.prove_converted("cx").status == "ok"
+    eng.prove_converted("cx")
+    assert _verdicts(tmp_path)["function add_tax"]["status"] == "ok"
 
 
 def test_a_view_that_selects_other_rows_is_a_difference(pair, tmp_path):
@@ -206,18 +232,24 @@ def test_a_view_that_selects_other_rows_is_a_difference(pair, tmp_path):
     try:
         got = eng.prove_converted("cx")
         assert got.status == "diff", got.__dict__
-        assert got.detail.endswith(": big_ids, big_orders") or \
-            got.detail.endswith(": big_orders, big_ids"), got.detail
+        by = _verdicts(tmp_path)
+        assert sorted(n for n, v in by.items() if v["status"] == "diff") == \
+            ["view big_ids", "view big_orders"], by
     finally:
         _pg("create or replace view big_orders as select id, amount from"
             " orders where amount > 10")
-    assert eng.prove_converted("cx").status == "ok"
+    eng.prove_converted("cx")
+    by = _verdicts(tmp_path)
+    assert by["view big_orders"]["status"] == "ok", by
+    assert by["view big_ids"]["status"] == "ok", by
 
 
 def test_the_deep_check_carries_the_proof(pair, tmp_path):
     got = [r for r in _engine(tmp_path).check_deep("cx")]
     mine = [r for r in got if r.scope == "cx converted code"]
-    assert [r.status for r in mine] == ["ok"], [r.__dict__ for r in got]
+    # the procedure nobody ran keeps the line from `ok`
+    assert [r.status for r in mine] == ["warn"], [r.__dict__ for r in got]
+    assert "procedure ping: not proved" in mine[0].detail, mine[0].detail
     # beside the checks that were there, not instead of them
     assert len(got) > 1, [r.__dict__ for r in got]
 

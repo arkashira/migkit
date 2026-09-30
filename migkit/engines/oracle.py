@@ -166,6 +166,108 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
             out.append((self._said(name), params, returns, one))
         return out
 
+    def code_routines(self, side, db):
+        """Every standalone function, procedure and trigger in the schema,
+        with the statement that makes each (`CREATE OR REPLACE` and the
+        source the server keeps). A package's members are not standalone
+        and are not listed here."""
+        from ..storedcode.routines import Param, Routine
+        owner = self._owner(side, db)
+        src = {}
+        for name, kind, text in self._rows(
+                side, db, "select name, type, text from all_source where"
+                          f" owner = {MARK} and type in ('FUNCTION',"
+                          " 'PROCEDURE', 'TRIGGER') order by name, type,"
+                          " line", (owner,)):
+            src.setdefault((name, kind), []).append(text or "")
+        args = {}
+        for name, arg, declared, pos, mode in self._rows(
+                side, db, f"select object_name, argument_name, {DECLARED},"
+                          " position, in_out from all_arguments where owner"
+                          f" = {MARK} and package_name is null and"
+                          " data_level = 0 order by object_name, position",
+                (owner,)):
+            args.setdefault(name, []).append((arg, declared, int(pos),
+                                              str(mode)))
+        trig = {}
+        for name, table, kind, event in self._rows(
+                side, db, "select trigger_name, table_name, trigger_type,"
+                          " triggering_event from all_triggers where owner ="
+                          f" {MARK} and base_object_type = 'TABLE'",
+                (owner,)):
+            trig[name] = (self._said(table), str(kind), str(event))
+        out = []
+        for (name, kind), lines in sorted(src.items()):
+            text = "".join(lines)
+            k = kind.lower()
+            r = Routine(kind=k, name=self._said(name), language="plsql",
+                        definition="create or replace " + text.strip(),
+                        body=text, settings={"owner": owner})
+            mine = args.get(name, [])
+            r.returns = next((d for a, d, p, _ in mine if p == 0), None) \
+                if k == "function" else None
+            r.params = [Param(self._said(a or ""), d, {"IN": "in",
+                                                        "OUT": "out"}.get(
+                                  m, "inout"))
+                        for a, d, p, m in mine if p > 0]
+            if k == "trigger" and name in trig:
+                table, how, event = trig[name]
+                r.table = table
+                r.timing = ("BEFORE" if how.startswith("BEFORE") else
+                            "INSTEAD OF" if how.startswith("INSTEAD")
+                            else "AFTER")
+                r.level = "row" if "EACH ROW" in how else "statement"
+                r.events = tuple(e.strip() for e in event.split(" OR "))
+                if self.hop.excluded(db, table):
+                    continue
+            out.append(r)
+        return out
+
+    def table_ddl(self, side, db, table):
+        """The table as the server itself writes it (`DBMS_METADATA`),
+        without storage, tablespace and the owner's name, for a copy in
+        another schema on another Oracle (the proof's sandbox); its
+        foreign keys are `foreign_keys`'."""
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute("begin dbms_metadata.set_transform_param("
+                        "dbms_metadata.session_transform, 'STORAGE', false);"
+                        " dbms_metadata.set_transform_param("
+                        "dbms_metadata.session_transform, 'SEGMENT_ATTRIBUTES',"
+                        " false); dbms_metadata.set_transform_param("
+                        "dbms_metadata.session_transform,"
+                        " 'REF_CONSTRAINTS', false); end;")
+            cur.execute("select dbms_metadata.get_ddl('TABLE', :1, :2) from"
+                        " dual", (self._q(table)[1:-1],
+                                  self._owner(side, db)))
+            text = str(cur.fetchone()[0])
+        finally:
+            conn.close()
+        owner = self._owner(side, db)
+        return text.replace(f'"{owner}".', "").strip()
+
+    def foreign_keys(self, side, db):
+        got = {}
+        for name, child, col, parent, pcol in self._rows(
+                side, db, "select c.constraint_name, c.table_name,"
+                          " cc.column_name, p.table_name, pc.column_name"
+                          " from all_constraints c join all_cons_columns cc"
+                          " on cc.owner = c.owner and cc.constraint_name ="
+                          " c.constraint_name join all_constraints p on"
+                          " p.owner = c.r_owner and p.constraint_name ="
+                          " c.r_constraint_name join all_cons_columns pc on"
+                          " pc.owner = p.owner and pc.constraint_name ="
+                          " p.constraint_name and pc.position = cc.position"
+                          f" where c.owner = {MARK} and c.constraint_type ="
+                          " 'R' order by c.constraint_name, cc.position",
+                (self._owner(side, db),)):
+            one = got.setdefault((name, child, parent), ([], []))
+            one[0].append(self._said(col))
+            one[1].append(self._said(pcol))
+        return [(self._said(c), a, self._said(p), b)
+                for (_, c, p), (a, b) in got.items()]
+
     def neutral_function_sql(self, name, params, returns, body):
         # quoted as the body quotes them; Oracle takes no length or scale
         # on an argument or a result

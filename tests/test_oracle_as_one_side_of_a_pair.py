@@ -127,6 +127,33 @@ def test_its_values_digest_as_postgresql_digests_them(pg_pair, monkeypatch):
     assert _oracle().neutral_digest("src", "app", "t", columns) != theirs
 
 
+def test_rows_read_back_by_key_are_at_their_declared_scale(monkeypatch):
+    """A batch written to Oracle is read back by its keys and held to what
+    was read from the source. NUMBER keeps no trailing zeros: read by key
+    without its declared scale, 0.10 came back 0.1 and every move into
+    Oracle of such a value stopped as a difference."""
+    from migkit import canon
+    from migkit.engines.dbapi import DbapiRows
+    from migkit.engines.oracle import OracleEngine
+    declared = {"id": "NUMBER(10,0)", "price": "NUMBER(8,2)",
+                "code": "CHAR(3)"}
+    columns = [(n, canon.comparable("oracle", t)[0])
+               for n, t in declared.items()]
+    monkeypatch.setattr(OracleEngine, "neutral_columns",
+                        lambda self, side, db, table: list(declared.items()))
+    monkeypatch.setattr(DbapiRows, "_rows", lambda self, side, db, sql,
+                        args=None: [(Decimal("2"), Decimal("0.1"), "ab ")])
+    monkeypatch.setattr(DbapiRows, "_wide_times",
+                        lambda self, side, db, table: {})
+    monkeypatch.setattr(DbapiRows, "_whole_times",
+                        lambda self, side, db, table, names, rows: rows)
+    got = _oracle().neutral_rows_by_key("dst", "app", "items", columns,
+                                        ["id"], [(2,)])
+    (row,) = got.values()
+    assert [canon.render_value(c, v) for (_, c), v in zip(columns, row)] \
+        == ["2", "0.10", "ab"], row
+
+
 def test_a_plsql_function_of_one_return_is_carried(monkeypatch):
     from migkit.engines.oracle import OracleEngine
     source = [("ADD_TAX", "FUNCTION", "FUNCTION add_tax(x NUMBER)\n"),

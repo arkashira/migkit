@@ -471,3 +471,12 @@ class FoldsToCapitals:
         for batch in super().neutral_batches(side, db, table, columns, size,
                                              where):
             yield self._unpad(side, db, table, columns, batch)
+
+    def neutral_rows_by_key(self, side, db, table, columns, key, keys,
+                            where=None):
+        # read back as a read reads them: a write checked by its keys
+        # otherwise finds 0.10 written and 0.1 there
+        got = super().neutral_rows_by_key(side, db, table, columns, key,
+                                          keys, where)
+        return self._by_key_map(columns, key, self._unpad(
+            side, db, table, columns, [list(r) for r in got.values()]))

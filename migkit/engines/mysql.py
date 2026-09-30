@@ -3709,9 +3709,124 @@ class MySQLEngine(Engine):
             out.append((fn, params, returns, text[7:] if one else None))
         return out
 
+    def code_routines(self, side, db):
+        """Every function, procedure, trigger and event written in the
+        database, with the statement that makes each (`SHOW CREATE`) and
+        the `sql_mode` it was made under - which it runs under too."""
+        from ..storedcode.routines import Param, Routine
+        name = self._d(side, db)
+        params = {}
+        for spec, pos, mode, pname, dtd in self._q(
+                side, "select specific_name, ordinal_position,"
+                      " parameter_mode, parameter_name, dtd_identifier from"
+                      " information_schema.parameters where specific_schema"
+                      " = %s order by specific_name, ordinal_position",
+                (name,)):
+            if int(pos) > 0:
+                params.setdefault(spec, []).append(
+                    Param(str(pname), str(dtd), str(mode or "IN").lower()))
+        out = []
+        for rn, kind, dtd, body, mode, access in self._q(
+                side, "select routine_name, routine_type, dtd_identifier,"
+                      " routine_definition, sql_mode, sql_data_access from"
+                      " information_schema.routines where routine_schema"
+                      " = %s order by 1", (name,)):
+            if self.hop.excluded(db, rn):
+                continue
+            kind = str(kind).lower()
+            out.append(Routine(
+                kind=kind, name=str(rn), params=params.get(rn, []),
+                returns=str(dtd) if kind == "function" else None,
+                body=body, definition=self._show_create(side, db, kind, rn),
+                language="sql", settings={"sql_mode": mode,
+                                          "data": access}))
+        for tn, event, table, body, timing, mode in self._q(
+                side, "select trigger_name, event_manipulation,"
+                      " event_object_table, action_statement, action_timing,"
+                      " sql_mode from information_schema.triggers where"
+                      " trigger_schema = %s order by event_object_table,"
+                      " action_order", (name,)):
+            if self.hop.excluded(db, table):
+                continue
+            out.append(Routine(
+                kind="trigger", name=str(tn), body=body, table=str(table),
+                timing=str(timing).upper(), events=(str(event).upper(),),
+                definition=self._show_create(side, db, "trigger", tn),
+                language="sql", settings={"sql_mode": mode}))
+        for en, body, kind, at, every, unit, starts, ends, status, \
+                keep, zone, mode in self._q(
+                    side, "select event_name, event_definition, event_type,"
+                          " execute_at, interval_value, interval_field,"
+                          " starts, ends, status, on_completion, time_zone,"
+                          " sql_mode from information_schema.events where"
+                          " event_schema = %s order by 1", (name,)):
+            schedule = {"at": str(at)} if str(kind) == "ONE TIME" else {
+                "every": f"{every} {unit}", "starts": str(starts or ""),
+                "ends": str(ends or "")}
+            schedule.update({"status": str(status), "zone": str(zone),
+                             "on completion": str(keep)})
+            out.append(Routine(
+                kind="event", name=str(en), body=body, schedule=schedule,
+                definition=self._show_create(side, db, "event", en),
+                language="sql", settings={"sql_mode": mode}))
+        return out
+
+    def _show_create(self, side, db, kind, name):
+        """The statement that makes it, without the account that made it:
+        a copy made elsewhere belongs to whoever makes it there."""
+        import re
+        try:
+            text = self.code_definition(side, db, kind, name)
+        except Exception:  # noqa: BLE001 - not allowed to read it
+            return None
+        return re.sub(r"(?is)^\s*create\s+definer\s*=\s*\S+\s+", "create ",
+                      text) if text else None
+
+    def table_ddl(self, side, db, table):
+        """The statement that makes this table as it is, for a copy of it
+        on another server of this engine (the proof's sandbox)."""
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"show create table {self._my_ident(self._d(side, db))}"
+                            f".{self._my_ident(self.local_table(table))}")
+                return cur.fetchone()[1]
+        finally:
+            conn.close()
+
+    def unique_keys(self, side, db):
+        """{table: [[columns of one unique key], ...]}, the primary key
+        first: the keys an `ON DUPLICATE KEY` can hit."""
+        got = {}
+        for t, index, col in self._q(
+                side, "select table_name, index_name, column_name from"
+                      " information_schema.statistics where table_schema ="
+                      " %s and non_unique = 0 order by table_name,"
+                      " index_name <> 'PRIMARY', index_name, seq_in_index",
+                (self._d(side, db),)):
+            got.setdefault(str(t), {}).setdefault(str(index), []).append(
+                str(col))
+        return {t: list(keys.values()) for t, keys in got.items()}
+
+    def foreign_keys(self, side, db):
+        """[(child, [its columns], parent, [the parent's columns])]."""
+        got = {}
+        for cname, child, col, parent, pcol in self._q(
+                side, "select constraint_name, table_name, column_name,"
+                      " referenced_table_name, referenced_column_name from"
+                      " information_schema.key_column_usage where"
+                      " table_schema = %s and referenced_table_name is not"
+                      " null order by constraint_name, ordinal_position",
+                (self._d(side, db),)):
+            one = got.setdefault((cname, child, parent), ([], []))
+            one[0].append(str(col))
+            one[1].append(str(pcol))
+        return [(str(c), a, str(p), b) for (_, c, p), (a, b) in got.items()]
+
     def code_definition(self, side, db, kind, name):
         what = {"view": "view", "function": "function",
-                "procedure": "procedure"}.get(kind)
+                "procedure": "procedure", "trigger": "trigger",
+                "event": "event"}.get(kind)
         if not what:
             return None
         conn = self._conn(side)

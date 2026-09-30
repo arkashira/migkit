@@ -97,6 +97,12 @@ HOP_OPTIONS = {
     "checksum": Key("text or jsonb row rendering", "str", ("postgres",)),
     "checksum_workers": Key("tables checksummed at once", "int",
                             ("postgres",), knob="size"),
+    "code_dir": Key("where the operator's own converted routines are kept",
+                    "str"),
+    "code_model": Key("the model endpoint this hop's code conversion asks",
+                      "dict", subs=("provider", "url", "model")),
+    "code_model_rounds": Key("the rounds a model gets on one routine",
+                             "int"),
     "create_streams": Key("create a missing stream", "bool", ("kinesis",)),
     "deep": Key("compare every key's value, not a sample", "bool",
                 ("redis",)),
@@ -127,6 +133,9 @@ HOP_OPTIONS = {
     "partition_by": Key("the column a stream partitions by", "str",
                         STREAMS),
     "performance": Key("gate: a slower target fails the check", "str"),
+    "proof_sandbox": Key("where converted code is run to prove it: two"
+                         " scratch servers, or docker", "str|dict",
+                         subs=("source", "target")),
     "protect_target": Key("the application may not write the target"
                           " while migkit moves into it", "bool"),
     "pt_apply": Key("the online schema change path, on or off", "bool",

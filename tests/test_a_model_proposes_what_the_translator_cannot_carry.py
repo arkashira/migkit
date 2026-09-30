@@ -24,14 +24,14 @@ from tests.conftest import psql
 
 pytestmark = [pytest.mark.docker]
 
-MY, MY_PORT = "migkit-test-propose-my", 15839
+MY, MY_PORT = "migkit-test-code-propose-my", 16086
 
 PROPOSALS = {
-    "steps": "```sql\nCREATE FUNCTION steps(x bigint) RETURNS bigint"
-             " LANGUAGE plpgsql AS $$ DECLARE y bigint; BEGIN y := x + 1;"
+    "steps": "```sql\nCREATE FUNCTION steps(x integer) RETURNS integer"
+             " LANGUAGE plpgsql AS $$ DECLARE y integer; BEGIN y := x + 1;"
              " RETURN y; END $$;\n```",
     # doubles where the source's function doubles and adds one
-    "twice": "CREATE FUNCTION twice(x bigint) RETURNS bigint LANGUAGE sql"
+    "twice": "CREATE FUNCTION twice(x integer) RETURNS integer LANGUAGE sql"
              " AS $$ SELECT x * 2 $$",
 }
 
@@ -111,6 +111,11 @@ def mysql():
         subprocess.run(["docker", "rm", "-f", "-v", MY], capture_output=True)
 
 
+def _verdicts(tmp_path):
+    got = json.loads((tmp_path / "code-proof.json").read_text())
+    return {v["routine"]: v for v in got["verdicts"]}
+
+
 def _pair(pg_port, tmp_path):
     from migkit.engines.hetero import HeteroEngine
     hop = Hop(name="prop", engine="hetero",
@@ -151,11 +156,18 @@ def test_proposals_are_marked_and_proven(mysql, pg_pair, model, tmp_path,
         eng.dst_engine.neutral_create_code("dst", "cx", got[name])
     proved = eng.prove_converted("cx")
     assert proved.status == "diff", proved.__dict__
-    assert proved.detail.endswith("answer differently on the target:"
-                                  " twice"), proved.detail
-    psql(port, "create or replace function twice(x bigint) returns bigint"
+    by = _verdicts(tmp_path)
+    assert by["function twice"]["status"] == "diff", by
+    assert by["function twice"]["reason"].startswith("called with (x=0):"), \
+        by
+    psql(port, "create or replace function twice(x integer) returns integer"
                " language sql as $$ select x * 2 + 1 $$", db="cx")
     proved = eng.prove_converted("cx")
-    assert proved.status == "ok", proved.__dict__
-    assert "(2 of them written by a model or a person, not by the" \
-        " translator)" in proved.detail, proved.detail
+    # both now answer every call the same; bodies of statements, asked on
+    # the hop's own servers with no sandbox named, are not measured for
+    # which of their statements ran - so not `ok`, and said why
+    assert proved.status == "warn", proved.__dict__
+    by = _verdicts(tmp_path)
+    for name in ("function steps", "function twice"):
+        assert by[name]["status"] == "warn", by
+        assert "answered the same" in by[name]["reason"], by

@@ -49,6 +49,10 @@ dependencies = [
     "pandas",
     "pyarrow",
     "sqlglot",
+    # stored code proved by running it: inputs drawn and shrunk by
+    # property search, and a branch the search never took solved for
+    "hypothesis",
+    "z3-solver",
     # DuckDB files as a side of a pair, and the diff of keys too many to
     # hold
     "duckdb>=1.1",

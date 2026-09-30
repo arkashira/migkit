@@ -917,6 +917,174 @@ class MSSQLEngine(DbapiRows, Engine):
             out.append((name, sql))
         return out
 
+    def code_routines(self, side, db):
+        """Every function, procedure and trigger written in the database,
+        with the statement that makes each as the server keeps it."""
+        from ..storedcode.routines import Param, Routine
+        kinds = {"FN": "function", "IF": "function", "TF": "function",
+                 "P": "procedure", "TR": "trigger"}
+        found = self._rows(
+            side, db, "select o.object_id, o.name, o.type, m.definition,"
+                      " s.name from sys.objects o join sys.sql_modules m on"
+                      " m.object_id = o.object_id join sys.schemas s on"
+                      " s.schema_id = o.schema_id where o.is_ms_shipped = 0"
+                      " and o.type in ('FN', 'IF', 'TF', 'P', 'TR')"
+                      " order by o.name")
+        params = {}
+        for oid, pname, declared, pid, out in self._rows(
+                side, db, f"select p.object_id, p.name,"
+                          f" {self.DECLARED.format(c='p')}, p.parameter_id,"
+                          " p.is_output from sys.parameters p join"
+                          " sys.objects o on o.object_id = p.object_id where"
+                          " o.is_ms_shipped = 0 order by p.object_id,"
+                          " p.parameter_id"):
+            params.setdefault(oid, []).append((str(pname).lstrip("@"),
+                                               str(declared), int(pid),
+                                               bool(out)))
+        triggers = {}
+        for oid, table, instead, event in self._rows(
+                side, db, "select t.object_id, s.name + '.' +"
+                          " object_name(t.parent_id), t.is_instead_of_trigger,"
+                          " e.type_desc from sys.triggers t join"
+                          " sys.trigger_events e on e.object_id = t.object_id"
+                          " join sys.objects o on o.object_id = t.parent_id"
+                          " join sys.schemas s on s.schema_id = o.schema_id"
+                          " where t.parent_class = 1"):
+            one = triggers.setdefault(oid, [str(table), bool(instead), []])
+            one[2].append(str(event).upper())
+        out = []
+        for oid, name, kind, definition, schema in found:
+            k = kinds[str(kind).strip()]
+            mine = params.get(oid, [])
+            returns = next((t for n, t, pid, _ in mine if pid == 0), None)
+            r = Routine(kind=k, name=str(name), definition=definition,
+                        language="tsql",
+                        params=[Param(n, t, "inout" if o else "in")
+                                for n, t, pid, o in mine if pid > 0],
+                        returns=returns if k == "function" else None,
+                        returns_set=str(kind).strip() in ("IF", "TF"),
+                        settings={"schema": str(schema)})
+            if str(kind).strip() in ("IF", "TF"):
+                r.returns = "TABLE"
+            if k == "trigger":
+                table, instead, events = triggers.get(oid, [None, False,
+                                                            []])
+                r.table, r.events = table, tuple(events)
+                r.timing = "INSTEAD OF" if instead else "AFTER"
+                r.level = "statement"
+                if table and self.hop.excluded(db, *table.split(".", 1)):
+                    continue
+            try:
+                from ..storedcode.tsql_pg import body_of
+                r.body = body_of(definition or "", k)[0]
+            except Exception:  # noqa: BLE001 - read from its definition
+                r.body = definition
+            out.append(r)
+        return out
+
+    def table_ddl(self, side, db, table):
+        """The statements that make this table as it is - each column's
+        type, collation, identity, default and NULL rule, its key and its
+        unique and check constraints - for a copy on another SQL Server
+        (the proof's sandbox). Foreign keys are `foreign_keys`'."""
+        quoted = self._qualified(side, db, table)
+        sch = str(table).split(".", 1)[0] if "." in str(table) else "dbo"
+        cols = []
+        for name, declared, nullable, collation, ident, seed, step, dflt, \
+                computed in self._rows(
+                    side, db, f"select c.name, {self.DECLARED.format(c='c')},"
+                              " c.is_nullable, c.collation_name,"
+                              " c.is_identity, cast(ic.seed_value as"
+                              " decimal(38, 0)), cast(ic.increment_value as"
+                              " decimal(38, 0)), d.definition,"
+                              " cc.definition from sys.columns c left join"
+                              " sys.identity_columns ic on ic.object_id ="
+                              " c.object_id and ic.column_id = c.column_id"
+                              " left join sys.default_constraints d on"
+                              " d.parent_object_id = c.object_id and"
+                              " d.parent_column_id = c.column_id left join"
+                              " sys.computed_columns cc on cc.object_id ="
+                              " c.object_id and cc.column_id = c.column_id"
+                              f" where c.object_id = object_id({MARK})"
+                              " order by c.column_id", (quoted,)):
+            if computed:
+                cols.append(f"{self._q(name)} as {computed}")
+                continue
+            one = f"{self._q(name)} {declared}"
+            if collation:
+                one += f" collate {collation}"
+            if ident:
+                one += f" identity({seed}, {step})"
+            one += " null" if nullable else " not null"
+            if dflt:
+                one += f" default {dflt}"
+            cols.append(one)
+        keys = {}
+        for kname, kind, col in self._rows(
+                side, db, "select i.name, case when i.is_primary_key = 1"
+                          " then 'primary key' else 'unique' end, c.name"
+                          " from sys.indexes i join sys.index_columns ic on"
+                          " ic.object_id = i.object_id and ic.index_id ="
+                          " i.index_id join sys.columns c on c.object_id ="
+                          " ic.object_id and c.column_id = ic.column_id"
+                          f" where i.object_id = object_id({MARK}) and"
+                          " (i.is_primary_key = 1 or i.is_unique_constraint"
+                          " = 1) order by i.index_id, ic.key_ordinal",
+                (quoted,)):
+            keys.setdefault((kname, kind), []).append(self._q(col))
+        for (_, kind), kcols in keys.items():
+            cols.append(f"{kind} ({', '.join(kcols)})")
+        for (check,) in self._rows(
+                side, db, "select definition from sys.check_constraints"
+                          f" where parent_object_id = object_id({MARK})",
+                (quoted,)):
+            cols.append(f"check {check}")
+        return (f"if schema_id('{sch}') is null exec('create schema"
+                f" {self._q(sch)}');\n"
+                f"create table {self._create_name(side, db, table)}"
+                f" ({', '.join(cols)})")
+
+    def foreign_keys(self, side, db):
+        got = {}
+        for fk, child, col, parent, pcol in self._rows(
+                side, db, "select f.name, s.name + '.' + object_name("
+                          "f.parent_object_id), cp.name, rs.name + '.' +"
+                          " object_name(f.referenced_object_id), cr.name"
+                          " from sys.foreign_keys f join"
+                          " sys.foreign_key_columns k on"
+                          " k.constraint_object_id = f.object_id join"
+                          " sys.columns cp on cp.object_id ="
+                          " k.parent_object_id and cp.column_id ="
+                          " k.parent_column_id join sys.columns cr on"
+                          " cr.object_id = k.referenced_object_id and"
+                          " cr.column_id = k.referenced_column_id join"
+                          " sys.objects o on o.object_id ="
+                          " f.parent_object_id join sys.schemas s on"
+                          " s.schema_id = o.schema_id join sys.objects ro on"
+                          " ro.object_id = f.referenced_object_id join"
+                          " sys.schemas rs on rs.schema_id = ro.schema_id"
+                          " order by f.name, k.constraint_column_id"):
+            one = got.setdefault((fk, child, parent), ([], []))
+            one[0].append(str(col))
+            one[1].append(str(pcol))
+        return [(str(c), a, str(p), b) for (_, c, p), (a, b) in got.items()]
+
+    def unique_keys(self, side, db):
+        got = {}
+        for table, index, col in self._rows(
+                side, db, "select s.name + '.' + t.name, i.name, c.name from"
+                          " sys.indexes i join sys.tables t on t.object_id ="
+                          " i.object_id join sys.schemas s on s.schema_id ="
+                          " t.schema_id join sys.index_columns ic on"
+                          " ic.object_id = i.object_id and ic.index_id ="
+                          " i.index_id join sys.columns c on c.object_id ="
+                          " ic.object_id and c.column_id = ic.column_id"
+                          " where i.is_unique = 1 order by 1,"
+                          " i.is_primary_key desc, i.name, ic.key_ordinal"):
+            got.setdefault(str(table), {}).setdefault(str(index), []).append(
+                str(col))
+        return {t: list(k.values()) for t, k in got.items()}
+
     def neutral_functions(self, side, db):
         """Scalar functions whose body is `BEGIN RETURN <expression> END`;
         the rest - procedures, table-valued functions, bodies of

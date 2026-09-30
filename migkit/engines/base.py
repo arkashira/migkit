@@ -3564,6 +3564,32 @@ class Engine:
         proposal to be made from; None where the engine cannot give it."""
         return None
 
+    def code_routines(self, side, db):
+        """[`storedcode.routines.Routine`] for every function, procedure,
+        trigger and event the engine's users wrote - [] where the engine
+        keeps none, or migkit cannot read them yet."""
+        return []
+
+    def table_ddl(self, side, db, table):
+        """The statement(s) making this table as it is, in this engine's
+        own SQL, for a copy on another server of the same engine."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot say how a table is made")
+
+    def foreign_keys(self, side, db):
+        """[(child, [columns], parent, [parent's columns])]."""
+        return []
+
+    def unique_keys(self, side, db):
+        """{table: [[columns of one unique key], ...]}, the primary key
+        first - here only the primary key, where the engine says no more."""
+        out = {}
+        for t in self.neutral_tables(side, db):
+            key = self.neutral_key(side, db, t)
+            if key:
+                out[t] = [list(key)]
+        return out
+
     def neutral_function_sql(self, name, params, returns, body):
         """The statement creating a one-expression function here, from
         `[(parameter, this engine's type)]`, this engine's return type

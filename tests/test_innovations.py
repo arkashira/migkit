@@ -395,11 +395,18 @@ def test_installing_says_how_many_not_which(monkeypatch, tmp_path):
     # a vendor's build is fetched over the network: asked for, not done
     monkeypatch.setattr(tools, "install_vendor",
                         lambda program, log: fetched.append(program) or True)
+    # and a program built from its source likewise
+    compiled = []
+    monkeypatch.setattr(tools, "built_program", lambda name: None)
+    monkeypatch.setattr(tools, "install_from_source",
+                        lambda program, log: compiled.append(program) or True)
     said = []
     tools.install_missing(said.append)
     assert built, "the second reading is part of installing everything"
     assert fetched == list(tools.VENDOR), fetched
     assert "fetching vendor component 1 ..." in said, said
+    assert compiled == list(tools.SOURCE_BUILDS), compiled
+    assert "building component 1 from its source ..." in said, said
     assert ran and len([s for s in said if "installing component" in s]) \
         == len(ran), said
     low = " ".join(said).lower()

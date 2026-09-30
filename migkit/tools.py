@@ -222,7 +222,140 @@ def second_reader_present():
 def _present(cmd):
     if cmd == SECOND_READER:
         return second_reader_present()
+    if cmd in SOURCE_BUILDS:
+        return built_program(cmd) is not None
     return which(cmd)
+
+
+#: programs no package manager carries for this machine, built here from
+#: their own published source, at the revision measured with migkit:
+#: {program: (revision, source archive)}
+SOURCE_BUILDS = {
+    "ora2pg": ("v25.0", "https://github.com/darold/ora2pg/archive/refs/tags"
+                        "/v25.0.tar.gz"),
+    "sqlines": ("4d0d87896cead95481fc4656f831a8ac6d7ec291",
+                "https://github.com/dmtolpeko/sqlines/archive/"
+                "4d0d87896cead95481fc4656f831a8ac6d7ec291.tar.gz"),
+}
+
+
+#: what the pinned SQLines source needs to build under clang and outside
+#: Linux, measured on macOS arm64: a Linux-only header it never uses, three
+#: pointers compared with `false`, and the commercial licence check the
+#: open repository leaves out (a class answering "no check needed")
+SQLINES_PATCHES = {
+    "sqlparser/file.cpp": [("#include <sys/io.h>", "")],
+    "sqlines/file.cpp": [("#include <sys/io.h>", "")],
+    "sqlines/filelist.cpp": [("#include <sys/io.h>", "")],
+    "sqlparser/oracle.cpp": [("(first == false) ? second->Compare",
+                              "(first == NULL) ? second->Compare")],
+    "sqlparser/select.cpp": [("GetNextCharToken(',', L',') == false",
+                              "GetNextCharToken(',', L',') == NULL")],
+    "sqlparser/statements.cpp": [("if(next_begin == false)",
+                                  "if(next_begin == NULL)")],
+}
+SQLINES_LICENSE_H = """#ifndef MIGKIT_SQLINES_LICENSE_H
+#define MIGKIT_SQLINES_LICENSE_H
+#include <string>
+class License {
+public:
+    void Set(const char *) {}
+    bool IsLicenseCheckRequired() { return false; }
+    bool IsEmpty() { return true; }
+    std::string GetName() { return ""; }
+};
+#endif
+"""
+
+
+def tools_home():
+    """Where migkit keeps the programs it builds for itself."""
+    import os
+    from pathlib import Path
+    return Path(os.environ.get("MIGKIT_TOOLS") or
+                Path.home() / ".migkit" / "tools")
+
+
+def built_program(name):
+    """(the command line that runs `name`, the environment it needs), or
+    None where it is neither built here nor on PATH."""
+    home = tools_home() / name
+    if name == "ora2pg" and home.exists():
+        # its installer lays itself out as the local Perl does (bin and
+        # lib under usr/local on Linux, Library/Perl on macOS): found by
+        # what it installed, not by where it was asked to
+        script = next((p for p in home.rglob("ora2pg")
+                       if p.parent.name == "bin" and p.is_file()), None)
+        module = next(home.rglob("Ora2Pg.pm"), None)
+        if script and module:
+            return (["perl", str(script)],
+                    {"PERL5LIB": str(module.parent)})
+    if name == "sqlines":
+        program = home / "sqlines"
+        if program.exists():
+            return ([str(program)], {})
+    found = which(name)
+    return ([found], {}) if found else None
+
+
+def install_from_source(name, log=print):
+    """Fetch `name`'s source at the revision measured here and build it
+    under `tools_home()`. True once the built program answers."""
+    import os
+    import tarfile
+    import tempfile
+    import urllib.request
+    revision, url = SOURCE_BUILDS[name]
+    home = tools_home() / name
+    home.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as work:
+        archive = os.path.join(work, "src.tar.gz")
+        try:
+            urllib.request.urlretrieve(url, archive)
+        except OSError as e:
+            log(f"  could not fetch it ({type(e).__name__})")
+            return False
+        with tarfile.open(archive) as box:
+            box.extractall(work, filter="data")
+        top = next(os.path.join(work, d) for d in os.listdir(work)
+                   if os.path.isdir(os.path.join(work, d)))
+
+        def step(cmd, cwd):
+            got = subprocess.run(cmd, cwd=cwd, capture_output=True,
+                                 text=True)
+            if got.returncode != 0:
+                log(f"  the build stopped: {(got.stderr.strip().splitlines() or [''])[-1][:120]}")
+            return got.returncode == 0
+        if name == "ora2pg":
+            # Perl with the DBI module; nothing of it is loaded into
+            # migkit - it runs as a program of its own
+            ok = step(["perl", "Makefile.PL", f"INSTALL_BASE={home}"], top) \
+                and step(["make"], top) and step(["make", "install"], top)
+        else:
+            for rel, edits in SQLINES_PATCHES.items():
+                path = os.path.join(top, rel)
+                text = open(path, encoding="latin-1").read()
+                for old, new in edits:
+                    text = text.replace(old, new)
+                open(path, "w", encoding="latin-1").write(text)
+            open(os.path.join(top, "sqlines", "license.h"), "w").write(
+                SQLINES_LICENSE_H)
+            parser = os.path.join(top, "sqlparser")
+            cpp = sorted(f for f in os.listdir(parser) if f.endswith(".cpp"))
+            ok = step(["c++", "-O2", "-w", "-c"] + cpp, parser) and step(
+                ["ar", "rcs", "sqlparser.a"] +
+                [f[:-4] + ".o" for f in cpp], parser)
+            main = os.path.join(top, "sqlines")
+            # its own str.cpp is the parser's again: linked twice, every
+            # symbol in it is defined twice
+            ok = ok and step(["c++", "-O2", "-w", "applog.cpp", "file.cpp",
+                              "filelist.cpp", "main.cpp", "os.cpp",
+                              "parameters.cpp", "sqlines.cpp",
+                              "../sqlparser/sqlparser.a", "-o",
+                              str(home / "sqlines")], main)
+        if not ok:
+            return False
+    return built_program(name) is not None
 
 
 # name, what it lets the operator do, programs required, optional faster path.
@@ -276,6 +409,10 @@ CAPABILITIES = [
     ("Any engine: row-level diff",
      "cross-dialect row comparison and drilldown",
      [], []),
+    ("Stored code: more converters",
+     "procedures, functions and triggers converted more than one way,"
+     " each version proved against the source before it is chosen",
+     [], ["ora2pg", "sqlines"]),
 ]
 
 
@@ -318,6 +455,8 @@ def by_hand(programs):
             continue    # `doctor --install` builds it wherever Python runs
         if c in VENDOR and vendor_file(c):
             continue    # fetched from its vendor (`install_vendor`)
+        if c in SOURCE_BUILDS:
+            continue    # built from its source (`install_from_source`)
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
             out.append(c)
@@ -340,7 +479,7 @@ def install_missing(log=print, ask=None):
         wanted += needs + optional
     pkgs = []
     for cmd in wanted:
-        if cmd == SECOND_READER or which(cmd):
+        if cmd == SECOND_READER or cmd in SOURCE_BUILDS or which(cmd):
             continue
         formula, apt = PROGRAMS.get(cmd, ("", ""))
         pkg = formula if mgr == "brew" else apt
@@ -376,6 +515,12 @@ def install_missing(log=print, ask=None):
         if not ok:
             log(f"  vendor component {n} did not install; run migkit"
                 " doctor again to see which capability is still short")
+    for n, cmd in enumerate([c for c in dict.fromkeys(wanted)
+                             if c in SOURCE_BUILDS and not _present(c)], 1):
+        log(f"building component {n} from its source ...")
+        if not install_from_source(cmd, log):
+            log(f"  component {n} did not build; run migkit doctor again"
+                " to see which capability is still short")
     if not _present(SECOND_READER):
         install_second_reader(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]

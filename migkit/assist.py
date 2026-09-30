@@ -45,11 +45,16 @@ def provider():
     return got or None
 
 
-def _request(kind, prompt):
-    """(url, headers, body) for one prompt to `kind`."""
-    base = os.environ.get("MIGKIT_AI_URL", "").rstrip("/") or BASE[kind]
+def _request(kind, prompt, endpoint=None):
+    """(url, headers, body) for one prompt to `kind`. `endpoint` names
+    another address and model than the environment's (a hop's own); the
+    key is always the environment's."""
+    endpoint = endpoint or {}
+    base = (str(endpoint.get("url") or "") or
+            os.environ.get("MIGKIT_AI_URL", "")).rstrip("/") or BASE[kind]
     key = os.environ.get("MIGKIT_AI_KEY", "")
-    model = os.environ.get("MIGKIT_AI_MODEL", "") or DEFAULT_MODEL.get(kind)
+    model = str(endpoint.get("model") or "") or \
+        os.environ.get("MIGKIT_AI_MODEL", "") or DEFAULT_MODEL.get(kind)
     if not model:
         raise SystemExit(f"MIGKIT_AI={kind} needs MIGKIT_AI_MODEL: migkit"
                          " does not choose a model for this provider")
@@ -79,14 +84,18 @@ def _answer(kind, got):
             ).get("content", "")
 
 
-def ask(prompt):
+def ask(prompt, endpoint=None):
     """The provider's answer, or None where none is configured. A provider
     that cannot be reached is said as the answer: this never stops a
-    command whose own result is already in."""
-    kind = provider()
+    command whose own result is already in. `endpoint` ({provider, url,
+    model}) is a hop's own choice over the environment's."""
+    kind = str((endpoint or {}).get("provider") or "").lower() or provider()
     if not kind:
         return None
-    url, headers, body = _request(kind, prompt)
+    if kind not in BASE:
+        raise SystemExit(f"the model provider {kind} is not one of"
+                         f" {', '.join(sorted(BASE))}")
+    url, headers, body = _request(kind, prompt, endpoint)
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", **headers},
