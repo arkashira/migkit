@@ -35,6 +35,10 @@ PHASES = {
     "empty": "emptying the target's tables",
     "load": "loading the local copy into the target",
     "stream-copy": "copying tables straight from source to target",
+    "pull": "the target pulling the tables from the source, server to"
+            " server",
+    "subscribe-copy": "the target copying the tables through a temporary"
+                      " subscription, server to server",
     "sync": "copying online while the source keeps changing, then"
             " committing",
     "copy-table": "copying table by table",

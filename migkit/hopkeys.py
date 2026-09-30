@@ -102,6 +102,9 @@ HOP_OPTIONS = {
     "checksum": Key("text or jsonb row rendering", "str", ("postgres",)),
     "checksum_workers": Key("tables checksummed at once", "int",
                             ("postgres",), knob="size"),
+    "cloud": Key("the cloud the servers run in - aws, gcp or azure -"
+                 " where their addresses and the servers do not say; the"
+                 " machine and the target's class are named in it", "str"),
     "code_dir": Key("where the operator's own versions of routines are"
                     " kept, one <name>.sql each", "str", ("hetero",)),
     "code_model": Key("the model a routine no converter proves is asked"
@@ -114,6 +117,10 @@ HOP_OPTIONS = {
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
                    subs=("budget", "start_below", "freeze", "pooler",
                          "flip", "flip_undo", "keys", "jobs")),
+    "deadline": Key("when the move must be done by - a duration (6h,"
+                    " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
+                    " names the cheapest machine for migkit that meets it",
+                    "str|number"),
     "deep": Key("compare every key's value, not a sample", "bool",
                 ("redis",)),
     "exclude_schema": Key("schemas left out of the schema dump", "str",
@@ -172,6 +179,8 @@ HOP_OPTIONS = {
                           " while migkit moves into it", "bool"),
     "pt_apply": Key("the online schema change path, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
+    "region": Key("the region the machine and the target's class are"
+                  " priced in, where the addresses do not say", "str"),
     "reladiff": Key("the second data reading, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
     "repair_window": Key("seconds a writer is paused for a repair",
@@ -189,6 +198,12 @@ HOP_OPTIONS = {
     "schema_authority": Key("which schema reading decides", "str"),
     "server_id": Key("the replica id the binlog reader uses", "int",
                      ("mysql",)),
+    "server_to_server": Key("the target may pull the rows from the source"
+                            " itself, with the objects that needs made on"
+                            " the servers for the copy and dropped after:"
+                            " true, or {source: host:port} where the target"
+                            " reaches the source at another address",
+                            "bool|dict", ("postgres",), subs=("source",)),
     "settle": Key("seconds a re-check waits for a stream to settle",
                   "int"),
     "share_tables": Key("machines share one move's tables", "bool"),

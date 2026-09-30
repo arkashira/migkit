@@ -6103,6 +6103,49 @@ on docker pairs with throttled CPU, I/O and network (tc/toxiproxy),
 the binding resource named correctly in each case, and no run slower
 than today's `Pace`.
 
+*Built (2026-09-30), items 4 and 6:*
+* **Hops removed** (`migkit/legs.py`): two rungs at the head of the one
+  ladder a database climbs (`movers._ladder`), each needing the hop's
+  leave (`server_to_server:`, true or `{source: host:port}`): the target
+  pulling through a foreign server - extension, server, user mapping and
+  a schema of foreign tables made on the target, `INSERT ... SELECT` a
+  key range at a time several at once, the fetch sized from the round
+  trip, the credentials dropped the moment the last row is in, all of it
+  said in the plan first - and, below it, a temporary subscription with
+  `copy_data` (same major version, binary; a publication and a slot on
+  the source, dropped after; tables without a key go by the copier, since
+  published they would make the source refuse its updates). Proved at the
+  start of the move by acting on the target (a probe through the foreign
+  server, a subscription with no slot), falling a rung and saying why.
+  Measured on the pair with a proxy's delay: the pull wins only where
+  migkit is far from the target (beside it, its own copy was faster by a
+  quarter, 0.77 s against 1.05 s a 40 MB range at 50 ms), so the rungs
+  need that, measured by a statement's round trip. MySQL's clone is the
+  physical rungs' (`physical-clone`), named in `legs.DIRECT`. Where
+  migkit should run is said in `doctor` and the plan from the same round
+  trips (`legs.placement`), the servers' own where the pull's proof timed
+  it. Not measured: what crossing a width-bound link once instead of
+  twice saves.
+* **The machine to run on** (`migkit/machine.py`,
+  `migkit/data/instances.json`): 98 AWS, 48 GCP and 43 Azure types from
+  the providers' own pages and price lists (sources in the file), network
+  and disk as baseline and burst; the time on a type worked out in
+  phases, the burst while it lasts and the baseline after; the cheapest
+  type meeting the hop's `deadline:` said with its time, cost and what
+  binds - or that a server binds and no machine would help; the stages
+  read from the resource model's `model.json` where the plan kept one,
+  else from the hop's own runs (bytes and CPU seconds now kept with each
+  rate). Refreshed from AWS's API (instance types and price list) where
+  credentials are present, kept a week. The cloud and region from
+  `cloud:`/`region:`, else `clouds` (the address now gives AWS's region)
+  and `facts.json`.
+* **The target's class** (W2's first piece): each `assess` observes the
+  source's load for 3 s (`Engine.load_sample`, PostgreSQL and MySQL:
+  sessions on a CPU, block reads and writes, transactions, connections,
+  cache and hit ratio), keeps it beside the hop, and sizes the class from
+  the busiest kept (95th percentile past 20), with RDS's default
+  connection limit checked against it.
+
 ### R23. What people who migrate actually want, and what is still missing (added 2026-09-29)
 
 Asked by the owner: what does a migration tool people really want look

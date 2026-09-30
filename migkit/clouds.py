@@ -81,6 +81,8 @@ class Where:
     cloud: str = ""
     service: str = ""
     evidence: list = field(default_factory=list)
+    #: the region, where the address carries one (AWS's names do)
+    region: str = ""
 
     @property
     def label(self):
@@ -91,7 +93,12 @@ class Where:
 
     def as_dict(self):
         return {"cloud": self.cloud, "service": self.service,
-                "label": self.label, "evidence": list(self.evidence)}
+                "label": self.label, "evidence": list(self.evidence),
+                "region": self.region}
+
+
+#: an AWS region inside a service's address: `db.abc.eu-west-1.rds...`
+AWS_REGION = re.compile(r"\.([a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d)\.")
 
 
 def from_host(host):
@@ -99,7 +106,9 @@ def from_host(host):
     name = str(host or "").strip().lower().rstrip(".")
     for pattern, cloud, service in HOSTS:
         if re.search(pattern, name):
-            return Where(cloud, service, [f"the address ({name})"])
+            m = AWS_REGION.search(name) if cloud == "aws" else None
+            return Where(cloud, service, [f"the address ({name})"],
+                         m.group(1) if m else "")
     return Where()
 
 
@@ -170,7 +179,7 @@ def of(eng, side, ep):
         service = (by_host.service if by_host.service in (
             "aurora-reader", "rds-proxy") else by_server.service)
         return Where(by_server.cloud, service,
-                     by_host.evidence + by_server.evidence)
+                     by_host.evidence + by_server.evidence, by_host.region)
     return by_server
 
 

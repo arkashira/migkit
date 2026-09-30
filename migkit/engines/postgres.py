@@ -9322,6 +9322,52 @@ class PostgresEngine(Engine):
         " || '|' || current_setting('max_worker_processes')"
         " || '|' || pg_is_in_recovery()::int")
 
+    #: the load a side carries, as counters `machine.observe` turns into
+    #: rates: transactions, block reads and writes (`pg_stat_io` from 16,
+    #: which counts every backend's; before it the databases' reads and
+    #: the buffers the writers flushed), sessions on a CPU now - active and
+    #: waiting on nothing - connections and their limit, the shared cache
+    #: and how often a read found its block there
+    LOAD_SQL = (
+        "select (select sum(xact_commit + xact_rollback) from"
+        " pg_stat_database)"
+        " || '|' || {reads} || '|' || {writes}"
+        " || '|' || (select count(*) from pg_stat_activity where state ="
+        " 'active' and backend_type = 'client backend' and wait_event is"
+        " null and pid <> pg_backend_pid())"
+        " || '|' || (select count(*) from pg_stat_activity where"
+        " backend_type = 'client backend')"
+        " || '|' || current_setting('max_connections')"
+        " || '|' || pg_size_bytes(current_setting('shared_buffers'))"
+        " || '|' || coalesce((select sum(blks_hit)::float8 / nullif("
+        "sum(blks_hit + blks_read), 0) from pg_stat_database)::text, '')")
+    LOAD_IO = {
+        True: ("(select coalesce(sum(reads), 0) from pg_stat_io)",
+               "(select coalesce(sum(writes), 0) + coalesce(sum(extends), 0)"
+               " from pg_stat_io)"),
+        False: ("(select sum(blks_read) from pg_stat_database)",
+                "(select buffers_checkpoint + buffers_clean + buffers_backend"
+                " from pg_stat_bgwriter)")}
+
+    def load_sample(self, side, db):
+        """One reading of the side's load counters (`LOAD_SQL`); the share
+        of memory its cache is, as a managed service sets it by default -
+        shared buffers a quarter of the class's memory."""
+        version = self.__dict__.setdefault("_load_version", {})
+        if side not in version:
+            version[side] = self._server_version(side, self._d(side, db)) \
+                or 0
+        reads, writes = self.LOAD_IO[version[side] >= 160000]
+        got = self._psql(side, db, self.LOAD_SQL.format(
+            reads=reads, writes=writes)).strip().split("|")
+        xacts, r, w, running, conns, most, cache, hit = (got + [""] * 8)[:8]
+        num = (lambda v: float(v) if v not in ("", None) else None)
+        return {"xacts": num(xacts), "reads": num(r), "writes": num(w),
+                "running": int(running or 0), "connections": int(conns or 0),
+                "max_connections": int(most or 0),
+                "cache_bytes": int(cache or 0), "cache_share": 0.25,
+                "hit": num(hit)}
+
     def capacity(self, side, db):
         """PostgreSQL says nothing of its CPUs in SQL. Where the server's
         own files may be read (a superuser on a server it runs itself) they

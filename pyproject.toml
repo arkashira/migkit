@@ -126,6 +126,10 @@ version = { attr = "migkit.__version__" }
 [tool.setuptools.packages.find]
 include = ["migkit*"]
 
+[tool.setuptools.package-data]
+# the instance catalog the machine advice weighs (`migkit.machine`)
+migkit = ["data/*.json"]
+
 [tool.pytest.ini_options]
 markers = ["docker: needs a docker daemon",
            "mssql: runs against SQL Server (the x86 workflow runs these)",

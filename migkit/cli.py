@@ -490,7 +490,7 @@ def doctor(install):
                 reached.append(side)
             except Exception as e:
                 console.print(f"{name} {side}: [red]FAIL[/red] {e}")
-        said = _placement_said(rtt)
+        said = _placement_said(rtt, hop)
         if said:
             console.print(f"{name}: {said}")
         if len(reached) == 2:
@@ -582,23 +582,27 @@ def _doctor_setup(name, hop, eng):
                       f" ({n.now})")
 
 
-#: a round trip past which a side is across a wide network, not beside
-#: the machine migkit runs on
-FAR_MS = 20.0
-
-
-def _placement_said(rtt):
+def _placement_said(rtt, hop=None):
     """Where this machine is between the two sides, where both round
-    trips were measured: far from both means each row crosses a wide
-    network twice, once in and once out."""
-    a, b = rtt.get("src"), rtt.get("dst")
-    if a is None or b is None or min(a, b) < FAR_MS:
-        return ""
-    return (f"[yellow]placement[/yellow]: this machine is {a} ms from the"
-            f" source and {b} ms from the target, so every row crosses a"
-            " wide network twice. Run migkit next to the target - the side"
-            " written to, whose statements wait on each round trip - so"
-            " only the reads travel")
+    trips were measured (`legs.placement`): far from both means each row
+    crosses a wide network twice, once in and once out; beside the source
+    and far from the target, that every write waits on the link."""
+    from . import legs
+    direct, seen, may = False, None, False
+    if hop is not None:
+        from . import movers
+        from .engines import ALIASES
+        may = legs.allowed(hop)
+        seen = legs.servers_seen(hop)
+        if may:
+            try:
+                direct = legs.direct(movers.for_hop(
+                    hop, ALIASES.get(hop.engine, hop.engine))[0])
+            except Exception:  # noqa: BLE001 - a probe never fails doctor
+                direct = False
+    said = legs.placement(rtt.get("src"), rtt.get("dst"), seen, direct,
+                          False, may)
+    return f"[yellow]placement[/yellow]: {said}" if said else ""
 
 
 def _leg_said(eng, side, db, ep):
@@ -730,6 +734,17 @@ def assess(hop_name):
         level, what = "warn", f"cutover: could not be worked out ({e})"
     items.append({"level": level, "scope": "cutover", "item": what,
                   "detail": ""})
+    # the source's load, the class the target needs and the machine to run
+    # migkit on (R22): asked of the first database, which holds the load
+    from . import machine
+    dbs = list(hop.databases or [])
+    if not dbs:
+        try:
+            dbs = eng.databases()
+        except Exception:  # noqa: BLE001 - said by the engine's own rows
+            dbs = []
+    if dbs:
+        items += machine.assess_items(hop, eng, dbs[0])
     color = {"pass": "green", "warn": "yellow", "fail": "red"}
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for it in items:
@@ -1533,7 +1548,7 @@ def movers_pick_and_run(hop, eng, db, go):
     from . import movers
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
-    via = movers.pick(engine)
+    via, _ = movers.for_hop(hop, engine, "", go)
     for d in ([db] if db else eng.databases()):
         if via == "builtin":
             _move_full(hop, eng, d, "", 500000, go)
@@ -1586,7 +1601,44 @@ def _table_plan(hop, eng, d, via):
                              free, kept)
     return (["  by table:"] + planner.lines(decisions)
             + [f"  time: {planner.estimate(hop, via, rows)}"]
-            + ([f"  size: {size}"] if size else []))
+            + ([f"  size: {size}"] if size else [])
+            + _where_and_machine(hop, eng, d, via))
+
+
+def _where_and_machine(hop, eng, d, via):
+    """The plan's lines about where migkit should run and the machine to
+    run it on (R22): from the round trips measured now, and from the
+    stages measured on this path."""
+    from . import legs, machine
+    out = []
+    try:
+        where = legs.plan_line(hop, via, d)
+    except Exception:  # noqa: BLE001 - a plan line, not a reason to stop
+        where = ""
+    if where:
+        out.append(f"  where: {where}")
+    # a deadline the hop gives wrong stops here, said (SystemExit)
+    try:
+        said = machine.plan_line(hop, via, machine.size_of(eng, d, hop),
+                                 legs.direct(via), d)
+    except Exception:  # noqa: BLE001 - a plan line, not a reason to stop
+        said = ""
+    if said:
+        out.append(f"  machine: {said}")
+    return out
+
+
+def _record_run(hop, eng, d, via, rows, began, spent):
+    """One finished copy of a whole database kept with the hop's rates:
+    its rows and seconds, the bytes it carried, and the CPU seconds this
+    machine spent - where the copy ran here and not in a container, whose
+    CPU this process does not see."""
+    from . import machine, movers, planner, sizing
+    here = movers.PROGRAMS.get(via) != ("docker",)
+    planner.record_rate(hop, via, rows, time.time() - began,
+                        machine.size_of(eng, d, hop),
+                        spent.seconds() if here else None,
+                        sizing.host().get("cpus") if here else None)
 
 
 def _source_rows(eng, d):
@@ -1900,6 +1952,8 @@ def _move_full(hop, eng, db, table, chunk, go):
             from . import planner
             console.print("  time: " + planner.estimate(
                 hop, "builtin", _source_rows(eng, d)))
+            for line in _where_and_machine(hop, eng, d, "builtin"):
+                console.print(line)
             continue
         # a value the target would round, cut or refuse stops the move
         # here, before the first table is copied; a table an earlier run
@@ -1910,6 +1964,8 @@ def _move_full(hop, eng, db, table, chunk, go):
         share = _sharing(hop) if not table else None
         before = drift.shape(eng, "src", d)
         began, rows = time.time(), _source_rows(eng, d)
+        from . import machine
+        spent = machine.Spent()
         point = _position_before_copy(eng, d) if not table else None
         _mark_move(hop, eng, d)
         lk = _lock(hop)
@@ -1943,8 +1999,7 @@ def _move_full(hop, eng, db, table, chunk, go):
         if not table and not share:
             # a whole database's rows over its time; one table's run is not
             # a rate for the rest, and neither is one machine's share
-            from . import planner
-            planner.record_rate(hop, "builtin", rows, time.time() - began)
+            _record_run(hop, eng, d, "builtin", rows, began, spent)
         _stop_if_the_schema_moved(hop, eng, d, before)
         if not table:
             _refuse_if_nothing_arrived(hop, eng, d, "the table copy",
@@ -2656,7 +2711,13 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                if _keep_out(hop, eng, d,
                             _tables_to_copy(hop, eng, d, table),
                             go) is not None]
-        v, why = movers.fitted(hop, engine, movers.chosen(engine, table))
+        from . import legs
+        base, passed = movers.for_hop(hop, engine, table, go)
+        v, why = movers.fitted(hop, engine, base)
+        if passed and not legs.direct(v) and not table:
+            # the hop asked for the servers to pull from each other: why
+            # they do not is the first thing the operator reads
+            console.print(f"  the rows go through this machine: {passed}")
         if why:
             console.print(f"  {why}, so the tables are copied one by one")
         if v != "builtin":
@@ -2674,6 +2735,8 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     for line in _table_plan(hop, eng, d, v):
                         console.print(line)
                     began, rows = time.time(), _source_rows(eng, d) if go else 0
+                    from . import machine
+                    spent = machine.Spent()
                     point = _position_before_copy(eng, d) if go else None
                     if go:
                         _mark_move(hop, eng, d)
@@ -2683,8 +2746,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                     steps = movers.run_via(v, hop, d, hop.workers, go,
                                            lambda m: chat(f"  {m}"))
                     if go:
-                        from . import planner
-                        planner.record_rate(hop, v, rows, time.time() - began)
+                        _record_run(hop, eng, d, v, rows, began, spent)
                     for s0 in steps:
                         console.print(f"  {s0}")
                     if go:

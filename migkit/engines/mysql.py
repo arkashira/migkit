@@ -6025,6 +6025,41 @@ class MySQLEngine(Engine):
 
     PAYLOAD_SQL = "select repeat(md5(rand()), {n})"
 
+    #: the status counters a side's load is read from
+    LOAD_STATUS = ("Com_commit", "Com_rollback", "Innodb_data_reads",
+                   "Innodb_data_writes", "Threads_connected",
+                   "Threads_running", "Innodb_buffer_pool_read_requests",
+                   "Innodb_buffer_pool_reads")
+
+    def load_sample(self, side, db):
+        """One reading of the side's load counters, as `machine.observe`
+        turns them into rates: transactions (commits and rollbacks), the
+        storage engine's data reads and writes, the threads running beside
+        this one, connections and their limit, the buffer pool and how
+        often a read found its page there. The pool's share of memory is
+        what a managed service sets by default: three quarters."""
+        status = {k: v for k, v in self._q(
+            side, "show global status where variable_name in ("
+            + ", ".join(f"'{k}'" for k in self.LOAD_STATUS) + ")")}
+        most, pool = self._q(side, "select @@max_connections,"
+                                   " @@innodb_buffer_pool_size")[0]
+
+        def num(k):
+            v = status.get(k)
+            return float(v) if v not in (None, "") else None
+        asked, missed = num("Innodb_buffer_pool_read_requests"), \
+            num("Innodb_buffer_pool_reads")
+        return {"xacts": (num("Com_commit") or 0) + (num("Com_rollback")
+                                                     or 0),
+                "reads": num("Innodb_data_reads"),
+                "writes": num("Innodb_data_writes"),
+                "running": max(0, int(num("Threads_running") or 1) - 1),
+                "connections": int(num("Threads_connected") or 0),
+                "max_connections": int(most or 0),
+                "cache_bytes": int(pool or 0), "cache_share": 0.75,
+                "hit": (1 - missed / asked) if asked and missed is not None
+                else None}
+
     def capacity(self, side, db):
         """MySQL 8 lists the CPUs a session may run on in its default
         resource group (`0-3`); MariaDB and older releases do not say. A

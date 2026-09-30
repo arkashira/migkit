@@ -19,4 +19,9 @@ hops:
     # options:
     #   mask: [users.email, ssn]  # values reports show from rows, as salted hashes; `all` masks every value
     #   transfer_price_per_gb: 0.09   # the plan then says what carrying the rows across costs
+    #   server_to_server: true       # the target may pull the rows from the source itself (objects made on the servers for the copy, dropped after; the plan lists them)
+    #   server_to_server: {source: 10.0.0.5:5432}   # the same, where the target reaches the source at another address than migkit does
+    #   deadline: 6h                 # the plan and assess name the cheapest machine for migkit that meets it (also 90m, 2d, 2026-10-01T02:00)
+    #   cloud: aws                   # where the servers run, when their addresses do not say (aws | gcp | azure)
+    #   region: eu-west-1            # the region the machines are priced in
     #   accept_changes: [orders.placed_at]   # a pair of engines refuses to move a value the target would round, cut or refuse; these columns may arrive as the target keeps them

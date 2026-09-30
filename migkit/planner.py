@@ -59,14 +59,15 @@ def ways(via):
     everything the table asks, the table copier where it does not, and
     nothing for a table the hop leaves out."""
     from .decide import Rung
-    from .movers import ROW_FILTER_MOVERS
+    from .movers import NEEDS_KEYS, ROW_FILTER_MOVERS
     bulk = {"carried"} | ({"row filter"} if via in ROW_FILTER_MOVERS
-                          else set())
+                          else set()) | ({"keyless"} if via not in NEEDS_KEYS
+                                         else set())
     return (Rung(BULK, "the bulk copy", gives=frozenset(bulk),
                  because="the fastest path here"),
             Rung(COPIER, "the table copier",
                  gives=frozenset({"carried", "row filter",
-                                  "column mapping"})),
+                                  "column mapping", "keyless"})),
             Rung(LEFT, WORDS[LEFT], gives=frozenset({LEFT})))
 
 
@@ -96,14 +97,16 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
     for ident in sorted(tables):
         parts = [p for p in str(ident).split(".") if p]
         name = _name(parts, qualifier)
-        about = _about(facts.get(ident) or facts.get(name))
+        fact = facts.get(ident) or facts.get(name) or {}
+        about = _about(fact)
         if hop.excluded(db, *parts):
             need = (LEFT,)
         else:
             need = ("carried",) + (
                 ("row filter",) if filtered and hop.row_filter(db, *parts)
                 else ()) + (("column mapping",)
-                            if hop.column_rules(db, *parts) else ())
+                            if hop.column_rules(db, *parts) else ()) + (
+                ("keyless",) if fact.get("key") is False else ())
         got = climb(name, rungs, need=need)
         mine = choice.get(parts[-1]) if got.path == BULK else None
         if mine is not None and mine.rung:
@@ -148,8 +151,13 @@ def _kind(hop):
     return hop.engine
 
 
-def record_rate(hop, path, rows, seconds):
-    """Remember one finished copy: `rows` in `seconds` by `path`."""
+def record_rate(hop, path, rows, seconds, size=None, cpu_seconds=None,
+                cpus=None):
+    """Remember one finished copy: `rows` in `seconds` by `path` - and,
+    where the caller knows them, the bytes it carried and the CPU seconds
+    this machine spent on it out of its `cpus`, which is what tells the
+    next plan whether this machine or something beyond it held the copy
+    back (`machine.stages_for`)."""
     import json
     import time
     if not rows or seconds <= 0:
@@ -160,9 +168,14 @@ def record_rate(hop, path, rows, seconds):
     except (OSError, ValueError):
         got = {}
     runs = got.setdefault(path, [])
-    runs.append({"rows": int(rows), "seconds": round(seconds, 3),
-                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "kind": _kind(hop)})
+    run = {"rows": int(rows), "seconds": round(seconds, 3),
+           "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": _kind(hop)}
+    if size:
+        run["bytes"] = int(size)
+    if cpu_seconds is not None and cpus:
+        run["cpu_seconds"] = round(float(cpu_seconds), 3)
+        run["cpus"] = int(cpus)
+    runs.append(run)
     del runs[:-10]
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(got, indent=1))
@@ -174,6 +187,11 @@ def _runs(path_file, path):
         return json.loads(path_file.read_text()).get(path) or []
     except (OSError, ValueError):
         return []
+
+
+def runs(hop, path):
+    """The copies kept for `path` on this hop, oldest first."""
+    return _runs(_rates_path(hop), path)
 
 
 def measured_rate(hop, path):

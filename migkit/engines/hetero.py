@@ -2931,6 +2931,13 @@ class HeteroEngine(Engine):
         return (self.src_engine if side == "src"
                 else self.dst_engine).link_probe(side, db, wait)
 
+    def load_sample(self, side, db):
+        """The side's own engine's reading of its load, where it gives
+        one (`machine.observe`)."""
+        fn = getattr(self.src_engine if side == "src" else self.dst_engine,
+                     "load_sample", None)
+        return fn(side, db) if fn else None
+
     def move_table(self, db, sch, tbl, chunk, ck, log):
         """One table through the copier every pair shares.
 

@@ -2402,11 +2402,11 @@ class Engine:
         from .. import movers
         # the path the move would take for this hop, not the first one
         # installed: the online sync gives way where the hop cannot use it
+        base = movers.for_hop(self.hop, self.hop.engine)[0]
         try:
-            via, _ = movers.fitted(self.hop, self.hop.engine,
-                                   movers.chosen(self.hop.engine))
+            via, _ = movers.fitted(self.hop, self.hop.engine, base)
         except SystemExit:
-            via = movers.chosen(self.hop.engine)
+            via = base
         dbs = list(self.hop.databases or self.hop.db_map or [])
         if via not in movers.PROGRAMS or not dbs:
             return []

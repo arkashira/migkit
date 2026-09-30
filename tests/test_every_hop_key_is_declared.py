@@ -44,6 +44,7 @@ DYNAMIC = {
                                               "sslcert", "sslkey",
                                               "sslcrl")),
     ("config.py", "mysql_tls"): ("endpoint", ("ssl_cert", "ssl_key")),
+    ("mysql.py", "_client_tls"): ("endpoint", ("ssl_cert", "ssl_key")),
     ("warehouse.py", "_connect"): ("endpoint", ("warehouse", "role")),
     ("config.py", "redis_tls"): ("endpoint", ("tls_cert_file",
                                               "tls_key_file")),

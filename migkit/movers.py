@@ -27,7 +27,8 @@ from .tooluse import TOPPED, UNUSED, USED
 from .util import quiet_argv, run, tool_env, which
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
-        "pgloader", "mongodump", "mongosync", "riotx", "native")
+        "pgloader", "mongodump", "mongosync", "riotx", "native", "pgpull",
+        "pgsubscribe")
 
 
 def _native(engine):
@@ -56,8 +57,9 @@ def _ladder():
     list and not by a hop's rates: a whole run's rate at one size does not
     carry to another, and a database is not moved twice to learn which
     way is faster - the benchmark (item 28) ranks them."""
+    from . import legs
     from .decide import Need, Rung
-    return (
+    return legs.rungs() + (
         # the version-matched container first: it overlaps copy, index
         # and constraint work, builds indexes after the rows land, and
         # needs no intermediate directory - none of which the dump path
@@ -105,15 +107,28 @@ def _ladder():
     )
 
 
-def pick(engine, table=""):
+def pick(engine, table="", hop=None, go=False):
     """Fastest installed tool for whole-db moves, builtin for single tables
     (chunk resume matters more than raw speed there)."""
-    from .decide import climb
-    return climb(table or engine, _ladder(), {"engine": engine},
-                 ("resume by chunk",) if table else ()).path
+    return choice(engine, table, hop, go).path
 
 
-def chosen(engine, table=""):
+def choice(engine, table="", hop=None, go=False):
+    """`pick`'s whole answer, the reason with it. With the `hop`, the ways
+    that need its leave and ask its servers are weighed too; a way that
+    proves itself only by acting on a server is proved when the move goes
+    (`go`), and a dry run names it on its needs alone."""
+    from . import legs
+    from .decide import Facts, climb
+    facts = Facts({"engine": engine, "hop": hop, "go": go,
+                   "db": legs._first_db(hop) if hop is not None else None},
+                  legs=lambda: legs.facts(hop),
+                  rtt=lambda: legs.round_trips(hop))
+    return climb(table or engine, _ladder(), facts,
+                 ("resume by chunk",) if table else ())
+
+
+def chosen(engine, table="", hop=None, go=False):
     """Which mover to use. Not a user-facing decision.
 
     Picking the fastest installed tool for an engine is knowledge migkit
@@ -132,7 +147,22 @@ def chosen(engine, table=""):
             raise SystemExit(f"MIGKIT_MOVER={forced} does not apply to"
                              f" a {engine} hop")
         return forced
-    return pick(engine, table)
+    return pick(engine, table, hop, go)
+
+
+def for_hop(hop, engine, table="", go=False):
+    """(via, why the ways above it were passed over, or "") for a move of
+    `hop`: the ways that take the rows from server to server are climbed
+    only where the hop allows them, and otherwise the choice is `chosen`'s
+    exactly as it always was - one call for the move, `assess`, `doctor`
+    and the plan."""
+    import os
+
+    from . import legs
+    if legs.allowed(hop) and not os.environ.get("MIGKIT_MOVER", "").strip():
+        got = choice(engine, table, hop, go)
+        return got.path, got.reason
+    return chosen(engine, table), ""
 
 
 def fitted(hop, engine, via):
@@ -216,7 +246,17 @@ ROW_FILTER_MOVERS = ("mydumper", "mysqlsh")
 
 #: Bulk paths that can leave a table out, so a table with a row filter can
 #: be carried by the table copier instead.
-ROUTING_MOVERS = ("pgdump", "pgcopydb", "native")
+ROUTING_MOVERS = ("pgdump", "pgcopydb", "native", "pgpull", "pgsubscribe")
+
+#: Bulk paths that carry only a table with a key: a temporary
+#: subscription publishes the tables it copies, and a table without a key
+#: in a publication makes the source refuse its application's updates and
+#: deletes while it is there
+NEEDS_KEYS = ("pgsubscribe",)
+
+#: Bulk paths that write a local copy of the source and load it back: the
+#: disk of the machine they run on writes every byte and reads it again
+LOCAL_COPY = ("pgdump", "mydumper", "mongodump")
 
 #: Engines whose table copier (`move_table`) applies the row filter on
 #: both ends - reading only what it selects, replacing only what it
@@ -267,7 +307,8 @@ def _filtered_here(hop, db):
     return sorted(out)
 
 
-def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None):
+def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None,
+                     facts=None):
     """The tables a bulk path cannot filter, carried by the table copier.
 
     `via` copies whole tables; the copier reads and replaces only the rows
@@ -280,8 +321,12 @@ def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None):
     it already (`my_bulk_choice`).
     """
     from . import planner
+    if facts is None and via in NEEDS_KEYS:
+        # which tables have a key is a fact of the source's
+        from .engines import get_engine
+        facts = get_engine(hop).table_facts("src", db)
     return [d.table for d in planner.plan(hop, db, via, tables, qualifier,
-                                          choice=choice)
+                                          facts, choice=choice)
             if d.path == planner.COPIER]
 
 
@@ -323,6 +368,8 @@ def refuse_unpushable_filters(hop, db, via, engine=None):
 def supported(engine, via):
     return {"pgdump": engine == "postgres",
             "pgcopydb": engine == "postgres",
+            "pgpull": engine == "postgres",
+            "pgsubscribe": engine == "postgres",
             "mydumper": engine == "mysql",
             "mysqlsh": engine == "mysql",
             "pgloader": engine == "hetero",
@@ -7176,11 +7223,13 @@ def stream_status(name, port=8083):
 
 
 def _movers():
+    from . import legs
     return {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
             "mydumper": mydumper_move, "mysqlsh": mysqlsh_move,
             "pgloader": pgloader_move, "mongodump": mongodump_move,
             "mongosync": mongosync_move, "riotx": riotx_move,
-            "native": native_move}
+            "native": native_move, "pgpull": legs.pull_move,
+            "pgsubscribe": legs.subscribe_move}
 
 
 #: the programs each bulk path runs, in the order it runs them
@@ -7192,7 +7241,7 @@ PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
             "mongodump": ("mongodump", "mongorestore"),
             "mongosync": ("mongosync",),
             "riotx": ("riotx",),
-            "native": ()}
+            "native": (), "pgpull": (), "pgsubscribe": ()}
 #: the programs a bulk path runs besides those, where they are installed:
 #: the MySQL bulk copy carries the tables chosen for the straight copy by it
 ALSO = {"mydumper": ("mysqlsh",)}
