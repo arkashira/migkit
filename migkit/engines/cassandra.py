@@ -138,19 +138,19 @@ class CassandraEngine(NeutralCopier, Engine):
         if where:
             raise SystemExit(f"{table} moves under a row filter, which is"
                              " SQL, and Cassandra takes none")
+        from .. import pieces
         names = [n for n, _ in columns]
+        # a page of as many rows as a batch's bytes hold at the table's
+        # widest (a row is a mutation, 16 MB by default at most), handed on
+        # in batches of `size` rows or `pieces.BATCH_BYTES`
         stmt = SimpleStatement(
             f"select {', '.join(self._q(n) for n in names)} from"
-            f" {self._qualified(side, db, table)}", fetch_size=int(size))
+            f" {self._qualified(side, db, table)}",
+            fetch_size=pieces.rows_for(pieces.widest(self, side, db, table),
+                                       int(size)))
         result = self._session(side).execute(stmt)
-        batch = []
-        for row in result:
-            batch.append([self._value(v) for v in row])
-            if len(batch) >= size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+        yield from pieces.by_bytes(([self._value(v) for v in row]
+                                    for row in result), most_rows=int(size))
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):

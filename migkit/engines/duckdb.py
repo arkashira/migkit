@@ -7,6 +7,7 @@ engine without a canonical SQL rendering shares, so any pair with DuckDB on
 either side moves, is read back as it goes, and is checked. One writer at a
 time: DuckDB lets one process write a file.
 """
+from .. import pieces
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
 from .warehouse_sql import DigestsInSQL
@@ -28,6 +29,19 @@ class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
     WRITES_IN_PARALLEL = False
     PARAMSTYLE = "qmark"
     LIMIT = "limit"
+    #: large values: each value's bytes as the file keeps them, and its md5
+    #: where it lies - the digest in DuckDB's SQL writes a wide value as its
+    #: length and md5 (`warehouse_sql`), and a fold here of a table its SQL
+    #: does not render reads one as that too. The library holds a value
+    #: whole in this process whichever way it is read, so none is read in
+    #: pieces
+    LARGE_VALUES = pieces.Sql(
+        "sized in the file, wide values hashed where they lie",
+        length={"blob": "octet_length({c})", "bytea": "octet_length({c})",
+                "varchar": "strlen({c})", "text": "strlen({c})",
+                "string": "strlen({c})"},
+        types=("blob", "bytea", "varchar", "text", "string"),
+        md5="md5({c})", md5_classes=("bytes", "text"))
 
     def row_bucket_sql(self, side, db, table, columns, n):
         """DuckDB's own hash of the whole row, in [0, n), for a table with

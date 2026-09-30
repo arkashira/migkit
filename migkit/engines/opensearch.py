@@ -21,6 +21,7 @@ import ssl
 import urllib.error
 import urllib.request
 
+from .. import pieces
 from .base import Engine, NeutralCopier, Result
 
 #: mapping for each class, and the kinds of field a mapping names
@@ -82,6 +83,20 @@ class OpenSearchEngine(NeutralCopier, Engine):
     FOLDED_BECAUSE = "has no way to hash documents in the service"
     OVER_NETWORK = True
     RESUMES_BY_KEY = False
+    #: large values - a document is as large as a request the cluster takes
+    #: (`http.max_content_length`, 100 MB by default): read in scroll pages
+    #: of as many as `pieces.BATCH_BYTES` holds at the index's widest
+    #: document (`_page`), written in bulk requests cut by bytes
+    #: (`BULK_BYTES`, one alone where it is more), hashed here as it passes
+    LARGE_VALUES = pieces.Way(
+        "documents read in pages sized by the widest, written in bulk"
+        " requests cut by bytes")
+
+    def _page(self, side, db, table, most):
+        """Documents a scroll page of `table` asks for: `most`, or as many
+        as `pieces.BATCH_BYTES` holds at its widest document as sampled
+        (`pieces.widest`) - a page is held whole once it arrives."""
+        return pieces.rows_for(pieces.widest(self, side, db, table), most)
 
     # ---- the wire ---------------------------------------------------------
 
@@ -323,7 +338,8 @@ class OpenSearchEngine(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         index = self._index(side, db, table)
         got = self._call(side, "POST", f"/{index}/_search?scroll=2m",
-                         {"size": int(size), "sort": ["_doc"],
+                         {"size": self._page(side, db, table, int(size)),
+                          "sort": ["_doc"],
                           "_source": [n for n in names if n != "_id"]})
         scroll = got.get("_scroll_id")
         try:
@@ -848,8 +864,10 @@ class OpenSearchEngine(NeutralCopier, Engine):
         from concurrent.futures import ThreadPoolExecutor
         src, dst = self._index("src", db, t), self._index("dst", db, t)
 
+        page = self._page("src", db, t, 1000)
+
         def one(i):
-            body = {"size": 1000, "sort": ["_doc"],
+            body = {"size": page, "sort": ["_doc"],
                     "seq_no_primary_term": True}
             if slices > 1:
                 body["slice"] = {"id": i, "max": slices}
@@ -1080,11 +1098,12 @@ class OpenSearchEngine(NeutralCopier, Engine):
         if table.lower() not in self.neutral_tables("dst", db):
             self._made_like(db, table)
         wrote = 0
+        page = self._page("src", db, table, 1000)
         for s, top in sorted(upto.items()):
             if top <= done[s]:
                 continue
             for hits in self._scroll(
-                    "src", src, {"size": 1000, "sort": ["_doc"],
+                    "src", src, {"size": page, "sort": ["_doc"],
                                  "seq_no_primary_term": True,
                                  "query": {"range": {"_seq_no": {
                                      "gt": done[s], "lte": top}}}},

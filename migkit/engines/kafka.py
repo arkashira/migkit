@@ -1,6 +1,7 @@
 import hashlib
 import time
 
+from .. import pieces
 from .base import Engine, RepairAction, Result
 
 
@@ -94,9 +95,108 @@ class KafkaEngine(Engine):
             from kafka import KafkaProducer
         except ImportError:
             raise SystemExit("pip install 'migkit[kafka]' for kafka support")
+        kw = {"acks": "all", "request_timeout_ms": 15000,
+              "max_request_size": 16 * 2 ** 20, **extra}
         return self._signed_in("dst", lambda: KafkaProducer(
-            **self._connection("dst"), acks="all", request_timeout_ms=15000,
-            max_request_size=16 * 2 ** 20, **extra))
+            **self._connection("dst"), **kw))
+
+    #: large values - a message is as large as its topic takes
+    #: (`max.message.bytes`, 1 MB by default and set per topic): carried
+    #: whole, a message being the broker's unit, by a producer sized to the
+    #: source topic's bound (`_sized_for`), every send's outcome checked
+    #: before a position moves (a message the target refuses stops the copy
+    #: there, never skipped), fetched by bytes, and hashed as it passes
+    LARGE_VALUES = pieces.Way(
+        "messages carried whole up to their topic's own bound, every send"
+        " checked, fetched and hashed by bytes as they pass")
+    #: what one worker of the topic copier holds, counted from the code, not
+    #: yet measured: a fetch of up to 50 MB (the consumer's own bound), each
+    #: message as the fetch parsed it and again in the producer's buffer
+    #: until it is sent - three times the larger of the fetch and the
+    #: widest message (`row_sizes`)
+    COPY_MEMORY = {"own": 64 * 2 ** 20, "per_row": 3.0,
+                   "batch": 50 * 2 ** 20}
+
+    def _message_bound(self, topic):
+        """The most a message of the source's `topic` can be, in bytes
+        (`max.message.bytes` as the topic has it), or None where it will
+        not say."""
+        got = (self._topic_configs("src", [topic]) or {}).get(topic) or {}
+        try:
+            return int(got.get("max.message.bytes") or 0) or None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _sized_for(most):
+        """The producer's settings for messages of up to `most` bytes: a
+        request that takes one - the client refuses a larger message
+        before it is sent - and room for two of them in its buffer."""
+        request = max(16 * 2 ** 20, int(most or 0) + 64 * 2 ** 10)
+        return {"max_request_size": request,
+                "buffer_memory": max(32 * 2 ** 20, 2 * request)}
+
+    @staticmethod
+    def _refused(topic, partition, sends):
+        """Stop where a message of a flushed batch did not land: the
+        client's flush waits for every send and raises for none, so a
+        message the target refused - larger than its topic takes, say -
+        was passed over while the positions moved on past it."""
+        for offset, sent in sends:
+            if sent.failed():
+                raise SystemExit(
+                    f"{topic}[{partition}]: the target refused the message"
+                    f" at offset {offset:,} ({sent.exception}); nothing"
+                    " past the last saved position is counted as copied. A"
+                    " message larger than the target's topic takes needs"
+                    " its max.message.bytes raised to the source topic's")
+
+    def row_sizes(self, side, db, tables=None):
+        """{topic: sizes}: a message's key and value as the broker keeps
+        them, over the last messages of each partition - `SIZE_SAMPLE` a
+        topic at most, each measured and let go, fetched by bytes."""
+        from kafka import TopicPartition
+
+        from .base import sizes_of
+        consumer = self._consumer(side)
+        out = {}
+        try:
+            for topic in (tables if tables is not None
+                          else self._topics(consumer)):
+                parts = self._partitions(consumer, topic)
+                if not parts:
+                    continue
+                share = max(1, self.SIZE_SAMPLE // len(parts))
+                lengths, whole = [], True
+                for p in parts:
+                    tp = TopicPartition(topic, p)
+                    consumer.assign([tp])
+                    end = consumer.end_offsets([tp])[tp]
+                    beg = consumer.beginning_offsets([tp])[tp]
+                    start = max(beg, end - share)
+                    whole = whole and start == beg
+                    if start >= end:
+                        continue
+                    consumer.seek(tp, start)
+                    got = 0
+                    while got < end - start:
+                        batch = consumer.poll(timeout_ms=5000,
+                                              max_records=500)
+                        if not batch:
+                            break
+                        for msgs in batch.values():
+                            for m in msgs:
+                                if m.offset >= end:
+                                    continue
+                                lengths.append(
+                                    max(m.serialized_key_size, 0)
+                                    + max(m.serialized_value_size, 0) + 1)
+                                got += 1
+                if lengths:
+                    out[topic] = sizes_of(lengths, exact=whole)
+        finally:
+            consumer.close()
+        return out
 
     def _stream_options(self):
         from .. import streamout
@@ -304,7 +404,10 @@ class KafkaEngine(Engine):
         # set when the consumer is made: its fetcher reads it only then
         src = self._consumer("src", isolation_level="read_committed")
         dst = self._consumer("dst")
-        producer = self._producer(max_in_flight_requests_per_connection=1)
+        # sized to the largest message the source topic takes (`LARGE_VALUES`)
+        producer = self._producer(max_in_flight_requests_per_connection=1,
+                                  **self._sized_for(
+                                      self._message_bound(topic)))
         marked = self._marks_positions()
         sent = 0
         try:
@@ -353,6 +456,7 @@ class KafkaEngine(Engine):
                                           min(src.position(src_tp), end))
                         save()
                         break
+                    sends, counted = [], 0
                     for m in batch:
                         if ahead > 0:
                             ahead -= 1
@@ -363,17 +467,21 @@ class KafkaEngine(Engine):
                                            if h[0] != self.HEADER] + [
                                     (self.HEADER, self._position(
                                         p, m.offset))]
-                            producer.send(
+                            sends.append((m.offset, producer.send(
                                 topic,
                                 value=self._translated(topic, "value",
                                                        m.value),
                                 key=self._translated(topic, "key", m.key),
                                 headers=headers,
-                                partition=p, timestamp_ms=m.timestamp)
+                                partition=p, timestamp_ms=m.timestamp)))
                             sent += 1
-                        pst["copied"] += 1
-                        done += 1
+                        counted += 1
                     producer.flush()
+                    # a message the target refused stops the copy before a
+                    # position moves past it
+                    self._refused(topic, p, sends)
+                    pst["copied"] += counted
+                    done += counted
                     pst["next"] = batch[-1].offset + 1
                     save()
                     log(progress(f"{topic}[{p}]", done, total, began,

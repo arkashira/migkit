@@ -120,9 +120,9 @@ def _bigquery(c, cls, declared):
     if cls == "boolean":
         return f"CASE WHEN {c} IS NULL THEN NULL WHEN {c} THEN '1' ELSE '0' END"
     if cls == "text":
-        return c if base in ("STRING",) else None
+        return _wide("bigquery", c, c) if base in ("STRING",) else None
     if cls == "bytes":
-        return f"UPPER(TO_HEX({c}))"
+        return _wide("bigquery", c, f"UPPER(TO_HEX({c}))")
     if cls == "date":
         return f"FORMAT_DATE('%Y-%m-%d', {c})"
     if cls == "timestamp":
@@ -147,9 +147,14 @@ def _snowflake(c, cls, declared):
     if cls == "boolean":
         return f"CASE WHEN {c} IS NULL THEN NULL WHEN {c} THEN '1' ELSE '0' END"
     if cls == "text":
-        return c if base in ("TEXT", "VARCHAR", "STRING") else None
+        return (_wide("snowflake", c, c)
+                if base in ("TEXT", "VARCHAR", "STRING") else None)
     if cls == "bytes":
-        return f"TO_VARCHAR({c}, 'HEX')"
+        # Snowflake hashes a string, not a binary's own bytes: a column
+        # that can hold a value wider than `canon.WIDE` (a BINARY is 8 MB
+        # unless declared less) is folded here instead
+        return (f"TO_VARCHAR({c}, 'HEX')"
+                if _narrow(declared, 8 * 2 ** 20) else None)
     if cls == "date":
         return f"TO_VARCHAR({c}, 'YYYY-MM-DD')"
     # a time kept to nine digits (Snowflake's own, unless declared fewer)
@@ -184,7 +189,11 @@ def _redshift(c, cls, declared):
         return c if base in ("CHARACTER VARYING", "VARCHAR", "TEXT",
                              "NVARCHAR") else None
     if cls == "bytes":
-        return f"UPPER(TO_HEX({c}))"
+        # as Snowflake's: a VARBYTE declared past `canon.WIDE` (it holds up
+        # to 16 MB; 64,000 bytes where no size is declared) is folded here.
+        # A VARCHAR holds 65,535 bytes at most, never a wide value
+        return (f"UPPER(TO_HEX({c}))" if _narrow(declared, 64000)
+                else None)
     if cls == "date":
         return f"TO_CHAR({c}, 'YYYY-MM-DD')"
     if cls == "timestamp":
@@ -208,13 +217,14 @@ def _duckdb(c, cls, declared):
     if cls == "boolean":
         return f"CASE WHEN {c} IS NULL THEN NULL WHEN {c} THEN '1' ELSE '0' END"
     if cls == "text":
-        return c if base in ("VARCHAR", "STRING", "TEXT") else None
+        return (_wide("duckdb", c, c)
+                if base in ("VARCHAR", "STRING", "TEXT") else None)
     if cls == "uuid":
         # its text in small letters with its four hyphens, as `canon`
         # writes one
         return f"CAST({c} AS VARCHAR)" if base == "UUID" else None
     if cls == "bytes":
-        return f"upper(hex({c}))"
+        return _wide("duckdb", c, f"upper(hex({c}))", blob=True)
     if cls == "date":
         return f"strftime({c}, '%Y-%m-%d')"
     if cls == "timestamp":
@@ -234,6 +244,41 @@ def _duckdb(c, cls, declared):
 
 _COLUMN = {"bigquery": _bigquery, "snowflake": _snowflake,
            "redshift": _redshift, "duckdb": _duckdb}
+
+
+def _wide(dialect, c, text, blob=False):
+    """`text`, the column's own rendering, except for a value wider than
+    `canon.WIDE` bytes: its length and md5 as `canon.digest_value` writes
+    them, hashed where it lies - the text every other engine and this
+    process fold for it, never the value written out in full."""
+    rest = canon.WIDE_MARK[1:]
+    if canon.WIDE_MARK[0] != chr(31) or "'" in rest:
+        raise ValueError(f"canon's wide mark {canon.WIDE_MARK!r} is not one"
+                         " this SQL writes")
+    if dialect == "duckdb":
+        n = f"octet_length({c})" if blob else f"strlen({c})"
+        said = (f"chr(31) || '{rest}' || CAST({n} AS VARCHAR) || ':' ||"
+                f" md5({c})")
+    elif dialect == "bigquery":
+        n = f"BYTE_LENGTH({c})"
+        said = (f"CONCAT(CODE_POINTS_TO_STRING([31]), '{rest}',"
+                f" CAST({n} AS STRING), ':', TO_HEX(MD5({c})))")
+    elif dialect == "snowflake":
+        n = f"OCTET_LENGTH({c})"
+        said = (f"CHR(31) || '{rest}' || TO_VARCHAR({n}) || ':' ||"
+                f" MD5({c})")
+    else:
+        raise ValueError(f"no wide rendering for {dialect}")
+    return f"CASE WHEN {n} > {canon.WIDE} THEN {said} ELSE {text} END"
+
+
+def _narrow(declared, default):
+    """Whether every value of a byte column of this declared type is
+    within `canon.WIDE`: its declared length, or the dialect's `default`
+    where it declares none."""
+    nums = _base(declared)[1]
+    most = int(nums[0]) if nums else int(default)
+    return 0 < most <= canon.WIDE
 
 
 def _padded(dialect, text, scale):
@@ -434,9 +479,10 @@ def unrendered(dialect, columns):
 
 
 def agree(cols, values, texts):
-    """Whether each row of values, rendered in this process, is the text
-    the server rendered for it."""
-    return all(rowtext.encode([canon.render_value(c, v) for (_, c, _), v
+    """Whether each row of values, rendered in this process as a digest
+    renders it (`canon.digest_value`: a wide value as its length and md5),
+    is the text the server rendered for it."""
+    return all(rowtext.encode([canon.digest_value(c, v) for (_, c, _), v
                                in zip(cols, row)]) == text
                for row, text in zip(values, texts))
 

@@ -47,7 +47,7 @@ account - each test says which.
 import hashlib
 import json
 
-from .. import decide, nanotime
+from .. import decide, nanotime, pieces
 from . import warehouse_sql
 from .base import Engine
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
@@ -793,6 +793,22 @@ class SnowflakeEngine(FoldsToCapitals, _Warehouse):
     are."""
     CANON_ENGINE = "snowflake"
     DIGEST_DIALECT = "snowflake"
+    #: large values - a VARCHAR or VARIANT holds up to 128 MB, a BINARY
+    #: 64 MB: sized by the server over a sample of a large table, a wide
+    #: text hashed where it lies (Snowflake's MD5 hashes a string, so a
+    #: binary is hashed here as it is folded); read whole, a batch cut by
+    #: bytes
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, wide text hashed where it lies",
+        length={**{t: "octet_length({c})" for t in (
+                    "varchar", "text", "string", "binary", "varbinary")},
+                # a semi-structured value by its JSON text, as it is carried
+                **{t: "octet_length(to_json({c}))" for t in (
+                    "variant", "object", "array")}},
+        types=("varchar", "text", "string", "binary", "varbinary",
+               "variant", "object", "array"),
+        md5="md5({c})", md5_classes=("text",),
+        sample="sample system ({pct})")
     #: a CHAR is a VARCHAR here, kept without padding
     PADDED = ()
     SCALED = ("NUMBER", "DECIMAL", "NUMERIC")
@@ -1199,6 +1215,16 @@ class BigQueryEngine(_Warehouse):
     READS_BILLED = True
     CANON_ENGINE = "bigquery"
     DIGEST_DIALECT = "bigquery"
+    #: large values - a row holds up to 100 MB: sized from the free listing
+    #: of rows (`row_sizes`), never a billed scan; hashed where they lie in
+    #: the digest's SQL and in a fold here; read whole, a batch cut by bytes
+    LARGE_VALUES = pieces.Sql(
+        "sized from the free listing, wide values hashed where they lie",
+        length={"string": "byte_length({c})", "bytes": "byte_length({c})",
+                # a JSON value by its text, as it is carried
+                "json": "byte_length(to_json_string({c}))"},
+        types=("string", "bytes", "json"),
+        md5="to_hex(md5({c}))", md5_classes=("bytes", "text"))
     #: load jobs a project may run in a day, failed ones counted (BigQuery's
     #: quota), and the share a move leaves for everything else there
     LOAD_JOBS_A_DAY = 100000
@@ -1462,7 +1488,9 @@ class BigQueryEngine(_Warehouse):
         does not bill, where a query for them is billed by every byte of
         the columns it reads whatever its LIMIT: the sizing of a dataset's
         tables would cost a scan of each. A JSON value is counted as its
-        text, as it is carried."""
+        text, as it is carried. Only the sizes are kept: a row is let go
+        once it is measured, so a listing of wide rows holds a page of them
+        at most."""
         import json
 
         from .base import _row_bytes, sizes_of
@@ -1473,14 +1501,16 @@ class BigQueryEngine(_Warehouse):
             try:
                 it = client.list_rows(self._ref(side, db, t),
                                       max_results=self.SIZE_SAMPLE)
-                rows = [[json.dumps(v) if isinstance(v, (dict, list)) else v
-                         for v in r.values()] for r in it]
+                lengths = [_row_bytes([json.dumps(v)
+                                       if isinstance(v, (dict, list)) else v
+                                       for v in r.values()]) for r in it]
             except Exception:  # noqa: BLE001 - that table is not sized
                 continue
             total = getattr(it, "total_rows", None)
-            sized = sizes_of([_row_bytes(r) for r in rows],
-                             exact=(len(rows) == total if total is not None
-                                    else len(rows) < self.SIZE_SAMPLE),
+            sized = sizes_of(lengths,
+                             exact=(len(lengths) == total
+                                    if total is not None
+                                    else len(lengths) < self.SIZE_SAMPLE),
                              rows=total)
             if sized:
                 out[t] = sized

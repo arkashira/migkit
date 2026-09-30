@@ -3,7 +3,7 @@ import signal
 import sys
 import time
 
-from .. import tailtables
+from .. import pieces, tailtables
 from ..decide import Rung
 from ..util import is_transient
 from .base import Engine, RepairAction, Result
@@ -83,6 +83,19 @@ class HeteroEngine(Engine):
     # the in-process binlog tail below needs this driver; without it
     # `move --mode cdc` uses migkit's streaming pipeline instead
     tail_requires = "pymysqlreplication"
+
+    #: large values, for any pair (`pieces`): each side sizes its rows
+    #: where they lie, each side's read of a batch ends at
+    #: `pieces.BATCH_BYTES` or one row and each side's own pieces carry a
+    #: value past a piece; a written batch is read back and compared by
+    #: digest texts, a wide value by its length and md5 - the text both
+    #: servers' digests hold it to
+    LARGE_VALUES = pieces.Way(
+        "batches cut by bytes on both sides, values past a piece read and"
+        " written in pieces where each side can, wide values compared by"
+        " their length and md5")
+    #: what one worker of the pair's copier holds (`pieces.PAIR_MEMORY`)
+    COPY_MEMORY = pieces.PAIR_MEMORY
 
     def __init__(self, hop):
         super().__init__(hop)
@@ -1371,11 +1384,13 @@ class HeteroEngine(Engine):
     def _rows_differ(sc, dc, a, b):
         """(missing, extra, changed) between rows read by key from each
         side - {key: row} in `sc` and `dc` order - compared in the one
-        rendering both sides render to."""
+        rendering both sides' digests render to (`canon.digest_value`): a
+        value wider than `canon.WIDE` by its length and md5, as the servers
+        hold it - never its hex, twice its size on each side."""
         from .. import canon
 
         def text(cols, row):
-            return tuple(canon.render_value(c, v)
+            return tuple(canon.digest_value(c, v)
                          for (_, c), v in zip(cols, row))
         missing = [k for k in a if k not in b]
         extra = [k for k in b if k not in a]
@@ -2088,8 +2103,8 @@ class HeteroEngine(Engine):
 
     #: what one read of the table copier holds, at most: rows, and bytes
     #: as the source's catalogue counts them
-    READ_ROWS = 50000
-    READ_BYTES = 64 * 2 ** 20
+    READ_ROWS = pieces.PAIR_ROWS
+    READ_BYTES = pieces.BATCH_BYTES
 
     def _read_rows(self, db, src_t, chunk):
         """Rows per read: `chunk` asked for 500,000 at a time, and a read
@@ -2097,7 +2112,9 @@ class HeteroEngine(Engine):
         about 250 bytes a row: 486 MB held at 500,000 rows a read - and a
         table of wide rows would hold that many times over. Capped by a
         count and by the table's own bytes a row, so what is held does not
-        grow with the row either. Each read is still a resumable step."""
+        grow with the row either. Each read is still a resumable step, and
+        ends by itself at the row that brings it to `pieces.BATCH_BYTES`
+        where rows are wider than their table's average (`pieces`)."""
         per_row = None
         try:
             facts = self.src_engine.table_facts("src", db).get(src_t) or {}

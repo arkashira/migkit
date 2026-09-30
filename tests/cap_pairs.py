@@ -192,10 +192,12 @@ def live_eta(samples):
     return p["eta_copy"], took, abs(p["eta_copy"] - took) / took
 
 
-def run_capped(work, memory, *args, env=None):
+def run_capped(work, memory, *args, env=None, image=None, network=None):
     """`migkit <args>` from this checkout in a container held to `memory`
     (no swap), with `work` as its configuration and reports: (exit code,
-    what it printed, killed for memory, the most its cgroup held)."""
+    what it printed, killed for memory, the most its cgroup held). `image`
+    one with the drivers another engine's move imports, `network` a docker
+    network its servers are reached on by name."""
     remove(RUNNER)
     envs = []
     for k, v in {"PYTHONPATH": "/src", "MIGKIT_CONF": "/work/hops.yaml",
@@ -209,7 +211,8 @@ def run_capped(work, memory, *args, env=None):
     got = subprocess.run(["docker", "run", "--name", RUNNER, "--memory",
                           memory, "--memory-swap", memory, "-v",
                           f"{ROOT}:/src:ro", "-v", f"{work}:/work", *envs,
-                          runner_image(), "sh", "-c", cmd],
+                          *(["--network", network] if network else []),
+                          image or runner_image(), "sh", "-c", cmd],
                          capture_output=True, text=True, timeout=1800)
     state = json.loads(subprocess.run(
         ["docker", "inspect", "-f", "{{json .State}}", RUNNER],

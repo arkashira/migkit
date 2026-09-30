@@ -11,6 +11,7 @@ canonical SQL rendering shares.
 Written 2026-09-25 without a server to run it against: SAP's ASE image
 runs on x86 only, and this machine is arm64.
 """
+from .. import pieces
 from .base import Engine
 from .dbapi import MARK, DbapiRows
 
@@ -40,6 +41,20 @@ class AseEngine(DbapiRows, Engine):
     #: to its length, by the ASE reference's own account; read without the
     #: padding, as every other engine's fixed-length text is compared
     PADDED = ("char", "nchar", "unichar")
+    #: large values: sized by the server (`datalength`), and every session
+    #: takes a text or image value whole (`_connect`) - read whole, bound
+    #: whole, and hashed here as it is folded
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, text and image values read whole, never cut"
+        " at the session's text size",
+        length="datalength({c})",
+        types=("text", "unitext", "image", "varchar", "varbinary",
+               "univarchar", "nvarchar"))
+    #: what a session takes of a text or image value: all of it. ASE hands a
+    #: session 32,768 bytes of one unless the session says otherwise, and
+    #: cuts the rest off without a word - a copy and a check read through
+    #: the same cut would each see the same first 32 KB and agree
+    TEXT_SIZE = 2147483647
 
     def _driver(self, side):
         import os
@@ -79,6 +94,7 @@ class AseEngine(DbapiRows, Engine):
                               timeout=15)
         # names in double quotes are names, not strings
         conn.cursor().execute("set quoted_identifier on")
+        conn.cursor().execute(f"set textsize {int(self.TEXT_SIZE)}")
         return conn
 
     def databases(self):

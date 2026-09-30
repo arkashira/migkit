@@ -132,6 +132,9 @@ for _name, _what, _group, _how in (
     ("p99_row", "the 99th percentile row, bytes", "table", READ),
     ("lob_share", "the share of a table's bytes in large values", "table",
      READ),
+    ("past a piece", "whether a batch holds a value past a piece"
+     " (`pieces.PIECE`), which is written a piece a statement", "table",
+     READ),
     ("key", "whether a table has a key, and its columns", "table", READ),
     ("keyed", "tables with an auto-increment key", "table", READ),
     ("keyless", "whether a table lacks a key", "table", READ),

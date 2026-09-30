@@ -26,6 +26,10 @@ class DbapiRows(NeutralCopier):
     #: spaces to the column's length: read without them, as PostgreSQL's
     #: `char(n)` reads and as every other engine's is compared
     PADDED = ()
+    #: what this engine does with its large values (`pieces.Sql`): sized,
+    #: read and written in pieces, and hashed where they lie by its own
+    #: expressions; None where it has none of its own
+    LARGE_VALUES = None
 
     # ---- what an engine provides ---------------------------------------
 
@@ -170,6 +174,20 @@ class DbapiRows(NeutralCopier):
         return (f"select {cols} from {source}{cond}{order}"
                 + (f" fetch first {int(limit)} rows only" if limit else ""))
 
+    def _read_plan(self, side, db, table, columns, key=None):
+        """How a read of `columns` carries their large values: split out
+        and read in pieces (`pieces.ReadPlan`), or - inside a digest folded
+        here - hashed where they lie (`pieces.DigestPlan`). `key` is the
+        table's, where the caller has asked it already. The select list of
+        `_read_query`, and what a read's rows are finished by: an engine
+        that writes its own `_read_query` and has no `LARGE_VALUES` reads
+        the plain list, which its plan finishes as it is."""
+        from .. import pieces
+        wide = self._wide_times(side, db, table)
+        plan = (pieces.DigestPlan if pieces.is_hashing(self)
+                else pieces.ReadPlan)
+        return plan(self, side, db, table, columns, wide, key)
+
     def _read_query(self, side, db, table, columns, after, limit, where):
         names = [n for n, _ in columns]
         key = self.neutral_key(side, db, table)
@@ -180,39 +198,57 @@ class DbapiRows(NeutralCopier):
         cond = (" where " + " and ".join(parts)) if parts else ""
         order = (" order by " + ", ".join(self._q(k) for k in key)
                  if key else "")
-        wide = self._wide_times(side, db, table)
-        return (self._select(", ".join(wide.get(n, self._q(n))
-                                       for n in names),
-                             self._qualified(side, db, table), cond, order,
-                             limit if key else None),
+        plan = self._read_plan(side, db, table, columns, key)
+        return (self._select(plan.select, self._qualified(side, db, table),
+                             cond, order, limit if key else None),
                 args, key, names)
+
+    def _rows_until(self, side, db, sql, args, size):
+        """The statement's rows up to the one that brings them to
+        `pieces.BATCH_BYTES` (`pieces.fetch_until`)."""
+        from .. import pieces
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            self._run(cur, sql, args)
+            return pieces.fetch_until(cur, size)
+        finally:
+            conn.close()
 
     # ---- the neutral contract -------------------------------------------
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):
+        """In key order, ending at `limit` rows or at the row that brings
+        the read to `pieces.BATCH_BYTES`, whichever is first: the next read
+        goes on from its last row. A table with no key is read whole, as
+        the contract says."""
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  after, limit, where)
-        rows = self._whole_times(side, db, table, names,
-                                 self._rows(side, db, sql, args))
-        if not rows or not key or not all(k in names for k in key):
+        plan = self._read_plan(side, db, table, columns, key)
+        keyed = bool(key) and all(k in names for k in key)
+        raw = (self._rows_until(side, db, sql, args, plan.size) if keyed
+               else self._rows(side, db, sql, args))
+        rows = self._whole_times(side, db, table, names, plan.finish(raw))
+        if not rows or not keyed:
             return (rows, None)
         return (rows, tuple(rows[-1][names.index(k)] for k in key))
 
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):
-        sql, args, _, names = self._read_query(side, db, table, columns,
-                                               None, None, where)
+        """The whole table in one pass, in batches of `size` rows or
+        `pieces.BATCH_BYTES` (`pieces.batches`)."""
+        from .. import pieces
+        sql, args, key, names = self._read_query(side, db, table, columns,
+                                                 None, None, where)
+        plan = self._read_plan(side, db, table, columns, key)
         conn = self._connect(side, db)
         try:
             cur = conn.cursor()
             self._run(cur, sql, args)
-            while True:
-                rows = cur.fetchmany(size)
-                if not rows:
-                    break
+            for rows in pieces.batches(cur, size, plan.size):
                 yield self._whole_times(side, db, table, names,
-                                        [list(r) for r in rows])
+                                        plan.finish(rows))
         finally:
             conn.close()
 
@@ -224,17 +260,16 @@ class DbapiRows(NeutralCopier):
         keys = list(keys)
         one = "(" + " and ".join(f"{self._q(k)} = {MARK}" for k in key) + ")"
         found = []
-        wide = self._wide_times(side, db, table)
-        cols = ", ".join(wide.get(n, self._q(n)) for n, _ in columns)
+        plan = self._read_plan(side, db, table, columns)
         for i in range(0, len(keys), self.DELETE_BATCH):
             part = keys[i:i + self.DELETE_BATCH]
             cond = " or ".join([one] * len(part))
             if where:
                 cond = f"({cond}) and ({where})"
-            found += self._rows(side, db, f"select {cols} from"
-                                          f" {self._qualified(side, db, table)}"
-                                          f" where {cond}",
-                                [canon.sql_value(v) for k in part for v in k])
+            found += plan.finish(self._rows(
+                side, db, f"select {plan.select} from"
+                          f" {self._qualified(side, db, table)} where {cond}",
+                [canon.sql_value(v) for k in part for v in k]))
         return self._by_key_map(columns, key, self._whole_times(
             side, db, table, [n for n, _ in columns], found))
 
@@ -263,20 +298,35 @@ class DbapiRows(NeutralCopier):
 
     def neutral_digest(self, side, db, table, columns, where=None):
         """Folded here, over rows the driver hands back as values, with the
-        renderer and the arithmetic every engine's digest is held to."""
-        from .. import canon
+        renderer and the arithmetic every engine's digest is held to: in
+        batches cut by bytes, each value wider than `canon.WIDE` that the
+        server hashes read as its length and md5 (`pieces.hashing`)."""
+        from .. import canon, pieces
         classes = [c for _, c in columns]
         total, n = 0, 0
-        for batch in self.neutral_batches(side, db, table, columns,
-                                          size=5000, where=where):
-            k, total = canon.fold_rows(classes, batch, total)
-            n += k
+        with pieces.hashing(self):
+            for batch in self.neutral_batches(side, db, table, columns,
+                                              size=5000, where=where):
+                k, total = canon.fold_rows(classes, batch, total)
+                n += k
         return (n, str(total))
+
+    def row_sizes(self, side, db, tables=None):
+        """Measured by the server where this engine says how
+        (`LARGE_VALUES`, `pieces.sql_row_sizes`); from a sample of rows
+        read here otherwise (`Engine.row_sizes`)."""
+        from .. import pieces
+        if isinstance(self.LARGE_VALUES, pieces.Sql):
+            return pieces.sql_row_sizes(self, side, db, tables)
+        return super().row_sizes(side, db, tables)
 
     def neutral_write(self, side, db, table, columns, rows):
         """Rows with the same key are deleted and inserted again in one
-        transaction, which converges on a restart as an upsert does."""
-        from .. import canon
+        transaction, which converges on a restart as an upsert does. A row
+        holding a value past `pieces.PIECE` in a column this engine adds to
+        is inserted with its first piece and filled by the rest, in the
+        same transaction (`pieces.written_in_pieces`)."""
+        from .. import canon, pieces
         self._target_only(side, "write rows")
         if not rows:
             return 0
@@ -298,19 +348,24 @@ class DbapiRows(NeutralCopier):
                               [canon.write_value(self.CANON_ENGINE,
                                                  columns[j][1], r[j])
                                for r in part for j in at])
+            landed = len(rows)
+            if pieces.wider_than(rows):
+                rows = pieces.written_in_pieces(self, cur, side, db, table,
+                                                columns, key, rows)
             insert = self._sql(
                 f"insert into {quoted}"
                 f" ({', '.join(self._q(n) for n in names)}) values"
                 f" ({', '.join([MARK] * len(names))})", True)
-            cur.executemany(insert, [tuple(
-                canon.write_value(self.CANON_ENGINE, c, v)
-                for (_, c), v in zip(columns, r)) for r in rows])
+            if rows:
+                cur.executemany(insert, [tuple(
+                    canon.write_value(self.CANON_ENGINE, c, v)
+                    for (_, c), v in zip(columns, r)) for r in rows])
             if undo:
                 self._run(cur, undo)
             conn.commit()
         finally:
             conn.close()
-        return len(rows)
+        return landed
 
     # ---- applying a change stream ---------------------------------------
     #
