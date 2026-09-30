@@ -2756,13 +2756,6 @@ class HeteroEngine(Engine):
         same finding."""
         if not self._can_move_neutrally():
             return None
-
-        def first(eng, side, table):
-            cols = eng.neutral_columns(side, db, table)[:1]
-            return cols and [(cols[0][0], canon.comparable(
-                eng.CANON_ENGINE, cols[0][1])[0])]
-
-        from .. import canon
         try:
             there = ([] if self.dst_engine.target_missing(db)
                      else self.dst_engine.neutral_tables("dst", db))
@@ -2773,18 +2766,55 @@ class HeteroEngine(Engine):
             empty = []
             for src_t in list(landed) + list(src_only):
                 src_where, dst_where = self._row_scope(db, src_t)
-                cols = first(self.src_engine, "src", src_t)
-                if not cols or not self.src_engine.neutral_read(
-                        "src", db, src_t, cols, limit=1,
-                        where=src_where)[0]:
+                if not self._a_row("src", db, src_t, src_where):
                     continue
                 dst_t = landed.get(src_t)
-                dcols = dst_t and first(self.dst_engine, "dst", dst_t)
-                if not dcols or not self.dst_engine.neutral_read(
-                        "dst", db, dst_t, dcols, limit=1,
-                        where=dst_where)[0]:
+                if not dst_t or not self._a_row("dst", db, dst_t, dst_where):
                     empty.append(src_t)
             return sorted(empty)
+        except Exception:  # noqa: BLE001 - None: cannot be asked
+            return None
+
+    def _a_row(self, side, db, table, where):
+        """Whether a side's table holds one row under `where`, read by
+        its first column through the side's own reader."""
+        from .. import canon
+        eng = self.src_engine if side == "src" else self.dst_engine
+        cols = eng.neutral_columns(side, db, table)[:1]
+        if not cols:
+            return False
+        return bool(eng.neutral_read(
+            side, db, table,
+            [(cols[0][0], canon.comparable(eng.CANON_ENGINE, cols[0][1])[0])],
+            limit=1, where=where)[0])
+
+    def rows_held(self, db, tables):
+        """The target's table under the name the hop gives each, holding a
+        row within the hop's row filter: a row outside it is not the
+        copy's to replace (`_neutral_move` empties only what the filter
+        selects), and a table the target lacks holds none."""
+        if not self._can_move_neutrally():
+            return None
+        try:
+            if self.dst_engine.target_missing(db):
+                return set()
+            pairs, _, _, _ = self.match_tables(
+                self.src_engine.neutral_tables("src", db),
+                self.dst_engine.neutral_tables("dst", db), self._rename)
+            landed = dict(pairs)
+            held = set()
+            for sch, tbl in tables:
+                src_t = f"{sch}.{tbl}" if sch else tbl
+                if src_t not in landed:
+                    # a table named without its schema, as `--table` takes
+                    # it, is the one of that name
+                    same = [k for k in landed if self._leaf(k) == tbl]
+                    src_t = same[0] if len(same) == 1 else src_t
+                dst_t = landed.get(src_t)
+                if dst_t and self._a_row("dst", db, dst_t,
+                                         self._row_scope(db, src_t)[1]):
+                    held.add((sch, tbl))
+            return held
         except Exception:  # noqa: BLE001 - None: cannot be asked
             return None
 

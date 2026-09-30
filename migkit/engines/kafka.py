@@ -692,15 +692,29 @@ class KafkaEngine(Engine):
         """
         def one(side):
             try:
-                consumer = self._consumer(side)
-                try:
-                    cid = consumer._client.cluster.cluster_id
-                finally:
-                    consumer.close()
+                cid = self._cluster_id(side)
                 return {"cluster_id": cid} if cid else {}
             except Exception:
                 return {}
         return (one("src"), one("dst"))
+
+    def _cluster_id(self, side):
+        consumer = self._consumer(side)
+        try:
+            return consumer._client.cluster.cluster_id
+        finally:
+            consumer.close()
+
+    def server_identity(self, side, db):
+        """The cluster's id, which every broker of it answers with."""
+        cid = self._cluster_id(side)
+        return {"id": {"cluster": str(cid)}} if cid else {}
+
+    def rows_held(self, db, tables):
+        """None of them: a topic's copy goes on after what the target's
+        topic holds, counted from its own end (`base`), and removes
+        nothing - there is nothing held for it to write over."""
+        return set()
 
     def _server_versions(self):
         """Kafka does not publish a version over the client protocol the way

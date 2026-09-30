@@ -1620,6 +1620,31 @@ class Engine:
         cannot say."""
         return None
 
+    def server_identity(self, side, db):
+        """What the side's server says it is, for the interlock on the
+        target (`interlock`): {"id": which server or cluster, "running":
+        the process answering now, "name": what it calls itself,
+        "version", "bytes": the database's size, "absent": the database is
+        not there yet}, each where the engine can say. Here, the
+        change log's owner alone."""
+        got = self.stream_identity(side, db)
+        return {"id": got} if got else {}
+
+    def side_database(self, side, db):
+        """The database a side's connections go to for `db`: the target's
+        through the hop's `db_map`, as the engine resolves it (`_d`)."""
+        d = getattr(self, "_d", None)
+        if d is not None:
+            return d(side, db)
+        return self.hop.target_db(db) if side == "dst" else db
+
+    def rows_held(self, db, tables):
+        """Of `tables` - (schema, table) as `list_move_tables` gives them -
+        the ones the target already holds a row of that a copy would write
+        over (within the hop's row filter), or None where it cannot be
+        asked. Asked through the pair every engine copies through."""
+        return self._as_pair().rows_held(db, tables)
+
     def position_lost(self, side, db, token):
         """Why the side's log no longer holds `token`, in words, or None
         where it does or the engine cannot say before reading."""

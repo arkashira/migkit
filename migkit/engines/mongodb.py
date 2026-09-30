@@ -546,6 +546,48 @@ class MongoEngine(Engine):
             pass
         return out
 
+    def server_identity(self, side, db):
+        """The replica set (`stream_identity`), the member answering and
+        its process - an election moves both - its version, and the
+        database's size."""
+        from pymongo.errors import PyMongoError
+        client = self._client(side)
+        hello = client.admin.command("hello")
+        out = {"name": str(hello.get("me") or "")}
+        try:
+            st = client.admin.command("serverStatus")
+            out["running"] = f"{st.get('host')} process {st.get('pid')}"
+            out["version"] = str(st.get("version") or "")
+            out["name"] = out["name"] or str(st.get("host") or "")
+        except PyMongoError:
+            pass
+        name = self._d(side, db)
+        if name:
+            try:
+                if name not in client.list_database_names():
+                    out["absent"] = True
+                else:
+                    out["bytes"] = int(client[name].command("dbStats")
+                                       .get("dataSize") or 0)
+            except PyMongoError:
+                pass
+        got = self.stream_identity(side, db)
+        if got:
+            out["id"] = got
+        return out
+
+    def rows_held(self, db, tables):
+        """Collections the target holds a document of: its copy empties a
+        collection before it starts one afresh (`move_table`)."""
+        from pymongo.errors import PyMongoError
+        try:
+            t = self._client("dst")[self._d("dst", db)]
+            have = set(t.list_collection_names())
+            return {(s, c) for s, c in tables
+                    if c in have and t[c].find_one({}, {"_id": 1}) is not None}
+        except PyMongoError:
+            return None
+
     def position_lost(self, side, db, token):
         """The oplog no longer reaching back to the token, or the token
         standing later than the set's own clock - taken on another set.

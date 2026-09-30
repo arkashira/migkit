@@ -1636,6 +1636,28 @@ class MSSQLEngine(DbapiRows, Engine):
             return None
         return {"server": str(got[0][0]), "database created": str(got[0][1])}
 
+    def server_identity(self, side, db):
+        """`@@SERVERNAME` with the database's creation (`stream_identity`),
+        the machine it runs on, its version, the database's size, and -
+        where this login may read the server's state - when it started."""
+        name, version, size = self._rows(
+            side, db, "select cast(serverproperty('MachineName') as"
+                      " nvarchar(128)), cast(serverproperty('ProductVersion')"
+                      " as nvarchar(128)), (select sum(cast(size as bigint))"
+                      " * 8192 from sys.database_files)")[0]
+        out = {"name": str(name or ""), "version": str(version or ""),
+               "bytes": int(size or 0)}
+        try:
+            out["running"] = str(self._rows(
+                side, db, "select sqlserver_start_time from"
+                          " sys.dm_os_sys_info")[0][0])
+        except Exception:  # noqa: BLE001 - VIEW SERVER STATE is not given
+            pass
+        got = self.stream_identity(side, db)
+        if got:
+            out["id"] = got
+        return out
+
     def position_lost(self, side, db, token):
         """A table whose tracking no longer reaches back to `token`: what
         changed there before its oldest kept version is gone, and a tail

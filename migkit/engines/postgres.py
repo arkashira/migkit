@@ -4989,6 +4989,49 @@ class PostgresEngine(Engine):
             return None
         return {"cluster": got.strip()} if got.strip() else None
 
+    def server_identity(self, side, db):
+        """The system identifier, which a clone restored from the source's
+        backup shares with it - so the start of the postmaster beside it,
+        which no two servers share - the address it answers on, its
+        version and the database's size. Asked once with a short wait,
+        and through the maintenance database where the hop's is not there
+        yet (a bulk path makes it)."""
+        import psycopg2
+        ep = self.hop.source if side == "src" else self.hop.target
+        want = self._d(side, db) if db else "postgres"
+        last = None
+        for at in dict.fromkeys((want, "postgres")):
+            try:
+                conn = psycopg2.connect(host=ep.host, port=ep.port,
+                                        user=ep.user, password=ep.password,
+                                        dbname=at, connect_timeout=5,
+                                        **ep.libpq_tls())
+            except psycopg2.Error as e:
+                if "does not exist" not in str(e):
+                    raise
+                last = e
+                continue
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("select pg_postmaster_start_time()::text,"
+                                " current_setting('server_version'),"
+                                " host(inet_server_addr()),"
+                                " pg_database_size(current_database())")
+                    started, version, addr, size = cur.fetchone()
+            finally:
+                conn.close()
+            out = {"running": started, "version": version,
+                   "name": addr or ""}
+            if at == want:
+                out["bytes"] = int(size)
+            else:
+                out["absent"] = True
+            got = self.stream_identity(side, at if at == "postgres" else db)
+            if got:
+                out["id"] = got
+            return out
+        raise last
+
     #: WAL the target held at its peak during a load, per byte of
     #: `max_wal_size`: measured on 16 at 64MB, loading a 355 MiB table
     #: that wrote 411 MiB of WAL, `pg_wal` peaked at 80 MiB

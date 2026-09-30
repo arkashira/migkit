@@ -8,8 +8,9 @@ DuckDB to DuckDB 115s (37.8s once the copier wrote through Arrow), by
 DuckDB itself 4.5s. A table the hop excludes is left alone, a table with a
 row filter or
 mapped columns still goes table by table, a table already on the target
-is emptied and filled again, and a table the target lacks arrives with the
-source's keys, indexes and triggers.
+is emptied and filled again (the hop says so: `target_rows: replace`), and
+a table the target lacks arrives with the source's keys, indexes and
+triggers.
 """
 import sqlite3
 
@@ -58,6 +59,7 @@ def lite(tmp_path, monkeypatch):
         f"    source: {{host: {src}, user: x, password: x}}\n"
         f"    target: {{host: {dst}, user: x, password: x}}\n"
         "    databases: [main]\n    exclude: [audit]\n"
+        "    options: {target_rows: replace}\n"
         "    mapping:\n      where:\n        notes: \"id < 3\"\n")
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
@@ -242,7 +244,8 @@ def test_parquet_part_files_are_copied_as_they_are(tmp_path, monkeypatch):
     conf.write_text(
         "hops:\n  lake:\n    engine: parquet\n"
         f"    source: {{host: {src}}}\n    target: {{host: {dst}}}\n"
-        "    databases: [lake]\n    exclude: [left]\n")
+        "    databases: [lake]\n    exclude: [left]\n"
+        "    options: {target_rows: replace}\n")
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
     monkeypatch.delenv("MIGKIT_MOVER", raising=False)

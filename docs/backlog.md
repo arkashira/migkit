@@ -5806,6 +5806,23 @@ cutover, R21, types, users, workload). Not yet anywhere:
    production system the hop does not name as the target, or when it
    holds data and the hop has not said what to do with it; the
    identities are checked again at the start of every write step.
+   *Done 2026-09-30 (`interlock`); its tests wait for the one run of the
+   suite at the end:* each engine says what
+   it is (`server_identity`: PostgreSQL's system identifier and the
+   postmaster's start, MySQL's `@@server_uuid`, MongoDB's replica set and
+   the member answering, SQL Server's `@@SERVERNAME` and its database's
+   creation, Redis's `run_id`, Kafka's cluster id; version, size, the
+   managed service by `clouds`), in the database the engine really writes
+   (`side_database`: PostgreSQL never maps its maintenance database - the
+   first docker run found the interlock calling the source's own database
+   another one). Every write step - move, sync, repair, cutover, users,
+   converted schema, rollback, the stream back - starts at
+   `before_write`; a copy at `before_copy`, which asks `rows_held` (the
+   pair's reader, within the row filter). Hop options `target_rows:
+   refuse|replace|keep` (refuse by default), `production: [patterns]`
+   and `production_target`, declared in `hopkeys` and checked on load.
+   What a hop wrote into the same target before is its own on a run
+   again; a restart or failover asks for the plan to be shown again.
 4. **Performance after a change of engine:** `workload.py` compares the
    source's own reads on the same engine; after a change of engine the
    translated workload (P10) is timed too, writes as well as reads, and

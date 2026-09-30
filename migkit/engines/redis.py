@@ -507,13 +507,36 @@ class RedisEngine(Engine):
         """The keyspace holds keys on the source and none on the target,
         counting only what the hop does not leave out."""
         try:
-            def any_kept(side):
-                return any(self._raw_kept(db, keys) for keys, _ in
-                           self._walk(side, db, False, self.COPY_BATCH))
-            return [f"db{db}"] if any_kept("src") and not any_kept("dst") \
-                else []
+            return [f"db{db}"] if self._any_kept("src", db) and \
+                not self._any_kept("dst", db) else []
         except Exception:  # noqa: BLE001 - None: cannot be asked
             return None
+
+    def _any_kept(self, side, db):
+        """Whether the side's keyspace holds a key the hop does not leave
+        out, on any node of a cluster."""
+        return any(self._raw_kept(db, keys) for keys, _ in
+                   self._walk(side, db, False, self.COPY_BATCH))
+
+    def rows_held(self, db, tables):
+        """The keyspace, where the target holds a key the hop does not
+        leave out: its copy removes those before it starts afresh."""
+        try:
+            return set(tables) if self._any_kept("dst", db) else set()
+        except Exception:  # noqa: BLE001 - None: cannot be asked
+            return None
+
+    def side_database(self, side, db):
+        """The same keyspace number on both sides: a hop's `db_map` does
+        not move a keyspace to another number."""
+        return db
+
+    def server_identity(self, side, db):
+        """The process answering (`run_id`, new at every start - a server
+        says nothing lasting about itself) and its version."""
+        info = self._client(side).info("server")
+        return {"running": str(info.get("run_id") or ""),
+                "version": str(info.get("redis_version") or "")}
 
     def snapshot_state(self, db, state_dir, kind="all"):
         """What the target held before a repair: how many keys of each

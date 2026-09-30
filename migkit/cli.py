@@ -191,6 +191,51 @@ def _shared(hop, d):
     return Mirror(remote, [hop.report_dir(d) / n for n in RUN_FILES]).fetch()
 
 
+def _interlock(hop, eng, d, go):
+    """The interlock on the target, at the start of a write step
+    (`interlock.before_write`)."""
+    from . import interlock
+    return interlock.before_write(hop, eng, d, go,
+                                  lambda m: console.print(f"  {m}"))
+
+
+def _tables_to_copy(hop, eng, d, table=""):
+    """What a copy of `d` writes, as `list_move_tables` says it, or None
+    where the engine has no copier to ask or a side does not answer - the
+    move then says why in its own words."""
+    from . import interlock
+    if table:
+        return [tuple(table.split(".", 1)) if "." in table
+                else ("", table)]
+    if not interlock.reached(hop):
+        return None
+    try:
+        return eng.list_move_tables(d)
+    except (AttributeError, NotImplementedError):
+        return None
+
+
+def _keep_out(hop, eng, d, tables, go, whole=False):
+    """The interlock's word on a copy of `d` (`interlock.before_copy`):
+    the tables whose rows the hop keeps as they are are left out of it.
+    The tables still to copy, or None where that leaves nothing of `d`."""
+    from . import interlock
+    if tables is None:
+        _interlock(hop, eng, d, go)
+        return []
+    kept = interlock.before_copy(hop, eng, d, tables, go,
+                                 lambda m: console.print(f"  {m}"), whole)
+    if not kept:
+        return list(tables)
+    interlock.leave_out(hop, d, kept)
+    left = [t for t in tables if tuple(t) not in kept]
+    if all(hop.excluded(d, *t) for t in left):
+        console.print(f"  {d}: every table this copy writes holds rows the"
+                      " hop keeps as they are; nothing to copy")
+        return None
+    return left
+
+
 def _require_configured(hop):
     missing = [side for side, ep in (("source", hop.source),
                                      ("target", hop.target))
@@ -731,6 +776,7 @@ def _convert_schema(hop_name, db, do_apply):
         raise SystemExit("--convert is for hetero hops,"
                          " same-engine hops use migkit schema HOP")
     for d in ([db] if db else eng.databases()):
+        _interlock(hop, eng, d, do_apply)
         objects = eng.converted_objects(d)
         stmts = [s for _, s in objects]
         out = hop.report_dir(d) / "converted-schema.sql"
@@ -1195,6 +1241,7 @@ def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
             from . import approvals
             approvals.require(hop, "repair", d,
                               lambda m: console.print(f"  {m}"))
+        _interlock(hop, eng, d, do_apply)
         _repair_one(hop, eng, d, kind, do_apply)
 
 
@@ -1302,6 +1349,7 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
     dbs = [db] if db else eng.databases()
     for d in dbs:
         console.print(f"[bold]{d}[/bold]")
+        _interlock(hop, eng, d, True)
         point = store.new_point(d, tag)
         eng.snapshot_state(d, point.dir, kind)
         journal = point.path("journal.jsonl")
@@ -1490,7 +1538,8 @@ def movers_pick_and_run(hop, eng, db, go):
     for d in ([db] if db else eng.databases()):
         if via == "builtin":
             _move_full(hop, eng, d, "", 500000, go)
-        else:
+        elif _keep_out(hop, eng, d, _tables_to_copy(hop, eng, d),
+                       go) is not None:
             for line in movers.run_via(via, hop, d, hop.workers, go,
                                        lambda m: chat(f"   {m}")):
                 chat(f"   {line}")
@@ -1834,6 +1883,9 @@ def _move_full(hop, eng, db, table, chunk, go):
                       else ("", table)]
         else:
             tables = eng.list_move_tables(d)
+        tables = _keep_out(hop, eng, d, tables, go)
+        if tables is None:
+            continue
         if not go:
             done = sum(1 for sch, t in tables
                        if ck.get(eng.move_key(d, sch, t), {}).get("done"))
@@ -2105,6 +2157,14 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None):
     # the source's replication user a password the replica set up for the
     # first no longer had
     secret = secrets.token_urlsafe(24) if go and not do_drop else None
+    for d in dbs:
+        # every database before the first is written: a replica of the
+        # whole server writes them all
+        if copy_data and not do_drop:
+            _keep_out(hop, eng, d, _tables_to_copy(hop, eng, d), go,
+                      whole=True)
+        else:
+            _interlock(hop, eng, d, go)
     once = getattr(eng, "REPLICATES_THE_SERVER", False)
     for i, d in enumerate(dbs):
         if once and i:
@@ -2176,6 +2236,7 @@ def _follow(hop, eng, db, do_drop, go):
     dbs = [db] if db else eng.databases()
     for d in dbs:
         console.print(f"[bold]{d}[/bold]")
+        _interlock(hop, eng, d, go)
         if do_drop:
             for line in movers.follow_teardown(hop, d, go,
                                                lambda m: chat(f"  {m}")):
@@ -2269,6 +2330,7 @@ def _copy_record_used(hop, d):
 
 def _tail(hop, eng, db, go):
     path = _tail_token(hop, db)
+    _interlock(hop, eng, db, go)
     shared = _shared(hop, db)
     rec = _copy_record(hop, db)
     if not path.exists() and rec and rec.get("before") is not None \
@@ -2382,6 +2444,8 @@ def _stream(hop, eng, db, do_drop, go, engine):
     migkit writes it, starts it, registers the connectors and tears it down."""
     from . import movers
     dbs = [db] if db else eng.databases()
+    for d in dbs:
+        _interlock(hop, eng, d, go)
     out = movers.stream_codegen(hop, dbs, engine)
     name = f"migkit-{hop.name}"
     if do_drop:
@@ -2571,6 +2635,9 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         from . import approvals
         approvals.require(hop, "cutover", db,
                           lambda m: console.print(f"  {m}"))
+    for d in ([db] if db else eng.databases()):
+        # before the target is written to at all, its grants included
+        _interlock(hop, eng, d, go)
     if not table and not do_drop and _carried_physically(hop, eng, db, mode,
                                                          go):
         return
@@ -2584,11 +2651,16 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     if mode == "full":
+        # before the mover is chosen: a table the hop keeps as it is has to
+        # be left out, and a mover that cannot leave one out is not chosen
+        dbs = [d for d in ([db] if db else eng.databases())
+               if _keep_out(hop, eng, d,
+                            _tables_to_copy(hop, eng, d, table),
+                            go) is not None]
         v, why = movers.fitted(hop, engine, movers.chosen(engine, table))
         if why:
             console.print(f"  {why}, so the tables are copied one by one")
         if v != "builtin":
-            dbs = [db] if db else eng.databases()
             lk = _lock(hop) if go else None
             try:
                 for d in dbs:
@@ -3142,6 +3214,7 @@ def rollback(hop_name, db, state_ts, do_apply):
         hopkeys.refuse_writes(hop, "a rollback")
         approvals.require(hop, "rollback", db,
                           lambda m: console.print(f"  {m}"))
+    _interlock(hop, eng, db, do_apply)
     # read before the target's own counters are put back: the new
     # primary's as they stand clear every key it handed out, even one
     # whose row it deleted since
@@ -3391,6 +3464,10 @@ def users_cmd(hop_name, mode, do_apply, pw_file):
     Never touches the source.
     """
     from .users import run as _users_run
+    if mode in ("create", "setpw", "rollback"):
+        hop = get_hop(hop_name)
+        _require_configured(hop)
+        _interlock(hop, get_engine(hop), "", do_apply)
     _users_run(hop_name, mode, do_apply, pw_file)
 
 

@@ -3657,6 +3657,33 @@ class MySQLEngine(Engine):
         got = self._q(side, "select @@server_uuid")
         return {"server": str(got[0][0])} if got else None
 
+    def server_identity(self, side, db):
+        """The server's own id, its host name and version, and the
+        schema's size as the catalogue last counted it. Asked once: a
+        plan does not wait on a server that is not there."""
+        name = self._d(side, db)
+        conn = self._conn(side, retry=False)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select @@hostname, @@version,"
+                            " (select sum(data_length + index_length) from"
+                            " information_schema.tables where table_schema"
+                            " = %s), (select count(*) from"
+                            " information_schema.schemata where schema_name"
+                            " = %s)", (name, name))
+                host, version, size, there = cur.fetchone()
+        finally:
+            conn.close()
+        out = {"name": str(host or ""), "version": str(version)}
+        if name and not int(there):
+            out["absent"] = True
+        elif name:
+            out["bytes"] = int(size or 0)
+        got = self.stream_identity(side, db)
+        if got:
+            out["id"] = got
+        return out
+
     def log_kept(self, db, grows):
         """A binlog is kept whole until it expires, however long the load
         took to write it."""

@@ -157,6 +157,12 @@ HOP_OPTIONS = {
                          " compared on, or docker for migkit to start"
                          " them", "str|dict", ("hetero",),
                          subs=("source", "target", "docker")),
+    "production": Key("host patterns of production servers: a target"
+                      " matching one is written only when the hop names"
+                      " it (production_target)", "str|list"),
+    "production_target": Key("the production server this hop writes to"
+                             " on purpose, by a name it answers to",
+                             "str|list"),
     "protect_target": Key("the application may not write the target"
                           " while migkit moves into it", "bool"),
     "pt_apply": Key("the online schema change path, on or off", "bool",
@@ -198,6 +204,9 @@ HOP_OPTIONS = {
                                " restore replays its binlog, so a load"
                                " may leave the binlog off", "bool",
                                ("mysql",)),
+    "target_rows": Key("refuse, replace or keep: what a copy does with"
+                       " the rows a table on the target already holds",
+                       "str"),
     "tombstones": Key("carry deletes' empty messages", "bool", ("kafka",)),
     "topic": Key("the stream name template", "str", STREAMS),
     "topology": Key("one_way or two_way", "str"),
@@ -625,6 +634,17 @@ def _contradictions(where, raw, opts, goal, engine):
                     f"goal copy moves the data once, and {k} keeps a"
                     " stream running - make the goal cutover or two-way,"
                     " or drop the option"))
+    from .interlock import CHOICES
+    rows = opts.get("target_rows")
+    if rows is not None and str(rows).lower() not in CHOICES:
+        out.append(Problem("error", f"{where}.options.target_rows",
+                           f"{rows!r} - one of {', '.join(CHOICES)}"))
+    if opts.get("production_target") and not opts.get("production"):
+        out.append(Problem(
+            "warn", f"{where}.options.production_target",
+            "names a production server to write to, and no production"
+            " list says which servers are production, so it opens"
+            " nothing - add production: [host patterns]"))
     dbs = [str(d) for d in (raw.get("databases") or [])]
     for src in (raw.get("db_map") or {}):
         if dbs and str(src) not in dbs:
