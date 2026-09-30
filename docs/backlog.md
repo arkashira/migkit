@@ -3401,8 +3401,21 @@ fallback and the source-change offer. Flat, to be made smart:
    reactive. With the hop's limits (P0-SMART) it holds a target (the
    source's load cap, the lag a replica may reach) instead of only
    reacting.
-6. **The cross-engine copier carries rows through Python** - being
-   removed (R20 cross-engine, running).
+6. **The cross-engine copier carried rows through Python** - removed
+   (crossmove.py, loadtext.py): rendered and compiled ways, 5M rows
+   MySQL->PostgreSQL 402s -> 102s, PostgreSQL->MySQL 338s -> 186s.
+7. **JSON is hashed in Python for every cross-engine proof** - now the
+   limit (at 1M rows: copy 8s, proof 24-26s). Canonical JSON digested on
+   the server where the engine can render it canonically (sorted keys,
+   one number form), in Python only where it cannot, same digest.
+8. **Quieting the target's triggers during a load is not carried into
+   range worker processes** - a table copied by ranges in parallel fires
+   its triggers; one rule for triggers and keys during any write into the
+   target (the repair ladder's rule) held in every worker.
+9. **A one-pass database program is ranked above migkit's table copier
+   without ever having moved a row** on the machine (it failed sign-in to
+   MySQL 8.4 every run and exited 0); a program earns its rank by a
+   measured run like every other rung.
 
 *Built with P0-SMART 2026-10-01, tests written and not yet run:*
 * *3*: `tuning` - every reasoned number declared with today's value as
