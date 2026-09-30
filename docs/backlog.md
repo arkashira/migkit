@@ -2866,6 +2866,17 @@ prediction):
   speed is optimised only among strategies that reach it; the dry run
   proposes (choice, predicted time and spread, guarantees, runners-up,
   deciding and unknown facts) and `--go` decides.
+* **The owner, later the same day: the choices stay inside.** "The
+  logic and the choices inside - the user doesn't need to know them; let
+  the decision engine run it and choose inside migkit, and what comes out
+  must be the best, smartest, fastest, most correct." The console shows
+  outcomes only (what happens to each side, predicted time and outage
+  with spread, guarantees reached, what the operator must do or approve,
+  one line when a way switched); the decision record (strategies
+  evaluated, the choice per table and phase, runners-up, deciding and
+  unknown facts, predictions against measurements) goes to the run's log
+  and the evidence export, and to the console only with
+  `MIGKIT_EXPLAIN=1`. No way or program is named on the console.
 * **Counterfactuals in the plan and the evidence export:** the chosen
   rung, its predicted time with spread, the next best and why not.
 
