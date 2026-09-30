@@ -2818,6 +2818,28 @@ store). What was still nowhere:
     same outcomes the console shows, the approvals and the source-change
     offer answered there.
 
+## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
+
+"Not just AWS to Tencent - any <-> any from the start: AWS, Tencent,
+GCP, Azure, Huawei, on-prem, anything - every database type in each
+provider." Two parts:
+
+1. **One managed-service layer**: a catalogue of every managed database
+   service per provider (AWS, GCP, Azure, Tencent, Alibaba, Huawei,
+   Oracle Cloud, IBM Cloud, and the DBaaS vendors - Atlas, Redis Cloud,
+   Aiven, Neon, Supabase, PlanetScale, Crunchy Bridge, Timescale,
+   CockroachDB Cloud, Yugabyte, SingleStore, Confluent) with what each
+   admin can and cannot do, how CDC is turned on, how writes are held,
+   snapshots/clones/restore points, limits and defaults; one provider API
+   layer (each provider's SDK, credentials as its CLI resolves them); the
+   preflight, the source-change offer and the freezes read it for any
+   source service and any target service. On-prem is a provider too.
+2. **Cloud-native services that are engines of their own** and migkit
+   lacks: Spanner, Bigtable, Firestore, GaussDB, OceanBase, TDSQL
+   (distributed), PolarDB-X, Keyspaces, Neptune, Timestream, Lindorm,
+   GeminiDB - each a side with copy, check and follow where the service
+   exposes changes.
+
 ## P0-SCENARIOS. Every reason a database is migrated (owner, 2026-10-01)
 
 Asked: "old version to a newer one, SQL Server Web edition to Datacenter
