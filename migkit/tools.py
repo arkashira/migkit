@@ -313,6 +313,18 @@ def second_reader_present():
     return second_reader.interpreter() is not None
 
 
+#: not a program either: the extensions the compiled cross-engine mover
+#: attaches servers and files through (`crossmove`), installed into the
+#: analytical engine migkit already depends on
+COMPILED_MOVER = "compiled-mover"
+
+
+def compiled_mover_present():
+    from . import crossmove
+    return not (crossmove.missing_extensions(tuple(crossmove.EXTENSIONS))
+                or set(crossmove.LAKES) - crossmove.installed_extensions())
+
+
 #: not a program on PATH either: the driver `engines.ase` connects through
 ASE_DRIVER = "ase-odbc"
 
@@ -412,6 +424,8 @@ IBMI_RPM = ("https://public.dhe.ibm.com/software/ibmi/products/odbc/rpms/"
 def _present(cmd):
     if cmd == SECOND_READER:
         return second_reader_present()
+    if cmd == COMPILED_MOVER:
+        return compiled_mover_present()
     if cmd == "OpenLogReplicator":
         from .engines import oracle_redo
         return oracle_redo.program()
@@ -676,6 +690,11 @@ CAPABILITIES = [
      "create missing tables, resumable copy, cross-dialect verify;"
      " MySQL to PostgreSQL also in one bulk pass",
      [], ["pgloader"]),
+    ("Cross-engine: server to server copy",
+     "MySQL into PostgreSQL and back, and SQLite, DuckDB, Parquet, Delta"
+     " and Iceberg files into PostgreSQL, range by range with no row"
+     " through migkit, each range proved by both servers",
+     [], [COMPILED_MOVER]),
     ("Change streaming",
      "follow live changes until cutover",
      [], ["docker"]),
@@ -751,7 +770,7 @@ def by_hand(programs):
         "apt" if shutil.which("apt-get") else None)
     out = []
     for c in programs:
-        if c == SECOND_READER:
+        if c in (SECOND_READER, COMPILED_MOVER):
             continue    # `doctor --install` builds it wherever Python runs
         if c == REDO_READER:
             continue    # built from source by `doctor --install`
@@ -784,7 +803,8 @@ def install_missing(log=print, ask=None):
         wanted += needs + optional
     pkgs = []
     for cmd in wanted:
-        if cmd == SECOND_READER or cmd in SOURCE_BUILDS or _present(cmd):
+        if cmd in (SECOND_READER, COMPILED_MOVER) or cmd in SOURCE_BUILDS \
+                or _present(cmd):
             continue
         formula, apt = PROGRAMS.get(cmd, ("", ""))
         pkg = formula if mgr == "brew" else apt
@@ -842,6 +862,10 @@ def install_missing(log=print, ask=None):
         install_second_reader(log)
     if redo and answer.get(REDO_READER_CLIENT):
         install_redo_reader(log)
+    if not _present(COMPILED_MOVER):
+        from . import crossmove
+        log("installing the server to server copy's parts ...")
+        crossmove.install_extensions(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
 
 

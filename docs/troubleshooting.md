@@ -221,6 +221,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * unknown hop <...>, have: <...>
 
+## `migkit/crossmove.py`
+
+* MIGKIT_TABLE_COPY=<...> is not one of <...>
+
 ## `migkit/cutover.py`
 
 * cutover: is `true` or the path's settings (<...>), not <...>
@@ -729,9 +733,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
 
+* <...> on the target is a Delta or Iceberg table, which migkit reads and does not write
+
 * <...> is not described on the target yet
 
 * <...>: a row filter is SQL, and Parquet files take none
+
+* <...>: a Delta or Iceberg table is read through its log, not copied file by file; exclude it from this hop or move it into a database
 
 ## `migkit/engines/pgwire.py`
 

@@ -12,6 +12,10 @@ in-process renderer every engine without a server uses. A decimal whose
 source declared no precision is kept as its text, since no fixed scale
 reproduces what an unconstrained numeric holds. A decimal with one is kept
 as an Arrow decimal, which the tools that read Parquet expect.
+
+A source table directory may instead be a Delta or an Iceberg table
+(`lake`): it is described by its own schema, read through its own log -
+the files of its current snapshot and no others - and never written.
 """
 import hashlib
 import json
@@ -53,6 +57,35 @@ def _arrow(cls, numbers):
         return pa.time64("us"), "time64[us]"
     raise SystemExit(f"a {cls} column has no Parquet counterpart migkit"
                      " writes; leave the column out with mapping.columns")
+
+
+def _arrow_name(t):
+    """The name `_table.json` would give an Arrow type a lake table's
+    schema holds: a narrower integer or float is the class's own, a
+    decimal keeps its numbers, a timestamp its unit's microseconds; any
+    other type (a list, a struct) keeps Arrow's own name, which no class
+    maps - so it is carried by the table copier and left out of the
+    comparison with the reason said, never guessed at."""
+    import pyarrow as pa
+    if pa.types.is_integer(t):
+        return "int64"
+    if pa.types.is_floating(t):
+        return "double"
+    if pa.types.is_boolean(t):
+        return "bool"
+    if pa.types.is_string(t) or pa.types.is_large_string(t):
+        return "string"
+    if pa.types.is_binary(t) or pa.types.is_large_binary(t):
+        return "binary"
+    if pa.types.is_date32(t):
+        return "date32"
+    if pa.types.is_timestamp(t):
+        return "timestamp"
+    if pa.types.is_time64(t):
+        return "time64"
+    if pa.types.is_decimal(t):
+        return f"decimal{t.bit_width}({t.precision}, {t.scale})"
+    return str(t)
 
 
 def _declared_arrow(declared):
@@ -133,6 +166,84 @@ class ParquetEngine(NeutralCopier, Engine):
             with fs.open_input_stream(posixpath.join(d, META)) as f:
                 return json.loads(f.read())
         except (FileNotFoundError, OSError):
+            pass
+        lake = self.lake(side, db, table)
+        if lake is None:
+            return None
+        # a lake table describes itself: its columns from its own schema,
+        # and no key - a lake keeps none
+        return {"columns": [[n, _arrow_name(t)]
+                            for n, t in zip(lake[2].names, lake[2].types)],
+                "key": []}
+
+    def lake(self, side, db, table):
+        """(format, where, Arrow schema) of a table directory that is a
+        Delta or an Iceberg table rather than migkit's own part files:
+        `delta` and the directory, or `iceberg` and the metadata file its
+        `version-hint.text` names - else the highest numbered, the table's
+        latest where nothing writes to it while it is read. None for any
+        other directory, for one in a bucket - the logs are read from a
+        disk here - and on the target: a lake is read, never written."""
+        import pyarrow.fs as pafs
+        fs, d = self._dir(side, db, table)
+        if side != "src" or not isinstance(fs, pafs.LocalFileSystem):
+            return None
+        if os.path.isdir(os.path.join(d, "_delta_log")):
+            from deltalake import DeltaTable
+            got = DeltaTable(d).to_pyarrow_dataset()
+            return "delta", d, got.schema
+        meta = os.path.join(d, "metadata")
+        if not os.path.isdir(meta):
+            return None
+        hint = os.path.join(meta, "version-hint.text")
+        found = sorted(n for n in os.listdir(meta)
+                       if n.endswith(".metadata.json"))
+        if not found:
+            return None
+        pick = found[-1]
+        if os.path.exists(hint):
+            v = open(hint).read().strip()
+            named = [n for n in found if n.startswith(f"v{v}.")
+                     or n.split("-")[0].lstrip("0") == v.lstrip("0")]
+            pick = named[-1] if named else pick
+        where = os.path.join(meta, pick)
+        return "iceberg", where, self._iceberg(where).schema().as_arrow()
+
+    @staticmethod
+    def _iceberg(where):
+        from pyiceberg.table import StaticTable
+        return StaticTable.from_metadata(where)
+
+    def _lake_batches(self, lake, names, size):
+        """Record batches of a lake table's current snapshot, as its own
+        library reads them: the files its log says are live, and no
+        other."""
+        kind, where, _ = lake
+        if kind == "delta":
+            from deltalake import DeltaTable
+            yield from DeltaTable(where).to_pyarrow_dataset().to_batches(
+                columns=list(names), batch_size=size)
+            return
+        reader = self._iceberg(where).scan(
+            selected_fields=tuple(names)).to_arrow_batch_reader()
+        for batch in reader:
+            yield batch.select(list(names))
+
+    def _lake_rows(self, lake):
+        """The rows the log says the current snapshot holds, without
+        reading one; None where it does not say."""
+        kind, where, _ = lake
+        try:
+            if kind == "delta":
+                import pyarrow as pa
+                from deltalake import DeltaTable
+                got = pa.table(DeltaTable(where).get_add_actions(
+                    flatten=True)).column("num_records").to_pylist()
+                return None if None in got else int(sum(got))
+            snap = self._iceberg(where).current_snapshot()
+            got = (snap.summary or {}).get("total-records") if snap else "0"
+            return None if got is None else int(got)
+        except Exception:  # noqa: BLE001 - an estimate, or none
             return None
 
     def _parts(self, side, db, table):
@@ -182,6 +293,12 @@ class ParquetEngine(NeutralCopier, Engine):
             raise SystemExit(f"{table} moves under a row filter, which is"
                              " SQL, and Parquet files take none")
         import pyarrow.parquet as pq
+        lake = self.lake(side, db, table)
+        if lake is not None:
+            for batch in self._lake_batches(lake, names, size):
+                cols = [batch.column(n).to_pylist() for n in names]
+                yield [list(r) for r in zip(*cols)] if cols else []
+            return
         fs, parts = self._parts(side, db, table)
         for p in parts:
             with fs.open_input_file(p) as f:
@@ -255,6 +372,11 @@ class ParquetEngine(NeutralCopier, Engine):
         import pyarrow.parquet as pq
         out = {}
         for t in self.neutral_tables(side, db):
+            lake = self.lake(side, db, t)
+            if lake is not None:
+                out[t] = {"rows": self._lake_rows(lake), "bytes": None,
+                          "key": False}
+                continue
             fs, parts = self._parts(side, db, t)
             rows = size = 0
             for p in parts:
@@ -280,6 +402,13 @@ class ParquetEngine(NeutralCopier, Engine):
                              " is already there")
         desc = self.neutral_create_sql(side, db, table, columns, key)
         fs, d = self._dir(side, db, table)
+        if any(fs.get_file_info(posixpath.join(d, n)).type
+               != __import__("pyarrow.fs").fs.FileType.NotFound
+               for n in ("_delta_log", "metadata")):
+            # a lake table's directory: part files written beside its log
+            # are files the log never names
+            raise SystemExit(f"{table} on the target is a Delta or Iceberg"
+                             " table, which migkit reads and does not write")
         fs.create_dir(d, recursive=True)
         with fs.open_output_stream(posixpath.join(d, META)) as f:
             f.write(desc.encode())
@@ -391,6 +520,14 @@ class ParquetEngine(NeutralCopier, Engine):
         again. A table already on the target has its part files removed
         first; the description is written last, so a table stopped part
         way is not taken for a finished one."""
+        lakes = [t for t in tables if self.lake("src", db, t) is not None]
+        if lakes:
+            # its directory holds files its log has removed, and the log
+            # itself is not a description this engine writes
+            raise SystemExit(f"{', '.join(lakes)}: a Delta or Iceberg table"
+                             " is read through its log, not copied file by"
+                             " file; exclude it from this hop or move it"
+                             " into a database")
         steps = [f"{t}: part files copied as they are" for t in tables]
         if not go:
             return steps

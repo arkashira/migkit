@@ -836,7 +836,14 @@ def _pg_clear_carried_objects(hop, db, env_t, log=None):
     the load stopped on each of them (measured: `duplicate key value
     violates unique constraint "pg_largeobject_metadata_oid_index"`, the
     target already holding what an earlier move had carried). One the
-    source does not have is left as it is."""
+    source does not have is left as it is. A source of another engine
+    has none to carry: asking a MySQL source for them stopped the one-pass
+    load before it began (measured, `received invalid response to SSL
+    negotiation`, psql speaking to MySQL's port)."""
+    from .engines import ALIASES
+    source = (hop.options or {}).get("source_engine", hop.engine)
+    if ALIASES.get(source, source) != "postgres":
+        return
     s, t = hop.source, hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
     got = _sh(["psql", "-h", s.host, "-p", str(s.port), "-U", s.user,
@@ -3864,9 +3871,19 @@ ALTER SCHEMA '{db}' RENAME TO 'public';
     try:
         if log:
             log(copy)
-        _sh(copy.argv, None, log)
+        done = _sh(copy.argv, None, log)
     finally:
         loadfile.unlink(missing_ok=True)
+    # it says an error in its log and exits 0: measured, 3.6.10 could not
+    # sign in to MySQL 8.4 (`The value of SEQUENCE ... is not of type
+    # (SIMPLE-ARRAY (UNSIGNED-BYTE 8))`), loaded nothing and ended as if
+    # it had loaded everything
+    failed = [ln for ln in f"{done.stdout}\n{done.stderr}".splitlines()
+              if " ERROR " in ln or " FATAL " in ln]
+    if failed:
+        from .wording import database_words, without_programs
+        said = database_words("\n".join(failed)) or failed[0][-300:]
+        raise RuntimeError(without_programs(said, DRIVEN))
     return steps
 
 
