@@ -79,7 +79,8 @@ class Endpoint:
 
     def configured(self):
         return bool(self.host or self.options.get("hosts")
-                    or self.options.get("path") or self.options.get("url"))
+                    or self.options.get("path") or self.options.get("url")
+                    or self.options.get("program"))
 
     #: a PostgreSQL connection's TLS from the endpoint's options, under
     #: libpq's own names: `sslmode` (verify-full checks the certificate and
@@ -691,7 +692,7 @@ def load_hops(path=None):
 
 #: engines whose side signs in with nothing a keychain would hold
 _NO_KEYCHAIN = ("sqlite", "duckdb", "parquet", "bigquery", "pubsub",
-                "generic")
+                "generic", "saas")
 
 
 def build_hop(name, raw):

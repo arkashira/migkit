@@ -4290,6 +4290,50 @@ the deep check. Test written, not run:
 `test_cosmosdb_as_a_side_of_a_pair.py` (the vNext emulator, arm64).
 Still open: bulk paths (container copy jobs), point-in-time snapshots.
 
+**Done 2026-10-01: ER3, ER6, ER7.**
+* **ER3 Teradata** (`engines/teradata.py`): Teradata's driver, installed by
+  `doctor --install` once its terms are accepted; ANSI sessions (a value
+  too long is refused, never cut), data encrypted, TLS by `sslmode`. Read
+  in FastExport's parallel sessions from 100,000 rows where the user may
+  read `DBC.SessionInfoV`, one statement otherwise, a FastExport that
+  cannot start switched from; tables read in one pass or by `HASHBUCKET`
+  buckets, never in key order (rows lie by hash on the AMPs); key pages
+  ordered and resumed CASESPECIFIC alike. Batches bulk-loaded by FastLoad
+  into a table of their own and merged in, its errors, warnings and row
+  count held to what was sent (it drops a duplicate row without failing),
+  statements otherwise; a tail's batch one transaction with its line in
+  `migkit_origin`. PERIOD as `[begin, end)`, INTERVAL as its parts, TIME
+  and TIMESTAMP WITH TIME ZONE as the instant, NUMBER by value. Two
+  systems compared on the servers: `HASHROW` of each row's salted values
+  (text as `CHAR2HEXINT`, NULLs marked) into `HASHBUCKET` under four
+  salts, summed; users, roles and rights from `DBC.AllRightsV`; the DBA's
+  script; `COLLECT STATISTICS` after a load; the deep check finds a table
+  left mid-load. Cannot prove: nothing is followed (no change log a
+  client reads); a LOB, JSON or XML column is folded in this process;
+  written without a system.
+* **ER6 SAP ODP over OData** (`engines/sapodp.py`): a service is a
+  database, an entity set a table, pyodata for the metadata. The copy a
+  follow starts from is the delta initialisation (no data-less start
+  exists over OData); deltas by token, a before image passed over; the
+  fence by the queue's own request times; a follow of an entity set with
+  no delta links refused. Verify: a full read compared row by row, and the
+  service's own `$count` - and an aggregate's sums - before and after it
+  held to the rows read. Cannot prove: a digest on the SAP side (there is
+  none); an extractor delivering additive deltas; users (PFCG roles); the
+  delta subscription is the SAP user's and is ended in ODQMON.
+* **ER7 SaaS as programs** (`engines/saas.py`, `saas_salesforce.py`): one
+  adapter - catalogue, read from a state, the state reached - for Singer
+  taps, Airbyte-protocol connectors (ELv2, terms accepted at install) and
+  dlt sources; each kind's state the position; what a read hands over held
+  to the hashes of what the target was given, moved on only once the
+  tail's position after it is handed back; deletes carried where a stream
+  is read whole or the program marks them. Salesforce read by a Bulk API
+  2.0 job (REST pages where refused) and followed through the Pub/Sub API
+  with Avro payloads. Verify by a second read, and by the application's
+  own count where it keeps one. Cannot prove: a delete in a stream read
+  incrementally with no mark (check finds it); a formula field's change
+  (no event carries it); a file's bytes (`base64`).
+
 ### Leapfrog: a live tail's table set, raw logs, closed capabilities rebuilt (docs/research/leapfrog-live-tail-and-raw-logs-2026-09-28.md)
 
 26 items with an order in the report (start: L7, L2, L8, R1, R7).

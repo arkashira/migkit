@@ -58,6 +58,14 @@ _ZOS_LOG = ("Db2 for z/OS hands its log out only to licensed code - a load"
 _EXTRACT = ("a file described by a copybook is an extract at rest, with no"
             " server, settings or change log; what changed since the last"
             " extract is found by comparing the two, which check does")
+_TD_LOG = ("Teradata keeps no change log a client can read, so a Teradata"
+           " source moves by copies, each proved by check")
+_READ_ONLY = ("{} is read, never written: it is a pair's source (engine:"
+              " hetero, source_engine: {}), and a hop between two of them"
+              " compares them")
+_READ_FOLLOW = ("{} is followed as a pair's source, its changes carried"
+                " into another engine (engine: hetero, source_engine: {});"
+                " two of them are compared, never one written")
 
 #: every gap, by engine: (NOT_APPLICABLE, why) or (NOT_YET, backlog item)
 GAPS = {
@@ -180,6 +188,49 @@ GAPS = {
         "statistics": (NOT_YET, "34"),
         "snapshot": (NOT_YET, "34"),
     },
+    "teradata": {
+        "sequences": (NOT_APPLICABLE, "Teradata has no sequences, and an"
+                                      " identity column's next number is"
+                                      " the system's own, set on no table"
+                                      " that exists"),
+        "params": (NOT_APPLICABLE, "Teradata's system settings are read by"
+                                   " its own utility on a node, not through"
+                                   " SQL"),
+        "bulk-move": (NOT_APPLICABLE, "Teradata's whole-system copy is its"
+                                      " backup and restore, licensed apart"
+                                      " from the database; tables are"
+                                      " copied in its parallel sessions"
+                                      " (table-copy)"),
+        "stream": (NOT_APPLICABLE, _TD_LOG),
+        "fence": (NOT_APPLICABLE, _TD_LOG),
+        "confirm": (NOT_APPLICABLE, _TD_LOG),
+        "delta": (NOT_APPLICABLE, _TD_LOG),
+        "snapshot": (NOT_APPLICABLE, "Teradata keeps no snapshot a client"
+                                     " can take; a copy of the target is its"
+                                     " backup tool's"),
+    },
+    **{name: {
+        "deep": (NOT_APPLICABLE, f"{said} holds no state of a load to look"
+                                 " into: it is read through its own"
+                                 " interface"),
+        "sequences": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "params": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "bulk-move": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "table-copy": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "guard": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "statistics": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "snapshot": (NOT_APPLICABLE, _READ_ONLY.format(said, name)),
+        "stream": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "fence": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "confirm": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "delta": (NOT_APPLICABLE, _READ_FOLLOW.format(said, name)),
+        "users": (NOT_APPLICABLE, users),
+    } for name, said, users in (
+        ("sapodp", "an SAP system's application data",
+         "SAP authorisations are the system's roles (PFCG), not carried"),
+        ("saas", "a SaaS application",
+         "who may use an application is the application's own, not"
+         " carried"))},
     "ase": {
         "deep": (NOT_YET, "34"),
         "sequences": (NOT_YET, "34"),

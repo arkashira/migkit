@@ -51,7 +51,7 @@ needs_docker = _mk_docker_mark()
 #: files are named with: a file named for one is marked for it, and the x86
 #: workflow runs `pytest -m <engine>` - every such test and nothing else
 ENGINE_MARKS = {"mssql": ("sql_server", "mssql"), "db2": ("db2",),
-                "ase": ("sap_ase",)}
+                "ase": ("sap_ase",), "teradata": ("teradata_against",)}
 
 #: the SQL Server the tests start. SQL Edge where nothing else runs: SQL
 #: Server's engine in the one build made for arm64 (retired, still

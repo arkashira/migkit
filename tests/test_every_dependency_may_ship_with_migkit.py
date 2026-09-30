@@ -162,6 +162,8 @@ def _install(monkeypatch, home, accept=""):
     monkeypatch.setattr(tools, "second_reader_present", lambda: True)
     monkeypatch.setattr(tools, "ibmi_odbc_present", lambda: False)
     monkeypatch.setattr(tools, "db2_connect_present", lambda: False)
+    monkeypatch.setattr(tools, "teradata_driver_present", lambda: False)
+    monkeypatch.setattr(tools, "install_teradata", lambda log: False)
     monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
     # a machine the redo-file reader runs on, whatever this one is
     monkeypatch.setattr(tools, "_redo_reader_here", lambda: True)
@@ -217,6 +219,9 @@ def test_every_closed_term_is_asked_in_one_question_first(home,
     monkeypatch.setattr(tools, "install_ibm",
                         lambda component, log: order.append(
                             ("build", component)))
+    monkeypatch.setattr(tools, "teradata_driver_present", lambda: False)
+    monkeypatch.setattr(tools, "install_teradata",
+                        lambda log: order.append(("build", "teradata")))
     monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
     monkeypatch.setattr(tools, "_redo_reader_here", lambda: True)
     from migkit.engines import oracle_redo

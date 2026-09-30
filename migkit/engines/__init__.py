@@ -9,7 +9,9 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "db2z": "db2zos", "delta-lake": "delta",
            "cockroach": "cockroachdb", "crdb": "cockroachdb",
            "aurora-dsql": "dsql", "cosmos": "cosmosdb",
-           "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb"}
+           "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb",
+           "td": "teradata", "vantage": "teradata",
+           "sap-odp": "sapodp", "odp": "sapodp", "program": "saas"}
 
 #: engines reached over another's wire protocol, whose values a driver
 #: hands over, a table is built and a value written as that one's are
@@ -51,6 +53,12 @@ SCHEMES = {
     "iceberg": "iceberg", "iceberg+http": "iceberg",
     "iceberg+https": "iceberg",
     "delta": "delta", "delta+s3": "delta",
+    "teradata": "teradata",
+    # an SAP system's OData services, https or - a sandbox's - http
+    "sapodp": "sapodp", "sapodp+http": "sapodp",
+    # a program source: the scheme is its kind (`engines.saas`)
+    "dlt": "saas", "singer": "saas", "airbyte": "saas",
+    "salesforce": "saas",
     "trino": "generic", "presto": "generic", "vertica": "generic",
     "tidb": "tidb",
     "cockroachdb": "cockroachdb", "cockroach": "cockroachdb",
@@ -143,6 +151,15 @@ def _class_for(name):
     if name == "db2zos":
         from .db2zos import Db2ZosEngine
         return Db2ZosEngine
+    if name == "teradata":
+        from .teradata import TeradataEngine
+        return TeradataEngine
+    if name == "sapodp":
+        from .sapodp import SapOdpEngine
+        return SapOdpEngine
+    if name == "saas":
+        from .saas import SaasEngine
+        return SaasEngine
     if name == "tidb":
         from .tidb import TiDBEngine
         return TiDBEngine
@@ -167,11 +184,11 @@ def _class_for(name):
 #: every canonical engine name, in the order a report lists them
 NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "parquet", "clickhouse", "dynamodb", "oracle", "db2", "db2i",
-         "db2zos", "ase",
+         "db2zos", "ase", "teradata",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
          "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
          "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
-         "hetero", "generic")
+         "sapodp", "saas", "hetero", "generic")
 
 
 def engines_with(method):
