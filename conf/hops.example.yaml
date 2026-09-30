@@ -1,26 +1,21 @@
 hops:
   my-first-hop:
-    engine: postgres            # postgres | mysql | mssql | mongodb | redis | kafka
-    service: native             # playbook set: aws-dms | tencent-dts | gcp-dms | native
-    source:
-      host: source.example.com
-      port: 5432
-      user: postgres
-      # secrets need not be plaintext - use a reference resolved at load:
-      #   env:NAME / ${NAME}   file:/run/secrets/pw   vault:secret/db#password
-      password: env:MIGKIT_SRC_PASSWORD
-    target:
-      host: 10.0.0.1
-      port: 5432
-      user: root
-      password: secret
-    databases: []               # source db names, empty = discover from source
-    db_map: {}                  # optional src->dst rename, e.g. {cart_uat: cart}
-                                #   config + reports stay keyed by the source
-                                #   name; only the target connection is remapped
-    workers: 4
-    big_rows: 5000000
-    slice: 1000000
+    # two addresses are a hop: the engine, the pair, the port and the
+    # databases are read from them, TLS from the query; migkit decides the
+    # rest (workers, ranges, the way each table goes) from the servers.
+    # No password in an address - `migkit init` keeps it in this
+    # machine's keychain, or write a reference in its place:
+    #   env:NAME / ${NAME}   file:/run/secrets/pw   vault:secret/db#password
+    source: postgres://postgres:env:MIGKIT_SRC_PASSWORD@source.example.com:5432/shop
+    target: postgres://root:env:MIGKIT_DST_PASSWORD@10.0.0.1/shop
+    # what the hop is for: copy (left out) | cutover | verify | two-way |
+    # keep-in-sync
+    # goal: cutover
+    # the long form stays valid for a side an address cannot say:
+    #   source: {host: source.example.com, port: 5432, user: postgres,
+    #            password: env:MIGKIT_SRC_PASSWORD}
+    #   databases: [shop]           # source db names, empty = discover
+    #   db_map: {cart_uat: cart}    # optional src->dst rename
     # options:
     #   mask: [users.email, ssn]  # values reports show from rows, as salted hashes; `all` masks every value
     #   transfer_price_per_gb: 0.09   # the plan then says what carrying the rows across costs

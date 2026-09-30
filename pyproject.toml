@@ -68,6 +68,8 @@ dependencies = [
     # cloud metadata for managed-service hops
     "boto3",
     "google-cloud-pubsub>=2.20",
+    # the passwords `migkit init` keeps, in the OS keychain
+    "keyring>=25",
 ]
 
 [project.urls]
@@ -86,7 +88,7 @@ diff = []
 dataframe = []
 s3 = []
 pgschema = []
-dev = ["pytest", "faker", "hypothesis"]
+dev = ["pytest", "faker", "hypothesis", "pexpect"]
 
 [project.scripts]
 migkit = "migkit.cli:main"

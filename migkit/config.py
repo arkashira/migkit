@@ -271,6 +271,60 @@ class IamEndpoint(Endpoint):
         pass
 
 
+#: the keychain entries migkit keeps passwords under: service `migkit`,
+#: one entry a hop side (`keychain_name`)
+KEYCHAIN = "migkit"
+
+
+def keychain_name(hop, side):
+    return f"{hop}.{side}"
+
+
+def keychain_read(name, strict=True):
+    """The password this machine's keychain holds under `name`. `strict`
+    for a `keyring:` reference, which names an entry that must be there;
+    not for a side given as an address, which may sign in without one."""
+    try:
+        import keyring
+        got = keyring.get_password(KEYCHAIN, name)
+    except Exception as e:  # noqa: BLE001 - no keychain on this machine
+        if strict:
+            raise SystemExit(f"this machine's keychain could not be read"
+                             f" for {KEYCHAIN}/{name}: {type(e).__name__}"
+                             f" {e}".rstrip())
+        return ""
+    if got is None and strict:
+        raise SystemExit(f"nothing is kept in this machine's keychain as"
+                         f" {KEYCHAIN}/{name} - `migkit init` keeps it"
+                         " there, or write another reference")
+    return got or ""
+
+
+def keychain_write(name, secret):
+    import keyring
+    keyring.set_password(KEYCHAIN, name, secret)
+
+
+class KeychainEndpoint(Endpoint):
+    """A side written as an address with no password: its password is the
+    one this machine's keychain keeps for the hop and side, read the first
+    time a connection needs it - so a hop that never connects never asks
+    the keychain, and one whose server wants no password finds none."""
+
+    keychain = ""
+    _got = None
+
+    @property
+    def password(self):
+        if self._got is None:
+            self._got = keychain_read(self.keychain, strict=False)
+        return self._got
+
+    @password.setter
+    def password(self, value):
+        pass
+
+
 def _aws_client(service, region=None, role=None):
     try:
         import boto3
@@ -308,6 +362,9 @@ class Hop:
     workers_set: bool = True
     #: the most the pace of a move may reach, set by `sizing.fit`
     workers_most: int = 0
+    #: what the hop is for (`hopkeys.GOALS`), "" where it does not say -
+    #: its options are already under the hop's own by the time it is built
+    goal: str = ""
 
     def reversed(self):
         """The same hop run the other way: the target as the source, the
@@ -468,6 +525,8 @@ def _secret(val):
                            -> Google Secret Manager (latest by default)
       azure-kv:https://<vault>.vault.azure.net/secrets/<name>
                            -> Azure Key Vault
+      keyring:<name>       -> this machine's keychain (`migkit init` keeps
+                              passwords there)
     A plain string is returned unchanged."""
     if not isinstance(val, str):
         return val
@@ -490,6 +549,8 @@ def _secret(val):
         return _gcp_secret(val[7:])
     if val.startswith("azure-kv:"):
         return _azure_secret(val[9:])
+    if val.startswith("keyring:"):
+        return keychain_read(val[8:])
     return val
 
 
@@ -558,7 +619,10 @@ def _vault_read(ref):
                      " (need vault CLI + VAULT_ADDR/VAULT_TOKEN)")
 
 
-def _endpoint(engine, raw):
+def _endpoint(engine, raw, keychain=""):
+    """A side from its long-form mapping. `keychain` names the entry a
+    side written as an address signs in with where it carries no password
+    of its own."""
     raw = raw or {}
     extra = {k: v for k, v in raw.items()
              if k not in ("host", "port", "user", "password")}
@@ -569,14 +633,19 @@ def _endpoint(engine, raw):
     if auth not in ("", "password", "aws_iam"):
         raise SystemExit(f"auth: {auth} - password (the default) or"
                          " aws_iam")
-    return (IamEndpoint if auth == "aws_iam" else Endpoint)(
+    lazy = bool(keychain) and auth != "aws_iam" and not raw.get("password")
+    ep = (IamEndpoint if auth == "aws_iam" else
+          KeychainEndpoint if lazy else Endpoint)(
         host=_secret(raw.get("host", "")),
         port=int(raw.get("port") or DEFAULT_PORTS.get(engine, 0)),
         user=_secret(raw.get("user", "")),
-        password=("" if auth == "aws_iam"
+        password=("" if auth == "aws_iam" or lazy
                   else str(_secret(raw.get("password", "")))),
         options=extra,
     )
+    if lazy:
+        ep.keychain = keychain
+    return ep
 
 
 def load_hops(path=None):
@@ -587,26 +656,86 @@ def load_hops(path=None):
             "  create one:  migkit init\n"
             "  or point at an existing file:  MIGKIT_CONF=/path/to/hops.yaml")
     data = yaml.safe_load(path.read_text()) or {}
-    hops = {}
-    for name, raw in (data.get("hops") or {}).items():
-        engine = raw.get("engine", "postgres")
-        hops[name] = Hop(
-            name=name,
-            engine=engine,
-            source=_endpoint(engine, raw.get("source")),
-            target=_endpoint(engine, raw.get("target")),
-            databases=raw.get("databases") or [],
-            exclude=raw.get("exclude") or [],
-            service=raw.get("service", ""),
-            big_rows=int(raw.get("big_rows", 5_000_000)),
-            slice=int(raw.get("slice", 1_000_000)),
-            workers=int(raw.get("workers", 4)),
-            options=raw.get("options") or {},
-            db_map=raw.get("db_map") or {},
-            mapping=raw.get("mapping") or {},
-            workers_set="workers" in raw,
-        )
-    return hops
+    from . import hopkeys
+    errors = [p for p in hopkeys.check(data) if p.level == "error"]
+    if errors:
+        # before anything runs, and all of them at once: a run stopped on
+        # the first only to meet the second is two runs for one fix
+        raise SystemExit(
+            f"{path} has {len(errors)} problem"
+            f"{'s' if len(errors) > 1 else ''}, and nothing was run:\n"
+            + "\n".join(f"  {p}" for p in errors))
+    return {name: build_hop(name, raw)
+            for name, raw in (data.get("hops") or {}).items()}
+
+
+#: engines whose side signs in with nothing a keychain would hold
+_NO_KEYCHAIN = ("sqlite", "duckdb", "parquet", "bigquery", "pubsub",
+                "generic")
+
+
+def build_hop(name, raw):
+    """One hop from its mapping - the long form, two addresses
+    (`migkit.addresses`), or a side of each. An address is read into the
+    mapping the long form would hold, and built the same way from there."""
+    from . import addresses, hopkeys
+    raw = dict(raw or {})
+    src_e, dst_e, engine = hopkeys.sides(raw)
+    options = dict(raw.get("options") or {})
+    dbs = list(raw.get("databases") or [])
+    db_map = dict(raw.get("db_map") or {})
+    ends = {}
+    for side in ("source", "target"):
+        got = raw.get(side)
+        if not addresses.is_address(got):
+            ends[side] = _endpoint(engine, got)
+            continue
+        e, ep_raw, names = addresses.parse(got, side)
+        ends[side] = _endpoint(e, ep_raw, "" if e in _NO_KEYCHAIN
+                               else keychain_name(name, side))
+        if engine == "hetero":
+            options.setdefault(f"{side}_engine", e)
+        if side == "source" and names:
+            if dbs and [str(d) for d in dbs] != names:
+                raise SystemExit(
+                    f"{name}: the source address names {', '.join(names)}"
+                    f" and databases says {', '.join(map(str, dbs))} -"
+                    " say it once")
+            dbs = names
+        if side == "target" and names:
+            if not dbs or len(names) != len(dbs):
+                raise SystemExit(
+                    f"{name}: the target address names"
+                    f" {', '.join(names)}, and the source"
+                    + (f" {len(dbs)} databases" if dbs else " none")
+                    + " - name as many on each, in the same order, and"
+                    " each moves into the one in its place")
+            for s, t in zip(dbs, names):
+                if str(s) != t:
+                    if db_map.get(s, t) != t:
+                        raise SystemExit(
+                            f"{name}: {s} goes to {t} by the target"
+                            f" address and to {db_map[s]} by db_map")
+                    db_map[s] = t
+    hop = Hop(
+        name=name,
+        engine=engine,
+        source=ends["source"],
+        target=ends["target"],
+        databases=dbs,
+        exclude=raw.get("exclude") or [],
+        service=raw.get("service", ""),
+        big_rows=int(raw.get("big_rows", 5_000_000)),
+        slice=int(raw.get("slice", 1_000_000)),
+        workers=int(raw.get("workers", 4)),
+        options=options,
+        db_map=db_map,
+        mapping=raw.get("mapping") or {},
+        workers_set="workers" in raw,
+        goal=str(raw.get("goal") or ""),
+    )
+    hopkeys.apply_goal(hop)
+    return hop
 
 
 def get_hop(name):

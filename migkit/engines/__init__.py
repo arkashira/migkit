@@ -5,6 +5,36 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "elasticsearch": "opensearch", "scylladb": "cassandra",
            "sybase": "ase", "sap-ase": "ase"}
 
+#: an address's scheme and the engine it names - `source:
+#: postgres://app@db1/shop` in a hop (`migkit.addresses`). The one place a
+#: scheme is mapped: an engine added to `NAMES` without a scheme here is
+#: one an address cannot name, which `tests/test_a_hop_from_two_addresses`
+#: fails on. `generic` takes the address whole, as its own `url`.
+SCHEMES = {
+    "postgres": "postgres", "postgresql": "postgres", "pgsql": "postgres",
+    "mysql": "mysql", "mariadb": "mysql",
+    "mongodb": "mongodb", "mongodb+srv": "mongodb",
+    "redis": "redis", "rediss": "redis", "valkey": "redis",
+    "mssql": "mssql", "sqlserver": "mssql",
+    "oracle": "oracle",
+    "clickhouse": "clickhouse",
+    "kafka": "kafka",
+    "sqlite": "sqlite",
+    "duckdb": "duckdb",
+    "db2": "db2",
+    "ase": "ase", "sybase": "ase",
+    "opensearch": "opensearch", "elasticsearch": "opensearch",
+    "cassandra": "cassandra", "scylla": "cassandra",
+    "dynamodb": "dynamodb",
+    "redshift": "redshift",
+    "snowflake": "snowflake",
+    "bigquery": "bigquery",
+    "kinesis": "kinesis",
+    "pubsub": "pubsub",
+    "parquet": "parquet", "parquet+s3": "parquet",
+    "trino": "generic", "presto": "generic", "vertica": "generic",
+}
+
 
 def _class_for(name):
     """The engine class for a canonical name, or None."""

@@ -1,0 +1,36 @@
+{
+  "ReplicationTasks": [
+    {
+      "ReplicationTaskIdentifier": "orders-to-aurora",
+      "SourceEndpointArn": "arn:aws:dms:eu-west-1:000000000000:endpoint:example-src",
+      "TargetEndpointArn": "arn:aws:dms:eu-west-1:000000000000:endpoint:example-dst",
+      "MigrationType": "full-load-and-cdc",
+      "TableMappings": "{\"rules\": [{\"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"orders\", \"object-locator\": {\"schema-name\": \"public\", \"table-name\": \"orders\"}, \"rule-action\": \"include\", \"filters\": [{\"filter-type\": \"source\", \"column-name\": \"region\", \"filter-conditions\": [{\"filter-operator\": \"eq\", \"value\": \"EU\"}, {\"filter-operator\": \"eq\", \"value\": \"UK\"}]}, {\"filter-type\": \"source\", \"column-name\": \"id\", \"filter-conditions\": [{\"filter-operator\": \"gte\", \"value\": \"1000\"}]}]}, {\"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"items\", \"object-locator\": {\"schema-name\": \"public\", \"table-name\": \"order_items\"}, \"rule-action\": \"include\"}, {\"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"no-tmp\", \"object-locator\": {\"schema-name\": \"public\", \"table-name\": \"tmp%\"}, \"rule-action\": \"exclude\"}, {\"rule-type\": \"transformation\", \"rule-id\": \"4\", \"rule-name\": \"rename-items\", \"rule-target\": \"table\", \"object-locator\": {\"schema-name\": \"public\", \"table-name\": \"order_items\"}, \"rule-action\": \"rename\", \"value\": \"lines\"}, {\"rule-type\": \"transformation\", \"rule-id\": \"5\", \"rule-name\": \"drop-notes\", \"rule-target\": \"column\", \"object-locator\": {\"schema-name\": \"public\", \"table-name\": \"orders\", \"column-name\": \"notes\"}, \"rule-action\": \"remove-column\"}, {\"rule-type\": \"transformation\", \"rule-id\": \"6\", \"rule-name\": \"lower\", \"rule-target\": \"schema\", \"object-locator\": {\"schema-name\": \"%\"}, \"rule-action\": \"convert-lowercase\"}]}",
+      "ReplicationTaskSettings": "{\"FullLoadSettings\": {\"TargetTablePrepMode\": \"DROP_AND_CREATE\"}, \"TargetMetadata\": {\"LimitedSizeLobMode\": true, \"LobMaxSize\": 32}}"
+    }
+  ],
+  "Endpoints": [
+    {
+      "EndpointIdentifier": "src",
+      "EndpointType": "SOURCE",
+      "EngineName": "postgres",
+      "EndpointArn": "arn:aws:dms:eu-west-1:000000000000:endpoint:example-src",
+      "ServerName": "orders.example.eu-west-1.rds.amazonaws.com",
+      "Port": 5432,
+      "DatabaseName": "orders",
+      "Username": "dms_reader",
+      "SslMode": "verify-full"
+    },
+    {
+      "EndpointIdentifier": "dst",
+      "EndpointType": "TARGET",
+      "EngineName": "aurora",
+      "EndpointArn": "arn:aws:dms:eu-west-1:000000000000:endpoint:example-dst",
+      "ServerName": "orders.cluster-example.eu-west-1.rds.amazonaws.com",
+      "Port": 3306,
+      "DatabaseName": "orders",
+      "Username": "dms_writer",
+      "SslMode": "require"
+    }
+  ]
+}

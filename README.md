@@ -140,7 +140,7 @@ already reported as consistent:
 ```bash
 uv tool install migkit   # or: pipx install migkit
 migkit doctor            # what this machine can do (no config needed)
-migkit init              # starter hops.yaml, then fill in the endpoints
+migkit init              # asks for two addresses, connects, writes the hop
 migkit assess  my-hop    # readiness before anything moves
 migkit check   my-hop    # read-only, exit 1 on any difference
 migkit report --serve    # dashboard at localhost:8899
@@ -176,21 +176,38 @@ When you are ready:
 migkit init              # writes ~/.config/migkit/hops.yaml, mode 600
 ```
 
+In a terminal, `init` asks where the data is and where it goes - an
+address each, or a task file from another tool (a DMS task, a
+change-capture connector's configuration, a LOAD DATABASE file) - and the
+passwords, which it keeps in the OS keychain or leaves in environment
+variables. It connects, says what it found (software and versions, who runs
+each side, sizes, tables without a key, types that need care across two
+engines, whether changes can be followed, what the users may do), proposes
+the plan, writes a script for the DBA where a grant or a setting is
+missing, and writes the hop. Without a terminal it reads `MIGKIT_SOURCE`
+and `MIGKIT_TARGET` instead, or writes a template.
+
 migkit finds that file on its own. `MIGKIT_CONF=/path/to/hops.yaml` overrides
 it, and a `conf/hops.yaml` in the working directory takes precedence, so a
 project can keep its hops beside its code. The file looks like this:
 
 ```yaml
 hops:
-  my-hop:
-    engine: postgres            # postgres | mysql | mssql | mongodb | sqlite | redis | kafka | hetero
-    service: native             # playbook: aws-dms | tencent-dts | gcp-dms | native
-    source: { host: src.example.com, port: 5432, user: app, password: "secret" }
-    target: { host: 10.0.0.10,       port: 5432, user: app, password: "secret" }
-    databases: [appdb, orders]  # source db names, empty = discover from source
-    db_map: { appdb: app_prod } # optional src->dst rename; unmapped = same name
-    workers: 4                  # tables and key ranges copied side by side
+  shop:
+    goal: cutover                 # copy (left out) | cutover | verify | two-way | keep-in-sync
+    source: postgres://app@db1.example.com:5432/shop?sslmode=verify-full
+    target: mysql://app@10.0.0.10/shop
 ```
+
+The engines, the pair, the ports, the databases and TLS are read from the
+addresses; the number of workers, the size of a range and the way each
+table goes are decided from the servers, so the file says none of them. A
+password is never in an address - `init` keeps it in the keychain, or
+write a reference in its place (`postgres://app:env:SRC_PW@db1/shop`). The
+long form (`source: {host: ..., port: ..., user: ...}`, `databases`,
+`db_map`) stays valid, and every configuration is checked before anything
+runs: an unknown key is refused with the closest known one, a wrong type or
+a contradiction with where it is.
 
 A move reads every range it writes back from the target and holds it to
 what it copied, and compares a bulk program's result with the source before

@@ -262,34 +262,28 @@ def _hops_table(required=True):
 
 
 STARTER_CONFIG = """\
-# migkit hops. A hop is one source -> target pair.
-# This file holds passwords: keep it chmod 600 and out of version control.
+# migkit hops. A hop is one source -> target pair: two addresses, and
+# migkit decides the rest (the engine, the port and the databases are read
+# from the addresses; how many workers, how big a range, which way each
+# table goes, from the servers).
 #
+#   migkit init            in a terminal: asks for the two addresses,
+#                          connects, and writes the hop for you
 #   migkit doctor          what this machine can do, and whether hops connect
 #   migkit assess  my-hop  readiness before anything moves
 #   migkit check   my-hop  read-only comparison, exit 1 on any difference
 hops:
   my-hop:
-    # postgres | mysql | mssql | mongodb | sqlite | redis | kafka
-    engine: postgres
-    # playbook only, does not change what migkit does:
-    # aws-dms | tencent-dts | gcp-dms | native
-    service: native
-    source:
-      host: source.example.com
-      port: 5432
-      user: app
-      password: "CHANGE_ME"
-    target:
-      host: target.example.com
-      port: 5432
-      user: app
-      password: "CHANGE_ME"
-    # source database names; leave empty to discover them from the source
-    databases: []
-    # optional source -> target rename; unlisted names stay the same
-    db_map: {}
-    workers: 4
+    # scheme://user@host:port/database - postgres, mysql, mongodb, mssql,
+    # oracle, redis, kafka, sqlite, clickhouse, ...; TLS in the query
+    # (?sslmode=verify-full). No password in an address: `migkit init`
+    # keeps it in this machine's keychain, or write a reference in its
+    # place - postgres://app:env:SRC_PASSWORD@source.example.com/shop
+    source: postgres://app@source.example.com:5432/shop
+    target: postgres://app@target.example.com:5432/shop
+    # what the hop is for: copy (left out) | cutover | verify | two-way |
+    # keep-in-sync
+    # goal: cutover
 """
 
 
@@ -299,14 +293,29 @@ hops:
                    " user config directory")
 @click.option("--force", is_flag=True, help="overwrite an existing file")
 def init(here, force):
-    """Write a starter hop configuration.
+    """Set up a hop: in a terminal, asks for the two addresses and the
+    passwords, connects, says what it found and what it will do, and
+    writes the hop. Without one, reads MIGKIT_SOURCE and MIGKIT_TARGET
+    (MIGKIT_SOURCE_PASSWORD, MIGKIT_TARGET_PASSWORD, MIGKIT_GOAL,
+    MIGKIT_HOP), or writes a template to edit.
 
     Installed from a package there is no checkout to copy an example out of,
-    so migkit writes the template itself. Mode 600, because the next thing
-    that goes in it is a password.
+    so migkit writes the template itself. Mode 600, because what goes in it
+    next can be a secret's reference.
     """
+    import os
+    import sys
+
     from .config import user_config_path
     path = (Path.cwd() / "conf" / "hops.yaml") if here else user_config_path()
+    tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if tty or os.environ.get("MIGKIT_SOURCE"):
+        from . import guide
+        guide.run(_ask if tty else None, console.print, path, force)
+        if not here:
+            console.print("\nmigkit finds this file automatically."
+                          " Override with MIGKIT_CONF=/path/to/hops.yaml")
+        return
     if path.exists() and not force:
         raise SystemExit(f"{path} already exists (use --force to overwrite)")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,6 +328,15 @@ def init(here, force):
     if not here:
         console.print(f"\nmigkit finds this file automatically."
                       " Override with MIGKIT_CONF=/path/to/hops.yaml")
+
+
+def _ask(question, secret=False, default=""):
+    """One question of the guide, in the terminal."""
+    if secret:
+        import getpass
+        return getpass.getpass(f"{question}: ")
+    return click.prompt(question, default=default, show_default=bool(
+        default))
 
 
 def _ask_terms(program, terms):
@@ -388,8 +406,13 @@ def doctor(install):
             # the one thing that helps
             console.print("  it cannot install these here; they need"
                           f" installing by hand: {', '.join(manual)}")
-    for name, hop in load_hops().items():
+    hops, raw = _doctor_config()
+    from . import hopkeys
+    for name, hop in hops.items():
+        for _, line in hopkeys.said_by_doctor(hop, raw.get(name) or {}):
+            console.print(f"{name}: [yellow]{line}[/yellow]")
         rtt = {}
+        reached = []
         for side, ep in (("src", hop.source), ("dst", hop.target)):
             if not ep.configured():
                 console.print(f"{name} {side}: not configured")
@@ -419,11 +442,19 @@ def doctor(install):
                 said = _two_way_said(hop, eng, one) if side == "dst" else ""
                 if said:
                     console.print(f"  {said}")
+                reached.append(side)
             except Exception as e:
                 console.print(f"{name} {side}: [red]FAIL[/red] {e}")
         said = _placement_said(rtt)
         if said:
             console.print(f"{name}: {said}")
+        if len(reached) == 2:
+            try:
+                _doctor_setup(name, hop, eng)
+            except Exception as e:  # noqa: BLE001 - a probe never fails it
+                why = (str(e).splitlines() or [type(e).__name__])[-1]
+                console.print(f"{name}: what the servers allow could not"
+                              f" be asked - {why[:160]}")
         # read from what the freeze recorded, so it is said even when the
         # target cannot be reached right now
         from . import freeze
@@ -435,6 +466,65 @@ def doctor(install):
                               f" {', '.join(sorted(held['roles']))};"
                               " tearing the stream down at cutover, or"
                               " rollback --apply, gives them back")
+
+
+def _doctor_config():
+    """(hops, their mappings as written) for doctor, which says what is
+    wrong with a configuration rather than stopping on it: an error was
+    said by the hop table above, and only the warnings are left to say."""
+    import yaml
+
+    from . import config as _config
+    from . import hopkeys
+    path = Path(_config.CONF)
+    if not path.exists():
+        return {}, {}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        console.print(f"[red]{path} is not YAML migkit can read[/red]: {e}")
+        return {}, {}
+    try:
+        hops = load_hops()
+    except SystemExit:
+        return {}, {}
+    for p in hopkeys.check(data):
+        console.print(f"[yellow]{p}[/yellow]")
+    return hops, (data.get("hops") or {}) if isinstance(data, dict) else {}
+
+
+def _doctor_setup(name, hop, eng):
+    """Who runs each side, and whether what the hop's goal needs of the
+    two servers is there - asked again each time, the DBA's script
+    written again for what is still missing, or taken away."""
+    from . import clouds, dba
+    from .guide import _looking_at, record
+    wheres = {}
+    for side in ("source", "target"):
+        e, key = _looking_at(eng, hop, side)
+        ep = hop.source if side == "source" else hop.target
+        wheres[side] = clouds.of(e, key, ep)
+        if wheres[side].cloud:
+            console.print(f"{name} {side}: {wheres[side].label} (from"
+                          f" {' and '.join(wheres[side].evidence)})")
+    record(hop, {s: {"where": w.as_dict()} for s, w in wheres.items()})
+    found = dba.needs(hop, eng, None, wheres)
+    if not found:
+        return
+    written = dba.write(hop, eng, found, wheres)
+    lack = dba.missing(found)
+    goal = hop.goal or "copy"
+    if not lack:
+        console.print(f"{name}: [green]the servers allow everything goal"
+                      f" {goal} needs[/green]")
+    for n in lack:
+        console.print(f"{name} {n.side}: [red]missing[/red] {n.what}"
+                      f" ({n.now})")
+    for side, p in written.items():
+        console.print(f"  what the DBA must run on the {side}: {p}")
+    for n in (x for x in found if x.ok is None):
+        console.print(f"{name} {n.side}: {n.what} - could not be asked"
+                      f" ({n.now})")
 
 
 #: a round trip past which a side is across a wide network, not beside
@@ -613,8 +703,11 @@ def _setup_target(hop_name, db):
 
 
 def _convert_schema(hop_name, db, do_apply):
+    from . import hopkeys
     hop = get_hop(hop_name)
     _require_configured(hop)
+    if do_apply:
+        hopkeys.refuse_writes(hop, "creating the target's schema")
     eng = get_engine(hop)
     if not hasattr(eng, "convert_ddl"):
         raise SystemExit("--convert is for hetero hops,"
@@ -1049,8 +1142,11 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
 
 
 def _repair(hop_name, db, kind, do_apply, on_conflict="source-wins"):
+    from . import hopkeys
     hop = get_hop(hop_name)
     _require_configured(hop)
+    if do_apply:
+        hopkeys.refuse_writes(hop, "a repair")
     hop.options["on_conflict"] = on_conflict
     eng = get_engine(hop)
     if db:
@@ -1170,10 +1266,12 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
 
 
 def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
+    from . import hopkeys
     from .state import get_store
 
     hop = get_hop(hop_name)
     _require_configured(hop)
+    hopkeys.refuse_writes(hop, "a repair")
     hop.options["on_conflict"] = on_conflict
     eng = get_engine(hop)
     capabilities.require(
@@ -1293,6 +1391,9 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
                  on_conflict="source-wins"):
     hop = get_hop(hop_name)
     _require_configured(hop)
+    if go and mode != "verify":
+        from . import hopkeys
+        hopkeys.refuse_writes(hop, f"sync --mode {mode}")
     eng = get_engine(hop)
     tail = "  (dry-run; add --apply/--go to execute)" if not go else ""
 
@@ -2348,9 +2449,11 @@ def _protect_target(hop, eng, db, release=False):
 
 
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
-    from . import movers
+    from . import hopkeys, movers
     hop = get_hop(hop_name)
     _require_configured(hop)
+    if go:
+        hopkeys.refuse_writes(hop, "a move")
     eng = get_engine(hop)
     back_at_cutover, _ = _topology(hop)
     if go and do_drop:
@@ -2792,8 +2895,9 @@ def rollback(hop_name, db, state_ts, do_apply):
     from .state import get_store
     hop = get_hop(hop_name)
     eng = get_engine(hop)
-    from . import approvals, freeze
+    from . import approvals, freeze, hopkeys
     if do_apply:
+        hopkeys.refuse_writes(hop, "a rollback")
         approvals.require(hop, "rollback", db,
                           lambda m: console.print(f"  {m}"))
     if freeze.state(hop, db):

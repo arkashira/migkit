@@ -1,0 +1,19 @@
+-- move sakila from MySQL into PostgreSQL
+LOAD DATABASE
+     FROM      mysql://root:CHANGE_ME@mysql.example.com:3306/sakila
+     INTO      postgresql://app@pg.example.com:5432/pagila?sslmode=require
+
+ WITH include drop, create tables, create indexes, reset sequences,
+      workers = 8, concurrency = 1
+
+  SET maintenance_work_mem to '128MB', work_mem to '12MB'
+
+ CAST type datetime to timestamptz drop default drop not null using zero-dates-to-null
+
+ INCLUDING ONLY TABLE NAMES MATCHING ~/film/, 'actor', 'rental'
+ EXCLUDING TABLE NAMES MATCHING ~<_text$>
+
+ ALTER TABLE NAMES MATCHING 'actor' RENAME TO 'actors'
+
+ BEFORE LOAD DO
+ $$ create schema if not exists sakila; $$;

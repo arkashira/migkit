@@ -1,0 +1,17 @@
+{
+  "name": "inventory-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "10.0.0.12",
+    "database.port": "5433",
+    "database.user": "cdc",
+    "database.password": "CHANGE_ME",
+    "database.dbname": "inventory",
+    "database.sslmode": "require",
+    "topic.prefix": "inv",
+    "plugin.name": "pgoutput",
+    "table.include.list": "public\\.orders,public\\.customers,public\\.audit_.*",
+    "table.exclude.list": "public\\.audit_2019",
+    "snapshot.mode": "initial"
+  }
+}
