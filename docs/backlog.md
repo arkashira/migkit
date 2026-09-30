@@ -2791,6 +2791,33 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## P0-PARITY. Every engine as deep as PostgreSQL and MySQL (owner, 2026-10-01)
+
+Asked: "can the other engines do better - smart, deep, not flat; if they
+are already good, leave them". Measured from `decide.coverage()` and
+`capabilities.matrix()` at 6182e06: PostgreSQL and MySQL have a way for
+all 10 shapes; Oracle 8; every other engine 3-7. 70 "not yet" cells, and
+they are three cross-cutting gaps, not 26 engine problems:
+
+* **Large values** - not yet on 22 engines (all but PostgreSQL, MySQL,
+  Oracle): values read, written and hashed in pieces, memory sized from
+  the widest row (R22 `model.row_sizes`), wide values digested where
+  they lie (`canon.WIDE`) - one mechanism, an adapter per engine.
+* **Partitioned** - not yet on 15: copy by partition (the partition as
+  the range), partition coverage checked (deep checks did it for
+  PostgreSQL and MySQL), partition-aware workers.
+* **Read-only target** (BAR-3) - not yet on 24: the target kept from
+  the application while migkit moves into it, or its writes named - the
+  same hold-writes primitives the cutover's freezes use on the source
+  (one primitive per engine, used for both).
+* Smaller: missing grant on MongoDB and pairs; capability gaps on
+  warehouses, ASE, Db2 and lakes (6-11 cells each); the generic engine
+  is not yet on every shape (decide whether it deepens or is declared
+  a thin fallback).
+
+Done when every cell is a way or "not applicable" with its reason, and
+the depth tests run on every engine, not only PostgreSQL and MySQL.
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really
