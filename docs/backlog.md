@@ -2790,6 +2790,71 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
+
+Asked: "is the decision engine smart or still flat - I want it really
+smart". Honest state at c7dc5a2: the frame is right (needs, probes,
+measured costs, footprint as tie-break, kept choice, runtime fallback,
+source-change offer) but the intelligence in it is shallow:
+
+1. A rung's cost is one number (seconds a unit, per hop), not a function
+   of what the unit is: measured on a small table, it ranks the same on a
+   500 GB one with LOBs over a 50 ms link.
+2. A rung never run is ranked by its list's order, not by a prediction -
+   the resource model (R22, `model.py`) can predict it and is not asked.
+3. Exploration is "try every untimed rung once", on whatever unit comes
+   next: a slow way can be tried on the biggest table, one sample is
+   trusted, noise is a fixed 5% tie.
+4. Every choice is made alone (way, workers, table order, index builds,
+   verify passes), never as one plan under the hop's limits.
+5. Nothing re-plans when the world changes mid-run (a source that gets
+   busy, a link that slows): the pace backs off, the way never changes.
+6. What one hop learned does not help the next hop, engine pair or
+   machine.
+7. Only seconds count: the source's load, money (bytes billed, egress),
+   the outage and the target's memory are not constraints of the choice.
+
+To build (the owner's rule stands: correctness first as a hard filter,
+then the fastest by measurement, footprint breaks ties; predictions are
+used only where nothing is measured, and a measurement always beats a
+prediction):
+
+* **Cost as a function of the unit.** cost(rung, facts) = start-up +
+  work / rate of the resource that binds, with the facts that move it
+  (bytes, rows, widest row, LOBs, keyless, types, partitions, link RTT
+  and bandwidth, server load); fitted online per rung x engine pair x
+  shape from every unit it ran, with its uncertainty (mean and spread),
+  not one number.
+* **Predict before measuring.** A rung never run here gets its cost from
+  the resource model and from what similar hops measured, with a wide
+  spread; the plan says which numbers are measured and which predicted.
+* **Explore safely.** Try an unmeasured rung on a small representative
+  unit, never on the critical path of a deadline; stop exploring when
+  the best rung's lead is outside the spread (a bandit with a risk
+  bound, not "each once").
+* **One plan, jointly.** Choose the way per table, the workers, the table
+  order (longest first), index builds overlapped and the verify passes as
+  one schedule minimising the makespan under the hop's limits: deadline,
+  the source's load cap, money budget, outage budget, target memory and
+  connections (a CP-SAT or greedy-with-bounds scheduler; measured against
+  the per-choice greedy).
+* **Re-plan while running.** When a unit's rate leaves its predicted
+  spread, re-climb for the ranges left (switch ways at range edges, which
+  are idempotent), and say why.
+* **Learn across hops.** A local knowledge base (never leaves the
+  machine) of rung performance and failure by engine pair, version, shape
+  and link class seeds the next hop's priors; migkit's own benchmarks
+  ship as the first priors.
+* **Risk in the cost.** A rung's chance of failing here (from its history:
+  a service that refuses, a version that breaks) times the work a failure
+  throws away enters its expected time.
+* **Constraints as needs, trade-offs said.** The source's load cap, money
+  and outage are hard limits where the hop sets them; the plan names the
+  trade-off ("the fastest way bills about $X; the chosen one is 12%
+  slower and bills nothing").
+* **Counterfactuals in the plan and the evidence export:** the chosen
+  rung, its predicted time with spread, the next best and why not.
+
 ## Decided by the owner 2026-09-30
 
 * **A faster way that needs a change on the source is offered, never
