@@ -1702,10 +1702,13 @@ def _final_check(hop, eng, d, before, left, say):
             else:
                 got = eng.check_data(d)
                 result["how"] = "every table"
-            # anything but a clean answer stops it: a flip on a check that
-            # did not say "same" is the one mistake here with no undo
-            result["bad"] = [r for r in got
-                             if r.status not in ("ok", "skip")]
+            # anything but "same" by the one verdict stops it - a flip on
+            # a check that compared nothing (every answer skipped, or no
+            # answer at all) is the one mistake here with no undo
+            from . import verdict
+            result["decision"] = verdict.decide(
+                [{"status": r.status, "scope": r.scope, "detail": r.detail}
+                 for r in got], hop)
             result["skipped"] = [r.scope for r in got if r.status == "skip"]
         except Exception as e:  # noqa: BLE001 - a check that fails is a stop
             result["error"] = str(e).strip()[:300]
@@ -1717,10 +1720,10 @@ def _final_check(hop, eng, d, before, left, say):
                     " budget ran out")
     if "error" in result:
         raise _Undo(f"{d}: the final check failed - {result['error']}")
-    if result["bad"]:
-        r = result["bad"][0]
-        raise _Undo(f"{d}: the final check found a difference - {r.scope}:"
-                    f" {r.detail}")
+    decision = result["decision"]
+    if decision.status != "same":
+        raise _Undo(f"{d}: the final check did not find the two the same"
+                    f" ({decision.word}) - {decision.why}")
     watch = drift.reader(eng)
     if watch is not None and before is not None:
         moved = drift.changes(before, drift.shape(watch, "src", d))
