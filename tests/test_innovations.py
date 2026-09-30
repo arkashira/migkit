@@ -443,9 +443,20 @@ def test_the_second_reading_installs_in_migkits_words(monkeypatch, tmp_path):
                         lambda argv, **k: ran.append(argv) or
                         type("P", (), {"returncode": 0})())
     said = []
+    monkeypatch.setattr(tools, "which", lambda n: None)
     assert tools.install_second_reader(said.append) is True
     assert ran[0][1:3] == ["-m", "venv"], ran
     assert ran[1][-1] == tools.SECOND_READER_PACKAGE, ran
+    # with the package manager that can fetch the Python it needs: 3.12,
+    # past which numpy 1.26.4 has no wheels
+    ran.clear()
+    monkeypatch.setattr(tools, "which", lambda n: "/x/uv" if n == "uv"
+                        else None)
+    assert tools.install_second_reader(said.append) is True
+    assert ran[0][:5] == ["/x/uv", "venv", "-q", "--python", "3.12"], ran
+    assert ran[1][:3] == ["/x/uv", "pip", "install"], ran
+    assert ran[1][-1] == tools.SECOND_READER_PACKAGE, ran
+    assert ran[1][ran[1].index("--python") + 1] == ran[0][-1] + "/bin/python"
     low = " ".join(said).lower()
     assert said and not [t for t in TOOLS + ("validator", "google", "pso")
                          if t in low], said

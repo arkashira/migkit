@@ -64,9 +64,26 @@ class GenericEngine(Engine):
         # not here: an address can carry its password
         cmd = ["reladiff", "--conf", None,
                *(["--stats"] if stats else []), "-j", str(max(1, int(want)))]
+        # sized by migkit where the table's facts say its rows; its own
+        # defaults otherwise, spelled out
+        from ..verifiers import reladiff_rung
+        fact = self._facts_of(table)
+        rung = reladiff_rung(fact.get("rows"), fact.get("bytes"), want,
+                             ("generic",))
+        cmd += ["--bisection-factor", str(rung["bisection_factor"]),
+                "--bisection-threshold", str(rung["bisection_threshold"])]
         for k in self._key():
             cmd += ["-k", k]
         return cmd + list(extra)
+
+    def _facts_of(self, table):
+        """What the catalogue says of one table's size, or {}: the engine
+        reads no catalogue of its own, so this is {} until one does."""
+        try:
+            got = self.table_facts("src", "")
+        except Exception:  # noqa: BLE001 - no facts, the defaults
+            return {}
+        return got.get(table) or {}
 
     def _reladiff(self, table, extra, jobs=None, stats=True):
         if not which("reladiff"):

@@ -857,20 +857,34 @@ def schema_reading_note():
 def install_second_reader(log=print):
     """Build the second reader its own environment, beside migkit's.
 
-    From this interpreter, so it is the Python migkit already runs on, and
-    at the version measured to write nothing to either side. Said in
+    Its own, because its dependencies would break migkit's (measured on
+    8.9.3: numpy 1.26.4, pandas 2.3.3 and sqlglot 19.9 against migkit's
+    2.5, 3.0 and 30.18), at the version measured to write nothing to
+    either side. On Python 3.12 where the package manager can fetch one:
+    numpy 1.26.4 has no wheels past it, so a newer interpreter would
+    compile it. Measured with a warm cache: 3.9 s and 422 MB. Said in
     migkit's words; the package is nobody's business but migkit's.
     """
     import sys
     home = Path.home() / ".migkit" / "second-reader"
     log("installing the independent second reading in its own environment"
         " (a large download, once) ...")
-    made = subprocess.run([sys.executable, "-m", "venv", str(home)],
-                          capture_output=True, text=True)
-    if made.returncode == 0:
-        made = subprocess.run([str(home / "bin" / "pip"), "install", "-q",
-                               SECOND_READER_PACKAGE],
+    uv = which("uv")
+    if uv:
+        made = subprocess.run([uv, "venv", "-q", "--python", "3.12",
+                               str(home)], capture_output=True, text=True)
+        if made.returncode == 0:
+            made = subprocess.run([uv, "pip", "install", "-q", "--python",
+                                   str(home / "bin" / "python"),
+                                   SECOND_READER_PACKAGE],
+                                  capture_output=True, text=True)
+    else:
+        made = subprocess.run([sys.executable, "-m", "venv", str(home)],
                               capture_output=True, text=True)
+        if made.returncode == 0:
+            made = subprocess.run([str(home / "bin" / "pip"), "install",
+                                   "-q", SECOND_READER_PACKAGE],
+                                  capture_output=True, text=True)
     if made.returncode != 0:
         log("  the second reading did not install; everything else still"
             " works, and migkit doctor --install tries again")

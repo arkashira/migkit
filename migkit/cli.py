@@ -881,7 +881,7 @@ def _drill(hop_name, db, table, limit):
     if not hasattr(eng, "fetch_sample_df"):
         raise SystemExit("--drill supports postgres and mysql hops")
     try:
-        import datacompy
+        import datacompy  # noqa: F401 - what the explanation is built on
     except ImportError:
         raise SystemExit(
             "the row-by-row drilldown needs a component that is not"
@@ -901,16 +901,15 @@ def _drill(hop_name, db, table, limit):
     if not keys:
         raise SystemExit(f"{table} has no primary key for joining")
     # compared as shown: a masked column's values are tokens, equal where
-    # the values are, so the rows still line up and still differ
-    from . import masking
-    cmp = datacompy.PandasCompare(masking.frame(hop, table, a),
-                                  masking.frame(hop, table, b),
-                                  join_columns=[k.lower() for k in keys],
-                                  df1_name="source", df2_name="target")
-    console.print(cmp.report())
-    # datacompy counts the differing rows; it prints the values as they are,
-    # which for an invisible difference is two identical-looking strings.
-    # The count was never the hard part.
+    # the values are, so the rows still line up and still differ. In
+    # migkit's words: the comparison's own report opens with its name
+    from . import second_reader
+    for line in second_reader.explain(a, b, keys, hop, table,
+                                      limit=max(limit, 1), per_column=10):
+        console.print(line, markup=False, highlight=False)
+    # the explanation shows the values as they are, which for an invisible
+    # difference is two identical-looking strings. The count was never the
+    # hard part.
     extra = eng._invisible_section(a, b, keys, table)
     if extra:
         console.print(extra)

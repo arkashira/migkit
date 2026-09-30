@@ -79,9 +79,13 @@ the kept leaves where the hop keeps them and the tail's position matches
 (pass D, `kept`), else by one scan (pass A); leaves by range for one
 integer key, else by hash; localized by the sketch where few differences
 are expected and the link is slow (measured round trip), else by the
-leaves (pass B); confirmed against the totals, then past the tail's
-position where a tail runs (pass C); and a second, independent reading
-where the hop asks for two or migkit's own digest disagreed.
+leaves (pass B) - or, where measured cheaper, by the second reader's
+aggregates per group of a column the source's statistics say splits the
+table (`by_groups`), or by the bisecting reader on one engine, each held
+to the totals as the leaves are; confirmed against the totals, then past
+the tail's position where a tail runs (pass C); and a second, independent
+reading where the hop asks for two or migkit's own digest disagreed, held
+key for key to the rows found (`second_reading`).
 """
 import hashlib
 import time
@@ -532,6 +536,7 @@ class Localized:
     complete: bool = False
     why: str = ""
     how: str = ""              #: the way it was localized, for the clause
+    said: str = ""             #: what that way did, where it says more
     found: tuple = (0, 0, 0)   #: what the rows found add up to
     delta: tuple = (0, 0, 0)   #: the difference of the two tables' totals
 
@@ -955,6 +960,21 @@ PASSES = (
            needs=(_chosen("leaf reads"),),
            because="only the leaves that differ are read, and each is held"
                    " to its digest"),
+        _R("groups", "the groups whose aggregates differ when read a second"
+                     " way, their rows read back and held to the digests",
+           needs=(_chosen("groups"),
+                  _N("the second reader installed for both engines",
+                     lambda f: bool(f.get("row hash reader")),
+                     "{rung} needs the second reader, and it is not"
+                     " installed or does not read both engines"),
+                  _N("a column the source's statistics say splits it",
+                     lambda f: f.get("group column") is not None,
+                     "no column of it is known from the source's"
+                     " statistics to split it into groups, integer or"
+                     " text - and only integer across two engines")),
+           prove=lambda f: f.get("groups failed"),
+           because="the second reader's aggregates per group rule out the"
+                   " groups that agree, and only the others are read back"),
         _R("bisection", "the bisecting reader over every column, each row it"
                         " names read back and held to the digests",
            needs=(_chosen("bisection"),
@@ -1150,7 +1170,6 @@ def _facts(pair, db, a, b, digests):
     timed only where few differences are expected, a reader looked for
     only where two readings are called for."""
     from . import second_reader, tailctl
-    from .util import which
     expected = None
     counts = [d[0] for d in digests] if digests else None
     if counts and counts[0] != counts[1]:
@@ -1161,6 +1180,7 @@ def _facts(pair, db, a, b, digests):
         expected = max(expected or 0, before)
     opts = pair.hop.options or {}
     engines = {pair.src_name, pair.dst_name}
+    rows = max([int(d[0]) for d in digests] if digests else [0])
     return decide.Facts(
         {"key": "integer" if int_keyed(a, b) else ("other" if a.key
                                                    else None),
@@ -1175,9 +1195,36 @@ def _facts(pair, db, a, b, digests):
         **{"row hash reader": lambda: bool(
             second_reader.interpreter()
             and engines <= set(second_reader.READER_TYPES)),
-           "bisection reader": lambda: bool(
-            which("reladiff") and engines <= set(URL_SCHEMES)
-            and all(_driver(e) for e in engines))})
+           "bisection reader": lambda: bisection_reader(engines),
+           "group column": lambda: group_of(pair, db, a, b, rows)})
+
+
+def bisection_reader(engines):
+    """Whether the bisecting reader is here and reads every one of these
+    engines - with its driver, without which it reads nothing and exits
+    0 (measured)."""
+    from .util import which
+    engines = set(engines)
+    return bool(which("reladiff") and engines <= set(URL_SCHEMES)
+                and all(_driver(e) for e in engines))
+
+
+def group_of(pair, db, a, b, rows):
+    """(column, class, groups) the second reader's aggregates may split
+    this table by (`second_reader.group_column`), from the source's
+    statistics, or None: a column both sides call by one name, since the
+    reader groups the two sides by it."""
+    from . import second_reader
+    try:
+        cands = a.eng.group_candidates("src", db, a.table)
+    except Exception:  # noqa: BLE001 - no statistics, no groups
+        return None
+    names = [n for n, _ in a.cols]
+    theirs = [n for n, _ in b.cols]
+    cands = [(c, cls, n) for c, cls, n in cands
+             if c in names and theirs[names.index(c)] == c]
+    return second_reader.group_column(cands, a.key,
+                                      pair.src_name == pair.dst_name, rows)
 
 
 #: the module the bisecting reader reads each engine through: installed
@@ -1222,6 +1269,16 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None):
         else:
             costs.saw("localize/sketch", max(rows, 1),
                       time.monotonic() - began)
+    if found is None and strat.parts["localize"].name == "groups":
+        began = time.monotonic()
+        found, why = _tried(by_groups, pair, db, a, b, digests, rows,
+                            facts["group column"])
+        if found is None:
+            facts["groups failed"] = why
+            strat = strategy(f"{db}.{name}", facts, costs)
+        else:
+            costs.saw("localize/groups", max(rows, 1),
+                      time.monotonic() - began)
     if found is None and strat.parts["localize"].name == "bisection":
         began = time.monotonic()
         found, why = _tried(by_bisection, pair, db, a, b, digests)
@@ -1244,7 +1301,7 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None):
         costs.saw("leaves/" + ("hash" if kind == "row" else kind),
                   max(rows, 1), took)
         costs.saw("localize/leaf reads", max(rows, 1), took)
-    return _clause(pair, db, name, a, b, found, strat)
+    return _clause(pair, db, name, a, b, found, strat, rows)
 
 
 def _tried(fn, *args):
@@ -1257,9 +1314,11 @@ def _tried(fn, *args):
             else type(e).__name__
 
 
-def _clause(pair, db, name, a, b, found, strat):
+def _clause(pair, db, name, a, b, found, strat, rows=0):
     how = (f"; found from a sketch of the differences ({found.differ:,}"
            " rows decoded)" if found.how == "sketch" else
+           f"; {found.said} ({found.rows:,} rows read back)"
+           if found.how == "groups" else
            f"; found by bisecting the key range ({found.rows:,} rows"
            " named, each read back and hashed)"
            if found.how == "bisection" else
@@ -1279,7 +1338,7 @@ def _clause(pair, db, name, a, b, found, strat):
                 " moment later - still arriving, or changed again")
     second = strat.parts.get("second")
     if second is not None and second.name != "none":
-        how += second_reading(pair, db, a, b, second.name)
+        how += second_reading(pair, db, a, b, second.name, found, rows)
     if not a.key:
         # nothing a repair can address by key: an earlier run's lists go
         pair._write_drill(db, name, missing=[], changed=[], extra=[])
@@ -1303,21 +1362,11 @@ def by_bisection(pair, db, a, b, digests):
     salt), and all of them held to the difference of the two digests the
     first pass took - what it misses, or names that do not differ, fails
     the sum and the leaves are read instead."""
-    from .util import PrivateFile, diff_run_config, run
     if not digests:
         return None, "no digests to hold its rows to"
-    conf = diff_run_config(
-        _url(pair.src_name, pair.hop.source, db), a.table,
-        _url(pair.dst_name, pair.hop.target, pair.hop.target_db(db)),
-        b.table)
-    cmd = ["reladiff", "--conf", None, "-j", "2", "-c", "%", "--json"]
-    for k in a.key:
-        cmd += ["-k", k]
-    if a.where:
-        cmd += ["--where", a.where]
-    with PrivateFile(conf, ".toml") as path:
-        cmd[2] = path
-        p = run(cmd, check=False, timeout=3600)
+    p = _bisect_run(pair.hop, (pair.src_name, pair.dst_name), db, a.table,
+                    b.table, a.key, a.where, ["--json"],
+                    max(int(d[0]) for d in digests))
     import json
     named = set()
     for line in (p.stdout or "").splitlines():
@@ -1381,44 +1430,124 @@ def _url(engine, ep, db):
             f"{quote(ep.password or '', safe='')}@{ep.host}:{ep.port}/{db}")
 
 
-def second_reading(pair, db, a, b, how):
+def _bisect_run(hop, names, db, src_table, dst_table, key, where, extra,
+                rows=None):
+    """One run of the bisecting reader over every column of one table, its
+    bisection sized by migkit (`verifiers.reladiff_rung`): both addresses
+    in an owner-only file for the run, never on its command line."""
+    from .util import PrivateFile, diff_run_config, run
+    from .verifiers import reladiff_rung
+    rung = reladiff_rung(rows, None, 2, names)
+    conf = diff_run_config(
+        _url(names[0], hop.source, db), src_table,
+        _url(names[1], hop.target, hop.target_db(db)), dst_table)
+    # every column, not only the key: without `-c %` the bisecting reader
+    # compares keys alone - measured, a million rows with four changed,
+    # three missing and three extra came back as "0 rows updated"
+    cmd = ["reladiff", "--conf", None, "-j", str(rung["threads"]),
+           "--bisection-factor", str(rung["bisection_factor"]),
+           "--bisection-threshold", str(rung["bisection_threshold"]),
+           "-c", "%"] + list(extra)
+    for k in key:
+        cmd += ["-k", k]
+    if where:
+        cmd += ["--where", where]
+    with PrivateFile(conf, ".toml") as path:
+        cmd[2] = path
+        return run(cmd, check=False, timeout=3600)
+
+
+def bisection_reading(hop, names, db, src_table, dst_table, key, where=None,
+                      rows=None):
+    """A clause with the bisecting reader's own count of what differs in
+    one table - an independent reading, added to the verdict."""
+    from .engines.generic import GenericEngine
+    p = _bisect_run(hop, names, db, src_table, dst_table, key, where,
+                    ["--stats"], rows)
+    got = GenericEngine._stats(GenericEngine, p)
+    if not got:
+        return "; the second reading by bisection gave no numbers"
+    return (f"; read a second way by bisection: {got['only_a']:,} rows"
+            f" only on the source, {got['only_b']:,} only on the"
+            f" target, {got['updated']:,} changed")
+
+
+def second_reading(pair, db, a, b, how, found=None, rows=0):
     """A clause with an independent reading of one table: `row hash`
-    through the second reader's row validation, `bisection` through the
+    through the second reader's row validation, held key for key to the
+    rows found (`Engine._read_rows_twice`), `bisection` through the
     bisecting reader. What either says is added to the verdict, never put
     in its place: the table already differs by migkit's own digest."""
+    pair.__dict__.setdefault("_read_twice", set()).add((db, str(a.table)))
     if how == "row hash":
         from . import second_reader
-        answer = second_reader.run({
-            "source": second_reader.connection(pair.src_name,
-                                               pair.hop.source, db),
-            "target": second_reader.connection(
-                pair.dst_name, pair.hop.target, pair.hop.target_db(db)),
-            "kind": "row", "tables": [f"{a.table}={b.table}"],
-            "args": ["--hash", "*", "--primary-keys", ",".join(a.key)]})
-        got = second_reader.findings(answer, db)
-        return ("; read a second way: "
-                + "; ".join(f"{r.status} {r.detail}" for r in got))[:300]
+        mine = []
+        if found is not None:
+            for text in found.missing + found.changed + found.extra:
+                raw = found.raw.get(text, ())
+                mine.append(tuple("" if v is None else str(v) for v in raw))
+        cls = dict(a.cols)
+        both_ = [(n, c) for (n, c), (m, _) in zip(a.cols, b.cols) if n == m]
+        try:
+            fixed = [n for n, t in a.eng.neutral_columns("src", db, a.table)
+                     if second_reader.padded(t)]
+        except Exception:  # noqa: BLE001 - none left out then
+            fixed = []
+        got = pair._read_rows_twice(db, a.table, b.table, a.key,
+                                    [cls.get(k) for k in a.key], mine,
+                                    rows, both_, fixed)
+        if got is None:
+            return ""
+        if got.status in ("error", "skip"):
+            return f"; not read a second way: {got.detail}"[:400]
+        return f"; {got.detail}"[:400]
     if how == "bisection":
-        from .engines.generic import GenericEngine
-        from .util import PrivateFile, diff_run_config, run
-        conf = diff_run_config(
-            _url(pair.src_name, pair.hop.source, db), a.table,
-            _url(pair.dst_name, pair.hop.target, pair.hop.target_db(db)),
-            b.table)
-        # every column, not only the key: without `-c %` the bisecting
-        # reader compares keys alone - measured, a million rows with four
-        # changed, three missing and three extra came back as "0 rows
-        # updated"
-        cmd = ["reladiff", "--conf", None, "--stats", "-j", "2", "-c", "%"]
-        for k in a.key:
-            cmd += ["-k", k]
-        with PrivateFile(conf, ".toml") as path:
-            cmd[2] = path
-            p = run(cmd, check=False, timeout=3600)
-        got = GenericEngine._stats(GenericEngine, p)
-        if not got:
-            return "; the second reading by bisection gave no numbers"
-        return (f"; read a second way by bisection: {got['only_a']:,} rows"
-                f" only on the source, {got['only_b']:,} only on the"
-                f" target, {got['updated']:,} changed")
+        return bisection_reading(pair.hop, (pair.src_name, pair.dst_name),
+                                 db, a.table, b.table, a.key, a.where, rows)
     return ""
+
+
+def by_groups(pair, db, a, b, digests, rows, group):
+    """(Localized, None), or (None, why): the second reader's aggregates
+    per group of `group` (the source's statistics chose it), failures
+    only; the rows of the groups that differ read back on both sides as
+    the leaves read theirs, and held to the difference of the two digests
+    the first pass took. A difference the groups' measures cannot see - a
+    text changed to another of the same length moves no count, sum or
+    length - leaves the sum short, and the leaves are read instead."""
+    from . import second_reader
+    if not digests:
+        return None, "no digests to hold its rows to"
+    got = second_reader.narrow(
+        pair.hop, db, (pair.src_name, pair.dst_name),
+        (pair._reader_table("src", db, a.table),
+         pair._reader_table("dst", db, b.table)),
+        group, where=(a.where, b.where), keep=pair.hop.report_dir(db))
+    if not isinstance(got, second_reader.Narrowing):
+        return None, got
+    sa = Side(a.eng, a.side, a.db, a.table, a.cols, a.key,
+              got.inside(a.eng, a.where))
+    sb = Side(b.eng, b.side, b.db, b.table, b.cols, b.key,
+              got.inside(b.eng, b.where))
+    # one leaf holding every row the predicate selects, hashed as the
+    # table's digest hashes it (canon's text, no salt)
+    plain = Spec("hash")
+    fa, fb = both(leaf_rows, sa, sb, plain, [0])
+    out = Localized(how="groups", said=got.said())
+    out.leaves = len(got.values) + int(got.nulls)
+    out.read = out.leaves
+    out.rows = len(fa.keyed) + len(fb.keyed) + sum(
+        n for n, _ in fa.kept.values()) + sum(n for n, _ in fb.kept.values())
+    total = compare(fa, fb, out)
+    out.found = total[:2]
+    out.delta = (int(digests[0][0]) - int(digests[1][0]),
+                 int(digests[0][1] or 0) - int(digests[1][1] or 0))
+    if out.found != out.delta:
+        return None, ("the rows of the groups that differ do not add up to"
+                      " the difference of the two digests - something"
+                      " differs where the groups' measures cannot see")
+    out.complete = True
+    # the second reading of its rows reads only these groups
+    pair.__dict__.setdefault("_narrowed", {})[(db, str(a.table))] = (
+        got, got.said())
+    return out, None

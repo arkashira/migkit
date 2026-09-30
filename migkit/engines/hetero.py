@@ -484,6 +484,9 @@ class HeteroEngine(Engine):
             head = (f"rows src={a[0]:,} dst={b[0]:,}" if a[0] != b[0] else
                     f"rows {a[0]:,} match but the contents do not:"
                     f" digest src={a[1]} dst={b[1]}")
+            # for the second reading of its rows (`check_data`)
+            self.__dict__.setdefault("_differing", {})[(db, scope)] = (
+                src_t, dst_t, src_cols, dst_cols, max(a[0], b[0]))
             rows.append((scope, "diff",
                          head + self._drill(db, src_t, dst_t, src_cols,
                                             dst_cols, max(a[0], b[0]),
@@ -514,6 +517,24 @@ class HeteroEngine(Engine):
                                 self.src_engine, src_t, src_cols,
                                 self.dst_engine, dst_t, dst_cols,
                                 scope) + note
+
+    # --- the second reading, in this pair's terms (the logic is the base's)
+
+    def _reader_names(self):
+        return self.src_name, self.dst_name
+
+    def _reader_engine(self, side):
+        return self.src_engine if side == "src" else self.dst_engine
+
+    def _reader_table(self, side, db, table):
+        """The reader wants `schema.table`; MySQL's schema is its
+        database."""
+        if "." in str(table):
+            return str(table)
+        return f"{self.hop.target_db(db) if side == 'dst' else db}.{table}"
+
+    def _reader_where(self, db, src_t):
+        return self._row_scope(db, src_t)
 
     def _neutral_compare(self, db, table=None, stream=None):
         return [Result("data", scope, status, detail)
@@ -2254,11 +2275,8 @@ class HeteroEngine(Engine):
         one looking. So it runs whenever the independent reader is installed
         and speaks both engines, and never for pairs it cannot read.
         """
-        from .. import second_reader
-        more = super().planned_checks()
-        if (second_reader.interpreter()
-                and self.src_name in second_reader.READER_TYPES
-                and self.dst_name in second_reader.READER_TYPES):
+        more = tuple(c for c in super().planned_checks() if c != "second")
+        if self._can_read_twice():
             return ("second",) + more
         return more
 
@@ -2266,40 +2284,29 @@ class HeteroEngine(Engine):
         engine = self.src_engine if side == "src" else self.dst_engine
         return engine.run_rule(side, db, sql)
 
-    def check_second(self, db):
-        """Every paired table read a second way: counts, and the sum,
-        minimum and maximum of every column, through another library and
-        other SQL.
-
-        Aggregates, not the reader's row hash. Measured on a MySQL and a
-        PostgreSQL table holding the same values: the aggregates and a
-        field-by-field comparison agreed on all of them, and the row hash
-        called a row with the double `-1e-07` different - the two servers
-        spell it differently before hashing. A second reading that reports
-        differences which are not there is worse than none.
-        """
-        from .. import second_reader
+    def _second_pairs(self, db):
+        """The tables the second reading reads, paired as the check pairs
+        them - through the hop's renames."""
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
             self.dst_engine.neutral_tables("dst", db), self._rename)
-        if not pairs:
-            return [Result("second reading", db, "skip",
-                           "no table is on both sides to read twice")]
-        dst_db = self.hop.target_db(db)
+        return pairs
 
-        def named(ident, database):
-            # the reader wants schema.table; MySQL's schema is its database
-            return ident if "." in str(ident) else f"{database}.{ident}"
-        tables = [f"{named(s_, db)}={named(d_, dst_db)}" for s_, d_ in pairs]
-        answer = second_reader.run({
-            "source": second_reader.connection(self.src_name,
-                                               self.hop.source, db),
-            "target": second_reader.connection(self.dst_name,
-                                               self.hop.target, dst_db),
-            "kind": "column", "tables": tables,
-            "args": ["--count", "*", "--sum", "*", "--min", "*",
-                     "--max", "*"]})
-        return second_reader.findings(answer, db)
+    def _second_views(self, db):
+        """(name, the source's query, the target's) for each view the
+        source has and the target has under the name the conversion
+        gives it."""
+        there = self.target_names(db)
+        out = []
+        for name, _ in self.src_engine.neutral_views("src", db):
+            leaf = self._leaf(name)
+            if leaf in there:
+                out.append((leaf,
+                            "select * from " + self.src_engine._qualified(
+                                "src", db, name),
+                            "select * from " + self.dst_engine._qualified(
+                                "dst", db, leaf)))
+        return out
 
     def check_counts(self, db):
         if not self._can_compare_neutrally():
@@ -2330,9 +2337,42 @@ class HeteroEngine(Engine):
         rows = self._confirm_in_flight(db, rows, stream)
         res = [Result("data", scope, status, detail)
                for scope, status, detail, _, _ in rows]
+        res += [r for r in (self._second_rows(db, scope)
+                            for scope, status, _, _, _ in rows
+                            if status == "diff") if r]
         if with_counts:
             res = self._counts_rows(db, rows) + res
         return res
+
+    def _second_rows(self, db, scope):
+        """The second reading of a differing table's rows, or None - read
+        value by value, floats and fixed-width text left out, and only the
+        columns both sides call by the same name. A table whose rows the
+        leaves found was read twice on the way (`leaves.second_reading`),
+        and is not read again."""
+        import json
+        got = (self.__dict__.get("_differing") or {}).get((db, scope))
+        if not got:
+            return None
+        src_t, dst_t, src_cols, dst_cols, rows = got
+        try:
+            key = list(self.src_engine.neutral_key("src", db, src_t))
+        except Exception:  # noqa: BLE001 - no key, nothing to line up by
+            return None
+        classes = dict(src_cols)
+        both = [(n, c) for (n, c), (m, _) in zip(src_cols, dst_cols)
+                if n == m]
+        from .. import second_reader as sr
+        fixed = [n for n, t in self.src_engine.neutral_columns("src", db,
+                                                               src_t)
+                 if sr.padded(t)]
+        name = self._leaf(src_t)
+        mine = [tuple("" if v is None else str(v) for v in json.loads(k))
+                for kind in ("missing", "extra", "changed")
+                for k in self._read_drill(db, name, kind)]
+        return self._second_reading(db, src_t, dst_t, key,
+                                    [classes.get(k) for k in key], mine,
+                                    rows, both, fixed)
 
     # --- the confirm pass, where migkit's own tail carries the changes ------
     # A difference found while the tail is running may be a change it has

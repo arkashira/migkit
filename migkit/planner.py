@@ -180,7 +180,9 @@ def measured_rate(hop, path):
     """Rows per second the latest copy on `path` achieved, or None."""
     runs = _runs(_rates_path(hop), path)
     last = runs[-1] if runs else None
-    return last["rows"] / last["seconds"] if last else None
+    # a run kept to the millisecond can read 0.0: no rate, not a division
+    return last["rows"] / last["seconds"] if last and last["seconds"] \
+        else None
 
 
 def _elsewhere(hop, path):

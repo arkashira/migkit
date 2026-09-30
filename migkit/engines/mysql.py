@@ -2380,6 +2380,11 @@ class MySQLEngine(Engine):
                                r.report)
                 per[t] = (r, ra, rb)
         for t, (r, ra, rb) in per.items():
+            if r.status == "diff":
+                r.detail += self._second_notes(db, t)
+                second = self._second_rows(db, t)
+                if second:
+                    res.append(second)
             res.append(r)
             rows_a += ra
             rows_b += rb
@@ -2494,8 +2499,14 @@ class MySQLEngine(Engine):
         conf = PrivateFile(diff_run_config(
             self._reladiff_url("src", db), t, self._reladiff_url("dst", db),
             t), ".toml")
+        from ..verifiers import reladiff_rung
+        fact = (self.table_facts("src", db) or {}).get(t) or {}
+        rung = reladiff_rung(fact.get("rows"), fact.get("bytes"),
+                             self.hop.workers, ("mysql", "mysql"), asked=True)
         cmd = ["reladiff", "--conf", None, "--stats",
-               "-j", str(self.hop.workers), "-c", "%"]
+               "-j", str(rung["threads"]), "-c", "%",
+               "--bisection-factor", str(rung["bisection_factor"]),
+               "--bisection-threshold", str(rung["bisection_threshold"])]
         for k in pks:
             cmd += ["-k", k]
         pred = (self.hop.row_filter(db, t)
@@ -2575,6 +2586,7 @@ class MySQLEngine(Engine):
 
         bad_ranges, kinds = [], set()
         rows_a = rows_b = sum_a = sum_b = 0
+        whole = None
         with ThreadPoolExecutor(max_workers=4) as pool:
             futs = {}
             for lo, hi in todo:
@@ -2588,6 +2600,8 @@ class MySQLEngine(Engine):
                 ra, rb = fa.result(), fb.result()
                 if ra != rb:
                     bad_ranges.append(clause(lo, hi))
+                    if not col:
+                        whole = (int(ra[0]), int(rb[0]))
                     if key_expr and len(ra) > 2:
                         from ..verdict import difference_kind
                         k = difference_kind(ra[0], ra[2], rb[0], rb[2])
@@ -2620,7 +2634,7 @@ class MySQLEngine(Engine):
             return Result("data", scope, "diff",
                           "checksum differs, no pk for row drilldown", "",
                           "recopy whole table with dump/load"), rows_a, rows_b
-        r, ra, rb = self._drilldown(db, t, pks, expr, bad_ranges)
+        r, ra, rb = self._drilldown(db, t, pks, expr, bad_ranges, whole)
         if kinds and r.status != "ok":
             r.detail += " kind=" + ",".join(sorted(kinds))
         return r, ra, rb
@@ -2707,21 +2721,59 @@ class MySQLEngine(Engine):
                         " since, and stopped there")
         return "; ".join(said)
 
-    def _drilldown(self, db, t, pks, expr, ranges):
+    def _drilldown(self, db, t, pks, expr, ranges, counts=None):
+        """The differing rows of one table, over the ranges whose checksums
+        differ. `counts` is (source rows, target rows) where the whole
+        table is the one range: a large one's walk is chosen per table
+        (`_narrowed_walk`) - the groups the second reading says differ, or
+        all of it - and the counts it answers are then the table's, not
+        the walk's."""
         scope = f"{db}.{t}"
         from .. import rowtext
         pkexpr = rowtext.mysql_row(pks)
-        src, dst = {}, {}
-        for w in ranges:
-            src.update(dict(self._q("src",
-                f"select {pkexpr}, md5({expr})"
-                f" from {self._scope('src', db, t)} {w}")))
-            dst.update(dict(self._q("dst",
-                f"select {pkexpr}, md5({expr})"
-                f" from {self._scope('dst', db, t)} {w}")))
-        missing = sorted(k for k in src if k not in dst)
-        extra = sorted(k for k in dst if k not in src)
-        changed = sorted(k for k in src if k in dst and src[k] != dst[k])
+
+        def read(side, w):
+            return dict(self._q(side, f"select {pkexpr}, md5({expr})"
+                                      f" from {self._scope(side, db, t)} {w}"))
+
+        def walk(src_where, dst_where):
+            a, b = read("src", f"where {src_where}"), read(
+                "dst", f"where {dst_where}")
+            return ([k for k in a if k not in b], [k for k in b if k not in a],
+                    [k for k in a if k in b and a[k] != b[k]])
+
+        def same(src_where, dst_where):
+            return (self._checksum("src", db, t, expr, f"where {src_where}")
+                    == self._checksum("dst", db, t, expr,
+                                      f"where {dst_where}"))
+
+        read_whole = {}
+
+        def whole():
+            src, dst = {}, {}
+            for w in ranges:
+                src.update(read("src", w))
+                dst.update(read("dst", w))
+            read_whole["rows"] = (len(src), len(dst))
+            return ([k for k in src if k not in dst],
+                    [k for k in dst if k not in src],
+                    [k for k in src if k in dst and src[k] != dst[k]])
+
+        if ranges == [""] and counts and max(counts) > self.hop.slice:
+            # a large table checked whole: its walk is chosen - its
+            # differing groups, or all of it
+            self.__dict__.setdefault("_drilled_rows", {})[(db, t)] = \
+                max(counts)
+            found = self._narrowed_walk(db, t, t, pks, walk, same, whole,
+                                        max(counts))
+        else:
+            found = whole()
+            self.__dict__.setdefault("_drilled_rows", {})[(db, t)] = max(
+                read_whole["rows"])
+        missing, extra, changed = (sorted(x) for x in found)
+        # the rows each side holds: the walk's where it read them all, the
+        # checksum's where it read only the groups
+        src, dst = (range(n) for n in read_whole.get("rows", counts))
         d = self.hop.report_dir(db)
         for name, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
@@ -7209,13 +7261,94 @@ class MySQLEngine(Engine):
             return text
         return diff(tu, su), diff(su, tu)
 
-    def fetch_sample_df(self, side, db, table, limit):
+    def fetch_sample_df(self, side, db, table, limit, where=None):
         import pandas as pd
         t = table.split(".", 1)[-1]
         cols = self._cols(db, t)
         rows = self._q(side,
-                       f"select * from `{self._d(side, db)}`.`{t}` limit {limit}")
+                       f"select * from `{self._d(side, db)}`.`{t}`"
+                       + (f" where {where}" if where else "")
+                       + f" limit {limit}")
         return pd.DataFrame(rows, columns=cols)
+
+    # --- the second reading's part (backlog 0f; the logic is the base's) ---
+
+    def _reader_table(self, side, db, table):
+        return f"{self._d(side, db)}.{table}"
+
+    def group_candidates(self, side, db, table):
+        """[(column, neutral class, estimated distinct values)] for the
+        leading column of every index, from InnoDB's own estimate of its
+        cardinality - nothing is scanned, and a group read by an index is
+        what makes the narrowed walk cheap."""
+        from .. import canon
+        rows = self._q(side, "select s.column_name, c.column_type,"
+                             " max(s.cardinality)"
+                             " from information_schema.statistics s"
+                             " join information_schema.columns c"
+                             " on c.table_schema = s.table_schema"
+                             " and c.table_name = s.table_name"
+                             " and c.column_name = s.column_name"
+                             " where s.table_schema=%s and s.table_name=%s"
+                             " and s.seq_in_index = 1"
+                             " group by s.column_name, c.column_type",
+                       (self._d(side, db), table))
+        return [(r[0], canon.type_class("mysql", r[1]),
+                 None if r[2] is None else int(r[2])) for r in rows]
+
+    def _named_rows(self, db, t):
+        """The keys the drilldown named, each as its values in text."""
+        from .. import rowtext
+        out = []
+        for kind in ("missing", "extra", "changed"):
+            p = self.hop.report_dir(db) / f"data-{t}.{kind}"
+            if p.exists():
+                out += [tuple("" if v is None else str(v)
+                              for v in rowtext.parse(k))
+                        for k in p.read_text().splitlines() if k]
+        return out
+
+    def _second_notes(self, db, t):
+        """What narrowing and the column-by-column explanation found for a
+        differing table, as clauses of its finding."""
+        from .. import rowtext
+        said = ""
+        note = self._narrowed_note(db, t)
+        if note:
+            said += f"; {note}"
+        keys = []
+        for kind in ("missing", "extra", "changed"):
+            p = self.hop.report_dir(db) / f"data-{t}.{kind}"
+            if p.exists():
+                keys += [k for k in p.read_text().splitlines() if k]
+        pks = self._pk_cols(db, t)
+        # hex, so no key's bytes are read as an escape or a quote
+        where = (f"{rowtext.mysql_row(pks)} in ("
+                 + ", ".join(f"convert(X'{k.encode().hex()}' using utf8mb4)"
+                             for k in keys) + ")") if keys and pks else ""
+        return said + self._explained(db, t, pks, keys, where)
+
+    def _second_rows(self, db, t):
+        """The second reading of a differing table's rows, or None."""
+        pks = self._pk_cols(db, t)
+        if not pks:
+            return None
+        from .. import canon
+        types = dict(self.neutral_columns("src", db, t))
+        # the walk may have read only the ranges that differ; the reading
+        # would read the table, so the table's own estimate sizes it too
+        est = self._q("src", "select coalesce(max(table_rows), 0) from"
+                             " information_schema.tables where"
+                             " table_schema=%s and table_name=%s", (db, t))
+        rows = max(int(est[0][0]) if est else 0, (self.__dict__.get(
+            "_drilled_rows") or {}).get((db, t), 0))
+        from .. import second_reader as sr
+        return self._second_reading(
+            db, t, t, pks,
+            [canon.type_class("mysql", types.get(c)) for c in pks],
+            self._named_rows(db, t), rows,
+            [(n, canon.type_class("mysql", ty)) for n, ty in types.items()],
+            [n for n, ty in types.items() if sr.padded(ty)])
 
     def watch_sample(self, db):
         import time

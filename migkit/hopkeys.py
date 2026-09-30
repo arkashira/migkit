@@ -74,8 +74,10 @@ HOP_KEYS = {
                    "int", knob="ceiling"),
     "options": Key("the hop's options", "dict"),
     "db_map": Key("source database name -> target database name", "dict"),
-    "mapping": Key("renames, column rules and row filters", "dict",
-                   subs=("tables", "columns", "where")),
+    "mapping": Key("renames, column rules, row filters, and the"
+                   " percentage a table's aggregates may drift by when"
+                   " read a second way", "dict",
+                   subs=("tables", "columns", "where", "tolerance")),
 }
 
 #: the keys under a hop's `options`
@@ -215,8 +217,12 @@ HOP_OPTIONS = {
     "topology": Key("one_way or two_way", "str"),
     "transfer_price_per_gb": Key("what a carried gigabyte costs",
                                  "number"),
-    "two_readings": Key("a second, independent reading of every table"
-                        " that differs", "bool"),
+    "two_readings": Key("a second, independent reading of every table,"
+                        " row by row where it has a key (a table that"
+                        " differs is read twice whatever this says):"
+                        " true, or rows, sample and case_insensitive",
+                        "bool|dict",
+                        subs=("rows", "sample", "case_insensitive")),
     "two_way": Key("migkit's own tails both ways", "dict|bool",
                    subs=("on_conflict", "column", "source_rank",
                          "target_rank", "delta")),

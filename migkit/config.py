@@ -482,6 +482,21 @@ class Hop:
                 return str(rules[ident])
         return None
 
+    def tolerance(self, *parts):
+        """The percentage this table's aggregates may drift by when read a
+        second way, from the hop's `mapping.tolerance`, or None.
+
+        Only where the hop names it: a sum of doubles added in another
+        order is not the same number, and a hop moving such a table says
+        how far apart is still the same data. Nothing is allowed to drift
+        by default, and a drift inside the tolerance is still said.
+        """
+        rules = (self.mapping or {}).get("tolerance") or {}
+        for ident in self._ids(*parts):
+            if ident in rules:
+                return float(rules[ident])
+        return None
+
     def ambiguous_mapping(self):
         """Renames that would land two source tables on one target.
 
@@ -506,7 +521,8 @@ class Hop:
         for ident in source_ids:
             known.update(self._ids(*str(ident).split(".")))
         keys = set(self.table_map()) | set(
-            ((self.mapping or {}).get("where") or {}))
+            ((self.mapping or {}).get("where") or {})) | set(
+            ((self.mapping or {}).get("tolerance") or {}))
         return sorted(k for k in keys if k not in known)
 
 

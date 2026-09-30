@@ -1893,9 +1893,103 @@ class Engine:
     def planned_checks(self):
         """Checks added to this hop's battery from what can be seen about
         it, on top of `checks`: the operator's own business rules, when the
-        hop carries any."""
+        hop carries any, and a second reading of every table where the hop
+        asks for two (`two_readings`) and one can be had here."""
         from .. import rules
-        return ("rules",) if rules.configured(self.hop) else ()
+        from .. import second_reader as sr
+        more = ("rules",) if rules.configured(self.hop) else ()
+        if sr.asked(self.hop) and self._can_read_twice():
+            more += ("second",)
+        return more
+
+    def _second_pairs(self, db):
+        """[(source table, target table)] the second reading reads: every
+        table both sides have, within one engine."""
+        dst = set(self.neutral_tables("dst", db))
+        return [(t, t) for t in sorted(self.neutral_tables("src", db))
+                if t in dst]
+
+    def _second_views(self, db):
+        """(name, the source's query, the target's) for each view both
+        sides have: read through what it answers, not what it is."""
+        dst = {n for n, _ in self.neutral_views("dst", db)}
+        return [(n, f"select * from {self._qualified('src', db, n)}",
+                 f"select * from {self._qualified('dst', db, n)}")
+                for n, _ in self.neutral_views("src", db) if n in dst]
+
+    def check_second(self, db):
+        """Every table read a second way, through another library and other
+        SQL, in one batch: count, sum, minimum and maximum of every column
+        and the aggregates each column's type allows (`MORE`), within the
+        hop's tolerance where it names one; the views by what they answer;
+        and, where the hop asks for two readings, every keyed table row by
+        row - with random rows first where it asks for a sample, which is a
+        signal and never a verdict.
+
+        Across engines, aggregates and values, not the reader's row hash:
+        measured on a MySQL and a PostgreSQL table holding the same values,
+        the hash called a row with the double `-1e-07` different - the two
+        servers spell it differently before hashing. A second reading that
+        reports differences which are not there is worse than none.
+        """
+        from .. import canon
+        from .. import second_reader as sr
+        pairs = self._second_pairs(db)
+        if not pairs:
+            return [Result(sr.CHECK, db, "skip",
+                           "no table is on both sides to read twice")]
+        names = self._reader_names()
+        same = names[0] == names[1]
+        ask = sr.asked(self.hop)
+        src_e = self._reader_engine("src")
+        validations, samples = [], []
+        for s_, d_ in pairs:
+            a = self._reader_table("src", db, s_)
+            both = [f"{a}={self._reader_table('dst', db, d_)}"]
+            parts = str(s_).split(".")
+            declared = src_e.neutral_columns("src", db, s_)
+            cols = [(n, canon.type_class(names[0], t)) for n, t in declared]
+            fixed = [n for n, t in declared if sr.padded(t)]
+            rules = self.hop.column_rules(db, *parts) or {}
+            drop = set(rules.get("drop") or []) | set(rules.get("rename")
+                                                      or {})
+            if rules.get("keep"):
+                drop |= {n for n, _ in cols} - set(rules["keep"])
+            drop = sorted(drop)
+            where = self._reader_where(db, s_)
+            validations += sr.aggregates(
+                f"column:{a}", both, cols, same,
+                self.hop.tolerance(db, *parts), drop, where=where)
+            if not (ask.get("rows") or ask.get("sample")):
+                continue
+            key = list(src_e.neutral_key("src", db, s_))
+            if not key:
+                continue
+            ci = ask.get("case_insensitive", False)
+            if ask.get("rows"):
+                v = sr.rows(f"row:{a}", both, key, cols, same, where,
+                            case_insensitive=ci, drop=drop, fixed=fixed)
+                validations += [v] if v else []
+            if ask.get("sample"):
+                v = sr.rows(f"sample:{a}", both, key, cols, same, where,
+                            sample=ask["sample"], case_insensitive=ci,
+                            drop=drop, fixed=fixed)
+                samples += [v] if v else []
+        for name, src_sql, dst_sql in self._second_views(db):
+            validations.append(sr.custom_query(f"view:{name}", src_sql,
+                                               dst_sql))
+        job = {"source": sr.connection(names[0], self.hop.source, db),
+               "target": sr.connection(names[1], self.hop.target,
+                                       self.hop.target_db(db))}
+        out, keep = [], self.hop.report_dir(db)
+        ci = ask.get("case_insensitive", False)
+        if samples:
+            # first, and apart: what it finds is known before the whole
+            # tables are read
+            early = dict(job, validations=samples)
+            out += sr.findings(sr.run(early, keep=keep), db, early, ci, same)
+        job["validations"] = validations
+        return out + sr.findings(sr.run(job, keep=keep), db, job, ci, same)
 
     def newer_wins_column(self):
         """The column `newer_wins` names, when it decides changed rows.
@@ -2933,6 +3027,229 @@ class Engine:
             out["pairs"].append((name, scls, dcls))
         out["src_types"], out["dst_types"] = src_types, dst_types
         return out
+
+    # --- the second reading's part in a drilldown (backlog 0f) --------------
+    # Where the independent reader is installed and reads the pair, a table
+    # whose digest differs is narrowed to the groups whose aggregates differ
+    # before its rows are walked, and the rows migkit names are read again
+    # the other way. Where it is not, nothing here changes anything.
+
+    def _reader_names(self):
+        """(source engine, target engine) in the second reader's terms."""
+        return self.CANON_ENGINE, self.CANON_ENGINE
+
+    def _reader_engine(self, side):
+        """The engine that reads one side: `self`, within one engine."""
+        return self
+
+    def _reader_table(self, side, db, table):
+        """The table as the reader names it on one side: `schema.table`."""
+        return str(table)
+
+    def _reader_where(self, db, src_t):
+        """The hop's row filter on each side, in each side's SQL."""
+        pred = self.hop.row_filter(db, *str(src_t).split("."))
+        return pred, pred
+
+    def _can_read_twice(self):
+        from .. import second_reader as sr
+        return bool(sr.interpreter()) and all(
+            n in sr.READER_TYPES for n in self._reader_names())
+
+    def group_candidates(self, side, db, table):
+        """[(column, neutral class, estimated distinct values)] from the
+        statistics the server keeps, for the second reading's groups;
+        nothing where an engine keeps none it can say."""
+        return []
+
+    def _group_for(self, db, src_t, key, rows):
+        """(column, class, groups) the second reader's aggregates may split
+        a differing table by, or None."""
+        from .. import second_reader as sr
+        names = self._reader_names()
+        try:
+            cands = self._reader_engine("src").group_candidates("src", db,
+                                                                src_t)
+        except Exception:  # noqa: BLE001 - no statistics, no groups
+            return None
+        return sr.group_column(cands, key, names[0] == names[1], rows)
+
+    def _narrowed_walk(self, db, src_t, dst_t, key, walk, same, whole,
+                       rows=None):
+        """(missing, extra, changed) of a differing table, found the way
+        chosen for it (`second_reader.WALKS`, measured per hop): only the
+        groups the second reading says differ - and the rest too unless
+        migkit's own digest proves it equal - or `whole()`, the engine's
+        own walk of every row.
+
+        `walk(src_where, dst_where)` and `same(src_where, dst_where)` are
+        the engine's own row compare and digest over a predicate; `rows`
+        how many the table holds. Where no second reading can be had the
+        table is walked whole as it always was, and nothing is said or
+        kept. What was done is kept for the finding (`_narrowed_note`).
+        """
+        from .. import decide
+        from .. import second_reader as sr
+        if not self._can_read_twice():
+            return whole()
+        notes = self.__dict__.setdefault("_narrowed", {})
+        work = f"{db}.{src_t}"
+        facts = decide.Facts(
+            {"reader": True},
+            **{"group column": lambda: self._group_for(db, src_t, key,
+                                                       rows)})
+        costs = decide.HopCosts(self.hop, "verify passes/own ")
+        choice = decide.climb(work, sr.WALKS, facts, costs=costs)
+        units = max(int(rows or 0), 1)
+        if choice.path == "groups":
+            began = time.monotonic()
+            got = sr.narrow(self.hop, db, self._reader_names(),
+                            (self._reader_table("src", db, src_t),
+                             self._reader_table("dst", db, dst_t)),
+                            facts["group column"],
+                            where=self._reader_where(db, src_t),
+                            keep=self.hop.report_dir(db))
+            if isinstance(got, sr.Narrowing):
+                missing, extra, changed, said, only_inside = \
+                    sr.walk_narrowed(got, walk, same,
+                                     (self._reader_engine("src"),
+                                      self._reader_engine("dst")))
+                costs.saw("groups", units, time.monotonic() - began)
+                notes[(db, str(src_t))] = (got if only_inside else None,
+                                           said)
+                return missing, extra, changed
+            facts["groups failed"] = got
+            choice = decide.climb(work, sr.WALKS, facts, costs=costs)
+        began = time.monotonic()
+        found = whole()
+        costs.saw("walk", units, time.monotonic() - began)
+        notes[(db, str(src_t))] = (None, f"every row walked: {choice.reason}")
+        return found
+
+    def _second_reading(self, db, src_t, dst_t, key, key_classes, mine,
+                        rows, columns=(), fixed=()):
+        """The second reading of a differing table's rows, by the way the
+        verify passes choose for it (`leaves.PASSES`, its `second` part):
+        the second reader's row reading held key for key to what migkit
+        named (`_read_rows_twice`), or the bisecting reader's own count -
+        or None where there is no second reading to be had, or the table
+        was read twice already on the way to its rows."""
+        from .. import decide, leaves
+        from .. import second_reader as sr
+        if (db, str(src_t)) in self.__dict__.get("_read_twice", ()):
+            return None
+        names = self._reader_names()
+        part = next(p for p in leaves.PASSES if p.name == "second")
+        facts = decide.Facts(
+            {"two readings": bool(sr.asked(self.hop)), "disagreed": True,
+             "localizer": None},
+            **{"row hash reader": self._can_read_twice,
+               "bisection reader": lambda: bool(key) and
+               leaves.bisection_reader(names)})
+        got = decide.climb(f"{db}.{src_t}", part.rungs, facts)
+        if got.rung is None or got.rung.name == "none":
+            return None
+        self.__dict__.setdefault("_read_twice", set()).add((db, str(src_t)))
+        if got.rung.name == "row hash":
+            return self._read_rows_twice(db, src_t, dst_t, key, key_classes,
+                                         mine, rows, columns, fixed)
+        said = leaves.bisection_reading(
+            self.hop, names, db, self._reader_table("src", db, src_t),
+            self._reader_table("dst", db, dst_t), key,
+            self._reader_where(db, src_t)[0], rows)
+        return Result(sr.CHECK,
+                      f"{db}.{self._reader_table('src', db, src_t)} rows",
+                      "diff", said.lstrip("; "))
+
+    def _narrowed_note(self, db, src_t):
+        """What narrowing did for this table, or ''."""
+        return (self.__dict__.get("_narrowed") or {}).get(
+            (db, str(src_t)), (None, ""))[1]
+
+    def _read_rows_twice(self, db, src_t, dst_t, key, key_classes, mine,
+                         rows, columns=(), fixed=()):
+        """The rows migkit named in a differing table, held against the
+        second reader's own row reading of it - or None where no second
+        reading can be had here.
+
+        `mine` is the keys migkit named, each a tuple of its key's values
+        as text; `rows` how many rows the table holds. Where the table was
+        narrowed and every difference proved inside its groups, only those
+        groups are read; otherwise the table, unless it holds more rows
+        than a second row reading should pull (`ROWS_MOST`), which is said.
+        """
+        from .. import second_reader as sr
+        if not self._can_read_twice() or not key:
+            return None
+        names = self._reader_names()
+        same = names[0] == names[1]
+        tables = (self._reader_table("src", db, src_t),
+                  self._reader_table("dst", db, dst_t))
+        # named as the rest of the second reading names it (`check_second`)
+        scope = f"{db}.{tables[0]} rows"
+        where = self._reader_where(db, src_t)
+        narrowing = ((self.__dict__.get("_narrowed") or {}).get(
+            (db, str(src_t))) or (None, ""))[0]
+        if narrowing is not None:
+            where = tuple(narrowing.inside(self._reader_engine(side), w)
+                          for side, w in zip(("src", "dst"), where))
+            rows = rows * (len(narrowing.values) + int(narrowing.nulls)) \
+                // max(1, narrowing.groups)
+        if rows > sr.ROWS_MOST:
+            return Result(sr.CHECK, scope, "skip",
+                          f"{rows:,} rows are more than a second row by row"
+                          f" reading pulls ({sr.ROWS_MOST:,}), so the rows"
+                          " named were read one way only")
+        ask = sr.asked(self.hop)
+        label = f"row:{tables[0]}"
+        v = sr.rows(label, [f"{tables[0]}={tables[1]}"], key, columns,
+                    same_engine=same, where=where,
+                    case_insensitive=ask.get("case_insensitive", False),
+                    fixed=fixed)
+        if v is None:
+            return Result(sr.CHECK, scope, "skip",
+                          "no column of it but floats and fixed-width text"
+                          " can be read value by value across these two"
+                          " engines")
+        answer = sr.run({
+            "source": sr.connection(names[0], self.hop.source, db),
+            "target": sr.connection(names[1], self.hop.target,
+                                    self.hop.target_db(db)),
+            "validations": [v]}, keep=self.hop.report_dir(db))
+        ran = bool(answer.get("ok")) and sr._ran(answer, label, tables[0]) \
+            and not sr._broken(answer, label, tables[0])
+        by_value = all(c in ("integer", "text") for c in key_classes)
+        return sr.compared(db, tables[0], mine,
+                           sr.failing_keys(answer, label, tables[0]), ran,
+                           same, by_value)
+
+    def _explained(self, db, table, key, named, where):
+        """A differing set small enough to show, explained column by
+        column: which rows one side lacks, and for each column how many
+        rows differ in it and how, written to `data-<table>.explained` and
+        said in a clause. '' for a set too large or none, or where the rows
+        cannot be read back: the finding stands without it.
+
+        `named` is the keys the drilldown named, `where` a predicate
+        selecting exactly those rows on either side.
+        """
+        from .. import second_reader as sr
+        if (not named or len(named) > sr.EXPLAIN_MOST or not where
+                or not hasattr(self, "fetch_sample_df")):
+            return ""
+        try:
+            got = [self.fetch_sample_df(side, db, table, len(named) + 1,
+                                        where=where)
+                   for side in ("src", "dst")]
+            lines = sr.explain(got[0], got[1], key, self.hop, table)
+        except Exception:  # noqa: BLE001 - an explanation, not the finding
+            return ""
+        leaf = str(table).split(".")[-1]
+        path = self.hop.report_dir(db) / f"data-{leaf}.explained"
+        path.write_text("\n".join(lines) + "\n")
+        said = [ln.split(" - ")[0] for ln in lines[1:]]
+        return (f"; {table} column by column: " + "; ".join(said[:4])
+                + (" ..." if len(said) > 4 else "") + f" ({path.name})")
 
     def _drill_rows(self, db, name, src_engine, src_t, src_cols,
                     dst_engine, dst_t, dst_cols, wheres=(None, None)):

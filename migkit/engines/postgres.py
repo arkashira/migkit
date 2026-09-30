@@ -3384,6 +3384,43 @@ class PostgresEngine(Engine):
                               f'select count(*) from "{sch}"."{tbl}"'
                               f" where ({pred}) is not true") or 0)
 
+    def _digest_where(self, side, db, table, where):
+        """The checksum of the rows of `table` a predicate selects, on one
+        side: every column of every row, as the whole-table checksum reads
+        them."""
+        h = self._row_hash_expr("src", db, table)
+        return self._psql(side, db, f"select count(*)||'|'||"
+                                    f"{self._summed(h)}"
+                                    f" from {self._scope(db, table)}"
+                                    f" where {where}")
+
+    def group_candidates(self, side, db, table):
+        """[(column, neutral class, estimated distinct values)] for one
+        table, from the statistics the server keeps - nothing is scanned.
+        A negative `n_distinct` is a fraction of the rows. A table never
+        analysed has none, and is not narrowed."""
+        from .. import canon
+        sch, tbl = table.split(".", 1)
+        out = []
+        for line in self._psql(side, db, f"""
+                select s.attname||chr(31)||format_type(a.atttypid,
+                       a.atttypmod)||chr(31)||case when s.n_distinct >= 0
+                       then s.n_distinct::bigint else (-s.n_distinct
+                       * greatest(c.reltuples, 0))::bigint end
+                  from pg_stats s
+                  join pg_namespace n on n.nspname = s.schemaname
+                  join pg_class c on c.relnamespace = n.oid
+                                 and c.relname = s.tablename
+                  join pg_attribute a on a.attrelid = c.oid
+                                     and a.attname = s.attname
+                 where s.schemaname = '{sch}' and s.tablename = '{tbl}'
+                   and not s.inherited""").splitlines():
+            parts = line.split("\x1f")
+            if len(parts) == 3 and parts[2].lstrip("-").isdigit():
+                out.append((parts[0], canon.type_class("postgres", parts[1]),
+                            int(parts[2])))
+        return out
+
     def _data_fast_native(self, db, stream=None, may_skip=True):
         """Per-table checksum on both sides in parallel: commutative
         sum-of-md5 as a Postgres parallel aggregate (no sort, no lock beyond
@@ -3984,25 +4021,42 @@ class PostgresEngine(Engine):
             return out
 
         n = int(self._psql("src", db, f"select count(*) from {scoped}") or 0)
+        self.__dict__.setdefault("_drilled_rows", {})[(db, table)] = n
         intpk = self._int_pk(db, sch, tbl)
-        missing, extra, changed = [], [], []
-        if n > self.hop.slice and intpk:
-            mm = self._psql("src", db,
-                            f'select coalesce(min("{intpk}"),0)||\'|\'||'
-                            f'coalesce(max("{intpk}"),0) from {scoped}')
-            lo, hi = (int(x) for x in mm.split("|"))
-            step = max(1, (hi - lo) // max(1, n // self.hop.slice) + 1)
-            for a in range(lo, hi + 1, step):
-                w = f'where "{intpk}" >= {a} and "{intpk}" < {a + step}'
-                s, dd = fetch("src", w), fetch("dst", w)
-                missing += [k for k in s if k not in dd]
-                extra += [k for k in dd if k not in s]
-                changed += [k for k in s if k in dd and s[k] != dd[k]]
-        else:
+
+        def whole():
+            missing, extra, changed = [], [], []
+            if n > self.hop.slice and intpk:
+                mm = self._psql("src", db,
+                                f'select coalesce(min("{intpk}"),0)||\'|\'||'
+                                f'coalesce(max("{intpk}"),0) from {scoped}')
+                lo, hi = (int(x) for x in mm.split("|"))
+                step = max(1, (hi - lo) // max(1, n // self.hop.slice) + 1)
+                for a in range(lo, hi + 1, step):
+                    w = f'where "{intpk}" >= {a} and "{intpk}" < {a + step}'
+                    s, dd = fetch("src", w), fetch("dst", w)
+                    missing += [k for k in s if k not in dd]
+                    extra += [k for k in dd if k not in s]
+                    changed += [k for k in s if k in dd and s[k] != dd[k]]
+                return missing, extra, changed
             s, dd = fetch("src"), fetch("dst")
-            missing = [k for k in s if k not in dd]
-            extra = [k for k in dd if k not in s]
-            changed = [k for k in s if k in dd and s[k] != dd[k]]
+            return ([k for k in s if k not in dd], [k for k in dd if k not in s],
+                    [k for k in s if k in dd and s[k] != dd[k]])
+
+        def walk(src_where, dst_where):
+            s, dd = fetch("src", f"where {src_where}"), fetch(
+                "dst", f"where {dst_where}")
+            return ([k for k in s if k not in dd], [k for k in dd if k not in s],
+                    [k for k in s if k in dd and s[k] != dd[k]])
+
+        def same(src_where, dst_where):
+            return (self._digest_where("src", db, table, src_where)
+                    == self._digest_where("dst", db, table, dst_where))
+
+        # a large table's walk is chosen: its differing groups, or all of it
+        missing, extra, changed = (
+            self._narrowed_walk(db, table, table, cols, walk, same, whole, n)
+            if n > self.hop.slice else whole())
         self._write_pk_files(db, table, sorted(missing), sorted(extra),
                              sorted(changed))
         return len(missing), len(extra), len(changed)
@@ -4099,6 +4153,7 @@ class PostgresEngine(Engine):
                     whose.append(f"{t}: {said}")
             if whose:
                 detail += "; " + "; ".join(whose)
+            detail += "".join(self._second_notes(db, t) for t in bad[:5])
         if err:
             detail += f" errors: {', '.join(err)}"
         stopped = [l for l in out.splitlines() if l.startswith("stopped: ")]
@@ -4106,7 +4161,53 @@ class PostgresEngine(Engine):
             detail = (detail + " " + stopped[0]).strip()
         return pre + [Result("data", db, "diff" if bad else "error", detail,
                              str(self._report(db)),
-                             f"migkit sync {self.hop.name} --db {db} --kind rows")]
+                             f"migkit sync {self.hop.name} --db {db} --kind rows")
+                      ] + [r for r in (self._second_rows(db, t)
+                                       for t in bad[:5]) if r]
+
+    def _named_rows(self, db, table):
+        """The keys the drilldown named for a table, each as the tuple of
+        its key's values as text."""
+        return [tuple(self._pk_unescape(p) for p in k.split("\t"))
+                for kind in ("missing", "extra", "changed")
+                for k in self._drill_keys(db, table, kind)]
+
+    def _key_where(self, db, table, keys):
+        """A predicate selecting these named rows, in the key's own text."""
+        pkexpr = self._pk_text_expr(self._pk_cols_of(db, table))
+        wanted = ", ".join("'" + k.replace("'", "''") + "'" for k in keys)
+        return f"{pkexpr} in ({wanted})"
+
+    def _second_notes(self, db, table):
+        """What narrowing and the column-by-column explanation found for a
+        differing table, as clauses of its finding."""
+        said = ""
+        note = self._narrowed_note(db, table)
+        if note:
+            said += f"; {table}: {note}"
+        keys = [k for kind in ("missing", "extra", "changed")
+                for k in self._drill_keys(db, table, kind)]
+        said += self._explained(db, table, self._pk_cols_of(db, table),
+                                keys, self._key_where(db, table, keys)
+                                if keys else "")
+        return said
+
+    def _second_rows(self, db, table):
+        """The second reading of a differing table's rows, or None."""
+        cols = self._pk_cols_of(db, table)
+        if not cols:
+            return None
+        from .. import canon
+        types = dict(self.neutral_columns("src", db, table))
+        classes = [canon.type_class("postgres", types.get(c)) for c in cols]
+        columns = [(n, canon.type_class("postgres", t)) for n, t in
+                   types.items()]
+        rows = (self.__dict__.get("_drilled_rows") or {}).get((db, table), 0)
+        from .. import second_reader as sr
+        fixed = [n for n, t in types.items() if sr.padded(t)]
+        return self._second_reading(db, table, table, cols, classes,
+                                    self._named_rows(db, table), rows,
+                                    columns, fixed)
 
     def _ignore_patterns(self):
         import re as _re
@@ -9748,7 +9849,7 @@ class PostgresEngine(Engine):
             return text
         return diff(tu, su), diff(su, tu)
 
-    def fetch_sample_df(self, side, db, table, limit):
+    def fetch_sample_df(self, side, db, table, limit, where=None):
         """The rows `--drill` compares, read without being rewritten.
 
         `text=True` here would decode psql's output with universal
@@ -9776,7 +9877,8 @@ class PostgresEngine(Engine):
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
              "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",
              "-c", f"\\copy (select * from \"{sch}\".\"{tbl}\""
-                   f" limit {limit}) to stdout (format csv, header)"],
+                   + (f" where {where}" if where else "")
+                   + f" limit {limit}) to stdout (format csv, header)"],
             capture_output=True, env=env)
         if p.returncode:
             raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])

@@ -313,6 +313,86 @@ each offers:
   YAML config files run as a batch, labels, the result handlers. The
   top-up: its grouped aggregates to bisect a differing table to the
   group, then migkit's own row compare on that group only.
+
+  *Done for the three verifiers (2026-09-28, on R20's rungs
+  2026-09-30).* The table is
+  `migkit/verifiers.py`: per tool the features used (read off the code
+  that drives it), the ones not used with the reason, and the top-ups;
+  `tests/test_every_verifier_feature_is_used_or_explained.py` fails on a
+  documented feature with neither, on a reason for a feature now used,
+  and on a flag the installed program has that the table does not list.
+  The reader runs from its own environment (`doctor --install`: uv on
+  Python 3.12, 3.9 s warm and 422 MB; its numpy 1.26.4, pandas 2.3.3 and
+  sqlglot 19.9 cannot share migkit's), and is found by its program's
+  first line where it is on the path. Measured on PostgreSQL 16 pairs and
+  a MySQL 8 to PostgreSQL 16 pair before any of it was wired:
+  * every validation of a run goes into one batch file in its own format,
+    executed from the file and kept as `data-second-reading.yaml` (which
+    the hop's `at_rest` recipients encrypt: its predicates carry group
+    values); each carries migkit's label, and a validation that fails is
+    said per table, not as the whole run's failure
+  * `--filter-status fail` is applied by its result handler, which the
+    collector replaces - so the runner applies it, or a row reading asked
+    for its failures would have handed back every row
+  * the groups, a way to find a differing table's rows, chosen per table
+    by the decision engine where measured the cheaper: aggregates per
+    group of the column the source's statistics say splits it best (4 to
+    10,000 groups of 10 rows or more, integer or text, integer only across
+    engines), failures only, and only those groups' rows read back. Across
+    a pair it is a localizer of the verify passes (`leaves.PASSES`, rung
+    `groups`, after the leaves in the list): the rows read back are held to
+    the difference of the two digests, and where they fall short the
+    leaves are read. Where PostgreSQL or MySQL walk their own rows it is
+    `second_reader.WALKS` against that walk, and migkit's own digest of
+    everything outside the groups decides whether the rest is walked too.
+    The aggregates missed a text changed to one of the same length (`v25`
+    to `x25`: no count, sum or length moves) - the totals and the digest
+    are what keep that row from being lost
+  * the rows migkit names in a differing table are read again the other
+    way, as the verify passes' `second` part chooses (the row reader where
+    it is here, else the bisecting reader), on every engine's walk - its
+    row hash within an engine, only the groups where the groups proved to
+    hold every difference, at most 1,000,000 rows (`ROWS_MOST`), said
+    past it; value by value across engines,
+    floats and fixed-width text left out (the hash called the `-1e-07` row
+    different again, and a `char(5)` read `c1` from MySQL and `c1   ` from
+    PostgreSQL on all 301 equal rows) - and the two sets of keys are held
+    to each other. Never `ok`: the same rows, rows only the second reading
+    names (one reading is wrong), or rows it read as equal. Its hash drops
+    trailing blanks and reads NULL as a fixed word (read in its source; a
+    trailing blank measured invisible to it, visible value by value), and
+    every finding from it says so
+  * a set of up to 50 differing rows is explained column by column in
+    migkit's words (`data-<table>.explained`); `check --drill` says the
+    same instead of the library's own report, which opened with its name
+  * where the hop asks (`two_readings: true`, or `{rows: false,
+    sample: <rows>, case_insensitive: true}`, declared in `hopkeys`), every
+    table twice: the
+    aggregates, every keyed table row by row, the views by what they
+    answer; random rows first and apart, `skip` when they agree (200 of
+    5,000 rows missed all three differing ones) and `diff` when not
+  * average, deviation and bitwise XOR where the column is an integer or
+    an exact decimal: all nine agreed across MySQL and PostgreSQL on equal
+    rows; `--threshold` only from `mapping.tolerance`, and a drift inside
+    it said (a bigint's sum came back with no difference worked out, and
+    34,871 against 34,872 read `fail` under 1%: the tolerance did not
+    apply to it, and the measure is said); `--exclude-columns` from the
+    hop's column rules (it refuses `*` beside it)
+  * PostgreSQL 16, local: 200,000 rows by row hash 3.3 s, count and sums
+    1.9 s, grouped into 97 groups 1.9 s
+  * the bisecting comparison program: a rung with its facts
+    (`verifiers.reladiff_rung`) - factor, threshold and depth sized from
+    the table's rows and bytes, threads from the throttle - chosen where
+    it is the only reader of an engine or the hop asks, a rung of the
+    verify passes within one engine (localizer and second reading), and
+    why not across two; the sized settings passed wherever it runs,
+    through one command builder (`leaves._bisect_run`). It refuses a factor not below the threshold and exits 0
+    while saying so; on 200,000 equal rows its sizing changed nothing
+    (0.38 to 0.39 s); "broken on 3.14" did not reproduce: it imports on
+    3.14.7, with no driver built for 3.14 to compare with
+  Still open: per-partition runs of a table too large to read row by row
+  a second time (`generate-table-partitions`), said as skipped today;
+  SQL Server through the same narrowing.
 * **pgcopydb**: used - `clone`/`copy` with `--dir`, `--no-owner`,
   `--filters`, `--table-jobs`, `--resume`, `--not-consistent`,
   `--snapshot`, `--drop-if-exists`, `compare schema`, `compare data`,

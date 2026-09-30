@@ -154,7 +154,7 @@ def _cli(pair, tmp_path, monkeypatch, args):
 
 def _unequal(out):
     for line in out.splitlines():
-        if "rows with some compared columns unequal" in line:
+        if "rows on both sides with a value that differs" in line:
             return int(line.rsplit(":", 1)[1])
     raise AssertionError(f"no row summary in:\n{out}")
 
@@ -278,7 +278,8 @@ def test_a_difference_anybody_can_see_stays_out(inv_pair, tmp_path,
     seen = out.split("Differences You Cannot See", 1)[1]
     assert "blue" not in seen, seen
     assert "'red'" not in seen, seen
-    # the sample datacompy prints still carries it, so nothing was hidden
+    # the explanation above the section still shows it, so nothing was
+    # hidden
     assert "blue" in out, out
 
 

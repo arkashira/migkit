@@ -281,7 +281,7 @@ def test_doctor_names_no_program(tmp_path, monkeypatch):
     # a machine short of everything, with a package manager to fix it
     monkeypatch.setattr(tools, "which", lambda n: None)
     monkeypatch.setattr(tools.shutil, "which",
-                        lambda n: "/bin/brew" if n == "brew" else None)
+                        lambda n, **kw: "/bin/brew" if n == "brew" else None)
     monkeypatch.setattr(tools.platform, "system", lambda: "Darwin")
     said = CliRunner().invoke(cli.main, ["doctor"]).output
     assert "migkit doctor --install" in said, said
