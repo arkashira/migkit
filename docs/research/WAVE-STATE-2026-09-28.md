@@ -107,3 +107,5 @@ Then the queue above (live tail L/R/C/P items after tail_apply owners merge; eng
 - Machine: swap 17/18 GB used at resume; one container pair at a time.
 - OWNER RULE 2026-09-30: go through the whole backlog and implement to the end; tests written with each feature but NOT run mid-way (only compileall + the tool-name guard); full suite ONCE when the backlog is done, then fix. Merges no longer run docker checks. All running agents told. Two-way docker re-check stopped under this rule.
 - Cron replaced: 8dc4282b (every 10 min) with the rule above. Running 10: batch 1 (8) + a47bffb Oracle + a8d572b SQL Server.
+- 4e92945 write paths (a5bea35): measured way per table via decide.climb (`measured_ways`), MySQL staged upserts via pinned LOAD DATA LOCAL (only when local_infile already on), PG psycopg3 pipelined statements + binary COPY where exact, counters as one atomic upsert. Tests written-not-run: test_the_origin_is_taken_whichever_driver_writes.py, arrays expected strings, chooser pins, two-way tests vs merged writer.
+- Resumed: ae351bc MySQL tools (told to reuse measured_ways).
