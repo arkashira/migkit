@@ -14,14 +14,21 @@ class Migkit < Formula
   depends_on "libpq"
   depends_on "python@3.12"
 
-  # Programs migkit drives for capabilities beyond verification. Each is
-  # optional at runtime - `migkit doctor` reports what is present - but a
-  # Homebrew install may as well be complete.
+  # Programs migkit drives for capabilities beyond verification: every
+  # formula migkit's registry of programs names (`migkit/tools.py`
+  # `PROGRAM`, held to this list by tests/test_the_install_is_pinned.py).
+  # Each is optional at runtime - `migkit doctor` reports what is present,
+  # and `migkit doctor --install` replaces a build older than migkit takes
+  # and fetches the rest pinned by version and digest - but a Homebrew
+  # install may as well be complete.
   depends_on "mysql-client" => :recommended
   depends_on "mongodb/brew/mongodb-database-tools" => :optional
   depends_on "mydumper" => :optional
   depends_on "pgloader" => :optional
   depends_on "percona-toolkit" => :optional
+  depends_on "sqlcmd" => :optional
+  depends_on "freetds" => :optional
+  depends_on "unixodbc" => :optional
 
   # Python dependencies are generated with:
   #   brew update-python-resources Formula/migkit.rb

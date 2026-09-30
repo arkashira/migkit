@@ -38,7 +38,7 @@ import tempfile
 import threading
 import time
 
-from . import tooluse
+from . import runner, tooluse
 from .tooluse import TOPPED, UNUSED, USED
 
 PROGRAM = "redis-shake"
@@ -127,8 +127,15 @@ def reader_for(hop, db):
 # ---- the hop's exclusions as the program's own filters -------------------
 
 def _glob_re(glob):
-    """A shell pattern (`fnmatch`'s) as a regular expression the program's
-    Go regular expressions read the same way, anchored at both ends."""
+    """A shell pattern as `fnmatch` reads it - the matcher `Hop.excluded`
+    holds every key to - as a regular expression the program's Go regular
+    expressions read the same way, anchored at both ends.
+
+    Read in `fnmatch`'s own translation and held to it: `*` and `?` match
+    a line break (dot-all), where they did not - four keys holding one
+    matched the hop's pattern and not the program's filter (measured),
+    and were copied though the check left them out; and a set that starts
+    with `^` or `[` holds that character, where it began a negated set."""
     out, i, n = [], 0, len(glob)
     while i < n:
         c = glob[i]
@@ -148,14 +155,16 @@ def _glob_re(glob):
             if j >= n:
                 out.append(re.escape(c))
             else:
-                body = glob[i:j]
+                body = glob[i:j].replace("\\", "\\\\")
                 if body.startswith("!"):
                     body = "^" + body[1:]
-                out.append("[" + body.replace("\\", "\\\\") + "]")
+                elif body.startswith(("^", "[")):
+                    body = "\\" + body
+                out.append(f"[{body}]")
                 i = j + 1
         else:
             out.append(re.escape(c))
-    return "^" + "".join(out) + "$"
+    return "^(?s:" + "".join(out) + ")$"
 
 
 def key_filters(hop, db):
@@ -430,12 +439,16 @@ def facts(hop):
 
 class _Status:
     """The program's status port, read every few seconds while it runs:
-    what it has read and written becomes migkit's progress line, and the
-    last reading is kept for the proof after."""
+    what it has read and written becomes migkit's progress line, the last
+    reading is kept for the proof after, and a reading that changed is
+    movement to the stall limit (`watch`, `runner.run`'s `stall`) - so a
+    copy whose link holds and passes nothing is ended and said."""
 
     def __init__(self, port, label, total, log):
+        from .stall import Watch
         self.port, self.label, self.total, self.log = port, label, total, log
         self.last = {}
+        self.watch = Watch()
         self._stop = threading.Event()
         self._began = time.monotonic()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -455,6 +468,8 @@ class _Status:
             got = self.read()
             if not got:
                 continue
+            if got != self.last:
+                self.watch.moved()
             self.last = got
             counts = got.get("total_entries_count") or {}
             written = int(counts.get("write_count") or 0)
@@ -471,6 +486,19 @@ class _Status:
         self._stop.set()
         self._thread.join(5)
         return False
+
+
+def _log_words(work):
+    """The last of what the program's own log in `work` says went
+    wrong, in migkit's words; "" where it says nothing."""
+    try:
+        lines = (open(os.path.join(work, "shake.log"), errors="replace")
+                 .read().splitlines())
+    except OSError:
+        return ""
+    bad = [ln for ln in lines if re.search(r"\b(ERR|ERROR|PANIC|FATAL)\b",
+                                           ln)]
+    return runner.said("\n".join((bad or lines)[-3:]))[-300:]
 
 
 def move(hop, db, workers, go, log):
@@ -524,8 +552,20 @@ def move(hop, db, workers, go, log):
             log(step)
             log(f"db{db}: read by {reader.said} - {reader.reason}")
         with PrivateFile(text, ".toml") as path, \
-                _Status(port, f"db{db}", total, log):
-            movers._sh([PROGRAM, path], None, log)
+                _Status(port, f"db{db}", total, log) as status:
+            try:
+                runner.run([PROGRAM, path], log=log, merge=True,
+                           whole=False, stall=status.watch,
+                           what=f"db{db}: the keyspace copy",
+                           secrets=(hop.source.password,
+                                    hop.target.password))
+            except runner.Failed as e:
+                # its own log says more than its console, and lives in the
+                # directory removed below: read before it goes
+                said = _log_words(work)
+                if said:
+                    raise runner.Failed(f"{e}; {said}") from None
+                raise
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return [step]
@@ -643,7 +683,7 @@ def _account():
     put("advanced", "status_port", USED, "read every few seconds as the"
         " copy's progress")
     put("advanced", "log_file", USED, "kept in its private directory for"
-        " the words of a failure")
+        " the words of a failure, read before that directory is removed")
     put("advanced", "log_level", USED, "info: enough for the words of a"
         " failure, without a line a key")
     put("advanced", "log_interval", UNUSED, "progress is read from the"

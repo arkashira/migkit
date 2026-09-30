@@ -34,7 +34,6 @@ executed from it; the file is kept beside the run's other evidence
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,13 +107,30 @@ def run(job, python=None, timeout=3600, keep=None):
         return {"ok": False, "error": "the second reader is not installed"
                                       " on this machine: migkit doctor"
                                       " --install"}
-    p = subprocess.run([python, str(RUNNER)], input=json.dumps(job),
-                       capture_output=True, text=True, timeout=timeout)
+    from . import runner
+    secrets = [str((job.get(side) or {}).get("password") or "")
+               for side in ("source", "target")]
+    # the job, passwords and all, on its input; its answer alone on its
+    # output (`runners/second_reader.py` sends everything else the reader
+    # prints to the other stream), and what it said there kept for a
+    # failure's words
+    p = runner.run([python, str(RUNNER)], input=json.dumps(job),
+                   check=False, timeout=timeout, secrets=secrets,
+                   what="the second reading")
     try:
         answer = json.loads(p.stdout)
     except ValueError:
+        said = runner.said(p.stderr, secrets)
         return {"ok": False, "error": "the second reader gave no answer"
-                                      f" (exit {p.returncode})"}
+                                      f" (exit {p.returncode})"
+                                      + (f": {said[-300:]}" if said else "")}
+    # what the reader or its libraries said of a failure, in migkit's
+    # words: no program named, no password kept
+    if answer.get("error"):
+        answer["error"] = runner.words(runner.hide(answer["error"], secrets))
+    for d in answer.get("broken") or []:
+        if d.get("error"):
+            d["error"] = runner.words(runner.hide(d["error"], secrets))
     if keep is not None and answer.get("config"):
         keep.mkdir(parents=True, exist_ok=True)
         (keep / BATCH).write_text(answer["config"])

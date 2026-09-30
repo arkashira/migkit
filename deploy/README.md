@@ -28,6 +28,23 @@ believed, and the view does not start with a header and no secret. Add
 the name the proxy reaches it by to `MIGKIT_UI_HOSTS`. A hop's `access`
 option says who may see it and who may hold its tail.
 
+The image is built the same twice: its base by digest, Debian's packages
+as they stood on one day, every Python package by the digests of its files,
+and every program by `migkit doctor --install`, which holds each file it
+fetches to migkit's lock. `deploy/conf/` and anything holding a password or
+a report never enter it (`.dockerignore`). A program whose terms are not
+open goes in only where the build names it as accepted:
+`--build-arg MIGKIT_ACCEPT_TERMS=atlas,liquibase`.
+
+## a machine with no network
+    # where there is one: every file, wheel and image, with its sums
+    MIGKIT_BUNDLE_BUILD=/media/bundle MIGKIT_BUNDLE_KEY=~/.ssh/id_ed25519 \
+      MIGKIT_BUNDLE_PLATFORM=linux-x86_64-debian-12 migkit doctor --install
+    # where there is none
+    pip install --no-index --find-links /media/bundle/wheels migkit
+    MIGKIT_BUNDLE=/media/bundle MIGKIT_BUNDLE_SIGNERS=allowed_signers \
+      migkit doctor --install
+
 ## systemd
     sudo cp -r . /opt/migkit && /opt/migkit/bootstrap.sh
     sudo install -Dm600 conf/hops.yaml /etc/migkit/hops.yaml

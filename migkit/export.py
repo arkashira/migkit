@@ -93,12 +93,12 @@ def _names():
     """Every program and library migkit wraps, by the names its own
     registries know them by - what the words filter takes out. An
     engine's name is the database's, and stays."""
-    from . import movers, physical, tools, tooluse
+    from . import physical, tools, tooluse
     from .engines import ALIASES, NAMES
     from .storedcode import programs
     tooluse._load()
     engines = set(NAMES) | set(ALIASES)
-    return (set(movers.DRIVEN) | set(tools.IMAGES) | set(tooluse.REGISTRY)
+    return (tools.names() | set(tools.IMAGES) | set(tooluse.REGISTRY)
             | set(programs.READS) | set(physical.PROGRAMS)
             | {n for n in set(tools.PROGRAM_LICENCES) | set(tools.PROGRAMS)
                if n not in engines and n != "docker"})

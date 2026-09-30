@@ -138,4 +138,12 @@ def run(job):
 
 
 if __name__ == "__main__":
-    json.dump(run(json.load(sys.stdin)), sys.stdout, default=str)
+    job = json.load(sys.stdin)
+    # the answer alone on the stream migkit reads it from: whatever the
+    # reader or a library it loads prints - from Python or below it - goes
+    # to the other stream, where a stray line cannot break the answer
+    answer = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    json.dump(run(job), answer, default=str)
+    answer.flush()

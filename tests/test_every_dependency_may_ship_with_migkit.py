@@ -234,10 +234,9 @@ def test_every_closed_term_is_asked_in_one_question_first(home,
     monkeypatch.setattr(tools, "install_from_source",
                         lambda program, log: order.append(("build", program)))
     ran = []
-    monkeypatch.setattr(tools.subprocess, "run",
-                        lambda argv, **k: ran.append(argv) or
-                        type("P", (), {"returncode": 0, "stderr": "",
-                                       "stdout": ""})())
+    monkeypatch.setattr(tools, "_step",
+                        lambda argv, log, failed, cwd=None, env=None:
+                        ran.append(argv) or True)
 
     def ask(program, terms):
         order.append(("asked", program))
@@ -294,6 +293,16 @@ def vendor(monkeypatch, home):
     base = f"http://127.0.0.1:{srv.server_port}/"
     monkeypatch.setattr(tools, "VENDOR_URLS", {
         p: base + "{version}/" for p in tools.VENDOR_URLS})
+
+    def pinned(url):
+        # the lock this vendor's files are held to: each one's digest
+        body = files.get(url.rsplit("/", 1)[-1])
+        if body is None or not url.startswith(base):
+            return {}
+        import hashlib
+        return {"digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                "size": len(body)}
+    monkeypatch.setattr(tools, "pinned", pinned)
     monkeypatch.setattr(tools.platform, "system", lambda: "Linux")
     monkeypatch.setattr(tools.platform, "machine", lambda: "x86_64")
     yield files
