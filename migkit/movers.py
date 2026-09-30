@@ -17,12 +17,13 @@ import socket
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from . import leftovers
 from .util import quiet_argv, run, tool_env, which
 
-VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper",
+VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
         "pgloader", "mongodump", "mongosync", "riotx", "native")
 
 
@@ -66,9 +67,14 @@ def _ladder():
                      " are built after the rows land"),
         Rung("pgdump", "the dump and restore in parallel",
              needs=(_moves("pgdump"), _installed("pg_dump", "pg_restore"))),
+        # the MySQL bulk copy: each table by the rung chosen for it
+        # (`my_bulk_choice`), the straight copy alone where the dump and
+        # load programs are not here
         Rung("mydumper", "the parallel dump and load",
              needs=(_moves("mydumper"),
                     _installed("mydumper", "myloader"))),
+        Rung("mysqlsh", "the straight copy",
+             needs=(_moves("mysqlsh"), _installed("mysqlsh"))),
         Rung("pgloader", "the one-pass load",
              needs=(_moves("pgloader"), _installed("pgloader"))),
         # online, and consistent as of its commit - a dump of a source
@@ -201,8 +207,9 @@ _FITS = _fits()
 #: (verified: 2 of 3 rows dumped where a rule applied). `pg_dump` 18.6 and
 #: `pgcopydb` 0.18 have `-t`, `-T`, `--exclude-table-data` and `--filter` /
 #: `--filters` between them and **not one row predicate** - their filtering
-#: is table-level throughout.
-ROW_FILTER_MOVERS = ("mydumper",)
+#: is table-level throughout. The straight copy takes a `where` per table
+#: too, and both carry it into their checksum.
+ROW_FILTER_MOVERS = ("mydumper", "mysqlsh")
 
 #: Bulk paths that can leave a table out, so a table with a row filter can
 #: be carried by the table copier instead.
@@ -257,7 +264,7 @@ def _filtered_here(hop, db):
     return sorted(out)
 
 
-def routed_to_copier(hop, db, via, tables, qualifier="public"):
+def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None):
     """The tables a bulk path cannot filter, carried by the table copier.
 
     `via` copies whole tables; the copier reads and replaces only the rows
@@ -266,9 +273,12 @@ def routed_to_copier(hop, db, via, tables, qualifier="public"):
     this used to refuse the whole database. One answer for the dump, the
     plan and the move, so none of them can disagree about which tables took
     which path. Nothing is routed for a path that applies the filter itself.
+    `choice` is the MySQL bulk copy's per-table choice where the caller made
+    it already (`my_bulk_choice`).
     """
     from . import planner
-    return [d.table for d in planner.plan(hop, db, via, tables, qualifier)
+    return [d.table for d in planner.plan(hop, db, via, tables, qualifier,
+                                          choice=choice)
             if d.path == planner.COPIER]
 
 
@@ -281,7 +291,18 @@ def refuse_unpushable_filters(hop, db, via, engine=None):
     anything is copied, because a path that ignores the filter copies every
     row and leaves the check comparing a filtered source against a full
     target for good.
+
+    Masking on the way is held to the same rule: only the parallel dump
+    masks (`mask_plan`), so any other path would copy the very values the
+    hop asks to hide, and stops here instead.
     """
+    masks = mask_rules(hop, db)
+    if masks and via != "mydumper":
+        raise SystemExit(
+            f"the hop masks {', '.join(sorted(masks))} on the way, and only"
+            " the parallel dump of a MySQL hop can: this path would copy the"
+            " values as they are. Nothing has been copied. Install it with"
+            " migkit doctor --install, or drop the masking rule")
     mine = _filtered_here(hop, db)
     if not mine or via in ROW_FILTER_MOVERS:
         return
@@ -300,6 +321,7 @@ def supported(engine, via):
     return {"pgdump": engine == "postgres",
             "pgcopydb": engine == "postgres",
             "mydumper": engine == "mysql",
+            "mysqlsh": engine == "mysql",
             "pgloader": engine == "hetero",
             "mongodump": engine == "mongodb",
             "mongosync": engine == "mongodb",
@@ -343,8 +365,8 @@ def stream_supported(engine):
 #: the command lines go to the run's debug log, and what a failing one said
 #: is passed on with its name taken out.
 DRIVEN = ("pg_dump", "pg_restore", "pgcopydb", "psql", "mydumper",
-          "myloader", "pgloader", "mongodump", "mongorestore", "mongosync",
-          "riotx")
+          "myloader", "mysqlsh", "pgloader", "mongodump", "mongorestore",
+          "mongosync", "riotx")
 #: environment variables whose values are secrets, for the debug log
 _SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
 #: (DebugLog, secrets) for the run in progress, set by `run_via`
@@ -356,7 +378,7 @@ _DEBUG = None
 _RUNNING = None
 _RUNNING_LOCK = threading.Lock()
 LOADERS = ("pg_restore", "myloader", "mongorestore")
-COPIERS = ("pgcopydb", "pgloader", "mongosync", "riotx")
+COPIERS = ("pgcopydb", "pgloader", "mongosync", "riotx", "mysqlsh")
 
 
 def _program_role(program):
@@ -570,42 +592,6 @@ class _JsonLog:
 
     def failure(self):
         return "; ".join(self.errors[-3:]) or None
-
-
-def _my_dump_progress():
-    """The MySQL dump's `dump_table_progress` events, once per table."""
-    from .wording import Tally
-    tally = Tally(_SIZES)
-
-    def on(event):
-        if event.get("event") != "dump_table_progress":
-            return None
-        name = f"{event.get('db')}.{event.get('table')}"
-        total = str(event.get("tables_total") or "")
-        if total.isdigit():
-            tally.total = int(total)
-        so_far = tally.reached(name)
-        return f"{name}: reading ({so_far})" if so_far else None
-    return _JsonLog(on)
-
-
-def _my_load_progress(summary):
-    """The MySQL load's `restore_data_progress` events, once per table,
-    and its `restore_completed` counts into `summary`."""
-    from .wording import Tally
-    tally = Tally(_SIZES)
-
-    def on(event):
-        kind = event.get("event")
-        if kind == "restore_completed":
-            summary.update(event)
-            return None
-        if kind != "restore_data_progress":
-            return None
-        name = f"{event.get('db')}.{event.get('table')}"
-        so_far = tally.reached(name)
-        return f"{name}: loading ({so_far})" if so_far else None
-    return _JsonLog(on)
 
 
 #: what the PostgreSQL dump and load say, with `-v`, as they reach each
@@ -1998,9 +1984,10 @@ class client_defaults:
         return False
 
 
-def mydumper_session(hop, db):
+def mydumper_session(hop, db, sections=None):
     """The dump's defaults file: its session's sql_mode, then the hop's
-    row filters.
+    row filters and the lines migkit adds per table (`sections`: the
+    chunk size, the masking).
 
     The dump writes its session's sql_mode at the head of every data file,
     and the load runs under it. Left to itself it takes the source's mode
@@ -2014,11 +2001,15 @@ def mydumper_session(hop, db):
     from .engines.mysql import MySQLEngine
     return ("[mydumper_session_variables]\nsql_mode ="
             f" '{MySQLEngine.WRITE_SQL_MODE}'\n"
-            + (mydumper_defaults(hop, db) or ""))
+            + (mydumper_defaults(hop, db, sections) or ""))
 
 
-def mydumper_defaults(hop, db):
+def mydumper_defaults(hop, db, sections=None):
     """The hop's row filters as a mydumper defaults file, or None.
+
+    `sections` is {table: [line]} more to say about a table - its chunk
+    size (`my_chunk_rows`), its masking (`mask_plan`) - written into the
+    same section as its filter, one section a table.
 
     mydumper's `--where` is one predicate for the whole dump; the per-table
     form lives in a config file, one section per table. Verified against
@@ -2040,13 +2031,18 @@ def mydumper_defaults(hop, db):
     so `orders` means this database's, and `other.orders` does not.
     """
     rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
-    lines = ["[mydumper]"]
+    per = {}
     for key, predicate in sorted(rules.items()):
         parts = [p for p in str(key).split(".") if p]
         if len(parts) > 1 and parts[0] != db:
             continue
-        lines.append(f"[`{db}`.`{parts[-1]}`]")
-        lines.append(f"where = {predicate}")
+        per.setdefault(parts[-1], []).append(f"where = {predicate}")
+    for table, more in (sections or {}).items():
+        per.setdefault(table, []).extend(more)
+    lines = ["[mydumper]"]
+    for table in sorted(per):
+        lines.append(f"[`{db}`.`{table}`]")
+        lines += per[table]
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
@@ -2080,11 +2076,16 @@ def _options_of(path, stamp):
     # lower-case, gap-only pattern found 6 of mongodump's 37 flags. The
     # online sync names its value after one space (`--config value`), and
     # 5 of its 15 were found until that shape was read too; every other
-    # program's count stayed the same
+    # program's count stayed the same. The MySQL copy program lists an
+    # option beside its alias (`--py, --python`, `--nw, --no-wizard`):
+    # 81 of its 91 were found until both halves were read, and the others'
+    # counts stayed the same (136, 99, 73, 51, 37, 53, 34)
+    text = (p.stdout or "") + (p.stderr or "")
+    name = r"--[a-zA-Z0-9][a-zA-Z0-9-]*"
     return frozenset(re.findall(
-        r"(?m)^\s+(?:-\w,\s+)?(--[a-zA-Z0-9][a-zA-Z0-9-]*)"
-        r"(?=\s{2,}|$|=|\[=|\s[A-Za-z_<][\w<>.-]*\s{2,})",
-        (p.stdout or "") + (p.stderr or "")))
+        rf"(?m)^\s+(?:-\w,\s+|{name},\s+)?({name})"
+        r"(?=\s{2,}|$|=|\[=|\s[A-Za-z_<][\w<>.-]*\s{2,})", text)
+        + re.findall(rf"(?m)^\s+({name})(?=,\s+--)", text))
 
 
 def tool_flag(program, *spellings):
@@ -2107,7 +2108,7 @@ def tool_flag(program, *spellings):
         " `migkit doctor --install` puts a version in place that does")
 
 
-def _my_truncate_target(hop, db, log=None):
+def _my_truncate_target(hop, db, log=None, spare=()):
     """Empty the target's tables before a data-only MySQL load.
 
     The loader used to do this itself, as `--purge-mode TRUNCATE`. The
@@ -2129,12 +2130,16 @@ def _my_truncate_target(hop, db, log=None):
     its rows - which is why this path needs no counterpart to the PostgreSQL
     cascade refusal. One connection throughout, because the setting belongs
     to the session and `_q` opens a new one per call.
+
+    `spare` are tables a stopped load is going on with (`_shell_resumable`):
+    what it loaded is kept, and it loads the rest.
     """
     from .engines.mysql import MySQLEngine
     eng = MySQLEngine(hop)
     names = eng._all_tables("dst", db)
     skip = set(excluded_tables(hop, db, names, qualifier=db))
-    keep = [n for n in names if f"{db}.{n}" not in skip]
+    keep = [n for n in names if f"{db}.{n}" not in skip
+            and n not in set(spare)]
     if not keep:
         return []
     ddb = eng._quote_ident(eng._d("dst", db))
@@ -2302,7 +2307,42 @@ def _my_orphans_left(hop, db, log):
     return found
 
 
-def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
+def _my_tls(ep, program):
+    """The endpoint's TLS options as the program's flags (dump and load) or
+    connection keys (the straight copy), the way `Endpoint.mysql_tls`
+    reads them for migkit's own connections. The bulk programs used to be
+    given none of them, and connected with whatever the server offered."""
+    o = getattr(ep, "options", None) or {}
+    cert, key = o.get("ssl_cert"), o.get("ssl_key")
+    if program == "mysqlsh":
+        if o.get("ssl_ca"):
+            out = {"ssl-mode": ("VERIFY_IDENTITY"
+                                if o.get("ssl_verify_identity", True)
+                                else "VERIFY_CA"),
+                   "ssl-ca": str(o["ssl_ca"])}
+        elif o.get("ssl"):
+            out = {"ssl-mode": "REQUIRED"}
+        else:
+            return {}
+        if cert:
+            out["ssl-cert"] = str(cert)
+        if key:
+            out["ssl-key"] = str(key)
+        return out
+    if o.get("ssl_ca"):
+        # the dump and load programs know two modes: REQUIRED checks
+        # nothing, so a named authority is held to the server's name too
+        out = ["--ssl-mode", "VERIFY_IDENTITY", "--ca", str(o["ssl_ca"])]
+    elif o.get("ssl"):
+        out = ["--ssl"]
+    else:
+        return []
+    return (out + (["--cert", str(cert)] if cert else [])
+            + (["--key", str(key)] if key else []))
+
+
+def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None,
+                       logs=None, compress=False):
     """The dump and load command lines, built once for the plan and the run.
 
     Neither carries a password. It used to go on as `-p<secret>`, attached,
@@ -2318,22 +2358,45 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None):
 
     `-B` on the loader is the *target's* name for the database, which the
     hop's `db_map` may make different from the source's.
+
+    Both sides checksum every table (`--checksum-all`): the dump takes the
+    source's at the dump, the load the target's after it, and migkit reads
+    each pair (`_MyLoadLog`) and holds the move to them beside its own
+    digest. Measured on 1.0.5: without `--checksum-all` on the load as well,
+    its checksum step compares nothing - a dumped checksum edited to a
+    wrong value loaded with no warning - and with it the load logs each
+    table's expected and actual value. `--checksum warn` rather than
+    `fail`: `fail` stops at the first table and names only it, `warn` lets
+    migkit name every one and fail the move itself.
+
+    `--max-threads-per-table` is the whole of `workers`, so one large table
+    is read and loaded by every worker (the default is 4, whatever the
+    sizing says); `--rows` per table sits in the defaults file
+    (`my_chunk_rows`). `logs` is whether the target writes a binlog
+    (`_my_target_logs`), asked once by the caller.
     """
     from .engines.mysql import MySQLEngine
     s, t = hop.source, hop.target
-    dump = ["mydumper", "-h", s.host, "-P", str(s.port), "-u", s.user,
-            "-B", db, "-o", str(outdir), "--threads", str(workers),
-            "--no-schemas",
-            tool_flag("mydumper", "--trx-tables", "--trx-consistency-only")]
+    dump = (["mydumper", "-h", s.host, "-P", str(s.port), "-u", s.user]
+            + _my_tls(s, "mydumper")
+            + ["-B", db, "-o", str(outdir), "--threads", str(workers),
+               "--max-threads-per-table", str(workers), "--checksum-all"])
+    if compress:
+        dump += [tool_flag("mydumper", "--compress"), "zstd"]
+    dump += ["--no-schemas",
+             tool_flag("mydumper", "--trx-tables", "--trx-consistency-only")]
     if cnf:
         dump += ["--defaults-file", str(cnf)]
     if omit:
         dump += [tool_flag("mydumper", "--omit-from-file"), str(omit)]
-    load = ["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user,
-            "-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
-            "--threads", str(workers)]
+    load = (["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user]
+            + _my_tls(t, "myloader")
+            + ["-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
+               "--threads", str(workers), "--max-threads-per-table",
+               str(workers), "--checksum-all",
+               tool_flag("myloader", "--checksum"), "warn"])
     if (hop.options or {}).get("target_has_replicas", True) is not False \
-            and _my_target_logs(hop):
+            and (_my_target_logs(hop) if logs is None else logs):
         # the loader turns the binlog off for its own sessions unless told
         # otherwise. Measured on 8.4: a replica of the target received the
         # tables the move created and none of their 300,000 rows, and said
@@ -2362,7 +2425,8 @@ def mydumper_table(hop, db, table, workers, rows, log=None):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", table)
     outdir = hop.report_dir(db) / f"dump-table-{safe}"
     shutil.rmtree(outdir, ignore_errors=True)
-    dump, load = _mydumper_commands(hop, db, workers, outdir)
+    dump, load = _mydumper_commands(
+        hop, db, workers, outdir, logs=_my_target_logs(hop, quick=False))
     from . import ranges
     per = max(ranges.LEAST, int(rows or 0) // max(1, int(workers)))
     dump += ["-T", f"{db}.{table}", "--rows", str(per)]
@@ -2384,61 +2448,1381 @@ def mydumper_table(hop, db, table, workers, rows, log=None):
         shutil.rmtree(outdir, ignore_errors=True)
 
 
-def _my_target_logs(hop):
+def _my_ask(hop, side, sql, args=None):
+    """One question to a side, on a connection of its own that is not
+    retried: the plan asks it through `_within`, the run directly."""
+    from .engines.mysql import MySQLEngine
+    conn = MySQLEngine(hop)._conn(side, retry=False)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def _my_target_logs(hop, quick=True):
     """Whether the target writes a binlog, which its replicas and its
-    point-in-time recovery read. Asked quickly: a plan against a target
-    not reachable yet says it would not, and the run asks again."""
+    point-in-time recovery read. Asked quickly for a plan: a target not
+    reachable yet is said not to, and the run asks again, directly."""
+    def ask():
+        return str(_my_ask(hop, "dst", "select @@log_bin")[0][0]) == "1"
+    return bool(_within(ask)) if quick else ask()
+
+
+def _my_target_says(hop, db):
+    """What a plan asks the target, in one go (`_within` once, not once a
+    question): whether it writes a binlog, whether it takes local loads,
+    and the tables it lacks."""
+    row = _my_ask(hop, "dst", "select @@log_bin, @@global.local_infile")[0]
+    return {"logs": str(row[0]) == "1",
+            "loads": str(row[1]).lower() in ("1", "on"),
+            "missing": _my_missing_tables(hop, db)[0]}
+
+
+# --- the MySQL bulk copy's rungs, chosen per table ------------------------
+#
+# Three ways to carry a MySQL table, each used whole: the parallel dump and
+# load (chunked by rows inside a table, checksummed on both sides, masked
+# on the way where the hop asks), the straight copy (read and written at
+# once in chunks by bytes, checksummed), and migkit's own table copier
+# (each range read back and held to the source as it lands). Which carries
+# a table is decided from its facts and from rates measured on each rung -
+# the benchmark's until the hop has its own.
+
+DUMP_LOAD, STREAM_COPY, TABLE_COPIER = "dump-load", "stream-copy", "copier"
+#: the vias that are the MySQL bulk copy: every rung, and the straight copy
+#: alone (where the dump and load programs are not here, or `MIGKIT_MOVER`
+#: asks for it)
+MY_BULK = ("mydumper", "mysqlsh")
+#: a table's shape as the rates are kept: with a binary column (the
+#: straight copy writes those as base64) or without
+PLAIN, BINARY = "plain", "binary"
+#: the straight copy's rates where it reads and writes at once, with no
+#: dump on disk between (where the disk cannot hold one): `PLAIN + DIRECT`
+DIRECT = " direct"
+MY_BINARY_TYPES = ("binary", "varbinary", "tinyblob", "blob", "mediumblob",
+                   "longblob")
+
+
+@dataclass(frozen=True)
+class BulkRung:
+    """One way the MySQL bulk copy can carry a table, as data a decision
+    engine climbs: what it is called where an operator reads it, the
+    programs it runs, what it gives (in `decide.WORDS`' vocabulary), the
+    seconds a run of it costs before its first row, and bytes a second by
+    the shape of a table, measured.
+
+    The numbers are the benchmark's (`MY_BENCH`), kept until a move of the
+    hop measures its own (`my_rates`)."""
+    name: str
+    said: str
+    programs: tuple
+    gives: frozenset
+    fixed: float
+    rates: dict
+
+
+#: How the rungs were measured, 2026-09-28: two MySQL 8.4.11 servers in
+#: docker (colima, 2 CPUs and 4 GB for both), the programs on the host
+#: (Apple M-series, 10 cores), the docker lock held so nothing else ran;
+#: `appdb.narrow` 500,000 rows of int key, int, varchar(40), datetime and
+#: decimal with two secondary indexes (41.5 MB of data), `appdb.wide`
+#: 500,000 rows of bigint key, a 320-byte varbinary and a text with a
+#: prefix index (222 MB), `appdb.tiny` one row; four workers; the target's
+#: tables made beforehand, as the move makes them, their secondary indexes
+#: dropped for the load and added after (the index window). Seconds, the
+#: median of three runs (the runs of one configuration spread by up to a
+#: second on both tables):
+#:
+#:                                       both   narrow  wide   tiny
+#:   dump and load, as before              4.58   2.05   3.39   0.14
+#:   + rows per table                      5.60   2.05   3.73   0.15
+#:   + checksums on both sides (as run)    5.40   2.35   3.80   0.15
+#:   + zstd                                6.07   2.43   3.52   0.17
+#:   load makes the tables, keys after     4.13   1.85   2.81   0.15
+#:   straight copy, dump and load (run)    6.19   3.01   4.64   1.22
+#:   straight copy, read and written at    11.41  2.98   9.59   1.35
+#:     once (run where the disk is short)
+#:   straight copy making the tables,
+#:     indexes deferred / not             5.40 / 5.67  2.88 / 3.29
+#:                                                    3.99 / 3.95
+#:   table by table (the command, whole)   9.33   4.28   6.48   0.45
+#:   migkit's digest after a bulk copy     -      1.44   1.45   0.06
+#:
+#: The rates below are the "as run" rows: bytes over the time less the
+#: one-row table's (the start-up, `fixed`). The digest is paid after every
+#: bulk way alike (`_held_to_the_source` compares every table, the ones the
+#: copier carried too), so it does not change which way is faster. The
+#: straight copy's chunk: 16 MB against its default 64 MB, both tables
+#: 7.25 s against 9.89 s (read and written at once, no checksums) - so a
+#: chunk is sized for four a worker (`_shell_chunk`). Its binary columns
+#: cost it where it reads and writes at once (base64, 9.59 s on `wide`);
+#: through its own dump they do not (4.64 s). The dump read both tables in
+#: 0.94 s, 280 MB/s over four workers - `read`, which sizes the chunks.
+MY_BENCH = "docker pair, 2026-09-28"
+
+#: the rungs, in the order a tie goes: the one that has carried MySQL
+#: tables here longest first. `fixed` and `rates` are `MY_BENCH`'s
+MY_RUNGS = (
+    BulkRung(DUMP_LOAD, "dumped in parallel chunks and loaded",
+             ("mydumper", "myloader"),
+             frozenset({"row filter", "consistent as of", "keyless",
+                        "large values", "masked on the way"}),
+             fixed=0.15, rates={PLAIN: 18.9e6, BINARY: 60.8e6,
+                                "read": 280e6}),
+    BulkRung(STREAM_COPY, "copied straight from source to target in"
+             " parallel chunks", ("mysqlsh",),
+             frozenset({"row filter", "consistent as of", "keyless",
+                        "large values", "resume by chunk"}),
+             fixed=1.22, rates={PLAIN: 23.2e6, BINARY: 64.9e6,
+                                PLAIN + DIRECT: 25.4e6,
+                                BINARY + DIRECT: 26.9e6, "read": 280e6}),
+    BulkRung(TABLE_COPIER, "copied table by table, each range held to the"
+             " source as it lands", (),
+             frozenset({"row filter", "column mapping", "resume by key",
+                        "keyless", "large values"}),
+             fixed=0.45, rates={PLAIN: 10.8e6, BINARY: 36.8e6}),
+)
+_RUNG = {r.name: r for r in MY_RUNGS}
+#: each rung in a few words, where a reason sets it beside another
+MY_SHORT = {DUMP_LOAD: "the parallel dump and load",
+            STREAM_COPY: "the straight copy", TABLE_COPIER: "table by table"}
+
+#: What migkit asks of each MySQL bulk program, feature by feature, in the
+#: shape of the used / unused / topped-up table of backlog 0f: `used`,
+#: `topped-up` (used, and migkit does more with it than the program does
+#: alone) or `unused`, each with its reason. Kept beside the builders it
+#: describes, and the tests hold the command lines to it.
+TOOL_USE = {
+    "mydumper": {
+        "--threads": ("used", "from migkit's sizing of both servers and"
+                              " this machine, never set by hand"),
+        "--max-threads-per-table": (
+            "used", "the whole of the sizing, so one large table is read"
+                    " by every worker rather than four"),
+        "rows (per table)": (
+            "topped-up", "in the defaults file, one size a table from its"
+                         " rows and bytes and the rate this hop is read at"
+                         " (`my_chunk_rows`), where the flag is one size for"
+                         " every table. Measured on a local link no faster"
+                         " than the program's own cutting (5.60 s against"
+                         " 4.58 s for both tables, within the runs' spread"
+                         " on each alone): what it sets is where a chunk"
+                         " starts on the link this hop is read over"),
+        "--checksum-all": (
+            "topped-up", "each table's checksum at the dump held to the"
+                         " load's and folded into the move's verdict, beside"
+                         " migkit's own digest and never instead of it;"
+                         " measured within the runs' spread (5.40 s against"
+                         " 5.60 s for both tables)"),
+        "--compress": ("used", "zstd, where the dump would not fit the disk:"
+                               " measured slower where it fits, 6.07 s"
+                               " against 5.60 s (MY_BENCH)"),
+        "masking (per column)": (
+            "used", "null and constant, from the hop's mask_on_write, on"
+                    " columns outside every key, on a hop that sends"
+                    " nothing back; the masked columns are held to the rule"
+                    " after the load (`mask_plan`)"),
+        "--defaults-file": ("used", "the session's sql_mode, and per table"
+                                    " its filter, chunk size and masking"),
+        "--omit-from-file": ("used", "the tables the hop excludes and those"
+                                     " another rung carries"),
+        "--tables-list": (
+            "unused", "the tables other rungs carry are left out by name"
+                      " instead, so a table made on the source during the"
+                      " move is still carried"),
+        "--trx-tables": ("used", "one consistent snapshot of transactional"
+                                 " tables"),
+        "--machine-log-json": (
+            "topped-up", "read event by event into migkit's progress lines,"
+                         " each table's checksum pair and each table's time"
+                         " for the next choice"),
+        "--no-schemas": ("used", "migkit makes the tables the target lacks"
+                                 " from the source's own definition"),
+        "--where": ("unused", "one predicate for every table; the per-table"
+                              " where of the defaults file is used"),
+        "--stream": ("unused", "the target is emptied only once a whole dump"
+                               " is on disk"),
+        "--source-data": ("unused", "the dump's metadata holds the position"
+                                    " without it (`_my_dump_position`)"),
+        "--split-partitions": ("unused", "not yet: a partitioned table is"
+                                         " chunked by rows like the rest"),
+    },
+    "myloader": {
+        "--threads": ("used", "from migkit's sizing"),
+        "--max-threads-per-table": ("used", "the whole of the sizing"),
+        "--checksum-all": ("topped-up", "without it on the load, its checksum"
+                                        " step compares nothing (measured)"),
+        "--checksum": ("topped-up", "warn, so every table's pair is read and"
+                                    " migkit fails the move naming each"),
+        "--enable-binlog": ("used", "where the target writes a binlog, so its"
+                                    " replicas and point-in-time recovery"
+                                    " get the rows"),
+        "--optimize-keys": (
+            "unused", "not yet: it acts only where the load makes the"
+                      " tables, and migkit makes them from the source's"
+                      " definition (`_my_create_missing`) and moves their"
+                      " secondary indexes out of the load's way itself -"
+                      " which also strips what the target cannot keep"
+                      " (MariaDB's system versioning). Measured where the"
+                      " load makes them: both tables 4.07-4.52 s against"
+                      " 4.41-5.44 s by the index window (MY_BENCH), within"
+                      " the runs' spread, and the benchmark's window rebuilt"
+                      " one table after another where the move's rebuilds"
+                      " them side by side"),
+        "--disable-redo-log": ("unused", "it changes a server setting, which"
+                                         " migkit does not do"),
+        "--drop-table": ("unused", "on a data-only dump neither TRUNCATE nor"
+                                   " DELETE empties anything (measured);"
+                                   " migkit empties the target itself"),
+        "--resume": ("unused", "a stopped load is loaded again from an"
+                               " emptied target; the straight copy's"
+                               " resumable load carries the long moves"),
+    },
+    "mysqlsh": {
+        "util.copy_schemas": ("used", "read and written at once, no file"
+                                      " between, where this machine cannot"
+                                      " hold the dump (`_shell_direct`),"
+                                      " after its dry run"),
+        "util.dump_schemas + util.load_dump": (
+            "topped-up", "the way it runs wherever this machine holds the"
+                         " dump - measured faster than reading and writing"
+                         " at once (6.19 s against 11.41 s, MY_BENCH) - with"
+                         " the load's progress kept, and a stopped move"
+                         " going on from it only while the source's binlog"
+                         " is where the dump left it (`_shell_resumable`)"),
+        "threads": ("used", "from migkit's sizing"),
+        "bytesPerChunk": ("used", "from the rate this hop is read at, no"
+                                  " more than the largest table split across"
+                                  " the workers (`_shell_chunk`)"),
+        "checksum": ("topped-up", "every chunk's, a table that differs"
+                                  " folded into the move's verdict beside"
+                                  " migkit's digest"),
+        "compression": ("used", "zstd, for the dump a resumable load reads"),
+        "where": ("used", "the hop's row filter per table"),
+        "schema": ("used", "the target's name for the database (db_map)"),
+        "dryRun": ("used", "before the target is emptied: the source can be"
+                           " read and the target takes the load"),
+        "deferTableIndexes": (
+            "unused", "it acts only where the copy runs the tables' DDL;"
+                      " migkit makes the tables and moves their secondary"
+                      " indexes out of the load's way itself. Measured where"
+                      " it runs the DDL: all deferred 5.40 s against none"
+                      " 5.67 s for both tables (MY_BENCH)"),
+        "waitDumpTimeout": ("unused", "loading while the dump is written"
+                                      " empties the target before the dump"
+                                      " is whole; the straight copy loads"
+                                      " while it reads instead, after its"
+                                      " dry run"),
+        "local_infile": ("used", "asked of the target, never set: the rung is"
+                                 " not used where it is off"),
+        "maxRate": ("unused", "not yet: the throttle paces migkit's own"
+                              " copier, and has no rate to hand this one"),
+        "skipBinlog": ("unused", "the target's binlog is kept for its"
+                                 " replicas"),
+        "analyzeTables": ("unused", "migkit settles the target's statistics"
+                                    " after every bulk copy"),
+    },
+}
+
+
+@dataclass(frozen=True)
+class BulkChoice:
+    """How one table goes, and why: the rung, the sentence an operator
+    reads, and the seconds each rung that could carry it was estimated at
+    (None where the table's size is not known)."""
+    table: str
+    rung: str
+    reason: str
+    seconds: dict = field(default_factory=dict)
+
+
+MY_SHAPE_SQL = f"""
+    select table_name,
+           sum(data_type in ({', '.join(repr(t) for t in MY_BINARY_TYPES)}))
+      from information_schema.columns
+     where table_schema = %s
+     group by table_name"""
+
+
+def my_table_facts(hop, db, quick=False):
+    """`table_facts` of the source's tables, each with whether it holds a
+    binary column (`binary`) - the shape the rates are kept by. None when
+    a plan (`quick`) could not ask in time; a run asks directly, and a
+    failure is the run's."""
     from .engines.mysql import MySQLEngine
 
     def ask():
-        eng = MySQLEngine(hop)
-        conn = eng._conn("dst", retry=False)
+        facts = MySQLEngine(hop).table_facts("src", db)
+        for name, n in _my_ask(hop, "src", MY_SHAPE_SQL, (db,)):
+            if name in facts:
+                facts[name]["binary"] = bool(int(n or 0))
+        return facts
+    return _within(ask) if quick else ask()
+
+
+def _my_target_loads_files(hop, quick=False):
+    """Whether the target takes `LOAD DATA LOCAL` (`local_infile`), which
+    the straight copy loads by - asked, never set: turning it on is a
+    change to the target's server that is the operator's to make. None
+    where a plan could not ask in time."""
+    def ask():
+        got = _my_ask(hop, "dst", "select @@global.local_infile")
+        return str(got[0][0]).lower() in ("1", "on")
+    return _within(ask) if quick else ask()
+
+
+def _read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path, value):
+    """Written beside itself and put in place whole: a half-written file is
+    read as none, never as a smaller one."""
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-")
+    with os.fdopen(fd, "w") as f:
+        json.dump(value, f)
+    os.replace(tmp, path)
+
+
+def my_rates(hop, db=None):
+    """{rung: {shape: bytes/s}, "fixed": {rung: seconds}}: the benchmark's
+    numbers, with the hop's own over them.
+
+    A move's rates count only once the move they were measured in has
+    finished and been held to the source (`copy-position.json` is written
+    last): until then they wait beside it. So the move that measured them
+    and the table copier that follows it choose from the same numbers - a
+    table the move left to the copier is the copier's when it asks - and
+    a move that failed teaches nothing."""
+    rates = {r.name: dict(r.rates) for r in MY_RUNGS}
+    kept_path = hop.report_dir() / "bulk-rates.json"
+    kept = _read_json(kept_path) or {}
+    if db:
+        pending = hop.report_dir(db) / "bulk-rates.pending.json"
+        done = hop.report_dir(db) / "copy-position.json"
         try:
-            with conn.cursor() as cur:
-                cur.execute("select @@log_bin")
-                return str(cur.fetchone()[0]) == "1"
-        finally:
-            conn.close()
-    return bool(_within(ask))
+            ripe = (pending.exists() and done.exists()
+                    and done.stat().st_mtime_ns >= pending.stat().st_mtime_ns)
+        except OSError:
+            ripe = False
+        if ripe:
+            for rung, shapes in (_read_json(pending) or {}).items():
+                kept.setdefault(rung, {}).update(shapes)
+            _write_json(kept_path, kept)
+            pending.unlink(missing_ok=True)
+    for rung, shapes in kept.items():
+        if rung in rates:
+            rates[rung].update({k: float(v) for k, v in shapes.items()
+                                if v})
+    return rates
 
 
-def mydumper_move(hop, db, workers, go, log):
-    """Dump, then empty the target, then load - in that order.
+def _my_record_rates(hop, db, rung, spans, facts, wall=None, suffix=""):
+    """Keep what this move measured on `rung`, per shape, to count once
+    the move is done (`my_rates`): `spans` is {table: seconds}, the bytes
+    are the catalogue's.
 
-    The target is emptied only once a complete dump is on disk. Emptying it
+    `wall` is the rung's whole time, start-up and checksums in it, as the
+    benchmark's rates are: the spans only share it out. Tables carried side
+    by side overlap, so their spans add up to more than the time they took
+    together, and a rate taken from the spans alone would say the rung is
+    faster than it was."""
+    total = sum(s for s in spans.values() if s and s > 0)
+    if wall and total:
+        spans = {t: wall * s / total for t, s in spans.items()
+                 if s and s > 0}
+    got = {}
+    for table, seconds in spans.items():
+        fact = (facts or {}).get(table) or {}
+        size = int(fact.get("bytes") or 0)
+        if not size or not seconds or seconds <= 0:
+            continue
+        shape = (BINARY if fact.get("binary") else PLAIN) + suffix
+        b, s = got.get(shape, (0, 0.0))
+        got[shape] = (b + size, s + seconds)
+    if not got:
+        return
+    path = hop.report_dir(db) / "bulk-rates.pending.json"
+    pending = _read_json(path) or {}
+    pending.setdefault(rung, {}).update(
+        {shape: round(b / s, 1) for shape, (b, s) in got.items()})
+    _write_json(path, pending)
+
+
+def _my_estimate(fact, rung, rates, direct=False):
+    """Seconds `rung` would take over one table, from its size and the
+    rung's rate for its shape; None where the size is not known. `direct`:
+    the straight copy reads and writes at once (`_shell_direct`)."""
+    size = (fact or {}).get("bytes")
+    if not size:
+        return None
+    shape = BINARY if (fact or {}).get("binary") else PLAIN
+    got = rates.get(rung, {})
+    rate = (got.get(shape + DIRECT) if direct and rung == STREAM_COPY
+            else None) or got.get(shape)
+    return int(size) / float(rate) if rate else None
+
+
+def _disk_free(path):
+    import shutil
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
+def _shell_direct(hop, db, facts):
+    """Whether the straight copy reads and writes at once rather than
+    through a dump on disk: only where this machine cannot hold the dump
+    - the database's size, which its compressed dump stays under. Through
+    the dump it is faster (`MY_BENCH`) and a stopped load goes on."""
+    size = sum(int((f or {}).get("bytes") or 0)
+               for f in (facts or {}).values() if isinstance(f, dict))
+    free = _disk_free(hop.report_dir(db))
+    return bool(size and free is not None and size > free)
+
+
+def _choice_record(hop, db):
+    return hop.report_dir(db) / "bulk-choice.json"
+
+
+def _persisted_choice(hop, db):
+    """The choice the move in progress made, while it is in progress: the
+    move writes it after it began (`move-began.json`) and nothing has
+    finished a move since (`copy-position.json`). None otherwise."""
+    got = _read_json(_choice_record(hop, db))
+    began = _read_json(hop.report_dir(db) / "move-began.json") or {}
+    if not got or not began.get("epoch"):
+        return None
+    if float(got.get("at") or 0) < float(began["epoch"]):
+        return None
+    done = hop.report_dir(db) / "copy-position.json"
+    try:
+        if done.exists() and done.stat().st_mtime >= float(got["at"]):
+            return None
+    except OSError:
+        return None
+    return {t: BulkChoice(t, *v) for t, v in got["tables"].items()}
+
+
+def _seconds(s):
+    return "under a second" if s < 1 else f"about {_took(s)}"
+
+
+def _took(s):
+    from .wording import _duration
+    return _duration(s)
+
+
+def my_decide_rungs(available):
+    """`MY_RUNGS` as the decision engine's rungs (`decide.Rung`): what each
+    gives, and the one need - that it can run here, with the reason in
+    migkit's words where it cannot. Ranked by `decide.rank` from each
+    table's estimated seconds (`my_bulk_choice`)."""
+    from .decide import Need, Rung
+    return tuple(
+        Rung(r.name, r.said, gives=r.gives,
+             needs=(Need("to run here",
+                         lambda f, n=r.name: f["available"].get(n) is None,
+                         lambda f, n=r.name: f["available"][n]),))
+        for r in MY_RUNGS)
+
+
+def my_bulk_choice(hop, db, via, tables=None, facts=None, quick=False,
+                   fresh=False, available=None):
+    """{table: BulkChoice} for the tables of `db` the bulk copy carries.
+
+    Correctness first: a table masked on the way needs what only the dump
+    and load gives; a table whose columns the hop maps is left to
+    `planner.plan`, which sends it to the table copier. Then speed: each
+    table is climbed (`decide.climb`) over `my_decide_rungs`, ranked by the
+    seconds each would take over it - its size over the rung's measured
+    rate for its shape (`my_rates`) - so the rung measured fastest for it
+    is taken where it can run. Each rung in use then costs its start-up
+    (`BulkRung.fixed`) once, and a rung's tables go to another - one in
+    use, or one with a shorter start-up - wherever that is cheaper in all:
+    two programs started for one small table is slower than one. Where no
+    size is known, the first rung that can run carries it, as the engine
+    climbs a rung never timed.
+
+    The move decides afresh (`fresh`) and keeps its choice for the table
+    copier that follows it (`_persisted_choice`), so the two cannot
+    disagree about which tables the copier fills; a plan reads the kept
+    choice while a move is in progress, and decides afresh otherwise.
+
+    `available` is {rung: why not, or None}; worked out here when not
+    given - the dump and load where its programs are here and the via
+    allows it, the straight copy where its program is here and the target
+    takes local loads.
+    """
+    from .decide import TIE, Costs, climb
+    if not fresh:
+        kept = _persisted_choice(hop, db)
+        if kept is not None:
+            return kept
+    if facts is None or any("binary" not in f for f in facts.values()
+                            if isinstance(f, dict)):
+        facts = my_table_facts(hop, db, quick=quick) or facts or {}
+    names = sorted({str(t).rsplit(".", 1)[-1] for t in (tables or facts)})
+    if available is None:
+        available = my_rungs_available(hop, via, quick=quick)
+    rungs = my_decide_rungs(available)
+    order = [r.name for r in MY_RUNGS]
+    rates = my_rates(hop, db)
+    direct = _shell_direct(hop, db, facts)
+    fixed = {r.name: r.fixed for r in MY_RUNGS}
+    masked = set(mask_rules(hop, db))
+    words = {r.name: r.said for r in MY_RUNGS}
+    out, est = {}, {}
+    by = {}
+    for t in names:
+        if hop.excluded(db, t) or hop.column_rules(db, t):
+            continue
+        secs = {r: _my_estimate(facts.get(t), r, rates, direct)
+                for r in order}
+        costs = Costs({r: s for r, s in secs.items() if s is not None})
+        got = climb(t, rungs, {"available": available},
+                    need=("masked on the way",) if t in masked else (),
+                    costs=costs, prove=False)
+        if got.rung is None:
+            out[t] = BulkChoice(t, "", got.reason)
+            continue
+        est[t] = {r: s for r, s in secs.items()
+                  if available.get(r) is None}
+        by.setdefault(got.path, []).append(t)
+    # each rung in use costs its start-up once: the tables of one go to
+    # others - in use, or one not started yet - wherever the seconds they
+    # add are fewer than the start-ups saved. Measured why: two 2,000-row
+    # tables each a few milliseconds faster straight across went that way,
+    # and the move paid the straight copy's 1.22 s start against the dump's
+    # 0.15 s. A masked table stays where it must go
+    runnable = [r for r in order if available.get(r) is None]
+    changed = True
+    while changed:
+        changed = False
+        weight = {r: sum(est[t].get(r) or 0 for t in ts)
+                  for r, ts in by.items()}
+        best = None
+        for r in sorted(by, key=lambda r: weight[r]):
+            if any(t in masked for t in by[r]):
+                continue
+            for o in runnable:
+                if o == r or any(est[t].get(o) is None
+                                 and est[t].get(r) is not None
+                                 for t in by[r]):
+                    continue
+                if o in by:
+                    dest = {t: min((x for x in by if x != r),
+                                   key=lambda x: (est[t].get(x) or 0,
+                                                  order.index(x)))
+                            for t in by[r]}
+                else:
+                    dest = {t: o for t in by[r]}
+                delta = sum((est[t].get(dest[t]) or 0)
+                            - (est[t].get(r) or 0) for t in by[r]) \
+                    + sum(fixed.get(x, 0) for x in set(dest.values())
+                          if x not in by) - fixed.get(r, 0)
+                if delta < 0 and (best is None or delta < best[0]):
+                    best = (delta, r, dest)
+        if best:
+            _, r, dest = best
+            for t, o in dest.items():
+                by.setdefault(o, []).append(t)
+            del by[r]
+            changed = True
+    for rung, ts in by.items():
+        for t in ts:
+            known = {r: s for r, s in est[t].items() if s is not None}
+            if t in masked:
+                reason = (f"{words[rung]}: masked on the way as the hop"
+                          " asks, which only the parallel dump does")
+            elif not known:
+                reason = (f"{words[rung]} - its size is not known, so the"
+                          " first way that can run here")
+            else:
+                shape = ("with binary columns"
+                         if (facts.get(t) or {}).get("binary")
+                         else "without binary columns")
+                others = [f"{MY_SHORT[r]} {_seconds(s)}"
+                          for r, s in sorted(known.items(),
+                                             key=lambda x: x[1])
+                          if r != rung]
+                reason = (f"{words[rung]}: {_seconds(known.get(rung, 0))}"
+                          f" at the rate measured for a table {shape}"
+                          + (f", against {', '.join(others)}" if others
+                             else ""))
+                fastest = min(known, key=known.get)
+                if fastest != rung and rung in known and known[rung] - \
+                        known[fastest] <= TIE * known[rung]:
+                    reason += (" - within the measurements' spread of each"
+                               " other, a tie, which the order of the ways"
+                               " decides")
+                elif fastest != rung:
+                    reason += (" - rather than starting another program"
+                               " for it: the start-up costs more than it"
+                               " saves")
+            out[t] = BulkChoice(t, rung, reason,
+                                {r: (None if s is None else round(s, 3))
+                                 for r, s in est[t].items()})
+    return out
+
+
+def _persist_choice(hop, db, choice):
+    _write_json(_choice_record(hop, db), {
+        "at": time.time(),
+        "tables": {t: [c.rung, c.reason, c.seconds]
+                   for t, c in choice.items()}})
+
+
+def my_rungs_available(hop, via, quick=False, loads=...):
+    """{rung: None where it can carry a table here, else why not} - in
+    migkit's words, no program named. `loads` is whether the target takes
+    local loads, where the caller has asked already."""
+    out = {TABLE_COPIER: None}
+    if via == "mysqlsh":
+        out[DUMP_LOAD] = "the move is asked to copy straight across"
+    elif not (which("mydumper") and which("myloader")):
+        out[DUMP_LOAD] = ("the parallel dump is not installed here -"
+                          " migkit doctor --install puts it in place")
+    else:
+        out[DUMP_LOAD] = None
+    if not which("mysqlsh"):
+        out[STREAM_COPY] = ("the straight copy is not installed here -"
+                            " migkit doctor --install puts it in place")
+    else:
+        if loads is ...:
+            loads = _my_target_loads_files(hop, quick=quick)
+        out[STREAM_COPY] = (
+            None if loads else
+            "the target does not take local loads (local_infile is off),"
+            " which the straight copy loads by; migkit does not change the"
+            " target's settings" if loads is False else
+            "whether the target takes local loads could not be asked yet")
+    if via == "mysqlsh" and out[STREAM_COPY] is None:
+        # the straight copy alone: the table copier still carries what only
+        # it can (`planner.plan`), and a table where the straight copy
+        # cannot run, and nothing for its speed
+        out[TABLE_COPIER] = "the move is asked to copy straight across"
+    return out
+
+
+#: how long one chunk of the dump should take to read: the dump doubles a
+#: chunk read in under a second and halves one that took over two, so it
+#: starts between them
+CHUNK_SECONDS = 1.5
+#: the fewest rows a chunk is worth: below it the query costs more than
+#: the rows
+CHUNK_FLOOR = 1_000
+
+
+def my_chunk_rows(fact, read_rate, workers):
+    """`MIN:START:MAX` rows for the dump to cut one table by, or None where
+    one chunk is right.
+
+    START is the rows one worker reads in `CHUNK_SECONDS` at the rate the
+    dump reads this hop's tables (`read_rate`, bytes a second over every
+    worker - the link's share of it), no more than the table split once
+    across the workers so every worker has a part of a table that is
+    large. MIN and MAX are a tenth and ten times it, the room the dump's
+    own doubling and halving is given."""
+    rows = int((fact or {}).get("rows") or 0)
+    size = int((fact or {}).get("bytes") or 0)
+    workers = max(1, int(workers or 1))
+    if rows < 2 * CHUNK_FLOOR * workers:
+        return None
+    per_row = size / rows if size else 100.0
+    start = int(read_rate / workers * CHUNK_SECONDS / max(per_row, 1.0))
+    start = max(CHUNK_FLOOR, min(start, rows // workers))
+    return f"{max(CHUNK_FLOOR, start // 10)}:{start}:{start * 10}"
+
+
+# --- masking on the way ----------------------------------------------------
+
+#: what a write-side masking rule may ask for, and whether each is exact:
+#: every value it writes is known, so the target can be held to it after
+#: the load. A random value is known to nobody - it cannot be checked, and
+#: a second run writes another
+MASKS = {"null": True, "constant": True, "random": False}
+
+
+def mask_rules(hop, db):
+    """{table: {column: (kind, value)}} from the hop's `mask_on_write`,
+    for `db`: `table.column` or `db.table.column` to `null`, `constant
+    <text>` or `random`. The display option `mask` is not one of them: it
+    hides values where a person reads them and leaves what is written as
+    it is."""
+    raw = (getattr(hop, "options", None) or {}).get("mask_on_write") or {}
+    out = {}
+    for key, rule in sorted(raw.items()):
+        parts = [p for p in str(key).split(".") if p]
+        if len(parts) == 3 and parts[0] != db or len(parts) < 2:
+            continue
+        table, column = parts[-2], parts[-1]
+        text = "" if rule is None else str(rule).strip()
+        kind, _, value = text.partition(" ")
+        if ":" in kind:
+            kind, _, rest = kind.partition(":")
+            value = (rest + " " + value).strip()
+        out.setdefault(table, {})[column] = (kind.lower(), value.strip())
+    return out
+
+
+MY_KEY_COLUMNS_SQL = """
+    select table_name, column_name from information_schema.statistics
+     where table_schema = %s and non_unique = 0
+    union
+    select table_name, column_name from information_schema.key_column_usage
+     where table_schema = %s and referenced_table_name is not null
+    union
+    select referenced_table_name, referenced_column_name
+      from information_schema.key_column_usage
+     where referenced_table_schema = %s and referenced_table_name is not null"""
+
+
+def _my_mask_facts(hop, db):
+    """({table: {column}} of every column in a primary or unique key, or in
+    a foreign key on either end, and {table: {column}} of every column) on
+    the source: what `mask_plan` holds a rule to."""
+    keys, columns = {}, {}
+    for t, c in _my_ask(hop, "src", MY_KEY_COLUMNS_SQL, (db, db, db)):
+        keys.setdefault(str(t), set()).add(str(c))
+    for t, c in _my_ask(hop, "src", "select table_name, column_name from"
+                                    " information_schema.columns"
+                                    " where table_schema = %s", (db,)):
+        columns.setdefault(str(t), set()).add(str(c))
+    return keys, columns
+
+
+def _streams_back(hop):
+    opts = getattr(hop, "options", None) or {}
+    topo = str(opts.get("topology") or "").lower()
+    return bool(opts.get("reverse") or opts.get("two_way")
+                or topo in ("two-way", "two_way", "bidirectional"))
+
+
+def mask_plan(hop, db, keys, columns=None):
+    """(sections, refused) for the hop's masking rules on `db`: the dump's
+    defaults-file lines per table, and [(table.column, why)] for every rule
+    that cannot be applied as asked.
+
+    A rule is applied only where it is exact (`MASKS`) and safe to run
+    again and to undo: not on a key - a masked key is not the row's key
+    any more, and a second run, the check and every table that references
+    it line rows up by it - and not on a hop that streams the target's
+    changes back, which would write masked values over the source's real
+    ones. `keys` and `columns` are `_my_mask_facts`' ({table: {column}});
+    with `columns` known, a rule naming a column the source does not have
+    is refused rather than left to mask nothing - a typo there hides
+    nothing and says it did. `columns` is None where a plan could not
+    ask."""
+    sections, refused = {}, []
+    back = _streams_back(hop)
+    for table, rules in mask_rules(hop, db).items():
+        for column, (kind, value) in sorted(rules.items()):
+            name = f"{table}.{column}"
+            if kind not in MASKS:
+                refused.append((name, f"`{kind or '(nothing)'}` is not a"
+                                " masking rule: null, constant <text> or"
+                                " random"))
+            elif not MASKS[kind]:
+                refused.append((name, "a random value cannot be held to"
+                                " anything after the load, and a second run"
+                                " writes another"))
+            elif kind == "constant" and ("'" in value or "\n" in value
+                                         or not value):
+                refused.append((name, "a constant must be text without"
+                                " quotes or line breaks"))
+            elif column in (keys or {}).get(table, set()):
+                refused.append((name, "it is part of a key: a masked key is"
+                                " not the row's key any more, and a second"
+                                " run, the check and every table that"
+                                " references it line rows up by it"))
+            elif back:
+                refused.append((name, "the hop streams the target's changes"
+                                " back to the source, which would write"
+                                " masked values over the real ones"))
+            elif columns is not None and column not in columns.get(table,
+                                                                   ()):
+                refused.append((name, "the source has no such column"))
+            else:
+                line = (f"`{column}` = null" if kind == "null"
+                        else f"`{column}` = constant '{value}'")
+                sections.setdefault(table, []).append(line)
+    return sections, refused
+
+
+def _masked_record(hop, db):
+    return hop.report_dir(db) / "bulk-masked.json"
+
+
+def masked_tables(hop, db):
+    """`db.table` of every table the move in progress masked on the way
+    and held to the rule (`_my_masked_held`): not a copy of its source, so
+    not compared whole. Read from what the move wrote once it had held
+    them, never from the rules alone - a table a rule names and nothing
+    masked is compared like any other."""
+    got = _read_json(_masked_record(hop, db)) or {}
+    began = _read_json(hop.report_dir(db) / "move-began.json") or {}
+    if not got or float(got.get("at") or 0) < float(began.get("epoch")
+                                                     or 0):
+        return set()
+    return {f"{db}.{t}" for t in got.get("tables") or ()}
+
+
+def _my_masked_held(hop, db, rules):
+    """[problem] for the masked tables: each holds as many rows as its
+    source does (through the row filter), and every masked column holds
+    exactly what the rule writes. Asked of the servers, so it can say a
+    table is not what the rule makes it - a column left unmasked, a row
+    missing."""
+    from .engines.mysql import MySQLEngine
+    eng = MySQLEngine(hop)
+    q = eng._quote_ident
+    ddb = eng._d("dst", db)
+    out = []
+    for table, cols in sorted(rules.items()):
+        where = hop.row_filter(db, table)
+        src = eng._q("src", f"select count(*) from {q(db)}.{q(table)}"
+                            + (f" where {where}" if where else ""))[0][0]
+        dst = eng._q("dst", f"select count(*) from {q(ddb)}.{q(table)}")[0][0]
+        if int(src) != int(dst):
+            out.append(f"{table}: {int(dst):,} rows where the source has"
+                       f" {int(src):,}")
+        for column, (kind, value) in sorted(cols.items()):
+            n = eng._q("dst", f"select count(*) from {q(ddb)}.{q(table)}"
+                              f" where not ({q(column)} <=> %s)",
+                       (None if kind == "null" else value,))[0][0]
+            if int(n):
+                out.append(f"{table}.{column}: {int(n):,} rows not masked"
+                           " as the hop asks")
+    return out
+
+
+# --- what the dump and the load say, table by table -------------------------
+
+def _my_ts(text):
+    """Seconds from the programs' JSON `ts`. Measured on 1.0.5: the
+    fraction is microseconds without their leading zeros - `.95765`
+    follows `.142985`'s second and means .095765, and read as a decimal it
+    put a chunk before the one that started it."""
+    m = re.match(r"(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(?:\.(\d+))?",
+                 str(text or ""))
+    if not m:
+        return None
+    y, mo, d, h, mi, s = (int(x) for x in m.groups()[:6])
+    return (time.mktime((y, mo, d, h, mi, s, 0, 0, -1))
+            + int(m.group(7) or 0) / 1e6)
+
+
+class _Spans:
+    """How long each table took, from events that mark where a thread
+    started a piece of it: a piece ends where the same thread says
+    anything next, or where the run ends."""
+
+    def __init__(self):
+        self.open, self.spans = {}, {}
+
+    def start(self, thread, table, at):
+        self.stop(thread, at)
+        self.open[thread] = (table, at)
+
+    def stop(self, thread, at):
+        got = self.open.pop(thread, None)
+        if got and at is not None and got[1] is not None:
+            lo, hi = self.spans.get(got[0], (got[1], at))
+            self.spans[got[0]] = (min(lo, got[1]), max(hi, at))
+
+    def end(self, at):
+        for thread in list(self.open):
+            self.stop(thread, at)
+
+    def seconds(self):
+        return {t: hi - lo for t, (lo, hi) in self.spans.items()}
+
+
+class _MyDumpLog(_JsonLog):
+    """The dump's `dump_table_progress` events: migkit's line once per
+    table, and how long each table's reading took (`spans`)."""
+
+    def __init__(self):
+        from .wording import Tally
+        self.tally = Tally(_SIZES)
+        self.spans = _Spans()
+        super().__init__(self._on)
+
+    def _on(self, event):
+        at = _my_ts(event.get("ts"))
+        thread = event.get("thread_id") or event.get("thread")
+        kind = event.get("event")
+        if kind in ("dump_completed", "dump_finished"):
+            self.spans.end(at)
+            return None
+        if kind != "dump_table_progress":
+            if thread:
+                self.spans.stop(thread, at)
+            return None
+        table = str(event.get("table") or "")
+        self.spans.start(thread, table, at)
+        name = f"{event.get('db')}.{table}"
+        total = str(event.get("tables_total") or "")
+        if total.isdigit():
+            self.tally.total = int(total)
+        so_far = self.tally.reached(name)
+        return f"{name}: reading ({so_far})" if so_far else None
+
+
+class _MyLoadLog(_JsonLog):
+    """The load's events: migkit's line once per table, how long each
+    table's loading took, each table's checksum pair (`sums`: {table:
+    (at the dump, after the load)}), and the `restore_completed` counts
+    (`summary`)."""
+
+    def __init__(self):
+        from .wording import Tally
+        self.tally = Tally(_SIZES)
+        self.spans = _Spans()
+        self.sums, self.summary = {}, {}
+        super().__init__(self._on)
+
+    def _on(self, event):
+        at = _my_ts(event.get("ts"))
+        thread = event.get("thread_id") or event.get("thread")
+        kind = event.get("event")
+        if kind == "restore_completed":
+            self.spans.end(at)
+            self.summary.update(event)
+            return None
+        if kind == "checksum_run":
+            self.spans.end(at)
+            return None
+        if kind == "checksum_check" and event.get("checksum_type") \
+                == "table_data" and event.get("status") in ("finished",
+                                                           "failed"):
+            self.sums[str(event.get("table"))] = (
+                str(event.get("expected_checksum")),
+                str(event.get("actual_checksum")))
+            return None
+        if kind != "restore_data_progress":
+            if thread:
+                self.spans.stop(thread, at)
+            return None
+        table = str(event.get("table") or "")
+        self.spans.start(thread, table, at)
+        name = f"{event.get('db')}.{table}"
+        so_far = self.tally.reached(name)
+        return f"{name}: loading ({so_far})" if so_far else None
+
+
+def _my_load_progress(summary):
+    """The MySQL load's `restore_data_progress` events, once per table,
+    and its `restore_completed` counts into `summary`."""
+    reader = _MyLoadLog()
+    reader.summary = summary
+    return reader
+
+
+def _my_dumped(outdir):
+    """{table: rows} the dump's metadata counted, per table."""
+    try:
+        text = (outdir / "metadata").read_text()
+    except OSError:
+        return {}
+    out = {}
+    for m in re.finditer(r"(?ms)^\[`[^`]*`\.`([^`]*)`\]\s*$(.*?)(?=^\[|\Z)",
+                         text):
+        rows = re.search(r"(?m)^rows\s*=\s*(\d+)", m.group(2))
+        if rows:
+            out[m.group(1)] = int(rows.group(1))
+    return out
+
+
+# --- the straight copy, driven through its own Python ---------------------
+
+#: The program run inside the straight copy's own Python, which is where its
+#: API lives (no package carries it). The secrets reach it through its
+#: environment, never argv or a file; it says how it ended on a line of its
+#: own, and its own messages go to its error stream, read by `_ShellLog`.
+SHELL_RUN = '''import json
+import os
+
+
+def said(**kw):
+    print("MIGKIT " + json.dumps(kw), flush=True)
+
+
+spec = json.loads(os.environ["MIGKIT_SPEC"])
+
+
+def side(name):
+    ep = dict(spec[name])
+    ep["password"] = os.environ.get("MIGKIT_" + name.upper() + "_PASSWORD",
+                                    "")
+    return ep
+
+
+try:
+    what = spec["what"]
+    shell.connect(side("target" if what == "load" else "source"))
+    if what == "copy":
+        util.copy_schemas([spec["db"]], side("target"), spec["options"])
+    elif what == "dump":
+        util.dump_schemas([spec["db"]], spec["dir"], spec["options"])
+    else:
+        util.load_dump(spec["dir"], spec["options"])
+    said(ok=True)
+except Exception as e:
+    said(ok=False, error=str(e))
+'''
+
+#: the straight copy's messages, in its own words: colour codes, a
+#: checksum that did not match, the load's warning count, a row a load
+#: refused, and the position the copy was consistent at
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_SHELL_SUM = re.compile(r"Checksum verification failed for: `(?P<db>[^`]+)`"
+                        r"\.`(?P<table>[^`]+)`")
+_SHELL_WARNED = re.compile(r"(?P<n>\d+) warnings were reported during the"
+                           r" load")
+_SHELL_REFUSED = re.compile(r"LOAD DATA error for `[^`]+`\.`(?P<table>[^`]+)`"
+                            r".*?error (?P<code>\d+): (?P<text>.*)$")
+_SHELL_AT = re.compile(r"^\s*(?P<key>Binlog_file|Binlog_position|"
+                       r"Executed_GTID_set):\s*(?P<value>\S*)\s*$")
+_SHELL_ROWS = re.compile(r"Rows written: (?P<n>\d+)")
+
+
+class _ShellLog:
+    """Reads the straight copy's output as it runs: the ending it says on
+    its own line, the tables whose checksum did not match, the load's
+    warnings and the first rows it refused, and the binlog position the
+    copy was consistent at. Nothing it prints reaches the operator."""
+
+    def __init__(self):
+        self.result, self.sums, self.warned = None, set(), 0
+        self.refused, self.position, self.rows = [], {}, None
+
+    def __call__(self, line):
+        line = _ANSI.sub("", line).rstrip("\n")
+        if line.startswith("MIGKIT "):
+            try:
+                self.result = json.loads(line[7:])
+            except ValueError:
+                pass
+            return None
+        m = _SHELL_SUM.search(line)
+        if m:
+            self.sums.add(m.group("table"))
+        m = _SHELL_WARNED.search(line)
+        if m:
+            self.warned = max(self.warned, int(m.group("n")))
+        m = _SHELL_REFUSED.search(line)
+        if m and len(self.refused) < 3:
+            self.refused.append(f"{m.group('table')}: ERROR"
+                                f" {m.group('code')}: {m.group('text')}")
+        m = _SHELL_AT.match(line)
+        if m:
+            self.position[m.group("key")] = m.group("value")
+        m = _SHELL_ROWS.search(line)
+        if m:
+            self.rows = int(m.group("n"))
+        return None
+
+    def failure(self):
+        said = (self.result or {}).get("error") or ""
+        return "; ".join([s for s in [said] + self.refused if s]) or None
+
+
+def _shell_endpoint(ep):
+    out = {"scheme": "mysql", "host": ep.host, "port": int(ep.port),
+           "user": ep.user}
+    out.update(_my_tls(ep, "mysqlsh"))
+    return out
+
+
+#: bytes a chunk of the straight copy holds, when nothing measured says
+#: otherwise: its own default
+SHELL_CHUNK = 64 * 2 ** 20
+#: chunks each worker is given of the largest table: measured, 16 MB
+#: chunks (about four a worker of the 222 MB table) copied both tables in
+#: 7.25 s against 9.89 s at the default 64 MB (`MY_BENCH`)
+SHELL_CHUNKS_PER_WORKER = 4
+#: the smallest chunk worth a query of its own
+SHELL_CHUNK_FLOOR = 4 * 2 ** 20
+
+
+def _shell_chunk(read_rate, workers, largest):
+    """Bytes per chunk: what one worker reads in `CHUNK_SECONDS`, no more
+    than the largest table split into `SHELL_CHUNKS_PER_WORKER` a worker,
+    and within `SHELL_CHUNK_FLOOR` and four times the program's default."""
+    workers = max(1, int(workers or 1))
+    size = int(read_rate / workers * CHUNK_SECONDS) \
+        if read_rate else SHELL_CHUNK
+    if largest:
+        size = min(size, int(largest) // (workers * SHELL_CHUNKS_PER_WORKER))
+    return max(SHELL_CHUNK_FLOOR, min(size, 4 * SHELL_CHUNK))
+
+
+def _shell_spec(hop, db, what, tables, workers, chunk, where=None,
+                folder=None, progress=None):
+    """What the straight copy is asked to do, without a secret in it."""
+    from .engines.mysql import MySQLEngine
+    ddb = MySQLEngine(hop)._d("dst", db)
+    opts = {"threads": int(workers), "showProgress": False,
+            "checksum": True}
+    if what in ("copy", "dump"):
+        opts.update({"dataOnly": True, "consistent": True,
+                     "bytesPerChunk": str(int(chunk)),
+                     "includeTables": [f"{db}.{t}" for t in tables]})
+        if where:
+            opts["where"] = {f"{db}.{t}": w for t, w in where.items()}
+    if what == "dump":
+        opts["compression"] = "zstd"
+    if what == "load":
+        opts.update({"progressFile": str(progress), "resetProgress": False,
+                     "loadDdl": False, "ignoreExistingObjects": True})
+    if what in ("copy", "load") and ddb != db:
+        opts["schema"] = ddb
+    if what == "copy":
+        opts["ignoreExistingObjects"] = True
+    spec = {"what": what, "db": db, "options": opts,
+            "source": _shell_endpoint(hop.source),
+            "target": _shell_endpoint(hop.target)}
+    if folder:
+        spec["dir"] = str(folder)
+    return spec
+
+
+def _shell_argv(script):
+    return ["mysqlsh", "--file", str(script)]
+
+
+def _shell_run(hop, db, spec, script, log=None):
+    """Run the straight copy once, as `spec` says. Returns its `_ShellLog`;
+    raises with the database's words when it failed for any reason but a
+    checksum that did not match, which the caller folds into the move's
+    verdict."""
+    import os
+    import tempfile
+    reader = _ShellLog()
+    with tempfile.TemporaryDirectory(prefix="migkit-") as home:
+        env = {"MIGKIT_SPEC": json.dumps(spec),
+               "MIGKIT_SOURCE_PASSWORD": str(hop.source.password or ""),
+               "MIGKIT_TARGET_PASSWORD": str(hop.target.password or ""),
+               # its history, log and settings in a place of its own that
+               # goes with the run, not under this user's home
+               "MYSQLSH_USER_CONFIG_HOME": home}
+        os.chmod(home, 0o700)
+        _sh(_shell_argv(script), env, log, progress=reader)
+    result = reader.result or {}
+    if result.get("ok"):
+        return reader
+    if reader.sums and "checksum" in str(result.get("error", "")).lower():
+        return reader
+    raise RuntimeError(reader.failure() or "the straight copy stopped"
+                       " without saying why")
+
+
+def _shell_position(reader):
+    """The binlog position the straight copy was consistent at, in the
+    shape `_my_dump_position` keeps; None where it said none."""
+    p = reader.position
+    if p.get("Binlog_file") and str(p.get("Binlog_position", "")).isdigit():
+        return {"log_file": p["Binlog_file"],
+                "log_pos": int(p["Binlog_position"]),
+                "gtid_set": p.get("Executed_GTID_set", "")}
+    return None
+
+
+def _shell_resume_record(hop, db):
+    return hop.report_dir(db) / "bulk-resume.json"
+
+
+def _my_source_at(hop):
+    """Where the source's binlog is now, file and position - to tell
+    whether a dump taken earlier is still the source's state."""
+    try:
+        got = _my_ask(hop, "src", "show binary log status")
+    except Exception:  # noqa: BLE001 - before 8.2 it had its old name
+        got = _my_ask(hop, "src", "show master status")
+    return ({"log_file": str(got[0][0]), "log_pos": int(got[0][1])}
+            if got else None)
+
+
+def _shell_dumped_at(folder):
+    """The binlog position the straight copy's dump was consistent at, from
+    its own metadata (`@.json`), in `_my_dump_position`'s shape."""
+    at = ((_read_json(folder / "@.json") or {}).get("source") or {}).get(
+        "binlog") or {}
+    if not at.get("file") or not str(at.get("position", "")).isdigit():
+        return None
+    return {"log_file": str(at["file"]), "log_pos": int(at["position"]),
+            "gtid_set": str(at.get("gtidExecuted") or "")}
+
+
+def _shell_resumable(hop, db, tables, folder):
+    """The kept record of a dump whose load stopped, when the next move can
+    go on from it: the dump finished, the same tables, and the source not
+    written to since - its binlog where the dump's snapshot left it. None
+    otherwise: a dump older than the source's last write would load
+    yesterday's rows over today's."""
+    rec = _read_json(_shell_resume_record(hop, db))
+    if not rec or sorted(rec.get("tables") or []) != sorted(tables):
+        return None
+    if not (folder / "@.done.json").exists():
+        return None
+    dumped = rec.get("position") or {}
+    try:
+        now = _my_source_at(hop)
+    except Exception:  # noqa: BLE001 - not known, so not resumed
+        return None
+    return rec if now and dumped.get("log_file") == now["log_file"] \
+        and dumped.get("log_pos") == now["log_pos"] else None
+
+
+def mydumper_move(hop, db, workers, go, log, only=None):
+    """The MySQL bulk copy: each table by the rung chosen for it
+    (`my_bulk_choice`), the parallel dump and load and the straight copy
+    one after the other, the table copier after both (`routed_to_copier`).
+
+    Dump, then empty the target, then load - in that order. The target is
+    emptied only once a complete dump is on disk, and once the straight
+    copy has shown it can read the source (its dry run): emptying it
     first, and then finding the source unreachable, hands back a target
     with nothing in it and nothing to load.
+
+    Each rung's own checksums are compared table by table - the dump's
+    against the load's, the straight copy's chunk by chunk - and a table
+    either says differs stops the move here, whatever the digest that
+    follows would say (`_held_to_the_source` runs it after, as for every
+    bulk path: the programs' checksums are a second reading beside it,
+    never instead of it). `only` limits the move to one rung
+    (`mysqlsh_move`).
     """
-    outdir = hop.report_dir(db) / "mydumper"
-    settings = mydumper_session(hop, db)
+    from .wording import Step, phase
+    root = hop.report_dir(db)
+    outdir = root / "mydumper"
+    shell_dir = root / "straight-copy"
+    script = root / "straight-copy.py"
     # beside the dump directory, not inside it: myloader is pointed at
     # that directory and has no reason to meet a file it does not read
-    cnf = hop.report_dir(db) / "mydumper-filters.cnf"
-    omit = hop.report_dir(db) / "omit-tables.txt"
-    skip, routed, unresolved = [], [], ""
-    if _routes_any(hop, db):
-        from .engines.mysql import MySQLEngine
+    cnf = root / "mydumper-filters.cnf"
+    omit = root / "omit-tables.txt"
+    via = "mysqlsh" if only == STREAM_COPY else "mydumper"
+    unresolved = ""
+    # a plan asks each server once, and not for long; the run asks directly
+    if go:
         try:
-            every = MySQLEngine(hop)._all_tables("src", db)
-            skip = excluded_tables(hop, db, every, qualifier=db)
-            # the table copier carries these after the load (the dump
-            # applies row filters itself, so only mapped columns route)
-            routed = [n for n in routed_to_copier(hop, db, "mydumper", every,
-                                                  qualifier=db)
-                      if n not in skip]
+            facts = my_table_facts(hop, db)
         except Exception as e:
-            unresolved = str(e).strip().splitlines()[0][:100] if str(e) \
-                else type(e).__name__
-    from .wording import Step, phase
-    dump, load = _mydumper_commands(hop, db, workers, outdir, cnf,
-                                    omit if skip or routed else None)
+            why = (str(e).strip().splitlines()[0][:100] if str(e).strip()
+                   else type(e).__name__)
+            if _routes_any(hop, db) or mask_rules(hop, db):
+                raise _unresolved_exclusion(db, why)
+            raise RuntimeError(f"the source's tables could not be read:"
+                               f" {why}. Nothing has been changed on the"
+                               " target")
+        logs = _my_target_logs(hop, quick=False)
+        available = my_rungs_available(hop, via)
+        missing = lambda: _my_missing_tables(hop, db)[0]  # noqa: E731
+    else:
+        facts = my_table_facts(hop, db, quick=True)
+        said = _within(lambda: _my_target_says(hop, db)) or {}
+        logs = said.get("logs")
+        available = my_rungs_available(hop, via, loads=said.get("loads"))
+        missing = lambda: said.get("missing")  # noqa: E731
+    every = sorted(facts) if facts is not None else None
+    skip, routed, choice = [], [], {}
+    if every is not None:
+        skip = excluded_tables(hop, db, every, qualifier=db)
+        choice = my_bulk_choice(hop, db, via, every, facts, fresh=True,
+                                available=available)
+        if go:
+            _persist_choice(hop, db, choice)
+        # the table copier carries these after the load: mapped columns,
+        # and the tables it is measured faster on (the dump applies row
+        # filters itself)
+        routed = [n for n in routed_to_copier(hop, db, via, every,
+                                              qualifier=db, choice=choice)
+                  if n not in skip]
+    elif _routes_any(hop, db) or mask_rules(hop, db):
+        unresolved = "no answer in time"
+    leaf = {f"{db}.{t}": t for t in (every or [])}
+    elsewhere = {leaf.get(n, n.rsplit(".", 1)[-1]) for n in skip + routed}
+    shell_tables = [t for t in every or () if t not in elsewhere
+                    and choice.get(t) and choice[t].rung == STREAM_COPY]
+    dump_tables = (None if every is None else
+                   [t for t in every if t not in elsewhere
+                    and t not in shell_tables])
+    rates = my_rates(hop, db)
+    # masking on the way: exact rules on columns outside every key, on a
+    # hop that sends nothing back; anything else stops the move before it
+    # writes, rather than copy the values the hop asked to hide
+    sections, refused, rules = {}, [], mask_rules(hop, db)
+    if rules:
+        keys, columns = (_within(lambda: _my_mask_facts(hop, db))
+                         or ({}, None)) if not go else _my_mask_facts(hop, db)
+        sections, refused = mask_plan(hop, db, keys, columns)
+        for t in rules:
+            c = choice.get(t)
+            if every is not None and t not in every:
+                # a rule on a name the source does not have masks nothing,
+                # and the operator believes something is hidden
+                refused.append((t, "the source has no such table"))
+            elif c is not None and c.rung != DUMP_LOAD \
+                    or f"{db}.{t}" in routed:
+                refused.append((t, "only the parallel dump masks on the way,"
+                                " and this table cannot go by it"))
+    read_rate = rates[DUMP_LOAD].get("read") or rates[DUMP_LOAD][PLAIN]
+    for t in dump_tables or ():
+        spec = my_chunk_rows((facts or {}).get(t), read_rate, workers)
+        if spec:
+            sections.setdefault(t, []).append(f"rows = {spec}")
+    settings = mydumper_session(hop, db, sections)
+    size = sum(int(((facts or {}).get(t) or {}).get("bytes") or 0)
+               for t in dump_tables or ())
+    import shutil
+    free = _disk_free(root)
+    # compressed where the dump would not fit beside a margin; written
+    # plain otherwise, which is faster (MY_BENCH)
+    compress = bool(free is not None and size and size * 1.5 > free)
+    dump, load = _mydumper_commands(
+        hop, db, workers, outdir, cnf,
+        omit if skip or routed or shell_tables else None, logs=bool(logs),
+        compress=compress)
     dump = Step(phase("dump", workers=workers, left_out=len(skip),
                       routed=len(routed),
                       row_filters=len(_filtered_here(hop, db))
                       if mydumper_defaults(hop, db) else 0), dump)
     load = Step(phase("load", workers=workers), load)
-    steps = [dump, _truncate_step(hop, db), load]
-    note = _create_note(lambda: _my_missing_tables(hop, db)[0])
+    # through a dump on disk, its load's progress kept for a stopped move
+    # to go on from - measured faster than reading and writing at once too
+    # (MY_BENCH); at once only where this machine cannot hold the dump
+    resumable = not _shell_direct(hop, db, facts)
+    where = {t: hop.row_filter(db, t) for t in shell_tables
+             if hop.row_filter(db, t)}
+    largest = max([int(((facts or {}).get(t) or {}).get("bytes") or 0)
+                   for t in shell_tables] or [0])
+    chunk = _shell_chunk(rates[STREAM_COPY].get("read"), workers, largest)
+    shell_said = (phase("dump", tables=len(shell_tables), workers=workers,
+                        row_filters=len(where)) + "; "
+                  + phase("load", workers=workers) if resumable else
+                  phase("stream-copy", tables=len(shell_tables),
+                        workers=workers, row_filters=len(where)))
+    shell = Step(shell_said, _shell_argv(script)) if shell_tables else None
+    steps = []
+    if dump_tables is None or dump_tables:
+        steps.append(dump)
+    steps.append(_truncate_step(hop, db))
+    if dump_tables is None or dump_tables:
+        steps.append(load)
+    if shell:
+        steps.append(shell)
+    note = _create_note(missing)
     if note:
         steps.insert(1, note)
     if skip:
@@ -2446,38 +3830,215 @@ def mydumper_move(hop, db, workers, go, log):
                         " dumped at all")
     if unresolved:
         steps.insert(1, _unresolved_note(unresolved))
+    for name, why in refused:
+        steps.insert(1, f"# {name}: cannot be masked on the way as the hop"
+                        f" asks - {why}. The move stops before it writes")
+    if rules and not refused:
+        steps.insert(1, f"# {len(rules)} tables are masked on the way: the"
+                        " target is not a copy of the source in those"
+                        " columns, so the move holds them to the masking"
+                        " rule and counts their rows instead of comparing"
+                        " them; the check compares whole rows and shows"
+                        " them as different")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
         raise _unresolved_exclusion(db, unresolved)
+    if refused:
+        raise SystemExit(
+            f"{db}: the hop asks to mask "
+            + "; ".join(f"{n} ({why})" for n, why in refused)
+            + ". Nothing has been written: fix the rule, or drop it to copy"
+              " the values as they are")
+    if any(not c.rung for c in choice.values()):
+        raise SystemExit(
+            f"{db}: " + "; ".join(f"{t}: {c.reason}" for t, c in
+                                  sorted(choice.items()) if not c.rung))
+    _masked_record(hop, db).unlink(missing_ok=True)
     cnf.write_text(settings)
     cnf.chmod(0o600)
-    if skip or routed:
-        omit.write_text("".join(f"{n}\n" for n in skip + routed))
-    with _LocalCopy(outdir):
-        if log:
-            log(dump)
-        _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
-            progress=_my_dump_progress())
-        from .engines.mysql import MySQLEngine
+    if skip or routed or shell_tables:
+        omit.write_text("".join(f"{n}\n" for n in
+                                skip + routed
+                                + [f"{db}.{t}" for t in shell_tables]))
+    import contextlib
+    from .engines.mysql import MySQLEngine
+    sums, spans, took = {}, {}, {}
+    shell_reader, resumed = None, None
+    with contextlib.ExitStack() as stack:
+        dumped = {}
+        if dump_tables:
+            stack.enter_context(_LocalCopy(outdir))
+            if log:
+                log(dump)
+            reading = _MyDumpLog()
+            began = time.monotonic()
+            _sh(dump.argv, {"MYSQL_PWD": hop.source.password}, log,
+                progress=reading)
+            took[DUMP_LOAD] = time.monotonic() - began
+            spans[DUMP_LOAD] = reading.spans.seconds()
+            dumped = _my_dumped(outdir)
+        if shell_tables:
+            script.write_text(SHELL_RUN)
+            script.chmod(0o600)
+            if resumable:
+                resumed = _shell_resumable(hop, db, shell_tables, shell_dir)
+                if resumed is None:
+                    # kept when the load stops, for the next move to go on
+                    # from (`_shell_resumable`); private, like every local
+                    # copy of the source, and gone once the load is done
+                    shutil.rmtree(shell_dir, ignore_errors=True)
+                    (root / "straight-copy.progress").unlink(missing_ok=True)
+                    shell_dir.mkdir(parents=True)
+                    shell_dir.chmod(0o700)
+                    if log:
+                        log(phase("dump", workers=workers,
+                                  tables=len(shell_tables)))
+                    began = time.monotonic()
+                    _shell_run(hop, db, _shell_spec(
+                        hop, db, "dump", shell_tables, workers, chunk,
+                        where, folder=shell_dir), script, log)
+                    took[STREAM_COPY] = time.monotonic() - began
+                    _write_json(_shell_resume_record(hop, db), {
+                        "tables": sorted(shell_tables),
+                        "position": _shell_dumped_at(shell_dir)})
+                elif log:
+                    log(f"{len(shell_tables)} tables go on loading from the"
+                        " copy an earlier move made and did not finish:"
+                        " the source has not been written to since")
+            else:
+                # before anything is emptied: the source can be read, the
+                # tables are there, the target takes the load
+                spec = _shell_spec(hop, db, "copy", shell_tables, workers,
+                                   chunk, where)
+                spec["options"]["dryRun"] = True
+                _shell_run(hop, db, spec, script, None)
         _my_create_missing(hop, db, log)
-        _my_truncate_target(hop, db, log)
-        summary = {}
+        _my_truncate_target(hop, db, log,
+                            spare=shell_tables if resumed else ())
+        loading = _MyLoadLog()
         with _MyTriggerWindow(hop, db, log), \
                 _MyIndexWindow(MySQLEngine(hop), hop, db, workers, log):
-            if log:
-                log(load)
-            _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
-                progress=_my_load_progress(summary))
-        errors = str(summary.get("errors") or "0")
+            if dump_tables:
+                if log:
+                    log(load)
+                began = time.monotonic()
+                _sh(load.argv, {"MYSQL_PWD": hop.target.password}, log,
+                    progress=loading)
+                took[DUMP_LOAD] = took.get(DUMP_LOAD, 0) + (
+                    time.monotonic() - began)
+                load_spans = loading.spans.seconds()
+                spans[DUMP_LOAD] = {
+                    t: spans[DUMP_LOAD].get(t, 0) + load_spans.get(t, 0)
+                    for t in set(spans[DUMP_LOAD]) | set(load_spans)}
+                sums = loading.sums
+            if shell_tables:
+                if log:
+                    log(shell)
+                began = time.monotonic()
+                if resumable:
+                    spec = _shell_spec(
+                        hop, db, "load", shell_tables, workers, chunk,
+                        folder=shell_dir,
+                        progress=root / "straight-copy.progress")
+                else:
+                    spec = _shell_spec(hop, db, "copy", shell_tables,
+                                       workers, chunk, where)
+                shell_reader = _shell_run(hop, db, spec, script, log)
+                took[STREAM_COPY] = took.get(STREAM_COPY, 0) + (
+                    time.monotonic() - began)
+                if resumable:
+                    # the dump's own count, per table and exact
+                    counted = ((_read_json(shell_dir / "@.done.json") or {})
+                               .get("tableRows") or {}).get(db) or {}
+                    if counted:
+                        shell_reader.rows = sum(int(n) for n in
+                                                counted.values())
+        errors = str(loading.summary.get("errors") or "0")
         if errors.isdigit() and int(errors):
             # the load's own count, which an exit code of 0 does not rule
             # out
             raise RuntimeError(f"the load counted {int(errors):,} errors")
+        differ = sorted(
+            [t for t, (a, b) in sums.items() if a != b and t not in rules]
+            + list(shell_reader.sums if shell_reader else ()))
+        if differ:
+            raise SystemExit(
+                f"{db}: the copy's own checksum of {len(differ)} tables"
+                " differs from the source's: " + ", ".join(differ[:8])
+                + (" ..." if len(differ) > 8 else "")
+                + ". Nothing has been marked as moved"
+                + (f"; the load reported {shell_reader.warned:,} warnings,"
+                   " the likely cause" if shell_reader
+                   and shell_reader.warned else "")
+                + ". A source written to while it was copied differs by"
+                  " what changed - move with --mode full+cdc for that;"
+                  " otherwise `migkit sync` puts the rows right")
+        not_compared = sorted(t for t in dumped if t not in sums
+                              and t not in rules)
+        if dump_tables and not_compared and log:
+            log(f"{len(not_compared)} tables had no checksum from the copy"
+                " to compare; the digest that follows compares them")
+        if rules:
+            held = {t: c for t, c in rules.items()
+                    if t in (dump_tables or ())}
+            wrong = _my_masked_held(hop, db, held)
+            if wrong:
+                raise SystemExit(f"{db}: the tables masked on the way are not"
+                                 " what the hop's rule makes them: "
+                                 + "; ".join(wrong[:6]))
+            _write_json(_masked_record(hop, db),
+                        {"at": time.time(), "tables": sorted(held)})
         if skip:
             _my_orphans_left(hop, db, log)
-        _my_dump_position(hop, db, outdir)
+        # the position the copy is a snapshot at, for a replica that follows
+        # it - only where one rung carried every table: two rungs are two
+        # snapshots, and neither position is the other's
+        if dump_tables and not shell_tables:
+            _my_dump_position(hop, db, outdir)
+        elif shell_tables and not dump_tables:
+            at = (_shell_dumped_at(shell_dir) if resumable
+                  else _shell_position(shell_reader))
+            if at:
+                (root / "dump-position.json").write_text(json.dumps(at))
+        if resumable:
+            _shell_resume_record(hop, db).unlink(missing_ok=True)
+            (root / "straight-copy.progress").unlink(missing_ok=True)
+            shutil.rmtree(shell_dir, ignore_errors=True)
+        if dump_tables:
+            _my_record_rates(hop, db, DUMP_LOAD, spans.get(DUMP_LOAD) or {},
+                             facts, wall=took.get(DUMP_LOAD))
+            if took.get(DUMP_LOAD) and log:
+                n = sum(dumped.values())
+                log(f"dumped and loaded {n:,} rows in"
+                    f" {_took(took[DUMP_LOAD])}"
+                    + (f" ({int(n / took[DUMP_LOAD]):,} rows/s)"
+                       if took[DUMP_LOAD] > 0 else ""))
+                for t, secs in sorted((spans.get(DUMP_LOAD) or {}).items()):
+                    if dumped.get(t) and secs > 0:
+                        log(f"{db}.{t}: {dumped[t]:,} rows,"
+                            f" {int(dumped[t] / secs):,} rows/s")
+        if shell_tables and took.get(STREAM_COPY):
+            if log and shell_reader and shell_reader.rows is not None:
+                log(f"copied {shell_reader.rows:,} rows"
+                    f" {'through a dump' if resumable else 'straight across'}"
+                    " in"
+                    f" {_took(took[STREAM_COPY])}"
+                    + (f" ({int(shell_reader.rows / took[STREAM_COPY]):,}"
+                       " rows/s)" if took[STREAM_COPY] > 0 else ""))
+            # it says nothing table by table: its time is shared out by
+            # size; a load that went on from an earlier dump is part of a
+            # copy, and teaches nothing
+            if resumed is None:
+                _my_record_rates(hop, db, STREAM_COPY, {
+                    t: float((facts.get(t) or {}).get("bytes") or 0)
+                    for t in shell_tables}, facts, wall=took[STREAM_COPY],
+                    suffix="" if resumable else DIRECT)
     return steps
+
+
+#: the MySQL bulk copy by the straight copy alone
+mysqlsh_move = functools.partial(mydumper_move, only=STREAM_COPY)
 
 
 def _my_dump_position(hop, db, outdir):
@@ -3968,25 +5529,30 @@ def stream_status(name, port=8083):
 
 def _movers():
     return {"pgdump": pgdump_move, "pgcopydb": pgcopydb_move,
-            "mydumper": mydumper_move, "pgloader": pgloader_move,
-            "mongodump": mongodump_move, "mongosync": mongosync_move,
-            "riotx": riotx_move, "native": native_move}
+            "mydumper": mydumper_move, "mysqlsh": mysqlsh_move,
+            "pgloader": pgloader_move, "mongodump": mongodump_move,
+            "mongosync": mongosync_move, "riotx": riotx_move,
+            "native": native_move}
 
 
 #: the programs each bulk path runs, in the order it runs them
 PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
             "pgcopydb": ("docker",),
             "mydumper": ("mydumper", "myloader"),
+            "mysqlsh": ("mysqlsh",),
             "pgloader": ("pgloader",),
             "mongodump": ("mongodump", "mongorestore"),
             "mongosync": ("mongosync",),
             "riotx": ("riotx",),
             "native": ()}
+#: the programs a bulk path runs besides those, where they are installed:
+#: the MySQL bulk copy carries the tables chosen for the straight copy by it
+ALSO = {"mydumper": ("mysqlsh",)}
 #: how a report names them: never by the program's own name
 ROLES = ("dump program", "load program")
 #: the builds each program was measured with here (backlog 46)
 MEASURED = {"pg_dump": "18.6", "pg_restore": "18.6",
-            "mydumper": "1.0.5", "myloader": "1.0.5",
+            "mydumper": "1.0.5", "myloader": "1.0.5", "mysqlsh": "26.7.1",
             "mongodump": "100.16.1", "mongorestore": "100.16.1",
             "mongosync": "1.21.0"}
 
@@ -4013,6 +5579,7 @@ def options_missing(hop, db, via):
     wrapped = [p for p in PROGRAMS.get(via, ()) if p in MEASURED]
     if not wrapped or not all(which(p) for p in wrapped):
         return out
+    wrapped += [p for p in ALSO.get(via, ()) if p in MEASURED and which(p)]
     for step in _movers()[via](hop, db, 1, False, None) or ():
         argv = getattr(step, "argv", None) or []
         # a piped step carries two programs
@@ -4040,6 +5607,8 @@ def options_missing(hop, db, via):
 
 
 def _role(via, program):
+    if program not in PROGRAMS[via]:
+        return _program_role(program)
     return ROLES[min(PROGRAMS[via].index(program), len(ROLES) - 1)]
 
 
@@ -4054,7 +5623,7 @@ def bulk_path_report(hop, db, via):
         # a flag the move chooses between spellings of, and this build has
         # none of them (`tool_flag`)
         missing, refused = {}, str(e)
-    for program in PROGRAMS.get(via, ()):
+    for program in PROGRAMS.get(via, ()) + ALSO.get(via, ()):
         if program not in MEASURED or not which(program):
             continue
         role = _role(via, program)

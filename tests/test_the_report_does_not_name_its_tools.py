@@ -44,7 +44,7 @@ TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "atlas", "liquibase", "pg_dump", "pg_restore", "mongorestore",
          "mongosync", "mysqldump", "sqlcmd", "riot", "redis-shake",
          "mirrormaker", "pgcompare", "ora2pg", "sqlines", "plpgsql_check",
-         "sqlglot", "pglast")
+         "sqlglot", "pglast", "mysqlsh", "mysql shell")
 
 
 def _engine(tmp_path):

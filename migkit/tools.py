@@ -39,6 +39,9 @@ PROGRAMS = {
     "atlas": ("", ""),
     "liquibase": ("", ""),
     "riotx": ("", ""),
+    # the brew package is an installer that asks for an administrator's
+    # password, and no apt repository of the defaults carries it
+    "mysqlsh": ("", ""),
     "sqlcmd": ("sqlcmd", ""),
     "docker": ("", ""),
 }
@@ -57,6 +60,9 @@ PROGRAM_LICENCES = {
     "pgloader": "PostgreSQL", "pt-table-sync": "GPL-2.0-only",
     "atlas": "LicenseRef-Atlas-EULA", "liquibase": "FSL-1.1-ALv2",
     "riotx": "BUSL-1.1", "sqlcmd": "MIT", "docker": "Apache-2.0",
+    # GPLv2 with the Universal FOSS Exception, driven as a program: its
+    # Python API lives only inside its own process (no package carries it)
+    "mysqlsh": "GPL-2.0-only",
     # the image migkit runs its version-matched PostgreSQL copy from
     "pgcopydb": "PostgreSQL",
 }
@@ -375,7 +381,7 @@ CAPABILITIES = [
      ["mysql"], ["pt-table-sync"]),
     ("MySQL: bulk move",
      "parallel load between MySQL databases",
-     ["mysqldump"], ["mydumper", "myloader"]),
+     ["mysqldump"], ["mydumper", "myloader", "mysqlsh"]),
     ("MongoDB: verify and repair",
      "compare documents and indexes",
      [], []),
@@ -528,11 +534,12 @@ def install_missing(log=print, ask=None):
 
 #: programs no package manager carries, fetched from their vendor at the
 #: build measured here: {program: version}
-VENDOR = {"atlas": "1.3.0", "liquibase": "5.0.4", "mongosync": "1.21.0",
-          "riotx": "1.15.1"}
+VENDOR = {"atlas": "1.3.0", "liquibase": "5.0.4", "mysqlsh": "26.7.1",
+          "mongosync": "1.21.0", "riotx": "1.15.1"}
 VENDOR_URL = "https://fastdl.mongodb.org/tools/mongosync/"
 #: where each other vendor publishes its builds, by version
 VENDOR_URLS = {
+    "mysqlsh": "https://dev.mysql.com/get/Downloads/MySQL-Shell/",
     "atlas": "https://release.ariga.io/atlas/",
     "liquibase": "https://github.com/liquibase/liquibase/releases/download/"
                  "v{version}/",
@@ -576,6 +583,23 @@ def vendor_file(program, open_build=False):
     if program == "liquibase":
         # Java, the same archive everywhere; it needs Java 17 on the path
         return f"liquibase-{version}.tar.gz"
+    if program == "mysqlsh":
+        # measured by asking the vendor for each (2026-09-28): one build
+        # per architecture for macOS 15, and for glibc 2.28 and later;
+        # kept whole, its libraries beside it (`install_vendor`)
+        if system == "Darwin":
+            return (f"mysql-shell-{version}-macos15-"
+                    f"{'arm64' if arm else 'x86-64bit'}.tar.gz")
+        libc, ver = platform.libc_ver()
+        try:
+            new_enough = libc == "glibc" and tuple(
+                int(x) for x in ver.split(".")[:2]) >= (2, 28)
+        except ValueError:
+            new_enough = False
+        if system != "Linux" or not (arm or x86) or not new_enough:
+            return None
+        return (f"mysql-shell-{version}-linux-glibc2.28-"
+                f"{'arm-64bit' if arm else 'x86-64bit'}.tar.gz")
     if program == "riotx":
         # built with its own runtime, per system
         name = {"Darwin": "osx", "Linux": "linux"}.get(system)

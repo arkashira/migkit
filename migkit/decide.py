@@ -72,6 +72,8 @@ WORDS = {
                         " cannot do",
     "online": "the source keeps taking writes while it is read, which"
               " {rung} cannot allow",
+    "masked on the way": "the hop masks its columns on the way, which"
+                         " {rung} cannot do",
 }
 
 

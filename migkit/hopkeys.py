@@ -129,6 +129,8 @@ HOP_OPTIONS = {
     "lob_scan_seconds": Key("the budget of the large-value scan", "int",
                             ("mysql",)),
     "mask": Key("values reports show as salted hashes", "str|list|bool"),
+    "mask_on_write": Key("table.column -> null or constant <text>: masked"
+                         " on the way into the target", "dict", ("mysql",)),
     "max_message_bytes": Key("the largest message a stream takes", "int",
                              STREAMS),
     "mongodb_entitlement": Key("atlas or enterprise: the MongoDB licence"

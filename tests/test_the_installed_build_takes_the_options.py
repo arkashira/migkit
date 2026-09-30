@@ -42,9 +42,14 @@ def test_the_builds_here_take_every_option(tmp_path, via, engine):
     hop = _hop(engine, tmp_path)
     assert movers.options_missing(hop, "appdb", via) == {}
     rows = movers.bulk_path_report(hop, "appdb", via)
-    assert [r[0] for r in rows] == ["pass", "pass"], rows
+    # the MySQL bulk copy also runs the straight copy, where it is here,
+    # for the tables chosen for it
+    also = [p for p in movers.ALSO.get(via, ()) if movers.which(p)]
+    assert [r[0] for r in rows] == ["pass", "pass"] + ["pass"] * len(also), \
+        rows
     assert rows[0][1].startswith("the dump program, "), rows
     assert rows[1][1].startswith("the load program, "), rows
+    assert all(r[1].startswith("the copy program, ") for r in rows[2:]), rows
     assert all("takes every option" in r[2] for r in rows), rows
 
 
@@ -110,8 +115,10 @@ def test_assess_carries_the_rows(tmp_path, older_dump_program, monkeypatch):
     from migkit.engines.mysql import MySQLEngine
     monkeypatch.delenv("MIGKIT_MOVER", raising=False)
     got = MySQLEngine(_hop("mysql", tmp_path))._bulk_path_rows()
+    also = [p for p in movers.ALSO["mydumper"] if movers.which(p)]
     assert [(r["level"], r["scope"]) for r in got] == [
-        ("fail", "bulk path"), ("pass", "bulk path")], got
+        ("fail", "bulk path"), ("pass", "bulk path")] \
+        + [("pass", "bulk path")] * len(also), got
 
 
 def test_a_build_with_none_of_a_flags_spellings_is_a_failed_row(

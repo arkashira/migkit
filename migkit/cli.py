@@ -1782,8 +1782,13 @@ def _held_to_the_source(hop, eng, d, log):
     if not (hop.options or {}).get("verify_batches", True):
         return
     log("comparing what arrived with the source")
+    from .movers import masked_tables
+    # a table the hop masks on the way is not a copy of its source: the
+    # move held it to the masking rule and counted its rows already
+    masked = masked_tables(hop, d)
     bad = [r for r in eng.check_data(d)
-           if r.check == "data" and r.status in ("diff", "error")]
+           if r.check == "data" and r.status in ("diff", "error")
+           and r.scope not in masked]
     if not bad:
         return
     raise SystemExit(
@@ -2496,6 +2501,13 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     _require_configured(hop)
     if go:
         hopkeys.refuse_writes(hop, "a move")
+    if mode != "full" and (hop.options or {}).get("mask_on_write"):
+        # the masking is the dump's; a change read after it is the source's
+        # own row, and would land unmasked
+        raise SystemExit(
+            f"{hop.name} masks columns on the way, and a change stream would"
+            " carry their real values into the target: a hop that masks is"
+            " copied (--mode full), not followed. Nothing has been started")
     eng = get_engine(hop)
     back_at_cutover, two_way = _topology(hop)
     from . import twoway

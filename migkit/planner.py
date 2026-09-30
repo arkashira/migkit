@@ -70,7 +70,7 @@ def ways(via):
             Rung(LEFT, WORDS[LEFT], gives=frozenset({LEFT})))
 
 
-def plan(hop, db, via, tables, qualifier="public", facts=None):
+def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
     """One `Decision` per table, in name order.
 
     `via` is the bulk path the database goes by; a table it cannot carry
@@ -78,9 +78,17 @@ def plan(hop, db, via, tables, qualifier="public", facts=None):
     answer, keyed like `tables`, or None where the engine gives none.
     What a table asks - to be left alone, its row filter applied, its
     columns mapped - is climbed against `ways(via)`.
+
+    The MySQL bulk copy then chooses among its own ways for a table the
+    bulk copy carries, from measured rates (`movers.my_bulk_choice`, or
+    `choice` where the caller has it): a table measured faster table by
+    table goes that way, and each says which way and the numbers why.
     """
     from . import movers
     from .decide import climb
+    if via in movers.MY_BULK and choice is None:
+        choice = movers.my_bulk_choice(hop, db, via, tables, quick=True)
+    choice = choice or {}
     facts = facts or {}
     filtered = bool(movers._filtered_here(hop, db))
     rungs = ways(via)
@@ -97,6 +105,12 @@ def plan(hop, db, via, tables, qualifier="public", facts=None):
                 else ()) + (("column mapping",)
                             if hop.column_rules(db, *parts) else ())
         got = climb(name, rungs, need=need)
+        mine = choice.get(parts[-1]) if got.path == BULK else None
+        if mine is not None and mine.rung:
+            out.append(Decision(name, COPIER if mine.rung
+                                == movers.TABLE_COPIER else BULK,
+                                mine.reason + about))
+            continue
         out.append(Decision(name, got.path,
                             got.reason + ("" if got.path == LEFT else about)))
     return out

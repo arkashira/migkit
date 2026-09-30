@@ -217,11 +217,25 @@ file that is not one. `test_a_check_does_not_write_to_the_target.py`.
 
 ### mydumper - the row filter is already there
 
-    used:     --threads, --no-schemas, --trx-tables (spelling asked
-              of the installed build), --omit-from-file, --defaults-file,
-              -B -h -P -u -o -d; password in MYSQL_PWD, never on argv
-    unopened: -x/--regex (db.table matching), --rows (chunked parallel
-              per table)
+    used:     --threads, --max-threads-per-table, --no-schemas,
+              --trx-tables (spelling asked of the installed build),
+              --omit-from-file, --defaults-file (sql_mode, and per
+              table its where, rows and masking), --checksum-all on
+              both sides with the load's --checksum warn read table by
+              table, --compress zstd where the disk is short, TLS from
+              the endpoint, --machine-log-json read into per-table
+              rates; -B -h -P -u -o -d; password in MYSQL_PWD
+    unopened: -x/--regex (db.table matching), --optimize-keys (the move
+              makes the tables itself), --stream, --disable-redo-log
+
+2026-09-28: every feature's state and reason is kept beside the command
+builders, `movers.TOOL_USE`, with the MySQL Shell's (dump and load
+through its own Python, the load resumable, its checksums; the straight
+copy where the disk cannot hold a dump) - and the dump and load, the Shell
+and migkit's table copier are rungs chosen per table from measured rates
+(`movers.my_bulk_choice`, numbers in `movers.MY_BENCH`).
+`test_the_mysql_bulk_tools_used_whole.py`,
+`test_the_mysql_bulk_rungs_run.py`.
 
 `--where` is now wired: a generated defaults file gives mydumper one
 section per table, verified on a live dump (2 of 3 rows where a rule
