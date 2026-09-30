@@ -3,7 +3,7 @@ class Migkit < Formula
 
   desc "Verify, repair, and move databases across engines"
   homepage "https://github.com/arkashira/migkit"
-  license "MIT"
+  license "AGPL-3.0-or-later"
   head "https://github.com/arkashira/migkit.git", branch: "master"
 
   # Filled in by `brew create --python https://files.pythonhosted.org/...`

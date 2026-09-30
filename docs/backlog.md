@@ -2867,6 +2867,490 @@ is migrated." The cases, what migkit has (at fb5c988), what is missing:
 
 Every case is a `goal:` or a fact the decision engine reads, explained in
 `docs/goals-and-modes.md`; the plan names the case it recognised.
+## P0-AUDIT. What is still flat, slow or inconsistent (2026-10-01)
+
+Asked: "evaluate everything else too - not only the engines - whatever is
+still flat, not smart, not fast, not consistent: make it the best; put it
+in the backlog, then implement". Read at 5e30188 in ten areas; every finding
+with its file, lines, evidence (measured in-process where the code is pure)
+and fix is in `docs/research/flat-audit-2026-10-01.md` - the IDs below (V,
+ST, K, SEC, W, SC, SP, DU, LG, T) are that document's. Left out as already
+known: P0-SMART, P0-DEPTH, P0-PARITY, the cutover gaps, R23's rest, engine
+reach, the one table-way ladder.
+
+The worst of it: "same" is decided in four places that disagree (an empty
+answer set is `same`; the report renderer turns a `diff` into `ok` in the
+dicts the exit code is computed from; the dashboard pages on clean runs);
+three write paths skip the guards `move` enforces; nothing is written
+durably (three fsyncs in the tree, the tail's position rewritten in place
+every batch); the pair's schema check compares by class and misses
+narrowing, SQL Server's never compares a column; the hop's TLS is dropped on
+the main data paths while `doctor` says verified; typos in a hop load clean
+and turn approvals and column drops off; stopping migkit leaves programs
+writing; one process or connection per catalogue query; and the final suite
+as it stands is ~3.5-4.5 h serial with no timeout.
+
+Fixed during the audit (one-liners): `doctor`'s engine lookup on
+cross-engine hops (K8), the change-stream REST port bound to 127.0.0.1
+(SEC1), the Homebrew licence, `deploy/conf/` ignored (W5).
+
+**How the groups run.** One agent a group; within a wave the groups' files
+are disjoint. Wave 0 lays the shared helpers the rest use. Wave 2 takes
+files wave 1 held. The test migration and the sweep run last, when nothing
+else edits tests. Files running work also edits are named per group;
+start that group after the running work merges or leave those hunks to it.
+Tests are written with each item and run once in the final suite (the
+owner's rule); every verdict touched is proved able to say "different".
+
+### Wave 0
+
+**AUD-0. The shared helpers (S-M, first).** Files: `migkit/durable.py`
+(new), `migkit/envkeys.py` (new), `migkit/redact.py` (new),
+`migkit/catalog.py` (new), `migkit/util.py`, `migkit/wording.py`,
+`migkit/config.py` (the `Endpoint` renderers only).
+* `durable.write_atomic(path, data, mode=0o600)` (unique `O_EXCL` temp,
+  fsync, `os.replace`, directory fsync, `F_FULLFSYNC` where asked),
+  `append_line` (truncates a torn tail first), `read_state(path, kind)` with
+  one torn-file policy per kind (positions and undo journals stop naming the
+  file; caches read as absent), `private_dir` 0700 (ST1, ST9, ST15, SEC10).
+* `envkeys`: every `MIGKIT_*` variable declared with its type, default and
+  words; `flag()` (`1/true/yes/on`, `0/false/no/off`, anything else an
+  error), `number()`, `text()`; one error naming the variable; did-you-mean
+  for an unknown `MIGKIT_*` at start-up; a generated reference table (K13).
+* `redact.Redactor(hop)`: every resolved secret with its URL-encoded,
+  shell-quoted and SQL-escaped forms, shape rules (userinfo up to the last
+  `@`, `password=`/`PWD=`, `IDENTIFIED BY '...'`, `PASSWORD '...'`,
+  `masterauth x`), one `SECRET_KEY` pattern; `wording.redact` and
+  `util.without_secret` become calls to it (SEC12, DU9).
+* `config.Endpoint.url(scheme, db, tls=True)` (`quote(..., safe='')` for
+  user and password, IPv6 brackets, the TLS query) and `Endpoint.tls_forms()`
+  rendering the resolved TLS decision as libpq env, URI query, subscription
+  conninfo, MySQL `SOURCE_SSL*`, `REQUIRE SSL`, bulk-program flags and
+  Debezium fields (SEC2, DU8, SC17).
+* `util.stamp()` UTC ISO with zone (DU21); `wording._duration` the one
+  duration formatter, `util.human_secs` delegating (DU10); one bytes
+  formatter with honest units (DU24); `util.split_table(engine, name)` /
+  `qualify()` (DU14); `util.with_retry` the one retry policy, with
+  `writes=True` retrying only failures while connecting (DU11, W11);
+  `util.run`'s error without the argv (W3).
+* `catalog.py`: the shapes wave 1 and 2 share - `Catalog(tables, columns
+  {table: [(name, declared, cls, nullable, default, collation)]}, keys,
+  indexes, fks)` and `Shape {table: fingerprint}` - so AUD-F's drift,
+  AUD-G1/G2's one-query readers and AUD-H's consumers meet on one type
+  (SC3, SC15).
+* `util.Probes`: what a deep check planned to read and what it could not,
+  turned into the result's status and words ("compared 12 of 30 columns;
+  not read: a.b (timeout)"), so no deep check says `ok` over a failed read
+  (LG2).
+
+### Wave 1 (disjoint files)
+
+**AUD-A. One verdict, one exit code, one write guard (P0, L).** Files:
+`migkit/cli.py`, `migkit/verdict.py`, `migkit/report.py`,
+`migkit/integrations.py`, `migkit/session.py`, `migkit/schedule.py`,
+`migkit/interlock.py`, `migkit/guide.py`, `migkit/approvals.py`,
+`migkit/ranges.py`.
+* `verdict.decide(records) -> (status, exit code, severity per row)` and one
+  `VERDICTS` table (word, exit code, colour, metric value) used by the check
+  exit code, the report, `watch`, `sync`, `integrations.passed`; delete
+  `report._reclassify` and `report --refresh`'s rewrite; no live result dicts
+  to a renderer; empty or all-skip is `incomplete`; a failed watch cycle is
+  an `error` row; unknown `--only` names a usage error (V1, V2, DU2, LG11).
+* Exit codes 0 same/done, 1 different, 2 usage, 3 could not verify or
+  incomplete, 4 refused by a guard, 130 interrupted, mapped once in
+  `_Step.invoke`; the scheduled check and `schedule.run` read the same table
+  (V6).
+* `_Step.invoke` owns: the error handling `_move_run` has today for every
+  command (scrubbed through `export.words`/`redact`, the traceback to the
+  debug log), SIGTERM as Ctrl-C, the schedule gate (`NotDue`, nested invokes
+  skip it, every skip logged) (V7, W1, K4).
+* One `_guard_write` (refuse_writes, masking, approvals, interlock,
+  protect_target) for every writing entry point; `tail`/`replicate` thin
+  wrappers; `sync --mode migrate/stream` = `_move_run(full+cdc)` + the one
+  check; `sync --go` = restore point + `_repair(do_apply=True)` + the check,
+  exit from the re-check (V3, V4, V5, ST3).
+* Dry run reads what `--go` reads (`attempt(..., record=go)` - additive in
+  `decide.py`, P0-SMART's file) and runs the guards in "say, don't stop"
+  mode (V9); `run_checks()` shared by check, `watch --verify` and `sync`
+  (V13); resumed rows carry `reused_from` (V10); markup escaped,
+  `soft_wrap=True` (V8); `watch` SAFE only after a delta or consistent verify
+  (V14); flags validated per command, `-q` by level not substring (LG12
+  cli part); rollback under one lock, thaw last;
+  `history` from the state store; `init` updates the hop with the same two
+  addresses (V15); CLI text in migkit's words (V16, V17); `doctor` parallel
+  across hops and sides, one engine each, `init` reusing its facts (V12).
+* `on_conflict` from the hop unless the flag is given (K3); schedule slot
+  held by a lease, per-hop try/except, due slots run concurrently (K5, K6);
+  approvals: the requester identified by key, `max(1, count)`, step names
+  checked (K9); `interlock` keeps its answer per (hop, db, run) (V11).
+* The move checkpoint: position kept before the copy on every resume
+  (`_first_point`), an append-only per-table progress journal instead of
+  rewriting `move.json` twice a range, compact JSON, mutations under the lock
+  (ST4, ST17, ST24, SP4); `convert-schema --apply` in one transaction on
+  PostgreSQL and recording `built-tables.json` (SC21, SC7); the time
+  recorded under the way that ran (W10).
+* Running work: `decide.py` (P0-SMART) for `record=go`; `cutover.py`
+  (cutover gaps) must call `verdict.decide` so an all-skip check never flips.
+
+**AUD-B. Durable tail state and one follow loop (P0, L).** Files:
+`migkit/engines/hetero.py` (the tail), `migkit/tailtables.py`,
+`migkit/tailctl.py`, `migkit/marks.py`, `migkit/kept.py`, `migkit/lease.py`,
+`migkit/locks.py`, `migkit/setaside.py`, `migkit/state.py`,
+`migkit/checkpoint.py`, `migkit/audit.py`, `migkit/evidence.py`,
+`migkit/repairlog.py`, `migkit/jobs.py`, `migkit/twoway.py`,
+`migkit/engines/copybook.py`, `migkit/engines/kafka.py`,
+`migkit/engines/mongodb.py`.
+* The tail's token, table states, accounts and spool frames as rows of the
+  tail's SQLite, one transaction a batch; one `Position` envelope
+  `{v, engine, source, position, batch, rung, next}` written once, its path
+  computed in one place; every other state file through `durable` (ST1,
+  ST19, ST21, ST9).
+* Two-way exact batches never applied twice after a lost token (ST2; after
+  the conflict-resolution work merges); the tail state mirrored whole with a
+  generation, the higher wins (ST5); copybook batch index written before the
+  data (ST6); spools indexed by the range they wait on, released rows deleted
+  (ST18); spool names with a hash (ST25).
+* One lease per tail scope, `tailctl.alive` = a live lease holder, one
+  `liveness(record)` over (host, pid, expires) with the beat age for another
+  host, lease loss raised in the write loops (ST8, ST10, ST11).
+* One `tailctl.run_loop(look)` for the cross-engine, ClickHouse, OpenSearch,
+  Cassandra, MongoDB and Kafka tails: stop, until, pause, beat, retry,
+  SIGTERM, save; one `until()` reader, the slot's end honoured everywhere
+  (ST14, K14).
+* Undo journals durable, a torn last line tolerated; `_LineSealer.flush`;
+  `EvidencePath.open` seals every mode or refuses; one sealing policy
+  (`at_rest`) for restore points too; restore points committed by rename with
+  a unique name; versions and migrations for every state file and
+  `pragma user_version` (ST12, ST13, ST15, ST20, ST22, SEC9 evidence part).
+* The audit chain: torn tail repaired or marked, the opening stretch bound,
+  the head hash in the anchor (ST16, SEC15); `state.backend` read once
+  (K10); `checkpoint.json` merged under a lock (ST23); spool frames not
+  pickled (SEC21).
+* Tail speed: the copied-ranges check precomputed per entry and retired once
+  the tail is past every mark (SP3, without changing `ranges.place`); the
+  schema poll by one fingerprint, skipped where the change stream carries DDL
+  (SP8); idle back-off and a 50 ms fence check (SP10); the row filter's
+  translation cached (SP12); kept proof with per-table converters, batched
+  leaf reads, a stale-since flag instead of rewriting leaves (SP7); MongoDB
+  and Kafka fences without a fixed second (SP19).
+* MongoDB's sharding deep check says what it could not read (LG2, its part).
+* Running work: `twoway.py` (conflict resolution), `repairlog.py` (repair
+  ladder).
+
+**AUD-C. The dashboard, metrics, the run log and what leaves the machine
+(P0/P1, L).** Files: `migkit/ui.py`, `migkit/notify.py`, `migkit/traces.py`,
+`migkit/digests.py`, `migkit/export.py`, `migkit/diagnostics.py`,
+`migkit/tls.py`, `migkit/tunnel.py`, `migkit/assist.py`,
+`migkit/storedcode/model.py`, `migkit/capabilities.py`,
+`migkit/troubleshooting.py`, `migkit/runlog.py` (new),
+`deploy/docker-compose.yml`, `deploy/grafana/`,
+`deploy/prometheus-alerts.yml`, `deploy/README.md`, `docs/threat-model.md`,
+`SECURITY.md`, `docs/troubleshooting.md`.
+* The dashboard and `/metrics` read `verdict.json`; a state-set
+  `migkit_verdict{status}`; a background collector with a cached snapshot,
+  its age and errors exported; stream metrics per hop's own connector;
+  digests paired within one run; metric families renamed (counters `_total`,
+  no `quantile` label, stable key labels, one escaping sample helper) with a
+  deprecation period and a lint test (LG1, LG6 ui part, LG7, LG8, LG9).
+* The header sign-in needs a proxy secret; the hold/resume path checked
+  against its hop's own directory; buttons built without inline script and a
+  CSP; `/metrics` behind a token and `access:` roles; the deploy's bind
+  address and mounts fixed (SEC5, SEC6, SEC7, SEC16, LG10).
+* `runlog.py`: one JSON line per event `{ts, run, hop, db, table, phase,
+  level, event, msg}` in `reports/<hop>/runs/<run>.jsonl`; library records
+  routed into it; diagnostics include it and `commands.log`; append-only
+  files rotated with the chain head carried (LG5, LG12 library part, LG13).
+  The console is routed through it by the sweep.
+* `export`, `notify` and `diagnostics` redact through `redact.Redactor`;
+  failure notifications carry the error kind unless `notify.detail`; a
+  non-HTTPS model URL refused; failed digest writes counted into the
+  evidence; `export.left_anything` by a per-run marker (SEC12, SEC20, LG4,
+  K23).
+* Only an SSH tunnel counts as local for TLS; every networked engine in the
+  posture, "unknown" as a warning (SEC17, SEC18 tls part).
+* `capabilities`: the stale Kafka cell, probing only the named engine,
+  `decide`'s duplicate gap words folded in (DU17, SP17, LG14); the
+  troubleshooting guide regenerated and a pre-commit hook for the
+  generators (LG14); the threat model says what leaves the machine.
+
+**AUD-D. Options, environment and addresses checked at load (P0, M-L).**
+Files: `migkit/config.py`, `migkit/hopkeys.py`, `migkit/addresses.py`,
+`migkit/imports.py`, `migkit/clouds.py`, `migkit/rules.py`,
+`migkit/registry.py`, `migkit/zones.py`, `migkit/engines/__init__.py`,
+`migkit/engines/oracle_logminer.py` and `migkit/engines/warehouse.py` (one
+line each).
+* `Key(choices=, check=, default=, kind="secret")`; every owning module's
+  validator called at load; unknown sub-keys errors; `cutover.pooler.*` and
+  `mapping.columns.<t>.*` declared; `hopkeys.opt()` the one reader of a
+  default; `hopkeys.topology()`/`reverse()` (K1, K15, K20).
+* One YAML loader refusing duplicate keys, `CSafeLoader` (K2); secrets
+  resolved lazily, once, cached, with errors naming `hops.<hop>.<side>.<key>`,
+  option secrets included; `get_hop` builds only the named hop, memo by
+  mtime (K7, K12, SEC11); Vault over HTTP with KV v1/v2, one error format
+  for every secret store (K22).
+* The state root from `XDG_STATE_HOME` (or beside the config), never the
+  working directory; report directories 0700 (ST7, SEC10).
+* The canonical engine name stored on the hop (brand kept apart), aliases
+  and schemes one table, default ports one table in `engines/__init__.py`
+  for every engine (DU6);
+  `Hop.excluded` absorbs `noise_prefix` and other tools' tables (DU16);
+  migkit's own tables by one exact rule (DU26, config part).
+* Imports: filters quoted through each side's own helpers, an `include:` key
+  of patterns, a note for every dropped pattern (DU4, K16); addresses with a
+  secret reference holding `/` (K17); cloud detection by settings that cannot
+  be copied, roles as a hint (K18); business rules by `Counter`, a one-sided
+  rule an error (K19); `zones.infer` both directions; `get_hop`
+  did-you-mean (K24).
+* Every `MIGKIT_*` read in these files through `envkeys` (K13); the
+  warehouse builder passes `key` to `ddl_type` (SC6, its line).
+
+**AUD-E. External programs: one runner, stop means stop, pinned installs,
+the offline bundle (P0/P1, L).** Files: `migkit/runner.py` (new),
+`migkit/movers.py`, `migkit/stall.py`, `migkit/tools.py`,
+`migkit/tooluse.py`, `migkit/toolversion.py`, `migkit/redisshake.py`,
+`migkit/mirror.py`, `migkit/dsbulk.py`, `migkit/fromsnapshot.py`,
+`migkit/ddbexport.py`, `migkit/physical.py`, `migkit/cloudseed.py`,
+`migkit/second_reader.py`, `migkit/runners/second_reader.py`,
+`migkit/verifiers.py`, `migkit/bulkways.py`, `migkit/tableways.py`,
+`deploy/Dockerfile`, `.dockerignore` (new), `packaging/homebrew/migkit.rb`,
+`.github/workflows/wrapped-programs.yml`,
+`tests/test_the_report_does_not_name_its_tools.py`.
+* `runner.py`: every program started in its own session, stopped by process
+  group, `PR_SET_PDEATHSIG` on Linux, containers named and removed on exit
+  and before the next start, registered by create time, timeouts and a stall
+  limit fed by the progress readers, output read as it comes, remote scripts
+  under a lock with a pidfile; `classify(rc, text)` -> Refused / Blocked /
+  Transient through `wording.database_words`; all 62 direct spawns moved onto
+  it (W1 per-site handlers removed, W2, W9, W12, W20).
+* The tool registry the one source (install recipe, lock entry, version
+  probe cached on realpath+mtime, role word, image digest, terms); the side
+  tables, `DRIVEN`, the leak test's TOOLS, the Dockerfile and the formula
+  generated from it; the leak test reads f-strings, exception constructors
+  and runtime output (W3 movers part, W4, W13, W14).
+* A lock file `{version, url, sha256, size}` per program and platform,
+  verified before extracting; images by digest; the second reader with
+  `--require-hashes`; `doctor --install` replaces a build outside the range;
+  installs batched and atomic; `atlas version` offline with a timeout; the
+  Dockerfile from the lock, closed builds only with accepted terms, a
+  `.dockerignore` (W5, W6, W8, W22, W23, SEC14).
+* W8: the bundle built into a directory with `SHA256SUMS` and signed
+  (`MIGKIT_BUNDLE_BUILD=<dir>` on `doctor --install`, no new mode),
+  `MIGKIT_BUNDLE=<dir>` read by every installer, `docker load` and the
+  second reader, a CI job with no way out, the Windows blockers removed
+  (W7).
+* Stream secrets through Kafka Connect's env provider (SEC1 rest); TLS from
+  `Endpoint.tls_forms()` on the streaming copy, clone, follow, CLONE, the
+  page copy, pgloader, Debezium and the MySQL bulk programs including the
+  automatic answer (SEC2 movers/physical part); secret files through
+  `PrivateFile` with unique names, container secrets through `--env-file`
+  (W19); file names from table names sanitised (SEC19 movers part).
+* Wrappers resumable: the snapshot reader keeps its working state and runs
+  readers in parallel; DynamoDB export idempotent by `ClientToken`, its ARN
+  kept, `try/finally` forget; dumps kept with a manifest and resumed by TOC
+  (W16); flags checked on the exact argv, not a second dry run (W17);
+  machine output read where it exists (W18); the dump fallback a rung or
+  `Blocked`, recorded as itself (W10 movers part); stream readings filtered by
+  hop (LG6 movers part); RedisShake's key filter from migkit's own
+  matcher (DU25); post-data restored with `-j`, privileges restored
+  when the roles exist, missing MySQL tables on one connection (SC21, SC11
+  movers part).
+* Running work: `movers.py` (the table-way ladder) - start after it merges.
+
+**AUD-F. Schema, drift, users and grants (P0, L).** Files:
+`migkit/users.py`, `migkit/dba.py`, `migkit/ddl.py`, `migkit/logddl.py`,
+`migkit/drift.py`, `migkit/unchanged.py`, `migkit/indexes.py`,
+`migkit/leftovers.py`, `migkit/variants.py`, `migkit/engines/mssql.py`,
+`migkit/storedcode/pg_mysql.py`, `migkit/storedcode/mysql_pg.py`,
+`migkit/canon.py`.
+* Drift by `shape_catalog(side, db)`: one query per side, a per-table
+  fingerprint (types with length and precision, nullability, defaults,
+  collation, indexes, constraints, triggers), differing tables explained; the
+  interface here, PostgreSQL and MySQL implementations by AUD-G1/G2, SQL
+  Server here (SC3); `drift.transient` built once (SP1); drift and leftovers
+  on `Hop.excluded` (DU16).
+* SQL Server: columns, index columns and foreign-key columns compared (SC2);
+  permissions rendered by class with `minor_id`, WITH GRANT OPTION kept, SIDs
+  compared, policy flags carried (SC12); databases filtered by `exclude`
+  (DU15); one kept connection instead of a `sqlcmd` per query (W15 mssql);
+  its own `ok` when the drilldown finds nothing (V1 mssql part); hints in
+  migkit's words (W3).
+* Users: names through each engine's quoting (SEC3); roles first in
+  dependency order, a per-statement ledger, attributes, memberships, role
+  edges and default roles compared, `create` ending with `compare()` (SC9);
+  one result shape and correct hints, `_pg_conn(dbname=)`, `compare` returns
+  both sides, "passwords not compared" where hashes cannot be read (SC22); one
+  `system_principals(engine)` (DU13).
+* Logged DDL: partition truncate/drop/exchange/reorganize classified as
+  truncate-like, comma lists split (SC19); `needs_backfill` per clause (SC20).
+* `canon`: `citext`, exact-width integers per pair, a `limits(side)`
+  interface (identifier length, key bytes, row format, charset,
+  `max_string_size`, auth plugins, keywords) for `ddl_type`; routines typed
+  through `canon.ddl_type` with one collation per column (SC5 canon part,
+  SC13, SC18); `sql_rows` with a writer per column, `digest_step` and
+  `uuid_text` faster (SP14, SP18 canon part); version parsing in one place
+  (DU23).
+* Running work: `canon.py` (P0-PARITY large values).
+
+**AUD-G1. The PostgreSQL engine: one connection, one catalogue read, one
+quoting (P0, L).** Files: `migkit/engines/postgres.py`,
+`migkit/engines/pg_pass.py`, `migkit/legs.py`.
+* One `_connect(side, db, purpose)` (timeouts, keepalive, `TimeZone=UTC`,
+  TLS from `Endpoint`), a kept connection per side and thread, the
+  catalogue, fence and marker queries through it, `psql` only for `\copy`
+  and meta-commands; the target mapped once, inside (DU3, DU12, SP2, W15,
+  SP10, SP19 its part).
+* `catalog(side, db)` (the `catalog.Catalog` shape) in one query per side
+  and cached per run;
+  `shape_catalog` for drift; one `user_tables(side, db, kinds)`; one
+  `row_estimate` with None for unknown; key order from `neutral_key`
+  everywhere; the "unchanged" marker with the shape and in one query per
+  side (SC15, SC3, DU5, DU18, DU19, SC4).
+* Grants: one `aclexplode` read over tables, sequences, schemas, databases,
+  functions, columns and default ACLs with `is_grantable` (SC11); one
+  authoritative structural comparer, the others "not run: why" (SC16).
+* Native replication through `legs`' builder (sslmode, literal escaping,
+  `log_statement` off); structural diff URL from `Endpoint.url`; builders
+  pass `key` to `ddl_type`; identifiers through `_quote_ident` with a lint
+  test for the file; repair undo through stdout into `EvidencePath`; file
+  names sanitised; deep checks that could not read say so (SEC2, SEC13,
+  SC17, SC6, SEC4, SEC9, SEC19, LG2 its part); migkit's own tables by the one
+  rule (DU26).
+* Running work: `pg_pass.py` (the table-way ladder), the repair paths
+  (repair ladder).
+
+**AUD-G2. The MySQL engine: the same (P0, L).** Files:
+`migkit/engines/mysql.py`, `migkit/engines/my_pass.py`.
+* One `_connect` (read timeout, keepalive, UTC pinned for rules too, TLS
+  from `Endpoint`), a kept connection per side and thread, the key read once
+  per table (DU12, SP2).
+* Grants from `mysql.user`, `db`, `tables_priv`, `columns_priv`,
+  `procs_priv`, `role_edges`, `default_roles` in seven queries per side,
+  cached (SC10); MariaDB defaults read as MariaDB writes them (SC14); one
+  authoritative structural comparer, atlas demoting only the kinds it
+  inspected (SC16); `catalog`/`shape_catalog` (the `catalog` shapes) in
+  one query per side (SC15, SC3).
+* Native replication with `SOURCE_SSL*` and no `GET_SOURCE_PUBLIC_KEY` under
+  SSL; the schema dump with the client TLS; URLs from `Endpoint.url`; 175
+  raw backtick interpolations through `_quote_ident`, with a lint test
+  (SEC2, SC17, SEC4).
+* Deep checks read every column they plan and name what they could not;
+  `_rows_utc` raises; `watch_sample` fresh; writing scripts not retried;
+  `neutral_write` with a writer per column; migkit's own tables by the exact
+  prefix, `moved_nothing` filtered (LG2, LG4, V14, W11, SP14, DU26).
+* Running work: `my_pass.py` (the table-way ladder).
+
+**AUD-T1. The test suite, part one: infrastructure for one fast, reliable
+final run (P0, M).** Files: `tests/conftest.py`, `tests/servers.py` (new),
+`tests/waits.py` (new), `tests/mysql_pair.py`, `tools/final_suite.py`
+(new), `tools/with_docker_lock.py`, `pyproject.toml`,
+`.github/workflows/ci.yml`, `.github/workflows/release.yml`,
+`.github/workflows/x86-engines.yml`.
+* `tests/servers.py`: session fixtures by server profile (image, server
+  arguments, TLS) shared by every module naming it, per-module isolation
+  (database, schema, keyspace, topic prefix, db index), a port allocator
+  (`base + 100 * worker`), container names with the worker suffix, always
+  `127.0.0.1:` mappings, SQL through the driver, readiness by the server's
+  own sign, image builds cached by content hash (T1 helper, T4, T5, T10,
+  T11).
+* The session pair's wipe covers databases, slots, publications,
+  subscriptions, roles and schemas (T2); every test asking for a server
+  fixture marked `docker` by conftest (T13); a `vm` mark by file name
+  (Oracle, SQL Server 2022, Db2, ASE), skipped unless
+  `DOCKER_CONTEXT=colima-migkit` (T6); `MIGKIT_TEST_STRICT=1` turns an
+  infrastructure skip into a failure and the summary counts skips by reason
+  (T8); `tests/waits.py:until()` (T9 helper).
+* `pytest-xdist` and `pytest-timeout` in `[dev]`; `tools/final_suite.py`:
+  pure tests first with `-n auto`, images pulled once by digest, install
+  state checked, the default-profile shard and the `vm` shard at once under
+  the lock taken once, `--timeout 900`, junit per shard, `-rs`, a re-run of
+  only the failed ids (T3, T7).
+* CI and release install `.[dev]` and run the same script; the release tag
+  check reads `migkit/__init__.py`; `requires-python = ">=3.10.12"` (T12,
+  W21, W24).
+
+### Wave 2 (after wave 1 merges)
+
+**AUD-H. The pair's core: one schema comparer, one catalogue, both sides at
+once (P0, L).** Files: `migkit/engines/base.py`, `migkit/engines/hetero.py`
+(the pair, schema and copy parts), `migkit/engines/generic.py`,
+`migkit/engines/dbapi.py`, `migkit/engines/duckdb.py`,
+`migkit/engines/redis.py`, `migkit/leaves.py`, `migkit/render.py`,
+`migkit/rowtext.py`, `migkit/nanotime.py`, `migkit/avrostream.py`.
+* One schema comparer over a neutral shape (class, capacity, nullability,
+  default, indexes, foreign keys, collation) for every engine's
+  `check_schema` and the cutover gate; `declared()` for build, fit and
+  compare; the cross-engine schema's post-data section (indexes, foreign
+  keys, CHECKs); `finish_created` idempotent, parallel, with the engine's
+  name limit (SC1, SC5, SC7, SC8).
+* `Engine.catalog` default and every `neutral_*` reader on it; a per-run
+  memo of `table_facts`, `databases` and `server_identity`; one writer
+  connection per lane (SC15, V11, SP11).
+* A probe accumulator in `base`: no deep check says `ok` over what it could
+  not read (LG2); assess rows and the generic engine in migkit's words (W3);
+  the TLS posture for every engine (SEC18); report file names sanitised
+  (SEC19); one quoting helper per dialect (DU20).
+* Speed: the batch read-back by the target's digest over the key set; the
+  cross-engine check both sides at once and tables over the workers; the
+  renderer's fast paths; one capacity scan per table; `_key_of`, `_keep`,
+  `rowtext.encode`, `nanotime.parse`; Avro schemas cached per topic and
+  signature (SP5, SP6, SP9, SP15, SP16, SP18).
+* DuckDB compares sequences, `checks` from `capabilities.implemented()`
+  (DU1); Redis with its ACL user and its fence without a fixed wait (DU7,
+  SP19); `dbapi` writer per column (SP14); `hetero._url` and `leaves._url`
+  from `Endpoint.url` (SEC2, DU8).
+* Running work: the engines (P0-PARITY), repair paths (repair ladder),
+  apply paths (two-way conflicts).
+
+**AUD-DOC. The manual and the site from the code (P1, M; R24).** Files:
+`tools/gen_docs.py` (new), `README.md`, `docs/index.html`,
+`docs/goals-and-modes.md`, `docs/reference-*.md` (new), `.githooks/pre-commit`.
+* Engines, aliases and the capability matrix from `NAMES`/`ALIASES`/
+  `matrix()`; goals and modes from `hopkeys.GOALS` between markers with an
+  exact-match test; the environment reference from `envkeys`; the exit-code
+  table from `verdict`; the metric families from `ui`; command lists from
+  the CLI; the hook regenerates and fails on a stale doc (LG15, LG16).
+
+### Wave 3 (last, nothing else editing tests)
+
+**AUD-T2. The test suite, part two: every module on the shared servers (P0
+for the final run, L).** Files: `tests/test_*.py`. The 281 modules that start
+their own servers moved onto server profiles (68 PostgreSQL files need
+nothing `pg_pair` lacks; 43 MySQL files a stock server), hard-coded ports
+and names gone, the 144 fixed waits on `until()` and the tail's own
+caught-up sign, `docker exec` SQL through the driver; then the final run
+measured and its numbers written into `tools/final_suite.py` (T1, T4, T9,
+T10).
+
+**AUD-Z. The sweep: every leftover site on the one helper, lint tests that
+keep it so (P1, M).** Files: whatever no group held -
+`migkit/decide.py`, `migkit/cutover.py`, `migkit/freeze.py`,
+`migkit/machine.py`, `migkit/planner.py`, `migkit/model.py`,
+`migkit/sizing.py`, `migkit/sourcechange.py` and the rest, each after its
+running work merges.
+* Remaining state writes through `durable` (`decide._write` under a lock,
+  `planner.progress`, `model.save`, `machine`, `sourcechange`, cutover and
+  freeze records), remaining env reads through `envkeys`, durations and
+  stamps through the one formatter, retries through `with_retry` (ST1,
+  ST12, ST23, K13, DU10, DU11, DU21).
+* The console routed through `runlog`; event words from one table; fallbacks
+  in the decision record (LG5, LG12).
+* Cutover: its final check on `verdict.decide`, its record under the hop
+  lease, "quiet" proved or said unproved, `topology`/`reverse` from
+  `hopkeys`, `freeze.supported` by the target side (DU2, ST8, LG3, K20, K21).
+* The table builders of SQLite, Cassandra, ClickHouse and the lakes pass
+  `key` to `ddl_type` (SC6); SQLite's streamed words through the one level
+  (LG12); the freeze's fixed polls on a kept connection (SP19) - each after
+  P0-PARITY or the cutover work merges.
+* Lint tests: no raw identifier f-strings in `engines/`, no `MIGKIT_*` read
+  outside `envkeys`, no state write outside `durable`, no subprocess outside
+  `runner`, no hand-rolled retry, no program name in any user-facing
+  string (generated from the registry), no verdict word outside `VERDICTS`,
+  every URL or argv naming a host carrying the TLS keys (SEC2, SEC4, W3,
+  LG11).
+
+Done when every ID in the research document is fixed with its test or
+struck with the owner's reason, the lint tests hold, and the final suite
+runs through `tools/final_suite.py` with its time measured.
 
 ## P0-DEPTH. migkit's own parts that are still flat (owner, 2026-10-01)
 
