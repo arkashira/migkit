@@ -6580,7 +6580,7 @@ def stream_codegen(hop, dbs, engine):
   connect:
     image: {IMAGES["debezium"]}
     depends_on: [redpanda]
-    ports: ["8083:8083", "127.0.0.1:8778:8778"]
+    ports: ["127.0.0.1:8083:8083", "127.0.0.1:8778:8778"]
     environment:
       BOOTSTRAP_SERVERS: redpanda:9092
       GROUP_ID: migkit

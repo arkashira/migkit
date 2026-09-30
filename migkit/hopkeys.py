@@ -1315,8 +1315,8 @@ def said_by_doctor(hop, raw):
     engine = ALIASES.get(hop.engine, hop.engine)
     opts = hop.options or {}
     if engine == "hetero":
-        on = {ALIASES.get(opts.get("source_engine", "mysql")),
-              ALIASES.get(opts.get("target_engine", "postgres")), "hetero"}
+        on = {ALIASES.get(s, s) for s in (opts.get("source_engine", "mysql"),
+              opts.get("target_engine", "postgres"))} | {"hetero"}
     else:
         on = {engine}
     out = []
@@ -1357,9 +1357,9 @@ def said_by_doctor(hop, raw):
                         " otherwise decides"))
     for side in ("source", "target"):
         ep = getattr(hop, side)
-        e = (ALIASES.get(opts.get(f"{side}_engine") or (
-            "mysql" if side == "source" else "postgres"))
-            if engine == "hetero" else engine)
+        named = opts.get(f"{side}_engine") or (
+            "mysql" if side == "source" else "postgres")
+        e = ALIASES.get(named, named) if engine == "hetero" else engine
         for k in (ep.options or {}):
             key = ENDPOINT_OPTIONS.get(k)
             if key is not None and key.engines and e not in key.engines:

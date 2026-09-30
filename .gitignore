@@ -10,3 +10,4 @@ dist/
 migrations/
 reports/
 tests/__pycache__/
+deploy/conf/
