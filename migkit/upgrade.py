@@ -6,6 +6,16 @@ the new version; the move is the same move, follow and cutover any hop
 makes, and the cutover's outage is the only downtime. What is particular
 to an upgrade is decided and checked here.
 
+An edition up is an upgrade too (backlog P0-SCENARIOS, the owner's "SQL
+Server Web edition to Datacenter (Enterprise)"): a target at the source's
+version and of a higher edition, as both servers say it (`edition_only`,
+`editions`), is moved into as it is - a copy of the pages needs no step
+after it, and a logical move goes into it. A newer version and a higher
+edition at once is an upgrade of both. An edition down is no upgrade: it
+is `goal: cutover` or `copy`, said as the licence-driven move it is
+(`case`). SQL Server's own restore upgrades a database as it opens it, so
+its copy of the pages (`backupseed`) needs no step after it either.
+
 **The way, by what was measured.** migkit never upgrades the source where
 it runs: that is a change of the source's server, which migkit does not
 make (the only writes to a source are a cutover's, and they are undone).
@@ -113,6 +123,32 @@ def versions(hop, eng, db):
     return tuple(out)
 
 
+def edition_only(hop, eng, db=None, have=None):
+    """Whether this upgrade is of the edition alone (backlog P0-SCENARIOS,
+    "SQL Server Web to Enterprise"): the target runs the source's major
+    version already, of a higher edition as both servers say it
+    (`editions`), and the hop names no newer version. Then a copy of the
+    pages needs no step after it, and a logical move goes into the target
+    as it is."""
+    up = settings(hop)
+    if eng is None or up is None or up.get("version") or up.get("bin"):
+        return False
+    if db is None:
+        try:
+            db = (list(hop.databases or ()) or list(eng.databases())
+                  or [None])[0]
+        except Exception:  # noqa: BLE001 - no database: not known
+            return False
+    src_v, dst_v = have or versions(hop, eng, db)
+    if not src_v or not dst_v or major(src_v) != major(dst_v):
+        return False
+    from . import editions
+    try:
+        return editions.direction(*editions.pair(eng, db)) == "up"
+    except Exception:  # noqa: BLE001 - not read: not an edition upgrade
+        return False
+
+
 def new_version(hop, eng, db, have=None):
     """The version the target runs once the upgrade is done: its own where
     it is newer than the source already (a logical move), else what the
@@ -150,6 +186,13 @@ def checks(hop, eng, db, quick=False):
     `quick` leaves out the source's statements compared on both
     versions, which take up to a minute and a half."""
     src_v, dst_v = versions(hop, eng, db)
+    if edition_only(hop, eng, db, (src_v, dst_v)):
+        from . import editions
+        return [_row("pass", "versions",
+                     f"{src_v} on both sides: an upgrade of the edition -"
+                     f" {editions.words(*editions.pair(eng, db))}; what the"
+                     " target's edition lacks of what the source uses is"
+                     " said with the case")]
     new = new_version(hop, eng, db, (src_v, dst_v))
     out = []
     if not src_v or not new:
@@ -404,18 +447,22 @@ def _pg_settings(eng, db, seeded, nw):
     return out
 
 
-def _pg_extensions(eng, db, seeded):
+def _pg_extensions(eng, db, seeded, offered_in=None):
     """Each extension the source uses, offered by the target at its
-    version or one it is updated to after."""
+    version or one it is updated to after. `offered_in` is the target's
+    database asked what it offers - the server's list, the same in each -
+    where the database itself may not be there yet."""
     have = {r[0]: r[1] for r in _pg(eng, "src", db,
                                     "select extname || chr(31) || extversion"
                                     " from pg_extension") if len(r) == 2}
     offered = {}
-    for r in _pg(eng, "dst", db, "select name || chr(31) || version from"
-                                 " pg_available_extension_versions"):
+    there_db = offered_in or db
+    for r in _pg(eng, "dst", there_db, "select name || chr(31) || version"
+                                       " from"
+                                       " pg_available_extension_versions"):
         if len(r) == 2:
             offered.setdefault(r[0], []).append(r[1])
-    default = {r[0]: r[1] for r in _pg(eng, "dst", db,
+    default = {r[0]: r[1] for r in _pg(eng, "dst", there_db,
                                        "select name || chr(31) ||"
                                        " coalesce(default_version, '')"
                                        " from pg_available_extensions")
@@ -968,21 +1015,39 @@ def _facts(hop, eng, db):
 
     def have():
         return versions(hop, eng, db)
+
+    def step():
+        """Whether a copy of the pages needs the new version's own step
+        after it: not SQL Server's, whose restore upgrades a database as
+        it opens it, and not an upgrade of the edition alone."""
+        return _engine(eng) != "mssql" and not edition_only(hop, eng, db)
     return decide.Facts(seed=seed, versions=have,
-                        settings=lambda: settings(hop) or {})
+                        settings=lambda: settings(hop) or {}, step=step,
+                        edition_up=lambda: edition_only(hop, eng, db))
+
+
+def _newer(f):
+    v = f["versions"]
+    return bool(v[0] and v[1]) and major(v[1]) > major(v[0])
 
 
 def ways():
-    """The two ways, as the decision engine reads them."""
+    """The two ways, as the decision engine reads them. A copy of the pages
+    needs the hop to say how the target is upgraded after it only where a
+    step follows it (`_facts`' step); a logical move goes into a target
+    that runs a newer version already, or the same version of a higher
+    edition."""
     return (
         decide.Rung(
             "seeded", SEEDED, footprint=2,
             needs=(decide.Need(
                 "a copy of the pages the hop allows, upgraded as it says",
-                lambda f: f["seed"][0] is not None and bool(f["settings"]),
+                lambda f: f["seed"][0] is not None and (
+                    bool(f["settings"]) or not f.get("step", True)),
                 lambda f: ("the hop does not say how the target is upgraded"
                            " after a copy of the pages (physical: {upgrade:"
-                           " {...}})" if not f["settings"] else
+                           " {...}})" if not f["settings"]
+                           and f.get("step", True) else
                            f"a copy of the pages is not taken: "
                            f"{f['seed'][1] or 'the hop allows none'}")),),
             because="the pages arrive with their indexes built and nothing"
@@ -990,14 +1055,15 @@ def ways():
         decide.Rung(
             "logical", LOGICAL, footprint=1,
             needs=(decide.Need(
-                "a target that runs a newer version than the source",
-                lambda f: bool(f["versions"][0] and f["versions"][1])
-                and major(f["versions"][1]) > major(f["versions"][0]),
+                "a target that runs a newer version than the source, or a"
+                " higher edition",
+                lambda f: _newer(f) or bool(f.get("edition_up", False)),
                 lambda f: (f"the target runs {f['versions'][1] or '?'} and"
                            f" the source {f['versions'][0] or '?'}; a"
                            " logical move goes into a server that already"
-                           " runs the new version")),),
-            because="the target already runs the new version"),
+                           " runs the new version, or a higher edition of"
+                           " the same")),),
+            because="the target already runs the new version or edition"),
     )
 
 

@@ -12,6 +12,11 @@ known now would stop it half way:
   source itself, production the hop does not name, rows it did not write),
   the room its disk has for the tables, and what one worker of the copy
   holds against this machine's memory (`model`);
+* the case between the two servers (`case`): a fork change, a version
+  down, an edition change - what the source uses that the target has not
+  (`lacks`), what the target's edition leaves behind and its caps
+  (`editions`) - each refused with its fix where it would stop the move
+  or change what the target keeps;
 * the path: a mapping that would land two tables on one, the goal's own
   checks - an upgrade's (`upgrade.checks`), a subset's rules
   (`subset.problems`) - and the cutover as it is set up;
@@ -25,8 +30,10 @@ known now would stop it half way:
 first write, on every item that would stop the step itself and is known
 for sure now (`gate`): a grant the copy reads through, a stream the source
 cannot give, a refusal of the interlock, a row too wide for this machine,
-a disk too small for the tables alone, a mapping that collides, a goal's
-own refusal, a rehearsal that ended with differences. Each is said with
+a disk too small for the tables alone, a mapping that collides, a type, a
+collation or a feature the target has not, what the target's edition
+cannot take, a goal's own refusal, a rehearsal that ended with
+differences. Each is said with
 its fix, all at once - one run for all of them, not one per failure.
 `MIGKIT_PREFLIGHT=warn` says them and goes on. What is only likely - a
 disk too small for the tables with their indexes, a catch-up the probes
@@ -332,6 +339,21 @@ def _rehearsing(hop, own):
                  f"rehearses {own['hop']}, the same path")]
 
 
+def _case(hop, eng, dbs, quick):
+    """The case between the two servers (`case`): a fork change, a version
+    down, an edition change - what each adds, and what the source uses
+    that the target has not, each with its fix. What is known to stop the
+    move, or to change what the target keeps, is a refusal before the
+    first write."""
+    from . import case
+    out = []
+    for r in case.checks(hop, eng, dbs, quick=quick):
+        detail, _, fix = str(r["detail"]).partition("  [fix] ")
+        out.append(Item(r["level"], BEFORE, f"{r['scope']}: {r['item']}",
+                        detail, fix, gates=r["level"] == "fail"))
+    return out
+
+
 def _goal_checks(hop, eng, dbs, quick):
     """The goal's own: an upgrade's version checks and its way, a subset's
     rules."""
@@ -428,6 +450,7 @@ def items(hop, eng, dbs=None, mode=None, quick=False):
     for part in (lambda: _servers(hop, eng, mode),
                  lambda: _target(hop, eng, dbs),
                  lambda: _resources(hop, eng, dbs),
+                 lambda: _case(hop, eng, dbs, quick),
                  lambda: _goal_checks(hop, eng, dbs, quick),
                  lambda: _rehearsed(hop, eng, dbs) if not quick else
                  [i for i in _rehearsed_quick(hop)],

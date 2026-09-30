@@ -129,6 +129,12 @@ HOP_OPTIONS = {
                     " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
                     " names the cheapest machine for migkit that meets it",
                     "str|number"),
+    "edition": Key("what a change of edition may leave behind on the"
+                   " target - accept: [the features whose loss the hop"
+                   " accepts, as assess names them: encryption at rest,"
+                   " auditing, change data capture]", "dict",
+                   ("mssql", "oracle", "mysql", "mongodb"),
+                   subs=("accept",)),
     "deep": Key("compare every key's value, not a sample", "bool",
                 ("redis",)),
     "exact_batches": Key("a one-way tail numbers its batches on the target,"
@@ -198,15 +204,17 @@ HOP_OPTIONS = {
                         STREAMS),
     "performance": Key("gate: a slower target fails the check", "str"),
     "physical": Key("the target may be seeded from a copy of the source's"
-                    " pages or a cloud's own copy (`physical`,"
-                    " `cloudseed`), and how", "dict", ("postgres", "mysql"),
+                    " pages, SQL Server's own backup restored, or a cloud's"
+                    " own copy (`physical`, `backupseed`, `cloudseed`), and"
+                    " how", "dict", ("postgres", "mysql", "mssql"),
                     subs=("data", "run", "stop", "start", "restart",
                           "source", "source_plugin", "cloud", "source_id",
                           "target_id", "region", "target_region",
                           "target_role_arn", "kms_key", "instance_class",
                           "way", "subnet_group", "security_groups",
                           "subscription", "resource_group", "location",
-                          "project", "address", "upgrade")),
+                          "project", "address", "upgrade", "backup",
+                          "restore_from")),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -677,11 +685,14 @@ GOALS = {
                  "guarantees": "every phase measured and kept for the real"
                                " run's forecast; the two sides proved equal"
                                " before the real run is allowed to start"},
-    "upgrade": {"what": "the same engine at a newer version with the least"
-                        " downtime: what the new version changes checked"
-                        " first, then the data moved into it and followed,"
-                        " or a copy of its pages upgraded on the target"
-                        " where the hop allows it, and switched over",
+    "upgrade": {"what": "the same engine at a newer version, a higher"
+                        " edition (SQL Server Web to Enterprise), or both,"
+                        " with the least downtime: what the new version"
+                        " or edition changes checked first, then the data"
+                        " moved into it and followed, or a copy of its"
+                        " pages taken to the target where the hop allows"
+                        " it - upgraded there where the version moves -"
+                        " and switched over",
                 "options": {"protect_target": SUPPORTED},
                 "writes": True,
                 "next": ["migkit assess {hop}",
@@ -692,14 +703,18 @@ GOALS = {
                 "source": "read and followed as a cutover follows it; never"
                           " upgraded where it runs - its downtime is the"
                           " cutover's alone",
-                "target": "a server of the new version filled and followed,"
-                          " or a copy of the source's pages upgraded there"
-                          " by the new version's own upgrade, then followed"
-                          " from the copy's position",
-                "guarantees": "what the new version removes or changes said"
-                              " before anything is written; the source's own"
-                              " statements planned, timed and held to the"
-                              " same answers on both versions"},
+                "target": "a server of the new version or edition filled"
+                          " and followed, or a copy of the source's pages"
+                          " taken there - SQL Server's own backup restored,"
+                          " MySQL's clone, PostgreSQL's pages - upgraded by"
+                          " the new version's own upgrade where the version"
+                          " moves, then followed from the copy's position",
+                "guarantees": "what the new version removes or changes, and"
+                              " what the new edition lacks of what the"
+                              " source uses, said before anything is"
+                              " written; the source's own statements"
+                              " planned, timed and held to the same answers"
+                              " on both versions"},
     "subset": {"what": "a copy for testing: the rows chosen and every row"
                        " they refer to, masked where the hop says, into a"
                        " staging or developer database, proved row by row",

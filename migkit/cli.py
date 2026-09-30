@@ -3179,12 +3179,23 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         ready.gate(hop, eng, [db] if db else None, mode, do_drop,
                    lambda m: console.print(f"  {m}"))
     else:
+        # the case between the two servers first - a fork change, a version
+        # down, an edition change - and the way it decides
+        from . import case as server_case
+        from . import upgrade
+        if mode != "cdc":
+            try:
+                for line in server_case.plan_lines(
+                        hop, eng, db or (eng.databases() or [""])[0]):
+                    console.print(f"  {line}")
+            except Exception as e:  # noqa: BLE001 - the plan goes on
+                console.print(f"  the case could not be worked out:"
+                              f" {upgrade._quiet(str(e).strip()[:160])}")
         # the plan says them where the run would stop on them, and what a
         # person does before it
         for i in ready.stops(hop, eng, [db] if db else None, mode,
                              do_drop):
             console.print(f"  with --go this stops: {i}")
-        from . import upgrade
         if upgrade.settings(hop) is not None and mode != "cdc":
             # the way the upgrade goes, and what an upgrade in place on the
             # source would have cost

@@ -53,6 +53,32 @@ FIELDS = {"long": "integer", "integer": "integer", "short": "integer",
 class OpenSearchEngine(NeutralCopier, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "opensearch"
+    ENGINE_FAMILY = "opensearch"
+
+    def _brand_probes(self):
+        """What `GET /` says of each side: OpenSearch names its
+        distribution, Elasticsearch its build flavour and its tagline
+        (`variants.SIGNATURES`). Everything else migkit does here is the
+        same on both - a document written as JSON, a version given as
+        `external`, basic authentication - so Elasticsearch is a side as
+        OpenSearch is, and what one has of the other's field types is
+        asked before a move (`lacks.SEARCH`)."""
+        def one(side):
+            try:
+                got = self._call(side, "GET", "/") or {}
+            except Exception:
+                return {}
+            version = got.get("version") or {}
+            out = {"number": version.get("number"),
+                   "distribution": version.get("distribution"),
+                   "build_flavor": version.get("build_flavor"),
+                   "tagline": got.get("tagline")}
+            return {k: v for k, v in out.items() if v is not None}
+        return (one("src"), one("dst"))
+
+    def _server_versions(self):
+        s, d = self._brands()
+        return (s.version or None, d.version or None)
     FOLDED_BECAUSE = "has no way to hash documents in the service"
     OVER_NETWORK = True
     RESUMES_BY_KEY = False

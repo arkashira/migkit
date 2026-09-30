@@ -2700,7 +2700,21 @@ class PostgresEngine(Engine):
             except Exception:
                 return {}
             ver, _, sver = got.strip().partition("\x1f")
-            return {"version": ver, "server_version": sver}
+            out = {"version": ver, "server_version": sver}
+            # Citus's own settings exist only where its library is loaded;
+            # its version is the extension's (`variants.SIGNATURES`)
+            try:
+                citus = self._psql(
+                    side, "postgres",
+                    "select coalesce((select default_version from"
+                    " pg_available_extensions where name = 'citus' and"
+                    " exists (select 1 from pg_settings where name like"
+                    " 'citus.%')), '')").strip()
+            except Exception:
+                citus = ""
+            if citus:
+                out["citus"] = citus
+            return out
         return (one("src"), one("dst"))
 
     def databases(self):

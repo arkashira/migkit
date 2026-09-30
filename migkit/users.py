@@ -1611,27 +1611,58 @@ OS_KINDS = (("role", "roles", ("cluster_permissions", "index_permissions",
                                          "description")))
 
 
+#: Elasticsearch keeps the same three in its own security API, each in a
+#: shape of its own (`_security/role`, `_security/user`,
+#: `_security/role_mapping`), and marks what it keeps for itself
+#: `metadata._reserved`
+ES_KINDS = (("role", "/_security/role", ("cluster", "indices",
+                                         "applications", "run_as",
+                                         "description")),
+            ("user", "/_security/user", ("roles", "full_name", "email",
+                                         "enabled")),
+            ("mapping", "/_security/role_mapping", ("roles", "rules",
+                                                    "enabled")))
+
+
 def _os_engine(hop):
     from .engines.opensearch import OpenSearchEngine
     return OpenSearchEngine(hop)
 
 
+def _es_side(hop, side):
+    """Whether the side's server is Elasticsearch, as it says itself
+    (`variants`): its security API is its own, not the plugin's."""
+    b = _os_engine(hop)._brands()[0 if side == "src" else 1]
+    return b.name == "elasticsearch"
+
+
+def _os_paths(hop, side):
+    """{kind: the path its definitions are read and written at} on one
+    side, in its own API."""
+    if _es_side(hop, side):
+        return {kind: path for kind, path, _ in ES_KINDS}
+    return {kind: f"{OS_API}/{path}" for kind, path, _ in OS_KINDS}
+
+
 def _os_patterns(hop, rule):
     """A role's index permissions with the source's index names as the
-    target calls them, where the hop gives a database another name there."""
+    target calls them, where the hop gives a database another name there -
+    OpenSearch's `index_patterns`, Elasticsearch's `names`."""
     eng = _os_engine(hop)
     moved = [(eng._prefix("src", d), eng._prefix("dst", d))
              for d in (hop.databases or [])]
     out = json.loads(json.dumps(rule))
-    for perm in out.get("index_permissions") or []:
-        pats = []
-        for p in perm.get("index_patterns") or []:
-            for a, b in moved:
-                if a != b and str(p).startswith(a):
-                    p = b + str(p)[len(a):]
-                    break
-            pats.append(p)
-        perm["index_patterns"] = pats
+    for group, field in (("index_permissions", "index_patterns"),
+                         ("indices", "names")):
+        for perm in out.get(group) or []:
+            pats = []
+            for p in perm.get(field) or []:
+                for a, b in moved:
+                    if a != b and str(p).startswith(a):
+                        p = b + str(p)[len(a):]
+                        break
+                pats.append(p)
+            perm[field] = pats
     return out
 
 
@@ -1644,20 +1675,26 @@ def _os_security(hop, side):
     one the passwords file gives."""
     eng = _os_engine(hop)
     out = {}
-    for kind, path, keep in OS_KINDS:
+    es = _es_side(hop, side)
+    kinds = ES_KINDS if es else tuple((k, f"{OS_API}/{p}", keep)
+                                      for k, p, keep in OS_KINDS)
+    for kind, path, keep in kinds:
         try:
-            got = eng._call(side, "GET", f"{OS_API}/{path}")
+            got = eng._call(side, "GET", path)
         except RuntimeError as e:
             code = str(e).split(":", 2)[1].strip()[:3] if ":" in str(e) \
                 else ""
-            if code in ("400", "404", "405"):
+            if code in ("400", "404", "405") or (
+                    es and "security must be explicitly enabled"
+                    in str(e).lower()):
                 return None
             where = "source" if side == "src" else "target"
             raise SystemExit(f"users: the {where}'s security configuration"
                              f" cannot be read ({str(e)[:120]}): the account"
                              " needs the security plugin's REST API")
         for name, d in (got or {}).items():
-            if d.get("reserved") or d.get("static") or d.get("hidden"):
+            if d.get("reserved") or d.get("static") or d.get("hidden") \
+                    or (d.get("metadata") or {}).get("_reserved"):
                 continue
             entry = {k: d[k] for k in keep if d.get(k) not in (None, "",
                                                                 [], {})}
@@ -1679,9 +1716,15 @@ def _os_compared(hop, out, s, t, say):
             for k, v in s.items()}
     dd = sorted(k for k in want if k in t and want[k] != t[k])
     out["definitions_differ"] = dd
-    gap = out["missing_on_target"] or dd or (
+    apart = _es_side(hop, "src") != _es_side(hop, "dst")
+    out["apis_differ"] = apart
+    gap = out["missing_on_target"] or dd or apart or (
         out["plugin"]["target"] == "absent" and s)
     out["result"] = "gap" if gap else "pass"
+    if apart and s:
+        say("  one side is Elasticsearch and the other OpenSearch: each"
+            " keeps its roles, users and mappings in a shape of its own,"
+            " so they are made on the target by hand, from the list above")
     if out["plugin"]["source"] == "absent":
         say("  the source answers no security API (the plugin is absent or"
             " off): nothing to carry")
@@ -1706,6 +1749,11 @@ def _os_create(hop, apply, passwords, say):
                              " nothing can be carried to it")
         say("  nothing to create")
         return
+    if out.get("apis_differ") and s:
+        raise SystemExit("users: one side is Elasticsearch and the other"
+                         " OpenSearch, which keep roles, users and mappings"
+                         " in shapes of their own - make them on the target"
+                         " by hand, from what compare lists")
     t = _os_security(hop, "dst") or {}
     passwords = passwords or {}
     todo, skipped = [], []
@@ -1736,12 +1784,12 @@ def _os_create(hop, apply, passwords, say):
     if not apply:
         return
     eng = _os_engine(hop)
-    paths = {kind: path for kind, path, _ in OS_KINDS}
+    paths = _os_paths(hop, "dst")
     made, replaced, failed = [], {}, []
     for key, body in todo:
         kind, name = key.split(":", 1)
         try:
-            eng._call("dst", "PUT", f"{OS_API}/{paths[kind]}/{name}", body)
+            eng._call("dst", "PUT", f"{paths[kind]}/{name}", body)
         except Exception as e:  # noqa: BLE001 - recorded and said
             failed.append(f"{key}: {str(e).splitlines()[0][:120]}")
             continue
@@ -1779,7 +1827,8 @@ def _os_rollback(hop, apply, say):
             " undo")
         return
     eng = _os_engine(hop)
-    paths = {kind: path for kind, path, _ in OS_KINDS}
+    paths = _os_paths(hop, "dst")
+    es = _es_side(hop, "dst")
     order = {"mapping": 0, "user": 1, "role": 2}
     # who holds a role before the users, users before the roles
     for key in sorted(made, key=lambda k: (order[k.split(":", 1)[0]], k)):
@@ -1787,7 +1836,7 @@ def _os_rollback(hop, apply, say):
         if not apply:
             say(f"   would delete {kind} {name}")
             continue
-        eng._call("dst", "DELETE", f"{OS_API}/{paths[kind]}/{name}",
+        eng._call("dst", "DELETE", f"{paths[kind]}/{name}",
                   missing_ok=True)
         say(f"   deleted {kind} {name}")
     for key, body in sorted(replaced.items()):
@@ -1798,14 +1847,19 @@ def _os_rollback(hop, apply, say):
             body = {k: v for k, v in body.items()}
             if not apply:
                 continue
+            if es:
+                # Elasticsearch updates a user without a password and
+                # keeps the one it has
+                eng._call("dst", "PUT", f"{paths[kind]}/{name}", body)
+                continue
             ops = [{"op": "add", "path": f"/{name}/{k}", "value": v}
                    for k, v in body.items()]
-            eng._call("dst", "PATCH", f"{OS_API}/{paths[kind]}", ops)
+            eng._call("dst", "PATCH", paths[kind], ops)
             continue
         if not apply:
             say(f"   would put back {kind} {name}")
             continue
-        eng._call("dst", "PUT", f"{OS_API}/{paths[kind]}/{name}", body)
+        eng._call("dst", "PUT", f"{paths[kind]}/{name}", body)
         say(f"   put back {kind} {name}")
     if apply:
         rec.rename(str(rec) + ".rolled-back")
