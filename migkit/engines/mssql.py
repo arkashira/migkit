@@ -873,15 +873,22 @@ class MSSQLEngine(DbapiRows, Engine):
                  f" delete {n['extra']} rows the source does not have"],
                 [], f"{n['missing']} missing, {n['changed']} changed,"
                     f" {n['extra']} extra; every target row this overwrites"
-                    " or removes is written to the undo file first"))
+                    " or removes is written to the undo file first",
+                table=t))
         return out
+
+    def repair_found(self, db, table):
+        """The keys the last check named for `table` (`_found`)."""
+        return self._found(db, table)
 
     def apply(self, db, action):
         if action.kind == "rows":
             t = action.scope.split(".", 1)[1]
             sc, dc, _ = self._comparable_columns(db, self, t, self, t)
-            return self._apply_rows(db, t, self, t, sc, self, t, dc,
-                                    found=self._found(db, t))
+            # written as a load writes (`load_window`)
+            with self.load_window(db, None, {t}):
+                return self._apply_rows(db, t, self, t, sc, self, t, dc,
+                                        found=self._found(db, t))
         if action.kind != "sequences":
             raise SystemExit(f"mssql cannot apply a {action.kind!r} action")
         self._cmd("dst", db,

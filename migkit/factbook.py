@@ -296,6 +296,29 @@ for _name, _what, _group, _how in (
      " nothing", "side", READ),
     ("arms", "whether the stream back's engine lets it wait idle", "side",
      READ),
+    # --- a table's repair (`repairways`) and how rows are written ----------
+    ("named", "the rows the last check named that differ", "table", READ),
+    ("int key", "whether a table's key is one integer column on both"
+     " sides", "table", READ),
+    ("per row", "why the hop decides a table's rows one by one, or"
+     " nothing", "context", GIVEN),
+    ("filter", "whether the hop filters a table's rows", "context", GIVEN),
+    ("replace", "whether the hop lets a copy replace what a table holds",
+     "context", GIVEN),
+    ("range", "why a span of a table's key cannot be copied again the"
+     " move's way, or nothing", "table", READ),
+    ("spans", "the spans of a table's key that differ enough to copy"
+     " again", "table", READ),
+    ("spans why", "why no span of a table's key is copied again, or"
+     " nothing", "table", READ),
+    ("writers", "what else writes the target, or nothing", "side", READ),
+    ("copier", "whether the move copies the table", "table", READ),
+    ("copier why", "why the move cannot copy the table, or nothing",
+     "table", READ),
+    ("quiet", "how the target's user may keep its triggers and foreign"
+     " keys quiet while rows are written", "side", READ),
+    ("write refused", "why rows may not be written into the target's"
+     " tables at all, or nothing", "side", READ),
 ):
     declare(_name, _what, _group, _how)
 

@@ -511,7 +511,7 @@ class HeteroEngine(Engine):
                 stream(f"{scope}: {'ok' if a == b else 'diff'}")
             if a == b:
                 self._write_drill(db, self._leaf(src_t), missing=[],
-                                  changed=[], extra=[])
+                                  changed=[], extra=[], leaves=[])
                 rows.append((scope, "ok",
                              f"rows {a[0]:,} and every compared column equal"
                              f" across {self.src_name}/{self.dst_name}"

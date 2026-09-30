@@ -5326,7 +5326,7 @@ class MySQLEngine(Engine):
                 actions.append(RepairAction(
                     db, "rows", stmts,
                     [], f"{t}: delete extra/changed on target (saved to undo"
-                        " first), reinsert from source"))
+                        " first), reinsert from source", table=t))
             actions += self._mapped_repairs(db, kind)
             # after the resync, never before it: a recopy takes its rows from
             # the source, which is where the broken text lives
@@ -5573,6 +5573,14 @@ class MySQLEngine(Engine):
             return self._drill_keys(d / f"data-{t}.{kind}")
 
         missing, extra, changed = read("missing"), read("extra"), read("changed")
+        only = self.__dict__.get("_repair_only")
+        if only is not None:
+            # the keys a repair by spans leaves to be repaired by key
+            # (`repairways`)
+            canon_of = self._key_canon(db, t, pks)
+            missing, extra, changed = (
+                [k for k, c in zip(got, canon_of(got)) if tuple(c) in only]
+                for got in (missing, extra, changed))
         # keep-target preserves target-changed rows: fix only missing/extra
         if self.hop.options.get("on_conflict") == "keep-target":
             changed = []
@@ -5665,6 +5673,17 @@ class MySQLEngine(Engine):
         each extra key a delete, with the row the target held and the one
         it will hold."""
         from .. import repairlog
+        sc, canon_of = self._key_canon(db, t, pks, with_columns=True)
+        writes = canon_of(copied)
+        return repairlog.planned(
+            undo, repairlog.CanonIO(self, "dst", db, t, sc, pks),
+            repairlog.CanonIO(self, "src", db, t, sc, pks).rows(writes),
+            writes, canon_of(changed), canon_of(extra))
+
+    def _key_canon(self, db, t, pks, with_columns=False):
+        """A reader of the drilldown's keys (`_drill_keys`) as canonical
+        key texts - with the columns both sides render, where asked."""
+        from .. import repairlog
         sc, _, _ = self._comparable_columns(db, self, t, self, t)
         missing = [k for k in pks if k not in dict(sc)]
         if missing:
@@ -5672,12 +5691,43 @@ class MySQLEngine(Engine):
                 f"{t}: the key column {', '.join(missing)} has no text both"
                 " sides render, so the repair could not be recorded row by"
                 " row. Nothing was repaired on this table.")
-        writes = repairlog.canon_keys(sc, pks, copied)
-        return repairlog.planned(
-            undo, repairlog.CanonIO(self, "dst", db, t, sc, pks),
-            repairlog.CanonIO(self, "src", db, t, sc, pks).rows(writes),
-            writes, repairlog.canon_keys(sc, pks, changed),
-            repairlog.canon_keys(sc, pks, extra))
+
+        def canon_of(keys):
+            return repairlog.canon_keys(sc, pks, keys)
+        return (sc, canon_of) if with_columns else canon_of
+
+    def repair_found(self, db, table):
+        """The keys the last check named for `table`, as canonical text;
+        None where its key is not one both sides render."""
+        pks = self._pk_cols(db, table)
+        if not pks:
+            return None
+        try:
+            canon_of = self._key_canon(db, table, pks)
+        except SystemExit:
+            return None
+        d = self.hop.report_dir(db)
+        return {kind: [list(k) for k in canon_of(
+                    self._drill_keys(d / f"data-{table}.{kind}"))]
+                for kind in ("missing", "changed", "extra")}
+
+    #: a span of a table replaced under one transaction (`repair_range`)
+    ONE_TRANSACTION_A_RANGE = True
+
+    def repair_range_ready(self, db, sides):
+        """None: the table copier's own range copy takes any span of an
+        integer key (`copy_range`)."""
+        return None
+
+    def repair_range(self, db, sides, lo, hi, log):
+        """[lo, hi) of the table's integer key replaced by the source's the
+        way the table copier copies a range: the span deleted and copied in
+        one transaction, then read back (`copy_range`). Returns the rows
+        copied."""
+        (k,) = sides.dkey
+        t = sides.dst_t
+        return int(self.copy_range(db, t, k, int(lo) - 1, int(hi) - 1,
+                                   None, t, log) or 0)
 
     #: Characters that make the printed-SQL path unusable, measured on
     #: MySQL 8 with a text primary key:

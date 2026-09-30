@@ -894,7 +894,22 @@ class RedisEngine(Engine):
             f"db{db}", "rows", statements, [],
             f"{len(missing)} missing, {len(changed)} changed,"
             f" {len(extra)} extra; every key the repair overwrites or removes"
-            " is dumped to the undo file before it is touched")]
+            " is dumped to the undo file before it is touched",
+            table=f"db{db}")]
+
+    #: a key is put back from its serialised value by its own record
+    #: (`repair_io`), never as canonical text: repaired key by key alone
+    ROWS_PUT_BACK = False
+
+    def repair_found(self, db, table):
+        """The keys the last check named."""
+        return {kind: [(k,) for k in self._read_drilldown(db, kind)]
+                for kind in ("missing", "changed", "extra")}
+
+    def repair_sides(self, db, table):
+        """None: a database's keys are lined up by name alone, the rows
+        way (`repairways`)."""
+        return None
 
     def apply(self, db, action):
         """Copy the keys back with DUMP/RESTORE, then remove the strays.
