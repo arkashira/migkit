@@ -745,7 +745,10 @@ _DRIVERS = ("pymysql", "psycopg", "psycopg2", "pymongo", "pymssql",
             "pyodbc", "mssql_python", "oracledb", "redis", "kafka",
             "confluent_kafka", "cassandra", "clickhouse_connect",
             "clickhouse_driver", "sqlite3", "duckdb", "botocore", "boto3",
-            "google", "azure", "opensearchpy", "ibm_db", "snowflake")
+            "google", "azure", "opensearchpy", "ibm_db", "snowflake",
+            # DuckDB's errors are its compiled module's (`_duckdb`), as
+            # Db2's are its DB-API layer's
+            "_duckdb", "redshift_connector", "ibm_db_dbi", "grpc")
 
 
 def operational(e):

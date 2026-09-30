@@ -213,7 +213,9 @@ def test_the_walk_stops_at_the_cap_and_says_it_did(pg_pair, tmp_path,
     got = eng.check_data("postgres")
     row = [r for r in got if r.scope.endswith(".t")][0]
     assert "stopped after 10 rows" in row.detail, row.detail
-    assert "the leaves could not be read (no leaves today)" in row.detail
+    assert "the rows found from the leaves of its digest tree could not run"\
+           " (no leaves today) - switching to the rows walked by key" in \
+        row.detail, row.detail
     found = _drill_file(tmp_path, "changed")
     assert found and len(found) <= 10, found
     # and what it did find is real: every id it named differs on the target

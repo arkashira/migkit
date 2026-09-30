@@ -1020,7 +1020,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     def _write_choice(self, db, table, n, binds, big):
         """The climb of `WRITE_WAYS` for one batch: the ways this batch
         can go, then the cheaper of them on this table's own costs for
-        batches of its size (the engine's `_cheaper`, which the decision
+        batches of its size (the engine's `_way_costs`, which the decision
         layer reads back through `measured_ways`).
         `MIGKIT_ORACLE_WRITE` puts one way first, to diagnose."""
         from ..decide import climb, prune
@@ -1034,9 +1034,8 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         if len(held) < 2:
             return climb(str(table), WRITE_WAYS, facts)
         key = self._write_key(db, table, n)
-        self._cheaper(key, held)
         return climb(str(table), WRITE_WAYS, facts,
-                     costs=self.__dict__["_way_cost"][key])
+                     costs=self._way_costs(key, held, facts=facts))
 
     def _write_key(self, db, table, n):
         return self._work_key("write", f"{db}.{table}", n)

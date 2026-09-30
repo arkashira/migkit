@@ -254,23 +254,39 @@ def test_a_server_that_takes_no_load_is_written_by_statements(
 def test_a_value_the_stage_would_change_stops_as_a_statement_stops(
         server, monkeypatch):
     """A load takes a value too long for its column with a warning and
-    goes on: the stage is emptied, and the run goes as statements, which
-    refuse it - nothing of the run lands."""
+    goes on: the stage is emptied, and the run is switched to statements
+    by itself and said, which refuse it - nothing of the run lands."""
     import pymysql
 
+    from migkit import decide
     from migkit.engines.mysql import MySQLEngine
     my("drop table if exists s; create table s (id int primary key,"
        " v varchar(3))")
     staged, real = [], MySQLEngine._staged
-    monkeypatch.setattr(MySQLEngine, "_staged", lambda self, *a: staged.append(
-        real(self, *a)) or staged[-1])
+
+    def counted(self, *a):
+        try:
+            got = real(self, *a)
+        except decide.Blocked as e:
+            staged.append(str(e))
+            raise
+        staged.append(got)
+        return got
+    monkeypatch.setattr(MySQLEngine, "_staged", counted)
     _way(monkeypatch, "staged")
     rows = [{"op": "insert", "table": "s", "key": {"id": i},
              "values": {"id": i, "v": "abcdef" if i == 700 else "ab"}}
             for i in range(1100)]
+    said = []
+    eng = _engine()
+    eng.lend_log(said.append)
     with pytest.raises(pymysql.err.DataError, match="Data too long"):
-        _engine().neutral_apply("dst", "cx", rows)
-    assert staged == [False], staged
+        eng.neutral_apply("dst", "cx", rows)
+    assert len(staged) == 1 and staged[0].startswith(
+        "the bulk load was not taken as it was ("), staged
+    assert [m for m in said if "switching to the rows as multi-row"
+            " upserts" in m and "could not run (the bulk load was not"
+            " taken as it was" in m], said
     assert my("select count(*) from s") == "0"
 
 

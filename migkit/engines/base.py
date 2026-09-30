@@ -4954,11 +4954,63 @@ class Engine:
         once costs as much as the work itself (SQL Server: 27s by
         statements against 0.8s by its bulk load for 50,000 rows), it is
         not tried unless the cheaper one grows dearer than it."""
-        from ..decide import Costs, climb
+        from ..decide import climb
+        return climb(key[0], ways,
+                     costs=self._way_costs(key, ways, measured)).path
+
+    def _way_costs(self, key, ways, measured=None, facts=None):
+        """The costs a climb of `ways` for the work `key` names reads -
+        this engine's own for that work, from `measured` until each way is
+        timed here (`_took`) - with the ways and the facts their needs
+        read kept for `measured_ways`."""
+        from ..decide import Costs
         self.__dict__.setdefault("_way_rungs", {})[key] = tuple(ways)
-        costs = self.__dict__.setdefault("_way_cost", {}).setdefault(
+        if facts is not None:
+            self.__dict__.setdefault("_way_facts", {})[key] = facts
+        return self.__dict__.setdefault("_way_cost", {}).setdefault(
             key, Costs(measured or {}))
-        return climb(key[0], ways, costs=costs).path
+
+    def lend_log(self, log):
+        """The log a way of this engine's that fails as it runs says its
+        switch through (`_attempt`) where the work has no log of its own to
+        hand - a batch written, a table described: the copy's, lent by the
+        copier that writes through this engine."""
+        self.__dict__["_lent_log"] = log
+
+    def _attempt(self, work, rungs, run, facts=None, log=None, undo=None,
+                 switch=None, **kw):
+        """`decide.attempt` for a way of this engine's own: one that fails
+        as it runs is switched from by itself, and said through `log`, or
+        else through the log lent (`lend_log`) - there once for each way a
+        work gives up, so a table's thousand batches that each switch say
+        it once. The last way that holds is switched from to nothing: what
+        stops it is raised in its own words, as it was before there was a
+        switch, for the callers that read a server's refusal as one."""
+        from .. import decide
+        said = self.__dict__.setdefault("_switches_said", set())
+        fresh, left = [True], [0]
+
+        def running(choice):
+            left[0] = len(choice.ranked) - 1
+            return run(choice)
+
+        def switching(e):
+            return left[0] > 0 and (switch or decide.operational)(e)
+
+        def undone(rung, error):
+            if undo is not None:
+                undo(rung, error)
+            fresh[0] = (work, rung.name) not in said
+            said.add((work, rung.name))
+
+        def say(line):
+            if log is not None:
+                log(line)
+            elif fresh[0] and self.__dict__.get("_lent_log") is not None:
+                self.__dict__["_lent_log"](line)
+            fresh[0] = True
+        return decide.attempt(work, rungs, running, facts, log=say,
+                              undo=undone, switch=switching, **kw)
 
     def _took(self, key, way, seconds, rows):
         from ..decide import Costs

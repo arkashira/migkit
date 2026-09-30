@@ -3021,12 +3021,27 @@ prediction):
   the bulk way of `move --mode full` down to the table copier, the
   physical seed down to the logical copy, the servers' own replication
   down to the change leg run from here, the grouped narrowing of a
-  differing table down to its own walk. Still one-off, in files other
-  work owns, to be routed through it: the per-table streaming copy to
-  ranges and `my_bulk_choice` (`movers`), SQL Server's bulk load to
-  statements (`engines/mssql`), ClickHouse's pull to the copier
-  (`engines/clickhouse`), the tail's ways (`engines/hetero`), the
-  localizer's groups (`leaves`), and `movers.stream_way`, whose facts
+  differing table down to its own walk. Then every engine's own
+  try-and-except switch, through `Engine._attempt` (the switch said in
+  the work's log, or the log a copier or a repair lends the engine, once
+  a way for a work; the last way that holds failing in its own words):
+  SQL Server's bulk load to statements, kept for the table's run, and its
+  Arrow move to table by table; ClickHouse's pull to the table copier;
+  MySQL's load to inserts - a batch, a range rolled back whole, a staged
+  run of upserts; MongoDB's id-hash walk to the bytes on both sides (one
+  side's hashes had been held to the other side's bytes, every document
+  "changed"); PostgreSQL's consistent pass from shared-snapshot lanes to
+  one transaction, its repair from the replica role to the triggers as
+  they are, the roles read by name where their hashes are refused (the
+  passwords not compared now said), its write probe's six places; Redis's
+  absolute expiry to the time left; the pair's leaves to the walk; a
+  warehouse's digest in its own SQL to the fold here; DynamoDB's tags to
+  a file for the endpoint. Still one-off, in files other work owns, to be
+  routed through it: the per-table streaming copy to ranges,
+  `my_bulk_choice` and the streaming copy that cannot reach both sides to
+  the local dump (`movers`), the pass-through's ranges to text
+  (`engines/pg_pass`, on `decide.Trials`), Oracle's digest in SQL to the
+  fold (`engines/oracle`), and `movers.stream_way`, whose facts
   `cli._stream_facts` mirrors until it takes them.
 
 ## Decided by the owner 2026-09-28 - all of it is to be built

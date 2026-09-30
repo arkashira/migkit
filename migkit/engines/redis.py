@@ -1,5 +1,6 @@
 import time
 
+from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result
 
 
@@ -413,7 +414,20 @@ class RedisEngine(Engine):
         v = tuple(int(x) for x in re.findall(r"\d+", claim)[:2])
         return {"expiry": expiry,
                 "history": "freq" if pol in self.LFU else "idletime",
-                "abs": v >= (5, 0), "said": False}
+                "abs": v >= (5, 0)}
+
+    #: how a restored key's expiry is written (`_carry`): the moment it
+    #: falls due, with how long since it was read or how often, on a
+    #: target of 5.0 and later; the time left to that moment otherwise,
+    #: and where a target that claims 5.0 refuses the first
+    EXPIRY_WAYS = (
+        Rung("moment", "the moment each key falls due, with its access"
+                       " history",
+             needs=(Need("a target that takes an absolute expiry",
+                         lambda f: f["abs"],
+                         "the target is older than 5.0, which takes no"
+                         " absolute expiry on a restore"),)),
+        Rung("left", "the time left to each key's expiry"))
 
     def _carry(self, src, dst, keys, how, label="", log=None):
         """Copy `keys` from `src` to `dst` as the source holds them, and
@@ -485,23 +499,32 @@ class RedisEngine(Engine):
                 n += 1
             write.execute()
             return n
-        try:
-            return send(how["abs"])
-        except redis.ResponseError as e:
-            if how["abs"] and "syntax" in str(e).lower():
-                # a server that claims 5.0 and takes none of the three
-                how["abs"] = False
-                if log and not how["said"]:
-                    how["said"] = True
-                    log(f"{label}: the target takes no absolute expiry or"
-                        " access history on a restore; keys carry the time"
-                        " left to their expiry instead")
-                return send(False)
-            raise SystemExit(
-                f"{label}: the target refused a key it was handed:"
-                f" {str(e)[:90]}. A payload version error means it runs an"
-                " older Redis than the source, whose values do not load"
-                " into an older version") from None
+        from .. import decide
+
+        def run(choice):
+            try:
+                return send(choice.path == "moment")
+            except redis.ResponseError as e:
+                if choice.path == "moment" and "syntax" in str(e).lower():
+                    # a server that claims 5.0 and takes none of the three:
+                    # a restore it refuses writes nothing, and one sent
+                    # again replaces what the pipeline did write
+                    raise decide.Blocked(
+                        "the target takes no absolute expiry or access"
+                        " history on a restore") from None
+                raise SystemExit(
+                    f"{label}: the target refused a key it was handed:"
+                    f" {str(e)[:90]}. A payload version error means it runs"
+                    " an older Redis than the source, whose values do not"
+                    " load into an older version") from None
+
+        def undo(rung, error):
+            # kept for the rest of the run: the next batch goes on the time
+            # left at once
+            how["abs"] = False
+        return self._attempt(label or "the keys", self.EXPIRY_WAYS, run,
+                             how, log=log, undo=undo,
+                             switch=decide.only_blocked)[1]
 
     def moved_nothing(self, db):
         """The keyspace holds keys on the source and none on the target,

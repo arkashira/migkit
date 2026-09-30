@@ -630,3 +630,27 @@ def test_an_interval_is_bound_as_the_length_it_is():
     assert ds.sizes() == [oracledb.DB_TYPE_INTERVAL_DS]
     with pytest.raises(ValueError, match="day-to-second"):
         ds.values(Interval(1, 0, 0))
+
+
+def test_a_write_way_timed_both_ways_is_chosen_and_read_back():
+    """Once both ways of writing a table's large batches are timed, the
+    climb reads the facts their needs ask for and takes the cheaper - it
+    used to climb without them and raise KeyError on the second batch -
+    and `measured_ways` reads the same choice back."""
+    from types import SimpleNamespace
+
+    from migkit.engines.oracle import OracleEngine
+    eng = OracleEngine.__new__(OracleEngine)
+    binds = [SimpleNamespace(stageable=True)]
+    n = OracleEngine.DIRECT_FROM * 2
+    first = eng._write_choice("d", "t", n, binds, False)
+    assert first.rung.name == "direct"
+    key = eng._write_key("d", "t", n)
+    eng._took(key, "direct", 3.0, n)
+    assert eng._write_choice("d", "t", n, binds, False).rung.name == "array"
+    eng._took(key, "array", 1.0, n)
+    assert eng._write_choice("d", "t", n, binds, False).rung.name == "array"
+    eng._took(key, "direct", 0.2, n)
+    assert eng._write_choice("d", "t", n, binds, False).rung.name == "direct"
+    read = [w for w in eng.measured_ways() if w["table"] == "d.t"]
+    assert read and read[0]["chosen"] == "direct", read

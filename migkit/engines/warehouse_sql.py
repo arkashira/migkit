@@ -33,6 +33,7 @@ has no emulator: what is written for it is its documented SQL, proved only
 on a real account.
 """
 from .. import canon, rowtext
+from ..decide import Need, Rung
 
 DIALECTS = ("bigquery", "snowflake", "redshift", "duckdb")
 
@@ -500,6 +501,16 @@ class DigestsInSQL:
     #: whether the last digest asked was folded here, for the report's line
     #: on which side's rows crossed the network
     folded_last = True
+    #: where a table's digest is worked out (`neutral_digest`)
+    DIGEST_WAYS = (
+        Rung("server", "the digest worked out by the server in its own SQL",
+             needs=(Need("every column rendered in its SQL",
+                         lambda f: f["pick"] is not None,
+                         "a column has no rendering in the server's SQL"),),
+             prove=lambda f: None if f["proved"] else
+             "the server does not render the table's first rows as migkit"
+             " does"),
+        Rung("here", "the rows read and folded here"))
 
     def _fix_read(self, side, db, table, columns, rows):
         """Values as this engine's reads hand them on (a decimal at its
@@ -545,22 +556,29 @@ class DigestsInSQL:
         """(rows, digest) computed by the server where every column is
         rendered in its SQL and the rendering is proved on the table's
         first rows; folded here otherwise, over rows read in batches."""
+        from .. import decide
         cols = self._declared_cols(side, db, table, columns)
         pick = (digest_select(self.DIGEST_DIALECT, cols, self._q)
                 if cols else None)
-        if pick is not None and self._proved(side, db, table, cols):
-            try:
-                got = self._rows(side, db, f"select {pick} from"
-                                           f" {self._qualified(side, db, table)}"
-                                           + (f" where ({where})" if where
-                                              else ""))
-            except Exception:  # noqa: BLE001 - refused on a later row
-                got = None
-            if got:
-                self.folded_last = False
-                return int(got[0][0]), str(got[0][1])
-        self.folded_last = True
-        return super().neutral_digest(side, db, table, columns, where)
+        folded = super().neutral_digest
+
+        def run(choice):
+            if choice.path == "here":
+                self.folded_last = True
+                return folded(side, db, table, columns, where)
+            # refused on a later row than the proof read: folded here, the
+            # same number, switched to by itself and said
+            got = self._rows(side, db, f"select {pick} from"
+                                       f" {self._qualified(side, db, table)}"
+                             + (f" where ({where})" if where else ""))
+            if not got:
+                raise decide.Blocked("the server answered no digest")
+            self.folded_last = False
+            return int(got[0][0]), str(got[0][1])
+        return self._attempt(
+            str(table), self.DIGEST_WAYS, run, decide.Facts(
+                {"pick": pick},
+                proved=lambda: self._proved(side, db, table, cols)))[1]
 
     # ---- what `leaves` asks of a side it reads in SQL ----------------------
 

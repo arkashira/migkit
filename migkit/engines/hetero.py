@@ -4,6 +4,7 @@ import sys
 import time
 
 from .. import tailtables
+from ..decide import Rung
 from ..util import is_transient
 from .base import Engine, RepairAction, Result
 
@@ -108,6 +109,15 @@ class HeteroEngine(Engine):
         # the CLI down its fallback path for pairs that never wanted it
         if self.src_engine.CANON_ENGINE != "mysql":
             self.tail_requires = ""
+
+    def lend_log(self, log):
+        """Lent to both sides too: their ways switch as they write and
+        read for the pair."""
+        super().lend_log(log)
+        for eng in (self.src_engine, self.dst_engine):
+            lend = getattr(eng, "lend_log", None)
+            if lend is not None:
+                lend(log)
 
     def _mysql_to_postgres_only(self, what):
         if self.my is None or self.pg is None:
@@ -534,6 +544,11 @@ class HeteroEngine(Engine):
                 stream(f"# {side}: {gate.line()}")
         return rows
 
+    #: how the rows a differing table holds apart are found (`_drill`)
+    DRILLS = (Rung("leaves", "the rows found from the leaves of its digest"
+                             " tree"),
+              Rung("walk", "the rows walked by key"))
+
     def _drill(self, db, src_t, dst_t, src_cols, dst_cols, rows=0,
                digests=None, began=None):
         """The base's walk, over this hop's two engines, through the hop's
@@ -543,21 +558,27 @@ class HeteroEngine(Engine):
         of its digest tree (`leaves.drill`)."""
         from .. import leaves
         scope = self._row_scope(db, src_t)
-        note = ""
-        try:
-            found = leaves.drill(self, db, src_t, dst_t, src_cols, dst_cols,
-                                 scope, rows, digests, began)
-        except Exception as e:  # noqa: BLE001 - walked instead, and said
-            found = None
-            note = ("; the leaves could not be read"
-                    f" ({str(e).strip().splitlines()[-1][:90]}), so the rows"
-                    " were walked")
-        if found is not None:
-            return found
-        return self._drill_rows(db, self._leaf(src_t),
-                                self.src_engine, src_t, src_cols,
-                                self.dst_engine, dst_t, dst_cols,
-                                scope) + note
+
+        def walk():
+            return self._drill_rows(db, self._leaf(src_t),
+                                    self.src_engine, src_t, src_cols,
+                                    self.dst_engine, dst_t, dst_cols, scope)
+
+        def run(choice):
+            if choice.path == "walk":
+                return walk()
+            return leaves.drill(self, db, src_t, dst_t, src_cols, dst_cols,
+                                scope, rows, digests, began)
+        # leaves that cannot be read are switched from by itself to the
+        # walk, and said with what it found; the table differs either way,
+        # and where is what either finds
+        said = []
+        found = self._attempt(f"{db}.{self._leaf(src_t)}", self.DRILLS,
+                              run, log=said.append)[1]
+        if found is None:
+            # the leaves are not the way for this table: walked
+            return walk()
+        return found + "".join(f"; {m}" for m in said)
 
     # --- the second reading, in this pair's terms (the logic is the base's)
 
@@ -1436,6 +1457,9 @@ class HeteroEngine(Engine):
         honest consequence of there being nothing to resume from.
         """
         from .. import canon
+        # a way of either side that fails as it writes a batch says its
+        # switch in the copy's log (`Engine._attempt`)
+        self.lend_log(log)
         src_t = f"{sch}.{tbl}" if sch else tbl
         leaf = self._leaf(src_t)
         if not ck.get(self.move_key(db, "", leaf)):

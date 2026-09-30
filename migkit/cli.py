@@ -1373,7 +1373,16 @@ def _make_room_for_rows(hop, eng, db, actions):
     return paused
 
 
+def _lend_console(eng):
+    """A way of the engine's that fails as it repairs is switched from by
+    itself (`Engine._attempt`) and said here."""
+    lend = getattr(eng, "lend_log", None)
+    if lend is not None:
+        lend(lambda m: console.print(f"  [yellow]{m}[/yellow]"))
+
+
 def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
+    _lend_console(eng)
     for i, a in enumerate(actions):
         console.print(f"\n[bold]{a.kind} on {a.scope}[/bold]  {a.note}")
         for s in a.statements[:20]:
@@ -1431,6 +1440,7 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
     hopkeys.refuse_writes(hop, "a repair")
     hop.options["on_conflict"] = on_conflict
     eng = get_engine(hop)
+    _lend_console(eng)
     capabilities.require(
         hop.engine, "snapshot",
         "use migkit sync --apply, which repairs without the snapshot --go"

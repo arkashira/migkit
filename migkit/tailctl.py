@@ -313,6 +313,11 @@ def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
         same_source(eng, db, token_path, token)
     log(f"following the source's {noun}, ctrl-c to stop"
         + ("" if go else " (count-only, add --go to copy)"))
+    # a way that fails as it carries a change is switched from by itself
+    # and said here (`Engine._attempt`)
+    lend = getattr(eng, "lend_log", None)
+    if lend is not None:
+        lend(log)
     if not go:
         log(behind(token))
         return

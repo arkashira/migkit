@@ -896,21 +896,22 @@ class ClickHouseEngine(NeutralCopier, Engine):
 
     def _pull_plan(self, db, tables):
         """([tables the target pulls], [(table, why it goes by the table
-        copier instead)]), each table climbed through `_ways`."""
+        copier instead)], {table: the facts its climb read}), each table
+        climbed through `_ways`."""
         from ..decide import Facts, climb
         there = ({} if self.target_missing(db) else
                  {t: self._engine_of("dst", db, t)
                   for t in self.neutral_tables("dst", db)})
-        pulled, copied = [], []
+        pulled, copied, facts = [], [], {}
         for t in tables:
-            got = climb(t, self._ways(), Facts(
-                {"there": there.get(t)}, reach=self._reach,
-                kind=lambda t=t: self._engine_of("src", db, t)))
+            facts[t] = Facts({"there": there.get(t)}, reach=self._reach,
+                             kind=lambda t=t: self._engine_of("src", db, t))
+            got = climb(t, self._ways(), facts[t])
             if got.path == self.PULL:
                 pulled.append(t)
             else:
                 copied.append((t, got.reason))
-        return pulled, copied
+        return pulled, copied, facts
 
     def _made_from_source(self, db, table):
         """The target table made by the source's own definition - engine,
@@ -1132,7 +1133,10 @@ class ClickHouseEngine(NeutralCopier, Engine):
                         self._carry_rows(db, table, where, said)
                 except Exception as e:  # noqa: BLE001 - classified here
                     if not is_transient(e):
-                        raise SystemExit(
+                        # the partition was cleared and nothing of it is
+                        # kept as copied: another way may carry the table
+                        from .. import decide
+                        raise decide.Blocked(
                             f"{table}: partition {pid} could not be copied:"
                             f" {self._hidden(str(e).splitlines()[0])[:200]}")
                     lost = e
@@ -1212,9 +1216,15 @@ class ClickHouseEngine(NeutralCopier, Engine):
         target reaches the source (`_reach`, asked of the target); where it
         does not, or a table keeps no partitions, or it is replicated and
         not on the target yet, the table goes by the table copier as
-        before, and the plan says why. A table the target lacks is made by
+        before, and the plan says why. A pull that fails as it runs - the
+        target refusing `remote()`, a privilege it lacks, the source out of
+        its reach - is switched from by itself to the table copier and said
+        (`decide.attempt`); the copier empties the table before it writes,
+        so the partitions pulled before are not doubled. A partition that
+        differs from the source after its copy is the answer, and stops
+        the move: never switched from. A table the target lacks is made by
         the source's own definition."""
-        pulled, copied = self._pull_plan(db, tables)
+        pulled, copied, facts = self._pull_plan(db, tables)
         reach = self._reach() if pulled else {}
         steps = ([f"{t}: pulled by the target from the source, a partition"
                   " at a time" for t in pulled]
@@ -1228,15 +1238,22 @@ class ClickHouseEngine(NeutralCopier, Engine):
             if t not in there and not self._engine_of(
                     "src", db, t).startswith("Replicated"):
                 self._made_from_source(db, t)
-        for t in pulled:
-            self._pull_table(db, t, reach, log)
-        if copied:
-            from ..cli import _Checkpoint
-            ck = _Checkpoint(self.hop.report_dir(db) / "move-rows.json")
-            ck.clear()
-            ck.discard()
-            for t, _ in copied:
-                self.move_table(db, "", t, self.COPIER_CHUNK, ck, log)
+        ck = []
+
+        def run(choice, t):
+            if choice.path == self.PULL:
+                return self._pull_table(db, t, reach, log)
+            if not ck:
+                from ..cli import _Checkpoint
+                ck.append(_Checkpoint(self.hop.report_dir(db)
+                                      / "move-rows.json"))
+                ck[0].clear()
+                ck[0].discard()
+            return self.move_table(db, "", t, self.COPIER_CHUNK, ck[0], log)
+        for t in pulled + [t for t, _ in copied]:
+            self._attempt(t, self._ways(),
+                          lambda choice, t=t: run(choice, t), facts[t],
+                          log=log)
         return steps
 
     # ---- following the source by the partitions that changed ---------------

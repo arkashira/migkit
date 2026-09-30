@@ -7163,12 +7163,20 @@ class PostgresEngine(Engine):
             raise RuntimeError((p.stdout + p.stderr)[-400:])
         return p.stdout
 
+    #: how a set-based row repair writes the target (`_repair_rows_native`)
+    REPAIR_WAYS = (
+        Rung("quiet", "the target's triggers and foreign keys held quiet"
+                      " as a replica's are"),
+        Rung("as they are", "the target's triggers and foreign keys as they"
+                            " are"))
+
     def _repair_rows_native(self, db, t):
         """Set-based row repair: pull the rows to (re)copy from source into a
         temp file via a temp-pk join, save the target rows they overwrite as
         undo, delete extra/changed on target, then copy the source rows in.
-        session_replication_role=replica keeps FKs/triggers quiet, with a
-        fallback when the target refuses it."""
+        session_replication_role=replica keeps FKs/triggers quiet; a target
+        that refuses it is switched from by itself and said
+        (`REPAIR_WAYS`, `decide.attempt`)."""
         d = self._report(db)
         sch, tbl = t.split(".", 1)
         qt = f'"{sch}"."{tbl}"'
@@ -7219,13 +7227,25 @@ class PostgresEngine(Engine):
             if (work / "rows.out").exists():
                 body += f"\\copy {qt} from '{work}/rows.out'\n"
             body = "begin;\n" + body + "commit;\n"
-            try:
-                self._psql_run("dst", db,
-                               "set session_replication_role = replica;\n" + body)
-            except RuntimeError as e:
-                if "session_replication_role" not in str(e):
-                    raise
-                self._psql_run("dst", db, body)
+            from .. import decide
+
+            def repair(choice):
+                if choice.path == "as they are":
+                    return self._psql_run("dst", db, body)
+                try:
+                    return self._psql_run(
+                        "dst", db,
+                        "set session_replication_role = replica;\n" + body)
+                except RuntimeError as e:
+                    if "session_replication_role" not in str(e):
+                        raise
+                    # refused on the script's first line, which stops it:
+                    # nothing else ran
+                    raise decide.Blocked(
+                        "the target's user may not set the replica role: "
+                        + str(e).strip().splitlines()[-1][:160]) from e
+            self._attempt(t, self.REPAIR_WAYS, repair,
+                          switch=decide.only_blocked)
             record.applied(record.n)
             with (undo / "manifest.txt").open("a") as m:
                 m.write(f"{ts} {t}: re-copy {undo}/{ts}-{tbl}.rows to undo\n")
@@ -7377,6 +7397,43 @@ class PostgresEngine(Engine):
                      "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
         (state_dir / "dst-schema.sql").write_text(p.stdout)
 
+    #: how `assess` reads the login roles of both sides
+    ROLE_READS = (
+        Rung("hashes", "the roles with their password hashes"),
+        Rung("names", "the roles by name alone"))
+
+    def _login_roles(self):
+        """({role: password hash} of the source, of the target, [the
+        switch said]). pg_authid has the real hash (pg_roles masks it) and
+        needs a superuser; where it is refused on either side (a managed
+        service) the roles are read by name alone, switched to by itself -
+        and the passwords not compared then is said, not left out
+        quietly."""
+        roles_q = ("select rolname||'|'||coalesce(rolpassword,'')"
+                   " from pg_authid"
+                   " where rolcanlogin"
+                   " and rolname not like 'pg\\_%'"
+                   " and rolname not like 'rds%'"
+                   " and rolname not like '%tencent%' order by 1")
+        names_q = ("select rolname from pg_roles r"
+                   " where rolcanlogin"
+                   " and r.rolname not like 'pg\\_%'"
+                   " and r.rolname not like 'rds%'"
+                   " and r.rolname not like '%tencent%' order by 1")
+
+        def roles(choice):
+            if choice.path == "names":
+                return tuple({n: "" for n in self._psql(
+                    side, "postgres", names_q).splitlines()}
+                    for side in ("src", "dst"))
+            return tuple(dict(l.split("|", 1) for l in self._psql(
+                side, "postgres", roles_q).splitlines() if l)
+                for side in ("src", "dst"))
+        switched = []
+        src, dst = self._attempt("the login roles", self.ROLE_READS, roles,
+                                 log=switched.append)[1]
+        return src, dst, switched
+
     def assess(self):
         items = []
 
@@ -7494,34 +7551,11 @@ class PostgresEngine(Engine):
                 f" {who or 'an unnamed session'} - vacuum can remove nothing"
                 " newer than it while it is open")
 
-        # pg_authid has the real hash (pg_roles masks it); needs superuser,
-        # fall back to name-only when blocked
-        roles_q = ("select rolname||'|'||coalesce(rolpassword,'')"
-                   " from pg_authid"
-                   " where rolcanlogin"
-                   " and rolname not like 'pg\\_%'"
-                   " and rolname not like 'rds%'"
-                   " and rolname not like '%tencent%' order by 1")
-        try:
-            src_pairs = dict(l.split("|", 1) for l in
-                             self._psql("src", "postgres", roles_q).splitlines()
-                             if l)
-            dst_pairs = dict(l.split("|", 1) for l in
-                             self._psql("dst", "postgres", roles_q).splitlines()
-                             if l)
-        except RuntimeError:
-            # no pg_authid access (managed service): fall back to name-only
-            names_q = roles_q.replace(
-                "||'|'||coalesce(rolpassword,'')", "")
-            names_q = ("select rolname from pg_roles r"
-                       " where rolcanlogin"
-                       " and r.rolname not like 'pg\\_%'"
-                       " and r.rolname not like 'rds%'"
-                       " and r.rolname not like '%tencent%' order by 1")
-            src_pairs = {n: "" for n in
-                         self._psql("src", "postgres", names_q).splitlines()}
-            dst_pairs = {n: "" for n in
-                         self._psql("dst", "postgres", names_q).splitlines()}
+        src_pairs, dst_pairs, switched = self._login_roles()
+        if switched:
+            add("warn", "instance",
+                "role passwords match source (login will work on target)",
+                "not compared: " + "; ".join(switched))
         sa, da = set(src_pairs), set(dst_pairs)
         miss = sorted(sa - da)
         add("pass" if not miss else "warn", "instance",
@@ -8328,6 +8362,15 @@ class PostgresEngine(Engine):
             out.append("\n".join(lines))
         return out
 
+    #: how one side of the consistent pass reads its tables at one
+    #: instant (`_fast_consistent`)
+    CONSISTENT_WAYS = (
+        Rung("lanes", "several connections sharing one exported snapshot",
+             needs=(Need("more than one lane and one table",
+                         lambda f: f["lanes"] > 1 and f["tables"] > 1,
+                         "one lane or one table has nothing to share"),)),
+        Rung("one", "one transaction reading every table in turn"))
+
     def _fast_consistent(self, db):
         """Whole-database checksum inside ONE repeatable-read read-only
         transaction per side: no intra-db skew (every table of a side is
@@ -8374,27 +8417,42 @@ class PostgresEngine(Engine):
         # the hop's bound on how long a side's snapshot may be held, in
         # seconds; unset, the pass takes as long as it takes
         limit = float(self.hop.options.get("snapshot_limit") or 0)
-        outs, held = {}, {}
+        outs, held, said = {}, {}, []
+        from .. import decide
         for side in ("src", "dst"):
             began = time.time()
-            conn, snap = (self._export_snapshot(side, db)
-                          if lanes > 1 and len(both) > 1 else (None, None))
-            try:
-                scripts = ([script(side)] if not snap
-                           else self._snapshot_scripts(side, db, both, snap,
-                                                       lanes, w))
-                got = self._run_lanes(
-                    [self._psql_script(side, db, sc) for sc in scripts],
-                    began + limit if limit else None)
-            finally:
-                # released as soon as this side's lanes are done, not after
-                # the other side's: it used to be held through both
-                if conn is not None:
-                    try:
-                        conn.rollback()
-                        conn.close()
-                    except Exception:
-                        pass
+
+            def read(choice, side=side, began=began):
+                conn, snap = None, None
+                if choice.path == "lanes":
+                    conn, snap = self._export_snapshot(side, db)
+                try:
+                    if choice.path == "lanes" and not snap:
+                        # nothing read yet: one transaction reads the
+                        # same instant, without the lanes
+                        raise decide.Blocked(
+                            "the side would not export its snapshot for"
+                            " the lanes to share")
+                    scripts = ([script(side)] if not snap
+                               else self._snapshot_scripts(
+                                   side, db, both, snap, lanes, w))
+                    return self._run_lanes(
+                        [self._psql_script(side, db, sc) for sc in scripts],
+                        began + limit if limit else None)
+                finally:
+                    # released as soon as this side's lanes are done, not
+                    # after the other side's: it used to be held through
+                    # both
+                    if conn is not None:
+                        try:
+                            conn.rollback()
+                            conn.close()
+                        except Exception:
+                            pass
+            got = self._attempt(
+                f"the {side}'s consistent pass", self.CONSISTENT_WAYS, read,
+                {"lanes": lanes, "tables": len(both)}, log=said.append,
+                switch=decide.only_blocked)[1]
             if got is None:
                 return 1, (f"stopped: the pass had held the {side}'s snapshot"
                            f" for {limit:,.0f}s, the most `snapshot_limit`"
@@ -8422,7 +8480,7 @@ class PostgresEngine(Engine):
         src_lsn, src_rows = parse(outs["src"])
         dst_lsn, dst_rows = parse(outs["dst"])
         out = [f"consistent snapshot: one repeatable-read txn per side,"
-               f" src lsn={src_lsn} dst lsn={dst_lsn}"]
+               f" src lsn={src_lsn} dst lsn={dst_lsn}"] + said
         # how long this pass kept the source from cleaning up after itself:
         # nothing newer than its snapshot could be vacuumed meanwhile
         out.append(f"source snapshot held {held.get('src', 0):,.0f}s")
@@ -9833,6 +9891,21 @@ class PostgresEngine(Engine):
         key = self._pk_cols_of(db, ".".join(self._split(table)))
         return [(str(n), str(t)) for n, t in rows], key
 
+    #: where `probe_write` makes its table, each tried where the one
+    #: before was refused: the table's own schema, then public, typed as
+    #: the source's columns and then as text, and last a temporary table
+    PROBE_TABLES = (
+        Rung("own typed", "a table of the source's column types in the"
+                          " table's own schema"),
+        Rung("public typed", "a table of the source's column types in"
+                             " public"),
+        Rung("own text", "a table of text columns in the table's own"
+                         " schema"),
+        Rung("public text", "a table of text columns in public"),
+        Rung("temp typed", "a temporary table of the source's column"
+                           " types"),
+        Rung("temp text", "a temporary table of text columns"))
+
     def probe_write(self, db, table, sample, seconds=1.5, stream=0,
                     apply=True):
         """The sample COPYed into a table made for it in one transaction on
@@ -9853,14 +9926,13 @@ class PostgresEngine(Engine):
         name = f"migkit_probe_{os.getpid()}_{int(stream)}"
         cols = ", ".join(q(n) for n, _ in defs)
         conn = self._probe_conn("dst", db, seconds * 4 + 10)
-        how = "a table made and rolled back in one transaction"
         try:
             cur = conn.cursor()
-            made = None
-            for schema, typed in ((sch, True), ("public", True),
-                                  (sch, False), ("public", False),
-                                  (None, True), (None, False)):
-                body = ", ".join(f"{q(n)} {t if typed else 'text'}"
+
+            def make(choice):
+                place, kind = choice.path.split()
+                schema = {"own": sch, "public": "public"}.get(place)
+                body = ", ".join(f"{q(n)} {t if kind == 'typed' else 'text'}"
                                  for n, t in defs)
                 if key:
                     body += f", primary key ({', '.join(q(k) for k in key)})"
@@ -9870,14 +9942,18 @@ class PostgresEngine(Engine):
                 try:
                     cur.execute(f"create {'temp ' if not schema else ''}"
                                 f"table {where} ({body})")
-                    made = where
-                    if not schema:
-                        how = ("a temporary table, which the target writes"
-                               " no log for")
-                    break
-                except Exception:  # noqa: BLE001 - the next way
+                except Exception:
+                    # the next place starts from where this one did
                     cur.execute("rollback to savepoint migkit_probe")
-            if made is None:
+                    raise
+                return where, ("a temporary table, which the target writes"
+                               " no log for" if not schema else
+                               "a table made and rolled back in one"
+                               " transaction")
+            try:
+                made, how = self._attempt(f"the write probe of {table}",
+                                          self.PROBE_TABLES, make)[1]
+            except Exception:  # noqa: BLE001 - no place took one: no probe
                 return None
             began = time.monotonic()
             cur.copy_expert(f"copy {made} ({cols}) from stdin",

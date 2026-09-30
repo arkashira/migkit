@@ -469,14 +469,12 @@ class MySQLEngine(Engine):
                                        sorted(key), rows)
                     conn.commit()
                     return len(rows)
-                try:
-                    self._put_rows(cur, self._d(side, db), table, names,
-                                   rows, insert)
-                except _LoadRefused:
-                    # a row already there, or a value the column would not
-                    # take as it was: the insert says which, or replaces it
-                    conn.rollback()
-                    cur.executemany(insert, rows)
+                # a load taken with warnings - a row already there, or a
+                # value the column would not take as it was - is rolled
+                # back and the batch goes as inserts: the insert says
+                # which, or replaces it
+                self._put_rows(cur, self._d(side, db), table, names, rows,
+                               insert, undo=conn.rollback)
             conn.commit()
         finally:
             conn.close()
@@ -664,7 +662,7 @@ class MySQLEngine(Engine):
         self._apply_upserts(side, db, table, [(key, values)])
 
     def _apply_upserts(self, side, db, table, rows):
-        from .. import canon
+        from .. import canon, decide
         table = self.local_table(table)
         key = rows[0][0]
         full = [{**k, **v} for k, v in rows]
@@ -693,25 +691,34 @@ class MySQLEngine(Engine):
                         if len(values) >= self.STAGE_FROM
                         and self._loads(conn)
                         and not getattr(_PLAIN, "on", False) else None)
-                if work and self._cheaper(
-                        work, self.UPSERT_WAYS) == "staged":
+                way = (self._cheaper(work, self.UPSERT_WAYS) if work
+                       else "statements")
+                switched = []
+
+                def run(choice):
                     began = time.monotonic()
-                    if self._staged(cur, ddb, table, names, values, key):
-                        self._took(work, "staged", time.monotonic() - began,
-                                   len(values))
-                        return
-                    work = None
-                began = time.monotonic()
-                for at in range(0, len(values), self.APPLY_ROWS):
-                    part = values[at:at + self.APPLY_ROWS]
-                    cur.execute(
-                        f"insert into `{ddb}`.`{table}`"
-                        f" ({cols}) values "
-                        + ", ".join([mark] * len(part)) + tail,
-                        [v for r in part for v in r])
-                if work:
-                    self._took(work, "statements", time.monotonic() - began,
-                               len(values))
+                    if choice.path == "staged":
+                        self._staged(cur, ddb, table, names, values, key)
+                    else:
+                        for at in range(0, len(values), self.APPLY_ROWS):
+                            part = values[at:at + self.APPLY_ROWS]
+                            cur.execute(
+                                f"insert into `{ddb}`.`{table}`"
+                                f" ({cols}) values "
+                                + ", ".join([mark] * len(part)) + tail,
+                                [v for r in part for v in r])
+                    if work and not switched:
+                        # timed where the way was chosen by what it cost
+                        self._took(work, choice.path,
+                                   time.monotonic() - began, len(values))
+                # a stage that cannot take the run has written nothing to
+                # the table: the run is switched to statements by itself
+                # and said, which stop on a value the column cannot hold
+                self._attempt(f"{ddb}.{table}", self.UPSERT_WAYS
+                              if way == "staged" else self.UPSERT_WAYS[1:],
+                              run, undo=lambda rung, e: switched.append(
+                                  rung.name),
+                              switch=decide.only_blocked)
 
     def _added_row(self, side, db, table, key, values):
         """None where a unique index besides the key could take the
@@ -760,10 +767,11 @@ class MySQLEngine(Engine):
         where statements take one a thousand rows. The load is the pinned
         one (`_loading`): the server is sent these rows and nothing else.
 
-        False, with nothing written, where the stage cannot be made, the
-        load's text cannot carry a value exactly (`_Unfit`) or the server
-        took the load with a warning: the run then goes as statements,
-        which stop on a value the column cannot hold.
+        `decide.Blocked`, with nothing written to the table, where the
+        stage cannot be made, the load's text cannot carry a value exactly
+        (`_Unfit`), the server takes no load from here or took this one
+        with a warning (the stage emptied again, `_loaded`): the run then
+        goes as statements, which stop on a value the column cannot hold.
 
         Measured on mysql:8.4, a batch a run, rows of eight columns (bytes,
         text, decimal, datetime, JSON), staged against statements: 200,000
@@ -775,24 +783,16 @@ class MySQLEngine(Engine):
         the way is chosen by what it cost here, for runs of that size
         (`_cheaper`), not by a rule. (The round trip was added by a proxy
         that holds each packet: `tc` and `pfctl` need root.)"""
+        from .. import decide
         q = self._my_ident
         stage = self._stage(cur, db, table, names)
         if stage is None:
-            return False
+            raise decide.Blocked("the target would not make a temporary"
+                                 " table of its columns")
         at = f"{q(db)}.{q(stage)}"
-        try:
-            _load(cur, db, stage, names, values,
-                  self._load_types(cur, db, table))
-        except _Unfit:
-            return False
-        except _LoadRefused:
-            cur.execute(f"delete from {at}")
-            return False
-        except _loading_off() as e:
-            if e.args and e.args[0] in _LOAD_OFF:
-                self._loads_ok = False
-                return False
-            raise
+        self._loaded(cur, db, stage, names, values,
+                     self._load_types(cur, db, table),
+                     lambda: cur.execute(f"delete from {at}"))
         cols = ", ".join(q(n) for n in names)
         # a column of both tables is named with its table on the right of
         # an assignment, or the server calls it ambiguous
@@ -6952,8 +6952,16 @@ class MySQLEngine(Engine):
     ROWS_WAYS = (Rung("load", "the server's bulk load, sent only the rows"
                               " made for it"),
                  Rung("statements", "the rows as multi-row inserts"))
+    #: how one range of the table copier writes its batches
+    #: (`_range_checked`): each by the way measured cheaper (`ROWS_WAYS`),
+    #: or - once a load in it was taken with warnings and the range rolled
+    #: back whole - every one as inserts, which stop on the row the load
+    #: had let through
+    RANGE_WAYS = (Rung("load", "its batches each by the way measured"
+                               " cheaper"),
+                  Rung("statements", "every batch as inserts"))
 
-    def _put_rows(self, cur, db, table, names, rows, insert):
+    def _put_rows(self, cur, db, table, names, rows, insert, undo=None):
         """Rows onto the target, in the cursor's transaction: as the
         server's own bulk load (`load data local`) where the server takes
         one, else as the multi-row insert `insert` names.
@@ -6964,8 +6972,11 @@ class MySQLEngine(Engine):
         lets a server read any file the client can was why this was not
         used before. A load also turns what an insert refuses (a value too
         long, a key already there) into warnings and goes on, so a load
-        that raised any is `_LoadRefused`: the caller rolls it back and
-        writes the rows as inserts, which stop on the row as before.
+        that raised any is `_LoadRefused`. Where `undo` puts the cursor's
+        transaction back as it was before this batch, the batch is then
+        switched to inserts by itself (`_loaded`, `decide.attempt`), which
+        stop on the row as before; where it cannot, the caller rolls back
+        what the transaction holds and writes it again as inserts.
 
         Which of the two a batch goes by is the one measured cheaper on
         this server, for this table and batches of this size
@@ -6975,32 +6986,60 @@ class MySQLEngine(Engine):
         with a round trip of 10 ms - where the table copier's million rows
         had gone from 15.6s to 10.9s by the load and the read ahead
         together. Neither wins everywhere, so neither is assumed."""
-        key = None
+        from .. import decide
+        key, way = None, "statements"
         if len(rows) >= self.LOAD_FROM and self._loads(cur.connection) \
                 and not getattr(_PLAIN, "on", False):
             key = self._work_key("rows", f"{db}.{table}", len(rows))
-            if self._cheaper(key, self.ROWS_WAYS) == "load":
-                began = time.monotonic()
-                try:
-                    got = _load(cur, db, table, names, rows,
-                                self._load_types(cur, db, table))
-                    self._took(key, "load", time.monotonic() - began,
-                               len(rows))
-                    return got
-                except _Unfit:
-                    key = None
-                except _loading_off() as e:
-                    if e.args and e.args[0] in _LOAD_OFF:
-                        self._loads_ok = False
-                        key = None
-                    else:
-                        raise
-        began = time.monotonic()
-        cur.executemany(insert, rows)
-        if key:
-            self._took(key, "statements", time.monotonic() - began,
-                       len(rows))
-        return len(rows)
+            way = self._cheaper(key, self.ROWS_WAYS)
+        switched = []
+
+        def run(choice):
+            began = time.monotonic()
+            if choice.path == "load":
+                got = self._loaded(cur, db, table, names, rows,
+                                   self._load_types(cur, db, table), undo)
+            else:
+                cur.executemany(insert, rows)
+                got = len(rows)
+            if key and not switched:
+                # timed where the way was chosen by what it cost
+                self._took(key, choice.path, time.monotonic() - began,
+                           len(rows))
+            return got
+        return self._attempt(
+            f"{db}.{table}", self.ROWS_WAYS if way == "load" else
+            self.ROWS_WAYS[1:], run,
+            undo=lambda rung, e: switched.append(rung.name),
+            switch=decide.only_blocked)[1]
+
+    def _loaded(self, cur, db, into, names, rows, types, undo=None):
+        """`rows` into `into` by the pinned load, and the rows the server
+        took. What keeps the load from carrying them is `decide.Blocked`,
+        so another way writes them instead: a value its text cannot carry
+        as an insert would (`_Unfit`), the server refusing a load from here
+        - kept for the rest of the run - and, where `undo` puts back what
+        the load wrote, a load the server took with warnings
+        (`_LoadRefused`); without `undo` that one is raised as it is."""
+        from .. import decide
+        try:
+            return _load(cur, db, into, names, rows, types)
+        except _Unfit:
+            raise decide.Blocked("a value the load's text cannot carry as"
+                                 " an insert would") from None
+        except _LoadRefused as e:
+            if undo is None:
+                raise
+            undo()
+            raise decide.Blocked(f"the bulk load was not taken as it was"
+                                 f" ({e})") from e
+        except _loading_off() as e:
+            if not (e.args and e.args[0] in _LOAD_OFF):
+                raise
+            self._loads_ok = False
+            raise decide.Blocked(
+                "the target takes no load from here: "
+                + str(e.args[-1] if len(e.args) > 1 else e)[:160]) from e
 
     def _load_types(self, cur, db, table):
         known = self.__dict__.setdefault("_types_loaded", {})
@@ -7088,8 +7127,12 @@ class MySQLEngine(Engine):
         differs too; a range that still differs stops the copy, named."""
         import pymysql
 
+        from .. import decide
         from ..tally import Tally
         self._stall_bound(sconn, dconn)
+        # a batch's load switched to inserts is said once a table in the
+        # copy's log (`_put_rows`)
+        self.lend_log(log)
         ddb = self._d("dst", db)
         insert = f"insert into `{ddb}`.`{t}` ({collist}) values ({ph})"
         names = [n.replace("``", "`")
@@ -7155,24 +7198,32 @@ class MySQLEngine(Engine):
             dconn.commit()
             return sent
 
-        def copy():
-            # a deadlock or a lock wait the server gave up on rolls the
-            # range back whole; it is copied again from the start
-            for tries in range(6):
-                try:
-                    return once()
-                except _LoadRefused as e:
-                    # the range goes again as inserts, which stop on the
-                    # row the load had let through with a warning
-                    dconn.rollback()
-                    loads[0] = False
-                    log(f"{what}: the bulk load was not taken as it was"
-                        f" ({e}); copying the range again as inserts")
-                except pymysql.err.OperationalError as e:
-                    if e.args[0] not in (1205, 1213) or tries == 5:
-                        raise
-                    dconn.rollback()
-                    time.sleep(0.2 * (tries + 1))
+        def copy(ways):
+            def run(choice):
+                loads[0] = choice.path == "load"
+                # a deadlock or a lock wait the server gave up on rolls the
+                # range back whole; it is copied again from the start
+                for tries in range(6):
+                    try:
+                        return once()
+                    except _LoadRefused as e:
+                        # rolled back whole, the range is switched to
+                        # inserts, which stop on the row the load had let
+                        # through with a warning
+                        dconn.rollback()
+                        raise decide.Blocked(
+                            f"the bulk load was not taken as it was ({e})"
+                            f" in {what}") from e
+                    except pymysql.err.OperationalError as e:
+                        if e.args[0] not in (1205, 1213) or tries == 5:
+                            raise
+                        dconn.rollback()
+                        time.sleep(0.2 * (tries + 1))
+            # the table's work, not the range's: a table of a hundred
+            # thousand ranges keeps one decision, and a range that switched
+            # is named in its reason
+            return self._attempt(f"{ddb}.{t}", ways, run, log=log,
+                                 switch=decide.only_blocked)[1]
 
         def there():
             got = Tally()
@@ -7186,7 +7237,7 @@ class MySQLEngine(Engine):
                     for r in rows:
                         got.row(r)
             return got
-        sent = copy()
+        sent = copy(self.RANGE_WAYS)
         if not (self.hop.options or {}).get("verify_batches", True):
             return sent
         for round_ in (1, 2):
@@ -7212,8 +7263,7 @@ class MySQLEngine(Engine):
             # the second copy is the plainest one there is: whatever the
             # bulk load stored differently, an insert stores as it always
             # has
-            loads[0] = False
-            sent = copy()
+            sent = copy(self.RANGE_WAYS[1:])
         raise SystemExit(
             f"{what}: copied twice, and the target reads back {back.n:,}"
             f" rows where {sent.n:,} were copied, or the same number"

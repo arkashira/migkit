@@ -1367,10 +1367,21 @@ class MSSQLEngine(DbapiRows, Engine):
     }
 
     #: the ways a batch goes in, chosen per table and size of batch by
-    #: what each cost (`Engine._cheaper`), starting from `WRITE_COSTS`
+    #: what each cost (`Engine._cheaper`), starting from `WRITE_COSTS`;
+    #: the bulk load only where its driver loads here, the table has not
+    #: refused it this run and every column is of a type it is proved on
     WRITE_WAYS = (
         decide.Rung("bulk load", "SQL Server's bulk load, staged and"
                                  " promoted",
+                    needs=(decide.Need("its driver",
+                                       lambda f: f["driver"] is None,
+                                       lambda f: f["driver"]),
+                           decide.Need("a table that has not refused it",
+                                       lambda f: f["refused"] is None,
+                                       lambda f: f["refused"]),
+                           decide.Need("types it is proved on",
+                                       lambda f: f["unproved"] is None,
+                                       lambda f: f["unproved"])),
                     # a stage in tempdb while the batch is loaded
                     footprint=1),
         decide.Rung("statements", "statements"),
@@ -1423,11 +1434,22 @@ class MSSQLEngine(DbapiRows, Engine):
 
         def braced(v):
             return "{" + str(v).replace("}", "}}") + "}"
-        return mssql_python.connect(
-            f"Server={ep.host},{ep.port or 1433};"
-            f"Database={braced(self._d(side, db))};UID={braced(ep.user)};"
-            f"PWD={braced(ep.password)};Encrypt={encrypt};"
-            "TrustServerCertificate=yes", autocommit=False, timeout=15)
+        try:
+            return mssql_python.connect(
+                f"Server={ep.host},{ep.port or 1433};"
+                f"Database={braced(self._d(side, db))};UID={braced(ep.user)};"
+                f"PWD={braced(ep.password)};Encrypt={encrypt};"
+                "TrustServerCertificate=yes", autocommit=False, timeout=15)
+        except Exception as e:
+            if not decide.operational(e):
+                raise
+            # the statements' own connection may still be made: another
+            # way may carry the rows
+            from ..util import without_secret
+            raise decide.Blocked(
+                "the bulk load could not connect to the"
+                f" {'source' if side == 'src' else 'target'}: "
+                + without_secret(_said(e), ep.password)) from e
 
     def _shape(self, side, db, table):
         """{"declared": {column: declared type}, "key": [column],
@@ -1482,27 +1504,39 @@ class MSSQLEngine(DbapiRows, Engine):
     def _base(declared):
         return str(declared or "").split("(")[0].strip().lower()
 
+    def _write_ladder(self, side, db, table, columns, rows):
+        """(facts, costs, key) of a batch of `rows` rows into `table`
+        climbing `WRITE_WAYS`: the costs - what each way was measured to
+        cost (`WRITE_COSTS`) until each is timed here, for batches of this
+        size - only where both ways hold, and the batch is then timed."""
+        facts = decide.Facts(
+            driver=self._bulk_unusable,
+            refused=lambda: self.__dict__.get("_refused", {}).get(
+                (side, db, str(table))),
+            unproved=lambda: self._unproved(self._shape(side, db, table),
+                                            [n for n, _ in columns]))
+        held, _ = decide.prune(self.WRITE_WAYS, facts)
+        if len(held) < 2:
+            return facts, None, None
+        key = self._work_key("rows", str(table), rows)
+        return facts, self._way_costs(key, self.WRITE_WAYS, {
+            w: (fixed + rows * row) / max(rows, 1)
+            for w, (fixed, row) in self.WRITE_COSTS.items()}, facts), key
+
     def write_way(self, side, db, table, columns, rows):
         """("statements" | "bulk load", why) for a batch of `rows` rows
-        into `table`: the bulk load only where its driver loads here, it
-        has not refused a value of this table before and every column
-        written is of a type it is proved on - and then whichever way did
-        a row in less time for batches of this size (`Engine._cheaper`),
-        from what each was measured to cost (`WRITE_COSTS`) until each is
-        timed here."""
-        why = (self._bulk_unusable()
-               or self.__dict__.get("_refused", {}).get((side, db,
-                                                         str(table)))
-               or self._unproved(self._shape(side, db, table),
-                                 [n for n, _ in columns]))
-        if why:
-            return "statements", why
-        key = self._work_key("rows", str(table), rows)
-        way = self._cheaper(key, self.WRITE_WAYS, {
-            w: (fixed + rows * row) / max(rows, 1)
-            for w, (fixed, row) in self.WRITE_COSTS.items()})
-        return way, (f"the way a row cost less for batches of about"
-                     f" {key[2]:,} rows")
+        into `table`, climbed through `WRITE_WAYS`: the bulk load only
+        where its driver loads here, it has not refused this table this
+        run and every column written is of a type it is proved on - and
+        then whichever way did a row in less time for batches of this size
+        (`_write_ladder`)."""
+        facts, costs, key = self._write_ladder(side, db, table, columns,
+                                               rows)
+        got = decide.climb(str(table), self.WRITE_WAYS, facts, costs=costs)
+        if costs is None:
+            return got.path, got.reason
+        return got.path, (f"the way a row cost less for batches of about"
+                          f" {key[2]:,} rows")
 
     def neutral_write(self, side, db, table, columns, rows):
         """Rows in by statements or through the bulk load, whichever
@@ -1510,46 +1544,65 @@ class MSSQLEngine(DbapiRows, Engine):
         with the same key in one transaction, so a batch written again
         converges.
 
-        A value the bulk load will not take into its stage - one another
-        engine hands over in a form it does not convert - has touched
-        nothing but the stage: the batch goes by statements, and so does
-        the rest of the table. What the promote refuses, the table itself
-        refuses, and is said as it would be by statements."""
+        The bulk load that cannot run - a value its stage will not take,
+        one another engine hands over in a form it does not convert, or
+        its own connection or stage refused - has touched nothing but the
+        stage: the batch is switched to statements by itself and said
+        (`decide.attempt`), and so is the rest of the table this run. What
+        the promote refuses, the table itself refuses, and is said as it
+        would be by statements: never switched from."""
         if not rows:
             return 0
         self._target_only(side, "write rows")
-        way, _ = self.write_way(side, db, table, columns, len(rows))
-        began = time.monotonic()
-        if way == "bulk load":
-            from .. import canon
-            names = [n for n, _ in columns]
-            texts = self._as_text(side, db, table, names)
-            try:
-                staged = canon.sql_rows([c for _, c in columns], rows,
-                                        engine="mssql")
-                if texts:
-                    at = [(i, texts[n][0]) for i, n in enumerate(names)
-                          if n in texts]
-                    staged = [list(r) for r in staged]
-                    for r in staged:
-                        for i, text in at:
-                            r[i] = text(r[i])
-                with _Stage(self, side, db, table, names,
-                            {n: t[1:] for n, t in texts.items()}) as stage:
-                    stage.load(staged)
-                    stage.promote()
-            except _NotLoaded as e:
-                self.__dict__.setdefault("_refused", {})[
-                    (side, db, str(table))] = (
-                    f"the bulk load refused a value of it: {e}")
-                way, began = "statements", time.monotonic()
-        if way == "statements":
-            super().neutral_write(side, db, table, columns, rows)
-        key = self._work_key("rows", str(table), len(rows))
-        if key in self.__dict__.get("_way_rungs", {}):
-            # timed where the way was chosen by what it cost
-            self._took(key, way, time.monotonic() - began, len(rows))
+        facts, costs, key = self._write_ladder(side, db, table, columns,
+                                               len(rows))
+        by_statements = super().neutral_write
+
+        def run(choice):
+            began = time.monotonic()
+            if choice.path == "bulk load":
+                self._bulk_write(side, db, table, columns, rows)
+            else:
+                by_statements(side, db, table, columns, rows)
+            if costs is not None:
+                # timed where the way was chosen by what it cost
+                self._took(key, choice.path, time.monotonic() - began,
+                           len(rows))
+
+        def undo(rung, error):
+            self.__dict__.setdefault("_refused", {})[
+                (side, db, str(table))] = decide._first(error)
+        self._attempt(str(table), self.WRITE_WAYS, run, facts, costs=costs,
+                      undo=undo, switch=decide.only_blocked)
         return len(rows)
+
+    def _bulk_write(self, side, db, table, columns, rows):
+        """One batch through the bulk load, staged and promoted. What stops
+        it before the promote is `decide.Blocked`: nothing has reached the
+        table."""
+        from .. import canon
+        names = [n for n, _ in columns]
+        texts = self._as_text(side, db, table, names)
+        try:
+            staged = canon.sql_rows([c for _, c in columns], rows,
+                                    engine="mssql")
+            if texts:
+                at = [(i, texts[n][0]) for i, n in enumerate(names)
+                      if n in texts]
+                staged = [list(r) for r in staged]
+                for r in staged:
+                    for i, text in at:
+                        r[i] = text(r[i])
+            stage = _Stage(self, side, db, table, names,
+                           {n: t[1:] for n, t in texts.items()})
+        except _NotLoaded as e:
+            raise decide.Blocked(_refused_value(e)) from e
+        with stage:
+            try:
+                stage.load(staged)
+            except _NotLoaded as e:
+                raise decide.Blocked(_refused_value(e)) from e
+            stage.promote()
 
     def _as_text(self, side, db, table, names):
         """{column: (value to text, the stage's type, the turn back)} for
@@ -1587,34 +1640,40 @@ class MSSQLEngine(DbapiRows, Engine):
         through the bulk load, a batch staged and promoted at a time - no
         value becomes a Python object on the way. A table the target lacks,
         or with a column of a type the Arrow read is not proved on, is
-        copied table by table instead, where its batches still go by
-        whichever way costs less. A table a row filter keeps for the table
-        copier (`shape_only`) is made by the copier, the way it makes the
-        rest here. Measured: 500,000 rows in 6.97s on SQL Edge and 3.58s
-        on the 2022 server, against 269.6s and 305.3s by statements
-        (`WRITE_COSTS`)."""
+        copied table by table, where its batches still go by whichever way
+        costs less; so is one the bulk load cannot finish - a value its
+        stage refuses, its connection or its stage refused - switched to by
+        itself and said (`decide.attempt`): the copier empties the table
+        before it writes, so what the load had promoted is not doubled. A
+        table a row filter keeps for the table copier (`shape_only`) is
+        made by the copier, the way it makes the rest here. Measured:
+        500,000 rows in 6.97s on SQL Edge and 3.58s on the 2022 server,
+        against 269.6s and 305.3s by statements (`WRITE_COSTS`)."""
         steps = [f"{t}: read in batches and loaded by SQL Server's bulk load,"
                  " each batch staged and promoted in one transaction"
                  for t in tables]
         if not go or not tables:
             return steps
-        pair = None
-        for t in tables:
-            got = decide.climb(t, self.NATIVE_RUNGS, self._native_facts(db, t))
-            why = got.reason
-            if got.path == "arrow":
+        said = log or (lambda m: None)
+        pair = []
+
+        def run(choice, t):
+            if choice.path == "arrow":
                 try:
-                    self._native_table(db, t, log)
-                    continue
+                    return self._native_table(db, t, log)
                 except _NotLoaded as e:
-                    why = f"the bulk load refused a value of it: {e}"
-            if log:
-                log(f"{t}: copied table by table - {why}")
-            if pair is None:
-                pair = self._as_pair()
+                    raise decide.Blocked(_refused_value(e)) from e
+            said(f"{t}: copied table by table - {choice.reason}")
+            if not pair:
+                pair.append(self._as_pair())
             sch, _, tbl = str(t).rpartition(".")
-            pair.move_table(db, sch, tbl, pair.READ_ROWS, _Unkept(), log
-                            or (lambda m: None))
+            pair[0].move_table(db, sch, tbl, pair[0].READ_ROWS, _Unkept(),
+                               said)
+        for t in tables:
+            self._attempt(t, self.NATIVE_RUNGS,
+                          lambda choice, t=t: run(choice, t),
+                          self._native_facts(db, t), log=log,
+                          switch=decide.only_blocked)
         return steps
 
     def _native_facts(self, db, table):
@@ -2032,8 +2091,11 @@ class _Stage:
             # committed before the load looks for it: uncommitted, the
             # load's connection waits on this session's lock for good
             self.conn.commit()
-        except BaseException:
+        except BaseException as e:
             self.conn.close()
+            if isinstance(e, Exception) and decide.operational(e):
+                raise decide.Blocked(
+                    f"its stage could not be made: {_said(e)}") from e
             raise
 
     def _back(self, name, alias=""):
@@ -2122,6 +2184,11 @@ class _Stage:
 
 class _NotLoaded(Exception):
     """The bulk load did not fill its stage: nothing reached the table."""
+
+
+def _refused_value(e):
+    """Why the bulk load gave up on a table, from its `_NotLoaded`."""
+    return f"the bulk load refused a value of it: {e}"
 
 
 def _time_text(v):

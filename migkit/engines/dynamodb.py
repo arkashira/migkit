@@ -22,6 +22,7 @@ import json
 import time
 from decimal import Decimal
 
+from ..decide import Need, Rung
 from .base import Engine, NeutralCopier, Result
 
 class RawAttr(str):
@@ -126,6 +127,43 @@ class DynamoDBEngine(NeutralCopier, Engine):
             start = got.get("LastEvaluatedTableName")
             if not start:
                 return sorted(out)
+
+    #: where the description of a table migkit made is kept
+    #: (`neutral_create`, read by `_described`)
+    DESCRIBED = (Rung("tags", "the table's own tags",
+                      needs=(Need("tags to put on it", lambda f: f["tags"],
+                                  "the source keeps no tags of migkit's to"
+                                  " copy"),)),
+                 Rung("here", "a file of migkit's for the endpoint"))
+
+    def _keep_description(self, side, name, arn, tags, columns, key):
+        """The description of a table migkit made kept where `_described`
+        reads it: in `tags` on the table, or - on an endpoint that takes
+        none (DynamoDB Local), switched to by itself and said, or where
+        there are no tags to put on it - in migkit's file for the endpoint
+        (`DESCRIBED`)."""
+        from .. import decide
+        client = self._client(side)
+
+        def keep(choice):
+            if choice.path == "here":
+                path = self._kept_here(side)
+                try:
+                    kept = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    kept = {}
+                kept[arn] = {"columns": [list(c) for c in columns],
+                             "key": list(key)}
+                path.write_text(json.dumps(kept, indent=1))
+                return
+            try:
+                client.tag_resource(ResourceArn=arn, Tags=tags)
+            except Exception as e:  # noqa: BLE001 - by what it says
+                if "not currently supported" not in str(e):
+                    raise
+                raise decide.Blocked("the endpoint takes no tags") from e
+        self._attempt(name, self.DESCRIBED, keep, {"tags": tags},
+                      switch=decide.only_blocked)
 
     def _kept_here(self, side):
         """Descriptions of the tables migkit made, for an endpoint that
@@ -423,19 +461,9 @@ class DynamoDBEngine(NeutralCopier, Engine):
                              " a DynamoDB table's tags")
         arn = client.describe_table(TableName=spec["table"])["Table"][
             "TableArn"]
-        try:
-            client.tag_resource(ResourceArn=arn, Tags=tags + [
-                {"Key": TAG_KEY, "Value": ",".join(spec["key"])}])
-        except Exception as e:  # noqa: BLE001 - an endpoint without tags
-            if "not currently supported" not in str(e):
-                raise
-            path = self._kept_here(side)
-            try:
-                kept = json.loads(path.read_text())
-            except (OSError, ValueError):
-                kept = {}
-            kept[arn] = {"columns": spec["columns"], "key": spec["key"]}
-            path.write_text(json.dumps(kept, indent=1))
+        self._keep_description(side, spec["table"], arn, tags + [
+            {"Key": TAG_KEY, "Value": ",".join(spec["key"])}],
+            spec["columns"], spec["key"])
         return json.dumps(spec)
 
     def _batch_write(self, client, name, requests):
@@ -1038,24 +1066,16 @@ class DynamoDBEngine(NeutralCopier, Engine):
         if described is None or self._described("dst", db, table):
             return
         src, client = self._client("src"), self._client("dst")
-        arn = client.describe_table(TableName=self._name(
-            "dst", db, table))["Table"]["TableArn"]
+        name = self._name("dst", db, table)
+        arn = client.describe_table(TableName=name)["Table"]["TableArn"]
         try:
             tags = [t for t in src.list_tags_of_resource(
                 ResourceArn=src.describe_table(TableName=self._name(
                     "src", db, table))["Table"]["TableArn"]).get("Tags", [])
                 if t["Key"].startswith("migkit:")]
-            if tags:
-                client.tag_resource(ResourceArn=arn, Tags=tags)
-                return
-        except Exception as e:  # noqa: BLE001 - an endpoint without tags
+        except Exception as e:  # noqa: BLE001 - a source without tags
             if "not currently supported" not in str(e):
                 raise
-        path = self._kept_here("dst")
-        try:
-            kept = json.loads(path.read_text())
-        except (OSError, ValueError):
-            kept = {}
-        kept[arn] = {"columns": [list(c) for c in described[0]],
-                     "key": list(described[1])}
-        path.write_text(json.dumps(kept))
+            tags = []
+        self._keep_description("dst", name, arn, tags, described[0],
+                               described[1])

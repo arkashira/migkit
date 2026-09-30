@@ -1,5 +1,6 @@
 import time
 
+from ..decide import Rung
 from .base import Engine, RepairAction, Result
 from ..verdict import difference_kind_from_counts
 
@@ -1422,11 +1423,17 @@ class MongoEngine(Engine):
         finds nothing."""
         pipe = ([{"$match": flt}] if flt else []) + [
             {"$project": {"h": {"$toHashedIndexKey": "$$ROOT"}}}]
-        try:
-            return {repr(d["_id"]): (d["_id"], d["h"])
-                    for d in coll.aggregate(pipe, allowDiskUse=True)}
-        except Exception:
-            return self._client_hashes(coll, flt)
+        return {repr(d["_id"]): (d["_id"], d["h"])
+                for d in coll.aggregate(pipe, allowDiskUse=True)}
+
+    #: how a collection whose `dbHash` differs is walked first
+    #: (`_compare`): by the servers' id hash, which is cheap, and where a
+    #: server will not work it out - an older one without
+    #: `$toHashedIndexKey`, a user refused the aggregation - by the bytes,
+    #: on both sides alike
+    WALKS = (Rung("id hash", "each document's hash worked out by the"
+                             " servers"),
+             Rung("bytes", "each document's stored bytes"))
 
     def _compare(self, db, name, told):
         """One collection compared document by document, and the answer
@@ -1451,11 +1458,25 @@ class MongoEngine(Engine):
         can hash a document itself. Measured, 200,000 documents of 232
         bytes a side on MongoDB 7: the id hash walked them in 0.79 to
         1.13 s, the bytes in 1.36 to 2.49 s."""
+        by_bytes = False
         if told:
-            r = self._drilldown(db, name)
+            # a walk by the id hash that cannot run on either side is
+            # switched from by itself, to the bytes on both (`_attempt`):
+            # one side's hashes are never held to the other side's bytes,
+            # which differ for every document. A difference found is the
+            # answer, returned as it is
+            said = []
+            walked, r = self._attempt(
+                f"{db}.{name}", self.WALKS,
+                lambda c: self._drilldown(db, name,
+                                          exact=c.path == "bytes"),
+                log=said.append)
+            r = self._switch_said(r, said)
             if r.status != "ok":
                 return r
-        r = self._drilldown(db, name, exact=True)
+            by_bytes = walked.path == "bytes"
+        if not by_bytes:
+            r = self._drilldown(db, name, exact=True)
         if r.status != "ok" or not told:
             return r
         a, b = self._db_hashes(db, [name])
@@ -1472,6 +1493,14 @@ class MongoEngine(Engine):
                       f" bytes ({r.detail})", str(self.hop.report_dir(db)),
                       "check again with no writes on either side; if it"
                       " stays, copy the collection again")
+
+    @staticmethod
+    def _switch_said(r, said):
+        """The walk's result with the switch it took said in it."""
+        import dataclasses
+        if not said:
+            return r
+        return dataclasses.replace(r, detail=f"{r.detail}; {'; '.join(said)}")
 
     def _drilldown(self, db, name, exact=False):
         """Compare every document by id, one `_id` range at a time - by the
