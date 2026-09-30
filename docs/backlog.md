@@ -2853,6 +2853,19 @@ prediction):
   and outage are hard limits where the hop sets them; the plan names the
   trade-off ("the fastest way bills about $X; the chosen one is 12%
   slower and bills nothing").
+* **The owner, the same day: "a real decision engine - compute every
+  way, use every factor, propose and decide what fits: smartest,
+  fastest, most correct, most consistent, most idempotent."** So:
+  every composition of parts that fits is costed (dominated ones pruned,
+  the count said); one facts catalogue of everything a choice may read,
+  and a rung reading an undeclared fact fails a test; correctness,
+  consistency, idempotency, exactly-once and resumability are never
+  traded - each part declares its guarantee levels, a strategy holds the
+  weakest of its parts, a weaker fast part is allowed only where migkit
+  tops it up to the strongest level the engines allow (proved), and
+  speed is optimised only among strategies that reach it; the dry run
+  proposes (choice, predicted time and spread, guarantees, runners-up,
+  deciding and unknown facts) and `--go` decides.
 * **Counterfactuals in the plan and the evidence export:** the chosen
   rung, its predicted time with spread, the next best and why not.
 
