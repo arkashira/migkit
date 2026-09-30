@@ -28,7 +28,7 @@ def _sign(key, request):
 
 
 @pytest.fixture
-def hop(tmp_path):
+def hop(tmp_path, monkeypatch):
     keys = tmp_path / "keys"
     keys.mkdir()
     ann, bob, me = (_key(keys, n) for n in ("ann", "bob", "me"))
@@ -45,6 +45,8 @@ def hop(tmp_path):
             options={"approvals": {"steps": ["cutover", "repair"],
                                    "count": 2, "signers": str(signers)}})
     h.report_dir = lambda db=None: tmp_path / "reports"
+    # the one who asks, by the key they run with
+    monkeypatch.setenv("MIGKIT_IDENTITY", str(me))
     return h, {"ann": ann, "bob": bob, "me": me}
 
 

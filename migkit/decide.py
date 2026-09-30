@@ -1346,7 +1346,7 @@ def _cost_words(costs, failed, instead):
 
 def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
             keep=None, log=None, undo=None, answer=None, prove=True,
-            otherwise=None, switch=operational):
+            otherwise=None, switch=operational, record=True):
     """(the `Choice`, what `run` returned): the work done on the first rung
     that runs.
 
@@ -1367,7 +1367,10 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
     that ran for an hour, a target replaced by a copy): there only what
     the way itself raises as `Blocked` - it failed before anything it
     cannot put back. What cannot be undone stops everything, with both
-    reasons; no rung left stops with every rung's reason (`Exhausted`)."""
+    reasons; no rung left stops with every rung's reason (`Exhausted`).
+    `record` False reads what `where` keeps and writes nothing to it or
+    to `costs`: a dry run climbs the ladder `--go` climbs, the ways given
+    up included, and leaves everything as it found it."""
     facts = facts if facts is not None else Facts()
     rungs = tuple(rungs)
     say = log or (lambda m: None)
@@ -1421,7 +1424,7 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
             if not operational(e) or not switch(e):
                 raise
             why, last_error = _first(e), e
-            if callable(getattr(costs, "outcome", None)):
+            if record and callable(getattr(costs, "outcome", None)):
                 # its chance of failing, for the next climb here and the
                 # next hop of these engines (`costmodel.risk`)
                 costs.outcome(rung.name, False, why)
@@ -1437,7 +1440,7 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
                     " is tried over it") from err
             now[rung.name] = {"why": why, "seen": seen(rung, facts),
                               "at": time.time()}
-            if where is not None:
+            if where is not None and record:
                 _keep_given_up(where, work, rung.name, now[rung.name])
             nxt = climb(work, ladder(), facts, need, costs,
                         prove=False).rung
@@ -1448,9 +1451,9 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
                    else " - no other way is left"))
             keep = None
             continue
-        if where is not None:
+        if where is not None and record:
             remember(where, work, rung.name)
-        if callable(getattr(costs, "outcome", None)):
+        if record and callable(getattr(costs, "outcome", None)):
             costs.outcome(rung.name, True)
         return choice, result
 

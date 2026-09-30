@@ -96,8 +96,10 @@ Every command takes the hop's name; `--db` narrows one to a database.
    only what changed since its last clean cycle, inside the outage.
    `migkit watch HOP` samples counts and names the tables still being
    written to on the source.
-   - Passes when: `SAFE TO CUT OVER` (the source stable for two cycles,
-     and the target level with it).
+   - Passes when: `--verify --delta` says `SAFE TO CUT OVER` (the cycle
+     verified what changed the same, the source made no change since the
+     cycle before, and the tail has nothing left to apply). The counts
+     `migkit watch HOP` samples are estimates and only say they converge.
    - Otherwise: `NOT SAFE ... source still HOT` names the tables whose
      writers are still running.
 

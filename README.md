@@ -250,7 +250,7 @@ off for a hop where the time matters more.
 | `assess` | Premigration readiness check: CDC prerequisites, risky tables, encoding, extensions, accounts. |
 | `schema` | Target schema workflows: preparation plan (default), cross-engine DDL conversion (--convert), versioned migration files (--migration). |
 | `check` | Read-only validation of target vs source. |
-| `sync` | Make target equal to source, or run a full DMS-style migration. |
+| `sync` | Make target equal to source, or run a whole migration flow. |
 | `move` | Move data for this hop. |
 | `watch` | Watch a running migration load: row counts, rate, ETA, replication state. |
 | `report` | Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the live localhost dashboard (with a Prometheus /metrics endpoint). |

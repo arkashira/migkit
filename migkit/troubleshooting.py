@@ -149,6 +149,33 @@ def _text(node):
     return None
 
 
+#: what a refusal is raised as besides `SystemExit`: the two of it that
+#: say which end the command has (`verdict.Refused`, exit 4;
+#: `verdict.Usage`, exit 2) - by that module's name only, another
+#: module's `Refused` being its own
+RAISED_AS = ("Refused", "Usage")
+
+
+def _raised_as(tree):
+    """The names a module raises a refusal by: `SystemExit`, and the
+    verdict's own as it imports them."""
+    names = {"SystemExit"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(
+                ".")[-1] == "verdict":
+            names |= {a.asname or a.name for a in node.names
+                      if a.name in RAISED_AS}
+    return names
+
+
+def _raises_a_refusal(exc, names):
+    f = exc.func
+    if isinstance(f, ast.Name):
+        return f.id in names
+    return (isinstance(f, ast.Attribute) and f.attr in RAISED_AS
+            and getattr(f.value, "id", "") in ("verdict", "_verdict"))
+
+
 def refusals():
     """[(module, function, template)] for every `raise SystemExit(...)`
     whose words are written where it is raised, in file order."""
@@ -156,13 +183,14 @@ def refusals():
     for path in sorted(ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text())
         module = str(path.relative_to(ROOT.parent))
+        names = _raised_as(tree)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for node in ast.walk(fn):
                 if not (isinstance(node, ast.Raise)
                         and isinstance(node.exc, ast.Call)
-                        and getattr(node.exc.func, "id", "") == "SystemExit"
+                        and _raises_a_refusal(node.exc, names)
                         and node.exc.args):
                     continue
                 text = _text(node.exc.args[0])

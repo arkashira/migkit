@@ -121,7 +121,7 @@ def test_mysql_to_postgres(mysql_server, pg_pair, tmp_path, monkeypatch):
                                    " ('a')")
         assert "duplicate key" in dup.stderr, dup.stderr
         got, said = _run("check", "rules", "--only", "schema")
-        assert got.exit_code == 0, said
+        assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
         # a unique index the target lost is a difference
         psql(pg_pair["dst"], "drop index public.t_name")
         got, said = _run("check", "rules", "--only", "schema")
@@ -165,6 +165,6 @@ def test_postgres_to_mysql(mysql_server, pg_pair, tmp_path, monkeypatch):
                   " where table_schema = 'cy' and index_name = 'u_code'"
                   " and non_unique = 0") == "1", said
         got, said = _run("check", "rules", "--only", "schema")
-        assert got.exit_code == 0, said
+        assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     finally:
         psql(pg_pair["src"], "drop table if exists public.u")

@@ -113,9 +113,14 @@ def test_a_resumed_run_with_nothing_changed_still_reuses(lite):
     got, said = _check()
     assert got.exit_code == 0, said
     got, said = _check("--resume")
-    assert got.exit_code == 0, said
-    assert "resume: skipped, was ok" in json.dumps(_records(lite)), said
+    assert "resume: reused, was ok" in json.dumps(_records(lite)), said
     assert "schema changed since" not in said, said
+    # SQLite keeps no count of the changes made to it, so nothing says the
+    # reused answers still hold: the run is incomplete, and says why - it
+    # read "same" however old they were (audit V10)
+    env = json.loads((lite / "reports" / "lite" / "verdict.json").read_text())
+    assert env["status"] == "incomplete" and "reused" in env["why"], env
+    assert got.exit_code == 3, said
 
 
 def test_which_answers_are_taken_back():

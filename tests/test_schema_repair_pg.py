@@ -72,4 +72,4 @@ def test_schema_repair_aligns_objects(pg_pair, tmp_path):
     assert idx == "1"
 
     r = _migkit(conf, "check", "t", "--only", "schema")
-    assert r.returncode == 0, r.stdout
+    assert r.returncode == 3 and "the run was narrowed to" in r.stdout, r.stdout
