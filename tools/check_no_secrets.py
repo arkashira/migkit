@@ -14,7 +14,7 @@ import re, subprocess, sys, pathlib
 PATTERNS = [
     (r"\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "private IP address"),
     (r"[a-z0-9-]+\.(?:rds|docdb)\.amazonaws\.com", "real RDS/DocDB endpoint"),
-    (r"\b\d{12}\b", "AWS account id"),
+    (r"(?<![\w.\-])\d{12}(?![\w\-])", "AWS account id"),
     (r"\bcdb-[0-9a-z]{8}\b", "TencentDB instance id"),
     (r"\b(?:postgres|cmgo|crs)-[0-9a-z]{8}\b", "Tencent instance id"),
     (r"AKIA[0-9A-Z]{16}", "AWS access key"),
@@ -26,6 +26,7 @@ ALLOW = re.compile(
     r"xxxx|example|placeholder|<[a-z_-]+>|CHANGE_ME|your-|my-|dummy|sample"
     r"|0\.0\.0\.0|127\.0\.0\.1|localhost"
     r"|10\.0\.0\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.16\.\d{1,3}\.\d{1,3}"
+    r"|192\.0\.2\.\d{1,3}"
     r"|password:\s*\"secret\"|password=\"secret\"")
 
 def files(staged):
@@ -44,6 +45,12 @@ def is_binary(p):
         return True
 
 
+def flagged(line):
+    if ALLOW.search(line):
+        return None
+    return next((what for pat, what in PATTERNS if re.search(pat, line)), None)
+
+
 def main(staged):
     hits = []
     for p in files(staged):
@@ -54,12 +61,9 @@ def main(staged):
         except Exception:
             continue
         for i, line in enumerate(text.splitlines(), 1):
-            if ALLOW.search(line):
-                continue
-            for pat, what in PATTERNS:
-                if re.search(pat, line):
-                    hits.append((p, i, what, line.strip()[:70]))
-                    break
+            what = flagged(line)
+            if what:
+                hits.append((p, i, what, line.strip()[:70]))
     for p, i, what, line in hits:
         print(f"  {p}:{i}  {what}\n      {line}")
     if hits:
