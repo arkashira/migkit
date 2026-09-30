@@ -48,7 +48,7 @@ def test_the_least_stage_binds_and_littles_law_sizes_the_workers():
     assert m.rate(2) == pytest.approx(40 * MB)
     assert m.rate(8) == pytest.approx(40 * MB)
     said = " ".join(m.lines())
-    assert "binds: the target's writes at ~40.0 MB/s" in said, said
+    assert "binds: the target's writes at ~40.0 MiB/s" in said, said
     assert "2 at a time carry them - more would not help" in said
     assert "a larger target instance would" in said
     # and it can say another: a source that takes 10 MB/s in all binds
@@ -135,7 +135,7 @@ def test_what_a_worker_holds_follows_the_widest_row():
                            sides={"src": {"cpus": 16}, "dst": {"cpus": 16}},
                            model=m)
     assert plan.most == 2, plan.factors
-    assert any("rows of up to 250.0 MB (blobs)" in why
+    assert any("rows of up to 250.0 MiB (blobs)" in why
                for why in plan.factors)
 
 
@@ -645,7 +645,7 @@ def test_the_memory_watchdog_holds_workers_back_before_the_kernel_acts():
     # memory running out under them: at most one
     free[0] = 300 * MB
     s = mem.signal()
-    assert s is not None and s.at_most == 1 and "300.0 MB free" in s.why
+    assert s is not None and s.at_most == 1 and "300.0 MiB free" in s.why
     pace = sizing.Pace(4, 8, memory=mem)
     assert pace.admit(0) and not pace.admit(1)
 

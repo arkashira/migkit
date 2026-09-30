@@ -45,16 +45,22 @@ def test_a_real_password_is_hidden():
 
 
 def test_an_empty_password_leaves_the_statement_alone():
-    """The bug. Without the guard this comes back shredded."""
+    """The bug. Without the guard this comes back shredded. What is
+    hidden is only what has the shape of a password (`password=...`),
+    which the one redactor hides whoever's it is; the rest of the
+    statement stands as it was."""
     got = without_secret(STMT, "")
-    assert got == STMT, got
-    assert "****" not in got, got
+    assert got == STMT.replace("password=CHANGE_ME", "password=****"), got
+    assert "****c" not in got and "c****r" not in got, got
+    plain = "create subscription s publication p;"
+    assert without_secret(plain, "") == plain
 
 
 def test_a_missing_password_leaves_the_statement_alone():
     """`Endpoint.password` defaults to `""`, but a hop read from somewhere
     else could hand over `None`, and `str.replace(None, ...)` raises."""
-    assert without_secret(STMT, None) == STMT
+    assert without_secret(STMT, None) == STMT.replace("password=CHANGE_ME",
+                                                      "password=****")
 
 
 def test_it_is_the_helper_the_replicate_plan_uses():

@@ -262,7 +262,7 @@ def advise(stages, size, deadline, types, region=None):
                       seconds=size / bound, words=(
                           f"no machine for migkit meets the deadline of"
                           f" {_took(deadline)}: {_bind(which)} at"
-                          f" ~{_mb(bound)} MB/s, which takes"
+                          f" ~{_mb(bound)} MiB/s, which takes"
                           f" {_took(size / bound)} for"
                           f" {human_bytes(size)} whatever migkit runs on -"
                           f" a bigger machine would not help. "
@@ -295,13 +295,13 @@ def advise(stages, size, deadline, types, region=None):
             f"no type here meets the deadline of {_took(deadline)}: the"
             f" fastest, {m.said()}, takes {_took(secs)} for"
             f" {human_bytes(size)}, with {binds} holding it to"
-            f" ~{_mb(rate)} MB/s"))
+            f" ~{_mb(rate)} MiB/s"))
     m, secs, binds, rate, cost = min(
         meet, key=lambda r: (r[4] if r[4] is not None else math.inf,
                              r[0].price(region) or math.inf, r[1]))
     price = m.price(region)
     words = (f"{m.said()}: about {_took(secs)} for {human_bytes(size)} at"
-             f" ~{_mb(rate)} MB/s"
+             f" ~{_mb(rate)} MiB/s"
              + (f", about ${cost:,.2f} for the move at ${price:,.4g} an hour"
                 f" in {region}" if cost is not None else "")
              + (f", inside the deadline of {_took(deadline)}" if deadline
@@ -311,7 +311,7 @@ def advise(stages, size, deadline, types, region=None):
                   " be faster")
     elif not servers and stages.at_least and rate > stages.at_least * 1.1:
         words += (f"; {_bind(binds)} there - if the servers and the link"
-                  f" give it: they gave ~{_mb(stages.at_least)} MB/s to a"
+                  f" give it: they gave ~{_mb(stages.at_least)} MiB/s to a"
                   " machine that held them back, and more is not measured"
                   " yet")
     else:
@@ -346,6 +346,8 @@ def _what_would(which):
 
 
 def _mb(rate):
+    """A rate in MiB, the unit `wording.human_bytes` names: it was said as
+    MB, and a published 78.75 MB/s read as 75 (audit 2026-10-01, DU24)."""
     return f"{rate / 2 ** 20:,.0f}" if rate >= 2 ** 20 * 10 \
         else f"{rate / 2 ** 20:,.1f}"
 
@@ -461,7 +463,7 @@ def stages_for(hop, via, direct=False, db=None):
                   wire=wire,
                   spill=spill, measured=(
                       f"the last run on this path ({last.get('at', '')[:10]}):"
-                      f" {_mb(rate)} MB/s"
+                      f" {_mb(rate)} MiB/s"
                       + (f", this machine's {cpus} CPUs {busy:.0%} busy"
                          if busy is not None else "")))
 
@@ -536,7 +538,7 @@ def plan_line(hop, via, size, direct=False, db=None):
                     " machine does not bind: the smallest will do")
         if secs:
             return (f"the deadline of {_took(secs)} needs ~"
-                    f"{_mb(size / max(secs, 1))} MB/s end to end for"
+                    f"{_mb(size / max(secs, 1))} MiB/s end to end for"
                     f" {human_bytes(size)}; nothing is measured on this"
                     " path yet to weigh a machine against - the first"
                     " run's numbers are kept for the next plan")

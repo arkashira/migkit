@@ -440,7 +440,7 @@ def types_needing_care(hop, eng, dbs, canon):
 
 
 def _link(eng, hop, dbs):
-    """The slowest measured rate of the links to the two sides, MB/s, or
+    """The slowest measured rate of the links to the two sides, MiB/s, or
     None. Each carries every byte of the move, so whichever was measured
     bounds its time from below; a side not measured (a target database
     not made yet) bounds nothing."""
@@ -559,7 +559,7 @@ def plan(hop, found, goal, say):
             say(f"  time: {measured}")
         elif rate and size:
             secs = size / (rate * 2 ** 20)
-            say(f"  time: at least {_took(secs)} - {rate} MB/s is what"
+            say(f"  time: at least {_took(secs)} - {rate} MiB/s is what"
                 " the slowest link measured carried; the first copy"
                 " measures the real rate and every plan after it uses"
                 " that")

@@ -348,7 +348,7 @@ def test_an_editions_caps_are_held_to_the_source(monkeypatch):
     by = {r["item"]: r for r in editions.checks(_hop("mssql"), object(),
                                                 ["app"])}
     assert by["the edition's size"]["level"] == "fail"
-    assert "12.0 GB of data" in by["the edition's size"]["detail"]
+    assert "12.0 GiB of data" in by["the edition's size"]["detail"]
     assert by["the edition's memory"]["level"] == "warn"
     assert by["the edition's cores"]["level"] == "warn"
     assert "data compression" not in by
@@ -702,7 +702,7 @@ def test_sql_servers_own_backup_holds_only_where_the_target_takes_it():
     assert "app holds transparent data encryption" in got
     exp = E("mssql", "express", 0, version=(16, 0, 4135))
     got = why(editions=(ent, exp), allocated={"app": 11 * GB})
-    assert "10.0 GB of data files a database" in got and "app (11.0 GB)" \
+    assert "10.0 GiB of data files a database" in got and "app (11.0 GiB)" \
         in got
     assert why(editions=(ent, exp), allocated={"app": 9 * GB}) is None
     assert "already holds app" in why(dst_databases={"master", "app"})
