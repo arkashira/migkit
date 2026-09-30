@@ -161,6 +161,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is a copy for testing (goal subset): it is taken afresh by migkit move <...> --mode full --go, and proved by migkit check <...>; sync makes a target equal to the whole source. Nothing was written
 
+* <...>'s goal is <...>: its target holds rows this source does not, and sync makes a target equal to the source. It is carried by migkit move <...> --mode full --go and proved by migkit check <...>. Nothing was written
+
 * <...>: not started - <...>
 
 * <...> reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
@@ -1287,6 +1289,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * unsupported engine <...>
 
+* <...> cannot apply a <...> action
+
 * <...> has no key among the compared columns, so a row cannot be addressed on both sides
 
 * <...> rows of <...> have NULL in the key (<...> ... | <...>) - a row with no key cannot be found on the other side, so repairing it would report success and change nothing. Give those rows a key, or key the hop on a column that is always filled
@@ -1309,6 +1313,30 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## Elsewhere in migkit
 
+* archive: is a mapping - remove, restore, batch
+
+* archive: remove and restore both - one of the two
+
+* archive: batch: <...> is not a number of rows
+
+* removing rows from a <...> source is not a way migkit has: the archive is carried and proved, and the rows stay
+
+* <...>: an archive is carried by its rule (--mode full), run again to take the rows the rule picks since. Nothing has been started
+
+* <...>: nothing was written - <...>
+
+* <...>: the archive is not what it was to hold, nothing was removed - <...>
+
+* <...>: <...> - the archive would not hold every column of a row it proves, and a row removed from the source would lose them. Nothing was written
+
+* <...>: the archive holds <...> of the rows the rule picks otherwise than the source has them (<...>) - an archived row is never overwritten: find which is right, then move again. Nothing was removed
+
+* <...>: <...> rows written to the archive read back otherwise (<...>); nothing was removed
+
+* <...>: <...> rows are still on the source after their removal (<...>); the ledger has the batch
+
+* <...>: the archive holds <...> of the <...> rows to put back
+
 * ship: <...> names no container - write it as https://<account host>/<container>/<prefix>
 
 * ship: model <...> is not one of <...>'s (<...>) - name one, or give its capacity (capacity: 80TB)
@@ -1316,6 +1344,32 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * ship: carrier <...> - one of <...>
 
 * ship: no carrier the hop names can be written here - <...>
+
+* charset: <...> - a character set, or {to, collation, repair}}
+
+* charset: repair: <...> - double-encoded or none
+
+* charset: says neither a character set (to) nor a collation
+
+* charset: <...> is not a character set or collation name
+
+* consolidate: is a mapping - column, value or values, keys, offsets, with
+
+* consolidate: keys: <...> - one of <...>
+
+* consolidate: offsets: <...>: <...> is not a whole number
+
+* <...>: the consolidation does not hold together - <...>
+
+* consolidate: offsets names no offset for <...> (<...>)
+
+* <...> refers to <...> by <...>: only a one-column reference to a shifted key is shifted with it
+
+* <...>: a consolidation is carried once (--mode full): each source's changes followed into one target under its value is not a way migkit has. Nothing has been started
+
+* <...>: a consolidation is carried whole - its keys are shifted and proved across every table. Leave out --table
+
+* <...>: the consolidation is not what it was to hold - <...>
 
 * <...>: <...> is not something migkit sends; one of <...>, or none
 
@@ -1374,6 +1428,22 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: the parts are the bulk load's lines, and the target's table does not take them: <...>
 
 * <...>: every part is in, and the target holds <...> rows digesting <...>, where the parts add up to <...> rows and <...> - something else writes this table, or the target changes what it is given
+
+* split: is a mapping - with, shared, rest
+
+* split: rest: <...> - refuse, or stays
+
+* <...>: the split does not hold together - <...>
+
+* table_engine: <...> - an engine, or {to, accept, foreign_keys}}
+
+* table_engine: to: <...> is not an engine name
+
+* table_engine: accept: <...> - one of <...>
+
+* table_engine: foreign_keys: <...> - write table.column, or table(a, b)
+
+* table_engine: foreign_keys: <...> names <...> columns and <...> <...>
 
 * MIGKIT_BUNDLE_PLATFORM=<...> names no machine migkit builds bundles for: linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64, a Linux named after them (linux-x86_64-ubuntu-22.04)
 

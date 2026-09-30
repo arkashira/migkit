@@ -353,6 +353,7 @@ WRITE_WAYS = (
 class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
     CANON_ENGINE = "oracle"
+    CHARSETS = True
     SQL_DIALECT = "oracle"
     FOLDED_BECAUSE = ("holds a column this table has that Oracle's SQL"
                       " cannot render exactly, or a row too wide to hash"
@@ -1541,6 +1542,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                                         " validated", "",
                           "alter table ... enable validate constraint ..."
                           if loose else ""))
+        out.append(self._mojibake(db))
         return out
 
     # ---- settings --------------------------------------------------------
@@ -1708,9 +1710,15 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                     " next value is, or past their column's rows"))
         if kind in ("rows", "all"):
             actions += self._as_pair().repair_plan(db, "rows")
+            # after the rows: a row copied again takes the source's text
+            text = self._mojibake_repair(db)
+            if text:
+                actions.append(text)
         return actions
 
     def apply(self, db, action):
+        if action.kind == "text":
+            return self._apply_text(db, action)
         if action.kind != "sequences":
             return self._as_pair().apply(db, action)
         self._target_only("dst", "set sequences")

@@ -483,7 +483,7 @@ class Db2iEngine(Db2Engine):
             out += pair.check_data(db, t, stream)
         return out
 
-    def check_deep(self, db):
+    def _pending(self, db):
         """Constraints on the target left in check pending by a load: IBM i
         does not enforce them until checked."""
         try:
