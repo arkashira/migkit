@@ -302,6 +302,96 @@ def config(eng, side, db, listen, state):
     }
 
 
+def _account():
+    """What migkit asks of the reader, in the tool-use registry
+    (`tooluse`): each key of its configuration (`config`) and each request
+    of its protocol, used, topped up or not used, with the reason."""
+    from ..tooluse import TOPPED, UNUSED, USED
+    conf = {
+        "version": (USED, "the configuration schema of the build `doctor"
+                          " --install` makes, the one migkit speaks to"),
+        "log-level": (USED, "its own log kept short, beside its state, read"
+                            " where the reader does not come up"),
+        "memory.min-mb": (USED, "the least it starts with, small beside the"
+                                " database it runs next to"),
+        "memory.max-mb": (USED, "the source's redo_reader_mb, 1024 where it"
+                                " says nothing"),
+        "state.type": (USED, "disk, under the hop's report directory, so a"
+                             " reader started again goes on from its own"
+                             " checkpoint"),
+        "state.path": (USED, "one directory per source database, beside the"
+                             " reader's log"),
+        "source.alias": (USED, "the one source, named for its one writer"),
+        "source.name": (USED, "the database's own name, read from it, which"
+                              " every request of the protocol names too"),
+        "source.flags": (TOPPED, "checkpoint records, off unless asked: each"
+                                 " says every commit before an SCN was sent,"
+                                 " which migkit's fence waits on"),
+        "source.reader.type": (USED, "online: it names the redo's tables by"
+                                     " the dictionary of the database it"
+                                     " follows"),
+        "source.reader.user": (USED, "the source's own user, as migkit signs"
+                                     " in"),
+        "source.reader.password": (USED, "the source's own password, in a"
+                                         " file only this user reads"),
+        "source.reader.server": (USED, "the source's address, or how the"
+                                       " reader reaches it where that is not"
+                                       " migkit's (redo_reader_dsn)"),
+        "source.format": (USED, "the JSON shape `value_of` reads back"
+                                " exactly: text as the hex of its UTF-8,"
+                                " every message with its commit's SCN, a"
+                                " time with a zone as nanoseconds since the"
+                                " epoch"),
+        "source.filter.table": (USED, "the schema the hop follows, every"
+                                      " table of it; a table the hop leaves"
+                                      " out is dropped as its change is"
+                                      " read"),
+        "target.alias": (USED, "the one writer, named for its one source"),
+        "target.source": (USED, "the one source, as its alias names it"),
+        "target.writer.type": (USED, "network: migkit reads the stream"
+                                     " itself and confirms only what it"
+                                     " applied, so the writer holds the"
+                                     " rest"),
+        "target.writer.uri": (USED, "a port free on this machine where"
+                                    " migkit starts the reader, or where the"
+                                    " source says one listens"
+                                    " (redo_reader)"),
+        "target.writer.type file, kafka, zeromq": (
+            UNUSED, "a file or a broker between the reader and migkit would"
+                    " hold the changes the confirm is for, and migkit"
+                    " applies them itself"),
+        "source.reader.type batch": (
+            UNUSED, "a list of redo files read once is not a follow of the"
+                    " redo as it is written"),
+        "source.format.type protobuf": (
+            UNUSED, "not yet: the JSON documents are read back exactly, and"
+                    " nothing was measured to say the other form is"
+                    " faster"),
+    }
+    protocol = {
+        "INFO": (USED, "asked first, so a reader that reads another database"
+                       " is refused before anything is read"),
+        "START": (USED, "from the tail's own SCN where the writer has not"
+                        " begun"),
+        "CONTINUE": (USED, "from the position last confirmed where it has,"
+                           " so nothing it sent is lost to a restart"),
+        "CONFIRM": (TOPPED, "sent at the next read, once the batch before it"
+                            " was applied and its position saved; what comes"
+                            " again is left out by the commit SCN and the"
+                            " transactions the tail keeps"),
+    }
+    return {**{("config", k): v for k, v in conf.items()},
+            **{("protocol", k): v for k, v in protocol.items()}}
+
+
+def _register():
+    from .. import tooluse
+    tooluse.register(PROGRAM, options=_account(), release=VERSION)
+
+
+_register()
+
+
 def _free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

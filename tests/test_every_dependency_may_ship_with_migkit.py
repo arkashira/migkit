@@ -67,7 +67,8 @@ def test_the_licence_reading_would_notice():
 
 
 def test_every_program_is_open_or_has_its_terms_registered():
-    programs = set(tools.PROGRAMS) | set(tools.VENDOR)
+    # the images migkit pulls are held to it as the programs it installs
+    programs = set(tools.PROGRAMS) | set(tools.VENDOR) | set(tools.IMAGES)
     unknown = sorted(p for p in programs if p not in tools.PROGRAM_LICENCES)
     assert not unknown, unknown
     closed = {p for p in programs
@@ -162,12 +163,19 @@ def _install(monkeypatch, home, accept=""):
     monkeypatch.setattr(tools, "ibmi_odbc_present", lambda: False)
     monkeypatch.setattr(tools, "db2_connect_present", lambda: False)
     monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
+    # a machine the redo-file reader runs on, whatever this one is
+    monkeypatch.setattr(tools, "_redo_reader_here", lambda: True)
+    from migkit.engines import oracle_redo
+    monkeypatch.setattr(oracle_redo, "program", lambda: None)
     if accept:
         monkeypatch.setenv("MIGKIT_ACCEPT_TERMS", accept)
     fetched = []
     monkeypatch.setattr(tools, "install_vendor",
                         lambda program, log, open_build=False:
                         fetched.append((program, open_build)) or True)
+    monkeypatch.setattr(tools, "install_redo_reader",
+                        lambda log: fetched.append(
+                            (tools.REDO_READER, False)) or True)
     said = []
     tools.install_missing(said.append)
     return fetched, said
@@ -178,13 +186,65 @@ def test_declined_the_open_build_is_installed_or_nothing(home, monkeypatch):
     assert ("atlas", True) in fetched and ("liquibase", True) in fetched
     # no open build of these: the open path runs, nothing is fetched
     assert not [p for p, _ in fetched if p in ("mongosync", "riotx")]
+    # nor is the reader built with a client whose terms were declined
+    assert (tools.REDO_READER, False) not in fetched
     assert _record(home) == {}
+    # the pulled broker declined like any program, and said so
+    text = " ".join(said)
+    assert "MIGKIT_ACCEPT_TERMS=redpanda" in text, text
+    assert tools.TERMS["redpanda"].otherwise in text, text
 
 
 def test_accepted_the_build_its_terms_cover_is_installed(home, monkeypatch):
     fetched, _ = _install(monkeypatch, home, accept="all")
-    assert sorted(fetched) == sorted((p, False) for p in tools.VENDOR)
+    assert sorted(fetched) == sorted([(p, False) for p in tools.VENDOR]
+                                     + [(tools.REDO_READER, False)])
     assert set(_record(home)) == set(tools.TERMS)
+
+
+def test_every_closed_term_is_asked_in_one_question_first(home,
+                                                          monkeypatch):
+    """The terms of the vendor programs, of IBM's components, of the images
+    migkit pulls and of the client the redo-file reader is built with are
+    asked together, before anything is fetched or built - and an image is
+    not pulled here: docker pulls it where it runs."""
+    order = []
+    monkeypatch.setattr(tools, "which", lambda n: None)
+    monkeypatch.setattr(tools.shutil, "which", lambda n: None)
+    monkeypatch.setattr(tools, "second_reader_present", lambda: True)
+    monkeypatch.setattr(tools, "ibmi_odbc_present", lambda: False)
+    monkeypatch.setattr(tools, "db2_connect_present", lambda: False)
+    monkeypatch.setattr(tools, "install_ibm",
+                        lambda component, log: order.append(
+                            ("build", component)))
+    monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
+    monkeypatch.setattr(tools, "_redo_reader_here", lambda: True)
+    from migkit.engines import oracle_redo
+    monkeypatch.setattr(oracle_redo, "program", lambda: None)
+    monkeypatch.setattr(tools, "install_vendor",
+                        lambda program, log, open_build=False:
+                        order.append(("fetch", program)) or True)
+    monkeypatch.setattr(tools, "install_redo_reader",
+                        lambda log: order.append(("build", "reader")))
+    monkeypatch.setattr(tools, "install_from_source",
+                        lambda program, log: order.append(("build", program)))
+    ran = []
+    monkeypatch.setattr(tools.subprocess, "run",
+                        lambda argv, **k: ran.append(argv) or
+                        type("P", (), {"returncode": 0, "stderr": "",
+                                       "stdout": ""})())
+
+    def ask(program, terms):
+        order.append(("asked", program))
+        return True
+    tools.install_missing(lambda m: None, ask=ask)
+    asked = [p for what, p in order if what == "asked"]
+    assert set(asked) == set(tools.TERMS), asked
+    first_work = next(i for i, (what, _) in enumerate(order)
+                      if what != "asked")
+    assert first_work == len(asked), order
+    assert ("build", "reader") in order
+    assert not [a for a in ran if "pull" in a], ran
 
 
 # ---- which file, from where -------------------------------------------------

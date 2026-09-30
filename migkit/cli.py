@@ -2765,7 +2765,7 @@ def _cdc(hop, eng, db, do_drop, go, engine):
             capabilities.require(hop.engine, "stream")
         return _tail(hop, tailer, db, go)
     way = movers.stream_way(hop, engine, has_repl, has_tail,
-                            has_tail and _tail_ready(eng))
+                            has_tail and _tail_ready(eng), drop=do_drop)
     if way.path == "follow":
         return _follow(hop, eng, db, do_drop, go)
     if way.path in ("subscription", "replica"):
@@ -2779,9 +2779,14 @@ def _cdc(hop, eng, db, do_drop, go, engine):
                           " streaming pipeline instead[/yellow]")
         return _stream(hop, eng, db, do_drop, go, engine)
     capabilities.require(hop.engine, "stream")
+    # the pipeline the last way there was, passed over for its terms: the
+    # reason, not only that nothing is set up
+    held = [why for r, why in way.passed if r.name == "pipeline"
+            and why.startswith(movers.PIPELINE_SAID + ":")]
     raise SystemExit(f"no way to follow a {hop.engine} source is set up"
-                     " on this machine; migkit doctor says what is"
-                     " missing")
+                     " on this machine" + (f" - {held[0]}" if held else
+                                           "; migkit doctor says what is"
+                                           " missing"))
 
 
 def _cutover(hop, eng, db, go, engine):

@@ -61,6 +61,20 @@ def test_removing_a_capability_is_noticed(monkeypatch):
     assert ("postgres", "fence") in caps.undeclared()
 
 
+def test_redis_moves_in_bulk_by_the_redis_products_own_copy(monkeypatch):
+    """Redis declared bulk moving not applicable until the Redis products'
+    own copy became a mover (`movers.riotx_move`); it is read off the code
+    now, and taking that mover away is a gap nobody declared."""
+    from migkit import movers
+    assert caps.implemented("redis", "bulk-move")
+    assert "bulk-move" not in caps.GAPS["redis"]
+    real = movers.supported
+    monkeypatch.setattr(movers, "supported", lambda engine, via: False
+                        if via == "riotx" else real(engine, via))
+    assert not caps.implemented("redis", "bulk-move")
+    assert ("redis", "bulk-move") in caps.undeclared()
+
+
 def test_closing_a_gap_is_noticed(monkeypatch):
     """Give the generic engine a table copier and its declared gap goes
     stale. (Redis, then Kafka, were this example until each was given

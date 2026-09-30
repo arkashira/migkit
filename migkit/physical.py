@@ -493,12 +493,36 @@ def _pg_needs():
              lambda f: (f"wal_level is {f['wal_level']} on the source, and"
                         " the changes after the copy are read through a"
                         " logical slot"), when=_following),
+        LEG_HERE,
         _SIGNS_IN,
     )
 
 
 def _following(facts):
     return facts.mode == "full+cdc"
+
+
+def leg_here():
+    """Whether the changes after a copy go on by the change leg run from
+    here (`MIGKIT_CDC=follow`) rather than the servers' own replication."""
+    from . import movers
+    return movers.follow_selected() == "follow"
+
+
+def _leg_runs_here():
+    from . import movers
+    return not leg_here() or movers.pgcopydb_runner() == "local"
+
+
+#: a PostgreSQL copy gone on from by the leg run from here: its program
+#: is on this machine, asked before anything is stopped or copied - found
+#: missing after the copy, the copy would hold nothing after its position
+LEG_HERE = Need(
+    "the change leg's program on this machine", (),
+    lambda f: _leg_runs_here(),
+    "the changes after the copy go on by the leg run from here"
+    " (MIGKIT_CDC=follow), and this machine does not have what it runs:"
+    " migkit doctor --install puts it in place", when=_following)
 
 
 def _pg_prove(facts):
@@ -946,13 +970,23 @@ def _pg_slots_before(hop, eng, dbs, log):
     but the slot is the same slot a logical copy would follow, and one way
     of making it keeps one set of rules for it: a commit a synchronous
     standby holds out of sight past the wait stops the move here, before
-    anything is stopped or copied, on both paths alike."""
+    anything is stopped or copied, on both paths alike.
+
+    Where the leg run from here goes on from the copy (`leg_here`), the
+    publication it reads is made too, named after the slot as the leg
+    names it: a publication is looked up as of each change decoded, and
+    one made after the slot is not there for the changes before it - the
+    ones during the copy."""
     made = {}
+    leg = leg_here()
     try:
         for d in dbs:
             for stmt in eng.replicate_sql(d, copy_data=False)["src"]:
                 eng.apply_replication_stmt("src", d, stmt)
             slot = seed_slot(eng, d)
+            if leg:
+                eng.apply_replication_stmt("src", d, eng._publication_sql(
+                    slot, eng.published_tables(d)))
             have = eng._psql("src", d, "select plugin from"
                                        " pg_replication_slots where"
                                        f" slot_name = '{slot}'").strip()
@@ -1160,7 +1194,11 @@ def _pg_is_the_seed(eng, rec):
 def pg_continue(hop, eng, dbs, rec, go, log):
     """A subscription per database on the slot made before the copy, its
     origin advanced to where the target's recovery ended, then enabled -
-    so the first transaction applied is the first the target lacks."""
+    so the first transaction applied is the first the target lacks. Where
+    the target cannot dial the source (`MIGKIT_CDC=follow`), the leg run
+    from here instead, on the same slot from the same position
+    (`follow_from`)."""
+    from . import movers
     opts = settings(hop) or {}
     via = _source_address(hop, opts) if opts.get("source") else None
     for d in dbs:
@@ -1168,6 +1206,12 @@ def pg_continue(hop, eng, dbs, rec, go, log):
         if not slot:
             log(f"{d}: no slot was made before the copy, so no change after"
                 " it can be carried - it holds the copy only")
+            continue
+        if leg_here():
+            steps = movers.pgcopydb_follow(hop, d, go, log)
+            # the first step is said by the leg as it starts
+            for step in (steps[1:] if go else steps):
+                log(f"{d}: {step}")
             continue
         sql = eng.replicate_sql(d, copy_data=False, slot=slot,
                                 at=rec["lsn"], via=via)
@@ -1184,6 +1228,50 @@ def pg_continue(hop, eng, dbs, rec, go, log):
                 eng.apply_replication_stmt("dst", d, stmt)
         if go:
             log(f"{d}: {eng.replication_status(d, sql['status'])}")
+
+
+def follow_from(hop, eng, db):
+    """Where the change leg run from here goes on from after a physical
+    seed of `db`: {"slot", "lsn", "at"} - the slot made before the copy,
+    and the position the restored target proved (`replay_end`) - or None
+    where the target is not such a copy (no seed, or a copy made since).
+
+    Refused, with the reason, where the leg cannot start there: the seed
+    made no slot (`--mode full`), so nothing holds the changes after its
+    position and a leg started now would carry only what changes from
+    now; or it made its slot for the servers' own replication, which
+    reads it through a publication the leg does not."""
+    rec = seeded(hop) if settings(hop) else None
+    if not rec or not rec.get("lsn") or _engine_of(hop) != "postgres":
+        return None
+    try:
+        copied = json.loads((hop.report_dir(db) /
+                             "copy-position.json").read_text())
+    except (OSError, ValueError):
+        copied = None
+    if copied and not copied.get("physical") \
+            and str(copied.get("at") or "") >= str(rec.get("at") or ""):
+        return None
+    slot = (rec.get("slots") or {}).get(db)
+    if slot and rec.get("leg"):
+        return {"slot": slot, "lsn": rec["lsn"], "at": rec.get("at", "")}
+    if slot:
+        raise SystemExit(
+            f"{db} was copied from the source's pages on {rec.get('at')} for"
+            " the servers' own replication to go on from: its slot is read"
+            " through a publication the change leg run from here does not"
+            " read. Its changes go on by that replication (MIGKIT_CDC="
+            "native), or move again with --mode full+cdc and"
+            " MIGKIT_CDC=follow, which makes the slot for this leg")
+    if copied and copied.get("physical"):
+        raise SystemExit(
+            f"{db} was copied from the source's pages on {rec.get('at')},"
+            " and no slot was made before that copy, so nothing holds the"
+            f" changes after its position {rec['lsn']}: a change leg"
+            " started now would carry only what changes from now on."
+            " Move again with --mode full+cdc, which makes the slot first"
+            " and goes on from the copy's own position")
+    return None
 
 
 def _subscribed(eng, db):
@@ -1239,6 +1327,7 @@ def _pg_carry(hop, eng, rung, db, mode, go, log):
         took = time.time() - began
         rec = {"rung": rung.name, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
                "seconds": round(took, 1), "slots": slots,
+               "leg": bool(slots) and leg_here(),
                "copied_from": copied.get("start"),
                "copied_to": copied.get("end"), "kb": copied.get("kb"),
                "pages": copied.get("way"),

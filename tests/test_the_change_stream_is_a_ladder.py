@@ -25,8 +25,12 @@ def _hop(engine="postgres"):
 @pytest.fixture(autouse=True)
 def reports(tmp_path, monkeypatch):
     import migkit.config as cfg
+    from migkit import tools
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
     monkeypatch.delenv("MIGKIT_CDC", raising=False)
+    # the pipeline's log is under terms the operator accepts once; the
+    # ways below are chosen as on a machine where that was done
+    monkeypatch.setattr(tools, "terms_accepted", lambda n: True)
 
 
 @pytest.mark.parametrize("engine,repl,tail,ready,env,path", [
@@ -51,6 +55,54 @@ def test_the_way_passed_over_says_why():
     got = movers.stream_way(_hop("mysql"), "mysql", False, True, False)
     assert got.path == "pipeline"
     assert "needs a driver this machine does not have" in got.reason
+
+
+def test_the_pipeline_waits_for_its_logs_terms(monkeypatch):
+    """The pipeline's log is source-available: until its terms are
+    accepted on this machine the pipeline is passed over, with the reason
+    in migkit's words - and a pipeline already running is still taken
+    down."""
+    from migkit import tools
+    from tests.test_the_report_does_not_name_its_tools import TOOLS
+    monkeypatch.setattr(tools, "terms_accepted", lambda n: n != "redpanda")
+    got = movers.stream_way(_hop("hetero"), "hetero", False, False, False)
+    assert got.path is None, got
+    why = dict((r.name, w) for r, w in got.passed)["pipeline"]
+    assert why.startswith(movers.PIPELINE_SAID + ":"), why
+    assert tools.TERMS["redpanda"].otherwise in why, why
+    assert not [t for t in TOOLS if t in why.lower()], why
+    # a MySQL source with no tail driver: nothing else holds either
+    assert movers.stream_way(_hop("mysql"), "mysql", False, True,
+                             False).path is None
+    # the replica still holds where it did: only the pipeline waits
+    assert movers.stream_way(_hop("mysql"), "mysql", True, True,
+                             False).path == "replica"
+    # tearing down is not gated
+    assert movers.stream_way(_hop("hetero"), "hetero", False, False, False,
+                             drop=True).path == "pipeline"
+    # accepted, it is taken again
+    monkeypatch.setattr(tools, "terms_accepted", lambda n: True)
+    assert movers.stream_way(_hop("hetero"), "hetero", False, False,
+                             False).path == "pipeline"
+
+
+def test_the_move_says_why_the_pipeline_waits(tmp_path, monkeypatch):
+    """`move --mode cdc` on a hop the pipeline is the only way for says
+    the terms are why, and where to accept them."""
+    from migkit import cli, tools
+
+    class Eng:
+        hop = _hop("hetero")
+
+        def maps_columns(self):
+            return False
+    monkeypatch.setattr(tools, "terms_accepted", lambda n: False)
+    with pytest.raises(SystemExit) as e:
+        cli._cdc(Eng.hop, Eng(), "appdb", False, False, "hetero")
+    said = str(e.value)
+    assert "no way to follow a hetero source" in said, said
+    assert tools.TERMS["redpanda"].otherwise in said, said
+    assert "doctor --install" in said, said
 
 
 def test_a_measured_way_ranks_among_those_that_hold():

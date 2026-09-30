@@ -67,13 +67,11 @@ GAPS = {
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "mssql": {},
+    # bulk-move is read off the code: the Redis products' own copy
+    # (`movers.riotx_move`), into a target its terms allow; any other
+    # target is copied key by key (`table-copy`)
     "redis": {
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
-        "bulk-move": (NOT_APPLICABLE, "a keyspace already moves key for key"
-                                      " in the server's own serialised form,"
-                                      " or whole by the server's own"
-                                      " replication; no dump a client can"
-                                      " load is faster than either"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "kafka": {

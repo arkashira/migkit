@@ -666,7 +666,8 @@ def _follows(engine, provider_name):
                                 " azure.replication_support or"
                                 " cloudsql.logical_decoding turns it on),"
                                 " and the changes after the copy are read"
-                                " through a logical slot"), when=following),)
+                                " through a logical slot"), when=following),
+                physical.LEG_HERE)
     out = [Need("the binlog on the source to go on from the copy",
                 ("log_bin",), lambda f: f["log_bin"],
                 "the binlog is off on the source, and the changes after the"
@@ -872,6 +873,7 @@ def carry(hop, eng, rung, db, mode, go, log):
             raise
         rec = {"rung": rung.name, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
                "seconds": round(time.time() - began, 1), "slots": slots,
+               "leg": bool(slots) and physical.leg_here(),
                "target": target, "asked_at": at,
                "aurora": "aurora" in str(src.get("engine", "")),
                "system": facts["src_system"] if engine == "postgres"

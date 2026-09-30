@@ -142,6 +142,94 @@ def test_a_dry_run_starts_nothing(tmp_path):
     assert not (tmp_path / "follow").exists()
 
 
+PHYSICAL = {"data": "/var/lib/postgresql/data", "run": "sh -c",
+            "stop": "true", "start": "true"}
+
+
+def _seeded_hop(tmp_path, lsn="0/3001000", leg=True, slot=True):
+    """A hop seeded from a copy of the source's pages, as the seed's
+    record says it (`physical.seeded`)."""
+    import json
+    from migkit import physical
+    from migkit.engines.postgres import PostgresEngine
+    hop = _hop(tmp_path, name="fs")
+    hop.options = {"physical": dict(PHYSICAL)}
+    seed = physical.seed_slot(PostgresEngine(hop), "postgres")
+    (tmp_path / "physical-seed.json").write_text(json.dumps({
+        "rung": "physical-pages", "at": "2026-09-30 10:00:00", "lsn": lsn,
+        "slots": {"postgres": seed} if slot else {}, "leg": leg}))
+    return hop
+
+
+def test_after_a_copy_of_the_pages_the_leg_goes_on_from_its_position(
+        tmp_path):
+    """Not from now: the slot made before the copy, and only what commits
+    after the position the restored target proved."""
+    from migkit import movers
+    steps = movers.pgcopydb_follow(_seeded_hop(tmp_path), "postgres",
+                                   go=False)
+    argv = steps[0].argv
+    assert argv[argv.index("--slot-name") + 1] == "migkit_seed_fs_postgres"
+    assert "--create-slot" not in argv, argv
+    joined = "\n".join(steps)
+    assert "only what commits after 0/3001000" in joined, joined
+    assert "made before the copy of 2026-09-30 10:00:00" in joined, joined
+    assert "are not carried" not in joined, joined
+    assert "pgcopydb" not in joined.lower()
+    # a hop that is not seeded that way makes its own slot, as before
+    plain = movers.pgcopydb_follow(_hop(tmp_path), "postgres", go=False)
+    assert "--create-slot" in plain[0].argv
+    assert "migkit_seed" not in " ".join(map(str, plain[0].argv))
+
+
+def test_the_leg_is_refused_where_the_copy_left_nothing_to_go_on_from(
+        tmp_path):
+    from migkit import movers
+    with pytest.raises(SystemExit) as e:
+        movers.pgcopydb_follow(_seeded_hop(tmp_path, leg=False), "postgres",
+                               go=False)
+    assert "publication" in str(e.value), e.value
+    assert "pgcopydb" not in str(e.value).lower()
+
+
+def test_the_origin_is_set_at_the_copys_position_once(tmp_path):
+    """Made where it is not there, moved only where it holds no progress:
+    a leg that ran before moved it on, and it is never set back."""
+    from migkit import movers
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop(tmp_path))
+    ran = []
+    eng._psql = lambda side, db, sql: ran.append((side, sql)) or ""
+    movers._seed_origin(eng, "postgres", "migkit_fl_postgres", "0/3001000")
+    (s1, create), (s2, advance) = ran
+    assert s1 == s2 == "dst"
+    assert "pg_replication_origin_create('migkit_fl_postgres')" in create
+    assert "where not exists" in create, create
+    assert "pg_replication_origin_advance('migkit_fl_postgres', '0/3001000')" \
+        in advance, advance
+    assert "pg_replication_origin_progress('migkit_fl_postgres', false)" \
+        " is null" in advance, advance
+
+
+def test_teardown_takes_back_the_slot_made_before_the_copy(tmp_path,
+                                                           monkeypatch):
+    from migkit import movers
+    from migkit.engines.postgres import PostgresEngine
+    monkeypatch.setattr(PostgresEngine, "_target_feeds", lambda self, db: [])
+    joined = "\n".join(movers.follow_teardown(_seeded_hop(tmp_path),
+                                              "postgres", go=False))
+    assert "slot_name = 'migkit_seed_fs_postgres' and not active" in joined
+    assert "drop publication if exists migkit_seed_fs_postgres" in joined
+    # held by a subscription on the target: it is that stream's to drop
+    monkeypatch.setattr(PostgresEngine, "_target_feeds",
+                        lambda self, db: ["migkit_seed_fs_postgres"])
+    assert "migkit_seed" not in "\n".join(movers.follow_teardown(
+        _seeded_hop(tmp_path), "postgres", go=False))
+    # a hop never seeded that way: the three it always took back
+    assert len(movers.follow_teardown(_hop(tmp_path), "postgres",
+                                      go=False)) == 3
+
+
 def _sql(name, sql, db="postgres"):
     p = subprocess.run(["docker", "exec", name, "psql", "-U", "postgres",
                         "-d", db, "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
@@ -293,3 +381,51 @@ def test_tearing_down_a_leg_that_never_ran_is_not_an_error(pair, tmp_path):
     movers.follow_teardown(_hop(tmp_path, name="never-ran"), "postgres",
                            go=True)
     assert _sql1(NS, "select count(*) from pg_replication_slots") == "0"
+
+
+@needs_docker
+@needs_pgcopydb
+def test_it_goes_on_from_a_copys_position_on_the_slot_made_before_it(
+        pair, tmp_path):
+    """After a copy of the source's pages, the leg reads the slot made
+    before the copy and applies only what commits after the position the
+    copy holds. `log` has no key: a row the copy holds applied again is a
+    second row, one after the position missed is a missing id. The copy is
+    stood in for: the rows up to the position written to the target as a
+    copy of the pages would hold them, in the seed's order - the leg's
+    publication, then its slot, then the copy."""
+    import json
+    from migkit import movers, physical
+    from migkit.engines.postgres import PostgresEngine
+    hop = _seeded_hop(tmp_path)
+    eng = PostgresEngine(hop)
+    for n in (NS, ND):
+        _sql(n, "create table if not exists log (id int)")
+    seed = physical.seed_slot(eng, "postgres")
+    eng.apply_replication_stmt("src", "postgres", eng._publication_sql(
+        seed, eng.published_tables("postgres")))
+    _sql(NS, f"select pg_create_logical_replication_slot('{seed}',"
+             " 'pgoutput')")
+    _sql(NS, "insert into log select generate_series(1, 50)")
+    lsn = _sql1(NS, "select pg_current_wal_insert_lsn()")
+    _sql(ND, "insert into log select generate_series(1, 50)")
+    _sql(NS, "insert into log select generate_series(51, 100)")
+    rec = json.loads((tmp_path / "physical-seed.json").read_text())
+    (tmp_path / "physical-seed.json").write_text(json.dumps({**rec,
+                                                             "lsn": lsn}))
+    try:
+        steps = movers.pgcopydb_follow(hop, "postgres", go=True,
+                                       timeout=240)
+        assert "--create-slot" not in steps[0].argv
+        got = _sql1(ND, "select count(*) || ' ' || count(distinct id) ||"
+                        " ' ' || min(id) || ' ' || max(id) from log")
+        assert got == "100 100 1 100", got
+        assert physical.lsn_value(eng.applied_lsn("postgres")) > \
+            physical.lsn_value(lsn)
+    finally:
+        movers.follow_teardown(hop, "postgres", go=True)
+    for what, sql in (("slot", "select count(*) from pg_replication_slots"
+                               f" where slot_name = '{seed}'"),
+                      ("publication", "select count(*) from pg_publication"
+                                      f" where pubname = '{seed}'")):
+        assert _sql1(NS, sql) == "0", what

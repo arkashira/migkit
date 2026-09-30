@@ -569,12 +569,30 @@ def test_the_rungs_are_data_a_decision_engine_can_climb():
 
 def test_every_feature_has_a_state_and_a_reason():
     """The used / unused / topped-up table of backlog 0f, for these
-    programs; an unused feature says why."""
-    assert set(movers.TOOL_USE) == {"mydumper", "myloader", "mysqlsh"}
-    for tool, features in movers.TOOL_USE.items():
-        for feature, (state, why) in features.items():
-            assert state in ("used", "unused", "topped-up"), (tool, feature)
+    programs, in the one registry every wrapped tool's account is in; an
+    unused feature says why."""
+    from migkit import tooluse
+    assert not hasattr(movers, "TOOL_USE"), "a second table beside the" \
+                                            " registry"
+    rows = tooluse.tools_used()
+    for tool in ("mydumper", "myloader", "mysqlsh"):
+        account = tooluse.REGISTRY[tool].options
+        assert len(account) > 8, (tool, account)
+        for (command, feature), (state, why) in account.items():
+            assert command == "" and state in tooluse.STATES, (tool, feature)
             assert len(why) > 15 and "__" not in why, (tool, feature, why)
+        # the licence is the one `doctor --install` installs it under
+        from migkit import tools
+        assert rows[tool]["licence"] == tools.PROGRAM_LICENCES[tool]
+    # every reason and every number kept: the measured ones read as they did
+    assert "5.60 s against 4.58 s" in tooluse.entry(
+        "mydumper", "", "rows (per table)")[1]
+    assert tooluse.entry("myloader", "", "--optimize-keys")[0] == \
+        tooluse.UNUSED
+    assert tooluse.entry("mysqlsh", "", "util.dump_schemas +"
+                         " util.load_dump")[0] == tooluse.TOPPED
+    assert "6.19 s against 11.41 s" in tooluse.entry(
+        "mysqlsh", "", "util.dump_schemas + util.load_dump")[1]
 
 
 @needs_dump
@@ -583,11 +601,15 @@ def test_every_option_the_table_says_is_used_is_in_a_command_line(tmp_path):
                                            tmp_path / "d", tmp_path / "c",
                                            tmp_path / "o", logs=True,
                                            compress=True)
+    from migkit import tooluse
     for tool, argv in (("mydumper", dump), ("myloader", load)):
-        for feature, (state, _) in movers.TOOL_USE[tool].items():
-            if feature.startswith("--") and state != "unused":
+        flags = [(f, state) for (_, f), (state, _) in
+                 tooluse.REGISTRY[tool].options.items() if f.startswith("--")]
+        assert len(flags) > 5, (tool, flags)
+        for feature, state in flags:
+            if state != tooluse.UNUSED:
                 assert feature in argv, (tool, feature)
-            if feature.startswith("--") and state == "unused":
+            else:
                 assert feature not in argv, (tool, feature)
 
 

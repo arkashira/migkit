@@ -229,7 +229,8 @@ file that is not one. `test_a_check_does_not_write_to_the_target.py`.
               makes the tables itself), --stream, --disable-redo-log
 
 2026-09-28: every feature's state and reason is kept beside the command
-builders, `movers.TOOL_USE`, with the MySQL Shell's (dump and load
+builders, in the tool-use registry every wrapped tool's account is in
+(`tooluse`, registered from `movers`), with the MySQL Shell's (dump and load
 through its own Python, the load resumable, its checksums; the straight
 copy where the disk cannot hold a dump) - and the dump and load, the Shell
 and migkit's table copier are rungs chosen per table from measured rates

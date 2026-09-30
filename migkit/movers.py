@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from . import leftovers, tooluse
+from .tools import IMAGES
 from .tooluse import TOPPED, UNUSED, USED
 from .util import quiet_argv, run, tool_env, which
 
@@ -2622,141 +2623,137 @@ MY_SHORT = {DUMP_LOAD: "the parallel dump and load",
             STREAM_COPY: "the straight copy", TABLE_COPIER: "table by table"}
 
 #: What migkit asks of each MySQL bulk program, feature by feature, in the
-#: shape of the used / unused / topped-up table of backlog 0f: `used`,
-#: `topped-up` (used, and migkit does more with it than the program does
-#: alone) or `unused`, each with its reason. Kept beside the builders it
-#: describes, and the tests hold the command lines to it.
-TOOL_USE = {
-    "mydumper": {
-        "--threads": ("used", "from migkit's sizing of both servers and"
-                              " this machine, never set by hand"),
-        "--max-threads-per-table": (
-            "used", "the whole of the sizing, so one large table is read"
-                    " by every worker rather than four"),
-        "rows (per table)": (
-            "topped-up", "in the defaults file, one size a table from its"
-                         " rows and bytes and the rate this hop is read at"
-                         " (`my_chunk_rows`), where the flag is one size for"
-                         " every table. Measured on a local link no faster"
-                         " than the program's own cutting (5.60 s against"
-                         " 4.58 s for both tables, within the runs' spread"
-                         " on each alone): what it sets is where a chunk"
-                         " starts on the link this hop is read over"),
-        "--checksum-all": (
-            "topped-up", "each table's checksum at the dump held to the"
-                         " load's and folded into the move's verdict, beside"
-                         " migkit's own digest and never instead of it;"
-                         " measured within the runs' spread (5.40 s against"
-                         " 5.60 s for both tables)"),
-        "--compress": ("used", "zstd, where the dump would not fit the disk:"
-                               " measured slower where it fits, 6.07 s"
-                               " against 5.60 s (MY_BENCH)"),
-        "masking (per column)": (
-            "used", "null and constant, from the hop's mask_on_write, on"
-                    " columns outside every key, on a hop that sends"
-                    " nothing back; the masked columns are held to the rule"
-                    " after the load (`mask_plan`)"),
-        "--defaults-file": ("used", "the session's sql_mode, and per table"
-                                    " its filter, chunk size and masking"),
-        "--omit-from-file": ("used", "the tables the hop excludes and those"
-                                     " another rung carries"),
-        "--tables-list": (
-            "unused", "the tables other rungs carry are left out by name"
-                      " instead, so a table made on the source during the"
-                      " move is still carried"),
-        "--trx-tables": ("used", "one consistent snapshot of transactional"
-                                 " tables"),
-        "--machine-log-json": (
-            "topped-up", "read event by event into migkit's progress lines,"
-                         " each table's checksum pair and each table's time"
-                         " for the next choice"),
-        "--no-schemas": ("used", "migkit makes the tables the target lacks"
-                                 " from the source's own definition"),
-        "--where": ("unused", "one predicate for every table; the per-table"
-                              " where of the defaults file is used"),
-        "--stream": ("unused", "the target is emptied only once a whole dump"
-                               " is on disk"),
-        "--source-data": ("unused", "the dump's metadata holds the position"
-                                    " without it (`_my_dump_position`)"),
-        "--split-partitions": ("unused", "not yet: a partitioned table is"
-                                         " chunked by rows like the rest"),
-    },
-    "myloader": {
-        "--threads": ("used", "from migkit's sizing"),
-        "--max-threads-per-table": ("used", "the whole of the sizing"),
-        "--checksum-all": ("topped-up", "without it on the load, its checksum"
-                                        " step compares nothing (measured)"),
-        "--checksum": ("topped-up", "warn, so every table's pair is read and"
-                                    " migkit fails the move naming each"),
-        "--enable-binlog": ("used", "where the target writes a binlog, so its"
-                                    " replicas and point-in-time recovery"
-                                    " get the rows"),
-        "--optimize-keys": (
-            "unused", "not yet: it acts only where the load makes the"
-                      " tables, and migkit makes them from the source's"
-                      " definition (`_my_create_missing`) and moves their"
-                      " secondary indexes out of the load's way itself -"
-                      " which also strips what the target cannot keep"
-                      " (MariaDB's system versioning). Measured where the"
-                      " load makes them: both tables 4.07-4.52 s against"
-                      " 4.41-5.44 s by the index window (MY_BENCH), within"
-                      " the runs' spread, and the benchmark's window rebuilt"
-                      " one table after another where the move's rebuilds"
-                      " them side by side"),
-        "--disable-redo-log": ("unused", "it changes a server setting, which"
-                                         " migkit does not do"),
-        "--drop-table": ("unused", "on a data-only dump neither TRUNCATE nor"
-                                   " DELETE empties anything (measured);"
-                                   " migkit empties the target itself"),
-        "--resume": ("unused", "a stopped load is loaded again from an"
-                               " emptied target; the straight copy's"
-                               " resumable load carries the long moves"),
-    },
-    "mysqlsh": {
-        "util.copy_schemas": ("used", "read and written at once, no file"
-                                      " between, where this machine cannot"
-                                      " hold the dump (`_shell_direct`),"
-                                      " after its dry run"),
-        "util.dump_schemas + util.load_dump": (
-            "topped-up", "the way it runs wherever this machine holds the"
-                         " dump - measured faster than reading and writing"
-                         " at once (6.19 s against 11.41 s, MY_BENCH) - with"
-                         " the load's progress kept, and a stopped move"
-                         " going on from it only while the source's binlog"
-                         " is where the dump left it (`_shell_resumable`)"),
-        "threads": ("used", "from migkit's sizing"),
-        "bytesPerChunk": ("used", "from the rate this hop is read at, no"
-                                  " more than the largest table split across"
-                                  " the workers (`_shell_chunk`)"),
-        "checksum": ("topped-up", "every chunk's, a table that differs"
-                                  " folded into the move's verdict beside"
-                                  " migkit's digest"),
-        "compression": ("used", "zstd, for the dump a resumable load reads"),
-        "where": ("used", "the hop's row filter per table"),
-        "schema": ("used", "the target's name for the database (db_map)"),
-        "dryRun": ("used", "before the target is emptied: the source can be"
-                           " read and the target takes the load"),
-        "deferTableIndexes": (
-            "unused", "it acts only where the copy runs the tables' DDL;"
-                      " migkit makes the tables and moves their secondary"
-                      " indexes out of the load's way itself. Measured where"
-                      " it runs the DDL: all deferred 5.40 s against none"
-                      " 5.67 s for both tables (MY_BENCH)"),
-        "waitDumpTimeout": ("unused", "loading while the dump is written"
-                                      " empties the target before the dump"
-                                      " is whole; the straight copy loads"
-                                      " while it reads instead, after its"
-                                      " dry run"),
-        "local_infile": ("used", "asked of the target, never set: the rung is"
-                                 " not used where it is off"),
-        "maxRate": ("unused", "not yet: the throttle paces migkit's own"
-                              " copier, and has no rate to hand this one"),
-        "skipBinlog": ("unused", "the target's binlog is kept for its"
-                                 " replicas"),
-        "analyzeTables": ("unused", "migkit settles the target's statistics"
-                                    " after every bulk copy"),
-    },
-}
+#: tool-use registry of backlog 0f (`tooluse`): used, topped up (used, and
+#: migkit does more with it than the program does alone) or unused, each
+#: with its reason. Kept beside the builders it describes, and the tests
+#: hold the command lines to it. A feature is the program's flag, or what
+#: its defaults file or its utility is given, by the program's own name.
+def _features(account):
+    return {("", feature): got for feature, got in account.items()}
+
+
+tooluse.register("mydumper", options=_features({
+    "--threads": (USED, "from migkit's sizing of both servers and this"
+                        " machine, never set by hand"),
+    "--max-threads-per-table": (
+        USED, "the whole of the sizing, so one large table is read by every"
+              " worker rather than four"),
+    "rows (per table)": (
+        TOPPED, "in the defaults file, one size a table from its rows and"
+                " bytes and the rate this hop is read at (`my_chunk_rows`),"
+                " where the flag is one size for every table. Measured on a"
+                " local link no faster than the program's own cutting (5.60"
+                " s against 4.58 s for both tables, within the runs' spread"
+                " on each alone): what it sets is where a chunk starts on"
+                " the link this hop is read over"),
+    "--checksum-all": (
+        TOPPED, "each table's checksum at the dump held to the load's and"
+                " folded into the move's verdict, beside migkit's own digest"
+                " and never instead of it; measured within the runs' spread"
+                " (5.40 s against 5.60 s for both tables)"),
+    "--compress": (USED, "zstd, where the dump would not fit the disk:"
+                         " measured slower where it fits, 6.07 s against"
+                         " 5.60 s (MY_BENCH)"),
+    "masking (per column)": (
+        USED, "null and constant, from the hop's mask_on_write, on columns"
+              " outside every key, on a hop that sends nothing back; the"
+              " masked columns are held to the rule after the load"
+              " (`mask_plan`)"),
+    "--defaults-file": (USED, "the session's sql_mode, and per table its"
+                              " filter, chunk size and masking"),
+    "--omit-from-file": (USED, "the tables the hop excludes and those"
+                               " another rung carries"),
+    "--tables-list": (
+        UNUSED, "the tables other rungs carry are left out by name instead,"
+                " so a table made on the source during the move is still"
+                " carried"),
+    "--trx-tables": (USED, "one consistent snapshot of transactional"
+                           " tables"),
+    "--machine-log-json": (
+        TOPPED, "read event by event into migkit's progress lines, each"
+                " table's checksum pair and each table's time for the next"
+                " choice"),
+    "--no-schemas": (USED, "migkit makes the tables the target lacks from"
+                           " the source's own definition"),
+    "--where": (UNUSED, "one predicate for every table; the per-table where"
+                        " of the defaults file is used"),
+    "--stream": (UNUSED, "the target is emptied only once a whole dump is"
+                         " on disk"),
+    "--source-data": (UNUSED, "the dump's metadata holds the position"
+                              " without it (`_my_dump_position`)"),
+    "--split-partitions": (UNUSED, "not yet: a partitioned table is chunked"
+                                   " by rows like the rest"),
+}))
+tooluse.register("myloader", options=_features({
+    "--threads": (USED, "from migkit's sizing"),
+    "--max-threads-per-table": (USED, "the whole of the sizing"),
+    "--checksum-all": (TOPPED, "without it on the load, its checksum step"
+                               " compares nothing (measured)"),
+    "--checksum": (TOPPED, "warn, so every table's pair is read and migkit"
+                           " fails the move naming each"),
+    "--enable-binlog": (USED, "where the target writes a binlog, so its"
+                              " replicas and point-in-time recovery get the"
+                              " rows"),
+    "--optimize-keys": (
+        UNUSED, "not yet: it acts only where the load makes the tables, and"
+                " migkit makes them from the source's definition"
+                " (`_my_create_missing`) and moves their secondary indexes"
+                " out of the load's way itself - which also strips what the"
+                " target cannot keep (MariaDB's system versioning). Measured"
+                " where the load makes them: both tables 4.07-4.52 s against"
+                " 4.41-5.44 s by the index window (MY_BENCH), within the"
+                " runs' spread, and the benchmark's window rebuilt one table"
+                " after another where the move's rebuilds them side by"
+                " side"),
+    "--disable-redo-log": (UNUSED, "it changes a server setting, which"
+                                   " migkit does not do"),
+    "--drop-table": (UNUSED, "on a data-only dump neither TRUNCATE nor"
+                             " DELETE empties anything (measured); migkit"
+                             " empties the target itself"),
+    "--resume": (UNUSED, "a stopped load is loaded again from an emptied"
+                         " target; the straight copy's resumable load"
+                         " carries the long moves"),
+}))
+tooluse.register("mysqlsh", options=_features({
+    "util.copy_schemas": (USED, "read and written at once, no file between,"
+                                " where this machine cannot hold the dump"
+                                " (`_shell_direct`), after its dry run"),
+    "util.dump_schemas + util.load_dump": (
+        TOPPED, "the way it runs wherever this machine holds the dump -"
+                " measured faster than reading and writing at once (6.19 s"
+                " against 11.41 s, MY_BENCH) - with the load's progress"
+                " kept, and a stopped move going on from it only while the"
+                " source's binlog is where the dump left it"
+                " (`_shell_resumable`)"),
+    "threads": (USED, "from migkit's sizing"),
+    "bytesPerChunk": (USED, "from the rate this hop is read at, no more than"
+                            " the largest table split across the workers"
+                            " (`_shell_chunk`)"),
+    "checksum": (TOPPED, "every chunk's, a table that differs folded into"
+                         " the move's verdict beside migkit's digest"),
+    "compression": (USED, "zstd, for the dump a resumable load reads"),
+    "where": (USED, "the hop's row filter per table"),
+    "schema": (USED, "the target's name for the database (db_map)"),
+    "dryRun": (USED, "before the target is emptied: the source can be read"
+                     " and the target takes the load"),
+    "deferTableIndexes": (
+        UNUSED, "it acts only where the copy runs the tables' DDL; migkit"
+                " makes the tables and moves their secondary indexes out of"
+                " the load's way itself. Measured where it runs the DDL: all"
+                " deferred 5.40 s against none 5.67 s for both tables"
+                " (MY_BENCH)"),
+    "waitDumpTimeout": (UNUSED, "loading while the dump is written empties"
+                                " the target before the dump is whole; the"
+                                " straight copy loads while it reads"
+                                " instead, after its dry run"),
+    "local_infile": (USED, "asked of the target, never set: the rung is not"
+                           " used where it is off"),
+    "maxRate": (UNUSED, "not yet: the throttle paces migkit's own copier,"
+                        " and has no rate to hand this one"),
+    "skipBinlog": (UNUSED, "the target's binlog is kept for its replicas"),
+    "analyzeTables": (UNUSED, "migkit settles the target's statistics after"
+                              " every bulk copy"),
+}))
 
 
 @dataclass(frozen=True)
@@ -4640,7 +4637,7 @@ MONGO_RESTORED = (r"finished restoring `?(?P<table>[^`\s]+)`? \((?P<docs>\d+)"
 #: the mover was the inconsistent one.
 QUIET_TRIGGERS = "?options=-c%20session_replication_role%3Dreplica"
 
-PGCOPYDB_IMAGE = "dimitri/pgcopydb:latest"
+PGCOPYDB_IMAGE = IMAGES["pgcopydb"]
 _PGCOPYDB_OK = None
 
 
@@ -5407,13 +5404,17 @@ def _pgcopydb_account():
         " it, so there is no stopped leg to go on from")
     put(("follow",), "--slot-name", USED,
         "a slot named after the hop and the database, so teardown can name"
-        " it and drop it")
+        " it and drop it; after a copy of the source's pages, the slot made"
+        " before that copy (`physical.follow_from`)")
     put(("follow",), "--create-slot", USED,
-        "the leg makes its slot when it starts; teardown drops it, since an"
-        " abandoned slot pins the source's log")
+        "the leg makes its slot when it starts, except after a copy of the"
+        " source's pages, whose slot was made before it; teardown drops"
+        " either, since an abandoned slot pins the source's log")
     put(("follow",), "--origin", USED,
         "an origin on the target named after the hop, which records how far"
-        " it applied - migkit's reading of the leg's progress")
+        " it applied - migkit's reading of the leg's progress; after a copy"
+        " of the source's pages, made by migkit at the position the copy"
+        " holds, so the leg applies only what commits after it")
     put(("follow",), "--plugin", USED,
         "pgoutput, which every stock server has (measured: postgres:16"
         " carries pgoutput and test_decoding only)")
@@ -5682,28 +5683,40 @@ def stream_ways():
                         "the change tail runs here, and applies by key"
                         " where a replica stops on a row the copy already"
                         " carried"))),
-        Rung("pipeline", "migkit's streaming pipeline",
+        # its log is a source-available broker: started only once its
+        # terms are accepted on this machine, and taken down whatever
+        # they are, since a pipeline already running is the operator's
+        Rung("pipeline", PIPELINE_SAID,
              needs=(Need("an engine it streams",
                          lambda f: stream_supported(f["engine"]),
                          "{rung} does not stream this engine"),
                     unless_measured(
                         "pipeline", lambda f: not f["ready"],
-                        "the change tail runs here")),
+                        "the change tail runs here"),
+                    Need("its log's terms accepted",
+                         lambda f: f.get("drop") or f["broker"][0],
+                         lambda f: f"{PIPELINE_SAID}: {f['broker'][1]}")),
              footprint=2),
     )
 
 
-def stream_way(hop, engine, repl, tail, ready):
+#: the pipeline rung in an operator's words
+PIPELINE_SAID = "migkit's streaming pipeline"
+
+
+def stream_way(hop, engine, repl, tail, ready, drop=False):
     """The `decide.Choice` of the way this hop's changes follow its source,
     from what the engine has (`repl`: its servers' replication, `tail`:
     migkit's change tail, `ready`: the tail's driver installed) and what
-    each way was measured to cost on this hop."""
+    each way was measured to cost on this hop; `drop` where the way is
+    being taken down rather than set up."""
     from .decide import Facts, HopCosts, climb
     costs = HopCosts(hop, "cdc/")
     return climb(hop.name, stream_ways(),
                  Facts({"engine": engine, "repl": bool(repl),
                         "tail": bool(tail), "ready": bool(ready),
-                        "costs": costs}),
+                        "costs": costs, "drop": bool(drop)},
+                       broker=lambda: tooluse.allowed("redpanda", hop)),
                  costs=costs)
 
 
@@ -5766,13 +5779,28 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     0/156D578 against a final origin of 0/1567D28, on a run that copied
     every row correctly. Waiting for that comparison would never return.
     The end of the run is the process exiting; the proof is `migkit check`.
+
+    After a copy of the source's pages (`physical.follow_from`) the leg
+    goes on from that copy's position, never from now: it reads the slot
+    made before the copy instead of making one, and its origin is made
+    on the target at the position the restored target proved, as the
+    subscription's is (`physical.pg_continue`). The program keeps an
+    origin that exists and applies only what commits after its progress
+    (its own messages: `Replication origin ... already exists at LSN`,
+    `Setting up previous LSN from replication origin ... progress`); a
+    run after the first finds the origin moved on and leaves it there.
+    Where the seed cannot be gone on from this way, `follow_from` refuses
+    with the reason.
     """
     import os
     import subprocess as _sp
 
+    from . import physical
     from .engines.postgres import PostgresEngine
     eng = PostgresEngine(hop)
-    origin, slot = eng.follow_origin(db), eng.follow_slot(db)
+    seed = physical.follow_from(hop, eng, db)
+    origin = eng.follow_origin(db)
+    slot = seed["slot"] if seed else eng.follow_slot(db)
     d = follow_dir(hop, db)
     s, t = hop.source, hop.target
     src = (f"postgresql://{s.user}:{quote(s.password or '', safe='')}"
@@ -5780,8 +5808,8 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
            f"@{t.host}:{t.port}/{hop.target_db(db)}")
     argv = ["pgcopydb", "follow", "--dir", str(d), "--slot-name", slot,
-            "--create-slot", "--origin", origin, "--plugin", "pgoutput",
-            "--not-consistent"]
+            *([] if seed else ["--create-slot"]), "--origin", origin,
+            "--plugin", "pgoutput", "--not-consistent"]
     steps = [
         f"read the changes through slot {slot} and apply them on the"
         f" target under origin {origin}",
@@ -5795,6 +5823,15 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
         f"changes from before the slot {slot} existed are not carried;"
         " the bulk copy and migkit check are what cover those",
     ]
+    if seed:
+        steps[0] = (f"read the changes through slot {slot}, made before the"
+                    f" copy of {seed['at']}, and apply on the target under"
+                    f" origin {origin} only what commits after"
+                    f" {seed['lsn']}, the position the copy holds")
+        steps[4] = (f"origin {origin} made on the target at {seed['lsn']}"
+                    " where it is new: the copy holds everything before"
+                    " that position, and nothing before it is applied"
+                    " again")
     # the tables the hop excludes are the target's own, and a stream that
     # carried their source's changes would overwrite what the move left
     # alone; and a table the hop filters or renames cannot be carried by a
@@ -5829,6 +5866,8 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
             " place, or use MIGKIT_CDC=native, which needs no component"
             " here but does need the target to reach the source")
     d.mkdir(parents=True, exist_ok=True)
+    if seed:
+        _seed_origin(eng, db, origin, seed["lsn"])
     env = tool_env({"PGCOPYDB_SOURCE_PGURI": src, "PGCOPYDB_TARGET_PGURI": dst})
     out = d / "follow.log"
     _debug(argv, env)
@@ -5875,6 +5914,21 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     return steps
 
 
+def _seed_origin(eng, db, origin, lsn):
+    """The leg's origin on the target at `lsn` - made where it is not
+    there, and advanced only where it holds no progress yet: a leg that
+    ran before moved it on, and it is never set back."""
+    name = origin.replace("'", "''")
+    tdb = eng._d("dst", db)
+    eng._psql("dst", tdb, f"select pg_replication_origin_create('{name}')"
+                          " where not exists (select 1 from"
+                          " pg_replication_origin where roname ="
+                          f" '{name}')")
+    eng._psql("dst", tdb, f"select pg_replication_origin_advance('{name}',"
+                          f" '{lsn}') where pg_replication_origin_progress("
+                          f"'{name}', false) is null")
+
+
 def follow_teardown(hop, db, go, log=None):
     """Take back what the CDC leg left on both servers.
 
@@ -5882,8 +5936,12 @@ def follow_teardown(hop, db, go, log=None):
     until the source runs out of disk, which is a source outage caused by
     the migration tooling (E5). pgcopydb also creates a publication named
     after the slot, and the origin lives on the target - all three are
-    named by migkit, so all three can be named here.
+    named by migkit, so all three can be named here. A hop that may be
+    seeded from a copy of the source's pages takes back the slot made
+    before that copy and the publication named after it as well, where
+    no subscription holds the slot (`physical.follow_from`).
     """
+    from . import physical
     from .engines.postgres import PostgresEngine
     eng = PostgresEngine(hop)
     origin, slot = eng.follow_origin(db), eng.follow_slot(db)
@@ -5895,6 +5953,13 @@ def follow_teardown(hop, db, go, log=None):
                 " from pg_replication_origin"
                 f" where roname = '{origin}'"),
     ]
+    seed = physical.seed_slot(eng, db)
+    if physical.settings(hop) and seed not in eng._target_feeds(db):
+        plan[2:2] = [
+            ("src", f"select pg_drop_replication_slot('{seed}') from"
+                    f" pg_replication_slots where slot_name = '{seed}'"
+                    " and not active"),
+            ("src", f"drop publication if exists {seed}")]
     steps = [f"{side}: {sql}" for side, sql in plan]
     if not go:
         return steps
@@ -5903,9 +5968,9 @@ def follow_teardown(hop, db, go, log=None):
         try:
             eng._psql(side, d, sql)
         except RuntimeError as e:
-            # each of the three is independently absent on a leg that never
-            # ran, or that was torn down already; saying which one refused
-            # beats stopping before the slot is dropped
+            # each is independently absent on a leg that never ran, or that
+            # was torn down already; saying which one refused beats
+            # stopping before the slot is dropped
             steps.append(f"{side}: could not run `{sql[:40]}...`:"
                          f" {str(e).splitlines()[-1][:120]}")
         else:
@@ -6317,14 +6382,14 @@ def stream_codegen(hop, dbs, engine):
             "batch.size": buffers["max.batch.size"],
         },
     }
-    compose = """services:
+    compose = f"""services:
   redpanda:
-    image: redpandadata/redpanda:latest
+    image: {IMAGES["redpanda"]}
     command: redpanda start --overprovisioned --smp 1 --memory 1G
       --node-id 0 --kafka-addr PLAINTEXT://0.0.0.0:9092
       --advertise-kafka-addr PLAINTEXT://redpanda:9092
   connect:
-    image: quay.io/debezium/connect:3.0
+    image: {IMAGES["debezium"]}
     depends_on: [redpanda]
     ports: ["8083:8083"]
     environment:
@@ -6739,21 +6804,16 @@ def _debezium_account():
 
 
 tooluse.register(
-    "debezium", licence="Apache-2.0", options=_debezium_account(),
+    "debezium", options=_debezium_account(),
     declared={"postgres": frozenset(_RELATIONAL + _POSTGRES + _CONNECT),
               "mysql": frozenset(_RELATIONAL + _MYSQL + _CONNECT),
               "jdbc-sink": frozenset(_SINK + _CONNECT),
               "signals": frozenset(_SIGNALS)},
     families=_DEBEZIUM_FAMILIES)
-# the broker the generated pipeline pulls: source-available, and not a
-# program `doctor --install` puts in place, so not among the terms the
-# operator is asked to accept there
-tooluse.register(
-    "redpanda", licence="BUSL-1.1",
-    terms=tooluse.Terms(open=False, allows=(
-        "running it as a component of a product, as the pipeline's own"
-        " log; not offering it to others as a hosted streaming service")),
-    options={}, declared=None)
+# the broker the generated pipeline pulls: source-available, its terms
+# accepted where every closed program's are (`tools.TERMS`, `doctor
+# --install`), and the pipeline not started until they are (`stream_ways`)
+tooluse.register("redpanda", options={})
 
 
 def _connect_api(method, path, body=None, port=8083, timeout=15):

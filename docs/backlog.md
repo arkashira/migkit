@@ -315,9 +315,10 @@ each offers:
   group, then migkit's own row compare on that group only.
 
   *Done for the three verifiers (2026-09-28, on R20's rungs
-  2026-09-30).* The table is
-  `migkit/verifiers.py`: per tool the features used (read off the code
-  that drives it), the ones not used with the reason, and the top-ups;
+  2026-09-30).* The table is the tool-use registry's (`migkit/tooluse.py`,
+  registered from `migkit/verifiers.py`): per tool the features used (read
+  off the code that drives it), the ones not used with the reason, and the
+  top-ups;
   `tests/test_every_verifier_feature_is_used_or_explained.py` fails on a
   documented feature with neither, on a reason for a feature now used,
   and on a flag the installed program has that the table does not list.

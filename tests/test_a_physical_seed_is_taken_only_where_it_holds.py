@@ -334,6 +334,144 @@ def test_the_slot_is_made_the_one_way_before_the_copy(monkeypatch):
         ("copy",)], ran
 
 
+def test_the_leg_run_from_here_has_its_publication_before_its_slot(
+        monkeypatch):
+    """Going on by the leg run from here, the publication that leg reads
+    - named after the slot - is made before the slot too: one made after
+    it is not there for the changes during the copy."""
+    hop = _hop(physical_opts=PG_OPTS)
+    ran = []
+
+    class Eng:
+        def databases(self):
+            return ["app"]
+
+        def replicate_sql(self, db, copy_data=True):
+            return {"src": [f"create publication for {db}"]}
+
+        def published_tables(self, db):
+            return ["public.t"]
+
+        def _publication_sql(self, name, tables):
+            return f"create publication {name} for {','.join(tables)}"
+
+        def apply_replication_stmt(self, side, db, stmt):
+            ran.append(("stmt", side, stmt))
+
+        def _psql(self, side, db, sql):
+            return ""
+
+        def _slot_with_its_snapshot(self, side, db, name, plugin=None):
+            ran.append(("slot", side, db, name, plugin))
+    eng = Eng()
+    eng.hop = hop
+    monkeypatch.setenv("MIGKIT_CDC", "follow")
+    made = physical._pg_slots_before(hop, eng, ["app"], lambda m: None)
+    assert made == {"app": "migkit_seed_seed_app"}
+    assert ran == [
+        ("stmt", "src", "create publication for app"),
+        ("stmt", "src", "create publication migkit_seed_seed_app for"
+                        " public.t"),
+        ("slot", "src", "app", "migkit_seed_seed_app", "pgoutput")], ran
+    # the servers' own replication reads the hop's publication only
+    ran.clear()
+    monkeypatch.delenv("MIGKIT_CDC")
+    physical._pg_slots_before(hop, eng, ["app"], lambda m: None)
+    assert [r for r in ran if "migkit_seed_seed_app for" in str(r)] == []
+
+
+def test_the_leg_run_from_here_is_asked_for_before_the_copy(monkeypatch):
+    """Found missing after the copy, the leg would leave the copy holding
+    nothing after its position: its program is asked for first."""
+    from migkit import movers
+    hop = _hop(physical_opts=PG_OPTS)
+    monkeypatch.setenv("MIGKIT_CDC", "follow")
+    monkeypatch.setattr(movers, "pgcopydb_runner", lambda: "")
+    why = _rung(PAGES).refused(_pg_facts(hop))
+    assert why and "MIGKIT_CDC=follow" in why and "doctor --install" in why
+    # a copy nothing goes on from needs no leg
+    assert _rung(PAGES).refused(_pg_facts(hop, mode="full")) is None
+    monkeypatch.setattr(movers, "pgcopydb_runner", lambda: "local")
+    assert _rung(PAGES).refused(_pg_facts(hop)) is None
+    # and the servers' own replication needs nothing here
+    monkeypatch.setattr(movers, "pgcopydb_runner", lambda: "")
+    monkeypatch.delenv("MIGKIT_CDC")
+    assert _rung(PAGES).refused(_pg_facts(hop)) is None
+
+
+def _seed_record(hop, **rec):
+    physical._save_seed(hop, {"rung": PAGES, "at": "2026-09-30 10:00:00",
+                              "lsn": "0/3001000", **rec})
+
+
+def test_the_leg_goes_on_from_the_copys_position_or_says_why_not(tmp_path):
+    import json
+    from migkit.engines.postgres import PostgresEngine
+    hop = _hop(physical_opts=PG_OPTS)
+    eng = PostgresEngine(hop)
+    # no seed: the leg is what it was
+    assert physical.follow_from(hop, eng, "app") is None
+    _seed_record(hop, slots={"app": "migkit_seed_seed_app"}, leg=True)
+    assert physical.follow_from(hop, eng, "app") == {
+        "slot": "migkit_seed_seed_app", "lsn": "0/3001000",
+        "at": "2026-09-30 10:00:00"}
+    # a hop that does not ask for a physical seed never reads one
+    assert physical.follow_from(_hop(), eng, "app") is None
+    # a copy made since, table by table, is what the target holds now
+    (hop.report_dir("app") / "copy-position.json").write_text(json.dumps(
+        {"at": "2026-09-30 11:00:00", "before": None}))
+    assert physical.follow_from(hop, eng, "app") is None
+    (hop.report_dir("app") / "copy-position.json").unlink()
+    # its slot made for the servers' own replication: not this leg's
+    _seed_record(hop, slots={"app": "migkit_seed_seed_app"}, leg=False)
+    with pytest.raises(SystemExit) as e:
+        physical.follow_from(hop, eng, "app")
+    assert "publication" in str(e.value) and "MIGKIT_CDC=follow" in \
+        str(e.value), e.value
+    # no slot before the copy: nothing holds what changed since
+    _seed_record(hop, slots={}, leg=False)
+    physical._record_positions(hop, ["app"], None, {"lsn": "0/3001000"})
+    with pytest.raises(SystemExit) as e:
+        physical.follow_from(hop, eng, "app")
+    said = str(e.value)
+    assert "0/3001000" in said and "from now on" in said, said
+    assert "--mode full+cdc" in said, said
+
+
+def test_the_copy_goes_on_by_the_leg_where_the_target_cannot_dial(
+        monkeypatch):
+    """`MIGKIT_CDC=follow`: no subscription is made on the target; the leg
+    run from here goes on from the copy, database by database."""
+    from migkit import movers
+    hop = _hop(physical_opts=PG_OPTS)
+    legs = []
+    monkeypatch.setattr(movers, "pgcopydb_follow",
+                        lambda h, d, go, log=None: legs.append((d, go))
+                        or ["started", "applied up to 0/3002000"])
+
+    class Eng:
+        def replicate_sql(self, *a, **k):
+            raise AssertionError("a subscription was planned")
+    monkeypatch.setenv("MIGKIT_CDC", "follow")
+    said = []
+    physical.pg_continue(hop, Eng(), ["app", "crm"],
+                         {"lsn": "0/3001000", "slots": {"app": "s1"}},
+                         True, said.append)
+    assert legs == [("app", True)], legs
+    assert "app: applied up to 0/3002000" in said, said
+    assert any("crm: no slot was made before the copy" in s for s in said)
+
+
+def test_the_seed_slot_is_the_hops_own_by_name():
+    """The fence waits on the slot the seed made, before any subscription
+    reads it and where none does."""
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop(physical_opts=PG_OPTS))
+    eng._target_feeds = lambda db: []
+    assert physical.seed_slot(eng, "app") in eng.own_slots("app")
+    assert eng.follow_slot("app") in eng.own_slots("app")
+
+
 def test_a_failed_copy_drops_the_slots_it_made(monkeypatch):
     hop = _hop(physical_opts=PG_OPTS)
     dropped = []

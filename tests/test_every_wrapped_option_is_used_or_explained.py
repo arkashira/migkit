@@ -97,6 +97,163 @@ def test_every_tool_has_a_licence_and_terms():
     assert "hosted" in rows["redpanda"]["terms"]
 
 
+def test_every_wrapped_tool_is_in_the_one_registry():
+    """The MySQL bulk programs, the verifiers and the redo-file reader had
+    tables of their own, or none; each account is the registry's now, and
+    nothing keeps a second one."""
+    from migkit import verifiers
+    rows = tooluse.tools_used()
+    assert {"mydumper", "myloader", "mysqlsh", "dvt", "reladiff",
+            "datacompy", "OpenLogReplicator", "pgcopydb", "debezium",
+            "redpanda"} <= set(rows), sorted(rows)
+    assert not hasattr(movers, "TOOL_USE")
+    assert not hasattr(verifiers, "matrix")
+    for name in ("mydumper", "myloader", "mysqlsh", "dvt", "reladiff",
+                 "datacompy", "OpenLogReplicator"):
+        assert sum(len(row) for row in (rows[name][s] for s in
+                                        tooluse.STATES)) > 5, name
+
+
+def test_a_pulled_images_terms_are_accepted_where_every_programs_are(
+        tmp_path, monkeypatch):
+    """The broker the streaming pipeline pulls is source-available: its
+    licence and terms are `tools`'s, asked for with every other closed
+    tool's, and it is allowed only once they are accepted - the reason in
+    migkit's words, naming no program."""
+    from migkit import tools
+    assert tooluse.REGISTRY["redpanda"].licence == \
+        tools.PROGRAM_LICENCES["redpanda"] == "BUSL-1.1"
+    assert "redpanda" in tools.TERMS and "redpanda" in tools.IMAGES
+    with pytest.raises(ValueError, match="`tools`'s"):
+        tooluse.register("redpanda", licence="BUSL-1.1", options={})
+    hop = _hop("mysql")
+    monkeypatch.setattr(tools, "terms_accepted", lambda n: False)
+    ok, why = tooluse.allowed("redpanda", hop)
+    assert not ok and tools.TERMS["redpanda"].otherwise in why, why
+    assert "doctor --install" in why, why
+    assert not [t for t in TOOLS if t in why.lower()], why
+    monkeypatch.setattr(tools, "terms_accepted", lambda n: n == "redpanda")
+    assert tooluse.allowed("redpanda", hop) == (True, "")
+    # the open images are open, read from the same place
+    assert tooluse.allowed("debezium", hop) == (True, "")
+    assert tooluse.REGISTRY["debezium"].licence == "Apache-2.0"
+    # and the pipeline pulls the images named there, not others
+    _configs(tmp_path, monkeypatch, "postgres")
+    (compose,) = list(tmp_path.rglob("docker-compose.yml"))
+    text = compose.read_text()
+    for name in ("redpanda", "debezium"):
+        assert f"image: {tools.IMAGES[name]}" in text, text
+    assert movers.PGCOPYDB_IMAGE == tools.IMAGES["pgcopydb"]
+
+
+def test_a_use_read_off_the_code_and_the_reasons_held_to_it(tmp_path):
+    """Where a tool's uses are read off the code that drives it, only the
+    reasons are written: a reason for an option the code starts to use,
+    or a top-up of one it stops using, is stale; an option neither used
+    nor explained is unexplained; and a use cannot be written."""
+    driver = tmp_path / "driver.py"
+    driver.write_text("def run():\n    return ['prog', '--fast', '--quiet']\n")
+    reads = ((str(driver),), {("", o): o for o in ("--fast", "--quiet",
+                                                   "--slow", "--odd")})
+    try:
+        tooluse.register(
+            "planted", licence="MIT", release="1.0",
+            declared={"": frozenset({"--fast", "--quiet", "--slow",
+                                     "--odd"})}, reads=reads,
+            options={("", "--quiet"): (tooluse.TOPPED, "its output read by"
+                                                       " migkit instead"),
+                     ("", "--slow"): (tooluse.UNUSED, "measured slower than"
+                                                      " the default")})
+        assert tooluse.used("planted") == ["--fast", "--quiet"]
+        assert tooluse.entry("planted", "", "--fast") == (tooluse.USED,
+                                                          tooluse.READ_OFF)
+        assert tooluse.entry("planted", "", "--quiet")[0] == tooluse.TOPPED
+        assert tooluse.unexplained("planted") == [("", "--odd")]
+        assert tooluse.stale("planted") == []
+        driver.write_text("def run():\n    return ['prog', '--slow']\n")
+        assert tooluse.used("planted") == ["--slow"]
+        assert tooluse.stale("planted") == [("", "--quiet"), ("", "--slow")]
+        with pytest.raises(ValueError, match="read off the code"):
+            tooluse.register("planted2", licence="MIT", reads=reads,
+                             options={("", "--fast"): (tooluse.USED,
+                                                       "written as used"
+                                                       " here")})
+    finally:
+        tooluse.REGISTRY.pop("planted", None)
+        tooluse.REGISTRY.pop("planted2", None)
+
+
+def test_a_reason_may_point_to_another_options_reason():
+    """`see <option>` shares that option's reason - only one the tool has,
+    and never itself."""
+    try:
+        tooluse.register("pointer", licence="MIT", options={
+            ("", "--a"): (tooluse.UNUSED, "measured slower than the"
+                                          " default"),
+            ("", "--b"): (tooluse.UNUSED, "see --a")})
+        assert tooluse.entry("pointer", "", "--b") == (tooluse.UNUSED,
+                                                       "see --a")
+        for why in ("see --nothing", "see --b"):
+            with pytest.raises(ValueError, match="not written"):
+                tooluse.register("pointer", licence="MIT", options={
+                    ("", "--b"): (tooluse.UNUSED, why)})
+    finally:
+        tooluse.REGISTRY.pop("pointer", None)
+
+
+def test_what_the_redo_reader_is_given_is_what_the_account_calls_used():
+    """Every key of the reader's configuration migkit writes, and every
+    request it sends, against the account."""
+    import inspect
+    import re as _re
+
+    from migkit.engines import oracle_redo
+
+    class Ep:
+        options = {"redo_reader_mb": 512}
+        user, password = "app", "CHANGE_ME"
+
+    class Eng:
+        def _endpoint(self, side):
+            return Ep()
+
+        def _rows(self, side, db, sql):
+            return [("FREE",)]
+
+        def _dsn(self, ep):
+            return "10.0.0.1:1521/FREEPDB1"
+
+        def _owner(self, side, db):
+            return "APP"
+    conf = oracle_redo.config(Eng(), "src", "APP", "127.0.0.1:1", "/tmp/st")
+    assert conf["memory"]["max-mb"] == 512
+    written = set()
+
+    def walk(prefix, value):
+        if prefix in ("source.format", "source.filter.table") \
+                or not isinstance(value, (dict, list)):
+            written.add(prefix)
+            return
+        if isinstance(value, list):
+            for one in value:
+                walk(prefix, one)
+            return
+        for k, one in value.items():
+            walk(f"{prefix}.{k}" if prefix else k, one)
+    walk("", conf)
+    account = tooluse.REGISTRY["OpenLogReplicator"].options
+    used = {o for (c, o), (state, _) in account.items()
+            if c == "config" and state != tooluse.UNUSED}
+    assert written == used, written ^ used
+    sent = set(_re.findall(r"request\(([A-Z]+)",
+                           inspect.getsource(oracle_redo)))
+    asked = {o for (c, o), (state, _) in account.items()
+             if c == "protocol" and state != tooluse.UNUSED}
+    assert sent == asked == {"INFO", "START", "CONTINUE", "CONFIRM"}, sent
+    assert tooluse.REGISTRY["OpenLogReplicator"].release == \
+        oracle_redo.VERSION
+
+
 def test_a_closed_programs_terms_gate_it_until_accepted(monkeypatch):
     """A program `tools` holds closed terms for is allowed only once the
     operator accepted them there, and says what runs instead."""

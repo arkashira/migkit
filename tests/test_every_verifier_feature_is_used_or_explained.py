@@ -1,11 +1,12 @@
 """Every documented feature of the three verifiers migkit wraps is either
 used, read off the code, or given the reason it is not (backlog 0f).
 
-The table is `migkit.verifiers.matrix()`: per tool, what is used, what is
-not and why, and where migkit adds to it. These hold it to the code both
-ways, and hold the documented list to the flags the installed programs
-really have - a flag added in a new version with neither a use nor a
-reason fails here rather than going unnoticed.
+The table is the tool-use registry's (`migkit.tooluse`), the one every
+wrapped tool's account is in; `migkit.verifiers` registers these three,
+their uses read off the code that drives them. These hold it to the code
+both ways, and hold the documented list to the flags the installed
+programs really have - a flag added in a new version with neither a use
+nor a reason fails here rather than going unnoticed.
 """
 import re
 import subprocess
@@ -15,40 +16,53 @@ from pathlib import Path
 import pytest
 
 from migkit import second_reader as sr
+from migkit import tooluse
 from migkit import verifiers as v
 
 HELP = Path(__file__).parent / "reader_help.py"
+VERIFIERS = ("dvt", "reladiff", "datacompy")
+
+
+def _documented(tool):
+    return set(tooluse.surface(tool)[""])
 
 
 def test_no_documented_feature_lacks_a_use_or_a_reason():
-    assert v.undeclared() == []
+    for tool in VERIFIERS:
+        assert tooluse.unexplained(tool) == [], tool
 
 
 def test_no_reason_is_given_for_a_feature_the_code_uses():
-    assert v.stale() == []
+    for tool in VERIFIERS:
+        assert tooluse.stale(tool) == [], tool
 
 
-def test_the_table_has_the_shape_every_tool_table_has():
-    got = v.matrix()
-    assert set(got) == {"dvt", "reladiff", "datacompy"}
-    for tool, row in got.items():
-        assert set(row) == {"used", "unused", "topped_up"}, tool
-        assert row["used"], tool
-        documented = set(v.TOOLS[tool]["features"])
-        assert set(row["used"]) | set(row["unused"]) == documented, tool
-        assert not set(row["used"]) & set(row["unused"]), tool
-        for why in list(row["unused"].values()) + list(
-                row["topped_up"].values()):
-            # a reason, or a pointer to the feature whose reason it shares
-            words = why.split()
-            assert len(words) >= 3 or (words[0] == "see" and words[1]
-                                       in row["unused"]), (tool, why)
+def test_the_table_is_the_registrys_and_nowhere_else():
+    """One registry: the verifiers keep no table of their own to ask."""
+    for gone in ("TOOLS", "matrix", "undeclared", "stale", "used"):
+        assert not hasattr(v, gone), gone
+    rows = tooluse.tools_used()
+    for tool in VERIFIERS:
+        row = rows[tool]
+        assert row["licence"] and row["terms"] == "open", tool
+        used = set(tooluse.used(tool))
+        assert used, tool
+        unused = {o for o in row[tooluse.UNUSED]}
+        assert used | unused == _documented(tool), tool
+        assert not used & unused, tool
+        # a use is read off the code, never written
+        assert not [k for k, (state, _) in
+                    tooluse.REGISTRY[tool].options.items()
+                    if state == tooluse.USED], tool
+        assert tooluse.REGISTRY[tool].release, tool
+    from migkit import tools
+    assert rows["dvt"]["licence"] == tools.SECOND_READER_LICENCE
 
 
 def test_what_0f_asked_for_is_used(monkeypatch):
     """The features the owner named for the second reader, used - read off
     the code, not declared."""
-    used = set(v.used("dvt"))
+    used = set(tooluse.used("dvt"))
     for feature in ("--hash", "--primary-keys", "--comparison-fields",
                     "--grouped-columns", "--threshold", "--bit_xor",
                     "--std", "--avg", "--use-random-row",
@@ -58,9 +72,9 @@ def test_what_0f_asked_for_is_used(monkeypatch):
                     "validate custom-query column", "--labels"):
         assert feature in used, feature
     assert {"all_mismatch", "column_stats", "df1_unq_rows"} <= set(
-        v.used("datacompy"))
+        tooluse.used("datacompy"))
     assert {"--bisection-factor", "--bisection-threshold",
-            "--threads"} <= set(v.used("reladiff"))
+            "--threads"} <= set(tooluse.used("reladiff"))
 
 
 def test_taking_a_use_away_is_noticed(monkeypatch):
@@ -68,14 +82,17 @@ def test_taking_a_use_away_is_noticed(monkeypatch):
     aggregates leaves a documented feature with neither use nor reason,
     and the code starting to use one given a reason makes the reason
     stale."""
-    real = v._tokens
-    monkeypatch.setattr(v, "_tokens", lambda files: real(files)
+    real = tooluse._tokens
+    monkeypatch.setattr(tooluse, "_tokens", lambda files: real(files)
                         - {"--grouped-columns"})
-    assert ("dvt", "--grouped-columns") in v.undeclared()
-    assert ("dvt", "--grouped-columns") in v.stale()
-    monkeypatch.setattr(v, "_tokens", lambda files: real(files)
+    assert ("", "--grouped-columns") in tooluse.unexplained("dvt")
+    assert ("", "--grouped-columns") in tooluse.stale("dvt")
+    assert "--grouped-columns" not in tooluse.used("dvt")
+    monkeypatch.setattr(tooluse, "_tokens", lambda files: real(files)
                         | {"--concat"})
-    assert ("dvt", "--concat") in v.stale()
+    assert ("", "--concat") in tooluse.stale("dvt")
+    assert tooluse.entry("dvt", "", "--concat") == (tooluse.USED,
+                                                    tooluse.READ_OFF)
 
 
 def _reader_flags(python):
@@ -90,7 +107,7 @@ def _reader_flags(python):
 def test_every_flag_the_installed_reader_has_is_in_the_table():
     flags = _reader_flags(sr.interpreter()) - {"--help"}
     assert len(flags) > 40, flags
-    documented = set(v.TOOLS["dvt"]["features"])
+    documented = _documented("dvt")
     assert sorted(flags - documented) == []
 
 
@@ -106,7 +123,7 @@ def test_every_option_the_comparison_program_has_is_in_the_table():
                           capture_output=True, text=True, timeout=120).stdout
     flags = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", said)) - {"--help"}
     assert len(flags) > 20, flags
-    assert sorted(flags - set(v.TOOLS["reladiff"]["features"])) == []
+    assert sorted(flags - _documented("reladiff")) == []
 
 
 @pytest.mark.skipif(not _comparison_program(),
@@ -139,7 +156,7 @@ def test_every_public_method_of_the_frame_comparison_is_in_the_table():
                if not n.startswith("_")
                and callable(getattr(datacompy.PandasCompare, n))}
     assert len(methods) > 10, methods
-    assert sorted(methods - set(v.TOOLS["datacompy"]["features"])) == []
+    assert sorted(methods - _documented("datacompy")) == []
 
 
 # --- the comparison program as a rung --------------------------------------

@@ -8,29 +8,36 @@ reader, the bisecting comparison program and the frame comparison library
 - this is the table of which of their documented features migkit uses,
 which it does not and why, and where it adds to them.
 
-As `capabilities.matrix` does for engines, what is *used* is never
-declared: a feature is used when the token that turns it on is in the
-code that drives the tool (a flag as a string, a method or a keyword by
-name). Only the reasons are written. `undeclared()` is a documented
-feature with neither a use nor a reason, and `stale()` a reason for a
-feature the code has since started using; the test holds both empty, and
-holds the documented list against the flags the installed program
-actually has.
+The table is the tool-use registry's, every wrapped tool's one
+(`tooluse`), and these three are registered in it from here. As
+`capabilities.matrix` does for engines, what is *used* is never declared:
+a feature is used when the token that turns it on is in the code that
+drives the tool (a flag as a string, a method or a keyword by name,
+`tooluse.register(reads=...)`). Only the reasons are written.
+`tooluse.unexplained` is a documented feature with neither a use nor a
+reason, and `tooluse.stale` a reason for a feature the code has since
+started using; the test holds both empty, and holds the documented list
+against the flags the installed program actually has.
 
 Keys here are the tools' own names: this is migkit's bookkeeping, and
 none of it reaches an operator.
 """
-import ast
 import math
 import sys
-from pathlib import Path
 
-_HERE = Path(__file__).parent
+from . import tooluse
+from .tools import SECOND_READER_LICENCE
+from .tooluse import TOPPED, UNUSED
 
-#: per tool: where it is driven from, and each documented feature with the
-#: token whose presence in those files means it is used
-TOOLS = {
+#: per tool: its licence, the release its features are documented from,
+#: where it is driven from, each documented feature with the token whose
+#: presence in those files means it is used, and the reasons - the input
+#: of its account in the registry, registered below
+_ACCOUNTS = {
     "dvt": {
+        # installed by `doctor --install` in an environment of its own,
+        # at the version and licence `tools` pins it to
+        "licence": SECOND_READER_LICENCE,
         "version": "8.9.3",
         "files": ("second_reader.py", "runners/second_reader.py"),
         "features": {
@@ -219,6 +226,7 @@ TOOLS = {
         },
     },
     "reladiff": {
+        "licence": "MIT",
         "version": "0.6.0",
         "files": ("engines/generic.py",
                   "engines/mysql.py::_reladiff_table",
@@ -288,7 +296,7 @@ TOOLS = {
                 " connection count and not a speed; the rung's two in the"
                 " verify passes"),
             "--bisection-factor": (
-                "sized per table by `reladiff_rung` from its rows and row"
+                "sized per table by the rung below from its rows and row"
                 " width when the facts give them, kept below the threshold"
                 " the program otherwise refuses to start with"),
             "--bisection-threshold": "sized with the factor; see there",
@@ -301,6 +309,7 @@ TOOLS = {
         },
     },
     "datacompy": {
+        "licence": "Apache-2.0",
         "version": "1.0.4",
         "files": ("second_reader.py::explain",),
         "features": {
@@ -396,70 +405,16 @@ TOOLS = {
 }
 
 
-def _tokens(files):
-    """Every string constant, name, attribute, keyword and imported name
-    in the code that drives a tool - where a feature being used shows. A
-    file named `path::function` is read only inside that function, for a
-    file that drives other programs too."""
-    out = set()
-    for rel in files:
-        rel, _, fn = rel.partition("::")
-        tree = ast.parse((_HERE / rel).read_text())
-        if fn:
-            tree = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.FunctionDef) and n.name == fn)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                out.add(node.value)
-            elif isinstance(node, ast.Name):
-                out.add(node.id)
-            elif isinstance(node, ast.Attribute):
-                out.add(node.attr)
-            elif isinstance(node, ast.keyword) and node.arg:
-                out.add(node.arg)
-            elif isinstance(node, ast.ImportFrom):
-                out.update(a.name for a in node.names)
-    return out
-
-
-def used(tool):
-    """The documented features of one tool the code uses, read off it."""
-    spec = TOOLS[tool]
-    seen = _tokens(spec["files"])
-    return sorted(f for f, token in spec["features"].items() if token in seen)
-
-
-def matrix():
-    """{tool: {"used": [...], "unused": {feature: why},
-    "topped_up": {feature: how}}} - the shape every wrapped tool's table
-    has."""
-    out = {}
-    for tool, spec in TOOLS.items():
-        now = used(tool)
-        out[tool] = {"used": now,
-                     "unused": {f: why for f, why in spec["unused"].items()
-                                if f not in now},
-                     "topped_up": {f: how for f, how in
-                                   spec["topped_up"].items() if f in now}}
-    return out
-
-
-def undeclared():
-    """(tool, feature) documented, not used, and with no reason."""
-    return [(tool, f) for tool, spec in TOOLS.items()
-            for f in spec["features"]
-            if f not in used(tool) and f not in spec["unused"]]
-
-
-def stale():
-    """(tool, feature) given a reason for not being used, and used; or
-    said to be topped up, and not used."""
-    out = []
-    for tool, spec in TOOLS.items():
-        now = set(used(tool))
-        out += [(tool, f) for f in spec["unused"] if f in now]
-        out += [(tool, f) for f in spec["topped_up"] if f not in now]
-    return out
+for _name, _spec in _ACCOUNTS.items():
+    tooluse.register(
+        _name, licence=_spec["licence"], release=_spec["version"],
+        declared={"": frozenset(_spec["features"])},
+        reads=(_spec["files"], {("", f): token for f, token in
+                                _spec["features"].items()}),
+        options={**{("", f): (UNUSED, why)
+                    for f, why in _spec["unused"].items()},
+                 **{("", f): (TOPPED, how)
+                    for f, how in _spec["topped_up"].items()}})
 
 
 # --- the comparison program as a rung the decision engine can choose -------

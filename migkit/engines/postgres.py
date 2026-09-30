@@ -8308,14 +8308,19 @@ class PostgresEngine(Engine):
         """The names of the slots on the source that carry this hop's own
         stream: its subscription's (named after the subscription, which
         the server folds to lower case), the one its CDC leg driven from
-        here reads, the slot of any subscription on the target itself -
-        whoever made it, it is what writes into this target - and any the
-        hop names (`slot:`) for a pipeline migkit did not set up."""
+        here reads, the one a physical seed made before its copy
+        (`physical.seed_slot`) - by name, so it is waited on before a
+        subscription takes it and where none does - the slot of any
+        subscription on the target itself - whoever made it, it is what
+        writes into this target - and any the hop names (`slot:`) for a
+        pipeline migkit did not set up."""
+        from ..physical import seed_slot
         named = (self.hop.options or {}).get("slot") or []
         if isinstance(named, str):
             named = [named]
         return sorted({self._repl_name().lower(), self.follow_slot(db),
-                       *[str(n) for n in named], *self._target_feeds(db)})
+                       seed_slot(self, db), *[str(n) for n in named],
+                       *self._target_feeds(db)})
 
     def _target_feeds(self, db):
         """The slots the target's own subscriptions read, asked once with
@@ -9543,10 +9548,7 @@ class PostgresEngine(Engine):
                             " nothing - move with --mode full+cdc, which"
                             " copies under the subscription"}
         try:
-            tables = [t for (t,) in self._plan_rows(
-                "src", db, "select schemaname||'.'||tablename from pg_tables"
-                " where schemaname not in ('pg_catalog','information_schema')"
-                " order by 1") if not self.hop.excluded(db, *t.split(".", 1))]
+            tables = self.published_tables(db)
             publish = self._publication_sql(name, tables)
         except RuntimeError as e:
             # a plan shown while the source cannot be reached: the list is
@@ -9579,6 +9581,14 @@ class PostgresEngine(Engine):
             "status": "select subname, received_lsn, latest_end_lsn,"
                       " latest_end_time from pg_stat_subscription",
         }
+
+    def published_tables(self, db):
+        """The source's tables the hop moves, as a publication of its
+        lists them: every table but the ones the hop excludes."""
+        return [t for (t,) in self._plan_rows(
+            "src", db, "select schemaname||'.'||tablename from pg_tables"
+            " where schemaname not in ('pg_catalog','information_schema')"
+            " order by 1") if not self.hop.excluded(db, *t.split(".", 1))]
 
     def _publication_sql(self, name, tables):
         """The publication of exactly the hop's tables: `FOR TABLE` every

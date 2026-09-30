@@ -75,8 +75,10 @@ PROGRAM_LICENCES = {
     # GPLv2 with the Universal FOSS Exception, driven as a program: its
     # Python API lives only inside its own process (no package carries it)
     "mysqlsh": "GPL-2.0-only",
-    # the image migkit runs its version-matched PostgreSQL copy from
-    "pgcopydb": "PostgreSQL",
+    # the images migkit pulls (`IMAGES`): its version-matched PostgreSQL
+    # copy, and the streaming pipeline's connectors and its log
+    "pgcopydb": "PostgreSQL", "debezium": "Apache-2.0",
+    "redpanda": "BUSL-1.1",
     "OpenLogReplicator": "AGPL-3.0-or-later",
     "oracle-instant-client": "LicenseRef-Oracle-Free-Use-Terms",
     # FreeTDS under the Library GPL 2 "or any later version", taken as
@@ -87,6 +89,14 @@ PROGRAM_LICENCES = {
     "ibmi-odbc": "LicenseRef-IBM-i-Access-Client-Solutions",
     "db2-connect": "LicenseRef-IBM-Db2-Connect",
 }
+
+#: the container images migkit runs, pulled by docker where they are run
+#: rather than installed: {name as `PROGRAM_LICENCES` and `TERMS` know it:
+#: image}. Pulled, not installed, and a closed one's terms accepted with
+#: every other's all the same (`install_missing`)
+IMAGES = {"pgcopydb": "dimitri/pgcopydb:latest",
+          "debezium": "quay.io/debezium/connect:3.0",
+          "redpanda": "redpandadata/redpanda:latest"}
 
 #: not a program on PATH: the second reader lives in an environment of its
 #: own (`migkit.second_reader`), because it pins an older numeric stack
@@ -113,10 +123,11 @@ class Terms:
     open_build: str = ""
 
 
-#: The programs whose licence is not open source. Each is installed and
-#: used only once the operator has accepted its terms (`accept_terms`), for
-#: what those terms allow; declined, the open build or the open path takes
-#: its place and migkit says so.
+#: The programs and images whose licence is not open source. Each is
+#: installed (an image: pulled) and used only once the operator has
+#: accepted its terms (`accept_terms`), for what those terms allow;
+#: declined, the open build or the open path takes its place and migkit
+#: says so.
 TERMS = {
     "atlas": Terms(
         "the Atlas EULA (the default build)",
@@ -155,6 +166,18 @@ TERMS = {
         " or Redis Software",
         "Redis copies take migkit's own keyspace copier, which every other"
         " target takes anyway"),
+    # an image the streaming pipeline pulls, not a program installed here:
+    # its terms are asked for here all the same, and the pipeline is not
+    # started until they are accepted (`movers.stream_ways`)
+    "redpanda": Terms(
+        "the Business Source License 1.1 (Redpanda Data): any use but"
+        " offering it to others as a streaming or queuing service",
+        "https://github.com/redpanda-data/redpanda/blob/dev/licenses/bsl.md",
+        "the log of migkit's streaming pipeline, run on this machine for one"
+        " hop's changes - never a streaming service hosted for others",
+        "a hop's changes follow its source by the ways that need no"
+        " pipeline - migkit's change tail or the servers' own replication -"
+        " and one with neither is not followed"),
     "ibmi-odbc": Terms(
         "IBM's licence for IBM i Access Client Solutions, of which the"
         " ODBC driver is part (no charge)",
@@ -670,7 +693,8 @@ def install_missing(log=print, ask=None):
     """Install every missing program with the platform package manager, and
     from its vendor what no package manager carries - a program that is not
     open source only once its terms are accepted (`accept_terms`, `ask`
-    the question at a terminal). Returns the capabilities still short
+    the question at a terminal), asked in the one question with the terms
+    of the images migkit pulls. Returns the capabilities still short
     afterwards."""
     mac = platform.system() == "Darwin"
     mgr = "brew" if (mac and shutil.which("brew")) else (
@@ -701,9 +725,14 @@ def install_missing(log=print, ask=None):
     fetch = [c for c in dict.fromkeys(wanted) if c in VENDOR and not which(c)]
     ibm = [c for c in dict.fromkeys(wanted) if c in (IBMI_ODBC, DB2_CONNECT)
            and not _present(c)]
-    # the terms first, all of them, before anything is fetched: a question
-    # asked halfway through a long download is one nobody is there for
-    answer = accept_terms(fetch + ibm, ask, log)
+    redo = REDO_READER in wanted and not _present(REDO_READER)
+    # the terms first, all of them, before anything is fetched or built: a
+    # question asked halfway through a long download is one nobody is
+    # there for. An image under closed terms is asked for here too: docker
+    # pulls it where it runs, and migkit runs it only once they are
+    # accepted (`tooluse.allowed`)
+    answer = accept_terms(fetch + ibm + [i for i in IMAGES if i in TERMS]
+                          + ([REDO_READER_CLIENT] if redo else []), ask, log)
     for n, cmd in enumerate(fetch, 1):
         open_build = cmd in TERMS and not answer.get(cmd)
         if open_build and not TERMS[cmd].open_build:
@@ -733,11 +762,8 @@ def install_missing(log=print, ask=None):
                 " to see which capability is still short")
     if not _present(SECOND_READER):
         install_second_reader(log)
-    if REDO_READER in wanted and not _present(REDO_READER):
-        # its client's terms asked for first, as every closed program's
-        if accept_terms([REDO_READER_CLIENT], ask, log).get(
-                REDO_READER_CLIENT):
-            install_redo_reader(log)
+    if redo and answer.get(REDO_READER_CLIENT):
+        install_redo_reader(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
 
 

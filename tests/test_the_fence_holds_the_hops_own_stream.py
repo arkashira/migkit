@@ -193,3 +193,32 @@ def test_no_slot_of_the_hops_is_no_fence_whoever_else_reads(pg_pair,
     finally:
         reader.kill()
         _drop_slots("other_consumer")
+
+
+def test_the_seed_slot_is_waited_on_with_no_subscription_on_it(pg_pair,
+                                                               tmp_path):
+    """A physical seed makes its slot before the copy, and nothing reads it
+    until the stream that goes on from the copy starts. The fence waits on
+    it by name all the same: behind, it holds; caught up, it passes -
+    where before it found no slot of the hop's and could not fence."""
+    from migkit import physical
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop(pg_pair, tmp_path))
+    seed = physical.seed_slot(eng, "postgres")
+    assert seed in eng.own_slots("postgres")
+    psql(55432, "create table if not exists public.seeded (id int primary"
+                " key)")
+    _slot(seed)
+    try:
+        psql(55432, "insert into public.seeded values (1)")
+        lsn = eng.src_lsn("postgres")
+        # no subscription on the target reads it
+        assert psql(55433, "select count(*) from pg_subscription"
+                    ).stdout.strip() == "0"
+        assert eng.fence_wait("postgres", lsn, timeout=4) is False
+        psql(55432, f"select pg_replication_slot_advance('{seed}',"
+                    f" '{lsn}')")
+        assert eng.fence_wait("postgres", lsn, timeout=4) is True
+    finally:
+        _drop_slots(seed)
+        psql(55432, "drop table if exists public.seeded")
