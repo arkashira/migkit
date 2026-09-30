@@ -5,6 +5,13 @@ import time
 
 import pytest
 
+# what the decision engine learns across hops (`costmodel.Knowledge`) is
+# kept apart for a test run, never added to this machine's own
+if not os.environ.get("MIGKIT_KNOWLEDGE"):
+    import tempfile
+    os.environ["MIGKIT_KNOWLEDGE"] = os.path.join(
+        tempfile.mkdtemp(prefix="migkit-knowledge-"), "knowledge.json")
+
 
 def _free(host, port):
     with socket.socket() as s:

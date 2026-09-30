@@ -418,6 +418,101 @@ class Loss:
         return None
 
 
+#: the resource model's stage (`model.Stage.name`) each of the pace's
+#: limits is for: what a way that loads it (`decide.Rung.loads`) is
+#: slowed by when that limit is cut (`decide.Trials`)
+STAGES = {"the source's reads": "source", "the target's writes": "target",
+          "the link to the source": "link:src",
+          "the link to the target": "link:dst",
+          "this machine's memory": "memory",
+          "this machine's connections": "nic",
+          "the hop's share of the source": "source",
+          "the source's replica lag": "source"}
+
+
+def stage_of(name):
+    """The stage a limit of the pace is for, by the limit's name."""
+    return STAGES.get(name, name)
+
+
+class Held:
+    """One of the hop's limits as a target the pace holds (backlog
+    P0-DEPTH, item 5), not only a strain it backs off from: `reading`
+    (called with this) answers the value now or None; over `target` it
+    asks the number down in proportion - target over reading, never
+    below half at once - and under it asks nothing, so its limit gives
+    one back a window (`Limit`): the number settles where the reading
+    sits at the target. `pace` is set by the `Pace` it is a signal of.
+
+    Simulated (a source whose reads carry 100 MB/s, 10 MB/s a worker, the
+    hop allowing 30%, 350 windows after the first 50, 2026-10-01): held
+    as a target the pace ran at the target's 3 workers 75% of the windows,
+    over it 13% and under it 12%; the same limit as a strain backed off
+    from, at 3 for 21%, under it for 59% and over it for 20%."""
+
+    #: a reading within this share over the target is at it
+    AT = 0.02
+
+    def __init__(self, what, reading, target, said=str):
+        self.what, self.reading, self.target = what, reading, float(target)
+        self.said = said
+        self.pace = None
+        self.last = None
+
+    def __call__(self):
+        try:
+            now = self.reading(self)
+        except Exception:  # noqa: BLE001 - a probe never stops a move
+            now = None
+        self.last = now
+        if now is None or now <= self.target * (1 + self.AT):
+            return None
+        return Strain(f"{self.said(now)}, past the {self.said(self.target)}"
+                      " the hop allows",
+                      factor=max(0.5, min(0.95, self.target / now)))
+
+    def room(self, current):
+        """Whether one more at once than `current` stays within the
+        target, the reading growing with the number running."""
+        if self.last is None or not current:
+            return True
+        return self.last * (current + 1) / current <= self.target * (
+            1 + self.AT)
+
+
+def held(hop, eng, db, model=None, health=None):
+    """{name: `Held`} for the limits the hop sets that the pace can hold:
+    its share of the source's reads (`limits: source_load`, read as the
+    move's own rate over what the source's reads carry, `model`), and the
+    lag the source's replica may reach (`limits: replica_lag`)."""
+    lim = ((getattr(hop, "options", None) or {}).get("limits") or {})
+    out = {}
+    share = lim.get("source_load")
+    src = (getattr(model, "stages", None) or {}).get("source")
+    per_row = getattr(model, "per_row", None)
+    if share is not None and src is not None and src.total and per_row:
+        from .jointplan import share_limit
+        cap = share_limit(share, "source_load")
+
+        def taken(h, total=src.total, per_row=per_row):
+            # the last window's rows, not the moving average: the average
+            # lags a cut and was measured to overshoot it
+            rate = getattr(h.pace, "rate", None)
+            return rate * per_row / total if rate else None
+        out["the hop's share of the source"] = Held(
+            "the move's share of the source's reads", taken, cap,
+            lambda x: f"{x:.0%} of the source's reads")
+    lag = lim.get("replica_lag")
+    if lag is not None and health is not None:
+        def behind(h):
+            got = health(eng, "src", db)
+            return getattr(got, "lag_seconds", None)
+        out["the source's replica lag"] = Held(
+            "the source's replica lag", behind, float(lag),
+            lambda x: f"{x:.0f}s of replica lag")
+    return out
+
+
 def resources(eng, db, hop=None, health=None, model=None):
     """{name: signal} for `Pace`: the source's reads, the target's writes
     and each link, one signal each - so a source that lags cuts the
@@ -445,6 +540,9 @@ def resources(eng, db, hop=None, health=None, model=None):
             out[f"the link to the {side}"] = RoundTrip(*at)
         if len(out) > 2:
             out["this machine's connections"] = Loss()
+        # the hop's limits as targets held, beside the strains backed off
+        # from
+        out.update(held(hop, eng, db, model, health))
     return out
 
 
@@ -520,15 +618,20 @@ class Limit:
             got = None
         if not got:
             self.said = ""
-            if self.value < self.most:
+            # a target held (`Held`) gives one back only where one more
+            # would stay within it
+            room = getattr(self.signal, "room", None)
+            if self.value < self.most and (room is None or room(current)):
                 self.value += 1
             return ""
         s = got if isinstance(got, Strain) else Strain(str(got))
         if s.at_most is not None:
             to = int(s.at_most)
         else:
+            # a hair over, so 4 x 0.3 / 0.4 is 3 and not the 2 its
+            # floating point would floor to
             to = math.floor(current * (s.factor if s.factor is not None
-                                       else cut))
+                                       else cut) + 1e-9)
         self.value = max(1, min(self.value, to, self.most))
         self.said = f"{self.name}: {s.why}" if self.name else s.why
         self.cuts += 1
@@ -622,6 +725,10 @@ class Pace:
             signals.setdefault(memory.name, memory.signal)
         self.limits = {n: Limit(n, fn, self.most)
                        for n, fn in signals.items()}
+        for fn in signals.values():
+            if isinstance(fn, Held):
+                # a target reads the rate the pace keeps
+                fn.pace = self
         self.memory = memory
         self._clock = clock
         self._lock = threading.Lock()

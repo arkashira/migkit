@@ -522,6 +522,8 @@ def doctor(install):
                 why = (str(e).splitlines() or [type(e).__name__])[-1]
                 console.print(f"{name}: what the servers allow could not"
                               f" be asked - {why[:160]}")
+        for line in _decisions_said(hop):
+            console.print(f"{name}: {line}")
         # read from what the freeze recorded, so it is said even when the
         # target cannot be reached right now
         from . import cutover, freeze, sourcechange
@@ -570,6 +572,24 @@ def _doctor_config():
     for p in hopkeys.check(data):
         console.print(f"[yellow]{p}[/yellow]")
     return hops, (data.get("hops") or {}) if isinstance(data, dict) else {}
+
+
+def _decisions_said(hop):
+    """What each database's last plan stood on (`factbook.account`), from
+    the decision record: how many facts were known, measured, predicted,
+    and which of the plan's factors nobody knew - the ones that would
+    change it once known."""
+    from . import decide, factbook
+    out, seen = [], set()
+    for e in reversed(decide.recorded(hop)):
+        facts = (e.get("detail") or {}).get("facts")
+        work = e.get("work") or ""
+        if not isinstance(facts, dict) or work in seen:
+            continue
+        seen.add(work)
+        out.append(f"{work}: the last plan ({e.get('at', '')}) stood on"
+                   f" {factbook.said(facts)}")
+    return out[::-1]
 
 
 def _doctor_setup(name, hop, eng):
@@ -1794,8 +1814,41 @@ def _resource_plan(hop, eng, d, via, facts=None, tables=None, go=False):
     short = m.too_wide(sizing._memory())
     if short:
         out.append(f"  memory: NOT ENOUGH - {short}")
-    return out + planner.phase_lines(_planned(hop, m, facts, tables, n,
-                                              via, d, go))
+    phases = _planned(hop, m, facts, tables, n, via, d, go)
+    return (out + planner.phase_lines(phases)
+            + _joint_lines(hop, eng, m, facts, tables, d, phases))
+
+
+def _joint_lines(hop, eng, m, facts, tables, d, phases=()):
+    """The move's tables planned as one schedule (`jointplan`), in what
+    it means for the operator: the end with its spread, what sets it,
+    whether it keeps to the hop's limits. The decision itself - each
+    table's way, the order, the workers, the facts it stood on and the
+    ones it did not know - goes to the run's decision record, and to the
+    console only where MIGKIT_EXPLAIN=1 (the owner, 2026-09-30: the
+    choices stay inside, the outcomes are said)."""
+    from . import decide, hopkeys, jointplan, sizing
+    out = [f"  {line}" for line in hopkeys.explain_limits(hop)]
+    try:
+        most = sizing.estimate(hop, eng, d, _units(eng, d), model=m).most
+        jp = jointplan.for_move(hop, m, facts, tables, most, d)
+    except SystemExit:
+        # a limit written wrong stops the command, said
+        raise
+    except Exception:  # noqa: BLE001 - the plan says what it knows
+        jp = None
+    if jp is not None:
+        out += [f"  plan: {line}" for line in jointplan.lines(jp)]
+        decide.record(hop, {
+            "work": f"the move of {d}", "plan": jp.as_evidence(),
+            "facts": jointplan.account(hop, m, facts, jp)},
+            lambda line: out.append(f"  {line}"),
+            way="the tables planned as one",
+            reason="; ".join(jointplan.lines(jp)))
+    said = jointplan.outage_line(hop, phases)
+    if said:
+        out.append(f"  limits: {said}")
+    return out
 
 
 def _planned(hop, m, facts, tables, n, via, d, go=False):
@@ -1905,9 +1958,47 @@ def _side_health(eng, side, d):
         return None
 
 
+def _joint_for_move(hop, eng, m, d, names, most, log):
+    """The joint plan the move goes by, kept beside its reports and in the
+    decision record; None where the model measured too little to plan.
+    Its end and what sets it are said; its choices only where
+    MIGKIT_EXPLAIN=1."""
+    from . import decide, jointplan
+    if not getattr(m, "measured", False):
+        return None
+    try:
+        facts = eng.table_facts("src", d)
+        jp = jointplan.for_move(hop, m, facts, set(names), most, d)
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001 - the move goes on as sized
+        return None
+    if jp is None:
+        return None
+    for line in jointplan.lines(jp):
+        log(f"plan: {line}")
+    decide.record(hop, {
+        "work": f"the move of {d}", "plan": jp.as_evidence(),
+        "facts": jointplan.account(hop, m, facts, jp)}, log,
+        way="the tables planned as one",
+        reason="; ".join(jointplan.lines(jp)))
+    return jp
+
+
 def _largest_first(eng, d, tables):
-    """The tables in the order that finishes soonest side by side: the
-    largest started first, so one is not left running alone at the end."""
+    """The tables in the order that finishes soonest side by side: as the
+    joint plan kept for this move starts them (`jointplan.order_of`),
+    else the largest started first, so one is not left running alone at
+    the end."""
+    from . import jointplan
+    hop = getattr(eng, "hop", None)
+    names = [f"{sch}.{t}" if sch else t for sch, t in tables]
+    planned = (jointplan.order_of(hop, d, names) if hop is not None
+               else None)
+    if planned is not None:
+        at = {n: i for i, n in enumerate(planned)}
+        return sorted(tables, key=lambda x: at.get(
+            f"{x[0]}.{x[1]}" if x[0] else x[1], len(at)))
     try:
         facts = eng.table_facts("src", d)
     except Exception:  # noqa: BLE001 - the order they came in
@@ -1952,11 +2043,18 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     most = plan.most
     if not getattr(target, "WRITES_IN_PARALLEL", True):
         most = 1
+    # the tables planned as one (`jointplan`): the order they start in
+    # (`_largest_first` reads it) and the fewest workers that end as soon
+    # as the most allowed would - where the model measured enough to plan
+    start = plan.start
+    joint = _joint_for_move(hop, eng, m, d, names, most, log)
+    if joint is not None and joint.workers:
+        start = joint.workers
     total = _source_rows(eng, d)
     where = hop.report_dir(d)
     ways = getattr(eng, "measured_ways", None) or (lambda: [])
     pace = sizing.Pace(
-        min(plan.start, most), most,
+        max(1, min(start, most)), most,
         resources=sizing.resources(eng, d, hop, _side_health, m),
         memory=sizing.Memory(m.worker_memory),
         report=lambda p: planner.progress(where, p, total, m, ways=ways()))
@@ -1971,11 +2069,17 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
         with (window(d, None, log) if window
               else contextlib.nullcontext()):
             # a finished table's indexes are built while the next copies
+            # as many tables at once as the joint plan found ends soonest
+            # (fewer lets the first tables' index builds run beside the
+            # rest's copy), their ranges sharing every worker
+            at_once = min(most, len(tables))
+            if joint is not None and joint.tables:
+                at_once = max(1, min(at_once, joint.tables))
             with movers.builds_beside(log):
-                _copy_tables_in(hop, eng, d, tables, chunk, ck,
-                                min(most, len(tables)))
+                _copy_tables_in(hop, eng, d, tables, chunk, ck, at_once)
         # what the copy measured of itself, which the next plan stands on
         m.observe(ways(), pace.total, pace.took(), pace.limit)
+        resource_model.tune_probe_floor(hop, m, pace.total, pace.took())
         try:
             m.save(where)
         except OSError:
@@ -2024,7 +2128,15 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
     def log(m):
         console.print(f"  {m}")
     if workers < 2:
-        from . import failpoint
+        from . import failpoint, jointplan
+        # one table at a time: in the joint plan's order where it planned
+        # this move's tables, as they came otherwise
+        names = _catalogue_names(eng, d, tables)
+        planned = jointplan.order_of(hop, d, names)
+        if planned is not None:
+            at = {n: i for i, n in enumerate(planned)}
+            tables = sorted(tables, key=lambda x: at[
+                f"{x[0]}.{x[1]}" if x[0] else x[1]])
         for sch, t in tables:
             _copy_table(eng, d, sch, t, chunk, ck, log)
             failpoint.hit("table.done")

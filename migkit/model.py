@@ -161,6 +161,10 @@ class Model:
         self.overlapped, self.path = overlapped, path
         #: what a move measured of itself (`observe`)
         self.observed = dict(observed or {})
+        #: seconds the probes took, where they ran: what the probe floor
+        #: is tuned by once the move has measured its own rate
+        #: (`tuning`, `probe_floor`)
+        self.probe_seconds = None
 
     # --- what follows -----------------------------------------------------
 
@@ -631,7 +635,7 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
                      f"the source's own count over its last"
                      f" {arrived[1] / 3600:,.1f}h")
     if probe is None:
-        probe = disk >= PROBE_FROM
+        probe = disk >= probe_floor(hop)
     if probe and carried:
         # both sides at once: a side that does not answer costs `REACH`
         rtts, _ = _side_by_side(
@@ -643,6 +647,7 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
         _probe(m, hop, eng, db, facts, carried, write, log)
         later = _safe(lambda: eng.changes_made("src", db))
         took = time.monotonic() - began
+        m.probe_seconds = took
         if arrived and later and took >= ARRIVAL_LEAST \
                 and later[0] >= arrived[0]:
             recent = (later[0] - arrived[0]) / took
@@ -658,6 +663,30 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
     else:
         _earlier(m, hop, db)
     return m
+
+
+def probe_floor(hop=None):
+    """The least a database carries for its resources to be probed:
+    `MIGKIT_PROBE_FROM` where the operator sets it, else `PROBE_FROM` as
+    this machine's and this hop's moves have tuned it (`tuning`: the bytes
+    a move carried in the time its probes took)."""
+    if os.environ.get("MIGKIT_PROBE_FROM"):
+        return PROBE_FROM
+    from . import tuning
+    try:
+        return tuning.value("model.PROBE_FROM", hop)
+    except Exception:  # noqa: BLE001 - the prior, then
+        return PROBE_FROM
+
+
+def tune_probe_floor(hop, m, rows, seconds):
+    """What a move that was probed says the probe floor should have been:
+    the bytes it carried in the time its probes took."""
+    if not m.probe_seconds or not rows or not seconds or not m.per_row:
+        return
+    from . import tuning
+    tuning.observe("model.PROBE_FROM",
+                   m.probe_seconds * rows / seconds * m.per_row, hop)
 
 
 #: seconds a server's port has to answer before its round trip is given up

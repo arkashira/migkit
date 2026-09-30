@@ -151,6 +151,17 @@ HOP_OPTIONS = {
                       "bool"),
     "key": Key("the key column(s) of a listed table", "str|list",
                ("generic",)),
+    "limits": Key("what the move may take at most, kept to as hard"
+                  " limits by its plan (`LIMITS`): source_load (the share"
+                  " of the source's reads, 0.3 or 30%), money (in the"
+                  " currency transfer_price_per_gb is in), bytes_billed"
+                  " (a warehouse's), outage (the cutover's write outage,"
+                  " seconds), replica_lag (seconds the source's replica"
+                  " may fall behind), target_memory and"
+                  " target_connections",
+                  "dict", subs=("source_load", "money", "bytes_billed",
+                                "outage", "replica_lag", "target_memory",
+                                "target_connections")),
     "liquibase": Key("the second schema reading, on or off", "bool",
                      ("postgres",), knob="way", named_for_a_program=True),
     "lob_scan_seconds": Key("the budget of the large-value scan", "int",
@@ -736,6 +747,47 @@ CUTOVER = {
     "off source": "nothing written at cutover: the operator stops its"
                   " writes and its jobs",
 }
+
+
+#: what each of a hop's limits holds the move to (`limits:` and
+#: `deadline:`), as the plan says it: every one is a hard limit - the
+#: plan keeps to it where any way can, and says what binds where none can
+#: - and a hop that sets none is planned for the soonest end
+LIMITS = {
+    "deadline": "the whole move - copy, index builds and check - planned"
+                " to end within it; where no plan can, what binds is said"
+                " and what would help",
+    "source_load": "the share of the source's reads the move may take:"
+                   " the source is planned as if it read only that fast,"
+                   " the ways that read it less are preferred where that"
+                   " ends sooner, and while it runs the pace holds the"
+                   " move's reads at that share",
+    "replica_lag": "the seconds the source's replica may fall behind"
+                   " while it is read: the pace holds the move to it",
+    "money": "what the move may spend on what it carries (at the hop's"
+             " transfer_price_per_gb) and on what a warehouse bills: the"
+             " ways that bill less are taken first where the budget would"
+             " be passed",
+    "bytes_billed": "the bytes a warehouse may bill the move for: read"
+                    " as money at its price",
+    "outage": "the cutover's write outage, seconds: the plan says whether"
+              " its predicted outage keeps within it (with cutover: on,"
+              " the cutover's own budget is this limit)",
+    "target_memory": "the target's memory the move may take: as many"
+                     " writers at once as it holds",
+    "target_connections": "the target's connections the move may take:"
+                          " as many writers at once as they carry",
+}
+
+
+def explain_limits(hop):
+    """What the hop's limits hold its move to, a line each - nothing
+    where it sets none."""
+    opts = getattr(hop, "options", None) or {}
+    said = [("deadline", opts.get("deadline"))] + list(
+        (opts.get("limits") or {}).items())
+    return [f"limit {k} {v}: {LIMITS[k]}" for k, v in said
+            if k in LIMITS and v not in (None, "")]
 
 
 def cutover_on(hop):
