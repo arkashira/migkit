@@ -350,6 +350,7 @@ def test_capabilities_and_install_selection(monkeypatch):
     # every program present -> every capability ready, nothing left to install
     monkeypatch.setattr(tools, "which", lambda n: "/bin/" + n)
     monkeypatch.setattr(tools, "second_reader_present", lambda: True)
+    monkeypatch.setattr(tools, "ase_driver_present", lambda: True)
     monkeypatch.setattr(tools, "install_second_reader",
                         lambda log=None: pytest.fail("nothing to install"))
     assert {st for _, _, st, _ in tools.capabilities()} == {"ready"}

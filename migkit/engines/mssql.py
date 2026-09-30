@@ -1,5 +1,6 @@
 import time
 
+from .. import decide
 from ..util import run, which
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows
@@ -865,6 +866,32 @@ class MSSQLEngine(DbapiRows, Engine):
                       " order by ic.key_ordinal",
             (self._qualified(side, db, table),))]
 
+    def table_facts(self, side, db):
+        """{table: rows, bytes, index bytes, key} from the catalogue in one
+        query: the rows the heap or clustered index holds and the pages in
+        use, which the plan estimates from and a copy records its rate
+        by."""
+        pages = ("(select sum(a.used_pages) * 8192 from sys.partitions p"
+                 " join sys.allocation_units a on a.container_id ="
+                 " p.partition_id where p.object_id = t.object_id and"
+                 " p.index_id {})")
+        out = {}
+        for name, rows, data, index, key in self._rows(
+                side, db, "select s.name + '.' + t.name, (select"
+                          " sum(p.rows) from sys.partitions p where"
+                          " p.object_id = t.object_id and p.index_id in"
+                          f" (0, 1)), {pages.format('in (0, 1)')},"
+                          f" {pages.format('> 1')}, case when exists (select"
+                          " 1 from sys.indexes i where i.object_id ="
+                          " t.object_id and i.is_primary_key = 1) then 1"
+                          " else 0 end from sys.tables t join sys.schemas s"
+                          " on s.schema_id = t.schema_id where"
+                          " t.is_ms_shipped = 0"):
+            out[name] = {"rows": None if rows is None else int(rows),
+                         "bytes": None if data is None else int(data),
+                         "index_bytes": int(index or 0), "key": bool(key)}
+        return out
+
     def _before_insert(self, cur, side, db, table):
         """Explicit values go into an identity column only with identity
         insert on, for the table and the session."""
@@ -1138,6 +1165,398 @@ class MSSQLEngine(DbapiRows, Engine):
         return (f"create function {self._bracket(name)}({args}) returns"
                 f" {returns} as begin return {tree.sql('tsql')} end")
 
+    # ---- rows in through SQL Server's own bulk load ------------------------
+    #
+    # The TDS bulk load, through the driver Microsoft publishes for Python:
+    # rows - or Arrow batches, where a SQL Server source is read without its
+    # values becoming Python objects - streamed into the load's packets by
+    # the driver's compiled core. The load commits on a connection of its
+    # own, which no transaction of migkit's can undo, so it never loads the
+    # table itself: it loads a stage (`_Stage`), and the stage is promoted
+    # into the table in one transaction of migkit's - the rows with the
+    # batch's keys deleted, the stage inserted, the stage emptied, committed
+    # together. A batch lands whole or not at all, and run again it finds
+    # its keys and replaces them. The promote is an insert like any other:
+    # the table's constraints are checked and stay trusted, its triggers
+    # fire, which a load straight into the table would skip.
+
+    #: what a batch costs each way into SQL Server: (seconds each time,
+    #: seconds a row), which `write_way` starts from until each way is
+    #: timed here. Measured on SQL Edge beside migkit (a 2-core VM),
+    #: seven columns a row (bigint key, nvarchar, decimal, datetime2(7),
+    #: varchar, varbinary, uniqueidentifier): 500,000 rows in batches of
+    #: 50,000 took 269.6s by statements (1,855 rows/s) and 7.55s through
+    #: the bulk load, staged and promoted (66,196 rows/s, 36 times as
+    #: fast); read from SQL Server as Arrow and loaded as read
+    #: (`native_bulk`), 6.97s (71,696 rows/s). A batch of 1, 100 and 1,000
+    #: rows took 0.019s, 0.069s and 0.562s by statements and 0.051s,
+    #: 0.048s and 0.067s through the load (a connection of its own and a
+    #: stage made each time): statements are cheaper up to about 57 rows.
+    #: The full 2022 server, x86 under Rosetta on 4 cores: 305.3s by
+    #: statements (1,638 rows/s), 5.83s through the load (85,750 rows/s),
+    #: 3.58s read as Arrow and loaded as read (139,613 rows/s). Measured
+    #: before a seven-digit time crossed the load as text (`_as_text`),
+    #: which that table's datetime2(7) now does; `bench/sql_server_write_
+    #: ways.py` produces them again.
+    WRITE_COSTS = {"statements": (0.018, 0.00054),
+                   "bulk load": (0.048, 0.000015)}
+
+    #: the declared types the bulk load carries as the server holds them,
+    #: from the values the table copier reads: each column of a table of
+    #: every type loaded into a stage and held to the source by its bytes
+    #: (`cast(... as varbinary(max))`) and by the server's rendering of the
+    #: row (`FOR JSON`), on SQL Edge. Refused: `datetimeoffset` (the load
+    #: stops, `returned invalid data for column`), and a char column of a
+    #: UTF-8 collation (`String length (30 characters) exceeds schema size
+    #: (20 characters)` for 4 characters in a varchar(20)). `datetime2(7)`
+    #: and `time(7)` lost their seventh digit to the load's own conversion
+    #: of a value, so they cross as the server's text of it (`_as_text`).
+    #: A column of any other type is written by statements.
+    BULK_TYPES = frozenset({
+        "bigint", "int", "smallint", "tinyint", "bit", "decimal", "numeric",
+        "money", "smallmoney", "float", "real", "date", "datetime",
+        "smalldatetime", "datetime2", "time", "char", "varchar", "text",
+        "nchar", "nvarchar", "ntext", "xml", "binary", "varbinary", "image",
+        "uniqueidentifier"})
+    #: read from a SQL Server source as Arrow and loaded as it was read
+    #: (`native_bulk`): the same types, measured the same way, but for two
+    #: whose Arrow form is not what the server holds - `datetime2(7)` comes
+    #: back as microseconds, the seventh digit gone, and `datetimeoffset` at
+    #: UTC with its offset gone. Those are read as the text the server
+    #: writes them in (style 121, its ODBC canonical form) into a text
+    #: column of the stage, and turned back by the server in the promote -
+    #: measured exact to the byte: {declared type: (the read, the stage's
+    #: type, the turn back)}. A table with a column of any other type is
+    #: copied table by table.
+    ARROW_TYPES = BULK_TYPES
+    CARRIED = {
+        "datetime2(7)": ("convert(varchar(27), {}, 121)", "varchar(27)",
+                         "convert(datetime2(7), {}, 121)"),
+        "datetimeoffset": ("convert(varchar(34), {}, 121)", "varchar(34)",
+                           "convert(datetimeoffset(7), {}, 121)"),
+    }
+
+    #: the ways a batch goes in, chosen per table and size of batch by
+    #: what each cost (`Engine._cheaper`), starting from `WRITE_COSTS`
+    WRITE_WAYS = (
+        decide.Rung("bulk load", "SQL Server's bulk load, staged and"
+                                 " promoted",
+                    # a stage in tempdb while the batch is loaded
+                    footprint=1),
+        decide.Rung("statements", "statements"),
+    )
+    #: the ways a table goes from one SQL Server to another in a bulk move
+    #: (`native_bulk`), in the order measured fastest
+    NATIVE_RUNGS = (
+        decide.Rung(
+            "arrow", "read as Arrow and loaded by SQL Server's bulk load",
+            gives=frozenset({"carried", "keyless"}),
+            needs=(decide.Need("its driver", lambda f: f["driver"] is None,
+                               lambda f: f["driver"]),
+                   decide.Need("the table on the target",
+                               lambda f: f["there"],
+                               "the target has no such table yet, and the"
+                               " copier makes it"),
+                   decide.Need("types it is proved on",
+                               lambda f: f["unproved"] is None,
+                               lambda f: f["unproved"])),
+            footprint=1),
+        decide.Rung("copier", "table by table",
+                    gives=frozenset({"carried", "keyless"})),
+    )
+
+    @staticmethod
+    def _bulk_unusable():
+        """Why the bulk load's driver cannot be used on this machine, or
+        None. It is a dependency, and still a compiled one: a wheel built
+        for a newer C library than the machine's installs and then fails
+        to load."""
+        try:
+            import mssql_py_core  # noqa: F401
+            import mssql_python  # noqa: F401
+        except ImportError:
+            return "the bulk load's driver does not load on this machine"
+        return None
+
+    def _bulk_connect(self, side, db):
+        """A connection through the bulk load's driver, encrypted as the
+        endpoint's `encrypt` says (`Endpoint.mssql_tls`: `off`, `request`,
+        and `require`, which is also what it is where nothing is said -
+        this driver encrypts unless told not to). The server's certificate
+        is trusted as it is, as the checks' client trusts it (`-C`) and as
+        `assess` reports for every SQL Server leg: the driver refuses one
+        the server made for itself."""
+        import mssql_python
+        ep = self.hop.source if side == "src" else self.hop.target
+        encrypt = {"off": "no", "request": "optional"}.get(
+            ep.mssql_tls().get("encryption"), "yes")
+
+        def braced(v):
+            return "{" + str(v).replace("}", "}}") + "}"
+        return mssql_python.connect(
+            f"Server={ep.host},{ep.port or 1433};"
+            f"Database={braced(self._d(side, db))};UID={braced(ep.user)};"
+            f"PWD={braced(ep.password)};Encrypt={encrypt};"
+            "TrustServerCertificate=yes", autocommit=False, timeout=15)
+
+    def _shape(self, side, db, table):
+        """{"declared": {column: declared type}, "key": [column],
+        "identity": column or None, "unwritable": {column}, "utf8":
+        {column}} - a computed column or a row version takes no value; a
+        char column of a UTF-8 collation is one the bulk load refuses.
+        Asked once a table."""
+        shapes = self.__dict__.setdefault("_shapes", {})
+        at = (side, db, str(table))
+        if at not in shapes:
+            quoted = self._qualified(side, db, table)
+            flags = self._rows(
+                side, db, "select c.name, c.is_identity, c.is_computed,"
+                          " type_name(c.system_type_id), c.collation_name"
+                          " from sys.columns c where c.object_id ="
+                          f" object_id({MARK})", (quoted,))
+            declared = dict(self.neutral_columns(side, db, table))
+            if not declared:
+                # not there yet: asked again once the copier has made it
+                return {"declared": {}, "key": [], "identity": None,
+                        "unwritable": set(), "utf8": set()}
+            shapes[at] = {
+                "declared": declared,
+                "key": self.neutral_key(side, db, table),
+                "identity": next((f[0] for f in flags if f[1]), None),
+                "unwritable": {f[0] for f in flags
+                               if f[2] or f[3] == "timestamp"},
+                "utf8": {f[0] for f in flags
+                         if "_utf8" in str(f[4] or "").lower()}}
+        return shapes[at]
+
+    def _unproved(self, shape, names, arrow=False):
+        """Why the bulk load is not used for these columns of a table of
+        `shape` - a type it is not proved on (`BULK_TYPES`, or read as
+        Arrow `ARROW_TYPES` and `CARRIED`), or a UTF-8 collation - or
+        None."""
+        def proved(n):
+            declared = str(shape["declared"].get(n, "")).lower()
+            if n in shape["utf8"]:
+                return False
+            if arrow and declared in self.CARRIED:
+                return True
+            return self._base(declared) in (self.ARROW_TYPES if arrow
+                                             else self.BULK_TYPES)
+        odd = sorted(n for n in names if not proved(n))
+        if not odd:
+            return None
+        return (f"{', '.join(odd[:4])} " + ("is" if len(odd) == 1 else "are")
+                + " of a type the bulk load is not proved on")
+
+    @staticmethod
+    def _base(declared):
+        return str(declared or "").split("(")[0].strip().lower()
+
+    def write_way(self, side, db, table, columns, rows):
+        """("statements" | "bulk load", why) for a batch of `rows` rows
+        into `table`: the bulk load only where its driver loads here, it
+        has not refused a value of this table before and every column
+        written is of a type it is proved on - and then whichever way did
+        a row in less time for batches of this size (`Engine._cheaper`),
+        from what each was measured to cost (`WRITE_COSTS`) until each is
+        timed here."""
+        why = (self._bulk_unusable()
+               or self.__dict__.get("_refused", {}).get((side, db,
+                                                         str(table)))
+               or self._unproved(self._shape(side, db, table),
+                                 [n for n, _ in columns]))
+        if why:
+            return "statements", why
+        key = self._work_key("rows", str(table), rows)
+        way = self._cheaper(key, self.WRITE_WAYS, {
+            w: (fixed + rows * row) / max(rows, 1)
+            for w, (fixed, row) in self.WRITE_COSTS.items()})
+        return way, (f"the way a row cost less for batches of about"
+                     f" {key[2]:,} rows")
+
+    def neutral_write(self, side, db, table, columns, rows):
+        """Rows in by statements or through the bulk load, whichever
+        `write_way` finds cheaper for this batch. Either replaces the rows
+        with the same key in one transaction, so a batch written again
+        converges.
+
+        A value the bulk load will not take into its stage - one another
+        engine hands over in a form it does not convert - has touched
+        nothing but the stage: the batch goes by statements, and so does
+        the rest of the table. What the promote refuses, the table itself
+        refuses, and is said as it would be by statements."""
+        if not rows:
+            return 0
+        self._target_only(side, "write rows")
+        way, _ = self.write_way(side, db, table, columns, len(rows))
+        began = time.monotonic()
+        if way == "bulk load":
+            from .. import canon
+            names = [n for n, _ in columns]
+            texts = self._as_text(side, db, table, names)
+            try:
+                staged = canon.sql_rows([c for _, c in columns], rows)
+                if texts:
+                    at = [(i, texts[n][0]) for i, n in enumerate(names)
+                          if n in texts]
+                    staged = [list(r) for r in staged]
+                    for r in staged:
+                        for i, text in at:
+                            r[i] = text(r[i])
+                with _Stage(self, side, db, table, names,
+                            {n: t[1:] for n, t in texts.items()}) as stage:
+                    stage.load(staged)
+                    stage.promote()
+            except _NotLoaded as e:
+                self.__dict__.setdefault("_refused", {})[
+                    (side, db, str(table))] = (
+                    f"the bulk load refused a value of it: {e}")
+                way, began = "statements", time.monotonic()
+        if way == "statements":
+            super().neutral_write(side, db, table, columns, rows)
+        key = self._work_key("rows", str(table), len(rows))
+        if key in self.__dict__.get("_way_rungs", {}):
+            # timed where the way was chosen by what it cost
+            self._took(key, way, time.monotonic() - began, len(rows))
+        return len(rows)
+
+    def _as_text(self, side, db, table, names):
+        """{column: (value to text, the stage's type, the turn back)} for
+        the columns of more than six digits after the second: a value
+        handed over keeps its seventh digit (`nanotime`), which the bulk
+        load's own conversion of a datetime would drop - so it crosses as
+        the server's text of it and the server turns it back in the
+        promote, as `CARRIED` does for a read."""
+        declared = self._shape(side, db, table)["declared"]
+        out = {}
+        for n in names:
+            d = str(declared.get(n, "")).lower()
+            if not self._nanos_text(self._q(n), d):
+                continue
+            if self._base(d) == "datetime2":
+                out[n] = (_time_text, "varchar(27)",
+                          f"convert({d}, {{}}, 121)")
+            else:
+                out[n] = (_time_text, "varchar(16)", f"convert({d}, {{}})")
+        return out
+
+    def neutral_rewrite(self, side, db, table, columns, rows):
+        """Written again by statements: a batch that read back different
+        is not given to the bulk load a second time."""
+        return super().neutral_write(side, db, table, columns, rows)
+
+    #: what one staged batch of a table copied by `native_bulk` holds at
+    #: most - rows, and bytes as Arrow holds them: one promote, so one
+    #: transaction on the target, carries that much
+    NATIVE_ROWS = 500_000
+    NATIVE_BYTES = 64 * 2 ** 20
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table read from the source as Arrow batches and loaded
+        through the bulk load, a batch staged and promoted at a time - no
+        value becomes a Python object on the way. A table the target lacks,
+        or with a column of a type the Arrow read is not proved on, is
+        copied table by table instead, where its batches still go by
+        whichever way costs less. A table a row filter keeps for the table
+        copier (`shape_only`) is made by the copier, the way it makes the
+        rest here. Measured: 500,000 rows in 6.97s on SQL Edge and 3.58s
+        on the 2022 server, against 269.6s and 305.3s by statements
+        (`WRITE_COSTS`)."""
+        steps = [f"{t}: read in batches and loaded by SQL Server's bulk load,"
+                 " each batch staged and promoted in one transaction"
+                 for t in tables]
+        if not go or not tables:
+            return steps
+        pair = None
+        for t in tables:
+            got = decide.climb(t, self.NATIVE_RUNGS, self._native_facts(db, t))
+            why = got.reason
+            if got.path == "arrow":
+                try:
+                    self._native_table(db, t, log)
+                    continue
+                except _NotLoaded as e:
+                    why = f"the bulk load refused a value of it: {e}"
+            if log:
+                log(f"{t}: copied table by table - {why}")
+            if pair is None:
+                pair = self._as_pair()
+            sch, _, tbl = str(t).rpartition(".")
+            pair.move_table(db, sch, tbl, pair.READ_ROWS, _Unkept(), log
+                            or (lambda m: None))
+        return steps
+
+    def _native_facts(self, db, table):
+        """What `NATIVE_RUNGS` read for one table, each asked only when a
+        need gets to it."""
+        def unproved():
+            source, target = (self._shape("src", db, table),
+                              self._shape("dst", db, table))
+            names = [n for n in source["declared"]
+                     if n in target["declared"]
+                     and n not in target["unwritable"]]
+            return (self._unproved(source, names, arrow=True)
+                    or self._unproved(target, names, arrow=True))
+        return decide.Facts(
+            driver=self._bulk_unusable,
+            there=lambda: str(table).lower() in {
+                t.lower() for t in self.neutral_tables("dst", db)},
+            unproved=unproved)
+
+    def _native_table(self, db, table, log):
+        """One table, emptied on the target and filled from the source's
+        read as it arrives: Arrow batches of up to `NATIVE_ROWS` rows or
+        `NATIVE_BYTES`, each staged and promoted. In the source's key
+        order, which is the target's too where both keep the key the same
+        way."""
+        import pyarrow as pa
+        target = self._shape("dst", db, table)
+        source = self._shape("src", db, table)
+        names = [n for n in source["declared"]
+                 if n in target["declared"] and n not in target["unwritable"]]
+        carried = {n: self.CARRIED[str(source["declared"][n]).lower()]
+                   for n in names
+                   if str(source["declared"][n]).lower() in self.CARRIED}
+        key = source["key"]
+        order = (" order by " + ", ".join(self._q(k) for k in key)
+                 if key and all(k in names for k in key) else "")
+        began, moved = time.monotonic(), 0
+        gone = self.neutral_empty("dst", db, table)
+        if gone and log:
+            log(f"{table}: emptied {gone:,} rows the target held before the"
+                " copy")
+        src = self._bulk_connect("src", db)
+        try:
+            cur = src.cursor()
+            cur.execute("select " + ", ".join(
+                f"{carried[n][0].format(self._q(n))} as {self._q(n)}"
+                if n in carried else self._q(n) for n in names)
+                + f" from {self._qualified('src', db, table)}{order}")
+            with _Stage(self, "dst", db, table, names,
+                        {n: c[1:] for n, c in carried.items()}) as stage:
+                held, rows, size = [], 0, 0
+                for batch in cur.arrow_reader(batch_size=10_000):
+                    held.append(batch)
+                    rows += batch.num_rows
+                    size += batch.nbytes
+                    if rows >= self.NATIVE_ROWS or size >= self.NATIVE_BYTES:
+                        stage.load_arrow(pa.Table.from_batches(held))
+                        stage.promote()
+                        moved += rows
+                        held, rows, size = [], 0, 0
+                        if log:
+                            log(f"{table}: {moved:,} rows")
+                if held:
+                    stage.load_arrow(pa.Table.from_batches(held))
+                    stage.promote()
+                    moved += rows
+        finally:
+            src.close()
+        took = time.monotonic() - began
+        if log:
+            log(f"{table}: copied, {moved:,} rows in {took:.1f}s")
+        return moved
+
     # ---- the change feed: Change Tracking --------------------------------
     #
     # SQL Server's own record of which rows changed since a version, the
@@ -1352,3 +1771,170 @@ class MSSQLEngine(DbapiRows, Engine):
 
     def fence_wait(self, db, lsn, timeout=300):
         return self._as_pair().fence_wait(db, lsn, timeout)
+
+
+class _Stage:
+    """Where a bulk load lands before it is promoted: a global temporary
+    table in tempdb, shaped as the columns written. `select top 0 ... into`,
+    joined to itself by `union all`, takes each column's type, length and
+    collation from the table and leaves its identity, defaults and
+    constraints behind - the stage holds values, it makes none. Global, so
+    the load's own connection can write it; named for itself, so tables
+    and ranges loaded side by side never share one; dropped when done with,
+    and by the server with the session that made it where migkit is killed
+    first. Nothing is left in the target's database."""
+
+    #: seconds one load may take; a stalled server is an error, not a hang
+    TIMEOUT = 1800
+
+    def __init__(self, eng, side, db, table, names, carried=None):
+        import uuid
+        shape = eng._shape(side, db, table)
+        self.q = eng._q
+        self.names = list(names)
+        #: {column: (the stage's type for it, what turns it back)} for a
+        #: column loaded as another type than the table's (`CARRIED`)
+        self.carried = dict(carried or {})
+        self.target = eng._qualified(side, db, table)
+        self.name = "##migkit_stage_" + uuid.uuid4().hex
+        self.identity = shape["identity"] in self.names
+        self.key = (shape["key"] if shape["key"]
+                    and all(k in self.names for k in shape["key"]) else [])
+        self.conn = eng._bulk_connect(side, db)
+        try:
+            cols = ", ".join(
+                f"cast(null as {self.carried[n][0]}) as {self.q(n)}"
+                if n in self.carried else self.q(n) for n in self.names)
+            self.conn.cursor().execute(
+                f"select top 0 {cols} into {self.name} from {self.target}"
+                f" union all select top 0 {cols} from {self.target}")
+            # committed before the load looks for it: uncommitted, the
+            # load's connection waits on this session's lock for good
+            self.conn.commit()
+        except BaseException:
+            self.conn.close()
+            raise
+
+    def _back(self, name, alias=""):
+        """A stage column as the table's value."""
+        at = f"{alias}{self.q(name)}"
+        return self.carried[name][1].format(at) if name in self.carried \
+            else at
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self.conn.rollback()
+            self.conn.cursor().execute(f"drop table if exists {self.name}")
+            self.conn.commit()
+        except Exception:  # noqa: BLE001 - the session's end drops it too
+            pass
+        finally:
+            self.conn.close()
+
+    def _options(self):
+        # the load's own defaults are the wrong way round for a copy: a
+        # NULL would take the column's default, an identity would number
+        # the rows itself. The stage has neither; this keeps it so should
+        # it ever be made another way. Nobody else writes the stage, so it
+        # is locked whole, which lets the load log least.
+        return {"keep_nulls": True, "keep_identity": True,
+                "table_lock": True, "timeout": self.TIMEOUT}
+
+    def load(self, rows):
+        """Rows as values, each a sequence in the order of `names`."""
+        rows = [r if isinstance(r, tuple) else tuple(r) for r in rows]
+        try:
+            got = self.conn.cursor().bulkcopy(self.name, rows,
+                                              **self._options())
+        except Exception as e:
+            raise _NotLoaded(_said(e)) from e
+        self._landed(got, len(rows))
+
+    def load_arrow(self, table):
+        try:
+            got = self.conn.cursor().bulkcopy_arrow(self.name, table,
+                                                    **self._options())
+        except Exception as e:
+            raise _NotLoaded(_said(e)) from e
+        self._landed(got, table.num_rows)
+
+    def _landed(self, got, n):
+        copied = (got or {}).get("rows_copied")
+        if copied is None or int(copied) != n:
+            raise _NotLoaded(f"it put {copied} of {n:,} rows into its stage")
+
+    def promote(self):
+        """The stage into the table, in one transaction: the rows with the
+        stage's keys deleted, the stage inserted, the stage emptied. A table
+        with no key is appended to, as a statement would append to it."""
+        q = self.q
+        cur = self.conn.cursor()
+        try:
+            cur.execute("set xact_abort on")
+            if self.identity:
+                cur.execute(f"set identity_insert {self.target} on")
+            if self.key:
+                cur.execute(f"delete t from {self.target} t where exists"
+                            f" (select 1 from {self.name} s where "
+                            + " and ".join(f"{self._back(k, 's.')} ="
+                                           f" t.{q(k)}" for k in self.key)
+                            + ")")
+            cur.execute(f"insert into {self.target}"
+                        f" ({', '.join(q(n) for n in self.names)}) select"
+                        f" {', '.join(self._back(n) for n in self.names)}"
+                        f" from {self.name}")
+            cur.execute(f"truncate table {self.name}")
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        finally:
+            if self.identity:
+                try:
+                    cur.execute(f"set identity_insert {self.target} off")
+                except Exception:  # noqa: BLE001 - a lost session holds
+                    pass           # nothing on, and the first error stands
+
+
+class _NotLoaded(Exception):
+    """The bulk load did not fill its stage: nothing reached the table."""
+
+
+def _time_text(v):
+    """A datetime or a time as SQL Server writes one of seven digits after
+    the second (style 121), from the six a Python value holds and the
+    digits past them it carries (`nanotime`). A value with a zone is not
+    one a column without a zone is written from here."""
+    import datetime
+    if v is None or isinstance(v, str):
+        return v
+    if getattr(v, "tzinfo", None) is not None:
+        raise _NotLoaded("a time with a zone, for a column without one")
+    frac = f"{v.microsecond:06d}{(getattr(v, 'nanosecond', 0) or 0) // 100}"
+    clock = f"{v.hour:02d}:{v.minute:02d}:{v.second:02d}.{frac}"
+    if isinstance(v, datetime.datetime):
+        return f"{v.year:04d}-{v.month:02d}-{v.day:02d} {clock}"
+    if isinstance(v, datetime.time):
+        return clock
+    raise _NotLoaded(f"a {type(v).__name__} for a time column")
+
+
+def _said(e):
+    """What the server or the driver said, on one line, without the
+    driver's own framing and without its name or its methods'."""
+    from ..wording import without_programs
+    text = " ".join(str(e).split()).split("DDBC Error: ", 1)[-1]
+    return without_programs(text, ("mssql_python", "mssql_py_core",
+                                   "mssql-python", "bulkcopy_arrow()",
+                                   "bulkcopy()", "bulkcopy"))[:240]
+
+
+class _Unkept(dict):
+    """A checkpoint for a table copied inside `native_bulk`, which starts
+    the table over on a run again rather than resuming it."""
+
+    def save(self):
+        pass

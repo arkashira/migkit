@@ -29,6 +29,9 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "pymysql>=1.1",
     "pymssql>=2.3",
+    # SQL Server's own bulk load (TDS bulk insert from a compiled core),
+    # which the target side of a SQL Server hop writes through
+    "mssql-python>=1.15",
     "clickhouse-connect>=0.8",
     "oracledb>=2",
     "ibm_db>=3.2",
@@ -110,4 +113,7 @@ version = { attr = "migkit.__version__" }
 include = ["migkit*"]
 
 [tool.pytest.ini_options]
-markers = ["docker: needs a docker daemon"]
+markers = ["docker: needs a docker daemon",
+           "mssql: runs against SQL Server (the x86 workflow runs these)",
+           "db2: runs against Db2 (the x86 workflow runs these)",
+           "ase: runs against SAP ASE (the x86 workflow runs these)"]

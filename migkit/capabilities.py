@@ -58,9 +58,7 @@ GAPS = {
                       "collections have no sequences or auto-increment"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
-    "mssql": {
-        "bulk-move": (NOT_YET, "0e"),
-    },
+    "mssql": {},
     "redis": {
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
         "bulk-move": (NOT_APPLICABLE, "a keyspace already moves key for key"

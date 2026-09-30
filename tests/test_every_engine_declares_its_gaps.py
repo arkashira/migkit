@@ -108,10 +108,10 @@ def test_a_capability_the_engine_has_is_not_refused():
 
 
 def test_not_yet_says_what_to_do_meanwhile():
-    said = _refused("mssql", "bulk-move")
+    said = _refused("ase", "bulk-move")
     assert said.startswith("Moving a whole database in bulk is not"
-                           " available for mssql hops yet"), said
-    assert "backlog item 0e" in said, said
+                           " available for ase hops yet"), said
+    assert "backlog item 34" in said, said
     assert caps.INSTEAD["bulk-move"] in said, said
 
 
@@ -122,12 +122,12 @@ def test_not_applicable_says_why():
 
 
 def test_the_name_the_operator_used_is_the_one_said_back():
-    """`azure-sql` is SQL Server underneath; the operator wrote azure-sql.
-    (This used MySQL's fence, then MongoDB's, then MongoDB's collection
-    copy, then SQL Server's stream, then its users; all five have one
-    now.)"""
-    said = _refused("azure-sql", "bulk-move")
-    assert "for azure-sql hops" in said, said
+    """`sybase` is SAP ASE underneath; the operator wrote sybase. (This
+    used MySQL's fence, then MongoDB's, then MongoDB's collection copy,
+    then SQL Server's stream, then its users, then SQL Server's bulk move;
+    all six have one now.)"""
+    said = _refused("sybase", "bulk-move")
+    assert "for sybase hops" in said, said
 
 
 def test_an_unknown_engine_is_refused_not_guessed():

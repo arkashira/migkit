@@ -1,0 +1,92 @@
+name: x86 engines
+
+# The engines whose servers run on x86-64 only - SQL Server 2022, Db2 and
+# SAP ASE - held to a real server of each. The machine migkit is built on is
+# arm64, where SQL Server runs only as SQL Edge (its engine, retired) and Db2
+# and ASE not at all; GitHub's hosted runners are x86-64 and cost this
+# public repository nothing. One engine a job, since a runner's disk holds
+# one of these images at a time, and only the tests marked for it
+# (`-m mssql`, `-m db2`, `-m ase`: a test file named for the engine is
+# marked by `tests/conftest.py`) - never the whole suite, which `ci` runs.
+# Each server is a throwaway container with a made-up password: no secret.
+on:
+  push:
+    branches: [master]
+    paths: ["migkit/engines/mssql.py", "migkit/engines/db2.py",
+            "migkit/engines/ase.py", "migkit/engines/dbapi.py",
+            "migkit/engines/hetero.py", "migkit/engines/base.py",
+            "migkit/canon.py", "migkit/decide.py", "migkit/planner.py",
+            "tests/conftest.py", "tests/test_sql_server_*.py",
+            "tests/test_mssql_*.py", "tests/test_db2_*.py",
+            "tests/test_sap_ase_*.py", "pyproject.toml",
+            ".github/workflows/x86-engines.yml"]
+  pull_request:
+    paths: ["migkit/engines/mssql.py", "migkit/engines/db2.py",
+            "migkit/engines/ase.py", "migkit/engines/dbapi.py",
+            "migkit/engines/hetero.py", "migkit/engines/base.py",
+            "migkit/canon.py", "migkit/decide.py", "migkit/planner.py",
+            "tests/conftest.py", "tests/test_sql_server_*.py",
+            "tests/test_mssql_*.py", "tests/test_db2_*.py",
+            "tests/test_sap_ase_*.py", "pyproject.toml",
+            ".github/workflows/x86-engines.yml"]
+  schedule:
+    - cron: "41 4 * * 1"   # weekly: an image that changed under its tag
+  workflow_dispatch:
+
+jobs:
+  sql-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # the full server, where the default is SQL Edge (tests/conftest.py)
+      MIGKIT_MSSQL_IMAGE: mcr.microsoft.com/mssql/server:2022-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: the SQL Server client the native checks drive, from its releases
+        run: |
+          curl -fsSL https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2 \
+            | sudo tar -xjf - -C /usr/local/bin sqlcmd
+          sqlcmd --version
+      - name: the server, pulled before a test times its start
+        run: docker pull "$MIGKIT_MSSQL_IMAGE"
+      - run: pip install -e . pytest faker
+      - run: pytest -q -m mssql tests/
+
+  db2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: the server, pulled before a test times its start
+        run: docker pull icr.io/db2_community/db2:latest
+      - run: pip install -e . pytest faker
+      - run: pytest -q -m db2 tests/
+
+  sap-ase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: FreeTDS's ODBC driver, which speaks ASE's protocol
+        run: sudo apt-get update && sudo apt-get install -y unixodbc tdsodbc
+      # SAP publishes no image; this one is JetBrains', built for their own
+      # tests of ASE 16.0 (charset iso_1)
+      - name: the server, pulled before a test times its start
+        run: docker pull datagrip/sybase:16.0
+      - run: pip install -e . pytest faker
+      - run: pytest -q -m ase tests/

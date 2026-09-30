@@ -40,6 +40,40 @@ def _mk_docker_mark():
 
 needs_docker = _mk_docker_mark()
 
+#: the engines whose servers run on x86-64 only, by the words their test
+#: files are named with: a file named for one is marked for it, and the x86
+#: workflow runs `pytest -m <engine>` - every such test and nothing else
+ENGINE_MARKS = {"mssql": ("sql_server", "mssql"), "db2": ("db2",),
+                "ase": ("sap_ase",)}
+
+#: the SQL Server the tests start. SQL Edge where nothing else runs: SQL
+#: Server's engine in the one build made for arm64 (retired, still
+#: runnable). The x86 workflow sets the full 2022 server here.
+MSSQL_IMAGE = os.environ.get("MIGKIT_MSSQL_IMAGE",
+                             "mcr.microsoft.com/azure-sql-edge:latest")
+
+
+def mssql_run(name, port, password, memory_mb=1024):
+    """`docker run` for a SQL Server container of `MSSQL_IMAGE`: an x86
+    image is asked for as x86, which an arm64 machine runs under Rosetta
+    (`tools/with_docker_lock.py --vm migkit`)."""
+    x86 = [] if "azure-sql-edge" in MSSQL_IMAGE else ["--platform",
+                                                      "linux/amd64"]
+    return ["docker", "run", "-d", "--name", name, *x86,
+            "-p", f"127.0.0.1:{port}:1433", "-e", "ACCEPT_EULA=Y",
+            "-e", f"MSSQL_SA_PASSWORD={password}",
+            "-e", f"MSSQL_MEMORY_LIMIT_MB={memory_mb}",
+            "-e", "MSSQL_TELEMETRY_ENABLED=false", MSSQL_IMAGE]
+
+
+def pytest_collection_modifyitems(config, items):
+    import re
+    for item in items:
+        name = item.path.stem if hasattr(item, "path") else ""
+        for mark, words in ENGINE_MARKS.items():
+            if any(re.search(rf"(^|_){w}(_|$)", name) for w in words):
+                item.add_marker(getattr(pytest.mark, mark))
+
 
 @pytest.fixture(scope="session")
 def pg_pair():

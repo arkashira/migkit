@@ -44,6 +44,9 @@ PROGRAMS = {
     "mysqlsh": ("", ""),
     "sqlcmd": ("sqlcmd", ""),
     "docker": ("", ""),
+    # not a program: FreeTDS's ODBC driver and the ODBC manager it loads
+    # through, which SAP ASE is reached by (`ASE_DRIVER`)
+    "ase-odbc": ("freetds unixodbc", "tdsodbc unixodbc"),
 }
 
 #: each program's licence, as SPDX names it. Every one is run as a program
@@ -65,6 +68,9 @@ PROGRAM_LICENCES = {
     "mysqlsh": "GPL-2.0-only",
     # the image migkit runs its version-matched PostgreSQL copy from
     "pgcopydb": "PostgreSQL",
+    # FreeTDS under the Library GPL 2 "or any later version", taken as
+    # 2.1; the ODBC manager under the LGPL 2.1
+    "ase-odbc": "LGPL-2.1-or-later",
 }
 
 #: not a program on PATH: the second reader lives in an environment of its
@@ -225,9 +231,31 @@ def second_reader_present():
     return second_reader.interpreter() is not None
 
 
+#: not a program on PATH either: the driver `engines.ase` connects through
+ASE_DRIVER = "ase-odbc"
+
+
+def ase_driver_present():
+    """FreeTDS's ODBC driver where `engines.ase` looks for it, and an ODBC
+    manager the driver module loads - it installs without one, and then
+    fails to import (measured: `libodbc.2.dylib ... no such file`)."""
+    import os
+
+    from .engines.ase import DRIVERS
+    if not any(os.path.exists(p) for p in DRIVERS):
+        return False
+    try:
+        import pyodbc  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _present(cmd):
     if cmd == SECOND_READER:
         return second_reader_present()
+    if cmd == ASE_DRIVER:
+        return ase_driver_present()
     if cmd in SOURCE_BUILDS:
         return built_program(cmd) is not None
     return which(cmd)
@@ -391,6 +419,9 @@ CAPABILITIES = [
     ("SQL Server: verify",
      "compare rows and objects",
      [], ["sqlcmd"]),
+    ("SAP ASE: verify and copy",
+     "compare and copy tables through ASE's own protocol",
+     [ASE_DRIVER], []),
     ("SQLite: verify, repair and copy",
      "compare rows and schema, repair with undo, copy table by table",
      [], []),
@@ -485,7 +516,7 @@ def install_missing(log=print, ask=None):
         wanted += needs + optional
     pkgs = []
     for cmd in wanted:
-        if cmd == SECOND_READER or cmd in SOURCE_BUILDS or which(cmd):
+        if cmd == SECOND_READER or cmd in SOURCE_BUILDS or _present(cmd):
             continue
         formula, apt = PROGRAMS.get(cmd, ("", ""))
         pkg = formula if mgr == "brew" else apt
@@ -495,8 +526,8 @@ def install_missing(log=print, ask=None):
     # business, and the line used to read `installing mydumper ...`
     for n, pkg in enumerate(pkgs, 1):
         log(f"installing component {n} of {len(pkgs)} ...")
-        cmd_line = (["brew", "install", pkg] if mgr == "brew"
-                    else ["sudo", "apt-get", "install", "-y", pkg])
+        cmd_line = (["brew", "install", *pkg.split()] if mgr == "brew"
+                    else ["sudo", "apt-get", "install", "-y", *pkg.split()])
         p = subprocess.run(cmd_line, capture_output=True, text=True)
         if p.returncode != 0:
             log(f"  component {n} did not install; run migkit doctor again"

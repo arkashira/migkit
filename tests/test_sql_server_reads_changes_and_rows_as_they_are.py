@@ -23,7 +23,7 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
-from tests.conftest import needs_docker
+from tests.conftest import mssql_run, needs_docker
 
 pytestmark = needs_docker
 
@@ -49,13 +49,7 @@ def _sql(db, *statements):
 @pytest.fixture(scope="module")
 def server():
     subprocess.run(["docker", "rm", "-f", "-v", MS], capture_output=True)
-    subprocess.run(["docker", "run", "-d", "--name", MS, "-p",
-                    f"127.0.0.1:{PORT}:1433", "-e", "ACCEPT_EULA=1", "-e",
-                    f"MSSQL_SA_PASSWORD={PW}", "-e",
-                    "MSSQL_MEMORY_LIMIT_MB=1024", "-e",
-                    "MSSQL_TELEMETRY_ENABLED=false",
-                    "mcr.microsoft.com/azure-sql-edge:latest"],
-                   check=True, capture_output=True)
+    subprocess.run(mssql_run(MS, PORT, PW), check=True, capture_output=True)
     try:
         end = time.time() + 180
         while time.time() < end:

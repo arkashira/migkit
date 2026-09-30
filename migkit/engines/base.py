@@ -4194,17 +4194,23 @@ class Engine:
         on runs ten times as long."""
         return (work, table, 1 << (int(run).bit_length() - 1) if run else None)
 
-    def _cheaper(self, key, ways):
+    def _cheaper(self, key, ways, measured=None):
         """The name of the way to do the work `key` names (`_work_key`),
         of the `decide.Rung`s in `ways`: climbed in `decide` on this
         engine's own costs for that work (`_took`) - each tried once, in
         order, then the one that did a row in less time, a tie going to the
         one that leaves less behind. Only the way taken is timed again, so
-        one that grows dearer than the other's last cost gives way to it."""
+        one that grows dearer than the other's last cost gives way to it.
+
+        `measured` is {way: seconds a row} as measured where the ways were
+        built, for work not yet timed here: where trying the dearer way
+        once costs as much as the work itself (SQL Server: 27s by
+        statements against 0.8s by its bulk load for 50,000 rows), it is
+        not tried unless the cheaper one grows dearer than it."""
         from ..decide import Costs, climb
         self.__dict__.setdefault("_way_rungs", {})[key] = tuple(ways)
         costs = self.__dict__.setdefault("_way_cost", {}).setdefault(
-            key, Costs())
+            key, Costs(measured or {}))
         return climb(key[0], ways, costs=costs).path
 
     def _took(self, key, way, seconds, rows):
