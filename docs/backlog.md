@@ -3367,6 +3367,33 @@ fallback and the source-change offer. Flat, to be made smart:
    which), the table reloaded by the fastest mover - chosen by predicted
    cost and the size of the drift, with the same statement record, undo
    and proof after.
+   **Built 2026-10-01 (tests written, the full run to come),
+   `migkit/repairways.py`:** every row repair naming its table
+   (`RepairAction.table`) climbs three rungs through `decide.attempt`:
+   the rows by key (the engine's own repair, as before); the spans of
+   one integer key that differ heavily copied again the move's way
+   (PostgreSQL's and MySQL's range copy, one transaction a span; the
+   pair's `copy_range` across engines), the rows named outside them by
+   key; the table copied again whole by `move_table`, only with
+   `target_rows: replace` and nothing else writing the target. Ranked by
+   P0-SMART's cost model (`repairways.RepairCosts`, a
+   `costmodel.CostModel`): each way costed on its own work (rows named;
+   rows in the spans and the rows named outside them; the table's rows),
+   fitted from every repair on the hop and learned across hops, a prior
+   from the move's own measured rate where a way never ran - and switched
+   from at run time. The check's leaves keep which spans differ and their
+   rows (`data-<t>.leaves`, `leaves.kept_leaves`), so a table whose rows
+   were too many places to name is repaired by spans or whole instead of
+   left out of the plan. Spans record every differing row before they
+   land (the pre-image); the reload keeps a snapshot of the table and its
+   digest before and after (`repairlog` form `snapshot`); rollback puts
+   either back only where the target still holds what the repair wrote.
+   Every table is checked afresh after its repair and the console says
+   that check's verdict. PostgreSQL's row repair writes by the load's rule
+   now (`load_window`, `WRITE_WAYS`): as a replica, or as the tables are
+   only without triggers and foreign keys, else refused - it used to fall
+   back to writing with triggers firing. Not done: the priors (`PRIOR`,
+   `BULK`) are set, not measured - the final run times each way.
 2. **Two-way conflicts are five whole-row policies** (error, apply_remote,
    keep_local, last_update_wins, source_priority) plus counters. Add: the
    changed-columns merge when the two sides touched different columns

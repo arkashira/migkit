@@ -32,9 +32,17 @@ as `before`.
 (`io_for`): `canon`, a row as canonical text by its columns' classes,
 through the neutral contract every table engine speaks (`neutral_rows_by_
 key`, `neutral_write`, `_apply_delete`); `document`, a MongoDB document
-as Extended JSON; `dump`, a Redis key as its serialised value and expiry.
-The record is written through the hop's report directory, under `undo/`,
-so a hop that keeps its evidence encrypted (`at_rest`) keeps this too.
+as Extended JSON; `dump`, a Redis key as its serialised value and expiry;
+`snapshot`, a whole table copied again (`repairways`), one statement
+whose `before` is the table's digest and the file its rows were kept in
+before it was replaced, and whose `after` is the digest it read once
+the copy landed (`landed`) - put back only where the table still reads
+as that. The record is written through the hop's report directory,
+under `undo/`, so a hop that keeps its evidence encrypted (`at_rest`)
+keeps this too. Rows put back are written as the repair wrote them:
+inside the target engine's load window (`Engine.load_window`), so a
+rollback follows the one rule for the target's triggers and foreign keys
+the load and the repair follow.
 """
 import json
 import re
@@ -87,6 +95,14 @@ class Record:
             self._line({"applied": int(upto)})
             self._handle.flush()
 
+    def landed(self, n, after):
+        """What statement `n` left on the target, read once it landed,
+        where only then can it be known: a table copied again whole reads
+        as the source did while it was copied, not as it did when the
+        statement was planned."""
+        self._line({"landed": int(n), "after": after})
+        self._handle.flush()
+
     def close(self):
         self._handle.close()
 
@@ -109,6 +125,10 @@ def read(path):
             head = entry
         elif "applied" in entry:
             upto = max(upto, int(entry["applied"]))
+        elif "landed" in entry:
+            at = int(entry["landed"]) - 1
+            if 0 <= at < len(out):
+                out[at]["after"] = entry["after"]
         else:
             out.append(entry)
     return head, out, upto
@@ -214,6 +234,10 @@ class CanonIO:
         return {tuple(k): [canon.render_value(c, v)
                            for (_, c), v in zip(self.columns, row)]
                 for k, row in got.items()}
+
+    def window(self):
+        """Where rows are put back: the target engine's load window."""
+        return self.eng.load_window(self.db, None, {self.table})
 
     def put(self, key, row):
         self.eng.neutral_write(self.side, self.db, self.table, self.columns,
@@ -337,13 +361,140 @@ def canon_rows(columns, rows):
             for r in rows]
 
 
+#: rows a snapshot of a table is read and put back in at once
+SNAPSHOT_BATCH = 5000
+
+
+def snapshot_name(path):
+    """The file a table's snapshot is kept in, beside `path` (a record's
+    own name, so the two go together)."""
+    return path.name[:-len(SUFFIX)] + ".snapshot.jsonl"
+
+
+def snapshot(engine, db, table, columns, key, path):
+    """Every row the target holds in `table` written to `path` as
+    canonical text, one JSON list a line, read in key order where the
+    table has a key and in one pass where it has none. Returns the rows
+    kept."""
+    kept = 0
+    with path.open("a") as out:
+        for rows in _all_rows(engine, "dst", db, table, columns, key):
+            for row in canon_rows(columns, rows):
+                out.write(json.dumps(row) + "\n")
+            kept += len(rows)
+    return kept
+
+
+def _all_rows(engine, side, db, table, columns, key):
+    """A side's whole table in batches: by key where it resumes by key,
+    through the engine's batched read otherwise."""
+    if key and getattr(engine, "RESUMES_BY_KEY", True):
+        after = None
+        while True:
+            rows, after = engine.neutral_read(side, db, table, columns,
+                                              after, SNAPSHOT_BATCH)
+            if rows:
+                yield rows
+            if not rows or after is None:
+                return
+    yield from engine.neutral_batches(side, db, table, columns,
+                                      SNAPSHOT_BATCH)
+
+
+def table_digest(engine, side, db, table, columns):
+    """A whole table's (count, digest) as JSON keeps it."""
+    n, d = engine.neutral_digest(side, db, table, columns)
+    return [int(n), str(d)]
+
+
+class TableIO:
+    """A whole table on the target as one statement (`snapshot` form): its
+    digest is what it holds, and what it held before it was copied again
+    is put back from the snapshot kept beside the record - emptied, then
+    written from the snapshot's rows."""
+
+    def __init__(self, engine, db, table, columns, key, undo_dir):
+        self.eng, self.db, self.table = engine, db, table
+        self.columns = [tuple(c) for c in columns]
+        self.key, self.undo_dir = list(key), undo_dir
+
+    def window(self):
+        return self.eng.load_window(self.db, None, {self.table})
+
+    def rows(self, keys):
+        return {tuple(k): {"digest": table_digest(
+            self.eng, "dst", self.db, self.table, self.columns)}
+            for k in keys}
+
+    @staticmethod
+    def same(have, want):
+        if have is None or want is None:
+            return have is want
+        return list(have["digest"]) == list(want["digest"])
+
+    def put(self, key, row):
+        if not row.get("snapshot"):
+            raise SystemExit(
+                f"{self.table}: a table copied again whole is not replayed"
+                " from its record - run the repair again, which copies it"
+                " from the source as it is now")
+        path = self.undo_dir / row["snapshot"]
+        if not path.exists():
+            raise SystemExit(f"{self.table}: the rows it held before it was"
+                             f" copied again were kept in {path}, which is"
+                             " gone - nothing was put back")
+        self.eng.neutral_empty("dst", self.db, self.table)
+        batch = []
+        with path.open("r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                batch.append([value(c, t) for (_, c), t in
+                              zip(self.columns, json.loads(line))])
+                if len(batch) >= SNAPSHOT_BATCH:
+                    self.eng.neutral_write("dst", self.db, self.table,
+                                           self.columns, batch)
+                    batch = []
+        if batch:
+            self.eng.neutral_write("dst", self.db, self.table, self.columns,
+                                   batch)
+        got = table_digest(self.eng, "dst", self.db, self.table,
+                           self.columns)
+        if list(got) != list(row["digest"]):
+            was = row["digest"]
+            raise SystemExit(
+                f"{self.table}: put back from its snapshot, it reads as"
+                f" {got[0]:,} rows (digest {got[1]}) and held {was[0]:,}"
+                f" (digest {was[1]}) before it was copied again - the"
+                " snapshot did not bring it back exactly")
+
+    def delete(self, key):
+        raise SystemExit(f"{self.table}: a table copied again whole is put"
+                         " back from its snapshot, never removed")
+
+
 def _turn(path, io, forward, log=None):
     """`reverse` (forward False) or `replay` (forward True) of one record
     through `io`: (put back, already so, left because changed since)."""
+    import contextlib
     head, stmts, _ = read(path)
     if not stmts:
         return 0, 0, []
     order = stmts if forward else list(reversed(stmts))
+    window = getattr(io, "window", None)
+    with window() if window else contextlib.nullcontext():
+        done, same, left = _turned(order, io, forward)
+    if log:
+        how = "reversed" if not forward else "replayed"
+        log(f"{head.get('table', '?')}: {done} statements {how}, {same}"
+            " already so"
+            + (f", {len(left)} left alone - changed since the repair:"
+               f" {', '.join('/'.join(map(str, k)) for k in left[:4])}"
+               if left else ""))
+    return done, same, left
+
+
+def _turned(order, io, forward):
     now = io.rows([tuple(s["key"]) for s in order])
     done, same, left = 0, 0, []
     for s in order:
@@ -363,13 +514,6 @@ def _turn(path, io, forward, log=None):
             io.put(s["key"], want)
         now[tuple(s["key"])] = want
         done += 1
-    if log:
-        how = "reversed" if not forward else "replayed"
-        log(f"{head.get('table', '?')}: {done} statements {how}, {same}"
-            " already so"
-            + (f", {len(left)} left alone - changed since the repair:"
-               f" {', '.join('/'.join(map(str, k)) for k in left[:4])}"
-               if left else ""))
     return done, same, left
 
 

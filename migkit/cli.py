@@ -1409,6 +1409,41 @@ def _lend_console(eng):
         lend(lambda m: console.print(f"  [yellow]{m}[/yellow]"))
 
 
+def _table_copier(hop, eng, db):
+    """How a repair copies one table again whole (`repairways`): the move's
+    own copier (`_copy_table`) at the move's own chunk, on a checkpoint of
+    its own begun afresh, inside the target's load window."""
+    def copy(sch, t, log):
+        path = hop.report_dir(db) / "repair-reload.json"
+        path.unlink(missing_ok=True)
+        try:
+            with eng.load_window(db, log, {t}):
+                _copy_table(eng, db, sch, t, 500000, _Checkpoint(path), log)
+        finally:
+            path.unlink(missing_ok=True)
+    return copy
+
+
+def _ladder(hop, eng, db, action):
+    """The way a row repair's table goes, climbed for it (`repairways`);
+    None for any other repair, which the engine applies as it is."""
+    if action.kind != "rows" or not action.table:
+        return None
+    from . import repairways
+    return repairways.Ladder(
+        eng, db, action,
+        log=lambda m: console.print(f"  [yellow]{m}[/yellow]"),
+        copy_table=_table_copier(hop, eng, db))
+
+
+def _said_outcome(outcome):
+    """A row repair's line: what it did, and what the check after it said."""
+    from . import repairways
+    colour = {"ok": "green", "diff": "yellow"}.get(outcome.proof, "red")
+    head = "applied - " if outcome.way else ""
+    return f"  [{colour}]{head}{repairways.said(outcome)}[/{colour}]"
+
+
 def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
     _lend_console(eng)
     for i, a in enumerate(actions):
@@ -1417,6 +1452,9 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
             console.print(f"  {s}")
         if len(a.statements) > 20:
             console.print(f"  ... {len(a.statements) - 20} more")
+        ladder = _ladder(hop, eng, db, a)
+        if ladder is not None and ladder.ready:
+            console.print(f"  {ladder.foreseen()}")
         if not do_apply:
             continue
         # the fix and its undo, run on a scratch copy first where the
@@ -1438,8 +1476,14 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
         applied = undo_dir / f"{ts}-{a.kind}-{i}.applied.sql"
         applied.write_text("\n".join(a.statements) + "\n")
         lk = _lock(hop)
+        outcome = None
         try:
-            eng.apply(db, a)
+            if ladder is not None:
+                # the table checked afresh after its repair: what is said
+                # of it is that check's, never the repair's own word
+                outcome = ladder.run(prove=True)
+            else:
+                eng.apply(db, a)
         finally:
             lk.unlink()
         import hashlib
@@ -1450,9 +1494,12 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir):
                          "statements": len(a.statements),
                          "applied_sha256": hashlib.sha256(
                              ("\n".join(a.statements) + "\n").encode()
-                         ).hexdigest()},
+                         ).hexdigest(),
+                         **({"repair": outcome.record()} if outcome
+                            else {})},
                    eng)
-        console.print("  [green]applied[/green]")
+        console.print(_said_outcome(outcome) if outcome
+                      else "  [green]applied[/green]")
     if not do_apply:
         console.print("\ndry-run only, add --apply to execute")
     else:
@@ -1513,14 +1560,24 @@ def _sync_go(hop_name, db, tag, on_conflict="source-wins", kind="all"):
             log({"event": "check-data", "status": r.status, "detail": r.detail})
             if r.status == "diff":
                 for a in eng.repair_plan(d, "rows"):
+                    ladder = _ladder(hop, eng, d, a)
                     lk = _lock(hop)
+                    outcome = None
                     try:
-                        eng.apply(d, a)
+                        # the whole database is checked again below
+                        if ladder is not None:
+                            outcome = ladder.run(prove=False)
+                        else:
+                            eng.apply(d, a)
                     finally:
                         lk.unlink()
+                    way = {"repair": outcome.record()} if outcome else {}
                     _changelog(hop, {"op": "sync", "db": d, "kind": "rows",
-                                     "state": point.ts, "note": a.note})
-                    log({"event": "repair-rows", "note": a.note})
+                                     "state": point.ts, "note": a.note,
+                                     **way})
+                    log({"event": "repair-rows", "note": a.note, **way})
+                    if outcome is not None:
+                        console.print(f"  {outcome.table}: {outcome.said}")
                 again = eng.check_data(d)[0]
                 console.print(f"  data re-check: {again.status} {again.detail}")
                 log({"event": "recheck-data", "status": again.status})

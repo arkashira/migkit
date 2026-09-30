@@ -1010,6 +1010,9 @@ class GenericEngine(Engine):
             " put back by migkit: the record is the undo file named beside"
             " it, to apply by hand")
 
+    #: nor are a span's or a table's replaced whole (`repairways`)
+    ROWS_PUT_BACK = False
+
     #: how many keys go into one `where` - the drilldown can be long and a
     #: query per row would be a round trip per row
     REPAIR_BATCH = 200

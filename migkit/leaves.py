@@ -373,6 +373,42 @@ def _scan_sql(s, spec, extra=None, only=None):
                if only else "") + " group by b")
 
 
+def range_counts(s, spec, buckets):
+    """{leaf: rows} of these range leaves on one side, counted by the key's
+    index - no row read into this process or hashed: what a repair weighs
+    a span of the key by (`repairways`). In the side's SQL where its leaves
+    are computed there; else the key's values alone read and counted
+    here."""
+    order = sorted({int(b) for b in buckets})
+    out = {}
+    for i in range(0, len(order), 200):
+        part = order[i:i + 200]
+        pred = _range_pred(s, spec, part)
+        where = [w for w in (s.where, pred) if w]
+        if s.engine in SQL_ENGINES or s.dialect:
+            k = _q(s, s.key[0])
+            inner = (f"select {k} as k0 from"
+                     f" {s.eng._qualified(s.side, s.db, s.table)}"
+                     " where " + " and ".join(f"({w})" for w in where))
+            sql = (f"select b, count(*) from (select {_bucket_sql(s, spec)}"
+                   f" as b from ({inner}) x) y group by b")
+            for b, n in s.eng.run_rule(s.side, s.db, sql):
+                out[int(b)] = out.get(int(b), 0) + int(n)
+            continue
+        cls = dict(s.cols)
+        after = None
+        while True:
+            rows, after = s.eng.neutral_read(
+                s.side, s.db, s.table, [(s.key[0], cls[s.key[0]])], after,
+                10_000, where=" and ".join(f"({w})" for w in where))
+            for (v,) in rows:
+                b = spec.bucket(0, v)
+                out[b] = out.get(b, 0) + 1
+            if not rows or after is None:
+                break
+    return out
+
+
 def _range_pred(s, spec, buckets):
     """The key ranges of these range leaves, adjacent ones joined."""
     runs, start, last = [], None, None
@@ -614,6 +650,10 @@ class Localized:
     said: str = ""             #: what that way did, where it says more
     found: tuple = (0, 0, 0)   #: what the rows found add up to
     delta: tuple = (0, 0, 0)   #: the difference of the two tables' totals
+    spec: object = None        #: how the rows fell into leaves
+    #: {leaf: (rows on the source, rows on the target)} of the leaves that
+    #: differ - what a repair copies again by range (`repairways`)
+    sizes: dict = field(default_factory=dict)
 
     @property
     def differ(self):
@@ -663,10 +703,12 @@ def localize(a, b, spec, ta, tb, held=HELD):
     `tb`: only the differing leaves are read back, in turns of about
     `held` rows a side; each leaf's rows are held to its digest on its
     side, and everything found to the difference of the two roots."""
-    out = Localized(delta=_minus(ta.root, tb.root), how="leaves")
+    out = Localized(delta=_minus(ta.root, tb.root), how="leaves", spec=spec)
     bad = ta.differing(tb)
     out.leaves = len(bad)
     z = (0, 0, 0)
+    out.sizes = {x: (ta.leaves.get(x, z)[0], tb.leaves.get(x, z)[0])
+                 for x in bad}
     size = {x: max(ta.leaves.get(x, z)[0], tb.leaves.get(x, z)[0], 1)
             for x in bad}
     if sum(size.values()) > MOST_ROWS:
@@ -1543,7 +1585,8 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
                                _generation_wait(pair, db, a))
             if gens.all_settled:
                 # nothing to name: an earlier run's lists go
-                pair._write_drill(db, name, missing=[], changed=[], extra=[])
+                pair._write_drill(db, name, missing=[], changed=[], extra=[],
+                                  leaves=[])
                 out = Said(gens.said())
                 out.settled = True
                 out.rows_src, out.rows_dst = gens.ta.root[0], gens.tb.root[0]
@@ -1640,7 +1683,8 @@ def _clause(pair, db, name, a, b, found, strat, rows=0, gens=None):
         how += second_reading(pair, db, a, b, second.name, found, rows)
     if not a.key:
         # nothing a repair can address by key: an earlier run's lists go
-        pair._write_drill(db, name, missing=[], changed=[], extra=[])
+        pair._write_drill(db, name, missing=[], changed=[], extra=[],
+                          leaves=[])
         parts = []
         for n, where, other in ((found.only_src, "source", "target"),
                                 (found.only_dst, "target", "source")):
@@ -1652,8 +1696,37 @@ def _clause(pair, db, name, a, b, found, strat, rows=0, gens=None):
             else "no row differs by value")
         return (f"; {body} (the table has no key: rows are told apart by"
                 " their values, and a row held twice counts twice)" + how)
-    return pair._drill_clause(db, name, found.missing, found.changed,
-                              found.extra, [], how)
+    clause = pair._drill_clause(db, name, found.missing, found.changed,
+                                found.extra, [], how)
+    kept_leaves(pair, db, name, a, found, rows)
+    return clause
+
+
+#: differing leaves kept for a repair at most; of a table differing in
+#: more, the spans kept are copied again or the table whole, and the check
+#: after the repair says what is left
+LEAVES_KEPT = 100_000
+
+
+def kept_leaves(pair, db, name, a, found, rows):
+    """The leaves that differ, kept beside the rows named
+    (`data-<table>.leaves`): how many rows each side holds in each, and
+    whether the rows found account for them - all a repair has where the
+    leaves differ in too many places for their rows to be named
+    (`repairways`). Leaves that are ranges of one integer key are spans of
+    it both sides select by the key's index, which a repair copies again
+    span by span; leaves by hash say only how far the table differs."""
+    import json
+    spec = found.spec
+    if spec is None or spec.kind not in ("range", "hash") \
+            or not found.sizes or not a.key:
+        return
+    pair._write_drill(db, name, leaves=[json.dumps({
+        "kind": spec.kind, "base": spec.base, "width": spec.width,
+        "key": list(a.key), "rows": int(rows or 0),
+        "complete": bool(found.complete),
+        "leaves": [[int(b), int(s), int(t)] for b, (s, t)
+                   in sorted(found.sizes.items())[:LEAVES_KEPT]]})])
 
 
 def by_bisection(pair, db, a, b, digests):

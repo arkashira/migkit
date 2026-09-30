@@ -746,6 +746,21 @@ class PostgresEngine(Engine):
             conn.rollback()
             known[ident] = False
 
+    #: how rows are written into the target's tables - by a load, a repair
+    #: and a rollback alike (`load_window`) - from what the target's user
+    #: may do, as the load reads it (`movers._pg_quiet_triggers`)
+    WRITE_WAYS = (
+        Rung("as a replica", "the target's triggers and foreign keys held"
+                             " quiet as a replica's are",
+             needs=(Need("the replica role",
+                         lambda f: f["quiet"] in ("flag", "session"),
+                         "the target's user may not write as a replica"),)),
+        Rung("as they are", "the target's tables written as they are",
+             needs=(Need("no trigger and no foreign key on the tables",
+                         lambda f: f["quiet"] == "none",
+                         lambda f: f["write refused"] or "the tables have"
+                         " triggers or foreign keys"),)))
+
     def load_window(self, db, log=None, tables=None):
         """The target's connections as a replica while rows are written
         into it, which a trigger does not fire for - the way the bulk paths
@@ -755,15 +770,29 @@ class PostgresEngine(Engine):
         `BEFORE INSERT OR UPDATE` trigger appending to the value turned `b`
         into `b!!` and wrote four audit rows the source never had. Decided
         once, before anything is written, and refused where the user may
-        not and the tables have triggers.
+        not and the tables have triggers (`WRITE_WAYS`) - for the load, a
+        repair and a rollback's rows put back alike.
         """
         import contextlib
 
-        from .. import movers
-        mode = movers._pg_quiet_triggers(self.hop, db, tables)
+        from .. import decide, movers
         on = self.__dict__.setdefault("_as_replica", set())
         name = self._d("dst", db)
-        if mode not in ("flag", "session") or name in on:
+        if name in on:
+            return contextlib.nullcontext()
+
+        def quiet():
+            try:
+                return movers._pg_quiet_triggers(self.hop, db, tables)
+            except SystemExit as e:
+                facts["write refused"] = str(e)
+                return "refused"
+        facts = decide.Facts({"write refused": ""}, quiet=quiet)
+        way = decide.climb(f"{db}: rows written into the target",
+                           self.WRITE_WAYS, facts)
+        if way.rung is None:
+            raise SystemExit(facts["write refused"] or way.reason)
+        if way.path == "as they are":
             return contextlib.nullcontext()
 
         @contextlib.contextmanager
@@ -7040,7 +7069,7 @@ class PostgresEngine(Engine):
                 actions.append(RepairAction(
                     db, "rows", [f"resync-rows {t}"], [],
                     f"{t}: {', '.join(counts) or 'no pk files'},"
-                    " deleted rows saved to undo before recopy"))
+                    " deleted rows saved to undo before recopy", table=t))
             # after the resync, never before it: a recopy takes its rows from
             # the source, which is where the broken text lives, so a text
             # repair applied first would be undone by the action next to it
@@ -7264,11 +7293,16 @@ class PostgresEngine(Engine):
 
     def _psql_run(self, side, db, script):
         """Run a multi-statement psql script from stdin so client-side
-        \\copy works (needed for the temp-pk join repair)."""
+        \\copy works (needed for the temp-pk join repair). On the target
+        inside the load window it writes as the window's connections do
+        (`replica_env`)."""
         ep = self.hop.source if side == "src" else self.hop.target
+        quiet = self.replica_env(db).get("PGOPTIONS", "") \
+            if side == "dst" else ""
         env = tool_env({**ep.libpq_env(),
                         "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": f"-c statement_timeout=0 {SESSION}"})
+                        "PGOPTIONS": f"-c statement_timeout=0 {SESSION}"
+                                     + (f" {quiet}" if quiet else "")})
         p = subprocess.run(
             ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
              "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
@@ -7283,20 +7317,18 @@ class PostgresEngine(Engine):
             raise RuntimeError((p.stdout + p.stderr)[-400:])
         return p.stdout
 
-    #: how a set-based row repair writes the target (`_repair_rows_native`)
-    REPAIR_WAYS = (
-        Rung("quiet", "the target's triggers and foreign keys held quiet"
-                      " as a replica's are"),
-        Rung("as they are", "the target's triggers and foreign keys as they"
-                            " are"))
-
     def _repair_rows_native(self, db, t):
         """Set-based row repair: pull the rows to (re)copy from source into a
         temp file via a temp-pk join, save the target rows they overwrite as
         undo, delete extra/changed on target, then copy the source rows in.
-        session_replication_role=replica keeps FKs/triggers quiet; a target
-        that refuses it is switched from by itself and said
-        (`REPAIR_WAYS`, `decide.attempt`)."""
+
+        Written as the load writes (`load_window`, `WRITE_WAYS`): as a
+        replica, which no trigger or foreign key fires for, where the
+        target's user may; as the tables are only where this one has no
+        trigger and no foreign key; and not at all otherwise. The repair
+        used to switch to writing as they are wherever the replica role was
+        refused, triggers or not, where the load stopped - a repair whose
+        rows the target's triggers rewrote as they landed."""
         d = self._report(db)
         sch, tbl = t.split(".", 1)
         qt = f'"{sch}"."{tbl}"'
@@ -7306,10 +7338,19 @@ class PostgresEngine(Engine):
         cols_decl = ", ".join(f"c{i + 1} text" for i in range(len(pks)))
         cond = " and ".join(f't."{pks[i]}"::text = p.c{i + 1}'
                             for i in range(len(pks)))
+        only = self.__dict__.get("_repair_only")
+        canon_of = self._key_canon(db, t, pks) if only is not None else None
 
         def read(kind):
             f = d / f"data-{t}.{kind}"
-            return f.read_text() if f.exists() else ""
+            text = f.read_text() if f.exists() else ""
+            if only is None:
+                return text
+            # the keys a repair by spans leaves to be repaired by key
+            # (`repairways`), the rest of the file left as it is
+            lines = [line for line in text.splitlines() if line]
+            return "".join(line + "\n" for line, k in
+                           zip(lines, canon_of(lines)) if tuple(k) in only)
 
         # on_conflict=keep-target preserves rows the target changed itself:
         # only fix missing (insert) and extra (delete), never overwrite a
@@ -7347,25 +7388,8 @@ class PostgresEngine(Engine):
             if (work / "rows.out").exists():
                 body += f"\\copy {qt} from '{work}/rows.out'\n"
             body = "begin;\n" + body + "commit;\n"
-            from .. import decide
-
-            def repair(choice):
-                if choice.path == "as they are":
-                    return self._psql_run("dst", db, body)
-                try:
-                    return self._psql_run(
-                        "dst", db,
-                        "set session_replication_role = replica;\n" + body)
-                except RuntimeError as e:
-                    if "session_replication_role" not in str(e):
-                        raise
-                    # refused on the script's first line, which stops it:
-                    # nothing else ran
-                    raise decide.Blocked(
-                        "the target's user may not set the replica role: "
-                        + str(e).strip().splitlines()[-1][:160]) from e
-            self._attempt(t, self.REPAIR_WAYS, repair,
-                          switch=decide.only_blocked)
+            with self.load_window(db, None, {t}):
+                self._psql_run("dst", db, body)
             record.applied(record.n)
             with (undo / "manifest.txt").open("a") as m:
                 m.write(f"{ts} {t}: re-copy {undo}/{ts}-{tbl}.rows to undo\n")
@@ -7382,6 +7406,21 @@ class PostgresEngine(Engine):
         has - and each extra key a delete, with the row the target held
         and the one it will hold, by the key files' lines."""
         from .. import repairlog
+        sc, canon_of = self._key_canon(db, t, pks, with_columns=True)
+
+        def keys(lines):
+            return canon_of([line for line in lines.splitlines() if line])
+        writes = keys(copy_lines)
+        return repairlog.planned(
+            undo, repairlog.CanonIO(self, "dst", db, t, sc, pks),
+            repairlog.CanonIO(self, "src", db, t, sc, pks).rows(writes),
+            writes, keys(changed_lines), keys(extra_lines))
+
+    def _key_canon(self, db, t, pks, with_columns=False):
+        """A reader of the drilldown's key lines (`_pk_text_expr`'s form,
+        tab-joined) as canonical key texts - with the columns both sides
+        render, where asked."""
+        from .. import repairlog
         sc, _, _ = self._comparable_columns(db, self, t, self, t)
         missing = [k for k in pks if k not in dict(sc)]
         if missing:
@@ -7390,15 +7429,50 @@ class PostgresEngine(Engine):
                 " sides render, so the repair could not be recorded row by"
                 " row. Nothing was repaired on this table.")
 
-        def keys(lines):
+        def canon_of(lines):
             return repairlog.canon_keys(sc, pks, [
                 [self._pk_unescape(p) for p in line.split("\t")]
-                for line in lines.splitlines() if line])
-        writes = keys(copy_lines)
-        return repairlog.planned(
-            undo, repairlog.CanonIO(self, "dst", db, t, sc, pks),
-            repairlog.CanonIO(self, "src", db, t, sc, pks).rows(writes),
-            writes, keys(changed_lines), keys(extra_lines))
+                for line in lines])
+        return (sc, canon_of) if with_columns else canon_of
+
+    def repair_found(self, db, table):
+        """The keys the last check named for `table`, from its key files,
+        as canonical text; None where its key is not one both sides
+        render."""
+        pks = self._pk_cols_of(db, table)
+        if not pks:
+            return None
+        try:
+            canon_of = self._key_canon(db, table, pks)
+        except SystemExit:
+            return None
+        return {kind: [list(k) for k in canon_of(
+                    self._drill_keys(db, table, kind))]
+                for kind in ("missing", "changed", "extra")}
+
+    #: a span of a table replaced under one transaction (`repair_range`)
+    ONE_TRANSACTION_A_RANGE = True
+
+    def repair_range_ready(self, db, sides):
+        """None: the table copier's own range copy takes any span of an
+        integer key (`_copy_checked`)."""
+        return None
+
+    def repair_range(self, db, sides, lo, hi, log):
+        """[lo, hi) of the table's integer key replaced by the source's the
+        way the table copier copies a range: the span deleted and copied in
+        one transaction, then read back and held to what passed
+        (`_copy_checked`, the pipe). Returns the rows copied."""
+        sch, tbl = self._split(sides.dst_t)
+        qt = f'"{sch}"."{tbl}"'
+        (k,) = sides.dkey
+        q = self._quote_ident(k)
+        pred = f"{q} >= {int(lo)} and {q} < {int(hi)}"
+        got = self._copy_checked(
+            db, qt, self._copy_cols(db, sch, tbl), pred,
+            f"delete from {qt} where {pred}",
+            f"{sch}.{tbl} {k} {int(lo):,} to {int(hi) - 1:,}", log)
+        return int(getattr(got, "n", got) or 0)
 
     def _newer_split(self, db, t, sch, tbl, pks, col, lines, d):
         """The changed keys to overwrite under `newer_wins`, as the key

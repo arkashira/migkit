@@ -2041,8 +2041,23 @@ class MongoEngine(Engine):
             actions.append(RepairAction(
                 db, "rows", [f"resync docs for {name} ({', '.join(counts)})"],
                 [], f"{name}: replace/insert from source per _id, deleted and"
-                    " overwritten target docs saved to undo first"))
+                    " overwritten target docs saved to undo first",
+                table=name))
         return actions
+
+    #: a document is put back as Extended JSON by its own record
+    #: (`repair_io`), never as canonical text: repaired by `_id` alone
+    ROWS_PUT_BACK = False
+
+    def repair_found(self, db, table):
+        """The `_id`s the last check named, each as its Extended JSON."""
+        return {kind: [(line,) for line in self._read_drill(db, table, kind)]
+                for kind in ("missing", "changed", "extra")}
+
+    def repair_sides(self, db, table):
+        """None: a collection's documents are lined up by `_id` alone, the
+        rows way (`repairways`)."""
+        return None
 
     def apply(self, db, action):
         from bson.json_util import dumps, loads
