@@ -122,14 +122,17 @@ def test_roles_users_and_who_holds_them_are_carried(clusters, tmp_path):
     assert out["plugin"] == {"source": "present", "target": "present"}
     assert {"role:reader", "user:ana", "user:nopw", "mapping:reader"} == \
         set(out["missing_on_target"]), out
-    assert out["definitions_differ"] == ["role:writer"], out
+    assert out["attributes_differ"] == ["role:writer"], out
     said = []
-    users.create(hop, apply=True, passwords={"ana": ANA}, say=said.append)
+    # nopw is skipped and said, and the gap it leaves fails the create
+    with pytest.raises(SystemExit, match="still differs.*nopw"):
+        users.create(hop, apply=True, passwords={"ana": ANA},
+                     say=said.append)
     assert any("skipped user nopw" in m for m in said), said
     assert not any(ANA in m or ADMIN in m for m in said), said
     out, _ = users.compare(hop, [].append)
     assert out["missing_on_target"] == ["user:nopw"], out
-    assert out["definitions_differ"] == [], out
+    assert out["attributes_differ"] == [], out
     got = _http(d, "GET", f"{API}/roles/reader")[1]["reader"]
     assert got["index_permissions"][0]["index_patterns"] == ["shopcopy.*"]
     # the password given is the one ana signs in to the target with

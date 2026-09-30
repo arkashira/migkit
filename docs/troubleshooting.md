@@ -603,6 +603,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * users: engine <...> not supported
 
+* users: the target still differs from the source after create - <...>
+
 * users: <...>
 
 * users: <...> could not be created
@@ -618,6 +620,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * users: one side is Elasticsearch and the other OpenSearch, which keep roles, users and mappings in shapes of their own - make them on the target by hand, from what compare lists
 
 * users: the target answers no security API, so nothing can be carried to it
+
+* users: <...> statement(s) failed, each named above and in <...>
 
 * setpw: mongodb only (other engines can copy the hash)
 
@@ -734,8 +738,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the saved position in <...> cannot be read, and a tail started from anywhere else either skips changes or cannot say it did not. Remove the file and move again
 
 ## SQL Server
-
-* the SQL Server client is not installed on this machine: migkit doctor --install
 
 * mssql cannot apply a <...> action
 

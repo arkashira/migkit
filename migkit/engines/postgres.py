@@ -6867,8 +6867,9 @@ class PostgresEngine(Engine):
         role, obj, priv = entry.split("|", 2)
         sch, _, name = obj.partition(".")
         kind = f"{obj_type} " if obj_type else ""
-        target = f'{kind}"{sch}"."{name}"'
-        who = f'"{role}"'
+        q = PostgresEngine._quote_ident
+        target = f"{kind}{q(sch)}.{q(name)}"
+        who = q(role)
         if revoke:
             return f'REVOKE {priv} ON {target} FROM {who};'
         return f'GRANT {priv} ON {target} TO {who};'

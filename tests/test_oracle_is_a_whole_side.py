@@ -622,11 +622,14 @@ def test_users_roles_and_grants_are_carried_and_taken_back(sandbox,
     made_here = {"user:MIGKIT", "user:APP"}
     assert "user:REPORTER" not in out["password_differs"]
     assert made_here <= set(out["password_differs"]), out
-    users.create(hop, apply=True, say=said.append)
+    # the sandbox's own accounts keep passwords that differ, and create
+    # ends by saying so
+    with pytest.raises(SystemExit, match="still differs"):
+        users.create(hop, apply=True, say=said.append)
     out, s = users.compare(hop, said.append)
     assert not {"user:REPORTER", "role:MIGKIT_R1"} & set(
         out["missing_on_target"] + out["password_differs"]
-        + out["grants_differ"]), (out, said)
+        + out["grants_missing"]), (out, said)
     assert "user:REPORTER" not in out["password_differs"], out
     assert s["user:REPORTER"]["hash"], "the password hash was not read"
     # the same password, carried as its hash: it signs in on the target

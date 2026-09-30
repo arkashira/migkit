@@ -7,10 +7,16 @@ postgres : password hashes are not readable on managed sources (RDS locks
            pg_authid), so create takes a passwords file (yaml `role: password`);
            attributes and role memberships are copied from the source.
 
-Cloud system accounts (AWS_*, rds*, tencent*, mysql internal) are excluded on
-both sides. Never writes to the source. create/rollback are dry-run unless
-apply=True. Every apply writes a created-record under the hop's report dir and
-rollback drops only users listed in that record.
+Cloud system accounts (`SYSTEM`) are excluded on both sides. Never writes to
+the source. create/rollback are dry-run unless apply=True. Every apply writes
+a record of each statement it ran under the hop's report dir, and rollback
+undoes only what that record lists; create ends by comparing again, and a
+gap it left is an error.
+
+A name read off the source reaches a statement run on the target only
+through that engine's own quoting, and a value only as a bound parameter:
+a source role called `x" SUPERUSER --` is a role of that name on the target,
+never a superuser (`tests/test_hostile_account_names_stay_names.py`).
 """
 import json
 import datetime
@@ -19,11 +25,51 @@ import os
 
 from .config import get_hop
 
-MYSQL_SYS = {'mysql.sys', 'mysql.session', 'mysql.infoschema', 'root',
-             'rdsadmin', 'rds_superuser_role', 'rdswriteforwarduser',
-             'tencentroot', 'tencentdba'}
-PG_SYS = {'rdsadmin', 'rdstopmgr', 'rds_superuser', 'rdsrepladmin',
-          'rdswriteforwarduser', 'root', 'postgres'}
+#: accounts and roles a server makes for itself, or its provider makes on a
+#: managed one: never carried, never compared - (whole names, prefixes).
+#: The one list `users`, the grant checks, `assess` and `freeze` ask
+#: (`system_principal`, `system_principals_sql`)
+SYSTEM = {
+    "mysql": (frozenset({"mysql.sys", "mysql.session", "mysql.infoschema",
+                         "mariadb.sys", "root"}),
+              ("AWS_", "rds", "tencent", "cloudsql", "azure_")),
+    "postgres": (frozenset({"postgres", "root"}),
+                 ("pg_", "rds", "tencentdb", "cloudsql", "azure",
+                  "alloydb")),
+    "mssql": (frozenset({"sa", "public", "sysadmin", "rdsa", "rdsadmin",
+                         "dbo", "guest", "sys", "INFORMATION_SCHEMA"}),
+              ("##", "NT ", "BUILTIN\\")),
+}
+#: the whole names alone, as the MySQL grant check reads them
+MYSQL_SYS = set(SYSTEM["mysql"][0]) | {
+    "rdsadmin", "rds_superuser_role", "rdswriteforwarduser", "tencentroot",
+    "tencentdba"}
+
+
+def system_principal(engine, name):
+    """Whether `name` is an account the server or its provider keeps for
+    itself on `engine` (`SYSTEM`)."""
+    whole, prefixes = SYSTEM.get(engine, (frozenset(), ()))
+    n = str(name)
+    if n in whole or n.startswith(prefixes):
+        return True
+    return engine == "mssql" and n.upper().startswith(("NT ", "BUILTIN\\"))
+
+
+def system_principals_sql(engine, column):
+    """`system_principal` as a SQL condition on `column`, for a catalogue
+    query to leave them out where they are read: true for a system one."""
+    whole, prefixes = SYSTEM.get(engine, (frozenset(), ()))
+
+    def lit(text):
+        return "'" + str(text).replace("'", "''") + "'"
+
+    def like(prefix):
+        return lit(prefix.replace("\\", "\\\\").replace("%", "\\%")
+                   .replace("_", "\\_") + "%")
+    parts = [f"{column} in ({', '.join(lit(n) for n in sorted(whole))})"]
+    parts += [f"{column} like {like(p)}" for p in prefixes]
+    return "(" + " or ".join(parts) + ")"
 
 
 def _h(x):
@@ -32,13 +78,11 @@ def _h(x):
 
 
 def _mysql_sysuser(u):
-    return u in MYSQL_SYS or u.startswith("AWS_")
+    return system_principal("mysql", u)
 
 
 def _pg_sysrole(r):
-    if r.startswith("pg_"):
-        return True
-    return r in PG_SYS or r.startswith("tencentdb") or r.startswith("rds")
+    return system_principal("postgres", r)
 
 
 def _retry(fn, tries=4, wait=5):
@@ -67,119 +111,387 @@ def _mysql_conn(ep):
         **ep.mysql_tls()))
 
 
-def _pg_conn(ep):
+def _pg_conn(ep, dbname="postgres"):
     import psycopg2
 
     def _open():
         c = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                             password=ep.password, dbname="postgres",
+                             password=ep.password, dbname=dbname,
                              connect_timeout=15, **ep.libpq_tls())
         c.autocommit = True
         return c
     return _retry(_open)
 
 
+# --- quoting ---------------------------------------------------------------
+#
+# A statement is (text, args): every name in `text` through the engine's own
+# quoting, every value in `args`. The PostgreSQL and MySQL drivers format
+# `text` with `args` whenever args are given - an empty tuple too - so a
+# `%` a name quoted for them holds is doubled, and their statements always
+# run with their tuple. The other engines' statements run without args,
+# so their text is not formatted and their quoting is the engine's alone.
+
+def _pg_ident(name):
+    """A PostgreSQL identifier, quoted as the engine quotes one: any
+    character but NUL inside double quotes, a double quote doubled."""
+    from .engines.postgres import PostgresEngine
+    return PostgresEngine._quote_ident(name).replace("%", "%%")
+
+
+def _ms_ident(name):
+    """A SQL Server identifier in brackets, a closing bracket doubled -
+    the engine's own quoting (`MSSQLEngine._q`)."""
+    from .engines.mssql import MSSQLEngine
+    return MSSQLEngine._q(name)
+
+
+def _cs_ident(name):
+    """A CQL identifier in double quotes, one doubled inside."""
+    from .engines.cassandra import CassandraEngine
+    return CassandraEngine._q(name)
+
+
+def _ora_ident(name):
+    """An Oracle identifier in double quotes. Oracle has no way to write a
+    double quote or a NUL inside one, so a name holding either cannot be
+    an Oracle name at all, and is refused rather than written."""
+    text = str(name)
+    if '"' in text or "\x00" in text:
+        raise ValueError(f"not an Oracle name: {text!r}")
+    return f'"{text}"'
+
+
+def _hex(value):
+    """Bytes (or a latin-1 string) as the hex digits of a literal: nothing
+    but 0-9 and a-f reaches the statement."""
+    b = value.encode("latin1") if isinstance(value, str) else bytes(value)
+    return b.hex()
+
+
+def _run_steps(cur, steps, say):
+    """Each step (`_step`) run on its own - one that fails is recorded and
+    the rest go on - into the ledger the record keeps: what ran, whether
+    it took, and the statement that takes it back where one does."""
+    ledger = []
+    for st in steps:
+        entry = {"key": st["key"], "sql": st["shown"], "undo": st["undo"],
+                 "made": st["made"]}
+        args = list(st["args"])
+        if "secret" in st:
+            args.insert(st.get("secret_at", len(args)), st["secret"])
+        try:
+            cur.execute(st["sql"], tuple(args))
+            entry["ok"] = True
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            entry["ok"] = False
+            entry["error"] = f"{type(e).__name__}: {str(e).strip()[:160]}"
+            say(f"   FAILED {st['shown']}: {entry['error']}")
+        ledger.append(entry)
+    return ledger
+
+
+def _record(hop, engine, ledger, **more):
+    """The ledger of one apply, appended to the hop's record of what
+    `create` did - every run kept, so each can be undone."""
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = []
+    if rec.exists():
+        got = json.loads(rec.read_text())
+        # the record's first shape, one dict per hop, kept as the run it was
+        prev = got if isinstance(got, list) else [
+            {"engine": got.get("engine"), "at": got.get("applied"),
+             "created": got.get("created", []), "failed": got.get("failed")}]
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": engine,
+                 "created": [e["key"] for e in ledger
+                             if e["ok"] and e.get("made")],
+                 "steps": ledger,
+                 "failed": [f"{e['sql']}: {e['error']}" for e in ledger
+                            if not e["ok"]], **more})
+    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+    return rec
+
+
+# --- MySQL -----------------------------------------------------------------
+#: what an account is created with besides its password, as mysql.user
+#: keeps it
+MY_ATTRS = ("account_locked", "password_expired", "ssl_type", "max_questions",
+            "max_updates", "max_connections", "max_user_connections")
+
+
+def _text(v):
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v).decode("utf-8", "replace")
+    return None if v is None else str(v)
+
+
 def _mysql_users(ep):
+    """{(user, host): {"plugin", "auth", "attrs", "ssl", "role",
+    "default_roles", "grants"}} of every account that is not the server's
+    own, read on one connection: mysql.user whole (its columns differ
+    between MySQL and MariaDB, so each is taken by name), the default
+    roles, and each account's own `SHOW GRANTS` - the server's rendering,
+    role grants among them."""
     c = _mysql_conn(ep)
-    cur = c.cursor()
-    cur.execute("select user, host, plugin, authentication_string from mysql.user")
-    d = {(u, h): (p, a) for u, h, p, a in cur.fetchall() if not _mysql_sysuser(u)}
-    c.close()
-    return d
+    try:
+        from .variants import identify
+        cur = c.cursor()
+        cur.execute("select version(), @@version_comment")
+        v, comment = cur.fetchone()
+        # the brand as `variants` names it, the one place it is told
+        maria = identify("mysql", {"version": _text(v), "version_comment":
+                                   _text(comment)}).name == "mariadb"
+        cur.execute("select * from mysql.user")
+        names = [d[0].lower() for d in cur.description]
+        out = {}
+        for row in cur.fetchall():
+            r = dict(zip(names, row))
+            u, h = _text(r.get("user")), _text(r.get("host"))
+            if system_principal("mysql", u):
+                continue
+            auth = r.get("authentication_string")
+            if auth is None:
+                auth = r.get("password")
+            out[(u, h)] = {
+                "plugin": _text(r.get("plugin")) or "",
+                "auth": bytes(auth) if isinstance(auth, (bytes, bytearray))
+                else _text(auth) or "",
+                "attrs": {a: _text(r.get(a)) for a in MY_ATTRS if a in r},
+                "ssl": {k: _text(r.get(k)) or "" for k in (
+                    "ssl_cipher", "x509_issuer", "x509_subject")},
+                "role": maria and _text(r.get("is_role")) == "Y",
+                "default_roles": ([_text(r.get("default_role"))]
+                                  if maria and r.get("default_role")
+                                  else []),
+                "maria": maria, "grants": []}
+        if not maria:
+            try:
+                cur.execute("select user, host, default_role_user,"
+                            " default_role_host from mysql.default_roles")
+                for u, h, ru, rh in cur.fetchall():
+                    key = (_text(u), _text(h))
+                    if key in out:
+                        out[key]["default_roles"].append(
+                            (_text(ru), _text(rh)))
+            except Exception:  # noqa: BLE001 - before 8.0: no roles
+                pass
+        for (u, h), v in out.items():
+            v["default_roles"].sort()
+            if v["role"]:
+                cur.execute("show grants for %s", (u,))
+            else:
+                cur.execute("show grants for %s@%s", (u, h))
+            # the USAGE line holds no privilege (before 5.7 it held the
+            # password's hash): what an account holds is the rest
+            v["grants"] = sorted(
+                g for g in (_text(g) for (g,) in cur.fetchall())
+                if not g.startswith("GRANT USAGE ON *.* TO "))
+        return out
+    finally:
+        c.close()
 
 
 def _pg_hashes(ep):
-    """rolname -> password hash, when the source allows reading pg_authid.
-    RDS/Aurora blocks it (returns {}); a PG where we are a real superuser does
-    not, so the hash can be copied to the target without knowing the password."""
+    """rolname -> password hash, or None where this account may not read
+    them: RDS/Aurora block pg_authid; a PG where we are a real superuser
+    does not, so the hash can be copied to the target without knowing the
+    password. None is never read as "no passwords": it is "not
+    compared"."""
     try:
         c = _pg_conn(ep)
+    except Exception:  # noqa: BLE001 - said as not compared
+        return None
+    try:
         cur = c.cursor()
-        cur.execute("select rolname, rolpassword from pg_authid where rolpassword is not null")
-        d = {n: h for n, h in cur.fetchall() if not _pg_sysrole(n)}
+        cur.execute("select rolname, rolpassword from pg_authid where"
+                    " rolpassword is not null")
+        return {n: h for n, h in cur.fetchall() if not _pg_sysrole(n)}
+    except Exception:  # noqa: BLE001 - not readable here
+        return None
+    finally:
         c.close()
-        return d
-    except Exception:
-        return {}
+
+
+#: a role's attributes, as pg_roles keeps them and CREATE ROLE sets them
+PG_ATTRS = ("login", "superuser", "createdb", "createrole", "replication",
+            "bypassrls", "inherit", "connlimit", "valid_until")
 
 
 def _pg_roles(ep):
+    """{role: attributes and `member_of` - the roles it is a member of,
+    each with ` WITH ADMIN` where it may grant it on}."""
     c = _pg_conn(ep)
-    cur = c.cursor()
-    cur.execute("""select r.rolname, r.rolcanlogin, r.rolcreatedb, r.rolcreaterole,
-                          r.rolconnlimit, r.rolsuper, r.rolreplication, r.rolbypassrls,
-                          r.rolinherit, r.rolvaliduntil,
-                          array(select b.rolname from pg_auth_members m
-                                join pg_roles b on m.roleid=b.oid where m.member=r.oid)
-                   from pg_roles r""")
-    d = {}
-    for n, lg, cd, cr, cl, su, rep, byp, inh, valid, mo in cur.fetchall():
-        if _pg_sysrole(n):
-            continue
-        d[n] = {"login": lg, "createdb": cd, "createrole": cr, "connlimit": cl,
-                "superuser": su, "replication": rep, "bypassrls": byp, "inherit": inh,
-                "valid_until": str(valid) if valid else None,
-                "member_of": [m for m in mo if m.startswith("pg_") or not _pg_sysrole(m)]}
-    c.close()
-    return d
+    try:
+        cur = c.cursor()
+        cur.execute("""select r.rolname, r.rolcanlogin, r.rolcreatedb,
+                              r.rolcreaterole, r.rolconnlimit, r.rolsuper,
+                              r.rolreplication, r.rolbypassrls, r.rolinherit,
+                              r.rolvaliduntil,
+                              array(select b.rolname || case when
+                                           m.admin_option then ' WITH ADMIN'
+                                           else '' end
+                                    from pg_auth_members m join pg_roles b
+                                      on m.roleid = b.oid
+                                    where m.member = r.oid)
+                       from pg_roles r""")
+        d = {}
+        for n, lg, cd, cr, cl, su, rep, byp, inh, valid, mo in cur.fetchall():
+            if _pg_sysrole(n):
+                continue
+            d[n] = {"login": lg, "createdb": cd, "createrole": cr,
+                    "connlimit": cl, "superuser": su, "replication": rep,
+                    "bypassrls": byp, "inherit": inh,
+                    "valid_until": str(valid) if valid else None,
+                    "member_of": sorted(
+                        m for m in mo if m.startswith("pg_")
+                        or not _pg_sysrole(m.split(" WITH ")[0]))}
+        return d
+    finally:
+        c.close()
 
 
-def compare(hop, say=print):
+# --- the one compare -------------------------------------------------------
+
+def _grant_gaps(s, t, part="grants"):
+    """(keys on both sides whose target lacks one of the source's `part`,
+    keys whose target holds one the source does not)."""
+    both = [k for k in s if k in t]
+    short = sorted(k for k in both
+                   if set(s[k].get(part) or ()) - set(t[k].get(part) or ()))
+    extra = sorted(k for k in both
+                   if set(t[k].get(part) or ()) - set(s[k].get(part) or ()))
+    return short, extra
+
+
+def _attr_gaps(s, t, attrs):
+    return sorted(k for k in s if k in t and any(
+        s[k].get(a) != t[k].get(a) for a in attrs))
+
+
+def compare(hop, say=print, sides=None):
+    """(result, source's accounts); the target's put in `sides["dst"]`
+    where the caller gives a `sides` to keep them (`_compare`), so what
+    carries the gap does not read the target again. The result has one
+    shape for every engine: `missing_on_target`, `extra_on_target`,
+    `attributes_differ`, `grants_missing`, `grants_extra`,
+    `password_differs` (None where passwords are not compared) and
+    `not_compared`; `result` is `pass`, `gap`, or `unknown` where
+    something that could differ was not read. The engines it branches on
+    are the ones `users` covers (`capabilities._users_engines` reads them
+    here)."""
     eng = hop.engine
+    notes, not_compared = [], []
+    ad, gm, gx, pw = [], [], [], []
     if eng == "mysql":
         s = _mysql_users(hop.source)
         t = _mysql_users(hop.target)
         skeys = {f"{u}@{h}" for u, h in s}
         tkeys = {f"{u}@{h}" for u, h in t}
-        pw = sorted(f"{u}@{h}" for (u, h) in s if (u, h) in t
-                    and _h(s[(u, h)][1]) != _h(t[(u, h)][1]))
+        both = [k for k in s if k in t]
+        pw = sorted(f"{u}@{h}" for (u, h) in both
+                    if _h(s[(u, h)]["auth"]) != _h(t[(u, h)]["auth"]))
+        ad = sorted(f"{u}@{h}" for (u, h) in both if any(
+            s[(u, h)][p] != t[(u, h)][p]
+            for p in ("attrs", "ssl", "default_roles", "plugin")))
+        gm, gx = [[f"{u}@{h}" for u, h in keys]
+                  for keys in _grant_gaps(s, t)]
     elif eng == "postgres":
         s = _pg_roles(hop.source)
         t = _pg_roles(hop.target)
-        skeys, tkeys, pw = set(s), set(t), []
+        skeys, tkeys = set(s), set(t)
+        ad = _attr_gaps(s, t, PG_ATTRS)
+        gm, gx = _grant_gaps(s, t, "member_of")
+        sh = _pg_hashes(hop.source)
+        th = _pg_hashes(hop.target) if sh else None
+        if sh is None:
+            pw = None
+            notes.append("passwords not compared: the source hides"
+                         " pg_authid (managed) - names, attributes and"
+                         " memberships only; create needs --passwords")
+        elif th is None and any(r in t for r in sh):
+            pw = None
+            not_compared.append("passwords: the source's hashes were read"
+                                " and the target hides pg_authid, so"
+                                " whether they match is not known")
+        else:
+            th = th or {}
+            pw = sorted(r for r, h in sh.items() if r in th and th[r] != h)
     elif eng in ("mongodb", "mongo"):
         s = _mongo_users(hop.source)
         t = _mongo_users(hop.target)
         skeys = {f"{d}.{u}" for d, u in s}
         tkeys = {f"{d}.{u}" for d, u in t}
-        pw = []
+        pw = None
+        # only roles the source has and the target lacks; a target superset
+        # is not a gap
+        gm = sorted(f"{d}.{u}" for (d, u) in s
+                    if (d, u) in t and _mongo_role_gap(s[(d, u)], t[(d, u)]))
+        notes.append("passwords cannot be copied from the source (SCRAM, and"
+                     " DocumentDB blocks system.users) -> create sets new"
+                     " ones")
     elif eng == "kafka":
         s = _kafka_accounts(hop, "src")
         t = _kafka_accounts(hop, "dst")
         skeys, tkeys = set(s["users"] or {}), set(t["users"] or {})
-        pw = []
+        pw = None
+        notes.append("a SCRAM password is stored salted and cannot be read"
+                     " back; create sets the one given in the passwords"
+                     " file")
     elif eng == "clickhouse":
         s = _ch_access(hop, "src")
         t = _ch_access(hop, "dst")
         skeys, tkeys = set(s), set(t)
-        pw = []
+        pw = None
+        gm, gx = _grant_gaps(s, t)
+        notes.append("a password is carried as its hash where the source"
+                     " shows it (display_secrets_in_show_and_select);"
+                     " otherwise create sets the one given in the passwords"
+                     " file")
     elif eng in ("opensearch", "elasticsearch"):
         s = _os_security(hop, "src")
         t = _os_security(hop, "dst")
         skeys, tkeys = set(s or {}), set(t or {})
-        pw = []
+        pw = None
+        notes.append("the security API shows no password, not even as its"
+                     " hash; create sets the one given in the passwords"
+                     " file")
     elif eng == "cassandra":
         s = _cs_roles(hop, "src")
         t = _cs_roles(hop, "dst")
         skeys, tkeys = set(s), set(t)
         # the salted hash itself: one carried by `create` is the same one
         pw = sorted(r for r in s if r in t and s[r]["hash"] != t[r]["hash"])
+        ad = _attr_gaps(s, t, ("login", "superuser", "member_of"))
+        gm, gx = _grant_gaps(s, t)
     elif eng == "mssql":
         s = _ms_principals(hop, "src")
         t = _ms_principals(hop, "dst")
         skeys, tkeys = set(s), set(t)
         pw = sorted(k for k in s if k in t and s[k].get("hash")
                     and s[k].get("hash") != t[k].get("hash"))
+        ad = _attr_gaps(s, t, MS_ATTRS)
+        gm, gx = [sorted(set(a) | set(b)) for a, b in
+                  zip(_grant_gaps(s, t, "roles"), _grant_gaps(s, t))]
     elif eng == "db2i":
         s = _ibmi_accounts(hop, "src")
         t = _ibmi_accounts(hop, "dst")
         skeys, tkeys = set(s), set(t)
-        pw = []
+        pw = None
+        ad = _attr_gaps(s, t, ("status", "class", "special", "groups"))
+        gm, gx = _grant_gaps(s, t)
+        notes.append("IBM i shows no password or its hash; a profile is"
+                     " created by its security officer with one of their"
+                     " choosing")
     elif eng == "teradata":
         s = _td_accounts(hop, "src")
         t = _td_accounts(hop, "dst")
         skeys, tkeys = set(s), set(t)
-        pw = []
+        pw = None
+        gm, gx = [sorted(set(a) | set(b)) for a, b in
+                  zip(_grant_gaps(s, t, "roles"), _grant_gaps(s, t))]
+        notes.append("Teradata shows no password or its hash; a user is"
+                     " created with the one the passwords file gives it")
     elif eng == "redis":
         s = _redis_users(hop.source)
         t = _redis_users(hop.target)
@@ -188,6 +500,8 @@ def compare(hop, say=print):
         # password is compared, and later carried, without being read
         pw = sorted(u for u in s if u in t
                     and s[u]["hashes"] != t[u]["hashes"])
+        # a user's rules are what it may do: its grants
+        gm = sorted(u for u in s if u in t and s[u]["rules"] != t[u]["rules"])
     elif eng == "oracle":
         s = _ora_principals(hop, "src")
         t = _ora_principals(hop, "dst")
@@ -196,6 +510,20 @@ def compare(hop, say=print):
         # is not one that differs, and is said below
         pw = sorted(k for k in s if k in t and s[k].get("hash")
                     and t[k].get("hash") and s[k]["hash"] != t[k]["hash"])
+        gm = _ora_short(s, t)
+        gx = _ora_short(t, s)
+        hidden = sorted(k for k in s if k.startswith("user:")
+                        and not s[k].get("hash"))
+        if hidden:
+            notes.append(f"password hash not readable with this account"
+                         f" ({len(hidden)}): {hidden[:8]} - create sets the"
+                         " one in the passwords file for these")
+        blind = sorted(k for k in s if k in t and s[k].get("hash")
+                       and not t[k].get("hash"))
+        if blind:
+            not_compared.append(
+                f"passwords of {len(blind)} user(s): the target hides their"
+                f" hashes ({blind[:8]})")
     else:
         from .capabilities import require
         require(eng, "users")
@@ -204,119 +532,82 @@ def compare(hop, say=print):
     extra = sorted(tkeys - skeys)
     out = {"check": "users", "hop": hop.name, "engine": eng,
            "generated": datetime.date.today().isoformat(),
-           "excluded": "cloud system accounts (AWS_*, rds*, tencent*, mysql internal)",
+           "excluded": "system and provider accounts (AWS_*, rds*,"
+                       " tencent*, cloudsql*, azure*, the server's own)",
            "source_users": len(skeys), "target_users": len(tkeys),
            "missing_on_target": missing, "extra_on_target": extra,
-           "password_differs": pw,
-           "result": "pass" if not missing and not pw else "gap"}
+           "attributes_differ": ad, "grants_missing": gm,
+           "grants_extra": gx, "password_differs": pw,
+           "not_compared": not_compared}
+    out["result"] = ("unknown" if not_compared else "gap"
+                     if missing or ad or gm or pw else "pass")
     say(f"hop={hop.name} engine={eng}  source={len(skeys)} target={len(tkeys)}")
-    say(f"  missing on target ({len(missing)}): {missing}")
-    say(f"  extra on target ({len(extra)}): {extra}")
-    if eng == "redis":
-        rd = sorted(u for u in s if u in t and s[u]["rules"] != t[u]["rules"])
-        out["rules_differ"] = rd
-        out["password_differs"] = pw
-        out["result"] = "pass" if not missing and not pw and not rd \
-            else "gap"
-        say(f"  rules differ ({len(rd)}): {rd}")
-        say(f"  password differs ({len(pw)}): {pw}")
-    elif eng == "kafka":
+    if eng == "kafka":
         _kafka_compared(out, s, t, missing, say)
     elif eng in ("opensearch", "elasticsearch"):
         _os_compared(hop, out, s, t, say)
-    elif eng == "mssql":
-        gd = sorted(k for k in s if k in t and (
-            set(s[k]["roles"]) - set(t[k]["roles"])
-            or set(s[k]["grants"]) - set(t[k]["grants"])))
-        out.update(grants_differ=gd, password_differs=pw)
-        out["result"] = "pass" if not (missing or pw or gd) else "gap"
-        say(f"  password differs ({len(pw)}): {pw}")
-        say(f"  roles or permissions missing on target ({len(gd)}): {gd}")
-    elif eng == "db2i":
-        ad = sorted(k for k in s if k in t and any(
-            s[k][a] != t[k][a] for a in ("status", "class", "special",
-                                         "groups")))
-        gd = sorted(k for k in s if k in t
-                    and set(s[k]["grants"]) - set(t[k]["grants"]))
-        out.update(attributes_differ=ad, grants_differ=gd)
-        out["result"] = "pass" if not (missing or ad or gd) else "gap"
-        say(f"  class, special authorities, groups or status differ"
-            f" ({len(ad)}): {ad}")
-        say(f"  object authorities missing on target ({len(gd)}): {gd}")
-        say("  note: IBM i shows no password or its hash; a profile is"
-            " created by its security officer with one of their choosing")
-    elif eng == "teradata":
-        gd = sorted(k for k in s if k in t and (
-            set(s[k]["grants"]) - set(t[k]["grants"])
-            or set(s[k]["roles"]) - set(t[k]["roles"])))
-        out.update(grants_differ=gd)
-        out["result"] = "pass" if not (missing or gd) else "gap"
-        say(f"  rights or role memberships missing on target ({len(gd)}):"
-            f" {gd}")
-        say("  note: Teradata shows no password or its hash; a user is"
-            " created with the one the passwords file gives it")
-    elif eng == "oracle":
-        gd = _ora_short(s, t)
-        hidden = sorted(k for k in s if k.startswith("user:")
-                        and not s[k].get("hash"))
-        out.update(grants_differ=gd, password_differs=pw,
-                   password_unread=hidden)
-        out["result"] = "pass" if not (missing or pw or gd) else "gap"
-        say(f"  password differs ({len(pw)}): {pw}")
-        say(f"  roles, privileges, grants or quotas missing on target"
-            f" ({len(gd)}): {gd}")
-        if hidden:
-            say(f"  password hash not readable with this account"
-                f" ({len(hidden)}): {hidden[:8]} - create sets the one in"
-                " the passwords file for these")
-    elif eng == "cassandra":
-        ad = sorted(r for r in s if r in t and any(
-            s[r][a] != t[r][a] for a in ("login", "superuser",
-                                         "member_of")))
-        gd = sorted(r for r in s if r in t
-                    and set(s[r]["grants"]) - set(t[r]["grants"]))
-        out.update(attributes_differ=ad, grants_differ=gd)
-        out["result"] = "pass" if not (missing or pw or ad or gd) \
-            else "gap"
-        say(f"  password differs ({len(pw)}): {pw}")
-        say(f"  login, superuser or membership differ ({len(ad)}): {ad}")
-        say(f"  permissions missing on target ({len(gd)}): {gd}")
-    elif eng == "clickhouse":
-        gd = sorted(k for k in s if k in t
-                    and set(s[k]["grants"]) - set(t[k]["grants"]))
-        out["grants_differ"] = gd
-        out["result"] = "pass" if not missing and not gd else "gap"
-        say(f"  grants missing on target ({len(gd)}): {gd}")
-        say("  note: a password is carried as its hash where the source"
-            " shows it (display_secrets_in_show_and_select); otherwise"
-            " create sets the one given in the passwords file")
-    elif eng in ("mongodb", "mongo"):
-        # only roles the source has and the target lacks; a target superset
-        # is not a gap
-        rd = sorted(f"{d}.{u}" for (d, u) in s
-                    if (d, u) in t and _mongo_role_gap(s[(d, u)], t[(d, u)]))
-        out["roles_differ"] = rd
-        out["result"] = "pass" if not missing and not rd else "gap"
-        say(f"  roles differ ({len(rd)}): {rd}")
-        say("  note: passwords cannot be copied from the source (SCRAM, and DocumentDB blocks system.users)"
-            " -> create sets new ones")
-    elif eng == "mysql":
-        say(f"  password differs ({len(pw)}): {pw}")
-    else:
-        sh = _pg_hashes(hop.source)
-        if sh:
-            th = _pg_hashes(hop.target)
-            pw = sorted(r for r, h in sh.items() if r in th and th[r] != h)
-            out["password_differs"] = pw
-            out["result"] = "pass" if not missing and not pw else "gap"
-            say(f"  password differs ({len(pw)}): {pw}   (hash copied from pg_authid)")
-        else:
-            say("  password compare: source hides pg_authid (managed) - names/attributes only;"
-                " create needs --passwords")
+    _said(out, say)
+    for n in notes:
+        say(f"  note: {n}")
     jf = hop.report_dir() / "users.json"
     json.dump(out, open(jf, "w"), indent=2, ensure_ascii=False)
     say(f"  json: {jf}")
+    if sides is not None:
+        sides["dst"] = t
     return out, s
+
+
+def _said(out, say):
+    """The result in one set of words for every engine."""
+    for key, words in (("missing_on_target", "missing on target"),
+                       ("extra_on_target", "extra on target"),
+                       ("attributes_differ", "attributes differ"),
+                       ("grants_missing", "grants or memberships missing on"
+                                          " target"),
+                       ("grants_extra", "grants or memberships only on"
+                                        " target"),
+                       ("password_differs", "password differs")):
+        got = out.get(key)
+        if got is None:
+            say(f"  {words}: not compared")
+        else:
+            say(f"  {words} ({len(got)}): {got}")
+    for why in out.get("not_compared") or []:
+        say(f"  NOT COMPARED - {why}")
+
+
+def _compare(hop, say=print):
+    """(result, source's accounts, target's accounts) - `compare` with
+    both sides kept."""
+    sides = {}
+    out, s = compare(hop, say, sides)
+    return out, s, sides["dst"]
+
+
+def _after(hop, say, apply, given=()):
+    """What `create` ends with once it applied anything: the same compare
+    again, and a gap it left an error rather than a line in its output.
+    `given`: accounts this create gave the passwords file's password - by
+    the operator's choice not the source's, so their passwords differing
+    is said, not a gap."""
+    if not apply:
+        return
+    say("  compared again after create:")
+    out, _, _ = _compare(hop, say)
+    chosen = sorted(set(out.get("password_differs") or ()) & set(given))
+    if chosen:
+        say(f"  set from the passwords file, not the source's ({len(chosen)}):"
+            f" {chosen}")
+        out["password_differs"] = [k for k in out["password_differs"]
+                                   if k not in chosen]
+    left = [f"{k.replace('_', ' ')}: {', '.join(map(str, v[:6]))}"
+            for k, v in out.items()
+            if k in ("missing_on_target", "attributes_differ",
+                     "grants_missing", "password_differs") and v]
+    left += out.get("not_compared") or []
+    if left:
+        raise SystemExit("users: the target still differs from the source"
+                         " after create - " + "; ".join(left))
 
 
 # --- kafka -----------------------------------------------------------------
@@ -396,14 +687,18 @@ def _acl_said(key):
 
 
 def _kafka_compared(out, s, t, missing, say):
-    """The users' mechanisms and the ACLs, on top of the user names.
-    What a side would not list is a result of its own, never a pass."""
+    """The users' mechanisms (their attributes) and the ACLs (their
+    grants), on top of the user names. What a side would not list is a
+    result of its own, never a pass."""
     su, tu = s["users"] or {}, t["users"] or {}
     mech = sorted(u for u in su if u in tu and set(su[u]) - set(tu[u]))
     sa, ta = s["acls"], t["acls"]
     gone = sorted(sa - ta) if sa and ta is not None else []
-    out["mechanisms_differ"] = mech
+    extra = sorted(ta - sa) if ta and sa is not None else []
+    out["attributes_differ"] = mech
     out["acls_missing"] = [list(k) for k in gone]
+    out["grants_missing"] = [_acl_said(k) for k in gone]
+    out["grants_extra"] = [_acl_said(k) for k in extra]
     out["source_acls"] = len(sa or ())
     unread = [f"{side} {what}: {why}"
               for side, acc in (("source", s), ("target", t))
@@ -414,20 +709,9 @@ def _kafka_compared(out, s, t, missing, say):
         unread.append(f"the source holds {len(sa)} ACL(s) and the target"
                       " checks none (no authorizer): every client there may"
                       " do anything")
-    out["unread"] = unread
-    if unread:
-        out["result"] = "unknown"
-    else:
-        out["result"] = "pass" if not missing and not mech and not gone \
-            else "gap"
-    say(f"  mechanisms differ ({len(mech)}): {mech}")
-    say(f"  ACLs missing on target ({len(gone)} of {len(sa or ())}):")
-    for k in gone:
-        say(f"    {_acl_said(k)}")
-    for u in unread:
-        say(f"  NOT COMPARED - {u}")
-    say("  note: a SCRAM password is stored salted and cannot be read back;"
-        " create sets the one given in the passwords file")
+    out["not_compared"] = unread
+    out["result"] = ("unknown" if unread else "gap"
+                     if missing or mech or gone else "pass")
 
 
 def _kafka_create(hop, apply, passwords, say):
@@ -437,13 +721,13 @@ def _kafka_create(hop, apply, passwords, say):
     as they are, principal and pattern included, whether or not their
     principal is a SCRAM user (mTLS and IAM principals have ACLs too)."""
     from kafka.admin import ScramMechanism, UserScramCredentialUpsertion
-    out, s = compare(hop, say)
+    out, s, t = _compare(hop, say)
     if out["result"] == "unknown":
-        raise SystemExit("users: " + "; ".join(out["unread"]))
+        raise SystemExit("users: " + "; ".join(out["not_compared"]))
     su = s["users"] or {}
     wanted = [(u, m) for u in out["missing_on_target"] for m in su[u]]
-    have = _kafka_accounts(hop, "dst")["users"] or {}
-    wanted += [(u, m) for u in out["mechanisms_differ"] for m in su[u]
+    have = t["users"] or {}
+    wanted += [(u, m) for u in out["attributes_differ"] for m in su[u]
                if m not in have.get(u, [])]
     users = [(u, m) for u, m in wanted if (passwords or {}).get(u)]
     skipped = sorted({u for u, _ in wanted if not (passwords or {}).get(u)})
@@ -532,8 +816,61 @@ def _kafka_rollback(hop, apply, say):
 
 
 # --- sql server ------------------------------------------------------------
-#: logins every server has, or the provider's on a managed one
-MS_SYS = ("sa", "public", "sysadmin", "rdsa", "rdsadmin")
+#: what is compared and carried of a login (its SID - the same SID is what
+#: keeps a database's user joined to it -, whether it is disabled, its
+#: default database and password policy) and of a database user (the login
+#: it is joined to, its default schema)
+MS_ATTRS = ("sid", "disabled", "default_db", "policy", "expiration",
+            "login", "schema")
+
+#: a securable's class (`sys.database_permissions.class`) as GRANT names
+#: its kind; the database itself (0) and an object or column (1) are
+#: written apart, a database principal (4) by the principal's own kind
+MS_SECURABLES = {3: "SCHEMA", 5: "ASSEMBLY", 6: "TYPE",
+                 10: "XML SCHEMA COLLECTION", 23: "FULLTEXT CATALOG",
+                 24: "SYMMETRIC KEY", 25: "CERTIFICATE",
+                 26: "ASYMMETRIC KEY"}
+#: the classes whose securable lives in a schema
+MS_IN_SCHEMA = (1, 6, 10)
+
+#: each permission granted in a database, with its securable's names: the
+#: object's schema and name and the column (`minor_id`) for class 1, the
+#: principal's kind for class 4
+MS_PERMISSIONS = (
+    "select g.name, p.state_desc, p.permission_name, p.class,"
+    " case p.class when 1 then object_schema_name(p.major_id)"
+    " when 3 then schema_name(p.major_id)"
+    " when 6 then (select schema_name(t.schema_id) from sys.types t where"
+    " t.user_type_id = p.major_id)"
+    " when 10 then (select schema_name(x.schema_id) from"
+    " sys.xml_schema_collections x where x.xml_collection_id = p.major_id)"
+    " end,"
+    " case p.class when 1 then object_name(p.major_id)"
+    " when 4 then (select d.name from sys.database_principals d where"
+    " d.principal_id = p.major_id)"
+    " when 5 then (select a.name from sys.assemblies a where a.assembly_id ="
+    " p.major_id)"
+    " when 6 then (select t.name from sys.types t where t.user_type_id ="
+    " p.major_id)"
+    " when 10 then (select x.name from sys.xml_schema_collections x where"
+    " x.xml_collection_id = p.major_id)"
+    " when 23 then (select f.name from sys.fulltext_catalogs f where"
+    " f.fulltext_catalog_id = p.major_id)"
+    " when 24 then (select k.name from sys.symmetric_keys k where"
+    " k.symmetric_key_id = p.major_id)"
+    " when 25 then (select c.name from sys.certificates c where"
+    " c.certificate_id = p.major_id)"
+    " when 26 then (select k.name from sys.asymmetric_keys k where"
+    " k.asym_key_id = p.major_id)"
+    " end,"
+    " case when p.class = 1 and p.minor_id > 0 then col_name(p.major_id,"
+    " p.minor_id) end,"
+    " case when p.class = 4 then (select d.type from sys.database_principals"
+    " d where d.principal_id = p.major_id) end,"
+    " p.class_desc, p.major_id, p.minor_id"
+    " from sys.database_permissions p join sys.database_principals g on"
+    " g.principal_id = p.grantee_principal_id"
+    " where not (p.class = 0 and p.permission_name = 'CONNECT')")
 
 
 def _ms_conn(ep, db="master"):
@@ -555,29 +892,80 @@ def _ms_rows(ep, db, sql):
 
 
 def _ms_system(name):
-    return (name in MS_SYS or name.startswith(("##", "NT ", "BUILTIN\\"))
-            or name.upper().startswith("NT "))
+    return system_principal("mssql", name)
+
+
+def _ms_securable(cls, sch, obj, col, ptype):
+    """The securable of one permission as GRANT names it: "" for the
+    database, `OBJECT::[s].[t] ([c])` for a column, `USER::[u]` or
+    `ROLE::[r]` for a principal, `CERTIFICATE::[c]` and the rest by their
+    class. None where its name could not be read or its class has no word
+    here - such a permission is compared and listed, never granted."""
+    q = _ms_ident
+    if cls == 0:
+        return ""
+    if obj is None or (cls in MS_IN_SCHEMA and sch is None):
+        return None
+    if cls == 1:
+        return (f"OBJECT::{q(sch)}.{q(obj)}"
+                + (f" ({q(col)})" if col is not None else ""))
+    if cls == 3:
+        return f"SCHEMA::{q(obj if obj is not None else sch)}"
+    if cls == 4:
+        kind = {"R": "ROLE", "A": "APPLICATION ROLE"}.get(
+            str(ptype or "").strip(), "USER")
+        return f"{kind}::{q(obj)}"
+    word = MS_SECURABLES.get(cls)
+    if word is None:
+        return None
+    return (f"{word}::{q(sch)}.{q(obj)}" if cls in MS_IN_SCHEMA
+            else f"{word}::{q(obj)}")
+
+
+def _ms_permission(state, perm, on):
+    """One permission as the GRANT or DENY that gives it, without its
+    grantee: `WITH GRANT OPTION` kept after it. None for one that cannot
+    be written (`_ms_securable`), or whose permission is not one of the
+    server's words."""
+    import re
+    if on is None or not re.fullmatch(r"[A-Z][A-Z ]*", str(perm)):
+        return None
+    head = (f"{'DENY' if state == 'DENY' else 'GRANT'} {perm}"
+            + (f" ON {on}" if on else ""))
+    return head + (" WITH GRANT OPTION"
+                   if state == "GRANT_WITH_GRANT_OPTION" else "")
 
 
 def _ms_principals(hop, side):
-    """{"login:<name>" | "user:<db>.<name>": {...}} - each SQL login with
-    its password hash and SID (the same SID is what keeps a database's user
-    joined to its login), its server roles; each database user of the
-    hop's databases with its login, roles and permissions."""
+    """{"login:<name>" | "user:<db>.<name>" | "role:<db>.<name>": {...}} -
+    each SQL or Windows login with its password hash, SID, password policy
+    and server roles; each database user and role of the hop's databases
+    with its login, default schema, the roles it is a member of and every
+    permission it holds, rendered by its class with the column a column
+    grant is on and its grant option (`_ms_permission`)."""
     ep = hop.source if side == "src" else hop.target
+    back = {hop.target_db(d): d for d in (hop.databases or [])} \
+        if side == "dst" else {}
     out = {}
-    for name, sid, pw, off, db_default, kind in _ms_rows(
+    sids = {}
+    for name, sid, pw, off, db_default, kind, policy, expiry in _ms_rows(
             ep, "master", "select p.name, p.sid, l.password_hash,"
-                          " p.is_disabled, p.default_database_name, p.type"
+                          " p.is_disabled, p.default_database_name, p.type,"
+                          " l.is_policy_checked, l.is_expiration_checked"
                           " from sys.server_principals p left join"
                           " sys.sql_logins l on l.principal_id ="
                           " p.principal_id where p.type in ('S', 'U', 'G')"):
+        sid = bytes(sid).hex() if sid else ""
+        sids[sid] = name
         if _ms_system(name):
             continue
         out[f"login:{name}"] = {
-            "kind": kind, "sid": bytes(sid).hex() if sid else "",
+            "name": name, "kind": str(kind).strip(), "sid": sid,
             "hash": bytes(pw).hex() if pw else "", "disabled": bool(off),
-            "default_db": db_default, "roles": [], "grants": []}
+            "default_db": back.get(db_default, db_default),
+            "policy": None if policy is None else bool(policy),
+            "expiration": None if expiry is None else bool(expiry),
+            "roles": [], "grants": []}
     for role, member in _ms_rows(
             ep, "master", "select r.name, m.name from"
                           " sys.server_role_members rm join"
@@ -588,19 +976,21 @@ def _ms_principals(hop, side):
             out[f"login:{member}"]["roles"].append(role)
     for db in hop.databases or []:
         name_db = hop.target_db(db) if side == "dst" else db
-        users = {}
+        found = {}
         for name, kind, sid, schema in _ms_rows(
                 ep, name_db, "select name, type, sid, default_schema_name"
                              " from sys.database_principals where type in"
-                             " ('S', 'U', 'G') and principal_id > 4"):
-            if _ms_system(name) or name in ("dbo", "guest"):
+                             " ('S', 'U', 'G', 'R') and principal_id > 4"
+                             " and is_fixed_role = 0 and name <> 'public'"):
+            if _ms_system(name):
                 continue
-            login = next((k[6:] for k, v in out.items()
-                          if k.startswith("login:") and v["sid"] ==
-                          (bytes(sid).hex() if sid else "")), None)
-            users[name] = {"kind": kind, "login": login,
-                           "schema": schema or "dbo", "roles": [],
-                           "grants": []}
+            kind = str(kind).strip()
+            sid = bytes(sid).hex() if sid else ""
+            found[name] = {
+                "name": name, "db": db, "kind": kind,
+                "login": sids.get(sid) if kind != "R" else None,
+                "schema": (schema or "dbo") if kind != "R" else None,
+                "roles": [], "grants": [], "unwritten": []}
         for role, member in _ms_rows(
                 ep, name_db, "select r.name, m.name from"
                              " sys.database_role_members rm join"
@@ -608,136 +998,259 @@ def _ms_principals(hop, side):
                              " = rm.role_principal_id join"
                              " sys.database_principals m on m.principal_id"
                              " = rm.member_principal_id"):
-            if member in users:
-                users[member]["roles"].append(role)
-        for who, state, perm, cls, sch, obj in _ms_rows(
-                ep, name_db, "select g.name, p.state_desc,"
-                             " p.permission_name, p.class_desc,"
-                             " coalesce(schema_name(o.schema_id),"
-                             " schema_name(p.major_id)), o.name from"
-                             " sys.database_permissions p join"
-                             " sys.database_principals g on g.principal_id"
-                             " = p.grantee_principal_id left join"
-                             " sys.objects o on p.class = 1 and o.object_id"
-                             " = p.major_id where p.permission_name <>"
-                             " 'CONNECT'"):
-            if who not in users:
+            if member in found:
+                found[member]["roles"].append(role)
+        for (who, state, perm, cls, sch, obj, col, ptype, cdesc, major,
+             minor) in _ms_rows(ep, name_db, MS_PERMISSIONS):
+            if who not in found:
                 continue
-            on = (f"[{sch}].[{obj}]" if cls == "OBJECT_OR_COLUMN" and obj
-                  else f"SCHEMA::[{sch}]" if cls == "SCHEMA" else "")
-            users[who]["grants"].append(
-                f"{'DENY' if state == 'DENY' else 'GRANT'} {perm}"
-                + (f" ON {on}" if on else ""))
-        for name, v in users.items():
+            said = _ms_permission(state, perm,
+                                  _ms_securable(cls, sch, obj, col, ptype))
+            if said is None:
+                # compared by what it is; never granted
+                said = (f"{state} {perm} ON {cdesc} {sch or ''}.{obj or ''}"
+                        f" #{major}.{minor}")
+                found[who]["unwritten"].append(said)
+            found[who]["grants"].append(said)
+        for name, v in found.items():
             v["roles"].sort()
             v["grants"].sort()
-            out[f"user:{db}.{name}"] = v
+            kind = "role" if v["kind"] == "R" else "user"
+            out[f"{kind}:{db}.{name}"] = v
     return out
 
 
-def _ms_create(hop, apply, passwords, say):
-    """Each missing login made with the source's password hash and SID
-    (`PASSWORD = 0x... HASHED`), so a database user carried beside it is
-    joined to it and signs in with the password it had; its server roles;
-    then each database's users, their roles and their permissions."""
-    out, s = compare(hop, say)
-    stmts, made = [], []
-    missing = out["missing_on_target"]
+def _ms_grant_to(grant, who):
+    """A permission `_ms_permission` rendered, given to `who`: the grantee
+    before `WITH GRANT OPTION`."""
+    tail = " WITH GRANT OPTION"
+    if grant.endswith(tail):
+        return f"{grant[:-len(tail)]} TO {who}{tail}"
+    return f"{grant} TO {who}"
+
+
+def _ms_revoke(grant, who):
+    """The statement that takes a permission `_ms_grant_to` gave back: a
+    REVOKE removes a GRANT and a DENY alike, and one given with its grant
+    option goes with what was granted on from it."""
+    tail = " WITH GRANT OPTION"
+    cascade = grant.endswith(tail)
+    body = grant[:-len(tail)] if cascade else grant
+    body = body.split(" ", 1)[1]
+    return f"REVOKE {body} FROM {who}" + (" CASCADE" if cascade else "")
+
+
+def _ms_plan(hop, out, s, t):
+    """Each statement `_ms_create` runs, in the order the server takes
+    them: the logins, their server roles; then in each database its roles,
+    its users, who is a member of which role, and the permissions. Each is
+    {"db", "key", "sql", "shown", "undo", "made"}."""
+    import re
+    q = _ms_ident
+    steps, skipped = [], []
+    missing = set(out["missing_on_target"])
+    differ = set(out["attributes_differ"]) | set(out["grants_missing"])
+
+    def there(db):
+        return hop.target_db(db) if db in (hop.databases or []) else db
+
+    def step(db, sql, key=None, undo=None, shown=None, made=False):
+        steps.append({"db": db, "key": key, "sql": sql,
+                      "shown": shown or sql, "undo": undo, "made": made})
+
     for key in sorted(k for k in missing if k.startswith("login:")):
-        v, name = s[key], key[6:]
-        if v["kind"] == "S":
-            if not v["hash"]:
-                say(f"   skipped {name}: its password hash is not readable")
-                continue
-            head = (f"CREATE LOGIN [{name}] WITH PASSWORD = 0x{v['hash']}"
-                    f" HASHED, SID = 0x{v['sid']}, CHECK_POLICY = OFF")
-            if v["default_db"]:
-                head += f", DEFAULT_DATABASE = [{v['default_db']}]"
-        else:
-            head = f"CREATE LOGIN [{name}] FROM WINDOWS"
-        stmts.append(("master", key, head))
-        if v["disabled"]:
-            stmts.append(("master", None, f"ALTER LOGIN [{name}] DISABLE"))
-        for role in v["roles"]:
-            stmts.append(("master", None,
-                          f"ALTER SERVER ROLE [{role}] ADD MEMBER [{name}]"))
-    for key in sorted(k for k in set(missing) | set(out.get(
-            "grants_differ", [])) if k.startswith("user:")):
         v = s[key]
-        db, name = key[5:].split(".", 1)
+        name = q(v["name"])
+        if v["kind"] == "S":
+            if not v["hash"] or not re.fullmatch(r"[0-9a-f]+", v["hash"]) \
+                    or not re.fullmatch(r"[0-9a-f]*", v["sid"]):
+                skipped.append(f"{key}: its password hash is not readable")
+                continue
+            opts = [f"SID = 0x{v['sid']}"] if v["sid"] else []
+            if v["default_db"]:
+                opts.append(f"DEFAULT_DATABASE = {q(there(v['default_db']))}")
+            opts.append("CHECK_POLICY ="
+                        f" {'OFF' if v['policy'] is False else 'ON'}")
+            opts.append("CHECK_EXPIRATION ="
+                        f" {'ON' if v['expiration'] else 'OFF'}")
+            head = f"CREATE LOGIN {name} WITH PASSWORD = 0x{v['hash']} HASHED"
+            step("master", head + ", " + ", ".join(opts), key,
+                 ["master", f"DROP LOGIN {name}"],
+                 f"CREATE LOGIN {name} WITH PASSWORD = <hash> HASHED, "
+                 + ", ".join(opts), made=True)
+        else:
+            head = f"CREATE LOGIN {name} FROM WINDOWS"
+            if v["default_db"]:
+                head += f" WITH DEFAULT_DATABASE = {q(there(v['default_db']))}"
+            step("master", head, key, ["master", f"DROP LOGIN {name}"],
+                 made=True)
+        if v["disabled"]:
+            step("master", f"ALTER LOGIN {name} DISABLE")
+    for key in sorted(k for k in (missing | differ)
+                      if k.startswith("login:")):
+        if key in skipped or any(x.startswith(key + ":") for x in skipped):
+            continue
+        v, have = s[key], t.get(key, {})
+        name = q(v["name"])
+        for role in sorted(set(v["roles"]) - set(have.get("roles", ()))):
+            step("master", f"ALTER SERVER ROLE {q(role)} ADD MEMBER {name}",
+                 undo=None if key in missing else
+                 ["master", f"ALTER SERVER ROLE {q(role)} DROP MEMBER"
+                            f" {name}"])
+        if key not in missing and have:
+            if v["disabled"] != have.get("disabled"):
+                now, was = (("DISABLE", "ENABLE") if v["disabled"]
+                            else ("ENABLE", "DISABLE"))
+                step("master", f"ALTER LOGIN {name} {now}",
+                     undo=["master", f"ALTER LOGIN {name} {was}"])
+            if v["kind"] == "S" and (v["policy"], v["expiration"]) != (
+                    have.get("policy"), have.get("expiration")):
+                step("master", f"ALTER LOGIN {name} WITH CHECK_POLICY ="
+                               f" {'OFF' if v['policy'] is False else 'ON'},"
+                               " CHECK_EXPIRATION ="
+                               f" {'ON' if v['expiration'] else 'OFF'}")
+            if v["sid"] != have.get("sid"):
+                skipped.append(f"{key}: the target's login has another SID,"
+                               " so the users joined to it on the source"
+                               " are not joined to it there - drop and"
+                               " create it again with the source's SID")
+    principals = [k for k in s if k.startswith(("user:", "role:"))]
+    for db in hop.databases or []:
         target = hop.target_db(db)
-        if key in missing:
-            how = (f"FOR LOGIN [{v['login']}]" if v["login"]
+        here = sorted(k for k in principals if s[k]["db"] == db)
+        # roles first: a user is made a member of one, and a role of another
+        for key in sorted(here, key=lambda k: not k.startswith("role:")):
+            if key not in missing:
+                continue
+            v = s[key]
+            name = q(v["name"])
+            if key.startswith("role:"):
+                step(target, f"CREATE ROLE {name}", key,
+                     [target, f"DROP ROLE IF EXISTS {name}"], made=True)
+                continue
+            how = (f"FOR LOGIN {q(v['login'])}" if v["login"]
                    else "WITHOUT LOGIN")
-            stmts.append((target, key, f"CREATE USER [{name}] {how} WITH"
-                                       f" DEFAULT_SCHEMA = [{v['schema']}]"))
-        for role in v["roles"]:
-            stmts.append((target, None,
-                          f"ALTER ROLE [{role}] ADD MEMBER [{name}]"))
-        for g in v["grants"]:
-            stmts.append((target, None, f"{g} TO [{name}]"))
-    if not stmts:
+            step(target, f"CREATE USER {name} {how} WITH DEFAULT_SCHEMA ="
+                         f" {q(v['schema'])}", key,
+                 [target, f"DROP USER IF EXISTS {name}"], made=True)
+        for key in here:
+            if key not in missing and key not in differ:
+                continue
+            v, have = s[key], t.get(key, {})
+            name = q(v["name"])
+            if key not in missing and have and key.startswith("user:"):
+                if v["schema"] != have.get("schema"):
+                    step(target, f"ALTER USER {name} WITH DEFAULT_SCHEMA ="
+                                 f" {q(v['schema'])}",
+                         undo=[target, f"ALTER USER {name} WITH"
+                                       f" DEFAULT_SCHEMA ="
+                                       f" {q(have.get('schema') or 'dbo')}"])
+                if v["login"] and v["login"] != have.get("login"):
+                    step(target, f"ALTER USER {name} WITH LOGIN ="
+                                 f" {q(v['login'])}")
+            for role in sorted(set(v["roles"]) - set(have.get("roles", ()))):
+                step(target, f"ALTER ROLE {q(role)} ADD MEMBER {name}",
+                     undo=None if key in missing else
+                     [target, f"ALTER ROLE {q(role)} DROP MEMBER {name}"])
+            for g in sorted(set(v["grants"]) - set(have.get("grants", ()))):
+                if g in v["unwritten"]:
+                    skipped.append(f"{key}: {g} - its securable has no"
+                                   " GRANT form here")
+                    continue
+                step(target, _ms_grant_to(g, name),
+                     undo=None if key in missing else
+                     [target, _ms_revoke(g, name)])
+    return steps, skipped
+
+
+def _ms_create(hop, apply, passwords, say):
+    """Each missing login made with the source's password hash, SID and
+    password policy (`PASSWORD = 0x... HASHED`), so a database user carried
+    beside it is joined to it and signs in with the password it had; its
+    server roles; then each database's roles and users, their memberships
+    and their permissions - a column's on that column, one with its grant
+    option with it (`_ms_plan`). Every statement goes into the record, with
+    the one that undoes it."""
+    out, s, t = _compare(hop, say)
+    steps, skipped = _ms_plan(hop, out, s, t)
+    for x in skipped:
+        say(f"   skipped {x}")
+    if not steps:
         say("  nothing to create")
         return
-    say(f">> sqlserver: {len(stmts)} statement(s)"
+    say(f">> sqlserver: {len(steps)} statement(s)"
         + ("" if apply else "  (nothing done; add --apply)"))
-    for db, _, st in stmts:
-        say(f"   [{db}] " + (st.split(" WITH PASSWORD")[0]
-                              + " WITH PASSWORD = <hash> HASHED ..."
-                              if "HASHED" in st else st))
+    for st in steps:
+        say(f"   [{st['db']}] {st['shown']}")
     if not apply:
         return
+    ledger = []
+    for st in steps:
+        entry = {"key": st["key"], "db": st["db"], "sql": st["shown"],
+                 "undo": st["undo"], "made": st["made"]}
+        try:
+            conn = _ms_conn(hop.target, st["db"])
+            try:
+                conn.cursor().execute(st["sql"])
+            finally:
+                conn.close()
+            entry["ok"] = True
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            entry["ok"] = False
+            entry["error"] = str(e).splitlines()[0][:160]
+            say(f"   FAILED [{st['db']}] {st['shown'][:80]}: {entry['error']}")
+        ledger.append(entry)
+    rec = _record(hop, "mssql", ledger, skipped=skipped)
+    made = sum(1 for e in ledger if e["ok"] and e["made"])
+    say(f"  created {made}, ran {sum(e['ok'] for e in ledger)} of"
+        f" {len(ledger)}; recorded at {rec} (undo with users {hop.name}"
+        " rollback)")
+    if any(not e["ok"] for e in ledger):
+        raise SystemExit(f"users: {sum(not e['ok'] for e in ledger)}"
+                         " statement(s) failed")
+
+
+def _ms_rollback(hop, apply, say):
+    """Each statement `_ms_create` ran that has an undo, undone last
+    first: a permission revoked, a membership dropped, then the users and
+    roles, then the logins they were joined to."""
+    rec = hop.report_dir() / "user-sync-created.json"
+    runs = [e for e in (json.loads(rec.read_text()) if rec.exists() else [])
+            if e.get("engine") == "mssql"]
+    undo = [tuple(st["undo"]) for e in runs
+            for st in (e.get("steps") or []) if st.get("ok") and
+            st.get("undo")]
+    # a record from before the ledger: what it created, users first
+    for e in runs:
+        if e.get("steps") is None:
+            for key in sorted(e.get("created", []),
+                              key=lambda k: k.startswith("user:")):
+                if key.startswith("user:"):
+                    db, name = key[5:].split(".", 1)
+                    undo.append((hop.target_db(db), "DROP USER IF EXISTS"
+                                                    f" {_ms_ident(name)}"))
+                else:
+                    undo.append(("master", f"DROP LOGIN {_ms_ident(key[6:])}"))
+    if not undo:
+        say("  no sqlserver logins or users were created by us, nothing to"
+            " undo")
+        return
     failed = []
-    for db, key, st in stmts:
+    for db, st in reversed(undo):
+        if not apply:
+            say(f"   would run [{db}] {st}")
+            continue
         try:
             conn = _ms_conn(hop.target, db)
             try:
                 conn.cursor().execute(st)
             finally:
                 conn.close()
-            if key:
-                made.append(key)
-        except Exception as e:  # noqa: BLE001 - recorded and said
-            failed.append(f"{st.split(' WITH PASSWORD')[0][:80]}:"
-                          f" {str(e).splitlines()[0][:120]}")
-    rec = hop.report_dir() / "user-sync-created.json"
-    prev = json.loads(rec.read_text()) if rec.exists() else []
-    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
-                 "engine": "mssql", "created": made, "failed": failed})
-    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
-    for f in failed:
-        say(f"   FAILED {f}")
-    say(f"  created {len(made)}; recorded at {rec}"
-        f" (undo with users {hop.name} rollback)")
-    if failed:
-        raise SystemExit(f"users: {len(failed)} statement(s) failed")
-
-
-def _ms_rollback(hop, apply, say):
-    rec = hop.report_dir() / "user-sync-created.json"
-    made = [k for e in (json.loads(rec.read_text()) if rec.exists() else [])
-            if e.get("engine") == "mssql" for k in e.get("created", [])]
-    if not made:
-        say("  no sqlserver logins or users were created by us, nothing to"
-            " undo")
-        return
-    # users before the logins they are joined to
-    for key in sorted(made, key=lambda k: not k.startswith("user:")):
-        if key.startswith("user:"):
-            db, name = key[5:].split(".", 1)
-            db, st = hop.target_db(db), f"DROP USER IF EXISTS [{name}]"
-        else:
-            db, st = "master", f"DROP LOGIN [{key[6:]}]"
-        if not apply:
-            say(f"   would run [{db}] {st}")
-            continue
-        conn = _ms_conn(hop.target, db)
-        try:
-            conn.cursor().execute(st)
-        finally:
-            conn.close()
-        say(f"   [{db}] {st}")
-    if apply:
+            say(f"   [{db}] {st}")
+        except Exception as e:  # noqa: BLE001 - said
+            failed.append(st)
+            say(f"   FAILED [{db}] {st}: {str(e).splitlines()[0][:120]}")
+    if apply and not failed:
         rec.rename(str(rec) + ".rolled-back")
 
 
@@ -800,14 +1313,18 @@ def _ibmi_create(hop, apply, say):
     missing on the target is listed for its security officer to create -
     IBM i shows no password to carry, and a profile's special authorities
     are theirs to decide."""
-    out, s = compare(hop, say)
-    t = _ibmi_accounts(hop, "dst")
+    import re
+    out, s, t = _compare(hop, say)
     for key in out["missing_on_target"]:
         say(f"   create by hand (CRTUSRPRF): {key[8:]}"
             f" class {s[key]['class']}"
             + (f", special {' '.join(s[key]['special'])}"
                if s[key]["special"] else ""))
-    cmds = []
+    # a CL command is one string: each name in it is a system name - what
+    # an IBM i name is made of, never a parenthesis, a blank or a quote -
+    # or the authority is not granted from here
+    word = re.compile(r"[A-Z0-9_$#@*][A-Z0-9_$#@.*]{0,127}")
+    cmds, odd = [], []
     for key, v in sorted(s.items()):
         if key not in t:
             continue
@@ -815,9 +1332,15 @@ def _ibmi_create(hop, apply, say):
         for g in sorted(set(v["grants"]) - set(t[key]["grants"])):
             auth, _, obj = g.partition(" ON ")
             db, _, name = obj.partition(".")
-            lib = hop.target_db(db)
-            cmds.append((key, g, f"GRTOBJAUT OBJ({lib.upper()}/{name})"
+            lib = hop.target_db(db).upper()
+            if not all(word.fullmatch(x) for x in (lib, name, who, auth)):
+                odd.append(f"{g} to {who}")
+                continue
+            cmds.append((key, g, f"GRTOBJAUT OBJ({lib}/{name})"
                                  f" OBJTYPE(*FILE) USER({who}) AUT({auth})"))
+    for x in odd:
+        say(f"   not granted from here, a name in it is not a system name:"
+            f" {x}")
     if not cmds:
         say("  no object authority to grant")
         return
@@ -988,8 +1511,7 @@ def _td_create(hop, apply, passwords, say):
     """Each role missing on the target made, each user made with the
     password the passwords file gives it (Teradata shows none to carry),
     then each role membership and each right the target lacks granted."""
-    out, s = compare(hop, say)
-    t = _td_accounts(hop, "dst")
+    out, s, t = _compare(hop, say)
     stmts = []
     for key in sorted(k for k in out["missing_on_target"]
                       if k.startswith("role:")):
@@ -1173,7 +1695,8 @@ def _ora_principals(hop, side):
                        " from dba_roles where oracle_maintained = 'N')"):
         if who in by_name:
             out[by_name[who]]["grants"].append(
-                f'{priv} ON "{_ora_said(hop, side, owner)}"."{obj}"'
+                f"{priv} ON {_ora_ident(_ora_said(hop, side, owner))}"
+                f".{_ora_ident(obj)}"
                 + (" WITH GRANT OPTION" if grantable == "YES" else ""))
     for who, space, most in _ora_rows(hop, side, "select username,"
                                                  " tablespace_name, max_bytes"
@@ -1181,7 +1704,7 @@ def _ora_principals(hop, side):
         if who in by_name:
             out[by_name[who]]["quotas"].append(
                 f"{'UNLIMITED' if int(most) < 0 else int(most)} ON"
-                f' "{space}"')
+                f" {_ora_ident(space)}")
     for v in out.values():
         for part in ("roles", "privileges", "grants", "quotas"):
             if part in v:
@@ -1197,68 +1720,83 @@ def _ora_short(s, t):
         for p in ("roles", "privileges", "grants", "quotas")))
 
 
+#: a privilege's words, as Oracle names every system and object privilege
+_ORA_WORDS = r"[A-Z][A-Z ]*[A-Z]"
+
+
 def _ora_create(hop, apply, passwords, say):
     """Each missing role, then each missing user - with the source's
     password hash (`IDENTIFIED BY VALUES`), or the one in the passwords
     file where the hash is not readable - its lock, profile and tablespace
     where the target has them, its quotas; then every role, privilege and
-    grant the target lacks, an object by the target's own schema."""
-    out, s = compare(hop, say)
-    t = _ora_principals(hop, "dst")
+    grant the target lacks, an object by the target's own schema. Every
+    name through `_ora_ident`; a privilege only if it is Oracle's words."""
+    import re
+    out, s, t = _compare(hop, say)
     spaces = {n for (n,) in _ora_rows(hop, "dst", "select tablespace_name"
                                                   " from dba_tablespaces")}
     profiles = {n for (n,) in _ora_rows(hop, "dst", "select distinct"
                                                     " profile from"
                                                     " dba_profiles")}
+    q = _ora_ident
     stmts, skipped = [], []
     missing = out["missing_on_target"]
     for key in sorted(k for k in missing if k.startswith("role:")):
-        stmts.append((key, f'CREATE ROLE "{s[key]["name"]}"'))
+        stmts.append((key, f"CREATE ROLE {q(s[key]['name'])}"))
     for key in sorted(k for k in missing if k.startswith("user:")):
         v = s[key]
         name = _ora_there(hop, v["name"])
         secret = (passwords or {}).get(v["name"]) or \
             (passwords or {}).get(v["name"].lower())
-        if v["hash"]:
+        if v["hash"] and re.fullmatch(r"[0-9A-Za-z:;]+", v["hash"]):
             how = f"IDENTIFIED BY VALUES '{v['hash']}'"
-        elif secret:
-            how = 'IDENTIFIED BY "' + str(secret).replace('"', "") + '"'
+        elif secret and '"' not in str(secret):
+            how = f"IDENTIFIED BY {q(secret)}"
         else:
             skipped.append(key)
             say(f"   skipped {key}: its password hash is not readable here"
-                " and the passwords file has none for it")
+                " and the passwords file has none for it that Oracle takes"
+                " (no double quote)")
             continue
-        head = f'CREATE USER "{name}" {how}'
+        head = f"CREATE USER {q(name)} {how}"
         if v["tablespace"] in spaces:
-            head += f' DEFAULT TABLESPACE "{v["tablespace"]}"'
+            head += f" DEFAULT TABLESPACE {q(v['tablespace'])}"
         if v["profile"] in profiles:
-            head += f' PROFILE "{v["profile"]}"'
+            head += f" PROFILE {q(v['profile'])}"
         if v["locked"]:
             head += " ACCOUNT LOCK"
         stmts.append((key, head))
-    for key in sorted(set(missing) | set(_ora_short(s, t))):
+    for key in sorted(set(missing) | set(out["grants_missing"])):
         if key in skipped or key not in s:
             continue
         v = s[key]
-        who = f'"{_ora_there(hop, v["name"])}"'
+        who = q(_ora_there(hop, v["name"]))
         have = t.get(key, {})
-        for q in v.get("quotas", []):
-            if q not in have.get("quotas", []):
-                stmts.append((None, f"ALTER USER {who} QUOTA {q}"))
+        for quota in v.get("quotas", []):
+            if quota not in have.get("quotas", []):
+                stmts.append((None, f"ALTER USER {who} QUOTA {quota}"))
         for role in v["roles"]:
             if role not in have.get("roles", []):
                 bare, _, admin = role.partition(" WITH ")
-                stmts.append((None, f'GRANT "{bare}" TO {who}'
+                stmts.append((None, f"GRANT {q(bare)} TO {who}"
                               + (f" WITH {admin}" if admin else "")))
         for priv in v["privileges"]:
             if priv not in have.get("privileges", []):
-                stmts.append((None, f"GRANT {priv} TO {who}"))
+                bare, _, admin = priv.partition(" WITH ")
+                if not re.fullmatch(_ORA_WORDS, bare):
+                    say(f"   not granted, not a privilege's name: {priv}")
+                    continue
+                stmts.append((None, f"GRANT {bare} TO {who}"
+                              + (f" WITH {admin}" if admin else "")))
         for grant in v["grants"]:
             if grant not in have.get("grants", []):
-                on = grant.split(" ON ", 1)
-                owner, _, rest = on[1].partition(".")
-                there = f'"{_ora_there(hop, owner.strip(chr(34)))}".{rest}'
-                stmts.append((None, f"GRANT {on[0]} ON {there} TO {who}"))
+                word, _, on = grant.partition(" ON ")
+                owner, _, rest = on.partition(".")
+                if not re.fullmatch(_ORA_WORDS, word):
+                    say(f"   not granted, not a privilege's name: {grant}")
+                    continue
+                there = f"{q(_ora_there(hop, owner[1:-1]))}.{rest}"
+                stmts.append((None, f"GRANT {word} ON {there} TO {who}"))
     if not stmts:
         say("  nothing to create")
         return
@@ -1312,8 +1850,8 @@ def _ora_rollback(hop, apply, say):
     failed = []
     for key in sorted(made, key=lambda k: not k.startswith("user:")):
         kind, name = key.split(":", 1)
-        st = (f'DROP USER "{_ora_there(hop, name)}"' if kind == "user"
-              else f'DROP ROLE "{name}"')
+        st = (f"DROP USER {_ora_ident(_ora_there(hop, name))}"
+              if kind == "user" else f"DROP ROLE {_ora_ident(name)}")
         if not apply:
             say(f"   would run {st}")
             continue
@@ -1369,7 +1907,7 @@ def _cs_resource(hop, resource):
     """A resource as a GRANT names it, the keyspace as the target calls
     it; None for one migkit does not carry (functions, beans)."""
     parts = str(resource).split("/")
-    q = '"{}"'.format
+    q = _cs_ident
     if parts[0] == "data":
         if len(parts) == 1:
             return "ALL KEYSPACES"
@@ -1387,9 +1925,10 @@ def _cs_create(hop, apply, say):
     superuser flags; then memberships; then permissions - by the
     statements the cluster takes, the keyspaces as the target calls
     them."""
+    import re
     out, s = compare(hop, say)
     stmts, skipped, made = [], [], []
-    q = '"{}"'.format
+    q = _cs_ident
     for r in out["missing_on_target"]:
         with_ = [f"LOGIN = {str(s[r]['login']).lower()}",
                  f"SUPERUSER = {str(s[r]['superuser']).lower()}"]
@@ -1400,11 +1939,11 @@ def _cs_create(hop, apply, say):
     for r in out["missing_on_target"] + out.get("attributes_differ", []):
         for parent in s[r]["member_of"]:
             stmts.append((None, f"GRANT {q(parent)} TO {q(r)}"))
-    for r in out["missing_on_target"] + out.get("grants_differ", []):
+    for r in out["missing_on_target"] + out["grants_missing"]:
         for g in s[r]["grants"]:
             perm, resource = g.split(" ", 1)
             on = _cs_resource(hop, resource)
-            if on is None:
+            if on is None or not re.fullmatch(r"[A-Z]+", perm):
                 skipped.append(f"{r}: {g}")
                 continue
             stmts.append((None, f"GRANT {perm} ON {on} TO {q(r)}"))
@@ -1455,7 +1994,7 @@ def _cs_rollback(hop, apply, say):
         if not apply:
             say(f"   would drop role {r}")
             continue
-        session.execute('DROP ROLE IF EXISTS "{}"'.format(r))
+        session.execute(f"DROP ROLE IF EXISTS {_cs_ident(r)}")
         say(f"   dropped role {r}")
     if apply:
         rec.rename(str(rec) + ".rolled-back")
@@ -1529,7 +2068,7 @@ def _ch_create(hop, apply, passwords, say):
             stmt = (stmt[:m.end()] + f" BY {_ch_literal(passwords[name])}"
                     + stmt[m.end():])
         todo.append((key, stmt, s[key]["grants"]))
-    for key in out.get("grants_differ", []):
+    for key in out["grants_missing"]:
         todo.append((key, None, [g for g in s[key]["grants"]]))
     if not todo:
         say("  nothing to create" + (f"; skipped {skipped}: no password"
@@ -1706,6 +2245,19 @@ def _os_security(hop, side):
     return out
 
 
+def _os_name(name):
+    """A role's, user's or mapping's name as one segment of the API's
+    path: a `/`, `?`, `#` or `..` in it stays in the name and never
+    reaches another endpoint."""
+    from urllib.parse import quote
+    return quote(str(name), safe="")
+
+
+def _os_pointer(name):
+    """A name as one step of a JSON Patch path (RFC 6901)."""
+    return str(name).replace("~", "~0").replace("/", "~1")
+
+
 def _os_compared(hop, out, s, t, say):
     """What differs besides what is missing, and whether each side runs the
     plugin at all."""
@@ -1715,7 +2267,9 @@ def _os_compared(hop, out, s, t, say):
     want = {k: (_os_patterns(hop, v) if k.startswith("role:") else v)
             for k, v in s.items()}
     dd = sorted(k for k in want if k in t and want[k] != t[k])
-    out["definitions_differ"] = dd
+    # a role's, a user's or a mapping's definition is what it may do and
+    # who holds it: its attributes, in the one result shape
+    out["attributes_differ"] = dd
     apart = _es_side(hop, "src") != _es_side(hop, "dst")
     out["apis_differ"] = apart
     gap = out["missing_on_target"] or dd or apart or (
@@ -1731,9 +2285,6 @@ def _os_compared(hop, out, s, t, say):
     if out["plugin"]["target"] == "absent" and s:
         say("  the target answers no security API: turn its security plugin"
             " on before these can be carried")
-    say(f"  definitions differ ({len(dd)}): {dd}")
-    say("  note: the security API shows no password, not even as its hash;"
-        " create sets the one given in the passwords file")
 
 
 def _os_create(hop, apply, passwords, say):
@@ -1742,7 +2293,7 @@ def _os_create(hop, apply, passwords, say):
     made with the password the passwords file gives it, or skipped and
     said. A definition the target already had is replaced, and kept in the
     record so a rollback puts it back."""
-    out, s = compare(hop, say)
+    out, s, t = _compare(hop, say)
     if out["plugin"]["target"] == "absent":
         if s:
             raise SystemExit("users: the target answers no security API, so"
@@ -1754,12 +2305,12 @@ def _os_create(hop, apply, passwords, say):
                          " OpenSearch, which keep roles, users and mappings"
                          " in shapes of their own - make them on the target"
                          " by hand, from what compare lists")
-    t = _os_security(hop, "dst") or {}
+    t = t or {}
     passwords = passwords or {}
     todo, skipped = [], []
     order = {"role": 0, "user": 1, "mapping": 2}
     for key in sorted(set(out["missing_on_target"])
-                      | set(out["definitions_differ"]),
+                      | set(out["attributes_differ"]),
                       key=lambda k: (order[k.split(":", 1)[0]], k)):
         kind, name = key.split(":", 1)
         body = (_os_patterns(hop, s[key]) if kind == "role"
@@ -1789,7 +2340,8 @@ def _os_create(hop, apply, passwords, say):
     for key, body in todo:
         kind, name = key.split(":", 1)
         try:
-            eng._call("dst", "PUT", f"{paths[kind]}/{name}", body)
+            eng._call("dst", "PUT", f"{paths[kind]}/{_os_name(name)}",
+                      body)
         except Exception as e:  # noqa: BLE001 - recorded and said
             failed.append(f"{key}: {str(e).splitlines()[0][:120]}")
             continue
@@ -1836,7 +2388,7 @@ def _os_rollback(hop, apply, say):
         if not apply:
             say(f"   would delete {kind} {name}")
             continue
-        eng._call("dst", "DELETE", f"{paths[kind]}/{name}",
+        eng._call("dst", "DELETE", f"{paths[kind]}/{_os_name(name)}",
                   missing_ok=True)
         say(f"   deleted {kind} {name}")
     for key, body in sorted(replaced.items()):
@@ -1850,16 +2402,18 @@ def _os_rollback(hop, apply, say):
             if es:
                 # Elasticsearch updates a user without a password and
                 # keeps the one it has
-                eng._call("dst", "PUT", f"{paths[kind]}/{name}", body)
+                eng._call("dst", "PUT", f"{paths[kind]}/{_os_name(name)}",
+                          body)
                 continue
-            ops = [{"op": "add", "path": f"/{name}/{k}", "value": v}
+            ops = [{"op": "add", "path": f"/{_os_pointer(name)}"
+                                         f"/{_os_pointer(k)}", "value": v}
                    for k, v in body.items()]
             eng._call("dst", "PATCH", paths[kind], ops)
             continue
         if not apply:
             say(f"   would put back {kind} {name}")
             continue
-        eng._call("dst", "PUT", f"{paths[kind]}/{name}", body)
+        eng._call("dst", "PUT", f"{paths[kind]}/{_os_name(name)}", body)
         say(f"   put back {kind} {name}")
     if apply:
         rec.rename(str(rec) + ".rolled-back")
@@ -2015,69 +2569,352 @@ def _mongo_create(hop, missing, role_diff, src, passwords, apply, say):
     return made, skipped
 
 
-def _plan(hop, out, s, passwords):
-    plan, skipped, secrets = [], [], {}
-    if hop.engine == "mysql":
-        c = _mysql_conn(hop.source)
+def _step(key, sql, args=(), shown=None, undo=None, made=False):
+    """One statement of a PostgreSQL or MySQL plan: `sql` with every name
+    quoted and every `%` of it doubled, `args` bound, `shown` what the
+    operator is shown (a password never), `undo` the (sql, args) that
+    takes it back where one does, `made` for a statement that makes an
+    account."""
+    return {"key": key, "sql": sql, "args": list(args),
+            "shown": shown or sql.replace("%%", "%"),
+            "undo": [undo[0], list(undo[1])] if undo else None,
+            "made": made}
+
+
+def _outside(text, word):
+    """Where `word` first stands in `text` outside back quotes, quotes and
+    parentheses, or -1: `GRANT SELECT (`a ON b`) ON `x`.* TO ...` holds
+    ` ON ` three times and only the last is the statement's."""
+    depth, quote = 0, None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "`'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and text.startswith(word, i):
+            return i
+        i += 1
+    return -1
+
+
+def _my_revoke(line):
+    """The REVOKE that takes back one `SHOW GRANTS` line replayed on an
+    account that was already there, or None where the line cannot be read
+    that certainly."""
+    if not line.startswith("GRANT "):
+        return None
+    body = line[len("GRANT "):]
+    grant_option = body.endswith(" WITH GRANT OPTION")
+    body = body[:-len(" WITH GRANT OPTION")] if grant_option else body
+    body = body[:-len(" WITH ADMIN OPTION")] \
+        if body.endswith(" WITH ADMIN OPTION") else body
+    to = _outside(body, " TO ")
+    if to < 0:
+        return None
+    what, who = body[:to], body[to + len(" TO "):]
+    on = _outside(what, " ON ")
+    if on < 0:
+        # a role granted
+        return f"REVOKE {what} FROM {who}"
+    privs = what[:on] + (", GRANT OPTION" if grant_option else "")
+    return f"REVOKE {privs} ON {what[on + len(' ON '):]} FROM {who}"
+
+
+#: what `ALTER USER` / `CREATE USER` calls each limit mysql.user keeps
+MY_LIMITS = (("max_questions", "MAX_QUERIES_PER_HOUR"),
+             ("max_updates", "MAX_UPDATES_PER_HOUR"),
+             ("max_connections", "MAX_CONNECTIONS_PER_HOUR"),
+             ("max_user_connections", "MAX_USER_CONNECTIONS"))
+
+
+def _my_options(v, lock=True):
+    """(text, args) of an account's TLS requirement, its limits and its
+    lock, as `CREATE USER` and `ALTER USER` take them: the issuer, subject
+    and cipher bound, the limits whole numbers."""
+    a, text, args = v["attrs"], [], []
+    ssl = str(a.get("ssl_type") or "").upper()
+    if ssl == "ANY":
+        text.append("REQUIRE SSL")
+    elif ssl == "X509":
+        text.append("REQUIRE X509")
+    elif ssl == "SPECIFIED":
+        parts = []
+        for col, word in (("x509_issuer", "ISSUER"),
+                          ("x509_subject", "SUBJECT"),
+                          ("ssl_cipher", "CIPHER")):
+            if v["ssl"].get(col):
+                parts.append(f"{word} %s")
+                args.append(v["ssl"][col])
+        text.append("REQUIRE " + " AND ".join(parts) if parts
+                    else "REQUIRE SSL")
+    elif ssl == "":
+        text.append("REQUIRE NONE")
+    limits = [f"{word} {int(a.get(col) or 0)}" for col, word in MY_LIMITS
+              if col in a]
+    if limits:
+        text.append("WITH " + " ".join(limits))
+    if lock and "account_locked" in a:
+        text.append("ACCOUNT LOCK" if a["account_locked"] == "Y"
+                    else "ACCOUNT UNLOCK")
+    return " ".join(text), args
+
+
+def _mysql_plugins(ep):
+    """The authentication plugins the server signs accounts in with now,
+    or None where it will not say. `mysql_native_password` is off by
+    default from 8.4 and gone in 9.0: a hash made by it cannot be carried
+    there, whatever the source holds."""
+    try:
+        c = _mysql_conn(ep)
+    except Exception:  # noqa: BLE001 - not known, then
+        return None
+    try:
         cur = c.cursor()
-        for key in out["missing_on_target"]:
-            u, h = key.rsplit("@", 1)
-            plugin, auth = s[(u, h)]
-            if not auth:
-                skipped.append((key, "source has empty auth string"))
-                continue
-            hexs = auth.encode("latin1").hex() if isinstance(auth, str) else auth.hex()
-            stmts = [f"CREATE USER '{u}'@'{h}' IDENTIFIED WITH '{plugin}' AS 0x{hexs}"]
-            show = [f"CREATE USER '{u}'@'{h}' IDENTIFIED WITH '{plugin}' AS 0x<hash>  (same password as source)"]
-            cur.execute("show grants for %s@%s", (u, h))
-            for (g,) in cur.fetchall():
-                if not g.startswith("GRANT PROXY"):
-                    stmts.append(g)
-                    show.append(g[:110])
-            plan.append((key, stmts, show))
+        cur.execute("select plugin_name from information_schema.plugins"
+                    " where plugin_type = 'AUTHENTICATION' and"
+                    " plugin_status = 'ACTIVE'")
+        return {_text(p) for (p,) in cur.fetchall()}
+    except Exception:  # noqa: BLE001 - not known, then
+        return None
+    finally:
         c.close()
-    else:
-        hashes = _pg_hashes(hop.source)
-        for r in out["missing_on_target"]:
-            a = s[r]
-            secret, how = None, None
-            if r in hashes:
-                secret, how = hashes[r], "hash from source (same password)"
-            elif r in passwords:
-                secret, how = passwords[r], "from --passwords file"
-            elif a["login"]:
-                skipped.append((r, "no hash readable on source and no --passwords entry"))
+
+
+def _my_plan(out, s, t, plugins=None, passwords=None):
+    """(steps, skipped) that bring the target's accounts level with the
+    source's: every missing account made first - a role as a locked
+    account with no password, which is what MySQL 8 makes of `CREATE
+    ROLE` -, then each one's grants as the source's server renders them
+    (role grants among them), then default roles, then the attributes of
+    accounts on both sides. An account whose plugin the target does not
+    sign in with (`plugins`, `_mysql_plugins`) is made with its password
+    from the passwords file, bound, under the target's own plugin - or
+    skipped, and said."""
+    import re
+    passwords = passwords or {}
+    steps, skipped = [], []
+    missing = {k for k in s if f"{k[0]}@{k[1]}" in
+               set(out["missing_on_target"])}
+    for key in sorted(missing):
+        u, h = key
+        v, name = s[key], f"{u}@{h}"
+        drop = ("DROP USER IF EXISTS %s@%s", (u, h))
+        if v["role"]:
+            steps.append(_step(name, "CREATE ROLE %s", (u,),
+                               undo=("DROP ROLE IF EXISTS %s", (u,)),
+                               made=True))
+            continue
+        plugin = v["plugin"]
+        if plugin and not re.fullmatch(r"[A-Za-z0-9_]+", plugin):
+            skipped.append((name, f"its authentication plugin {plugin!r}"
+                                  " is not a plugin's name"))
+            continue
+        opts, args = _my_options(v)
+        said = opts.replace("%s", "<bound>")
+        expired = v["attrs"].get("password_expired") == "Y"
+        secret = None
+        if not v["auth"]:
+            if v["attrs"].get("account_locked") != "Y":
+                skipped.append((name, "no password on the source, and it"
+                                      " may sign in: not made from here"))
                 continue
-            opts = ["LOGIN" if a["login"] else "NOLOGIN"]
-            if a.get("superuser"):
-                opts.append("SUPERUSER")
-            if a["createdb"]:
-                opts.append("CREATEDB")
-            if a["createrole"]:
-                opts.append("CREATEROLE")
-            if a.get("replication"):
-                opts.append("REPLICATION")
-            if a.get("bypassrls"):
-                opts.append("BYPASSRLS")
-            if a.get("inherit") is False:
-                opts.append("NOINHERIT")
-            if a["connlimit"] not in (None, -1):
-                opts.append(f"CONNECTION LIMIT {a['connlimit']}")
-            if a.get("valid_until"):
-                opts.append(f"VALID UNTIL '{a['valid_until']}'")
-            if secret is not None:
-                secrets[r] = secret
-            if secret is None:
-                stmts = [f'CREATE ROLE "{r}" {" ".join(opts)}']
-                show = [f'CREATE ROLE "{r}" {" ".join(opts)}  (no password: nologin role)']
-            else:
-                stmts = [f'CREATE ROLE "{r}" {" ".join(opts)} PASSWORD %s']
-                show = [f'CREATE ROLE "{r}" {" ".join(opts)} PASSWORD <{how}>']
-            for m in a["member_of"]:
-                stmts.append(f'GRANT "{m}" TO "{r}"')
-                show.append(f'GRANT "{m}" TO "{r}"')
-            plan.append((r, stmts, show))
-    return plan, skipped, secrets
+            sql = f"CREATE USER %s@%s {opts}"
+            shown = f"CREATE USER '{u}'@'{h}' {said} (a role: no password)"
+        elif plugins is not None and plugin and plugin not in plugins:
+            secret = passwords.get(u) or passwords.get(name)
+            if not secret:
+                skipped.append((name, f"the target does not sign in with"
+                                      f" {plugin}, so its password cannot"
+                                      " be carried as its hash, and the"
+                                      " passwords file has none for it"))
+                continue
+            sql = f"CREATE USER %s@%s IDENTIFIED BY %s {opts}"
+            shown = (f"CREATE USER '{u}'@'{h}' IDENTIFIED BY <from the"
+                     f" passwords file> {said} (the target has no {plugin})")
+        else:
+            how = f"IDENTIFIED WITH {plugin} AS 0x{_hex(v['auth'])}" \
+                if plugin else f"IDENTIFIED BY PASSWORD 0x{_hex(v['auth'])}"
+            sql = f"CREATE USER %s@%s {how} {opts}"
+            shown = (f"CREATE USER '{u}'@'{h}' IDENTIFIED WITH {plugin} AS"
+                     f" 0x<hash> {said} (the source's password)")
+        if expired:
+            sql += " PASSWORD EXPIRE"
+            shown += " PASSWORD EXPIRE"
+        steps.append(_step(name, sql, (u, h) + tuple(args), shown,
+                           undo=drop, made=True))
+        if secret is not None:
+            # bound in its place when it runs; never shown or recorded
+            steps[-1]["secret_at"] = 2
+            steps[-1]["secret"] = secret
+            steps[-1]["given"] = True
+    made = {f"{u}@{h}" for u, h in missing}
+    short = set(out["grants_missing"])
+    for key in sorted(s):
+        name = f"{key[0]}@{key[1]}"
+        if name not in made and name not in short:
+            continue
+        have = set(t.get(key, {}).get("grants") or ())
+        for line in s[key]["grants"]:
+            if line in have:
+                continue
+            undo = None if name in made else _my_revoke(line)
+            steps.append(_step(name, line.replace("%", "%%"),
+                               undo=(undo.replace("%", "%%"), ())
+                               if undo else None))
+    for key in sorted(s):
+        name = f"{key[0]}@{key[1]}"
+        want = s[key]["default_roles"]
+        had = t.get(key, {}).get("default_roles") or []
+        if not want or (name not in made and want == had):
+            continue
+        u, h = key
+        if s[key]["maria"]:
+            steps.append(_step(name, "SET DEFAULT ROLE %s FOR %s@%s",
+                               (want[0], u, h)))
+            continue
+        roles = ", ".join("%s@%s" for _ in want)
+        undo = None
+        if name not in made:
+            undo = (("ALTER USER %s@%s DEFAULT ROLE "
+                     + ", ".join("%s@%s" for _ in had),
+                     (u, h) + tuple(x for r in had for x in r))
+                    if had else ("ALTER USER %s@%s DEFAULT ROLE NONE",
+                                 (u, h)))
+        steps.append(_step(name, f"ALTER USER %s@%s DEFAULT ROLE {roles}",
+                           (u, h) + tuple(x for r in want for x in r),
+                           undo=undo))
+    for name in out["attributes_differ"]:
+        key = next(k for k in s if f"{k[0]}@{k[1]}" == name)
+        v, have = s[key], t[key]
+        u, h = key
+        if (v["attrs"], v["ssl"]) != (have["attrs"], have["ssl"]):
+            opts, args = _my_options(v)
+            back, bargs = _my_options(have)
+            steps.append(_step(name, f"ALTER USER %s@%s {opts}",
+                               (u, h) + tuple(args),
+                               undo=(f"ALTER USER %s@%s {back}",
+                                     (u, h) + tuple(bargs))))
+            if v["attrs"].get("password_expired") == "Y" and \
+                    have["attrs"].get("password_expired") != "Y":
+                steps.append(_step(name, "ALTER USER %s@%s PASSWORD EXPIRE",
+                                   (u, h)))
+        if v["plugin"] != have["plugin"]:
+            skipped.append((name, "signs in with another plugin on the"
+                                  " target: its password there is the"
+                                  " target's own, not changed from here"))
+    return steps, skipped
+
+
+def _pg_options(a, only=None):
+    """(text, args) of a role's attributes as CREATE ROLE and ALTER ROLE
+    take them: all of them, or those named in `only`; the date bound."""
+    flags = (("login", "LOGIN", "NOLOGIN"),
+             ("superuser", "SUPERUSER", "NOSUPERUSER"),
+             ("createdb", "CREATEDB", "NOCREATEDB"),
+             ("createrole", "CREATEROLE", "NOCREATEROLE"),
+             ("replication", "REPLICATION", "NOREPLICATION"),
+             ("bypassrls", "BYPASSRLS", "NOBYPASSRLS"),
+             ("inherit", "INHERIT", "NOINHERIT"))
+    text, args = [], []
+    for attr, yes, no in flags:
+        if only is None or attr in only:
+            text.append(yes if a.get(attr) else no)
+    if only is None or "connlimit" in only:
+        limit = a.get("connlimit")
+        text.append(f"CONNECTION LIMIT"
+                    f" {-1 if limit is None else int(limit)}")
+    if only is None or "valid_until" in only:
+        text.append("VALID UNTIL %s")
+        args.append(a.get("valid_until") or "infinity")
+    return " ".join(text), args
+
+
+def _pg_plan(out, s, t, hashes, passwords):
+    """(steps, skipped): every missing role made first, with
+    none of its memberships - so no role waits on another -, then each
+    membership the target lacks, then the attributes of roles on both
+    sides. A login role is made with the source's password hash where the
+    source shows it, else the passwords file's; one with neither is
+    skipped and said."""
+    steps, skipped = [], []
+    missing = set(out["missing_on_target"])
+    made = set()
+    q = _pg_ident
+    for r in sorted(missing):
+        a = s[r]
+        secret, how = None, None
+        if hashes and r in hashes:
+            secret, how = hashes[r], "hash from source (same password)"
+        elif r in passwords:
+            secret, how = passwords[r], "from --passwords file"
+        elif a["login"]:
+            skipped.append((r, "no hash readable on source and no"
+                               " --passwords entry"))
+            continue
+        # defaults left out: a managed target refuses to be told even
+        # NOREPLICATION by a role that is not a superuser
+        only = [k for k in PG_ATTRS if k not in ("connlimit", "valid_until")
+                and bool(a.get(k)) != (k == "inherit")]
+        if a["connlimit"] not in (None, -1):
+            only.append("connlimit")
+        if a.get("valid_until"):
+            only.append("valid_until")
+        opts, args = _pg_options(a, only)
+        sql = f"CREATE ROLE {q(r)} {opts}".rstrip()
+        shown = sql.replace("%%", "%").replace(
+            "VALID UNTIL %s", f"VALID UNTIL '{a.get('valid_until')}'")
+        if secret is not None:
+            sql += " PASSWORD %s"
+            shown += f" PASSWORD <{how}>"
+        else:
+            shown += "  (no password: nologin role)"
+        steps.append(_step(r, sql, args, shown,
+                           undo=(f"DROP ROLE IF EXISTS {q(r)}", ()),
+                           made=True))
+        if secret is not None:
+            # bound last when it runs; never in what is shown or recorded
+            steps[-1]["secret"] = secret
+            steps[-1]["given"] = r not in (hashes or {})
+        made.add(r)
+    for r in sorted(set(s)):
+        if r not in made and r not in out["grants_missing"]:
+            continue
+        have = set(t.get(r, {}).get("member_of") or ())
+        for m in s[r]["member_of"]:
+            if m in have:
+                continue
+            role, admin = m.split(" WITH ADMIN")[0], " WITH ADMIN" in m
+            if not admin and f"{role} WITH ADMIN" in have:
+                # a member here who may grant it on, and not on the source
+                steps.append(_step(
+                    r, f"REVOKE ADMIN OPTION FOR {q(role)} FROM {q(r)}",
+                    undo=(f"GRANT {q(role)} TO {q(r)} WITH ADMIN OPTION",
+                          ())))
+                continue
+            # taken back as it was given: the admin option alone where the
+            # membership was there before it
+            back = (f"REVOKE ADMIN OPTION FOR {q(role)} FROM {q(r)}"
+                    if admin and role in have
+                    else f"REVOKE {q(role)} FROM {q(r)}")
+            steps.append(_step(
+                r, f"GRANT {q(role)} TO {q(r)}"
+                   + (" WITH ADMIN OPTION" if admin else ""),
+                undo=None if r in made else (back, ())))
+    for r in out["attributes_differ"]:
+        a, b = s[r], t[r]
+        only = [k for k in PG_ATTRS if a.get(k) != b.get(k)]
+        opts, args = _pg_options(a, only)
+        back, bargs = _pg_options(b, only)
+        steps.append(_step(r, f"ALTER ROLE {q(r)} {opts}", args,
+                           undo=(f"ALTER ROLE {q(r)} {back}", bargs)))
+    return steps, skipped
 
 
 def _redis_client(ep):
@@ -2146,93 +2983,95 @@ def _redis_rollback(hop, apply, say):
 
 
 def create(hop, apply=False, passwords=None, say=print):
-    if hop.engine == "redis":
-        return _redis_create(hop, apply, say)
-    if hop.engine == "kafka":
-        return _kafka_create(hop, apply, passwords, say)
-    if hop.engine == "clickhouse":
-        return _ch_create(hop, apply, passwords, say)
-    if hop.engine == "cassandra":
-        return _cs_create(hop, apply, say)
-    if hop.engine in ("opensearch", "elasticsearch"):
-        return _os_create(hop, apply, passwords, say)
-    if hop.engine == "mssql":
-        return _ms_create(hop, apply, passwords, say)
-    if hop.engine == "db2i":
-        return _ibmi_create(hop, apply, say)
-    if hop.engine == "teradata":
-        return _td_create(hop, apply, passwords, say)
-    if hop.engine == "oracle":
-        return _ora_create(hop, apply, passwords, say)
-    if hop.engine in ("mongodb", "mongo"):
-        out, s = compare(hop, say)
-        t = _mongo_users(hop.target)
-        missing = [k for k in s if k not in t]
-        role_diff = [k for k in s if k in t and _mongo_role_gap(s[k], t[k])]
-        if not missing and not role_diff:
-            say("  nothing to create; users and roles already match")
-            return
-        say(f">> mongo: create {len(missing)} account(s), adjust roles on {len(role_diff)}"
-            + ("" if apply else "  (nothing done; add --apply)"))
-        made, skipped = _mongo_create(hop, missing, role_diff, s, passwords, apply, say)
-        if not apply:
-            say("  (dry-run: nothing created, so nothing recorded)")
-            return
-        rec = hop.report_dir() / "user-sync-created.json"
-        prev = json.loads(rec.read_text()) if rec.exists() else []
-        prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
-                     "engine": "mongodb", "created": made, "skipped": skipped})
-        json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
-        say(f"  recorded at {rec} (undo with users {hop.name} rollback)")
-        return
+    """Carry what the target lacks, and - once anything was applied -
+    compare again: a gap `create` left (an account skipped for want of a
+    password, a statement the target refused) ends it with an error
+    naming it, never with a clean exit over a target that still differs
+    (`_after`)."""
+    ways = {"redis": lambda: _redis_create(hop, apply, say),
+            "kafka": lambda: _kafka_create(hop, apply, passwords, say),
+            "clickhouse": lambda: _ch_create(hop, apply, passwords, say),
+            "cassandra": lambda: _cs_create(hop, apply, say),
+            "opensearch": lambda: _os_create(hop, apply, passwords, say),
+            "elasticsearch": lambda: _os_create(hop, apply, passwords, say),
+            "mssql": lambda: _ms_create(hop, apply, passwords, say),
+            "db2i": lambda: _ibmi_create(hop, apply, say),
+            "teradata": lambda: _td_create(hop, apply, passwords, say),
+            "oracle": lambda: _ora_create(hop, apply, passwords, say),
+            "mongodb": lambda: _mongo_create_all(hop, apply, passwords, say),
+            "mongo": lambda: _mongo_create_all(hop, apply, passwords, say)}
+    way = ways.get(hop.engine) or (
+        lambda: _sql_create(hop, apply, passwords or {}, say))
+    _after(hop, say, apply, way() or ())
 
-    passwords = passwords or {}
-    out, s = compare(hop, say)
-    if not out["missing_on_target"]:
-        say("nothing to create - target already has every non-system source user")
+
+def _mongo_create_all(hop, apply, passwords, say):
+    out, s, t = _compare(hop, say)
+    missing = [k for k in s if k not in t]
+    role_diff = [k for k in s if k in t and _mongo_role_gap(s[k], t[k])]
+    if not missing and not role_diff:
+        say("  nothing to create; users and roles already match")
         return
-    plan, skipped, secrets = _plan(hop, out, s, passwords)
-    say(f"\nplan: create {len(plan)} users on TARGET ({'APPLY' if apply else 'dry-run'})")
-    for key, _, show in plan:
-        say(f"  -- {key}")
-        for ln in show:
-            say(f"     {ln}")
-    for key, why in skipped:
-        say(f"  skipped {key}: {why}")
+    say(f">> mongo: create {len(missing)} account(s), adjust roles on {len(role_diff)}"
+        + ("" if apply else "  (nothing done; add --apply)"))
+    made, skipped = _mongo_create(hop, missing, role_diff, s, passwords, apply, say)
+    if not apply:
+        say("  (dry-run: nothing created, so nothing recorded)")
+        return
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = json.loads(rec.read_text()) if rec.exists() else []
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": "mongodb", "created": made, "skipped": skipped})
+    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+    say(f"  recorded at {rec} (undo with users {hop.name} rollback)")
+
+
+def _sql_create(hop, apply, passwords, say):
+    """PostgreSQL and MySQL: the plan (`_pg_plan`, `_my_plan`) shown, and
+    applied on one connection, each statement on its own into the ledger
+    the record keeps."""
+    out, s, t = _compare(hop, say)
+    if hop.engine == "mysql":
+        steps, skipped = _my_plan(
+            out, s, t, _mysql_plugins(hop.target) if out["missing_on_target"]
+            else None, passwords)
+    else:
+        hashes = _pg_hashes(hop.source) if out["missing_on_target"] else {}
+        steps, skipped = _pg_plan(out, s, t, hashes or {}, passwords)
+    say(f"\nplan: {len(steps)} statement(s) on TARGET"
+        f" ({'APPLY' if apply else 'dry-run'})")
+    key = None
+    for st in steps:
+        if st["key"] != key:
+            key = st["key"]
+            say(f"  -- {key}")
+        say(f"     {st['shown'][:160]}")
+    for name, why in skipped:
+        say(f"  skipped {name}: {why}")
+    if not steps:
+        say("nothing to create - the target already has every non-system"
+            " source account as the source has it")
+        return
     if not apply:
         say("\ndry-run only. Add --apply to execute on the target.")
         return
-    conn = _mysql_conn(hop.target) if hop.engine == "mysql" else _pg_conn(hop.target)
-    cur = conn.cursor()
-    created, failed = [], []
-    for key, stmts, _ in plan:
-        try:
-            for st in stmts:
-                if hop.engine == "postgres" and "PASSWORD %s" in st:
-                    cur.execute(st, (secrets.get(key, passwords.get(key)),))
-                else:
-                    cur.execute(st)
-            created.append(key)
-            say(f"  created {key}")
-        except Exception as e:
-            failed.append({"user": key, "error": f"{type(e).__name__}: {str(e)[:100]}"})
-            say(f"  FAILED {key}: {type(e).__name__}: {str(e)[:100]}")
-    conn.close()
-    rf = hop.report_dir() / "user-sync-created.json"
-    # append every run rather than overwrite: several creates must all be undoable
-    prev = []
-    if rf.exists():
-        try:
-            prev = json.load(open(rf)).get("created", [])
-        except Exception:
-            prev = []
-    allc = list(dict.fromkeys(prev + created))
-    rec = {"hop": hop.name, "engine": hop.engine,
-           "applied": datetime.date.today().isoformat(),
-           "created": allc, "created_this_run": created, "failed": failed}
-    json.dump(rec, open(rf, "w"), indent=2, ensure_ascii=False)
-    say(f"\ncreated={len(created)} failed={len(failed)}  record: {rf}")
-    say(f"next: migkit users {hop.name} verify")
+    conn = _mysql_conn(hop.target) if hop.engine == "mysql" \
+        else _pg_conn(hop.target)
+    try:
+        ledger = _run_steps(conn.cursor(), steps, say)
+    finally:
+        conn.close()
+    rec = _record(hop, hop.engine, ledger,
+                  skipped=[f"{n}: {why}" for n, why in skipped])
+    failed = [e for e in ledger if not e["ok"]]
+    say(f"\nran={len(ledger) - len(failed)} failed={len(failed)}"
+        f"  record: {rec}")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} statement(s) failed, each"
+                         f" named above and in {rec}")
+    # the accounts given the passwords file's password (`_after`)
+    return {st["key"] for st in steps if "secret" in st
+            and st.get("given")}
 
 
 def mongo_setpw(hop, passwords, apply=False, say=print):
@@ -2317,63 +3156,108 @@ def rollback(hop, apply=False, say=print):
         return _ora_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
         return _mongo_rollback(hop, apply, say)
+    return _sql_rollback(hop, apply, say)
+
+
+def _sql_rollback(hop, apply, say):
+    """PostgreSQL and MySQL: every statement a `create` ran that has an
+    undo, undone last first - a membership or grant given to an account
+    that was already there revoked, an attribute set back, an account it
+    made dropped. A role PostgreSQL will not drop while it holds a
+    privilege has them revoked in every database of the hop first."""
     rf = hop.report_dir() / "user-sync-created.json"
     if not rf.exists():
         say(f"no created-record at {rf} - nothing this tool created here")
         return
-    rec = json.load(open(rf))
-    if not rec["created"]:
-        say("record has no created users")
+    got = json.loads(rf.read_text())
+    runs = got if isinstance(got, list) else [
+        {"engine": got.get("engine"), "created": got.get("created", [])}]
+    undo = []
+    for run in runs:
+        if run.get("engine") != hop.engine:
+            continue
+        if "steps" in run:
+            undo += [(st["key"], st["undo"], st.get("made"))
+                     for st in run["steps"] if st.get("ok") and st["undo"]]
+            continue
+        # a record from before the ledger: the accounts it made
+        for key in run.get("created", []):
+            if hop.engine == "mysql":
+                u, h = key.rsplit("@", 1)
+                undo.append((key, ["DROP USER IF EXISTS %s@%s", [u, h]],
+                             True))
+            else:
+                undo.append((key, [f"DROP ROLE IF EXISTS {_pg_ident(key)}",
+                                   []], True))
+    if not undo:
+        say("record has nothing to undo")
         return
-    say(f"rollback plan ({'APPLY' if apply else 'dry-run'}): drop {len(rec['created'])} users created on {rec['applied']}")
-    for key in rec["created"]:
-        say(f"  DROP {key}")
+    say(f"rollback plan ({'APPLY' if apply else 'dry-run'}): {len(undo)}"
+        " statement(s), last first")
+    for key, (sql, args), _ in reversed(undo):
+        say(f"  {key}: {sql.replace('%%', '%')}"
+            + (f"  {args}" if args else ""))
     if not apply:
         say("dry-run only. Add --apply to execute.")
         return
-    conn = _mysql_conn(hop.target) if rec["engine"] == "mysql" else _pg_conn(hop.target)
-    cur = conn.cursor()
-    for key in rec["created"]:
-        try:
-            if rec["engine"] == "mysql":
-                u, h = key.rsplit("@", 1)
-                cur.execute(f"DROP USER IF EXISTS '{u}'@'{h}'")
-            else:
+    conn = _mysql_conn(hop.target) if hop.engine == "mysql" \
+        else _pg_conn(hop.target)
+    failed = []
+    try:
+        cur = conn.cursor()
+        for key, (sql, args), made in reversed(undo):
+            try:
                 try:
-                    cur.execute(f'DROP ROLE IF EXISTS "{key}"')
+                    cur.execute(sql, tuple(args))
                 except Exception:
-                    # PG refuses to drop a role that still holds privileges -> revoke across every db first
-                    conn.rollback()
-                    for db in (hop.databases or []):
-                        try:
-                            c2 = _pg_conn({**hop.target, "database": db})
-                            c2.autocommit = True
-                            k2 = c2.cursor()
-                            k2.execute("select nspname from pg_namespace where nspname not like 'pg\\_%'"
-                                       " and nspname <> 'information_schema'")
-                            for (ns,) in k2.fetchall():
-                                for obj in ("TABLES", "SEQUENCES", "FUNCTIONS"):
-                                    try:
-                                        k2.execute(f'REVOKE ALL ON ALL {obj} IN SCHEMA "{ns}" FROM "{key}"')
-                                    except Exception:
-                                        pass
-                                try:
-                                    k2.execute(f'REVOKE ALL ON SCHEMA "{ns}" FROM "{key}"')
-                                except Exception:
-                                    pass
-                            try:
-                                k2.execute(f'REVOKE ALL ON DATABASE "{db}" FROM "{key}"')
-                            except Exception:
-                                pass
-                            c2.close()
-                        except Exception:
-                            pass
-                    cur.execute(f'DROP ROLE IF EXISTS "{key}"')
-            say(f"  dropped {key}")
-        except Exception as e:
-            say(f"  FAILED {key}: {type(e).__name__}: {str(e)[:100]}")
-    conn.close()
-    rf.rename(str(rf) + ".rolled-back")
+                    if hop.engine != "postgres" or not made:
+                        raise
+                    _pg_revoke_everywhere(hop, key)
+                    cur.execute(sql, tuple(args))
+                say(f"  undone {key}: {sql.replace('%%', '%')[:100]}")
+            except Exception as e:  # noqa: BLE001 - said, the rest go on
+                failed.append(key)
+                say(f"  FAILED {key}: {type(e).__name__}: {str(e)[:100]}")
+    finally:
+        conn.close()
+    if not failed:
+        rf.rename(str(rf) + ".rolled-back")
+
+
+def _pg_revoke_everywhere(hop, role):
+    """What `role` holds in each of the hop's databases on the target,
+    revoked - PostgreSQL refuses to drop a role that still holds one."""
+    q = _pg_ident
+    for db in hop.databases or []:
+        there = hop.target_db(db)
+        try:
+            c2 = _pg_conn(hop.target, dbname=there)
+        except Exception:  # noqa: BLE001 - the drop says what is left
+            continue
+        try:
+            k2 = c2.cursor()
+            k2.execute("select nspname from pg_namespace where nspname not"
+                       " like 'pg\\_%%' and nspname <> 'information_schema'",
+                       ())
+            for (ns,) in k2.fetchall():
+                for obj in ("TABLES", "SEQUENCES", "FUNCTIONS"):
+                    try:
+                        k2.execute(f"REVOKE ALL ON ALL {obj} IN SCHEMA"
+                                   f" {q(ns)} FROM {q(role)}", ())
+                    except Exception:  # noqa: BLE001 - best effort
+                        pass
+                try:
+                    k2.execute(f"REVOKE ALL ON SCHEMA {q(ns)} FROM"
+                               f" {q(role)}", ())
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+            try:
+                k2.execute(f"REVOKE ALL ON DATABASE {q(there)} FROM"
+                           f" {q(role)}", ())
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+        finally:
+            c2.close()
 
 
 def run(hop_name, mode, apply=False, pw_file="", say=print):
@@ -2393,8 +3277,14 @@ def run(hop_name, mode, apply=False, pw_file="", say=print):
     else:
         out, _ = compare(hop, say)
         if mode == "verify":
+            from .verdict import VERDICTS
             if out["result"] == "pass":
                 say("VERIFY: pass")
+            elif out["result"] == "unknown":
+                # nothing found and not everything compared: never a pass,
+                # and not a gap it did not see (`verdict.VERDICTS`)
+                say("VERIFY: not everything could be compared")
+                raise SystemExit(VERDICTS["incomplete"].exit)
             else:
                 say("VERIFY: gap found")
-                raise SystemExit(1)
+                raise SystemExit(VERDICTS["different"].exit)
