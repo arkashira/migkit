@@ -2791,6 +2791,33 @@ store). What was still nowhere:
 * **Waiting on the owner (unchanged):** the PyPI upload and whether the
   name `migkit` is free; a brew tap.
 
+## Decided by the owner 2026-10-01 - scope
+
+* **Out of scope - operations around the database, not the database:**
+  changing the application's SQL/ORM code, switching its connection
+  strings, DNS or secrets, testing the application against the new
+  database, the jobs, ETL, BI and consumers pointed at the old one
+  (problems A1), and comparing cost before and after. migkit's cutover
+  still runs the flip command the hop names and says what else points
+  at the old database where it can see it; it does not own those
+  systems. (CV.P11 stays: reading the application's SQL to convert its
+  dialect is conversion work.)
+* **In scope, to be built:**
+  - **Data too large for the link** (hundreds of TB over a narrow line):
+    a seed shipped on media - the provider's appliance (Snowball, Data
+    Box, Transfer Appliance) or any disk - as a rung: exported in
+    checksummed, encrypted, resumable parts at a recorded position,
+    loaded at the other end, every part proved, then the change stream
+    carried on from that exact position; the decision engine offers it
+    when the link's measured rate says the copy would miss the deadline.
+  - **W1**: the mover highly available and scaled out (a standby that
+    takes over from the last committed position; one table across
+    machines with a conditional-write checkpoint).
+  - **W2 and a GUI**: several operators with roles and SSO, an API, and
+    a web interface for people who do not use the command line - the
+    same outcomes the console shows, the approvals and the source-change
+    offer answered there.
+
 ## P0-SCENARIOS. Every reason a database is migrated (owner, 2026-10-01)
 
 Asked: "old version to a newer one, SQL Server Web edition to Datacenter
