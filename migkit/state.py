@@ -278,9 +278,14 @@ class S3Store:
 def run_state(hop):
     """Where a run keeps its lease, checkpoints and change position besides
     this machine's report directory: the bucket of the s3 backend, or None
-    for the local one (backlog 30)."""
+    for the local one (backlog 30) - unless the hop's machines work
+    together (a standby, one table's ranges shared), which then agree
+    through the store `shared` chooses."""
     cfg = _cfg(hop)
-    return S3RunState(hop, cfg) if cfg.get("backend") == "s3" else None
+    if cfg.get("backend") == "s3":
+        return S3RunState(hop, cfg)
+    from . import shared
+    return shared.run_state(hop)
 
 
 class Taken(Exception):
@@ -296,9 +301,40 @@ class S3RunState:
     sealed as a restore point is, where `MIGKIT_STATE_KEY` is set: a
     checkpoint names the last key copied, which is data."""
 
+    kind = "bucket"
+    #: keeps what is not text as well (`put_blob`)
+    blobs = True
+
     def __init__(self, hop, cfg):
         self.hop = hop
         self.s3, self.bucket, self.prefix = _bucket(cfg)
+
+    def ident(self):
+        """Which store this is, the same on every machine that names it."""
+        return f"bucket:{self.bucket}/{self.prefix}{self.hop.name}"
+
+    def put_blob(self, data):
+        """`data` kept under its own digest, sealed as the run state is;
+        the digest. Written once: a digest already there holds the same
+        bytes."""
+        import hashlib
+        digest = hashlib.sha256(data).hexdigest()
+        key = f"{self.prefix}{self.hop.name}/blob/{digest}"
+        try:
+            self.s3.put_object(Bucket=self.bucket, Key=key,
+                               Body=_seal(data, often=True), IfNoneMatch="*")
+        except Exception as e:  # noqa: BLE001 - one already there is no error
+            code = getattr(e, "response", {}).get("Error", {}).get("Code")
+            if code not in ("PreconditionFailed", "ConditionalRequestConflict",
+                            "412", "409"):
+                raise
+        return digest
+
+    def get_blob(self, digest):
+        got = self.s3.get_object(
+            Bucket=self.bucket,
+            Key=f"{self.prefix}{self.hop.name}/blob/{digest}")
+        return _unseal(got["Body"].read())
 
     def key(self, path):
         root = Path(self.hop.report_dir())

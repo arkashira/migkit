@@ -135,6 +135,11 @@ VARS = {
                                 least=1),
     "MIGKIT_LEASE_SECONDS": Var("the term of the hop's lease", "number", 60,
                                 least=1),
+    "MIGKIT_STANDBY_SECONDS": Var("the term of the lease a hop with a"
+                                  " standby is moved under, and of a shared"
+                                  " range's claim: a machine not heard"
+                                  " from for as long is taken over",
+                                  "number", 15, least=3),
     "MIGKIT_FOLLOW_TIMEOUT": Var("seconds a follow of changes is given to"
                                  " catch up", "number", 1800),
     "MIGKIT_SUBSCRIBE_TIMEOUT": Var("seconds a subscription is given to"

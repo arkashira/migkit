@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .. import fencing
 from ..decide import Need, Rung
 from ..tableway import DIRECT, Way
 from ..util import keepalive as _keepalive, run, which, with_retry
@@ -547,6 +548,7 @@ class MySQLEngine(Engine):
                 if key and self._uniques(side, db, table) > 1:
                     self._write_by_key(cur, self._d(side, db), table, names,
                                        sorted(key), rows)
+                    fencing.hold(self, side, db, cur)
                     conn.commit()
                     return len(rows)
                 # a load taken with warnings - a row already there, or a
@@ -555,6 +557,10 @@ class MySQLEngine(Engine):
                 # which, or replaces it
                 self._put_rows(cur, self._d(side, db), table, names, rows,
                                insert, undo=conn.rollback)
+                # last before the commit, after anything rolled back and
+                # sent again: a writer that lost its hold is refused here
+                # (`fencing`)
+                fencing.hold(self, side, db, cur)
             conn.commit()
         finally:
             conn.close()
@@ -568,6 +574,7 @@ class MySQLEngine(Engine):
                 gone = cur.execute(
                     f"delete from {self._quote_ident(self._d(side, db))}"
                     f".{self._quote_ident(table)}" + self._where(where))
+                fencing.hold(self, side, db, cur)
             conn.commit()
         finally:
             conn.close()
@@ -1193,8 +1200,9 @@ class MySQLEngine(Engine):
         from .. import twoway
         name = f"{self._my_ident(self._d(side, db))}.`{twoway.TABLE}`"
         lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
+        made = self.__dict__.setdefault("_origin_made", set())
         with lock:
-            if not self.__dict__.get("_origin_made"):
+            if (side, self._d(side, db)) not in made:
                 conn = self._conn(side)
                 try:
                     with conn.cursor() as cur:
@@ -1213,8 +1221,23 @@ class MySQLEngine(Engine):
                     conn.commit()
                 finally:
                     conn.close()
-                self._origin_made = True
+                made.add((side, self._d(side, db)))
         return name
+
+    #: how `shared` and `fencing` write migkit's own rows here
+    OWN_DIALECT = "mysql"
+
+    def own_name(self, side, db):
+        """`migkit_origin`'s name in the database of `db` on `side`."""
+        from .. import twoway
+        return f"{self._my_ident(self._d(side, db))}.`{twoway.TABLE}`"
+
+    def own_table(self, side, db):
+        """(a connection of its own, `migkit_origin`'s name in the database
+        of `db` on `side`), the table made where it is not: where the
+        machines of a hop keep their records and the numbers their writers
+        are held to (`shared`, `fencing`)."""
+        return self._conn(side), self._origin_table(side, db)
 
     def twoway_uuid(self, probe=False):
         """The UUID of the GTIDs a two-way tail applies under: the hop's

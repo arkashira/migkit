@@ -119,6 +119,19 @@ def _takes_the_load():
                 " change a server's settings")
 
 
+def _unheld():
+    """Not where this process writes under a machine's number (`fencing`,
+    backlog W1): the way writes on connections of its own, around the
+    writer the target holds to the number, so a machine that lost the hop
+    or the range would not be refused - the table copier, whose every
+    write is held, goes instead."""
+    from .decide import Need
+    return Need("no machine's number to carry", lambda f: not f["held"],
+                "{rung} writes around the number the machine holding this"
+                " copy carries, so a machine that lost it could not be"
+                " refused by the target")
+
+
 def _installed():
     from .decide import Need
     return Need("its extensions installed",
@@ -154,7 +167,7 @@ def ways():
     from .decide import Rung
     return (
         Rung(RENDERED, "the source rendering the target's load format",
-             needs=(_need_pair(RENDERED_PAIRS,
+             needs=(_unheld(), _need_pair(RENDERED_PAIRS,
                                "the source renders the target's load format"
                                " between MySQL and PostgreSQL only"),
                     _held_whole(), _carries(lambda f: f["rendered"]),
@@ -162,7 +175,7 @@ def ways():
              because="measured fastest here: both servers do the work, and"
                      " the bytes between them are only passed on"),
         Rung(COMPILED, "the compiled mover",
-             needs=(_need_pair(_compiled_pairs(),
+             needs=(_unheld(), _need_pair(_compiled_pairs(),
                                "the compiled mover does not join these two"
                                " engines"),
                     _held_whole(), _carries(lambda f: f["compiled"]),
@@ -207,8 +220,10 @@ def _facts(eng, db, src_t, dst_t):
         if "c" not in got:
             got["c"] = columns(eng, db, src_t, dst_t)
         return got["c"]
+    from . import fencing
     return Facts(
         {"pair": (eng.src_engine.CANON_ENGINE, eng.dst_engine.CANON_ENGINE)},
+        held=lambda: fencing.armed(eng.hop) is not None,
         unproved=lambda: cols()[1],
         compiled=lambda: compiled_refuses(eng, db, src_t, cols()[0]),
         rendered=lambda: loadtext.refused(

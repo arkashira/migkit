@@ -617,6 +617,18 @@ def _steps(entries):
     return out
 
 
+def _movers(hop):
+    """Which machine wrote which batch and which range, and the proof of
+    one writer at a time, where the hop's machines work together (`ha`)."""
+    from . import ha
+    try:
+        rows = ha.evidence(hop)
+    except Exception:  # noqa: BLE001 - nothing kept to say
+        return []
+    return [{k: words(v) if isinstance(v, str) else _plain(v)
+             for k, v in r.items()} for r in rows]
+
+
 def gather(hop, session=None):
     """The machine view: the hop's whole history, or the run `session`'s
     part of it."""
@@ -649,6 +661,7 @@ def gather(hop, session=None):
         "removed": [{"op": _op(e), "db": e.get("db"), "at": e.get("at")}
                     for e in entries if e.get("op") in REMOVALS],
         "steps": _steps(entries),
+        "movers": _movers(hop),
         "record": chain,
         "at_rest": {"encrypted_to": len(evidence.recipients_of(hop))},
     }
@@ -768,6 +781,11 @@ def _sections(doc):
                                                 "detail"],
                 [(a["level"], a["scope"], a["item"], a["detail"])
                  for a in doc["assessment"]]))
+    out.append(("who wrote what", ["db", "what", "machine", "number",
+                                   "from", "to"],
+                [(m.get("db"), m.get("what"), m.get("by"), m.get("number"),
+                  m.get("from"), m.get("to")) for m in doc.get("movers")
+                 or []]))
     out.append(("left and removed", ["what", "db", "at"],
                 [(r["op"], r["db"], r["at"]) for r in doc["removed"]]))
     out.append(("the record", ["at", "op", "db", "who", "host"],

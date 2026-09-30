@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .. import fencing
 from ..config import REPORTS
 from ..decide import Need, Rung
 from ..tableway import Way
@@ -1161,6 +1162,9 @@ class PostgresEngine(Engine):
                         f"insert into {quoted} ({cols}) select {cols} from"
                         f" migkit_batch on conflict ({conflict}) do "
                         + (f"update set {sets}" if sets else "nothing"))
+                # last before the commit: a writer that lost its hold is
+                # refused here (`fencing`)
+                fencing.hold(self, side, db, cur)
         return len(rows)
 
     def _sparse_columns(self, side, db, table):
@@ -1196,6 +1200,7 @@ class PostgresEngine(Engine):
                 cur.execute(f'delete from "{sch}"."{tbl}"'
                             + self._where(where))
                 gone = cur.rowcount
+                fencing.hold(self, side, db, cur)
             conn.commit()
         return gone
 
@@ -1698,8 +1703,9 @@ class PostgresEngine(Engine):
 
         from .. import twoway
         lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
+        made = self.__dict__.setdefault("_origin_made", set())
         with lock:
-            if self.__dict__.get("_origin_made"):
+            if (side, self._d(side, db)) in made:
                 return
             conn = self._conn(side, self._d(side, db))
             try:
@@ -1713,7 +1719,23 @@ class PostgresEngine(Engine):
                                 " add column if not exists seen text")
             finally:
                 conn.close()
-            self._origin_made = True
+            made.add((side, self._d(side, db)))
+
+    #: how `shared` and `fencing` write migkit's own rows here
+    OWN_DIALECT = "postgres"
+
+    def own_name(self, side, db):
+        """`migkit_origin`'s name in the database of `db` on `side`."""
+        from .. import twoway
+        return f"public.{twoway.TABLE}"
+
+    def own_table(self, side, db):
+        """(a connection of its own to the database of `db` on `side`,
+        `migkit_origin`'s name there), the table made where it is not:
+        where the machines of a hop keep their records and the numbers
+        their writers are held to (`shared`, `fencing`)."""
+        self._origin_table(side, db)
+        return self._conn(side, self._d(side, db)), self.own_name(side, db)
 
     #: the prefix of the replication origins two-way tails apply under: a
     #: reader leaves out what carries one, and stops where any other
@@ -2159,6 +2181,23 @@ class PostgresEngine(Engine):
                 if again or not kept:
                     raise
 
+    def _slot_rows_waited(self, side, db, sql, args=None, wait=30.0):
+        """`_slot_rows` for a hop with a standby: a machine that lost the
+        tail may read the slot once more before it finds it lost (`ha`),
+        and the server refuses a second reader of a slot while one reads
+        (`object_in_use`) - a read that takes milliseconds, waited out
+        rather than taken for a failure."""
+        import time
+        end = time.monotonic() + wait
+        while True:
+            try:
+                return self._slot_rows(side, db, sql, args)
+            except Exception as e:  # noqa: BLE001 - only a busy slot waits
+                if _sqlstate(e) != OBJECT_IN_USE or time.monotonic() > end:
+                    raise
+                # the slot's connection is in autocommit: nothing to undo
+                time.sleep(0.2)
+
     def release_changes(self):
         for conn in self.__dict__.pop("_slot_held", {}).values():
             conn.close()
@@ -2364,7 +2403,20 @@ class PostgresEngine(Engine):
         """
         ask = self._slot_text(side, db)
         name = self._slot_ready(side, db, resuming_from=token, ask=ask)
-        if token:
+        standby = bool((self.hop.options or {}).get("standby"))
+        rows_of = self._slot_rows_waited if standby else self._slot_rows
+        if token and standby:
+            # a machine that took the tail over goes on from the position
+            # the last holder put where it reads, which may be a save
+            # behind the one that holder moved the slot to - and the slot
+            # moves only past what was applied, so it goes on from there:
+            # the server refuses to move a slot back (`ha`)
+            rows_of(side, db, "select pg_replication_slot_advance("
+                              "slot_name, %s::pg_lsn) from"
+                              " pg_replication_slots where slot_name = %s"
+                              " and confirmed_flush_lsn < %s::pg_lsn",
+                    (token, name, token))
+        elif token:
             # the caller applied everything up to this LSN, so the server may
             # stop keeping it
             self._slot_rows(side, db, "select pg_replication_slot_advance("
@@ -2380,12 +2432,12 @@ class PostgresEngine(Engine):
         # each change with its transaction's xid, for the tail to hold to
         # the marks the table copier kept (`mark_covers`); each commit with
         # the time the source made it, for the tail's beat
-        rows = self._slot_rows(side, db, "select lsn::text, xid::text, data"
-                                         " from pg_logical_slot_peek_changes("
-                                         "%s, %s, %s, 'include-timestamp',"
-                                         " 'true'"
-                               + (", 'only-local', 'true'" if local else "")
-                               + ")", (name, upto, int(limit)))
+        rows = rows_of(side, db, "select lsn::text, xid::text, data"
+                                 " from pg_logical_slot_peek_changes("
+                                 "%s, %s, %s, 'include-timestamp',"
+                                 " 'true'"
+                       + (", 'only-local', 'true'" if local else "")
+                       + ")", (name, upto, int(limit)))
         self._marks_seen = []
         out, last = self._slot_lines(side, db, rows, token, two_way, name,
                                      ask)
