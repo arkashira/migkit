@@ -630,10 +630,10 @@ _BY_KEY_ORDER = ("read by {}, never in key order, so the key's shape does"
 _NO_PROGRAM = ("no program is driven for this engine; migkit's own reader"
                " needs only to read")
 
-_DBAPI = ("mssql", "oracle", "db2", "ase", "redshift", "snowflake",
-          "bigquery", "duckdb")
+_DBAPI = ("mssql", "oracle", "db2", "db2i", "db2zos", "ase", "redshift",
+          "snowflake", "bigquery", "duckdb")
 _STREAMS = ("kinesis", "pubsub")
-_FILES = ("sqlite", "duckdb", "parquet")
+_FILES = ("sqlite", "duckdb", "parquet", "copybook")
 _NONE = {**{n: (NOT_APPLICABLE, _STREAM_ONLY) for n in _STREAMS},
          "generic": (NOT_YET, "33")}
 
@@ -649,6 +649,7 @@ WAYS = {
            for n in ("sqlite", "clickhouse", "cassandra", "dynamodb",
                      "opensearch", "parquet") + _DBAPI},
         "mongodb": (NOT_APPLICABLE, "every document carries an _id"),
+        "copybook": ("yes", "@position_spans"),
         "redis": (NOT_APPLICABLE, "every value is under its key"),
         "kafka": (NOT_APPLICABLE, "a message is addressed by its partition"
                                   " and offset, never by a key"),
@@ -665,6 +666,8 @@ WAYS = {
         "dynamodb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scan segments")),
         "opensearch": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scroll slices")),
         "parquet": (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time")),
+        "copybook": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "ranges of whole records")),
         "redis": (NOT_APPLICABLE, "a key is one string, read by the scan's"
                                   " cursor"),
         "kafka": (NOT_APPLICABLE, "a message's key is carried, never"
@@ -680,6 +683,9 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "@_large_values"),
         "mysql": ("yes", "@_large_values"),
+        "copybook": (NOT_APPLICABLE, "a field is as long as its copybook"
+                                     " says, a record 32,760 bytes at most"
+                                     " in a variable file"),
         "oracle": ("yes", "@_read_in_pieces"),
         "*": (NOT_YET, "R10"),
     },
@@ -701,6 +707,9 @@ WAYS = {
                                     " as one through its router"),
         "sqlite": (NOT_APPLICABLE, "SQLite has no partitioned tables"),
         "duckdb": (NOT_APPLICABLE, "DuckDB has no partitioned tables"),
+        "copybook": (NOT_APPLICABLE, "a file is not partitioned; one file"
+                                     " of several record layouts is several"
+                                     " tables, by segment"),
         "*": (NOT_YET, "R13"),
     },
     "missing grant": {

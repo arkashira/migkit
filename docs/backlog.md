@@ -3134,6 +3134,37 @@ mainframe, IBM i, SAP application data, Cosmos NoSQL or SaaS. In order:
    through `ibm_db` needs the operator's Db2 Connect licence (installed
    with acceptance); no open log reader exists for Db2 z/OS, IMS or
    CICS/VSAM changes - said.
+   *Built 2026-09-30.* **Copybook files** (`copybook`, also `vsam`):
+   migkit's own reader (`migkit/copybook.py`), chosen by a corpus of
+   139 values written from IBM's documented encodings plus 10 that must
+   fail (`tests/copybook_corpus.py`): Stingray 5.1.1 read 21 of the 139
+   right and read 6 of 7 must-fail values as numbers; Cobrix has no
+   program to drive and turns what it cannot decode into NULL. Code
+   pages through `ebcdic` (cp838 Thai included), COMP-3/zoned/COMP/COMP-5
+   and the signs, `P` scaling, COMP-1 as a float and COMP-2 as its exact
+   decimal, REDEFINES by a discriminator rule, OCCURS flattened, ODO
+   shifting what follows, 88 levels as boolean columns, LOW-VALUES as
+   NULL; F/FB/V/VB/z/OSMF record mode; multi-layout files as tables by
+   segment; must-fail values stop the read or land as NULL and are
+   listed. A file is read by ranges of whole records, resumed by record
+   offset, and folded in processes side by side (3,000,000 records of
+   74 bytes: 31.98 s in one process, 7.38 s on 10 CPUs); written back
+   in its own format, a keyed batch replacing itself. **Db2 for i**
+   (`db2i`): IBM's ODBC driver (installed with IBM's terms accepted),
+   DRDA under a Db2 Connect licence, or Mapepire; `QSYS2` catalogue, RRN
+   ranges, `HASH_ROW` sums between two systems, the journal followed by
+   `DISPLAY_JOURNAL` (commit order, rolled-back transactions dropped,
+   savepoint rollbacks re-read, key changes as delete and insert,
+   receivers checked before resuming), users and object authorities
+   compared and carried with GRTOBJAUT. Written without an IBM i: every
+   statement and what is made of its rows is held by recorded result
+   shapes; PUB400.com is where it can be proved on a real system.
+   **Db2 for z/OS** (`db2zos`): `SYSIBM` catalogue, copy and verify;
+   SQL1598N said as the Db2 Connect licence it is, the licence put in
+   place by `doctor --install` from `MIGKIT_DB2_CONNECT_LICENSE` once
+   accepted; follow declared not applicable, with the reason, and
+   `assess` says the depth reached. Proved on no z/OS (IBM Z Xplore is
+   the free one).
 3. **Teradata** (teradatasql, FastExport/FastLoad through TPT where
    installed, HASHROW for digests; ClearScape or the Vantage Express VM
    for tests).

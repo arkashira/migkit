@@ -2277,7 +2277,25 @@ class HeteroEngine(Engine):
                            self._pair_temporal_meaning(db)
                            if self._can_compare_neutrally() else None,
                            self.dst_engine._fk_orphans(db)) if r]
+        # a side that is files says whether every record of them reads
+        # (`deep_files`): a value that is not one, a file cut short
+        for side, eng in (("src", self.src_engine), ("dst", self.dst_engine)):
+            files = getattr(eng, "deep_files", None)
+            if files is not None:
+                out += files(side, db)
         return (out or super().check_deep(db)) + ([proved] if proved else [])
+
+    def _assess_extra(self):
+        """How deep migkit reaches each side, where its engine says
+        (`reach_items`): a Db2 for z/OS source is copied and verified and
+        never followed, an IBM i one followed only where its tables are
+        journaled with both images."""
+        items = []
+        for side, eng in (("src", self.src_engine), ("dst", self.dst_engine)):
+            reach = getattr(eng, "reach_items", None)
+            if reach is not None:
+                items += reach(side)
+        return items
 
     def load_window(self, db, log=None, tables=None):
         """The target's own, over the names the tables have there."""

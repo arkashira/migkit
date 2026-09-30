@@ -268,7 +268,21 @@ ENDPOINT_OPTIONS = {
                  ("mongodb", "kafka")),
     "uri_options": Key("the driver's own options", "str", ("mongodb",)),
     "path": Key("the file or directory", "str",
-                ("sqlite", "duckdb", "parquet")),
+                ("sqlite", "duckdb", "parquet", "copybook")),
+    "tables": Key("each table of a directory of files described by COBOL"
+                  " copybooks: its file, copybook, record, recfm, lrecl,"
+                  " codepage, key, segment, redefines, odo, bytes and"
+                  " unreadable", "dict", ("copybook",)),
+    "codepage": Key("the EBCDIC code page the files' text is in (cp037,"
+                    " cp838, cp1047 ...)", "str", ("copybook",)),
+    "recfm": Key("the files' record format: F, FB, V, VB or ZOSMF",
+                 "str", ("copybook",)),
+    "unreadable": Key("stop (the default) or null: a value that is not"
+                      " one stops the read, or lands as NULL and is"
+                      " listed", "str", ("copybook",)),
+    "odo": Key("actual (the default) or max: whether a table OCCURS"
+               " DEPENDING ON its count takes the room of its count or"
+               " of its most", "str", ("copybook",)),
     "url": Key("the whole connection address", "str",
                ("generic", "opensearch", "parquet")),
     "secure": Key("TLS", "bool", ("clickhouse",)),
@@ -295,8 +309,11 @@ ENDPOINT_OPTIONS = {
                           ("oracle",), knob="size"),
     "link_dsn": Key("how the target reaches the source over a database"
                     " link, where not as migkit does", "str", ("oracle",)),
-    "database": Key("the database to connect to", "str",
-                    ("db2", "redshift", "snowflake", "bigquery")),
+    "database": Key("the database to connect to (a z/OS subsystem's"
+                    " location name, an IBM i system's relational"
+                    " database)", "str",
+                    ("db2", "db2i", "db2zos", "redshift", "snowflake",
+                     "bigquery")),
     "account": Key("the account identifier", "str", ("snowflake",)),
     "warehouse": Key("the warehouse queries run in", "str",
                      ("snowflake",)),
@@ -315,13 +332,14 @@ ENDPOINT_OPTIONS = {
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
                " authorities (https on OpenSearch)", "bool",
-               ("opensearch",) + TLS_OWN),
+               ("opensearch", "db2i") + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
-                       TLS_OWN),
+                       ("db2i",) + TLS_OWN),
     "tls_cert_file": Key("a client certificate file", "str", TLS_OWN),
     "tls_key_file": Key("a client key file", "str", ("redis", "cassandra")),
     "tls_crl_file": Key("a revocation list file", "str", ("mongodb",)),
-    "tls_insecure": Key("TLS with nothing checked", "bool", TLS_OWN),
+    "tls_insecure": Key("TLS with nothing checked", "bool",
+                        ("db2i",) + TLS_OWN),
     "encrypt": Key("require, request or off", "str|bool", ("mssql",)),
     "redis_product": Key("community, cloud or software: the Redis product"
                          " the target is, where its name cannot say",

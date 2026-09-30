@@ -35,7 +35,7 @@ STATES = (USED, UNUSED, TOPPED)
 #: modules that register a tool when imported. A module that wraps one
 #: adds itself here, so `tools_used` sees every tool without importing
 #: all of migkit
-CONTRIBUTORS = ["migkit.movers"]
+CONTRIBUTORS = ["migkit.movers", "migkit.engines.db2i"]
 
 
 @dataclass(frozen=True)

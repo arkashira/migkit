@@ -159,6 +159,8 @@ def _install(monkeypatch, home, accept=""):
     monkeypatch.setattr(tools, "which", lambda n: None)
     monkeypatch.setattr(tools.shutil, "which", lambda n: None)
     monkeypatch.setattr(tools, "second_reader_present", lambda: True)
+    monkeypatch.setattr(tools, "ibmi_odbc_present", lambda: False)
+    monkeypatch.setattr(tools, "db2_connect_present", lambda: False)
     monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
     if accept:
         monkeypatch.setenv("MIGKIT_ACCEPT_TERMS", accept)

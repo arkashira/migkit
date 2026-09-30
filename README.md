@@ -281,7 +281,7 @@ engine produced it.
 | Tier | Engines |
 |---|---|
 | Native | postgres, mysql, mssql, mongodb, sqlite, redis, kafka |
-| Either side of a pair (move and verify) | parquet (disk or S3), clickhouse, dynamodb, opensearch, cassandra; oracle, db2 and ase (SAP ASE, also `sybase`) written, not yet run against a server; redshift, snowflake and bigquery written, not yet run against an account |
+| Either side of a pair (move and verify) | parquet (disk or S3), clickhouse, dynamodb, opensearch, cassandra; copybook (mainframe files described by COBOL copybooks, also `vsam`: EBCDIC, packed and zoned decimals, REDEFINES, OCCURS DEPENDING ON, F/V/VB); oracle, db2 and ase (SAP ASE, also `sybase`) written, not yet run against a server; db2i (IBM i, its journal followed; also `ibmi`, `as400`) and db2zos (Db2 for z/OS, copied and verified, never followed: no open log reader exists) written, not yet run against a system; redshift, snowflake and bigquery written, not yet run against an account |
 | Change streams delivered into | kafka (Azure Event Hubs through its Kafka endpoint), kinesis, pubsub (json, debezium or canal messages) |
 | Alias | mariadb, percona, tdsql, aurora-mysql/postgres, alloydb, documentdb, cosmosdb-mongo, azure-sql, elasticsearch, scylladb |
 | Row comparison | snowflake, bigquery, redshift, clickhouse, oracle, trino, duckdb, vertica, databricks |

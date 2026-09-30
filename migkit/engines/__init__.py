@@ -3,7 +3,10 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "documentdb": "mongodb", "cosmosdb-mongo": "mongodb",
            "azure-sql": "mssql", "tdsql": "mysql",
            "elasticsearch": "opensearch", "scylladb": "cassandra",
-           "sybase": "ase", "sap-ase": "ase"}
+           "sybase": "ase", "sap-ase": "ase", "vsam": "copybook",
+           "cobol": "copybook", "ibmi": "db2i", "as400": "db2i",
+           "iseries": "db2i", "db2-for-i": "db2i", "db2-zos": "db2zos",
+           "db2z": "db2zos"}
 
 #: an address's scheme and the engine it names - `source:
 #: postgres://app@db1/shop` in a hop (`migkit.addresses`). The one place a
@@ -22,6 +25,9 @@ SCHEMES = {
     "sqlite": "sqlite",
     "duckdb": "duckdb",
     "db2": "db2",
+    "db2i": "db2i", "ibmi": "db2i", "as400": "db2i",
+    "db2zos": "db2zos",
+    "copybook": "copybook", "vsam": "copybook",
     "ase": "ase", "sybase": "ase",
     "opensearch": "opensearch", "elasticsearch": "opensearch",
     "cassandra": "cassandra", "scylla": "cassandra",
@@ -104,6 +110,15 @@ def _class_for(name):
     if name == "duckdb":
         from .duckdb import DuckDBEngine
         return DuckDBEngine
+    if name == "copybook":
+        from .copybook import CopybookEngine
+        return CopybookEngine
+    if name == "db2i":
+        from .db2i import Db2iEngine
+        return Db2iEngine
+    if name == "db2zos":
+        from .db2zos import Db2ZosEngine
+        return Db2ZosEngine
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
@@ -112,9 +127,10 @@ def _class_for(name):
 
 #: every canonical engine name, in the order a report lists them
 NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
-         "parquet", "clickhouse", "dynamodb", "oracle", "db2", "ase",
+         "parquet", "clickhouse", "dynamodb", "oracle", "db2", "db2i",
+         "db2zos", "ase",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
-         "kinesis", "pubsub", "duckdb", "hetero", "generic")
+         "kinesis", "pubsub", "duckdb", "copybook", "hetero", "generic")
 
 
 def engines_with(method):

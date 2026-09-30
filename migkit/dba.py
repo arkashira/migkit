@@ -660,6 +660,50 @@ def _mssql(hop, e, key, side, dbs, where, read, write, follow, native):
     return out
 
 
+def _cl(command):
+    """A CL command as the SQL statement that runs it on IBM i."""
+    return "call qsys2.qcmdexc('" + command.replace("'", "''") + "');"
+
+
+def _db2i(hop, e, key, side, dbs, where, read, write, follow, native):
+    """What following an IBM i source needs: every table journaled, with
+    before images, to a journal that keeps whole entries - each missing
+    one as the CL command that sets it, run through `QSYS2.QCMDEXC`."""
+    out = []
+    for db in dbs:
+        start = len(out)
+        if follow and key == "src":
+            tables = e._journaled(key, db)
+            loose = sorted(t for t, i in tables.items() if not i["journal"])
+            after = sorted(t for t, i in tables.items()
+                           if i["journal"] and i["images"] != "*BOTH")
+            out.append(Need(
+                side, f"every table of {db} journaled", not loose,
+                f"{len(loose)} not journaled" if loose else "all",
+                [_cl(f"STRJRNPF FILE({tables[t]['system'][1]}/"
+                     f"{tables[t]['system'][0]}) JRN({tables[t]['system'][1]}"
+                     "/QSQJRN) IMAGES(*BOTH)") for t in loose]))
+            out.append(Need(
+                side, f"before images journaled for {db}", not after,
+                f"{len(after)} with after images only" if after else "all",
+                [_cl(f"CHGJRNOBJ OBJ(({tables[t]['system'][1]}/"
+                     f"{tables[t]['system'][0]} *FILE)) ATR(*IMAGES)"
+                     " IMAGES(*BOTH)") for t in after]))
+            for journal in sorted({i["journal"] for i in tables.values()
+                                   if i["journal"]}):
+                attached = [r for r in e._receivers(key, db, journal)
+                            if str(r[4]).strip() == "ATTACHED"]
+                whole = not attached or str(attached[0][5] or "NO") \
+                    .strip() == "NO"
+                out.append(Need(side, f"the journal {journal} keeps whole"
+                                      " entries", whole,
+                                "whole" if whole else "minimized",
+                                [_cl(f"CHGJRN JRN({journal})"
+                                     " MINENTDTA(*NONE)")]))
+        _following(out[start:])
+    return out
+
+
 # ---- Oracle ----------------------------------------------------------------
 
 def _ori(name):
@@ -824,12 +868,12 @@ def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
 
 #: the engines whose servers can be asked, by canonical name
 ASK = {"postgres": _pg, "mysql": _my, "mongodb": _mongo, "mssql": _mssql,
-       "oracle": _oracle}
+       "db2i": _db2i, "oracle": _oracle}
 
 #: how each writes a comment, and its script's file suffix
 SCRIPT = {"postgres": ("--", "sql"), "mysql": ("--", "sql"),
           "mongodb": ("//", "js"), "mssql": ("--", "sql"),
-          "oracle": ("--", "sql")}
+          "db2i": ("--", "sql"), "oracle": ("--", "sql")}
 
 
 def script(hop, eng, side, found, where=None):

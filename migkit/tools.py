@@ -51,6 +51,11 @@ PROGRAMS = {
     # not a program: FreeTDS's ODBC driver and the ODBC manager it loads
     # through, which SAP ASE is reached by (`ASE_DRIVER`)
     "ase-odbc": ("freetds unixodbc", "tdsodbc unixodbc"),
+    # not programs: IBM's ODBC driver for IBM i, from IBM's own package
+    # repository (`install_ibm`), and the operator's Db2 Connect licence
+    # put beside the IBM data server driver
+    "ibmi-odbc": ("", ""),
+    "db2-connect": ("", ""),
 }
 
 #: each program's licence, as SPDX names it. Every one is run as a program
@@ -77,6 +82,10 @@ PROGRAM_LICENCES = {
     # FreeTDS under the Library GPL 2 "or any later version", taken as
     # 2.1; the ODBC manager under the LGPL 2.1
     "ase-odbc": "LGPL-2.1-or-later",
+    # IBM's, not open source: each is used on the operator's acceptance
+    # of IBM's terms (`TERMS`)
+    "ibmi-odbc": "LicenseRef-IBM-i-Access-Client-Solutions",
+    "db2-connect": "LicenseRef-IBM-Db2-Connect",
 }
 
 #: not a program on PATH: the second reader lives in an environment of its
@@ -146,6 +155,25 @@ TERMS = {
         " or Redis Software",
         "Redis copies take migkit's own keyspace copier, which every other"
         " target takes anyway"),
+    "ibmi-odbc": Terms(
+        "IBM's licence for IBM i Access Client Solutions, of which the"
+        " ODBC driver is part (no charge)",
+        "https://www.ibm.com/support/pages/ibm-i-access-client-solutions",
+        "reading, writing and following Db2 for i (IBM i) tables over"
+        " ODBC, their types as IBM i keeps them",
+        "IBM i is reached through the Mapepire server where the operator"
+        " runs it on the system, or over DRDA under a Db2 Connect licence;"
+        " with neither, not from this machine"),
+    "db2-connect": Terms(
+        "IBM Db2 Connect: the operator's own licence from IBM - its file"
+        " on this machine, named by MIGKIT_DB2_CONNECT_LICENSE, or the"
+        " server activated for it by its administrator",
+        "https://www.ibm.com/products/db2-connect",
+        "reaching Db2 for z/OS, and Db2 for i where its ODBC driver is not"
+        " installed, over DRDA through the IBM data server driver",
+        "Db2 for z/OS is reached only where its subsystem is activated for"
+        " Db2 Connect by its administrator; Db2 for i through its ODBC"
+        " driver or its Mapepire server"),
     # the redo-file reader is open (AGPL); the client library it is built
     # against to reach the database is Oracle's own, free to use under
     # these terms and not open source
@@ -268,6 +296,82 @@ def ase_driver_present():
     return True
 
 
+#: IBM's components, which are not programs on PATH either: the ODBC
+#: driver `engines.db2i` connects through, and the Db2 Connect licence
+#: `engines.db2zos` (and DRDA to IBM i) needs
+IBMI_ODBC, DB2_CONNECT = "ibmi-odbc", "db2-connect"
+
+
+def ibmi_odbc_present():
+    from .engines.db2i import odbc_driver
+    return odbc_driver() is not None
+
+
+def db2_connect_present():
+    from .engines.db2 import db2_connect_licence
+    return db2_connect_licence() is not None
+
+
+def install_ibm(component, log=print):
+    """IBM's ODBC driver for IBM i from IBM's own package repository, with
+    the ODBC manager it loads through; or the operator's Db2 Connect
+    licence file (`MIGKIT_DB2_CONNECT_LICENSE`) copied beside the IBM data
+    server driver. Called once the terms are accepted. True once it is in
+    place."""
+    import os
+    if component == DB2_CONNECT:
+        path = os.environ.get("MIGKIT_DB2_CONNECT_LICENSE", "")
+        if not path:
+            log("  no licence file named: MIGKIT_DB2_CONNECT_LICENSE=<its"
+                " db2consv_*.lic> migkit doctor --install puts it in place"
+                " - a server activated for Db2 Connect needs none")
+            return False
+        import ibm_db
+        into = os.path.join(os.path.dirname(os.path.abspath(ibm_db.__file__)),
+                            "clidriver", "license")
+        if not os.path.isfile(path) or not os.path.basename(path) \
+                .startswith("db2consv_"):
+            log("  the file MIGKIT_DB2_CONNECT_LICENSE names is not a Db2"
+                " Connect licence (db2consv_*.lic)")
+            return False
+        os.makedirs(into, exist_ok=True)
+        shutil.copyfile(path, os.path.join(into, os.path.basename(path)))
+        return db2_connect_present()
+    mac = platform.system() == "Darwin"
+    if mac and shutil.which("brew"):
+        steps = [["brew", "tap", "ibm/iaccess", IBMI_TAP],
+                 ["brew", "install", "unixodbc", "ibm-iaccess"]]
+    elif shutil.which("apt-get"):
+        steps = [["sudo", "sh", "-c", f"curl -fsSL {IBMI_APT} >"
+                  " /etc/apt/sources.list.d/ibmi-acs-1.1.0.list"],
+                 ["sudo", "apt-get", "update"],
+                 ["sudo", "apt-get", "install", "-y", "unixodbc",
+                  "ibm-iaccess"]]
+    elif shutil.which("dnf"):
+        steps = [["sudo", "sh", "-c", f"curl -fsSL {IBMI_RPM} >"
+                  " /etc/yum.repos.d/ibmi-acs.repo"],
+                 ["sudo", "dnf", "install", "-y", "--refresh", "unixODBC",
+                  "ibm-iaccess"]]
+    else:
+        log("  no package manager here that IBM publishes the driver for")
+        return False
+    for step in steps:
+        got = subprocess.run(step, capture_output=True, text=True)
+        if got.returncode != 0:
+            log("  it did not install: "
+                f"{(got.stderr.strip().splitlines() or [''])[-1][:120]}")
+            return False
+    return ibmi_odbc_present()
+
+
+#: where IBM publishes the IBM i ODBC driver's packages
+IBMI_TAP = "https://public.dhe.ibm.com/software/ibmi/products/odbc/macos/tap/"
+IBMI_APT = ("https://public.dhe.ibm.com/software/ibmi/products/odbc/debs/"
+            "dists/1.1.0/ibmi-acs-1.1.0.list")
+IBMI_RPM = ("https://public.dhe.ibm.com/software/ibmi/products/odbc/rpms/"
+            "ibmi-acs.repo")
+
+
 def _present(cmd):
     if cmd == SECOND_READER:
         return second_reader_present()
@@ -276,6 +380,10 @@ def _present(cmd):
         return oracle_redo.program()
     if cmd == ASE_DRIVER:
         return ase_driver_present()
+    if cmd == IBMI_ODBC:
+        return ibmi_odbc_present()
+    if cmd == DB2_CONNECT:
+        return db2_connect_present()
     if cmd in SOURCE_BUILDS:
         return built_program(cmd) is not None
     return which(cmd)
@@ -439,6 +547,17 @@ CAPABILITIES = [
     ("SQL Server: verify",
      "compare rows and objects",
      [], ["sqlcmd"]),
+    ("Db2 for i (IBM i): verify, copy and follow",
+     "compare and copy tables, and follow their journal; its own driver"
+     " carries the types as IBM i keeps them",
+     [], [IBMI_ODBC]),
+    ("Db2 for z/OS: verify and copy",
+     "compare and copy tables over DRDA",
+     [], [DB2_CONNECT]),
+    ("Mainframe files: verify and copy",
+     "read, compare and write files described by COBOL copybooks, EBCDIC"
+     " and packed decimals exactly",
+     [], []),
     ("SAP ASE: verify and copy",
      "compare and copy tables through ASE's own protocol",
      [ASE_DRIVER], []),
@@ -539,6 +658,8 @@ def by_hand(programs):
             continue    # fetched from its vendor (`install_vendor`)
         if c in SOURCE_BUILDS:
             continue    # built from its source (`install_from_source`)
+        if c in (IBMI_ODBC, DB2_CONNECT):
+            continue    # IBM's, put in place by `install_ibm`
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
             out.append(c)
@@ -578,9 +699,11 @@ def install_missing(log=print, ask=None):
             log(f"  component {n} did not install; run migkit doctor again"
                 " to see which capability is still short")
     fetch = [c for c in dict.fromkeys(wanted) if c in VENDOR and not which(c)]
+    ibm = [c for c in dict.fromkeys(wanted) if c in (IBMI_ODBC, DB2_CONNECT)
+           and not _present(c)]
     # the terms first, all of them, before anything is fetched: a question
     # asked halfway through a long download is one nobody is there for
-    answer = accept_terms(fetch, ask, log)
+    answer = accept_terms(fetch + ibm, ask, log)
     for n, cmd in enumerate(fetch, 1):
         open_build = cmd in TERMS and not answer.get(cmd)
         if open_build and not TERMS[cmd].open_build:
@@ -597,6 +720,11 @@ def install_missing(log=print, ask=None):
         if not ok:
             log(f"  vendor component {n} did not install; run migkit"
                 " doctor again to see which capability is still short")
+    for n, cmd in enumerate([c for c in ibm if answer.get(c)], 1):
+        log(f"putting IBM component {n} in place ...")
+        if not install_ibm(cmd, log):
+            log(f"  IBM component {n} is not in place; run migkit doctor"
+                " again to see which capability is still short")
     for n, cmd in enumerate([c for c in dict.fromkeys(wanted)
                              if c in SOURCE_BUILDS and not _present(c)], 1):
         log(f"building component {n} from its source ...")

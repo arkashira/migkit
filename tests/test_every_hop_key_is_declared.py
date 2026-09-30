@@ -32,6 +32,8 @@ FILE_ENGINE = {"postgres.py": ("postgres",), "mysql.py": ("mysql",),
                "cassandra.py": ("cassandra",), "kinesis.py": ("kinesis",),
                "pubsub.py": ("pubsub",), "ase.py": ("ase",),
                "duckdb.py": ("duckdb",), "hetero.py": ("hetero",),
+               "copybook.py": ("copybook",), "db2i.py": ("db2i",),
+               "db2zos.py": ("db2zos",),
                "warehouse.py": ("redshift", "snowflake", "bigquery")}
 
 #: reads by a key held in a variable, where it comes from, and the keys

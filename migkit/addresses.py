@@ -37,13 +37,14 @@ REFERENCES = ("env:", "${", "file:", "vault:", "aws-sm:", "gcp-sm:",
               "azure-kv:", "keyring:")
 
 #: engines whose address is a file or a place, not a server
-PLACES = ("sqlite", "duckdb", "parquet")
+PLACES = ("sqlite", "duckdb", "parquet", "copybook")
 #: engines whose first path segment names what to connect to, and the
 #: second the hop's databases (their schemas)
-CONNECTS_TO = {"oracle": "service", "db2": "database",
+CONNECTS_TO = {"oracle": "service", "db2": "database", "db2zos": "database",
                "redshift": "database", "snowflake": "database"}
 #: engines that sign in without a user and password of the address's own
-NO_SIGN_IN = ("sqlite", "duckdb", "parquet", "bigquery", "pubsub")
+NO_SIGN_IN = ("sqlite", "duckdb", "parquet", "copybook", "bigquery",
+              "pubsub")
 #: an AWS region, as a host naming where a service is rather than a server
 REGION = re.compile(r"^[a-z]{2}(-gov|-iso[a-z]*)?-[a-z]+-\d$")
 

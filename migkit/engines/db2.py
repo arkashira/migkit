@@ -25,6 +25,58 @@ DECLARED = ("case when typename in ('DECIMAL', 'NUMERIC') then typename"
             " else typename end")
 
 
+#: the engine each Db2 platform is, and how it is said
+PLATFORM_ENGINE = {"luw": "db2", "zos": "db2zos", "i": "db2i"}
+PLATFORM_WORDS = {"luw": "Db2 for Linux, UNIX and Windows",
+                  "zos": "Db2 for z/OS", "i": "Db2 for i (IBM i)"}
+
+
+def platform_of(dbms_name):
+    """The Db2 platform a server is, by the product name its driver
+    reports: `DB2/<system>` for Linux, UNIX and Windows (`DB2/LINUXX8664`),
+    `DB2` for z/OS (product DSN), `AS` over DRDA and `DB2/400 SQL` over IBM
+    i's own ODBC driver for Db2 for i (product QSQ); None for a name none of
+    them gives. Taken from IBM's documentation of each driver - proved on
+    none of these servers here."""
+    n = str(dbms_name or "").strip().upper()
+    if n.startswith(("DB2/400", "AS/400", "AS ", "DB2 FOR I")) or n == "AS" \
+            or n.startswith("QSQ"):
+        return "i"
+    if n.startswith("DB2/"):
+        return "luw"
+    if n in ("DB2", "DSN") or n.startswith(("DSN", "DB2 FOR Z")):
+        return "zos"
+    return None
+
+
+def licence_refused(error):
+    """What a connection refused for want of a Db2 Connect licence
+    (SQL1598N) means, in words; None for any other failure."""
+    if "SQL1598N" not in str(error):
+        return None
+    return ("the server answers only a client licensed for Db2 Connect"
+            " (SQL1598N): the operator's licence file in the IBM data server"
+            " driver's licence directory - migkit doctor --install puts it"
+            " there once its terms are accepted, from the file"
+            " MIGKIT_DB2_CONNECT_LICENSE names - or the server activated"
+            " for Db2 Connect by its own administrator")
+
+
+def db2_connect_licence():
+    """The Db2 Connect licence file in place beside the IBM data server
+    driver `ibm_db` runs on, or None."""
+    import glob
+    import os
+    try:
+        import ibm_db
+    except ImportError:
+        return None
+    here = os.path.dirname(os.path.abspath(ibm_db.__file__))
+    found = sorted(glob.glob(os.path.join(here, "clidriver", "license",
+                                          "db2consv_*.lic")))
+    return found[0] if found else None
+
+
 def _twelve(text):
     """A Db2 timestamp's text of twelve digits after the second as the
     value, nine kept; one with a digit past the ninth, which no other
@@ -71,6 +123,11 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
             return (self._nanos_text(quoted, declared), _twelve)
         return None
 
+    #: the platform this engine's hops are on, as `platform_of` names it
+    PLATFORM = "luw"
+    #: the port a DRDA server listens on where the endpoint names none
+    DRDA_PORT = 50000
+
     def _connect(self, side, db):
         import ibm_db_dbi
         ep = self.hop.source if side == "src" else self.hop.target
@@ -79,10 +136,34 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
             raise SystemExit(f"the {'source' if side == 'src' else 'target'}"
                              " needs `database`, the Db2 database to connect"
                              " to; the hop's databases are its schemas")
-        return ibm_db_dbi.connect(
-            f"DATABASE={name};HOSTNAME={ep.host};PORT={ep.port or 50000};"
-            f"PROTOCOL=TCPIP;UID={ep.user};PWD={ep.password};"
-            "CONNECTTIMEOUT=15;", "", "")
+        try:
+            conn = ibm_db_dbi.connect(
+                f"DATABASE={name};HOSTNAME={ep.host};"
+                f"PORT={ep.port or self.DRDA_PORT};PROTOCOL=TCPIP;"
+                f"UID={ep.user};PWD={ep.password};CONNECTTIMEOUT=15;", "", "")
+        except Exception as e:  # noqa: BLE001 - said in migkit's words
+            why = licence_refused(e)
+            if why:
+                raise SystemExit(why) from None
+            raise
+        return self._confirmed(conn, side, conn.server_info()[0])
+
+    def _confirmed(self, conn, side, dbms_name):
+        """The connection, once the server says it is the platform this
+        engine is for - asked once a side. A Db2 of another platform has
+        another catalogue and another log, and is its own engine."""
+        seen = self.__dict__.setdefault("_platforms", {})
+        if side not in seen:
+            seen[side] = platform_of(dbms_name)
+        got = seen[side]
+        if got is not None and got != self.PLATFORM:
+            conn.close()
+            raise SystemExit(
+                f"the {'source' if side == 'src' else 'target'} is"
+                f" {PLATFORM_WORDS[got]} ({dbms_name}), and this hop names"
+                f" it {self.CANON_ENGINE}: name its engine"
+                f" {PLATFORM_ENGINE[got]}")
+        return conn
 
     def databases(self):
         return list(self.hop.databases)

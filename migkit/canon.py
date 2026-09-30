@@ -438,6 +438,46 @@ TYPES = {
         "blob": "bytes", "binary": "bytes", "varbinary": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
     },
+    # Db2 for i, by `QSYS2.SYSCOLUMNS` type names as `engines.db2i` reads
+    # them: NUMERIC is zoned, DECIMAL packed, both exact; VARG is
+    # VARGRAPHIC and VARBIN VARBINARY; a CHAR of CCSID 65535 is read as
+    # VARBINARY. ROWID, XML and DATALINK stay unmapped
+    "db2i": {
+        "smallint": "integer", "integer": "integer", "bigint": "integer",
+        "decimal": "decimal", "numeric": "decimal", "decfloat": "decimal",
+        "real": "float", "double": "float", "float": "float",
+        "boolean": "boolean",
+        "char": "text", "varchar": "text", "graphic": "text",
+        "varg": "text", "clob": "text", "dbclob": "text",
+        "binary": "bytes", "varbin": "bytes", "varbinary": "bytes",
+        "blob": "bytes",
+        "date": "date", "timestamp": "timestamp", "time": "time",
+    },
+    # Db2 for z/OS, by `SYSIBM.SYSCOLUMNS` COLTYPE as `engines.db2zos`
+    # reads them; a column FOR BIT DATA is read as VARBINARY
+    "db2zos": {
+        "smallint": "integer", "integer": "integer", "bigint": "integer",
+        "decimal": "decimal", "decfloat": "decimal",
+        "real": "float", "double": "float",
+        "char": "text", "varchar": "text", "longvar": "text",
+        "graphic": "text", "varg": "text", "clob": "text", "dbclob": "text",
+        "binary": "bytes", "varbin": "bytes", "varbinary": "bytes",
+        "blob": "bytes",
+        "date": "date", "timestamp": "timestamp", "time": "time",
+    },
+    # A file described by a COBOL copybook, by the types `migkit.copybook`
+    # gives its fields: how a number is stored, then what it is. A number
+    # that fits 64 bits at scale 0 is an integer; `COMP-2` is a decimal,
+    # the exact value of its 56-bit fraction; an 88 level is a condition
+    "copybook": {
+        "text": "text", "national": "text", "bytes": "bytes",
+        "zoned integer": "integer", "packed integer": "integer",
+        "binary integer": "integer", "native integer": "integer",
+        "zoned decimal": "decimal", "packed decimal": "decimal",
+        "binary decimal": "decimal", "native decimal": "decimal",
+        "hex float": "float", "long hex float": "decimal",
+        "condition": "boolean",
+    },
     # DuckDB, by `information_schema.columns` type names
     "duckdb": {
         "tinyint": "integer", "smallint": "integer", "integer": "integer",
@@ -1467,6 +1507,24 @@ DDL = {
         "time": ("TIME", "TIME"),
         "bson": ("CLOB", "CLOB"),
     },
+    # Db2 for i and for z/OS: DB2's own types, a boolean as the SMALLINT
+    # both hold on every release (BOOLEAN came to IBM i with 7.5), which
+    # renders the same 0 or 1
+    **{name: {
+        OWN: ("CLOB", "CLOB"),
+        "integer": ("BIGINT", "BIGINT"),
+        "decimal": ("DECIMAL(31,10)", "DECIMAL({0},{1})"),
+        "float": ("DOUBLE", "DOUBLE"),
+        "boolean": ("SMALLINT", "SMALLINT"),
+        "text": ("VARCHAR(4000)", "VARCHAR({0})"),
+        "uuid": ("CHAR(36)", "CHAR(36)"),
+        "inet": ("VARCHAR(49)", "VARCHAR(49)"),
+        "bytes": ("BLOB", "VARBINARY({0})"),
+        "date": ("DATE", "DATE"),
+        "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
+        "time": ("TIME", "TIME"),
+        "bson": ("CLOB", "CLOB"),
+    } for name in ("db2i", "db2zos")},
     "duckdb": {
         # a type of the same engine is made as the source declares it:
         # measured, DuckDB to DuckDB built every column VARCHAR, and the
@@ -2256,6 +2314,8 @@ TIME_MEANING = {
                  "timestamp with time zone": INSTANT, "date": WALL,
                  "time without time zone": WALL},
     "db2": {"timestamp": WALL, "date": WALL, "time": WALL},
+    "db2i": {"timestamp": WALL, "date": WALL, "time": WALL},
+    "db2zos": {"timestamp": WALL, "date": WALL, "time": WALL},
 }
 
 
@@ -2320,6 +2380,8 @@ INT_RANGES.update({
     "cassandra": {"tinyint": (-128, 127), "smallint": _I16, "int": _I32,
                   "bigint": _I64, "counter": _I64},
     "db2": {"smallint": _I16, "integer": _I32, "bigint": _I64},
+    "db2i": {"smallint": _I16, "integer": _I32, "bigint": _I64},
+    "db2zos": {"smallint": _I16, "integer": _I32, "bigint": _I64},
     "ase": {"tinyint": (0, 255), "smallint": _I16, "int": _I32,
             "integer": _I32, "bigint": _I64,
             "unsigned smallint": (0, 65535),
@@ -3334,7 +3396,8 @@ def comparable(engine, declared):
 # network to be folded, which `check` reports rather than leaves implied.
 IN_PROCESS = {"mongodb", "sqlite", "mssql", "parquet", "clickhouse",
               "dynamodb", "oracle", "db2", "opensearch", "cassandra",
-              "redshift", "snowflake", "bigquery", "ase", "duckdb"}
+              "redshift", "snowflake", "bigquery", "ase", "duckdb",
+              "copybook", "db2i", "db2zos"}
 
 
 def renders(engine):

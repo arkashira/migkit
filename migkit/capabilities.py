@@ -48,6 +48,14 @@ _STREAM_ONLY = ("{} is where a pair delivers its changes (engine:"
                 " holds a stream of changes, not a copy to compare")
 _FILES = ("Parquet files are data at rest, with no server, settings or"
           " change log of their own")
+_ZOS_LOG = ("Db2 for z/OS hands its log out only to licensed code - a load"
+            " module on the host reading it, or the change tables IBM's"
+            " replication product fills - and no open reader of either"
+            " exists, so a z/OS source moves by copies, each proved by"
+            " check")
+_EXTRACT = ("a file described by a copybook is an extract at rest, with no"
+            " server, settings or change log; what changed since the last"
+            " extract is found by comparing the two, which check does")
 
 #: every gap, by engine: (NOT_APPLICABLE, why) or (NOT_YET, backlog item)
 GAPS = {
@@ -107,6 +115,18 @@ GAPS = {
                                   " own access control, not the table's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
+    "copybook": {
+        "sequences": (NOT_APPLICABLE, _EXTRACT),
+        "params": (NOT_APPLICABLE, _EXTRACT),
+        "stream": (NOT_APPLICABLE, _EXTRACT),
+        "fence": (NOT_APPLICABLE, _EXTRACT),
+        "confirm": (NOT_APPLICABLE, _EXTRACT),
+        "delta": (NOT_APPLICABLE, _EXTRACT),
+        "users": (NOT_APPLICABLE, "who may read a dataset is the security"
+                                  " manager's or the file system's, not the"
+                                  " file's"),
+        "statistics": (NOT_APPLICABLE, _NO_PLANNER),
+    },
     "clickhouse": {
         "sequences": (NOT_APPLICABLE, "ClickHouse has no sequences or"
                                       " auto-increment to carry"),
@@ -135,6 +155,27 @@ GAPS = {
         "fence": (NOT_YET, "34"),
         "confirm": (NOT_YET, "34"),
         "delta": (NOT_YET, "34"),
+        "users": (NOT_YET, "34"),
+        "statistics": (NOT_YET, "34"),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "db2i": {
+        "sequences": (NOT_YET, "34"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "statistics": (NOT_APPLICABLE, "IBM i's query engine gathers and"
+                                       " keeps its own statistics as the"
+                                       " tables change"),
+        "snapshot": (NOT_YET, "34"),
+    },
+    "db2zos": {
+        "sequences": (NOT_YET, "34"),
+        "params": (NOT_YET, "34"),
+        "bulk-move": (NOT_YET, "34"),
+        "stream": (NOT_APPLICABLE, _ZOS_LOG),
+        "fence": (NOT_APPLICABLE, _ZOS_LOG),
+        "confirm": (NOT_APPLICABLE, _ZOS_LOG),
+        "delta": (NOT_APPLICABLE, _ZOS_LOG),
         "users": (NOT_YET, "34"),
         "statistics": (NOT_YET, "34"),
         "snapshot": (NOT_YET, "34"),

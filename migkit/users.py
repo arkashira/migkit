@@ -170,6 +170,11 @@ def compare(hop, say=print):
         skeys, tkeys = set(s), set(t)
         pw = sorted(k for k in s if k in t and s[k].get("hash")
                     and s[k].get("hash") != t[k].get("hash"))
+    elif eng == "db2i":
+        s = _ibmi_accounts(hop, "src")
+        t = _ibmi_accounts(hop, "dst")
+        skeys, tkeys = set(s), set(t)
+        pw = []
     elif eng == "redis":
         s = _redis_users(hop.source)
         t = _redis_users(hop.target)
@@ -222,6 +227,19 @@ def compare(hop, say=print):
         out["result"] = "pass" if not (missing or pw or gd) else "gap"
         say(f"  password differs ({len(pw)}): {pw}")
         say(f"  roles or permissions missing on target ({len(gd)}): {gd}")
+    elif eng == "db2i":
+        ad = sorted(k for k in s if k in t and any(
+            s[k][a] != t[k][a] for a in ("status", "class", "special",
+                                         "groups")))
+        gd = sorted(k for k in s if k in t
+                    and set(s[k]["grants"]) - set(t[k]["grants"]))
+        out.update(attributes_differ=ad, grants_differ=gd)
+        out["result"] = "pass" if not (missing or ad or gd) else "gap"
+        say(f"  class, special authorities, groups or status differ"
+            f" ({len(ad)}): {ad}")
+        say(f"  object authorities missing on target ({len(gd)}): {gd}")
+        say("  note: IBM i shows no password or its hash; a profile is"
+            " created by its security officer with one of their choosing")
     elif eng == "oracle":
         gd = _ora_short(s, t)
         hidden = sorted(k for k in s if k.startswith("user:")
@@ -704,6 +722,145 @@ def _ms_rollback(hop, apply, say):
         finally:
             conn.close()
         say(f"   [{db}] {st}")
+    if apply:
+        rec.rename(str(rec) + ".rolled-back")
+
+
+# --- IBM i -----------------------------------------------------------------
+
+def _ibmi_engine(hop):
+    from .engines.db2i import Db2iEngine
+    return Db2iEngine(hop)
+
+
+def _ibmi_accounts(hop, side):
+    """{"profile:<name>" | "*PUBLIC": {...}} - each user profile IBM did
+    not ship (created by `*IBM`, or named Q...), its class, special
+    authorities, group and supplemental groups and status; and each one's
+    object authority to every table of the hop's schemas, *PUBLIC's among
+    them. IBM i shows no password or its hash, so none is compared."""
+    from .engines.dbapi import MARK
+    eng = _ibmi_engine(hop)
+    db0 = (hop.databases or [""])[0]
+    out = {}
+    for name, status, klass, special, group, extra in eng._rows(
+            side, db0, "select authorization_name, status, user_class_name,"
+                       " special_authorities, group_profile_name,"
+                       " supplemental_group_list from qsys2.user_info where"
+                       " user_creator <> '*IBM' and authorization_name not"
+                       " like 'Q%'"):
+        out[f"profile:{str(name).strip()}"] = {
+            "status": str(status or "").strip(),
+            "class": str(klass or "").strip(),
+            "special": sorted(str(special or "").split()),
+            "groups": sorted(([str(group).strip()] if group and str(
+                group).strip() not in ("", "*NONE") else [])
+                + str(extra or "").split()),
+            "grants": []}
+    out.setdefault("*PUBLIC", {"status": "", "class": "", "special": [],
+                               "groups": [], "grants": []})
+    for db in hop.databases or []:
+        schema = hop.target_db(db) if side == "dst" else db
+        for obj, who, auth in eng._rows(
+                side, db, "select system_object_name, authorization_name,"
+                          " object_authority from qsys2.object_privileges"
+                          " where object_type = '*FILE' and"
+                          " system_object_schema = (select"
+                          " system_schema_name from qsys2.sysschemas where"
+                          f" schema_name = {MARK})",
+                (schema.upper() if schema == schema.lower() else schema,)):
+            key = "*PUBLIC" if str(who).strip() == "*PUBLIC" \
+                else f"profile:{str(who).strip()}"
+            if key in out:
+                out[key]["grants"].append(
+                    f"{str(auth).strip()} ON {db}.{str(obj).strip()}")
+    for v in out.values():
+        v["grants"].sort()
+    return out
+
+
+def _ibmi_create(hop, apply, say):
+    """Each object authority a profile has on the source and lacks on the
+    target, granted with GRTOBJAUT run through `QSYS2.QCMDEXC`; a profile
+    missing on the target is listed for its security officer to create -
+    IBM i shows no password to carry, and a profile's special authorities
+    are theirs to decide."""
+    out, s = compare(hop, say)
+    t = _ibmi_accounts(hop, "dst")
+    for key in out["missing_on_target"]:
+        say(f"   create by hand (CRTUSRPRF): {key[8:]}"
+            f" class {s[key]['class']}"
+            + (f", special {' '.join(s[key]['special'])}"
+               if s[key]["special"] else ""))
+    cmds = []
+    for key, v in sorted(s.items()):
+        if key not in t:
+            continue
+        who = "*PUBLIC" if key == "*PUBLIC" else key[8:]
+        for g in sorted(set(v["grants"]) - set(t[key]["grants"])):
+            auth, _, obj = g.partition(" ON ")
+            db, _, name = obj.partition(".")
+            lib = hop.target_db(db)
+            cmds.append((key, g, f"GRTOBJAUT OBJ({lib.upper()}/{name})"
+                                 f" OBJTYPE(*FILE) USER({who}) AUT({auth})"))
+    if not cmds:
+        say("  no object authority to grant")
+        return
+    say(f">> ibm i: {len(cmds)} authority(ies)"
+        + ("" if apply else "  (nothing done; add --apply)"))
+    for _, _, cmd in cmds:
+        say(f"   {cmd}")
+    if not apply:
+        return
+    eng = _ibmi_engine(hop)
+    db0 = (hop.databases or [""])[0]
+    made, failed = [], []
+    for key, g, cmd in cmds:
+        try:
+            conn = eng._connect("dst", db0)
+            try:
+                conn.cursor().execute("call qsys2.qcmdexc(?)", (cmd,))
+                conn.commit()
+            finally:
+                conn.close()
+            made.append(cmd)
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            failed.append(f"{cmd}: {str(e).splitlines()[0][:120]}")
+    rec = hop.report_dir() / "user-sync-created.json"
+    prev = json.loads(rec.read_text()) if rec.exists() else []
+    prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "engine": "db2i", "created": made, "failed": failed})
+    json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
+    for f in failed:
+        say(f"   FAILED {f}")
+    say(f"  granted {len(made)}; recorded at {rec}"
+        f" (undo with users {hop.name} rollback)")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} authority(ies) not granted")
+
+
+def _ibmi_rollback(hop, apply, say):
+    """Each authority `_ibmi_create` granted, revoked (RVKOBJAUT)."""
+    rec = hop.report_dir() / "user-sync-created.json"
+    made = [k for e in (json.loads(rec.read_text()) if rec.exists() else [])
+            if e.get("engine") == "db2i" for k in e.get("created", [])]
+    if not made:
+        say("  no IBM i authority was granted by us, nothing to undo")
+        return
+    eng = _ibmi_engine(hop)
+    db0 = (hop.databases or [""])[0]
+    for cmd in made:
+        undo = cmd.replace("GRTOBJAUT", "RVKOBJAUT", 1)
+        if not apply:
+            say(f"   would run {undo}")
+            continue
+        conn = eng._connect("dst", db0)
+        try:
+            conn.cursor().execute("call qsys2.qcmdexc(?)", (undo,))
+            conn.commit()
+        finally:
+            conn.close()
+        say(f"   {undo}")
     if apply:
         rec.rename(str(rec) + ".rolled-back")
 
@@ -1739,6 +1896,8 @@ def create(hop, apply=False, passwords=None, say=print):
         return _os_create(hop, apply, passwords, say)
     if hop.engine == "mssql":
         return _ms_create(hop, apply, passwords, say)
+    if hop.engine == "db2i":
+        return _ibmi_create(hop, apply, say)
     if hop.engine == "oracle":
         return _ora_create(hop, apply, passwords, say)
     if hop.engine in ("mongodb", "mongo"):
@@ -1886,6 +2045,8 @@ def rollback(hop, apply=False, say=print):
         return _os_rollback(hop, apply, say)
     if hop.engine == "mssql":
         return _ms_rollback(hop, apply, say)
+    if hop.engine == "db2i":
+        return _ibmi_rollback(hop, apply, say)
     if hop.engine == "oracle":
         return _ora_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
