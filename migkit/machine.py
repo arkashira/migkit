@@ -369,6 +369,19 @@ def _took(secs):
 _UNITS = {"s": 1, "m": 60, "min": 60, "h": 3600, "d": 86400}
 
 
+def duration(raw):
+    """Seconds a duration says - `6h`, `90m`, `2d`, a number of seconds -
+    or None where it is not one."""
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(s|m|min|h|d)?", str(raw).strip())
+    if not m:
+        return None
+    return float(m.group(1)) * _UNITS[m.group(2) or "s"]
+
+
 def deadline(hop, now=None):
     """Seconds the hop's `deadline:` gives the move, or None: a duration
     (`6h`, `90m`, `2d`, a number of seconds) or a moment
@@ -376,12 +389,10 @@ def deadline(hop, now=None):
     raw = (getattr(hop, "options", None) or {}).get("deadline")
     if raw in (None, ""):
         return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
+    got = duration(raw)
+    if got is not None:
+        return got
     text = str(raw).strip()
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(s|m|min|h|d)?", text)
-    if m:
-        return float(m.group(1)) * _UNITS[m.group(2) or "s"]
     import datetime
     try:
         when = datetime.datetime.fromisoformat(text)
@@ -957,6 +968,12 @@ def assess_items(hop, eng, db):
         items.append({"level": "pass", "scope": "sizing",
                       "item": "the machine to run migkit on",
                       "detail": line})
+    from . import ship
+    seed = ship.plan_line(hop, eng, db, via)
+    if seed:
+        items.append({"level": "pass", "scope": "sizing",
+                      "item": "the seed over the link or on media",
+                      "detail": seed})
     return items
 
 

@@ -116,6 +116,11 @@ dependencies = [
     # a run as spans, sent where the operator's OTEL_* variables say
     "opentelemetry-sdk>=1.40",
     "opentelemetry-exporter-otlp-proto-http>=1.40",
+    # a seed shipped on media (`ship`): the Azure appliance's blob
+    # endpoint and the storage account it is imported into, and the Cloud
+    # Storage bucket the Google appliance's parts land in
+    "azure-storage-blob>=12.20",
+    "google-cloud-storage>=2.18",
 ]
 
 [project.urls]
@@ -134,7 +139,9 @@ diff = []
 dataframe = []
 s3 = []
 pgschema = []
-dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]"]
+dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]",
+       # moto's server, the S3-compatible endpoint an appliance stands in as
+       "flask", "flask-cors"]
 
 [project.scripts]
 migkit = "migkit.cli:main"

@@ -1671,6 +1671,14 @@ class Engine:
         where it does or the engine cannot say before reading."""
         return None
 
+    def drop_lost_position(self, side, db):
+        """Let go of what the server keeps for migkit's change position
+        where the position is lost, so a new one can be taken (`ship`,
+        after a seed the source's log did not outlast). Nothing, where the
+        engine keeps nothing on the server for a position: a binary log's
+        file and offset, a resume token, an SCN."""
+        return None
+
     #: whether tables can be written side by side on this engine: a file
     #: that takes one writer at a time (SQLite) cannot
     WRITES_IN_PARALLEL = True

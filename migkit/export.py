@@ -963,15 +963,41 @@ def _signing_key(hop):
     return os.path.expanduser(str(key)) if key else None
 
 
-def _sign(path, key):
-    """`path` signed with the private SSH key `key` (`ssh-keygen -Y`),
-    beside it as `<path>.sig`; raises where it could not be."""
-    got = subprocess.run(["ssh-keygen", "-Y", "sign", "-n", NAMESPACE,
+def _sign(path, key, namespace=NAMESPACE):
+    """`path` signed with the private SSH key `key` (`ssh-keygen -Y`) in
+    `namespace`, beside it as `<path>.sig`; raises where it could not be.
+    A namespace a signature is made for is checked with it: an evidence
+    signature is no seed manifest's (`ship`)."""
+    got = subprocess.run(["ssh-keygen", "-Y", "sign", "-n", namespace,
                           "-f", key, str(path)], capture_output=True,
                          text=True, stdin=subprocess.DEVNULL, timeout=60)
     if got.returncode != 0:
         said = (got.stderr or got.stdout).strip().splitlines()
         raise RuntimeError(said[-1] if said else "could not sign")
+
+
+def _verify(path, signature, allowed, namespace=NAMESPACE):
+    """The signer `signature` (`_sign`'s) names for `path`, from the
+    allowed signers file `allowed`; raises where no signer there made it
+    or the file is not what was signed."""
+    found = subprocess.run(["ssh-keygen", "-Y", "find-principals", "-s",
+                            str(signature), "-f", str(allowed)],
+                           capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=60)
+    who = (found.stdout or "").strip().splitlines()
+    if found.returncode != 0 or not who:
+        raise RuntimeError("no signer the allowed signers name made this"
+                           " signature")
+    with open(path, "rb") as f:
+        got = subprocess.run(["ssh-keygen", "-Y", "verify", "-f",
+                              str(allowed), "-I", who[0], "-n", namespace,
+                              "-s", str(signature)], stdin=f,
+                             capture_output=True, text=True, timeout=60)
+    if got.returncode != 0:
+        said = (got.stderr or got.stdout).strip().splitlines()
+        raise RuntimeError(said[-1] if said else "the signature does not"
+                           " hold")
+    return who[0]
 
 
 def write(hop, session=None, log=None):

@@ -162,6 +162,47 @@ nobody (a managed service that refuses it), and:
 
 No is a normal answer: many teams allow no change on a production source.
 
+## A seed shipped on media (`ship:`)
+
+Where the link is too narrow to copy the data in time, the copy is cut in
+two halves and the rows travel on a carrier between them - a disk, or a
+provider's appliance (AWS's, reached by its object endpoint; Azure's, by
+its file share or blob endpoint; Google's, by its NFS share). The plan
+times both ways: the copy over the link at the link's measured rate, and
+the seed as the export here, the shipping the hop states and the load
+there. Where the copy over the link would miss the hop's `deadline:`, the
+plan offers the seed; where the hop names a carrier, the faster of the
+two that meets the deadline is taken.
+
+`move --mode full` (or `full+cdc`) runs the export where no sealed seed is
+found and the load where one is: run it beside the source with the
+carrier attached, ship the carrier, run the same command beside the
+target.
+
+| | What happens |
+|---|---|
+| On the source | read into parts, each table from the position the change stream starts from - taken before a row is read - each part in the format the target's own loader reads; nothing written to it but what the stream itself makes there (a slot) |
+| On the carrier | every part digested as the check digests, compressed, encrypted to the hop's `at_rest` recipients and hashed as stored; a manifest of them all, encrypted and signed like the evidence export; the seal written last, so a carrier with no seal holds no seed. Each carrier's capacity, largest file and file count are checked before a part is written: the provider's published numbers, and what a mounted share says of itself where that is less |
+| On the target | every part's hash checked before it is read, its rows held to its digest, loaded by the target's own loader and proved there; each table then held as a whole |
+| Guaranteed | no part loaded that is not the one exported; a part that fails is read again from the source over the link; the stream starts from the seed's position, and where the source no longer keeps its log back to it, a new position is taken and only the rows that changed since are copied, found leaf by leaf - the seed is not shipped again |
+
+    options:
+      at_rest: {recipients: [ssh-ed25519 AAAA... ops@example.com]}
+      deadline: 14d
+      ship:
+        carrier: snowball              # disk | snowball | databox |
+                                       # transfer_appliance
+        endpoint: https://10.0.0.20:8443
+        bucket: migkit-seed
+        shipping: 7d                   # sealed here to loaded there
+        load_from: s3://migkit-seed/   # where the provider imports it
+        signers: ~/.ssh/allowed_signers
+
+How long the source keeps its log back to the seed's position is read as
+the position is taken and held against the export, the shipping and the
+load, and said: raise the source's retention, or ship sooner, where it
+runs short.
+
 ## Limits the move keeps to
 
 A hop may say what its move may take at most. Each is a hard limit: the

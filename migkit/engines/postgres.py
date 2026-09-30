@@ -2027,6 +2027,18 @@ class PostgresEngine(Engine):
         base = re.sub(r"[^a-z0-9_]", "_", str(self.hop.name).lower())
         return f"migkit_{base}"[:63]
 
+    def drop_lost_position(self, side, db):
+        """This hop's slot, dropped only where the server says its WAL is
+        gone or going (`wal_status` lost, or unreserved - past
+        `max_slot_wal_keep_size`, removed at the next checkpoint): it hands
+        out no change again, and a new position is a new slot, made with
+        its snapshot. A slot that still holds its WAL is left as it is."""
+        self._psql(side, self._d(side, db),
+                   "select pg_drop_replication_slot(slot_name) from"
+                   " pg_replication_slots where slot_name ="
+                   f" '{self.slot_name()}' and wal_status in ('lost',"
+                   " 'unreserved')")
+
     def _slot_ready(self, side, db, resuming_from=None, ask=None,
                     make=None):
         """Make sure the slot exists and is one migkit can read. Returns its

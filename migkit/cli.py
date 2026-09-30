@@ -1841,6 +1841,12 @@ def _where_and_machine(hop, eng, d, via):
         said = ""
     if said:
         out.append(f"  machine: {said}")
+    # the copy over the link against a seed shipped on media, both timed,
+    # where the hop names a carrier or the link would miss its deadline
+    from . import ship
+    seed = ship.plan_line(hop, eng, d, via)
+    if seed:
+        out.append(f"  seed: {seed}")
     return out
 
 
@@ -3245,6 +3251,61 @@ def _carried_physically(hop, eng, db, mode, go):
     return True
 
 
+def _carried_on_media(hop, eng, db, mode, go):
+    """The move seeded on media, where the hop names a carrier and the
+    decision engine takes it (`ship`): the export where no sealed seed is
+    found, the load where one is - True where it was, and the move is
+    this one's. A hop without `ship:` never reaches it."""
+    from . import ship
+    if mode not in ("full", "full+cdc") or not ship.settings(hop):
+        return False
+    lk = _lock(hop) if go else None
+    try:
+        console.print("[bold]seed on media[/bold]")
+        done = ship.carry(hop, eng, db, mode, go,
+                          lambda m: console.print(f"  {m}"))
+    finally:
+        if lk:
+            lk.unlink()
+    if not done:
+        return False
+    if not go:
+        console.print("\ndry-run, add --go to execute")
+        return True
+    loaded = []
+    for d, got in done.items():
+        console.print(f"  {d}: {got.said}")
+        if got.half == "export":
+            _changelog(hop, {"op": "move-seed-export", "db": d})
+            console.print(f"  {d}: ship the carrier, then run the same"
+                          " command where the target is: migkit move"
+                          f" {hop.name} --mode {mode} --go")
+            continue
+        _changelog(hop, {"op": "move-seed-load", "db": d})
+        _refuse_if_nothing_arrived(hop, eng, d, "the seed on media",
+                                   lambda m: console.print(f"  {m}"))
+        _record_copy(hop, d, got.position)
+        settled = eng.settle_target(d)
+        if settled:
+            console.print(f"  {settled}")
+        loaded.append(d)
+    if loaded:
+        _protect_target(hop, eng, db)
+    if mode == "full+cdc" and loaded:
+        tailer = eng if hasattr(eng, "tail_apply") else _tail_pair(eng)
+        if db and tailer is not None:
+            _tail(hop, tailer, db, go)
+        else:
+            for d in loaded:
+                console.print(f"  {d}: its changes go on from the seed's"
+                              f" position - migkit move {hop.name} --mode"
+                              f" cdc --db {d} --go")
+    elif loaded:
+        console.print("[green]seeded[/green] - verify: migkit check"
+                      f" {hop.name}")
+    return True
+
+
 def _move(hop_name, db, table, mode, chunk, do_drop, go):
     from . import cutover, hopkeys, movers
     from . import model as resource_model
@@ -3330,6 +3391,9 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                            lambda m: console.print(f"  {m}"))
     if not table and not do_drop and _carried_physically(hop, eng, db, mode,
                                                          go):
+        return
+    if not table and not do_drop and _carried_on_media(hop, eng, db, mode,
+                                                       go):
         return
     if go and not (do_drop and mode == "cdc" and back_at_cutover):
         # before anything is copied, so no write of the application's lands

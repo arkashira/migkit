@@ -265,6 +265,21 @@ HOP_OPTIONS = {
                         " table to one machine; ranges, a large table's"
                         " ranges as well, every write held to the number"
                         " of the claim that took it", "bool|str"),
+    "ship": Key("the seed may go on media where the link is too narrow"
+                " (`ship`): the carrier (disk, snowball, databox,"
+                " transfer_appliance), where it is written (path, or"
+                " endpoint with bucket or container, prefix, region,"
+                " profile, ca_bundle, credential), its model or capacity,"
+                " where the far end reads it (load_from, load_endpoint,"
+                " load_region, load_profile, load_credential), how long it"
+                " takes to reach the far end as the operator states it"
+                " (shipping), and who must have signed its manifest"
+                " (signers)", "dict",
+                subs=("carrier", "path", "endpoint", "bucket", "container",
+                      "prefix", "region", "profile", "ca_bundle",
+                      "credential", "model", "capacity", "load_from",
+                      "load_endpoint", "load_region", "load_profile",
+                      "load_credential", "shipping", "signers")),
     "slot": Key("the slot a pipeline migkit did not set up reads, which"
                 " the fence waits for", "str|list", ("postgres",)),
     "standby": Key("the same move run on two or more machines: one moves"
@@ -834,6 +849,54 @@ CUTOVER = {
 }
 
 
+#: what a hop's `ship:` does to a full copy (`migkit.ship`): the seed on
+#: media, in two halves the same command runs where each server is
+SHIP = {
+    "what": "a seed shipped on media: the copy cut in two halves, the rows"
+            " carried between them on a carrier - a disk, or a provider's"
+            " appliance - where the link is too narrow to copy them in"
+            " time; taken where the hop's carrier would meet the deadline"
+            " and the link would not, or where nothing measured says the"
+            " link is faster",
+    "source": "read into parts beside it, each table from the position the"
+              " change stream starts from - taken before a row is read -"
+              " each part in the format the target's own loader reads;"
+              " nothing written to it but what the stream itself makes"
+              " there (a slot)",
+    "carrier": "every part digested as the check digests, compressed,"
+               " encrypted to the hop's at_rest recipients and hashed as"
+               " stored; a manifest of them all, encrypted and signed; the"
+               " seal written last",
+    "target": "every part's hash checked before it is read, its rows held"
+              " to its digest, loaded by the target's own loader and"
+              " proved there; each table then held as a whole",
+    "guarantees": "no part loaded that is not the one exported; a part"
+                  " that fails is read again from the source over the"
+                  " link; the stream starts from the seed's position, and"
+                  " where the source no longer keeps its log back to it,"
+                  " only the rows that changed since are copied, found"
+                  " leaf by leaf - the seed is not shipped again",
+    "halves": "move --mode full or full+cdc runs the export where no sealed"
+              " seed is found, and the load where one is: run it beside"
+              " the source with the carrier attached, ship the carrier,"
+              " and run the same command beside the target",
+}
+
+
+def ship_lines(hop):
+    """What the seed on media does for this hop, where it names a
+    carrier; [] where it does not."""
+    got = (hop.options or {}).get("ship")
+    if not isinstance(got, dict) or not got:
+        return []
+    return [f"ship: {SHIP['what']}",
+            f"  on the source: {SHIP['source']}",
+            f"  on the carrier: {SHIP['carrier']}",
+            f"  on the target: {SHIP['target']}",
+            f"  it guarantees: {SHIP['guarantees']}",
+            f"  {SHIP['halves']}"]
+
+
 #: what the machines of a hop do together where it says so (`standby`,
 #: `share_tables: ranges`), for `init`, `assess`, the dry run and the docs
 #: (`machines_lines`): the one place these are written
@@ -997,6 +1060,7 @@ def explain_goal(hop, goal=None):
            f"  it guarantees: {g['guarantees']}"]
     if goal == "cutover" or cutover_on(hop):
         out += ["  " + line for line in cutover_lines(hop)]
+    out += ["  " + line for line in ship_lines(hop)]
     out += ["  " + line for line in machines_lines(hop)]
     return out
 
@@ -1008,7 +1072,8 @@ def explain_mode(command, mode, drop=False):
     return f"--mode {key[1]}: {got}" if got else ""
 
 #: options that write, which a hop whose goal writes nothing contradicts
-WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover")
+WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover",
+           "ship")
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
 
@@ -1369,6 +1434,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     " or drop the option"))
     out += _goal_settings(where, opts, goal, engine)
     out += _source_changes(where, opts, goal)
+    out += _ship(where, opts)
     share = opts.get("share_tables")
     if isinstance(share, str) and share.lower() != "ranges":
         out.append(Problem("error", f"{where}.options.share_tables",
@@ -1446,6 +1512,56 @@ def _goal_settings(where, opts, goal, engine):
         out.append(Problem("warn", f"{where}.options.physical.upgrade",
                            "read only by a hop whose goal is upgrade, so it"
                            " does nothing here"))
+    return out
+
+
+def _ship(where, opts):
+    """The seed on media's settings held before anything runs: a carrier
+    migkit knows, reached the way that carrier is, a shipping time and a
+    capacity it can read, and recipients to seal the parts to - a carrier
+    travels."""
+    from . import carriers, machine
+    got = opts.get("ship")
+    if got is None:
+        return []
+    at = f"{where}.options.ship"
+    if not isinstance(got, dict):
+        return [Problem("error", at, "is not a mapping")]
+    out = []
+    kind = str(got.get("carrier") or "").lower()
+    if kind not in carriers.KINDS:
+        out.append(Problem("error", f"{at}.carrier",
+                           f"{got.get('carrier')!r} - one of"
+                           f" {', '.join(carriers.KINDS)}"))
+    elif not (got.get("path") or got.get("endpoint")):
+        out.append(Problem("error", at,
+                           f"{carriers.SAID[kind]} is reached through a"
+                           " directory here (path:) or an endpoint"
+                           " (endpoint:), and the hop gives neither"))
+    elif kind == "databox" and got.get("path"):
+        why = carriers._share_problem(str(got["path"]))
+        if why:
+            out.append(Problem("error", f"{at}.path", why))
+    if got.get("shipping") is not None and \
+            machine.duration(got["shipping"]) is None:
+        out.append(Problem("error", f"{at}.shipping",
+                           f"{got['shipping']!r} - a duration (7d, 36h)"))
+    if got.get("capacity") is not None and \
+            carriers.size_of(got["capacity"]) is None:
+        out.append(Problem("error", f"{at}.capacity",
+                           f"{got['capacity']!r} - a size (80TB, 120TiB)"))
+    rest = opts.get("at_rest")
+    if not (isinstance(rest, dict) and rest.get("recipients")):
+        out.append(Problem("error", at,
+                           "a carrier travels, and its parts are sealed to"
+                           " the hop's at_rest recipients - this hop names"
+                           " none (options at_rest: {recipients: [...]})"))
+    if got.get("shipping") is None:
+        out.append(Problem("warn", f"{at}.shipping",
+                           "not given: how long the source keeps its log"
+                           " for the stream is not held against the time"
+                           " the carrier takes, and the plan cannot time"
+                           " the seed"))
     return out
 
 
