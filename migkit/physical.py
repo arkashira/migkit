@@ -67,10 +67,28 @@ allows it (`physical:` in its options), the same major version on both
 sides, the privilege, an empty target, a hop that carries the whole server
 (a copy of the pages cannot leave a table out, rename a database or filter
 a row) - and where it proves itself, and not where this hop measured it
-slower than a logical copy. A managed source that gives no physical
-access (`clouds` names it) is refused, with the reason, and the cloud's
-own copy named instead. A hop without `physical:` moves exactly as
-before.
+slower than a logical copy. A managed source that says so itself and
+gives no physical access is refused, with the reason, and the cloud's own
+copy named instead; an address alone that names a service decides
+nothing. A hop without `physical:` moves exactly as before.
+
+**What the source must change is offered** (the owner, 2026-09-30;
+`sourcechange`). The clone needs the clone plugin on the source; the copy
+of the pages a replication right, room for its connections and, to go on
+from the copy, a log that carries rows. Each is a `decide.Change` of its
+rung, read on the server: there already, one migkit's user may make (the
+clone plugin: the privilege to put a plugin on, a server that loads
+plugins, no refusal recorded), or a DBA's (a grant a role cannot give
+itself, a setting that takes a restart). The one migkit may make is
+offered with what it saves - minutes on this hop's measured rates, or
+estimated from the table above and said so - and is made behind the
+hop's approvals and taken off again after the clone, or on any failure.
+Answered no, a DBA's, or refused by the server: the logical copy, said
+with its time and what it asks of the source. A way that fails as it
+runs before anything on the target is touched - the source refusing the
+plugin, the clone statement refused, the slots not made - is switched
+from by itself (`decide.attempt`); one that fails after the target was
+stopped or replaced stops, since what it began cannot be undone.
 
 The option:
 
@@ -87,10 +105,12 @@ The option:
                                         # it (default: the hop's)
         # MySQL - the target clones itself from the source
         restart: ssh 10.0.0.2 sudo systemctl restart mysqld
-        source_plugin: install          # put the clone plugin on the
-                                        # source, and take it off after
+        source_plugin: install          # the same as source_changes:
+                                        # {clone_plugin: yes}
         # a cloud's own copy instead (`cloudseed`)
         cloud: aws
+      source_changes: {clone_plugin: yes}   # yes | no | dba, answered
+                                            # ahead of the offer
 """
 import json
 import os
@@ -99,7 +119,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from . import decide
+from . import decide, sourcechange
 
 #: the programs a physical copy runs, hidden from what an operator reads
 PROGRAMS = ("pg_basebackup", "pg_verifybackup", "psql")
@@ -274,13 +294,23 @@ class Facts(dict):
         carries the source's users, and the target's own are gone."""
         return self.hop.target.user in self["src_users"]
 
-    def _managed_src(self):
-        """The managed service the source is, in words, or "" for a server
-        run by its owner - read from its address and its own answers
-        (`clouds.of`, the one place that tells them apart)."""
+    def _where(self):
+        """Who runs the source (`clouds.of`): its own answers where it
+        gives them, its address's otherwise."""
         from . import clouds
-        where = clouds.of(self.eng, "src", self.hop.source)
-        return where.label if clouds.managed(where) else ""
+        return clouds.of(self.eng, "src", self.hop.source)
+
+    def _managed_src(self):
+        """The managed service the source says it is, in words, or "":
+        only the server's own answer counts (a role, a version function,
+        where it runs from - `clouds.of`'s evidence); an address that names
+        a service is a hint and refuses nothing, the probes then decide."""
+        from . import clouds
+        where = self["where"]
+        if isinstance(where, Unread):
+            raise RuntimeError(where.why)
+        said = [e for e in where.evidence if e.startswith("the server")]
+        return where.label if clouds.managed(where) and said else ""
 
     def _our_seed(self):
         """Whether the target is the copy an earlier run of this hop made
@@ -473,26 +503,6 @@ def _pg_needs():
                         " subscribe too - a second reader of another"
                         " server's slot, taking its changes from the"
                         " source")),
-        Need("a user that may open a replication connection",
-             ("replication_role",), lambda f: f["replication_role"],
-             lambda f: (f"{f.hop.source.user} has neither REPLICATION nor"
-                        " superuser on the source; a DBA grants it:"
-                        f" alter role {f.hop.source.user} replication;")),
-        Need("room for its connections on the source",
-             ("sender_room", "slot_room", "slots_wanted"),
-             lambda f: f["sender_room"] >= 2
-             and f["slot_room"] >= f["slots_wanted"],
-             lambda f: (f"the copy streams its log on a connection of its own"
-                        f" and holds {f['slots_wanted']} slots; the source has"
-                        f" room for {max(f['sender_room'], 0)} more"
-                        f" connections (max_wal_senders) and"
-                        f" {max(f['slot_room'], 0)} more slots"
-                        " (max_replication_slots)")),
-        Need("logical decoding on the source to go on from the copy",
-             ("wal_level",), lambda f: f["wal_level"] == "logical",
-             lambda f: (f"wal_level is {f['wal_level']} on the source, and"
-                        " the changes after the copy are read through a"
-                        " logical slot"), when=_following),
         LEG_HERE,
         _SIGNS_IN,
     )
@@ -523,6 +533,89 @@ LEG_HERE = Need(
     "the changes after the copy go on by the leg run from here"
     " (MIGKIT_CDC=follow), and this machine does not have what it runs:"
     " migkit doctor --install puts it in place", when=_following)
+
+
+# --- what the source must change, as the rungs declare it --------------------
+
+def _ctx(f):
+    """What a change's statements are written with, for this source."""
+    from .dba import _pgi
+    where = f["where"]
+    user = f.hop.source.user or ""
+    who = (_pgi(user) if _engine_of(f.hop) == "postgres"
+           else f"'{user}'@'%'")
+    return sourcechange.Ctx(who=who, me=user,
+                            where=None if isinstance(where, Unread)
+                            else where)
+
+
+def _unread(*values):
+    """The first fact of `values` that could not be read, or None."""
+    return next((v for v in values if isinstance(v, Unread)), None)
+
+
+def _role_stand(f):
+    got = f["replication_role"]
+    if isinstance(got, Unread):
+        return decide.Stand(decide.BY_DBA, got.why)
+    if got:
+        return decide.Stand(decide.PRESENT)
+    who = f.hop.source.user
+    return decide.Stand(decide.BY_DBA, f"{who} has neither REPLICATION nor"
+                                       " superuser on the source, and a role"
+                                       " cannot give either to itself")
+
+
+def _senders_stand(f):
+    room = f["sender_room"]
+    if isinstance(room, Unread):
+        return decide.Stand(decide.BY_DBA, room.why)
+    if room >= 2:
+        return decide.Stand(decide.PRESENT)
+    return decide.Stand(decide.BY_DBA, "the copy streams its log on a"
+                                       " connection of its own, and the"
+                                       f" source has room for {max(room, 0)}"
+                                       " more connections (max_wal_senders)"
+                                       " - raising it takes a restart")
+
+
+def _slots_stand(f):
+    room, want = f["slot_room"], f["slots_wanted"]
+    gone = _unread(room, want)
+    if gone is not None:
+        return decide.Stand(decide.BY_DBA, gone.why)
+    if room >= want:
+        return decide.Stand(decide.PRESENT)
+    return decide.Stand(decide.BY_DBA, f"the copy holds {want} slots, and"
+                                       " the source has room for"
+                                       f" {max(room, 0)} more slots"
+                                       " (max_replication_slots) - raising it"
+                                       " takes a restart")
+
+
+def _wal_stand(f):
+    if not _following(f):
+        # a copy alone reads no logical slot
+        return decide.Stand(decide.PRESENT)
+    level = f["wal_level"]
+    if isinstance(level, Unread):
+        return decide.Stand(decide.BY_DBA, level.why)
+    if level == "logical":
+        return decide.Stand(decide.PRESENT)
+    return decide.Stand(decide.BY_DBA, f"wal_level is {level} on the source,"
+                                       " and the changes after the copy are"
+                                       " read through a logical slot -"
+                                       " changing it takes a restart")
+
+
+def _pg_changes():
+    return (
+        sourcechange.change("replication_role", _role_stand, _ctx),
+        sourcechange.change("wal_senders", _senders_stand, _ctx),
+        sourcechange.change("replication_slots", _slots_stand, _ctx),
+        sourcechange.change("wal_level", _wal_stand, _ctx,
+                            after="for as long as the changes are followed"),
+    )
 
 
 def _pg_prove(facts):
@@ -627,6 +720,26 @@ class MyFacts(Facts):
     def _dst_plugin(self):
         return self._plugin("dst")
 
+    def _plugin_rights(self):
+        """Whether migkit's user may put a plugin on the source and take it
+        off: INSERT and DELETE on mysql.plugin, as the grants the server
+        lists say it (its active roles' too)."""
+        from .dba import _my_privileges
+        privs = _my_privileges(self.eng, "src")
+
+        def has(p):
+            return any("ALL PRIVILEGES" in privs.get(o, ()) or p in
+                       privs.get(o, ()) for o in ("*.*", "mysql.*",
+                                                  "mysql.plugin"))
+        return has("INSERT") and has("DELETE")
+
+    def _dynamic_loading(self):
+        """Whether the source loads a plugin at all: a server built
+        without it answers NO, and nobody puts one on there."""
+        rows = self._q("src", "show global variables like"
+                              " 'have_dynamic_loading'")
+        return str(rows[0][1]).upper() != "NO" if rows else True
+
     def _grants(self, side):
         rows = self._q(side, "show grants for current_user()")
         return " ".join(str(r[0]) for r in rows).upper()
@@ -723,22 +836,75 @@ def _my_needs():
              lambda f: (f"{f.hop.target.user} lacks CLONE_ADMIN on the"
                         " target: grant clone_admin on *.* to"
                         f" {f.hop.target.user};")),
-        Need("the clone plugin on the source", ("src_plugin", "options"),
-             lambda f: f["src_plugin"] == "ACTIVE"
-             or f["options"].get("source_plugin") == "install",
-             lambda f: ("the clone plugin is not on the source, and putting"
-                        " it there changes the source's settings, which"
-                        " migkit does only where the hop allows it"
-                        " (physical: {source_plugin: install}, taken off"
-                        " again after the copy). Or a DBA runs on the"
-                        " source: INSTALL PLUGIN clone SONAME"
-                        " 'mysql_clone.so';")),
         Need("the binlog on the source to go on from the copy", ("log_bin",),
              lambda f: f["log_bin"],
              "the binlog is off on the source, and the changes after the"
              " copy are read from it", when=_following),
         _SIGNS_IN,
     )
+
+
+def _named_by_address(f):
+    """The managed service the source's address alone names, or "": a
+    hint said beside the server's own answer, never the proof."""
+    from . import clouds
+    where = f["where"]
+    if isinstance(where, Unread) or not clouds.managed(where):
+        return ""
+    if any(e.startswith("the server") for e in where.evidence):
+        return ""
+    return where.label
+
+
+def _clone_plugin_stand(f):
+    """Where the clone plugin stands on the source, read there: on and
+    running; on but not running (a DBA's to see to); a server with no
+    clone at all, or one that does not load plugins, or one that refused
+    it before at this version (impossible); migkit's user without the
+    right to put a plugin on (a DBA's); or one migkit may put on and take
+    off again."""
+    have, src = f["src_plugin"], f["src"]
+    gone = _unread(have, src)
+    if gone is not None:
+        return decide.Stand(decide.BY_DBA, gone.why)
+    if have == "ACTIVE":
+        return decide.Stand(decide.PRESENT)
+    if have:
+        return decide.Stand(decide.BY_DBA, "the plugin is on the source and"
+                                           f" {have.lower()}: the server's"
+                                           " error log says why")
+    version = src["version"]
+    if "mariadb" in version.lower() or _series(version) < (8, 0, 17):
+        return decide.Stand(decide.IMPOSSIBLE, f"the source is {version},"
+                                               " which has no clone plugin")
+    refused = sourcechange.refused_here(f.hop, "clone_plugin", version)
+    if refused:
+        return decide.Stand(decide.IMPOSSIBLE,
+                            f"the server refused it on {refused['at']}:"
+                            f" {refused['why']}")
+    loads = f["dynamic_loading"]
+    if isinstance(loads, Unread):
+        return decide.Stand(decide.BY_DBA, loads.why)
+    if not loads:
+        return decide.Stand(decide.IMPOSSIBLE, "the server loads no plugin"
+                                               " at all (have_dynamic_loading"
+                                               " is NO)")
+    rights = f["plugin_rights"]
+    if isinstance(rights, Unread):
+        return decide.Stand(decide.BY_DBA, rights.why)
+    named = _named_by_address(f)
+    hint = (f" (its address names {named}, whose service may refuse it:"
+            " the server's own answer decides)" if named else "")
+    if not rights:
+        return decide.Stand(decide.BY_DBA, f"{f.hop.source.user} may not put"
+                                           " a plugin on (INSERT and DELETE"
+                                           " on mysql.plugin)" + hint)
+    return decide.Stand(decide.POSSIBLE, "migkit's user may put it on and"
+                                         " take it off" + hint)
+
+
+#: the clone's one change on the source
+CLONE_PLUGIN = sourcechange.change("clone_plugin", _clone_plugin_stand, _ctx)
 
 
 # --- the rungs ---------------------------------------------------------------
@@ -752,10 +918,11 @@ def _rungs():
     local = (
         Rung("physical-pages", PAGES, gives=GIVES | {"pages proved"},
              needs=_pg_needs(), prove=_pg_prove, footprint=1,
+             changes=_pg_changes(),
              because="a copy of the pages carries the indexes built and"
                      " decodes nothing", engine="postgres"),
         Rung("physical-clone", CLONE, gives=GIVES, needs=_my_needs(),
-             footprint=1,
+             footprint=1, changes=(CLONE_PLUGIN,),
              because="a clone carries the pages and the indexes built and"
                      " decodes nothing", engine="mysql"),
     )
@@ -823,41 +990,128 @@ def choose(hop, eng, mode):
     where the hop measured one: a rung never measured is tried before one
     that was, so each gets its number once; after that the cheaper a row
     ranks first."""
+    got = _candidates(hop, mode)
+    if isinstance(got, str):
+        return None, got
+    candidates, cost = got
+    facts = facts_for(hop, eng, mode)
+    sourcechange.put_answers(hop, facts, candidates)
+    got = decide.climb("the seed", candidates, facts, costs=cost)
+    if got.rung is None or got.rung.name == LOGICAL.name:
+        return None, _why_not(hop, got.passed, got.rung, got.ranked)
+    return got.rung, got.reason
+
+
+def _candidates(hop, mode):
+    """(the rungs the seed climbs, their costs on this hop), or the reason
+    there are none - "" where the hop allows no physical seed."""
     if not settings(hop) or mode not in ("full", "full+cdc"):
-        return None, ""
+        return ""
     engine = _engine_of(hop)
     want = str(settings(hop).get("cloud") or "").lower()
     candidates = [r for r in rungs(engine) if r.cloud == want]
     if not candidates:
-        return None, ("a physical seed"
-                      + (f" through {want}" if want else "")
-                      + f" is not built for {hop.engine}; the logical copy"
-                        " carries it")
+        return ("a physical seed" + (f" through {want}" if want else "")
+                + f" is not built for {hop.engine}; the logical copy"
+                  " carries it")
     cost = costs(hop)
     if LOGICAL.name in cost:
         candidates.append(LOGICAL)
-    got = decide.climb("the seed", candidates, facts_for(hop, eng, mode),
-                       costs=cost)
-    if got.rung is None or got.rung is LOGICAL:
-        return None, _why_not(hop, got)
-    return got.rung, got.reason
+    return candidates, cost
 
 
-def _why_not(hop, got):
+def _why_not(hop, passed, chosen=None, ranked=()):
     """What passed every physical rung over, in words: each rung's own
     reason, and where the logical copy won on measurement, the numbers."""
     from . import planner
-    said = [f"{r.said}: {why}" for r, why in got.passed
-            if r is not LOGICAL]
-    if got.rung is LOGICAL:
+    said = [f"{r.said}: {why}" for r, why in passed
+            if r.name != LOGICAL.name]
+    if chosen is not None and chosen.name == LOGICAL.name:
         rate, _ = _logical_rate(hop)
-        for r in got.ranked:
+        for r in ranked:
             mine = planner.measured_rate(hop, r.name)
-            if r is not LOGICAL and mine:
+            if r.name != LOGICAL.name and mine:
                 said.append(f"{r.said} was measured slower on this hop -"
                             f" {mine:,.0f} rows a second against"
                             f" {rate:,.0f} for a logical copy")
     return "; ".join(said)
+
+
+#: migkit's own measurements of each way, from the table at the head of
+#: this module: (rows, seconds end to end) - what an estimate stands on
+#: where this hop has measured nothing yet
+MEASURED = {"physical-clone": (7_150_000, 5.3),
+            "physical-pages": (9_800_000, 15.7),
+            ("logical", "mysql"): (7_150_000, 77.7),
+            ("logical", "postgres"): (9_800_000, 50.8)}
+
+
+def saving(hop, eng, rung):
+    """What taking `rung` saves over the logical copy, for the offer and
+    for what not taking it means (`sourcechange.Saving`): each way's time
+    for the source's rows at this hop's own rate for it - the logical
+    copy's as its copies ran, or as the resource model's probes measured
+    it here (`model`) - or else estimated from migkit's measurement above,
+    each said which, and the load the logical copy puts on the source."""
+    from . import planner
+    try:
+        dbs = eng.databases()
+        rows = _rows(eng, dbs)
+    except Exception:  # noqa: BLE001 - no count: no minutes, said
+        dbs, rows = [], 0
+    engine = rung.engine or _engine_of(hop)
+    ref = MEASURED.get(rung.name)
+    ref_slow = MEASURED.get(("logical", engine))
+    fast, fast_how = planner.measured_rate(hop, rung.name), "measured"
+    if not fast and ref:
+        fast, fast_how = ref[0] / ref[1], "estimated"
+    slow, slow_how = _logical_rate(hop)[0], "measured"
+    if not slow:
+        slow, slow_how = _modelled_rate(hop, dbs), "modelled"
+    if not slow and ref_slow:
+        slow, slow_how = ref_slow[0] / ref_slow[1], "estimated"
+    said = {"measured": "measured on this hop",
+            "modelled": "from the resource model's probes on this hop",
+            "estimated": "estimated from migkit's own measurement"}
+    if (fast_how, slow_how) == ("measured", "measured"):
+        how = f"measured on this hop, for about {rows:,} rows"
+    else:
+        how = (f"for about {rows:,} rows: this way {said[fast_how]}, a"
+               f" logical copy {said[slow_how]}")
+        if "estimated" in (fast_how, slow_how) and ref and ref_slow:
+            how += (f" ({ref[0]:,} rows: {ref[1]:g}s this way,"
+                    f" {ref_slow[1]:g}s by a logical copy)")
+    got = sourcechange.Saving(instead="a logical copy", how=how)
+    if rows and fast and slow:
+        got.faster, got.slower = rows / fast, rows / slow
+        got.spared = (f"every row read one by one through its SQL layer for"
+                      f" about {sourcechange.took(got.slower)}, where"
+                      f" {rung.said} reads its pages as they are")
+    else:
+        got.spared = ("every row read one by one through its SQL layer,"
+                      f" where {rung.said} reads its pages as they are")
+    return got
+
+
+def _modelled_rate(hop, dbs):
+    """Rows a second a logical copy of this hop's databases carries as the
+    resource model measured it (`model.load`, kept by a plan's probes),
+    the slowest database's - or None where none was measured."""
+    from . import model
+    rates = []
+    for d in dbs:
+        m = model.load(hop.report_dir(d))
+        rate = m.rows_rate() if m is not None else None
+        if rate:
+            rates.append(rate)
+    return min(rates) if rates else None
+
+
+def _by_a_change(candidates, facts):
+    """The physical rungs held back only by a change on the source."""
+    return [r for r in candidates if r.changes
+            and not any(n.missing(r, facts) for n in r.needs)
+            and any(not c.holds(facts) for c in r.changes)]
 
 
 # --- running a command where the target is -----------------------------------
@@ -1317,7 +1571,16 @@ def _pg_carry(hop, eng, rung, db, mode, go, log):
             return
         facts = facts_for(hop, eng, mode)
         began = time.time()
-        slots = _pg_slots_before(hop, eng, dbs, log) if follow else {}
+        try:
+            slots = _pg_slots_before(hop, eng, dbs, log) if follow else {}
+        except Exception as e:  # noqa: BLE001 - operational ones switch
+            if not decide.operational(e):
+                raise
+            # nothing is stopped yet and the slots it made are dropped:
+            # another way may carry the move
+            raise decide.Blocked("the slots the copy goes on from could not"
+                                 " be made on the source:"
+                                 f" {_quiet(_first_line(e))}") from e
         try:
             copied = _pg_copy(hop, eng, opts, facts["src_version"], log)
             end = replay_end(eng, copied.get("end"), facts["src_system"])
@@ -1393,8 +1656,11 @@ def _my_clone(hop, eng, opts, facts, log):
         if code == 3707:
             restart = True
         elif code not in (2013, 2006):
-            raise SystemExit("the target could not clone the source:"
-                             f" {_quiet(e.args[-1] if e.args else e)}")
+            # the clone refused, and the target was empty before it (it is
+            # taken onto no other) and restarts into nothing: another way
+            # may carry the move onto it
+            raise decide.Blocked("the target could not clone the source:"
+                                 f" {_quiet(e.args[-1] if e.args else e)}")
     finally:
         try:
             conn.close()
@@ -1582,23 +1848,24 @@ def _my_carry(hop, eng, rung, db, mode, go, log):
         if not go:
             log("dry-run: nothing cloned")
             return
-        installed = False
-        if facts["src_plugin"] != "ACTIVE":
-            from . import approvals
-            approvals.require(hop, "source-setting", db, log)
-            _my_plugin(eng, "src", log)
-            installed = True
-        try:
+        import contextlib
+        sourcechange.put_answers(hop, facts, [rung])
+        if not CLONE_PLUGIN.holds(facts):
+            # the climb takes the clone only where it does; never assumed
+            raise SystemExit(CLONE_PLUGIN.missing(rung, facts))
+        made = contextlib.nullcontext()
+        if CLONE_PLUGIN.stand(facts).state != decide.PRESENT:
+            # put on for the clone and taken off after it, the source's
+            # settings as they were whether the clone succeeds or not
+            made = sourcechange.making(
+                hop, CLONE_PLUGIN, facts, lambda s: eng._q("src", s), db,
+                log, version=facts["src"]["version"])
+        with made:
             if facts["dst_plugin"] != "ACTIVE":
                 _my_plugin(eng, "dst", log)
             began = time.time()
             status = _my_clone(hop, eng, opts, facts, log)
             took = time.time() - began
-        finally:
-            if installed:
-                # the source's settings as they were
-                eng._q("src", "UNINSTALL PLUGIN clone")
-                log("the clone plugin taken off the source again")
         if status["state"] != "Completed" or status["error"]:
             raise SystemExit(f"the clone did not complete: {status['state']}"
                              f" {status['error']} {_quiet(status['message'])}")
@@ -1639,22 +1906,72 @@ def _my_is_the_seed(eng, rec):
 
 # --- the move ----------------------------------------------------------------
 
-def carry(hop, eng, db, mode, go, log):
+def carry(hop, eng, db, mode, go, log, ask=None):
     """Seed the target by the physical rung this hop allows and needs, and
     set up what carries on from it. True where it did (the move is this
     one's), False where the logical copy is to run - with the reason said
-    when the hop asked for a physical seed and none was taken."""
-    rung, why = choose(hop, eng, mode)
-    if rung is None:
-        if why:
-            log(f"the physical copy is not taken: {why}")
+    when the hop asked for a physical seed and none was taken.
+
+    A change on the source a faster rung needs is offered first
+    (`sourcechange.settle`: said in the dry run, asked through `ask` at a
+    terminal under `go`); a rung that cannot run as it goes is switched
+    from by itself (`decide.attempt`), down to the logical copy, and said -
+    what not taking the faster way means, its time and its load on the
+    source, where a change on the source is what held it back."""
+    got = _candidates(hop, mode)
+    if isinstance(got, str):
+        if got:
+            log(f"the physical copy is not taken: {got}")
         return False
-    log(f"{rung.said}: {why}")
-    if rung.cloud:
-        from . import cloudseed
-        cloudseed.carry(hop, eng, rung, db, mode, go, log)
-    elif rung.engine == "postgres":
-        _pg_carry(hop, eng, rung, db, mode, go, log)
+    candidates, cost = got
+    facts = facts_for(hop, eng, mode)
+    sourcechange.put_answers(hop, facts, candidates)
+
+    def answer(offer):
+        return sourcechange.settle(hop, offer, facts,
+                                   saving(hop, eng, offer.rung), go, ask,
+                                   log)
+
+    def run(choice):
+        rung = choice.rung
+        if rung.name == LOGICAL.name:
+            return False
+        log(f"{rung.said}: {choice.reason}")
+        if rung.cloud:
+            from . import cloudseed
+            cloudseed.carry(hop, eng, rung, db, mode, go, log)
+        elif rung.engine == "postgres":
+            _pg_carry(hop, eng, rung, db, mode, go, log)
+        else:
+            _my_carry(hop, eng, rung, db, mode, go, log)
+        return True
+    chosen = None
+    try:
+        chosen, done = decide.attempt(
+            "the seed", candidates, run, facts, costs=cost,
+            where=_seed_path(hop) if go else None, log=log, answer=answer,
+            otherwise=LOGICAL.said,
+            # a target stopped, emptied or cloned into cannot be put back:
+            # only a way refused before that switches
+            switch=decide.only_blocked)
+    except decide.Exhausted as e:
+        done, passed = False, e.reasons
     else:
-        _my_carry(hop, eng, rung, db, mode, go, log)
-    return True
+        passed = chosen.passed
+    finally:
+        # what the DBA is to make, as this run found it - a clone that
+        # stopped the move included
+        try:
+            sourcechange.hand_over(hop, candidates, facts)
+        except Exception:  # noqa: BLE001 - the move's own words stand
+            pass
+    if done:
+        return True
+    log("the physical copy is not taken: " + _why_not(
+        hop, passed, chosen.rung if chosen else None,
+        chosen.ranked if chosen else ()))
+    held = _by_a_change(candidates, facts)
+    if held:
+        log("without it: " + sourcechange.without(
+            saving(hop, eng, held[0]), held[0].changes[0]))
+    return False

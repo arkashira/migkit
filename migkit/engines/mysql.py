@@ -5511,14 +5511,15 @@ class MySQLEngine(Engine):
         items.append(self._version_row(sv, dv, parts=2))
         items += self._pooler_items()
         items += self._leg_items()
-        # each with the value to set, not only the verdict
+        # each with the value to set, not only the verdict - in the words
+        # the DBA's script and every refusal give it (`sourcechange`)
+        from .. import sourcechange as sc
         for name, want, lvl, fix in (
-                ("log_bin", "ON", "fail",
-                 "start the server with log-bin (a restart)"),
+                ("log_bin", "ON", "fail", sc.requirement("log_bin", "OFF")),
                 ("binlog_format", "ROW", "fail",
-                 "set global binlog_format = 'ROW'"),
+                 sc.requirement("binlog_format", "not ROW")),
                 ("binlog_row_image", "FULL", "warn",
-                 "set global binlog_row_image = 'FULL'"),
+                 sc.requirement("binlog_row_image", "not FULL")),
                 # the change tail refuses without it - measured, the reader
                 # otherwise cannot tell a varbinary from a varchar
                 ("binlog_row_metadata", "FULL", "warn",

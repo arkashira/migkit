@@ -1983,6 +1983,7 @@ class PostgresEngine(Engine):
         if not got:
             level = ask("show wal_level").strip()
             if level != "logical":
+                from .. import sourcechange
                 raise SystemExit(
                     f"wal_level is {level} on this server and a logical slot"
                     " needs 'logical'. Nothing migkit does client-side can"
@@ -1991,7 +1992,8 @@ class PostgresEngine(Engine):
                     "    alter system set wal_level = 'logical';"
                     "   -- then restart\n"
                     "    rds.logical_replication = 1"
-                    "                -- parameter group, then reboot")
+                    "                -- parameter group, then reboot\n"
+                    + sourcechange.consequence("wal_level").capitalize())
             if make is not None:
                 make(side, db, name)
                 return name

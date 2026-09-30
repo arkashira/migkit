@@ -501,6 +501,10 @@ def _say_found(hop, out, say):
         say("  the source's changes can " + (
             "be followed" if not off else
             "not be followed yet: " + "; ".join(n.now for n in off)))
+        # what that means, in the words the DBA's script gives it
+        without = next((n.without for n in off if n.without), "")
+        if without:
+            say(f"    {without}")
     grants = [n for n in out.get("needs") or [] if n.ok is False
               and n not in follow]
     if grants:
@@ -532,6 +536,11 @@ def plan(hop, found, goal, say):
     from . import dba, hopkeys
     from .wording import human_bytes
     say(f"\n[bold]the plan[/bold]: {goal} - {hopkeys.GOALS[goal]['what']}")
+    # what the goal does on each side and guarantees, and for a cutover
+    # what `cutover:` on or off means - the words `assess` and the dry run
+    # say too
+    for line in hopkeys.explain_goal(hop, goal)[1:]:
+        say(line)
     carried = found.get("carried") or {}
     size = carried.get("bytes")
     rows = int(carried.get("rows") or 0)

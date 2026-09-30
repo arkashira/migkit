@@ -5766,14 +5766,19 @@ def stream_way(hop, engine, repl, tail, ready, drop=False):
     migkit's change tail, `ready`: the tail's driver installed) and what
     each way was measured to cost on this hop; `drop` where the way is
     being taken down rather than set up."""
-    from .decide import Facts, HopCosts, climb
-    costs = HopCosts(hop, "cdc/")
-    return climb(hop.name, stream_ways(),
-                 Facts({"engine": engine, "repl": bool(repl),
-                        "tail": bool(tail), "ready": bool(ready),
-                        "costs": costs, "drop": bool(drop)},
-                       broker=lambda: tooluse.allowed("redpanda", hop)),
-                 costs=costs)
+    from .decide import climb
+    facts = stream_facts(hop, engine, repl, tail, ready, drop)
+    return climb(hop.name, stream_ways(), facts, costs=facts["costs"])
+
+
+def stream_facts(hop, engine, repl, tail, ready, drop=False):
+    """What `stream_ways`' needs read, as `stream_way` climbs them and as
+    `decide.attempt` runs them (`cli._cdc`): one reading of the hop."""
+    from .decide import Facts, HopCosts
+    return Facts({"engine": engine, "repl": bool(repl), "tail": bool(tail),
+                  "ready": bool(ready), "costs": HopCosts(hop, "cdc/"),
+                  "drop": bool(drop)},
+                 broker=lambda: tooluse.allowed("redpanda", hop))
 
 
 def _target_writes(hop, db):

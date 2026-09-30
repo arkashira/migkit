@@ -91,7 +91,7 @@ def test_every_need_holding_takes_the_pages():
      "the target holds 2 tables (app.public.orders, app.public.lines)"),
     ("managed_src", "Amazon RDS", "cloud: ..."),
     ("src_subscriptions", 2, "subscribes to 2 publications"),
-    ("replication_role", False, "alter role app replication"),
+    ("replication_role", False, "alter role app with replication"),
     ("slot_room", 1, "1 more slots"),
     ("sender_room", 1, "room for 1 more connections"),
     ("wal_level", "replica", "wal_level is replica"),
@@ -116,8 +116,8 @@ def test_a_fact_that_could_not_be_read_refuses_rather_than_guesses():
     facts = _pg_facts(hop, replication_role=physical.Unread(
         "replication role could not be read: permission denied"))
     why = _rung(PAGES).refused(facts)
-    assert "permission denied" in why and "a user that may open a" \
-        " replication connection is needed" in why, why
+    assert "permission denied" in why and "only a DBA can make here" \
+        in why, why
 
 
 def test_a_full_copy_does_not_need_logical_decoding():
@@ -568,7 +568,7 @@ def _my_facts(hop, mode="full+cdc", **over):
              src=dict(about), dst=dict(about), not_innodb=[], dst_tables=[],
              src_backup_admin=True, dst_clone_admin=True, src_plugin="ACTIVE",
              dst_plugin="ACTIVE", log_bin=True, gtid_mode="ON",
-             src_users={"app"})
+             src_users={"app"}, plugin_rights=True, dynamic_loading=True)
     f.update(over)
     return f
 
@@ -611,9 +611,14 @@ def test_one_series_clones_from_8_0_37():
 
 def test_the_source_plugin_goes_on_only_where_the_hop_allows_it():
     """Putting the plugin on the source changes its settings: refused, and
-    the DBA's statement said, unless the hop allows it."""
+    the DBA's statement said, unless the hop allows it - the old option
+    being the answer yes (`sourcechange`)."""
+    from migkit import sourcechange
     hop = _hop("mysql", {**MY_OPTS, "source_plugin": "install"})
-    assert _rung(CLONE).refused(_my_facts(hop, src_plugin="")) is None
+    facts = _my_facts(hop, src_plugin="")
+    assert "offered, never assumed" in _rung(CLONE).refused(facts)
+    sourcechange.put_answers(hop, facts, [_rung(CLONE)])
+    assert _rung(CLONE).refused(facts) is None
 
 
 def test_the_plugin_put_on_the_source_is_taken_off_again(monkeypatch):

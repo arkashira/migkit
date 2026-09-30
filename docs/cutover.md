@@ -10,6 +10,14 @@ the source, tells the operator what to do by hand, and proves around it.
 Either way the same checks come first, and without `--go` the command
 only shows them and the plan.
 
+`goal: cutover` does not turn `cutover:` on: the goal sets up the stream,
+the stream back and the protection of the target, and nothing else. A hop
+with the goal and without `cutover:` is told, in `init`, `assess` and
+every dry run, the steps it does by hand and what turning `cutover:` on
+adds - the timed path, the freeze, the drain, the fenced check, the
+counters, the stream back, the undo and the outage measured. What each
+goal and mode does on each side is in [goals-and-modes.md](goals-and-modes.md).
+
 Every command takes the hop's name; `--db` narrows one to a database.
 
 ## Before the day

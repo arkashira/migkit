@@ -384,6 +384,12 @@ def _ask(question, secret=False, default=""):
         default))
 
 
+def _ask_change(question):
+    """The offer of a change on the source, answered at the terminal."""
+    return click.prompt(f"  {question}",
+                        type=click.Choice(["yes", "no", "dba"]))
+
+
 def _ask_terms(program, terms):
     """The one question `doctor --install` asks: whether the operator
     accepts the terms of a program that is not open source. It names the
@@ -502,9 +508,11 @@ def doctor(install):
                               f" be asked - {why[:160]}")
         # read from what the freeze recorded, so it is said even when the
         # target cannot be reached right now
-        from . import cutover, freeze
+        from . import cutover, freeze, sourcechange
         for line in cutover.said_by_doctor(hop):
             console.print(f"{name} [yellow]cutover[/yellow]: {line}")
+        for line in sourcechange.said_by_doctor(hop):
+            console.print(f"{name} [yellow]source[/yellow]: {line}")
         if hop.source.configured() and hop.target.configured():
             try:
                 e = get_engine(hop)
@@ -758,10 +766,24 @@ def assess(hop_name):
             console.print(line)
     (hop.report_dir() / "assess.json").write_text(
         json.dumps(items, indent=1))
+    _say_goal(hop)
     console.print(f"\n{counts['pass']} pass, {counts['warn']} warn,"
                   f" {counts['fail']} fail")
     if counts["fail"]:
         raise SystemExit(1)
+
+
+def _say_goal(hop, mode_line=""):
+    """What the hop's goal - and the mode about to run - does on the
+    source and the target and guarantees, as `hopkeys` writes it once for
+    `init`, `assess` and every dry run; a hop cut over without `cutover:`
+    is told every time what it does by hand and what turning it on adds."""
+    from . import hopkeys
+    console.print("\n[bold]what each side sees[/bold]")
+    if mode_line:
+        console.print(f"  {mode_line}")
+    for line in hopkeys.explain_goal(hop):
+        console.print(f"  {line}")
 
 
 def _setup_target(hop_name, db):
@@ -1478,6 +1500,9 @@ def _orchestrate(ctx, hop_name, db, mode, go, serve, interval,
         hopkeys.refuse_writes(hop, f"sync --mode {mode}")
     eng = get_engine(hop)
     tail = "  (dry-run; add --apply/--go to execute)" if not go else ""
+    if not go:
+        from . import hopkeys
+        _say_goal(hop, hopkeys.explain_mode("sync", mode))
 
     if mode == "verify":
         console.print("[bold]verify[/bold]: read-only, consistent snapshot")
@@ -2635,8 +2660,26 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     the data, migkit verifies it.
 
     Use only over a trusted network (or run migkit on a cloud VM)."""
+    from . import decide
     try:
         return _move(hop_name, db, table, mode, chunk, do_drop, go)
+    except decide.Exhausted as e:
+        # every way was tried and each said why; the last failure's own
+        # words are asked of the engine as any stopped copy's are
+        from .movers import DRIVEN
+        from .wording import without_programs
+        why = ""
+        if e.__cause__ is not None:
+            try:
+                why = get_engine(get_hop(hop_name)).why_it_stopped(
+                    str(e.__cause__))
+            except Exception:  # noqa: BLE001 - no more to say
+                why = ""
+        raise SystemExit(
+            without_programs(str(e), DRIVEN) + "\n"
+            + (f"{why}\n" if why else "")
+            + "Nothing past the last finished table is marked as moved. The"
+            " commands that ran are in the run's commands.log.") from e
     except OSError as e:
         import errno
         if e.errno != errno.ENOSPC:
@@ -2705,11 +2748,16 @@ def _carried_physically(hop, eng, db, mode, go):
     from . import physical
     if mode not in ("full", "full+cdc") or not physical.settings(hop):
         return False
+    import sys
     lk = _lock(hop) if go else None
     try:
         console.print("[bold]physical seed[/bold]")
+        # a change on the source a faster way needs is asked here, and
+        # only at a terminal: the one question migkit asks (`sourcechange`)
         if not physical.carry(hop, eng, db, mode, go,
-                              lambda m: console.print(f"  {m}")):
+                              lambda m: console.print(f"  {m}"),
+                              ask=_ask_change if sys.stdin.isatty()
+                              else None):
             return False
     finally:
         if lk:
@@ -2753,6 +2801,16 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
     eng = get_engine(hop)
     # measured once for this run, and afresh for the next
     resource_model.forget()
+    teardown = mode == "cdc" and do_drop
+    if not go and not teardown:
+        _say_goal(hop, hopkeys.explain_mode("move", mode))
+    elif not teardown and hop.goal == "cutover" \
+            and not hopkeys.cutover_on(hop):
+        # every time: the goal is a cutover and migkit will not drive it
+        for line in hopkeys.cutover_lines(hop):
+            console.print(f"  {line}")
+    elif teardown:
+        console.print("  " + hopkeys.explain_mode("move", mode, True))
     back_at_cutover, two_way = _topology(hop)
     from . import twoway
     two_way = two_way or twoway.settings(hop) is not None
@@ -2799,61 +2857,11 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         if why:
             console.print(f"  {why}, so the tables are copied one by one")
         if v != "builtin":
-            lk = _lock(hop) if go else None
-            try:
-                for d in dbs:
-                    # before anything is copied: a filter this mover cannot
-                    # apply would silently move every row
-                    movers.refuse_unpushable_filters(hop, d, v, engine)
-                    if go:
-                        eng.refuse_unfit(d)
-                    console.print(f"[bold]{d}[/bold] bulk copy:")
-                    from . import drift
-                    before = drift.shape(eng, "src", d) if go else None
-                    for line in _table_plan(hop, eng, d, v, go):
-                        console.print(line)
-                    began, rows = time.time(), _source_rows(eng, d) if go else 0
-                    from . import machine
-                    spent = machine.Spent()
-                    point = _position_before_copy(eng, d) if go else None
-                    if go:
-                        _mark_move(hop, eng, d)
-                    from . import sizing
-                    # the model the plan above measured; the dump's and the
-                    # load's jobs each sized to their own side
-                    sizing.fit(hop, eng, d, lambda m: chat(f"  {m}"),
-                               units=_units(eng, d),
-                               model=resource_model.for_move(hop, eng, d))
-                    steps = movers.run_via(v, hop, d, hop.workers, go,
-                                           lambda m: chat(f"  {m}"))
-                    if go:
-                        _record_run(hop, eng, d, v, rows, began, spent)
-                    for s0 in steps:
-                        console.print(f"  {s0}")
-                    if go:
-                        # before the "moved nothing" guard: the bulk copy
-                        # left these tables out on purpose, so until the
-                        # copier has run they are empty by design
-                        _copy_routed(hop, eng, d, v, chunk,
-                                     lambda m: chat(f"  {m}"))
-                        _stop_if_the_schema_moved(hop, eng, d, before)
-                        _refuse_if_nothing_arrived(hop, eng, d,
-                                                   "the bulk copy",
-                                                   lambda m: chat(f"  {m}"))
-                        _held_to_the_source(hop, eng, d,
-                                            lambda m: chat(f"  {m}"))
-                        _changelog(hop, {"op": f"move-{v}", "db": d})
-                        _record_copy(hop, d, point)
-                        # the load left the statistics behind it; the engine
-                        # puts them right before anybody queries the target
-                        settled = eng.settle_target(d)
-                        if settled:
-                            console.print(f"  {settled}")
-                        console.print(f"[green]{d}: bulk copy complete"
-                                      "[/green], run migkit check to verify")
-            finally:
-                if lk:
-                    lk.unlink()
+            for d in dbs:
+                if go:
+                    _bulk_or_copier(hop, eng, d, v, table, chunk, engine)
+                else:
+                    _bulk_db(hop, eng, d, v, chunk, False, engine)
             return
         return _move_full(hop, eng, db, table, chunk, go)
     has_repl = hasattr(eng, "replicate_sql")
@@ -2894,6 +2902,91 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
                      " is missing")
 
 
+def _bulk_db(hop, eng, d, v, chunk, go, engine):
+    """One database by the bulk way `v`: its plan, and with `go` the copy,
+    the tables it routes to the copier, and the proofs after it."""
+    from . import drift, machine, movers, sizing
+    from . import model as resource_model
+    # before anything is copied: a filter this mover cannot apply would
+    # silently move every row
+    movers.refuse_unpushable_filters(hop, d, v, engine)
+    if go:
+        eng.refuse_unfit(d)
+    console.print(f"[bold]{d}[/bold] bulk copy:")
+    before = drift.shape(eng, "src", d) if go else None
+    for line in _table_plan(hop, eng, d, v, go):
+        console.print(line)
+    began, rows = time.time(), _source_rows(eng, d) if go else 0
+    spent = machine.Spent()
+    point = _position_before_copy(eng, d) if go else None
+    if go:
+        _mark_move(hop, eng, d)
+    # the model the plan above measured; the dump's and the load's jobs
+    # each sized to their own side
+    sizing.fit(hop, eng, d, lambda m: chat(f"  {m}"), units=_units(eng, d),
+               model=resource_model.for_move(hop, eng, d))
+    steps = movers.run_via(v, hop, d, hop.workers, go,
+                           lambda m: chat(f"  {m}"))
+    if go:
+        _record_run(hop, eng, d, v, rows, began, spent)
+    for s0 in steps:
+        console.print(f"  {s0}")
+    if not go:
+        return
+    # before the "moved nothing" guard: the bulk copy left these tables
+    # out on purpose, so until the copier has run they are empty by design
+    _copy_routed(hop, eng, d, v, chunk, lambda m: chat(f"  {m}"))
+    _stop_if_the_schema_moved(hop, eng, d, before)
+    _refuse_if_nothing_arrived(hop, eng, d, "the bulk copy",
+                               lambda m: chat(f"  {m}"))
+    _held_to_the_source(hop, eng, d, lambda m: chat(f"  {m}"))
+    _changelog(hop, {"op": f"move-{v}", "db": d})
+    _record_copy(hop, d, point)
+    # the load left the statistics behind it; the engine puts them right
+    # before anybody queries the target
+    settled = eng.settle_target(d)
+    if settled:
+        console.print(f"  {settled}")
+    console.print(f"[green]{d}: bulk copy complete[/green], run migkit"
+                  " check to verify")
+
+
+def _bulk_or_copier(hop, eng, d, v, table, chunk, engine):
+    """One database by the bulk way chosen, or by the table copier where
+    that way fails as it runs - a program that exits or crashes, a server
+    that refuses it, a connection lost (`decide.attempt`): switched to by
+    itself and said, never asked.
+
+    Only the copier is under it, not the next bulk way: the copier
+    replaces each range by key, so it converges on whatever a failed load
+    left in a table, where another bulk way would load over it. What the
+    copy is held to - the filters, the rows the hop keeps, the proofs
+    after it - is the same on both. The bulk way is kept given up beside
+    the database's checkpoint until its program's version changes."""
+    from . import decide, movers
+    ladder = {r.name: r for r in movers._ladder()}
+    ran = decide.Need(
+        "its programs as installed now", lambda f: f["programs"] is not None)
+    rungs = (decide.Rung(v, ladder[v].said if v in ladder else v,
+                         needs=(ran,)),
+             decide.Rung("builtin", ladder["builtin"].said))
+    facts = decide.Facts(programs=lambda: {
+        p: movers.program_version(p) if movers.which(p) else None
+        for p in movers.programs(v)})
+
+    def run(choice):
+        if choice.rung.name == "builtin":
+            return _move_full(hop, eng, d, table, chunk, True)
+        lk = _lock(hop)
+        try:
+            return _bulk_db(hop, eng, d, v, chunk, True, engine)
+        finally:
+            lk.unlink()
+    decide.attempt(f"the copy of {d}", rungs, run, facts,
+                   where=hop.report_dir(d) / "move.json",
+                   log=lambda m: console.print(f"  [yellow]{m}[/yellow]"))
+
+
 def _cdc(hop, eng, db, do_drop, go, engine):
     """The hop's change stream set up, or torn down, on the way the
     ladder of ways gives (`movers.stream_ways`)."""
@@ -2907,29 +3000,77 @@ def _cdc(hop, eng, db, do_drop, go, engine):
         if tailer is None:
             capabilities.require(hop.engine, "stream")
         return _tail(hop, tailer, db, go)
-    way = movers.stream_way(hop, engine, has_repl, has_tail,
-                            has_tail and _tail_ready(eng), drop=do_drop)
-    if way.path == "follow":
-        return _follow(hop, eng, db, do_drop, go)
-    if way.path in ("subscription", "replica"):
-        return _replicate_released(hop, eng, db, False, do_drop, go)
-    if way.path == "tail":
-        return _tail(hop, eng, db, go)
-    if way.path == "pipeline":
+    from . import decide
+    facts, rungs = _stream_facts(hop, eng, engine, has_repl, has_tail,
+                                  do_drop)
+    where = hop.report_dir(db) / "stream.json"
+    work = f"following {hop.name}'s source"
+    # a way refused as it starts - a target that cannot dial the source -
+    # is switched from by itself; one that fails after it began carrying
+    # changes stops, since its position is its own (`decide.only_blocked`)
+    facts["own replication failed"] = any(
+        n in decide.given_up(where, work) for n in ("subscription",
+                                                    "replica"))
+
+    def undo(rung, error):
+        if rung.name in ("subscription", "replica"):
+            facts["own replication failed"] = True
+
+    def run(choice):
+        path = choice.rung.name
+        if path == "follow":
+            return _follow(hop, eng, db, do_drop, go)
+        if path in ("subscription", "replica"):
+            return _replicate_released(hop, eng, db, False, do_drop, go)
+        if path == "tail":
+            return _tail(hop, eng, db, go)
         if has_tail:
             console.print("[yellow]native change tail needs a driver this"
                           " machine does not have - using migkit's"
                           " streaming pipeline instead[/yellow]")
         return _stream(hop, eng, db, do_drop, go, engine)
-    capabilities.require(hop.engine, "stream")
-    # the pipeline the last way there was, passed over for its terms: the
-    # reason, not only that nothing is set up
-    held = [why for r, why in way.passed if r.name == "pipeline"
-            and why.startswith(movers.PIPELINE_SAID + ":")]
-    raise SystemExit(f"no way to follow a {hop.engine} source is set up"
-                     " on this machine" + (f" - {held[0]}" if held else
-                                           "; migkit doctor says what is"
-                                           " missing"))
+    try:
+        return decide.attempt(
+            work, rungs, run, facts, costs=facts["costs"],
+            where=where if go else None, undo=undo,
+            log=lambda m: console.print(f"[yellow]{m}[/yellow]"),
+            switch=decide.only_blocked)[1]
+    except decide.Exhausted as e:
+        if e.__cause__ is not None:
+            # ways were tried and each said why
+            raise
+        capabilities.require(hop.engine, "stream")
+        # the pipeline the last way there was, passed over for its terms:
+        # the reason, not only that nothing is set up
+        held = [why for r, why in e.reasons if r.name == "pipeline"
+                and why.startswith(movers.PIPELINE_SAID + ":")]
+        raise SystemExit(f"no way to follow a {hop.engine} source is set up"
+                         " on this machine" + (f" - {held[0]}" if held else
+                                               "; migkit doctor says what"
+                                               " is missing"))
+
+
+def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False):
+    """(facts, rungs) of the ways this hop's changes may follow its source
+    (`movers.stream_ways`, read as `movers.stream_way` reads them), the leg
+    run from here held also where the servers' own replication could not
+    start here: what a target that cannot dial the source falls to."""
+    import dataclasses
+
+    from . import decide, movers
+    facts = movers.stream_facts(hop, engine, has_repl, has_tail,
+                                has_tail and _tail_ready(eng), drop)
+    rungs = []
+    for r in movers.stream_ways():
+        if r.name == "follow":
+            r = dataclasses.replace(r, needs=(r.needs[0], decide.Need(
+                "the target unable to dial the source",
+                lambda f: movers.follow_selected() == "follow"
+                or bool(f.get("own replication failed")),
+                "the target can dial the source, so its own replication"
+                " carries the changes")))
+        rungs.append(r)
+    return facts, rungs
 
 
 def _cutover(hop, eng, db, go, engine):

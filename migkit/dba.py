@@ -14,15 +14,27 @@ a server parameter, `ALTER SYSTEM` on a server run by its owner).
 
 `migkit init` writes them to a file per side and says where;
 `migkit doctor` asks again and says what is still missing. migkit never
-runs them: changing what a server allows is the DBA's to do.
+runs them: changing what a server allows is the DBA's to do - but for a
+change a faster way needs that the operator answered yes to, which
+migkit makes and takes off again itself (`sourcechange`).
 
 The requirements are read off the server as they stand - `has_table_
 privilege`, the grants the server lists, `wal_level`, `binlog_format`,
 change tracking - so a grant through a role counts, and a table the hop
 excludes is not asked for.
+
+Every change to the source's settings, logs and replication rights is
+written from `sourcechange.DEFINITIONS`, the one list the offers of a
+faster way are written from too, with what not having it means beside
+it; a change a faster way needs that was handed to the DBA - the answer
+dba, or one only a DBA can make - joins the script (`for_the_dba`). The
+read and write grants of the tables themselves stay here: every way needs
+them, and none is faster for them.
 """
 import re
 from dataclasses import dataclass, field
+
+from . import sourcechange as sc
 
 #: goals that follow the source's changes, and that write to the source
 STREAMS = ("cutover", "keep-in-sync", "two-way")
@@ -42,12 +54,25 @@ class Need:
     restart: bool = False
     #: whether it is what following the source's changes needs
     follow: bool = False
+    #: what not having it means (`sourcechange.consequence`)
+    without: str = ""
 
 
 def _following(found):
     for n in found:
         n.follow = True
     return found
+
+
+def _change(side, what, ok, now, name, ctx, fix_before=(), restart=None):
+    """A `Need` for one of `sourcechange.DEFINITIONS`: its statements, what
+    the side's cloud changes outside the server, whether it takes a
+    restart and what not having it means, all from the one list."""
+    return Need(side, what, ok, now,
+                list(fix_before) + sc.statements(name, ctx),
+                sc.outside(name, ctx),
+                sc.restarts(name, ctx) if restart is None else restart,
+                without=sc.consequence(name))
 
 
 def _side_engine(eng, side):
@@ -94,7 +119,8 @@ def needs(hop, eng, goal=None, wheres=None, streaming=None):
         except Exception as err:  # noqa: BLE001 - unknown, not clean
             out.append(Need(side, "ask the server what it allows", None,
                             _last(err)))
-    return out
+    # what a faster way needs of the source that was handed to the DBA
+    return out + sc.for_the_dba(hop)
 
 
 def _last(e):
@@ -299,33 +325,30 @@ def _lit(text):
 def _pg_follow(hop, e, key, side, dbs, where, who, super_, repl, native,
                label):
     out = []
+    ctx = sc.Ctx(who=who, where=where, label=label)
     level = e._psql(key, "postgres", "show wal_level").strip()
-    stmts, said = _setting("postgres", where, "wal_level", "logical", True,
-                           label)
-    out.append(Need(side, "a log that carries rows (wal_level logical)",
-                    level == "logical", f"wal_level is {level}", stmts,
-                    said, restart=True))
+    out.append(_change(side, "a log that carries rows (wal_level logical)",
+                       level == "logical", f"wal_level is {level}",
+                       "wal_level", ctx))
     aws = getattr(where, "cloud", "") == "aws"
     ok = super_ or repl or (aws and _member(e, key, "rds_replication"))
-    out.append(Need(side, "read the change log (replication)", ok,
-                    "may" if ok else "may not",
-                    [f"grant rds_replication to {who};"] if aws else
-                    [f"alter role {who} with replication;"]))
+    out.append(_change(side, "read the change log (replication)", ok,
+                       "may" if ok else "may not", "replication_role", ctx))
     free = _pg_rows(
         e, key, "postgres",
         "select current_setting('max_replication_slots')::int - (select"
         " count(*) from pg_replication_slots)||chr(31)||"
         "current_setting('max_wal_senders')::int - (select count(*) from"
         " pg_stat_replication)")[0]
-    for (name, left, what) in (
-            ("max_replication_slots", int(free[0]), "a free replication"
-                                                    " slot"),
-            ("max_wal_senders", int(free[1]), "a free WAL sender")):
-        # ten: room for this hop's and a few more, where the server's own
-        # default is ten already
-        stmts, said = _setting("postgres", where, name, "10", True, label)
-        out.append(Need(side, what, left > 0, f"{max(left, 0)} free ({name})",
-                        stmts, said, restart=True))
+    # ten: room for this hop's and a few more, where the server's own
+    # default is ten already (`sourcechange.DEFINITIONS`)
+    for (change, name, left, what) in (
+            ("replication_slots", "max_replication_slots", int(free[0]),
+             "a free replication slot"),
+            ("wal_senders", "max_wal_senders", int(free[1]),
+             "a free WAL sender")):
+        out.append(_change(side, what, left > 0,
+                           f"{max(left, 0)} free ({name})", change, ctx))
     if native and _streams_natively(hop) and key == "src":
         name = e._repl_name() if hasattr(e, "_repl_name") else "migkit"
         for d in dbs:
@@ -334,13 +357,14 @@ def _pg_follow(hop, e, key, side, dbs, where, who, super_, repl, native,
                            f" pubname = {_lit(name)}")[0][0] != "0"
             ok = has or super_ or (aws and _member(e, key,
                                                    "rds_superuser"))
-            out.append(Need(side, f"publish every table's changes in {d}",
-                            ok, "the publication is there" if has else
-                            ("may create it" if ok else
-                             "only a superuser publishes every table"),
-                            [f"-- in database {d}:",
-                             f"create publication {name} for all"
-                             " tables;"]))
+            out.append(_change(side, f"publish every table's changes in"
+                                     f" {d}",
+                               ok, "the publication is there" if has else
+                               ("may create it" if ok else
+                                "only a superuser publishes every table"),
+                               "publication",
+                               sc.Ctx(who=who, where=where, label=label,
+                                      db=d, name=name)))
     return out
 
 
@@ -462,27 +486,18 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
                              " 'binlog_row_image',"
                              " 'binlog_expire_logs_seconds')"))
         cloud = getattr(where, "cloud", "") or ""
-        if str(var.get("log_bin", "")).upper() != "ON":
-            said = {"aws": ["binary logging is on while automated backups"
-                            " are kept: set the backup retention above 0"],
-                    "gcp": ["gcloud sql instances patch <instance>"
-                            " --enable-bin-log"]}.get(cloud)
-            stmts, other = _setting("mysql", where, "log_bin", "ON", True,
-                                    label)
-            out.append(Need(side, "a binary log", False,
-                            "log_bin is OFF", stmts, said or other,
-                            restart=True))
-        else:
-            out.append(Need(side, "a binary log", True, "log_bin is ON"))
-        for name, want in (("binlog_format", "ROW"),
-                           ("binlog_row_image", "FULL")):
+        ctx = sc.Ctx(who=who, where=where, label=label)
+        on = str(var.get("log_bin", "")).upper() == "ON"
+        out.append(_change(side, "a binary log", on,
+                           "log_bin is ON" if on else "log_bin is OFF",
+                           "log_bin", ctx))
+        for change, name, want in (("binlog_format", "binlog_format", "ROW"),
+                                   ("binlog_row_image", "binlog_row_image",
+                                    "FULL")):
             have = str(var.get(name, "")).upper()
-            stmts, said = _setting("mysql", where, name, want,
-                                   cloud == "aws" and "aurora" in
-                                   getattr(where, "service", ""), label)
-            out.append(Need(side, f"rows in the log ({name} {want})",
-                            have == want, f"{name} is {have or '?'}",
-                            stmts, said))
+            out.append(_change(side, f"rows in the log ({name} {want})",
+                               have == want, f"{name} is {have or '?'}",
+                               change, ctx))
         keep = int(var.get("binlog_expire_logs_seconds") or 0)
         if cloud == "aws":
             # RDS keeps its own setting, empty by default - and then it
@@ -496,23 +511,16 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
                        "not kept: removed as soon as it may be")
             except Exception as err:  # noqa: BLE001 - not allowed to ask
                 ok, now = None, _last(err)
-            out.append(Need(side, "a log kept a day or more", ok, now,
-                            ["call mysql.rds_set_configuration('binlog"
-                             " retention hours', 24);"]))
         else:
-            stmts, said = _setting("mysql", where,
-                                   "binlog_expire_logs_seconds", "86400",
-                                   False, label)
-            out.append(Need(side, "a log kept a day or more", keep == 0 or
-                            keep >= 86400,
-                            f"kept {keep}s" if keep else "kept for ever",
-                            stmts, said))
+            ok = keep == 0 or keep >= 86400
+            now = f"kept {keep}s" if keep else "kept for ever"
+        out.append(_change(side, "a log kept a day or more", ok, now,
+                           "binlog_retention", ctx))
         ok = _has(privs, "*", "REPLICATION SLAVE") and _has(
             privs, "*", "REPLICATION CLIENT")
-        out.append(Need(side, "read the binary log (replication)", ok,
-                        "may" if ok else "may not",
-                        [f"grant replication slave, replication client on"
-                         f" *.* to {who};"]))
+        out.append(_change(side, "read the binary log (replication)", ok,
+                           "may" if ok else "may not", "replication_grants",
+                           ctx))
     _following(out[start:])
     return out
 
@@ -563,23 +571,20 @@ def _mongo(hop, e, key, side, dbs, where, read, write, follow, native):
     if follow:
         hello = client.admin.command("hello")
         rs = bool(hello.get("setName")) or hello.get("msg") == "isdbgrid"
-        out.append(Need(side, "a change stream (a replica set)", rs,
-                        f"replica set {hello.get('setName')}" if rs else
-                        "a single server",
-                        [] if rs else ["rs.initiate();"],
-                        [] if rs else ["start the server as a replica set"
-                                       " member (replSetName in its"
-                                       " configuration) and restart it"]))
+        ctx = sc.Ctx(where=where, label=f"the {side}")
+        out.append(_change(side, "a change stream (a replica set)", rs,
+                           f"replica set {hello.get('setName')}" if rs else
+                           "a single server", "replica_set", ctx))
         docdb = getattr(where, "service", "") == "documentdb"
         for db in dbs:
             ok = can(db, "changeStream")
-            fix = [grant.format(roles=f'{{role: "read", db: {_js(db)}}}')]
-            if docdb:
-                fix.insert(0, 'db.adminCommand({modifyChangeStreams: 1,'
-                              f' database: {_js(db)}, collection: "",'
-                              " enable: true});")
-            out.append(Need(side, f"follow {db}'s changes", ok,
-                            "may" if ok else "may not", fix))
+            got = _change(side, f"follow {db}'s changes", ok,
+                          "may" if ok else "may not", "change_streams",
+                          sc.Ctx(where=where, label=f"the {side}", db=db,
+                                 docdb=docdb))
+            got.fix.append(grant.format(roles=f'{{role: "read", db:'
+                                              f' {_js(db)}}}'))
+            out.append(got)
     _following(out[start:])
     return out
 
@@ -629,11 +634,9 @@ def _mssql(hop, e, key, side, dbs, where, read, write, follow, native):
             on = bool(e._rows(key, db, "select count(*) from"
                                        " sys.change_tracking_databases"
                                        " where database_id = db_id()")[0][0])
-            out.append(Need(side, f"change tracking on {db}", on,
-                            "on" if on else "off",
-                            [f"alter database {_msi(db)} set change_tracking"
-                             " = on (change_retention = 2 days,"
-                             " auto_cleanup = on);"]))
+            out.append(_change(side, f"change tracking on {db}", on,
+                               "on" if on else "off", "change_tracking",
+                               sc.Ctx(who=who, where=where, db=db)))
             rows = e._rows(key, db, "select s.name, t.name, case when"
                                     " c.object_id is null then 0 else 1 end,"
                                     " has_perms_by_name(quotename(s.name) +"
@@ -646,16 +649,16 @@ def _mssql(hop, e, key, side, dbs, where, read, write, follow, native):
             rows = [r for r in rows if not hop.excluded(db, r[0], r[1])]
             off = [(s, t) for s, t, tracked, _ in rows if not tracked]
             blind = sorted({s for s, _, _, can in rows if not can})
-            out.append(Need(side, f"every table of {db} tracked", not off,
-                            f"{len(off)} not tracked" if off else "all",
-                            [f"use {_msi(db)};"] + [
-                                f"alter table {_msi(s)}.{_msi(t)} enable"
-                                " change_tracking;" for s, t in off]))
-            out.append(Need(side, f"read {db}'s change tracking", not blind,
-                            "may" if not blind else "may not",
-                            [f"use {_msi(db)};"] + [
-                                f"grant view change tracking on schema::"
-                                f"{_msi(s)} to {who};" for s in blind]))
+            out.append(_change(side, f"every table of {db} tracked", not off,
+                               f"{len(off)} not tracked" if off else "all",
+                               "table_tracking",
+                               sc.Ctx(who=who, where=where, db=db,
+                                      tables=off)))
+            out.append(_change(side, f"read {db}'s change tracking",
+                               not blind, "may" if not blind else "may not",
+                               "tracking_grant",
+                               sc.Ctx(who=who, where=where, db=db,
+                                      tables=blind)))
         _following(out[start:])
     return out
 
@@ -725,29 +728,26 @@ def _db2i(hop, e, key, side, dbs, where, read, write, follow, native):
             loose = sorted(t for t, i in tables.items() if not i["journal"])
             after = sorted(t for t, i in tables.items()
                            if i["journal"] and i["images"] != "*BOTH")
-            out.append(Need(
+            out.append(_change(
                 side, f"every table of {db} journaled", not loose,
                 f"{len(loose)} not journaled" if loose else "all",
-                [_cl(f"STRJRNPF FILE({tables[t]['system'][1]}/"
-                     f"{tables[t]['system'][0]}) JRN({tables[t]['system'][1]}"
-                     "/QSQJRN) IMAGES(*BOTH)") for t in loose]))
-            out.append(Need(
+                "table_journaling", sc.Ctx(tables=[
+                    tuple(tables[t]["system"][:2]) for t in loose])))
+            out.append(_change(
                 side, f"before images journaled for {db}", not after,
                 f"{len(after)} with after images only" if after else "all",
-                [_cl(f"CHGJRNOBJ OBJ(({tables[t]['system'][1]}/"
-                     f"{tables[t]['system'][0]} *FILE)) ATR(*IMAGES)"
-                     " IMAGES(*BOTH)") for t in after]))
+                "before_images", sc.Ctx(tables=[
+                    tuple(tables[t]["system"][:2]) for t in after])))
             for journal in sorted({i["journal"] for i in tables.values()
                                    if i["journal"]}):
                 attached = [r for r in e._receivers(key, db, journal)
                             if str(r[4]).strip() == "ATTACHED"]
                 whole = not attached or str(attached[0][5] or "NO") \
                     .strip() == "NO"
-                out.append(Need(side, f"the journal {journal} keeps whole"
-                                      " entries", whole,
-                                "whole" if whole else "minimized",
-                                [_cl(f"CHGJRN JRN({journal})"
-                                     " MINENTDTA(*NONE)")]))
+                out.append(_change(side, f"the journal {journal} keeps whole"
+                                         " entries", whole,
+                                   "whole" if whole else "minimized",
+                                   "whole_entries", sc.Ctx(name=journal)))
         _following(out[start:])
     return out
 
@@ -798,22 +798,15 @@ def _ora_redo_files(e, key, db, who):
                              " 1 = 0")
         except Exception:  # noqa: BLE001 - not granted
             short.append(t)
-    fix = [f"grant select, flashback on sys.{_ori(t)} to {who};"
-           for t in short]
-    if short:
-        fix += [f"grant select on sys.{v} to {who};" for v in ORA_REDO_VIEWS]
-        fix += [f"grant select, flashback on xdb.xdb$ttset to {who};",
-                "-- and select, flashback on each xdb.x$nm, x$qn and x$pt"
-                " table of xdb.xdb$ttset's suffixes"]
-    return Need("source", "the redo-file reader reads the dictionary",
-                not short, f"{len(short)} tables it may not read" if short
-                else "may", fix)
+    return _change("source", "the redo-file reader reads the dictionary",
+                   not short, f"{len(short)} tables it may not read" if short
+                   else "may", "redo_file_grants",
+                   sc.Ctx(who=who, tables=short))
 
 
 def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
     from .engines import oracle_logminer
     out = []
-    aws = getattr(where, "cloud", "") == "aws"
     for db in dbs:
         owner = e._owner(key, db)
         me, have = _ora_privs(e, key, db)
@@ -853,50 +846,28 @@ def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
         start = len(out)
         if follow and key == "src":
             mode = oracle_logminer._mode(e, key, db)
+            ctx = sc.Ctx(who=who, me=me, where=where, db=db, owner=owner)
             archived = mode["log_mode"] == "ARCHIVELOG"
-            out.append(Need(side, "the redo archived", archived,
-                            mode["log_mode"],
-                            [] if aws else
-                            ["shutdown immediate;", "startup mount;",
-                             "alter database archivelog;",
-                             "alter database open;"],
-                            ["the automated backups' retention above 0"
-                             " keeps the redo archived, and"
-                             " `exec rdsadmin.rdsadmin_util.set_configuration"
-                             "('archivelog retention hours', 24);` keeps it"
-                             " for a day"] if aws else [],
-                            restart=not aws))
+            out.append(_change(side, "the redo archived", archived,
+                               mode["log_mode"], "archivelog", ctx))
             minimal = mode["min"] in ("YES", "IMPLICIT")
-            out.append(Need(side, "minimal supplemental logging", minimal,
-                            str(mode["min"]),
-                            ["exec rdsadmin.rdsadmin_util."
-                             "alter_supplemental_logging(p_action =>"
-                             " 'ADD');"] if aws else
-                            ["alter database add supplemental log data;"]))
+            out.append(_change(side, "minimal supplemental logging", minimal,
+                               str(mode["min"]), "supplemental_logging",
+                               ctx))
             keys = oracle_logminer.logged_keys(e, key, db)
             bare = sorted(t for t, k in keys.items() if k is None)
-            out.append(Need(side, f"every table of {owner} logs its key",
-                            not bare, f"{len(bare)} do not" if bare
-                            else "every one",
-                            [f"alter table {_ori(owner)}.{e._q(t)} add"
-                             " supplemental log data (primary key) columns;"
-                             for t in bare]))
+            out.append(_change(side, f"every table of {owner} logs its key",
+                               not bare, f"{len(bare)} do not" if bare
+                               else "every one", "table_key_logging",
+                               sc.Ctx(who=who, where=where, owner=owner,
+                                      tables=[e._q(t) for t in bare])))
             short = [p for p in ORA_FOLLOW if p not in have]
-            fix = ([f"grant {p.lower()} to {who};" for p in short
-                    if p != "SELECT_CATALOG_ROLE"]
-                   + ([f"grant select_catalog_role to {who};"]
-                      if "SELECT_CATALOG_ROLE" in short else [])
-                   + [f"grant execute on sys.dbms_logmnr to {who};",
-                      f"grant execute on sys.dbms_flashback to {who};"])
-            if aws:
-                # on RDS the SYS objects are granted through its own
-                # procedure, the master user holding no grant option
-                fix = [f"grant {p.lower()} to {who};" for p in short] + [
-                    f"exec rdsadmin.rdsadmin_util.grant_sys_object('{v}',"
-                    f" '{me}');" for v in ORA_RDS_OBJECTS]
-            out.append(Need(side, "read the redo back", not short,
-                            "may" if not short else
-                            f"lacks {', '.join(short)}", fix))
+            out.append(_change(side, "read the redo back", not short,
+                               "may" if not short else
+                               f"lacks {', '.join(short)}",
+                               "logmining_grants",
+                               sc.Ctx(who=who, me=me, where=where,
+                                      short=short)))
             from .engines import oracle_redo
             if oracle_redo.chosen(e, key, db) == oracle_redo.RUNG:
                 out.append(_ora_redo_files(e, key, db, who))
@@ -905,11 +876,12 @@ def _oracle(hop, e, key, side, dbs, where, read, write, follow, native):
                     key, db, "select table_name from all_tables where owner"
                              " = :1 and logging = 'NO' and temporary = 'N'",
                     (owner,)) if not hop.excluded(db, e._said(t))]
-                out.append(Need(side, f"no table of {owner} skips the redo",
-                                not loose, f"{len(loose)} NOLOGGING" if loose
-                                else "none", [f"alter table {_ori(owner)}."
-                                              f"{_ori(t)} logging;"
-                                              for t in loose]))
+                out.append(_change(side, f"no table of {owner} skips the"
+                                         " redo",
+                                   not loose, f"{len(loose)} NOLOGGING"
+                                   if loose else "none", "table_logging",
+                                   sc.Ctx(who=who, where=where, owner=owner,
+                                          tables=loose)))
         _following(out[start:])
     return out
 
@@ -946,6 +918,8 @@ def script(hop, eng, side, found, where=None):
         body.append("")
         body.append(f"{mark} {n.what}: {n.now}"
                     + (" - takes a restart" if n.restart else ""))
+        if n.without:
+            body.append(f"{mark}   {n.without}")
         body += [f"{mark}   {line}" for line in n.outside]
         body += n.fix
     return "\n".join([h for h in head if h.strip() != mark] + body) + "\n"

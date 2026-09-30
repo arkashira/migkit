@@ -660,30 +660,22 @@ def plan(hop, dbs, conf):
     """What the path does, step by step and side by side, as the dry run
     and the approvers see it; for a hop without `cutover:`, what the
     operator does by hand and what migkit proves around it."""
+    from .hopkeys import CUTOVER
     back = _reverse(hop)
     name = hop.name
     if not conf:
-        return [
+        # the steps and what turning it on adds, as `hopkeys.CUTOVER`
+        # writes them for every place that says them
+        return ([
             "without `cutover:` in the hop's options migkit writes nothing"
-            " to the source; by hand, in this order:",
-            "  1. switch off on the source the jobs it runs (pg_cron jobs,"
-            " MySQL events), so they write in one place",
-            "  2. stop the application's writes to the source: stop it, or"
-            " revoke its write privileges and end its sessions - ending"
-            " them is what rolls back what they had not committed",
-            f"  3. migkit move {name} --mode cdc --drop --go - migkit"
-            " proves nothing writes to the source and nothing is prepared"
-            " there, waits for the stream to pass where the source stands,"
-            " and only then tears it down"
-            + (" and starts the stream back" if back else ""),
-            f"  4. migkit check {name} - the final comparison",
-            f"  5. migkit sync {name} --go --kind sequences --tag"
-            " pre-cutover - the target's counters past the source's",
-            "  6. switch the jobs on on the target",
-            "  7. point the application at the target",
-            "with `cutover:` migkit does all of it, timed, and undoes it on"
-            " any failure",
-        ]
+            " to the source (no goal turns it on); by hand, in this"
+            " order:"]
+            + [f"  {i}. " + s.format(
+                hop=name, back=" and starts the stream back" if back else "")
+               for i, s in enumerate(CUTOVER["by hand"], 1)]
+            + ["with `cutover:` migkit does all of it, timed, and undoes it"
+               " on any failure - it adds:"]
+            + [f"  - {a}" for a in CUTOVER["adds"]])
     how = conf["freeze"]
     steps = [f"the cutover, within {conf['budget']:g}s of write outage"
              " (undone past it):"]
@@ -1422,8 +1414,9 @@ def summary(hop, eng, dbs):
     conf = settings(hop)
     back = _reverse(hop)
     if not conf:
-        return ("warn", "no `cutover:` in the hop's options: migkit writes"
-                        " nothing to the source at cutover - the operator"
+        return ("warn", "no `cutover:` in the hop's options (no goal turns"
+                        " it on): migkit writes nothing to the source at"
+                        " cutover - the operator"
                         " stops its writes and its jobs, and raises the"
                         " counters, by hand, and migkit proves around it;"
                         f" `migkit move {hop.name} --mode cdc --drop` lists"

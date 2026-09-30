@@ -3099,32 +3099,38 @@ class Engine:
             **{"group column": lambda: self._group_for(db, src_t, key,
                                                        rows)})
         costs = decide.HopCosts(self.hop, "verify passes/own ")
-        choice = decide.climb(work, sr.WALKS, facts, costs=costs)
         units = max(int(rows or 0), 1)
-        if choice.path == "groups":
+
+        def run(choice):
             began = time.monotonic()
+            if choice.path != "groups":
+                found = whole()
+                costs.saw("walk", units, time.monotonic() - began)
+                notes[(db, str(src_t))] = (None, "every row walked:"
+                                                 f" {choice.reason}")
+                return found
             got = sr.narrow(self.hop, db, self._reader_names(),
                             (self._reader_table("src", db, src_t),
                              self._reader_table("dst", db, dst_t)),
                             facts["group column"],
                             where=self._reader_where(db, src_t),
                             keep=self.hop.report_dir(db))
-            if isinstance(got, sr.Narrowing):
-                missing, extra, changed, said, only_inside = \
-                    sr.walk_narrowed(got, walk, same,
-                                     (self._reader_engine("src"),
-                                      self._reader_engine("dst")))
-                costs.saw("groups", units, time.monotonic() - began)
-                notes[(db, str(src_t))] = (got if only_inside else None,
-                                           said)
-                return missing, extra, changed
-            facts["groups failed"] = got
-            choice = decide.climb(work, sr.WALKS, facts, costs=costs)
-        began = time.monotonic()
-        found = whole()
-        costs.saw("walk", units, time.monotonic() - began)
-        notes[(db, str(src_t))] = (None, f"every row walked: {choice.reason}")
-        return found
+            if not isinstance(got, sr.Narrowing):
+                # the groups could not be read the second way: nothing was
+                # decided by them, and the table's own walk is next
+                raise decide.Blocked(got)
+            missing, extra, changed, said, only_inside = \
+                sr.walk_narrowed(got, walk, same,
+                                 (self._reader_engine("src"),
+                                  self._reader_engine("dst")))
+            costs.saw("groups", units, time.monotonic() - began)
+            notes[(db, str(src_t))] = (got if only_inside else None, said)
+            return missing, extra, changed
+        # a way that cannot run here switches by itself (`decide.attempt`);
+        # a difference found is the answer and is returned, never switched
+        # from
+        return decide.attempt(work, sr.WALKS, run, facts, costs=costs,
+                              switch=decide.only_blocked)[1]
 
     def _second_reading(self, db, src_t, dst_t, key, key_classes, mine,
                         rows, columns=(), fixed=()):

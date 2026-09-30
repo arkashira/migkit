@@ -35,10 +35,20 @@ checkpoint or the tail's token), so a restart stands on the same rung; a
 kept rung that no longer holds or proves is said and climbed past. No
 program is named here: a rung's `said` is what an operator reads, and the
 reasons are built from it.
+
+Two things the owner decided on 2026-09-30 are here as well. A rung may
+need a change on the source (`Change`): it is offered, never assumed -
+the only thing migkit asks (`offered`, `sourcechange`). And a way that
+is blocked or fails as it runs is switched from by itself and said, never
+asked (`attempt`): the next rung that holds everything the work needs.
 """
+import contextlib
+import dataclasses
+import hashlib
 import itertools
 import json
 import os
+import time
 from dataclasses import dataclass, field
 
 NOT_YET = "not yet"
@@ -150,6 +160,11 @@ class Rung:
     because: str = ""               #: why it is the first choice
     footprint: int = 0              #: what it leaves behind: the tie-breaker
     fits: object = None             #: {part: Rung} -> True, or why not
+    #: `Change`s on the source it needs, asked after its needs hold
+    changes: tuple = ()
+    #: (facts, error) -> None: what it began, undone where it fails as it
+    #: runs (`attempt`), so the next rung starts from what was there
+    cleanup: object = None
 
     def lacks(self, need):
         """The first needed capability this rung does not give, or None."""
@@ -338,16 +353,194 @@ def rank(rungs, costs=None):
                    for i, r in enumerate(rungs)])
 
 
+# --- a change on the source a rung needs -------------------------------------
+# The owner, 2026-09-30: a faster way that needs a change on the source - a
+# plugin put on, a setting, a grant - is offered, never assumed and never
+# hidden. The rung declares it (`Rung.changes`), and its probe reads the
+# server for where it stands: there already, migkit's user allowed to make
+# it, only a DBA, or nobody (a managed service that refuses it) - the
+# server's own answer, a cloud's name at most a hint. The operator's
+# answer is a fact like any other, under `answer_key`: a rung whose change
+# is not there holds only where the answer is yes. `offered` says what the
+# answer would buy before it is given; `sourcechange` asks, records, makes
+# the change and takes it off again.
+
+PRESENT = "present"        #: there already: nothing to change
+POSSIBLE = "possible"      #: migkit's user may make it, and take it off
+BY_DBA = "by a DBA"        #: a DBA can make it; migkit's user cannot
+IMPOSSIBLE = "impossible"  #: nobody can, on this source
+
+#: an operator's answers to a change offered: migkit makes it, the source
+#: is left as it is, or the statements go to the DBA's script
+ANSWERS = ("yes", "no", "dba")
+
+
+@dataclass(frozen=True)
+class Stand:
+    """Where one change stands on this source, as its probe read it, and
+    why - in words an operator reads after the change's own."""
+    state: str
+    why: str = ""
+
+
+def answer_key(name):
+    """The fact an answer to the change `name` is kept under."""
+    return "answer " + name
+
+
+def _first(e):
+    text = str(e).strip() or type(e).__name__
+    return text.splitlines()[-1][:300]
+
+
+def terminated(statement):
+    """A statement as a DBA's script writes it: ended by a semicolon, a
+    comment left as it is."""
+    s = str(statement).rstrip()
+    return s if s.endswith(";") or s.startswith(("--", "//")) else s + ";"
+
+
+@dataclass(frozen=True)
+class Change:
+    """One change on the source a rung needs: what it is in words, the
+    probe that reads where it stands (facts -> `Stand`), the statements
+    that make it and take it off again (a tuple, or facts -> [statement]),
+    and when migkit takes it off. `speeds` False: the rung cannot run
+    without it at all, where a faster way only goes faster."""
+    name: str
+    said: str
+    probe: object
+    make: object = ()
+    undo: object = ()
+    after: str = "after the copy"
+    speeds: bool = True
+
+    def stand(self, facts):
+        """The probe's answer, asked once and kept in the facts. A probe
+        that fails is a change nobody here can be sure of: a DBA's."""
+        key = "change " + self.name
+        if key not in facts:
+            try:
+                got = self.probe(facts)
+            except Exception as e:  # noqa: BLE001 - said, never guessed
+                got = Stand(BY_DBA, "whether it can be made here could not"
+                                    f" be read: {_first(e)}")
+            facts[key] = got
+        return facts[key]
+
+    def answer(self, facts):
+        got = facts.get(answer_key(self.name))
+        return got if got in ANSWERS else None
+
+    def statements(self, facts, which="make"):
+        got = getattr(self, which)
+        return list(got(facts) if callable(got) else got or ())
+
+    def holds(self, facts):
+        state = self.stand(facts).state
+        return state == PRESENT or (state == POSSIBLE
+                                    and self.answer(facts) == "yes")
+
+    def missing(self, rung, facts):
+        """Why `rung` cannot run for want of this change, or None."""
+        if self.holds(facts):
+            return None
+        stand, answer = self.stand(facts), self.answer(facts)
+        head = f"{rung.said} needs {self.said} on the source"
+        if stand.state == IMPOSSIBLE:
+            return f"{head}, which this source does not allow: {stand.why}"
+        stmts = " ".join(terminated(s) for s in self.statements(facts))
+        if stand.state == BY_DBA:
+            return (f"{head}, which only a DBA can make here: {stand.why}"
+                    + (f"; a DBA runs on the source: {stmts}" if stmts
+                       else ""))
+        if answer == "no":
+            return (f"{head}, and the answer is no: the source is left as it"
+                    " is")
+        if answer == "dba":
+            return (f"{head}, handed to the DBA and not made yet"
+                    + (f": {stmts}" if stmts else ""))
+        return (f"{head}, which migkit may make and take off again"
+                f" {self.after} - offered, never assumed: answer it"
+                f" (source_changes: {{{self.name}: yes | no | dba}})"
+                + (f", or a DBA runs on the source: {stmts}" if stmts
+                   else ""))
+
+
+@dataclass(frozen=True)
+class Offer:
+    """What a change on the source would buy, before anybody answers: the
+    way the climb would take with it, the changes (each possible here and
+    not answered), and the `Choice` the climb makes without them."""
+    work: str
+    rung: object
+    changes: tuple
+    instead: object
+
+
+@contextlib.contextmanager
+def answering(facts, answers):
+    """The facts with `answers` ({change name: answer}) standing in for
+    the operator's, put back as they were after."""
+    keys = {answer_key(n): v for n, v in answers.items()}
+    before = {k: facts[k] for k in keys if k in facts}
+    facts.update(keys)
+    try:
+        yield facts
+    finally:
+        for k in keys:
+            if k in before:
+                facts[k] = before[k]
+            else:
+                facts.pop(k, None)
+
+
+def offered(work, rungs, facts=None, need=(), costs=None):
+    """The `Offer` a change on the source makes, or None: where the climb,
+    were every change migkit may make here made, would take a rung that
+    needs one not answered yet. Only a rung whose own needs all hold asks
+    its changes' probes, so nothing is asked of the server for a rung out
+    for another reason; nothing is proved - nothing is run to offer."""
+    facts = facts if facts is not None else Facts()
+    rungs = tuple(rungs)
+    open_ = {}
+    for r in rungs:
+        if not r.changes or r.lacks(need) is not None:
+            continue
+        if any(n.missing(r, facts) for n in r.needs):
+            continue
+        for c in r.changes:
+            if c.name not in open_ and c.answer(facts) is None \
+                    and c.stand(facts).state == POSSIBLE:
+                open_[c.name] = c
+    if not open_:
+        return None
+    with answering(facts, dict.fromkeys(open_, "yes")):
+        got = climb(work, rungs, facts, need, costs, prove=False)
+    asked = tuple(c for c in (got.rung.changes if got.rung else ())
+                  if c.name in open_)
+    if not asked:
+        return None
+    with answering(facts, dict.fromkeys(open_, "no")):
+        instead = climb(work, rungs, facts, need, costs, prove=False)
+    return Offer(work, got.rung, asked, instead)
+
+
 def prune(rungs, facts, need=()):
     """([rung that holds], [(rung, why it does not)]): a rung lacking a
     needed capability, or one of whose needs does not hold, is out, with
-    the reason in migkit's words."""
+    the reason in migkit's words - and so is one whose change on the
+    source is neither there nor answered yes (`Change`)."""
     kept, out = [], []
     for r in rungs:
         cap = r.lacks(need)
         why = lacking(cap, r) if cap is not None else None
         for n in () if why else r.needs:
             why = n.missing(r, facts)
+            if why:
+                break
+        for c in () if why else r.changes:
+            why = c.missing(r, facts)
             if why:
                 break
         if why:
@@ -415,6 +608,10 @@ def remember(where, work, name):
     path = _kept_file(where)
     got = _read(path)
     got[str(work)] = name
+    _write(path, got)
+
+
+def _write(path, got):
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -463,6 +660,279 @@ def choose_kept(where, work, rungs, facts=None, need=(), costs=None):
     if got.rung is not None:
         remember(where, work, got.rung.name)
     return got
+
+
+# --- a way that fails as it runs: the next one, by itself -------------------
+# The owner, 2026-09-30: "if one way is blocked or fails, switch to another
+# way by itself - automatically, don't ask, just say it in the log". The
+# climb already passes over a way whose needs do not hold and one whose
+# proof fails; `attempt` goes on past one that fails as it runs. An
+# operational failure - refused, a privilege or a feature missing, a
+# program that exited or crashed, a server out of reach, a timeout, a
+# proof step that could not run - has what the rung began undone (its own
+# `cleanup`, then the caller's `undo`; a range or a batch replaced by key
+# is idempotent, so the next rung converges on what it left), is kept
+# beside the work's position with the reason and the facts the rung's
+# needs read, is said in one line, and the climb goes on to the next rung
+# that holds. Every rung the climb offers still holds the work's `need`,
+# so a switch never lands on a way that gives less than the hop asks. A
+# verdict is never a failure: a difference found, a digest that
+# disagrees, a proof that said "different" is the answer, and is raised as
+# it is - a false negative is the worst thing migkit can say. The only
+# question asked is a change on the source (`offered`): a "no" is kept and
+# climbed past like any other way that cannot run.
+
+class Blocked(SystemExit):
+    """A way could not run here, and what it began is undone: another way
+    may. A SystemExit, so a caller with no other way stops on its words
+    exactly as it did before there was one."""
+
+
+class Verdict(Exception):
+    """A way ran and its answer is a difference: never a reason to try
+    another way."""
+
+
+class Exhausted(SystemExit):
+    """No way of the work could run: every rung's reason, in one message."""
+
+    def __init__(self, work, reasons):
+        self.work, self.reasons = work, list(reasons)
+        super().__init__(f"no way of {work} could run here: "
+                         + _joined(f"{r.said}: {why}" for r, why in reasons))
+
+
+#: the modules whose errors are a server's own refusal or a lost
+#: connection - a way that could not run, not a fault in migkit
+_DRIVERS = ("pymysql", "psycopg", "psycopg2", "pymongo", "pymssql",
+            "pyodbc", "mssql_python", "oracledb", "redis", "kafka",
+            "confluent_kafka", "cassandra", "clickhouse_connect",
+            "clickhouse_driver", "sqlite3", "duckdb", "botocore", "boto3",
+            "google", "azure", "opensearchpy", "ibm_db", "snowflake")
+
+
+def operational(e):
+    """Whether `e` is a way failing to run - refused, missing, exited,
+    unreachable, timed out - rather than a verdict, migkit's own stop
+    (SystemExit, said as it is), or a fault in migkit that must be seen."""
+    import subprocess
+    if isinstance(e, Blocked):
+        return True
+    if isinstance(e, (Verdict, SystemExit)) or not isinstance(e, Exception):
+        return False
+    if isinstance(e, RecursionError):
+        return False
+    if isinstance(e, (OSError, TimeoutError, RuntimeError,
+                      subprocess.SubprocessError)):
+        return True
+    return (type(e).__module__ or "").split(".")[0] in _DRIVERS
+
+
+def only_blocked(e):
+    """`attempt`'s `switch` for a way whose work cannot be put back once
+    it is under way: only the failures it raised as `Blocked` switch."""
+    return isinstance(e, Blocked)
+
+
+def _stable(v):
+    """A value as the same text from one run to the next: a set's order
+    is not, a dict's is kept sorted."""
+    if isinstance(v, (set, frozenset)):
+        return sorted(_stable(x) for x in v)
+    if isinstance(v, dict):
+        return sorted((str(k), _stable(x)) for k, x in v.items())
+    if isinstance(v, (list, tuple)):
+        return [_stable(x) for x in v]
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    return repr(v)
+
+
+class _Reading:
+    """The facts, recording what is read of them."""
+
+    def __init__(self, facts):
+        self._facts, self.read = facts, {}
+
+    def __getitem__(self, key):
+        got = self._facts[key]
+        self.read[key] = got
+        return got
+
+    def get(self, key, default=None):
+        got = self._facts.get(key, default)
+        self.read[key] = got
+        return got
+
+    def __contains__(self, key):
+        return key in self._facts
+
+    def __setitem__(self, key, value):
+        self._facts[key] = value
+
+    def pop(self, key, *default):
+        return self._facts.pop(key, *default)
+
+    def update(self, *a, **kw):
+        return self._facts.update(*a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._facts, name)
+
+
+def seen(rung, facts):
+    """What the rung's needs and changes read of the facts, as one short
+    digest: a rung given up on is tried again once it differs - the fact
+    that stopped it has changed."""
+    reading = _Reading(facts)
+    for n in rung.needs:
+        try:
+            n.holds(reading)
+        except Exception:  # noqa: BLE001 - a need that cannot be read
+            pass
+    for c in rung.changes:
+        try:
+            c.holds(reading)
+        except Exception:  # noqa: BLE001 - the same
+            pass
+    text = json.dumps(_stable({"rung": rung.name, **{
+        str(k): v for k, v in reading.read.items()}}), default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _up_key(work):
+    return f"{work} given up"
+
+
+def given_up(where, work):
+    """{rung name: {"why", "seen"}} this work gave up on beside `where`."""
+    if where is None:
+        return {}
+    got = _read(_kept_file(where)).get(_up_key(work))
+    return dict(got) if isinstance(got, dict) else {}
+
+
+def _keep_given_up(where, work, name, rec):
+    path = _kept_file(where)
+    got = _read(path)
+    got.setdefault(_up_key(work), {})[name] = rec
+    _write(path, got)
+
+
+def _cost_words(costs, failed, instead):
+    """What the switch costs, where both ways were timed here."""
+    if costs is None or instead is None:
+        return ""
+    a, b = costs.get(failed.name), costs.get(instead.name)
+    if a is None or b is None or not a:
+        return ""
+    return (f"; {instead.said} was measured {b / a:,.1f} times the time a"
+            f" unit of {failed.said} took")
+
+
+def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
+            keep=None, log=None, undo=None, answer=None, prove=True,
+            otherwise=None, switch=operational):
+    """(the `Choice`, what `run` returned): the work done on the first rung
+    that runs.
+
+    `run(choice)` does the work on `choice.rung`. An operational failure
+    of it (`operational`) undoes what the rung began - `rung.cleanup(facts,
+    error)`, then `undo(rung, error)` - keeps the rung given up with its
+    reason beside `where` (the work's position file; None keeps it for
+    this call only), says one line through `log`, and climbs again. A
+    rung given up by an earlier run is passed over while what its needs
+    read is unchanged (`seen`); where every rung left was given up
+    earlier, the one given up last is tried again - the one the work
+    stood on most recently - and that is said. `answer(offer)` is
+    asked once, where a change on the source would let a faster way run
+    (`offered`) - "yes", "no", "dba", or None for none. `otherwise` is the
+    way the caller takes where no rung is left, in words, for the line
+    that says the switch. `switch(error)` narrows which failures switch,
+    where a way's work cannot be undone once it is under way (a stream
+    that ran for an hour, a target replaced by a copy): there only what
+    the way itself raises as `Blocked` - it failed before anything it
+    cannot put back. What cannot be undone stops everything, with both
+    reasons; no rung left stops with every rung's reason (`Exhausted`)."""
+    facts = facts if facts is not None else Facts()
+    rungs = tuple(rungs)
+    say = log or (lambda m: None)
+    if answer is not None:
+        off = offered(work, rungs, facts, need, costs)
+        if off is not None:
+            got = answer(off)
+            if got in ANSWERS:
+                for c in off.changes:
+                    facts[answer_key(c.name)] = got
+    if keep is None and where is not None:
+        keep = remembered(where, work)
+    earlier = given_up(where, work)
+    by_name = {r.name: r for r in rungs}
+    lifted = set()
+    for name in list(earlier):
+        r = by_name.get(name)
+        if r is None or earlier[name].get("seen") != seen(r, facts):
+            earlier.pop(name)
+            lifted.add(name)
+    now, last_error = {}, None
+
+    def ladder():
+        out = {**earlier, **now}
+        return tuple(dataclasses.replace(r, needs=tuple(r.needs) + (Need(
+            "not given up on here", lambda f, n=r.name: n not in out,
+            lambda f, n=r.name: f"{out[n]['why']} (given up on here)"),))
+            for r in rungs)
+    while True:
+        choice = climb(work, ladder(), facts, need, costs, keep=keep,
+                       prove=prove)
+        if choice.rung is None and earlier and not now:
+            # nothing else is left: the way given up last is tried again
+            # first - the one the work stood on most recently, whose
+            # position a restart goes on from
+            last = max(earlier, key=lambda n: earlier[n].get("at") or 0)
+            say(f"{work}: every way left was given up by an earlier run;"
+                f" trying {by_name[last].said} again")
+            earlier.pop(last)
+            continue
+        if choice.rung is None:
+            raise Exhausted(work, choice.passed) from last_error
+        rung = choice.rung
+        if rung.name in lifted:
+            say(f"{work}: {rung.said} is tried again - what stopped it last"
+                " time has changed")
+            lifted.discard(rung.name)
+        try:
+            result = run(choice)
+        except BaseException as e:
+            if not operational(e) or not switch(e):
+                raise
+            why, last_error = _first(e), e
+            try:
+                if rung.cleanup is not None:
+                    rung.cleanup(facts, e)
+                if undo is not None:
+                    undo(rung, e)
+            except BaseException as err:
+                raise SystemExit(
+                    f"{work}: {rung.said} failed ({why}), and what it began"
+                    f" could not be undone ({_first(err)}) - no other way"
+                    " is tried over it") from err
+            now[rung.name] = {"why": why, "seen": seen(rung, facts),
+                              "at": time.time()}
+            if where is not None:
+                _keep_given_up(where, work, rung.name, now[rung.name])
+            nxt = climb(work, ladder(), facts, need, costs,
+                        prove=False).rung
+            say(f"{work}: {rung.said} could not run ({why})"
+                + (f" - switching to {nxt.said}"
+                   + _cost_words(costs, rung, nxt) if nxt is not None
+                   else f" - switching to {otherwise}" if otherwise
+                   else " - no other way is left"))
+            keep = None
+            continue
+        if where is not None:
+            remember(where, work, rung.name)
+        return choice, result
 
 
 # --- a strategy composed of parts -------------------------------------------

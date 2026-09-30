@@ -651,11 +651,13 @@ class MSSQLEngine(DbapiRows, Engine):
         on = self._cmd("src", db, "select count(*) from"
                      " sys.change_tracking_databases where database_id = db_id()")
         if not on or on[0][0] != "1":
+            from .. import sourcechange as sc
+            # the same words as the DBA's script and every other refusal
             return [Result("delta", db, "error",
-                           "Change Tracking not enabled on source; run: alter"
-                           f" database [{db}] set change_tracking = on"
-                           " (change_retention = 2 days, auto_cleanup = on),"
-                           " then per table: alter table ... enable change_tracking")]
+                           sc.requirement("change_tracking", "off",
+                                          sc.Ctx(db=db))
+                           + " Until it is on, `migkit check` compares"
+                             " every row rather than the ones changed")]
         if not state.exists():
             cur = self._cmd("src", db,
                             "select change_tracking_current_version()")[0][0]
@@ -1596,11 +1598,12 @@ class MSSQLEngine(DbapiRows, Engine):
         got = self._rows(side, db, "select change_tracking_current_version()")
         at = got[0][0] if got else None
         if at is None:
+            from .. import sourcechange as sc
             raise SystemExit(
                 f"Change Tracking is off for {db}, and it is the change log"
-                " migkit reads here: alter database ... set change_tracking"
-                " = on, then alter table ... enable change_tracking for"
-                " each table")
+                " migkit reads here - "
+                + sc.requirement("change_tracking", "off", sc.Ctx(db=db))
+                + ". Then each table: alter table ... enable change_tracking")
         self._all_tracked(side, db)
         return int(at)
 
@@ -1610,11 +1613,16 @@ class MSSQLEngine(DbapiRows, Engine):
         missed = sorted(set(self.neutral_tables(side, db))
                         - self._tracked(side, db))
         if missed:
+            from .. import sourcechange as sc
+            tables = [tuple(t.split(".", 1)) if "." in t else ("dbo", t)
+                      for t in missed[:6]]
             raise SystemExit(
                 f"Change Tracking does not follow {', '.join(missed[:6])}"
                 + (f" and {len(missed) - 6} more" if len(missed) > 6 else "")
-                + ", so their changes would be carried by nothing: alter"
-                " table ... enable change_tracking for each")
+                + ", so their changes would be carried by nothing - "
+                + sc.requirement("table_tracking",
+                                 f"{len(missed)} not tracked",
+                                 sc.Ctx(db=db, tables=tables)))
 
     def log_position(self, side, db):
         got = self._rows(side, db, "select change_tracking_current_version()")

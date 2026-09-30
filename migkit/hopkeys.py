@@ -21,8 +21,12 @@ What the registry answers, and who asks:
 * `said_by_doctor` - the keys that do nothing on this hop, and the ones
   that set what migkit would otherwise decide (`workers` is a ceiling
   its sizing never passes; `big_rows` is read by nothing at all).
-* `GOALS` - the one word a hop may give for what it wants, and the
-  options each word stands for.
+* `GOALS` - the one word a hop may give for what it wants, the options
+  each word stands for, and what each does on the source and the target
+  and guarantees; `MODES` and `CUTOVER` the same for the modes of `move`
+  and `sync` and for `cutover:` on or off (`explain_goal`,
+  `explain_mode`): `init`, `assess`, the dry run and the docs say them
+  from here.
 * `smallest` - a hop as the fewest lines that load into the same
   decisions (`decisions`), which `migkit init` writes.
 """
@@ -209,6 +213,11 @@ HOP_OPTIONS = {
     "share_tables": Key("machines share one move's tables", "bool"),
     "slot": Key("the slot a pipeline migkit did not set up reads, which"
                 " the fence waits for", "str|list", ("postgres",)),
+    "source_changes": Key("the answer, given ahead, to a change on the"
+                          " source a faster way needs: yes (migkit makes it"
+                          " and takes it off again), no or dba - for every"
+                          " change, or by its name (clone_plugin: yes)",
+                          "str|dict|bool"),
     "shards": Key("a created stream's shards", "int", ("kinesis",)),
     "snapshot_limit": Key("how old a snapshot may get", "number",
                           ("postgres",)),
@@ -421,15 +430,32 @@ ENDPOINT_OPTIONS = {
 }
 
 #: each goal: what it is, the options it stands for (the hop's own win),
-#: whether it writes at all, and the commands that do it. A value of
-#: `SUPPORTED` is set only where the engine can do it (`freeze.supported`)
+#: whether it writes at all, the commands that do it - and, for `init`,
+#: `assess`, the dry run and the docs, what it does on each side and what
+#: it guarantees (the one place these are written; `explain_goal` says
+#: them). A value of `SUPPORTED` is set only where the engine can do it
+#: (`freeze.supported`). No goal turns `cutover:` on (the owner,
+#: 2026-09-30): the cutover migkit drives runs only where the hop sets it,
+#: and `CUTOVER` says what that adds.
 SUPPORTED = object()
 GOALS = {
     "copy": {"what": "move the data once and prove every row arrived",
              "options": {}, "writes": True,
              "next": ["migkit move {hop} --mode full",
                       "migkit move {hop} --mode full --go",
-                      "migkit check {hop}"]},
+                      "migkit check {hop}"],
+             "source": "read, never written: each table read as of one"
+                       " moment where the engine gives one; a row the"
+                       " application changes while it is read is not"
+                       " carried, and the check names it",
+             "target": "the tables it lacks made, and filled with the"
+                       " source's rows, indexes built after them; a table"
+                       " that already holds rows is refused unless the hop"
+                       " says what to do with them (target_rows: refuse,"
+                       " replace or keep)",
+             "guarantees": "every row compared after the copy (migkit"
+                           " check): equal, or each row that differs"
+                           " named"},
     "cutover": {"what": "move, follow the source's changes, prove both"
                         " equal, and switch with the least downtime - a"
                         " stream back ready from the moment of the switch",
@@ -438,25 +464,192 @@ GOALS = {
                 "writes": True,
                 "next": ["migkit sync {hop} --mode migrate",
                          "migkit sync {hop} --mode migrate --go",
-                         "migkit watch {hop}"]},
+                         "migkit watch {hop}"],
+                "source": "read, and its log of changes followed from a"
+                          " position taken before the copy - the stream's"
+                          " own slot and publication on PostgreSQL, its"
+                          " binary log read on MySQL, a change stream on"
+                          " MongoDB - made by the stream and dropped when"
+                          " it is torn down; nothing else is written to it"
+                          " unless the hop turns cutover: on, and then only"
+                          " during the cutover",
+                "target": "filled as a copy fills it, then kept level with"
+                          " the source change by change; kept from the"
+                          " application's writes until the cutover where"
+                          " the engine allows it (protect_target); after"
+                          " it, a stream back from it to the old source"
+                          " (reverse: at_cutover)",
+                "guarantees": "no change lost between the copy and the"
+                              " stream (the position is taken before the"
+                              " copy); each cycle's changes compared (watch"
+                              " --verify --delta); the stream torn down only"
+                              " once nothing writes to the source and the"
+                              " stream has passed where it stands"},
     "verify": {"what": "prove two databases hold the same; nothing is"
                        " written to either",
                "options": {}, "writes": False,
-               "next": ["migkit check {hop}"]},
+               "next": ["migkit check {hop}"],
+               "source": "read only",
+               "target": "read only",
+               "guarantees": "equal, or every table and row that differs"
+                             " named; nothing written to either side"},
     "two-way": {"what": "both sides written, each side's changes carried"
                         " to the other",
                 "options": {"topology": "two_way", "two_way": True},
                 "writes": True,
                 "next": ["migkit move {hop} --mode full+cdc",
-                         "migkit move {hop} --mode full+cdc --go"]},
+                         "migkit move {hop} --mode full+cdc --go"],
+                "source": "written: the target's changes carried to it by"
+                          " key, and its own told apart from what migkit"
+                          " wrote there, so nothing goes round",
+                "target": "written the same way: the source's changes"
+                          " carried to it",
+                "guarantees": "a change made on either side arrives on the"
+                              " other once; two changes to one row are"
+                              " settled by the hop's rule (on_conflict,"
+                              " newer_wins)"},
     "keep-in-sync": {"what": "a copy that follows the source for as long"
                              " as it runs, the application kept off it",
                      "options": {"protect_target": SUPPORTED},
                      "writes": True,
                      "next": ["migkit sync {hop} --mode migrate",
                               "migkit sync {hop} --mode migrate --go"
-                              " --serve"]},
+                              " --serve"],
+                     "source": "read, and its log of changes followed for as"
+                               " long as it runs; nothing else is written"
+                               " to it",
+                     "target": "a copy kept level with the source, the"
+                               " application kept from writing to it"
+                               " (protect_target)",
+                     "guarantees": "each cycle's changes compared, the"
+                                   " stream's lag said, a difference named"},
 }
+
+#: each mode of `move` and `sync`: what it does on each side, as the dry
+#: run says it before `--go`
+MODES = {
+    ("move", "full"): "one copy of every table the hop carries: the source"
+                      " read, the target written",
+    ("move", "cdc"): "the stream of changes started, or resumed from where"
+                     " it stood: the source's log read, the target written"
+                     " change by change",
+    ("move", "full+cdc"): "the copy, then the stream from a position taken"
+                          " before the copy began, so nothing changed"
+                          " during it is lost",
+    ("move", "cdc --drop"): "the cutover: the stream torn down, and what"
+                            " else happens on each side is what cutover:"
+                            " says (below)",
+    ("sync", "reconcile"): "the last check's differences shown; --apply"
+                           " writes the target to match the source",
+    ("sync", "verify"): "read only: every table compared as of one moment",
+    ("sync", "seed"): "the schema aligned, the copy, the differences"
+                      " repaired and a consistent check, one after another",
+    ("sync", "stream"): "the stream started, and each cycle's changes"
+                        " compared",
+    ("sync", "migrate"): "seed, then stream",
+}
+
+#: what `cutover:` in a hop's options adds, and what the operator does by
+#: hand without it (`cutover.plan` says the steps from here). `{hop}` is
+#: the hop's name, `{back}` what the stream back adds to the teardown.
+CUTOVER = {
+    "adds": [
+        "a timed path: the write outage clocked from the pooler's pause or"
+        " the freeze to the flip, against the hop's budget - past it, all"
+        " of it is undone",
+        "the freeze: migkit stops the source's writes itself - the whole"
+        " server made read-only where it may, or the application's grants"
+        " revoked and its sessions ended - and reads it back",
+        "the drain: the source's position taken after the freeze, and the"
+        " hop's own stream waited for until it passes it",
+        "the fenced check: the rows changed since the last verified pass"
+        " compared inside the outage, and the schema compared with the"
+        " preflight's",
+        "the counters: the target's sequences and auto-increments raised"
+        " past every key the source handed out",
+        "the stream back: started from the new primary to the old source"
+        " (reverse: at_cutover) and proven to reach it",
+        "the undo: every step recorded before it acts and put back, the"
+        " last first, on any failure, on the budget passing, or on the"
+        " next run after one killed half way",
+        "the outage measured: each run's outage and each step's time"
+        " recorded, and the next cutover refused where the last one's was"
+        " past its budget",
+    ],
+    "on source": "written during the cutover only: its jobs switched off,"
+                 " its writes frozen, each step reversible and behind the"
+                 " hop's approvals; after the flip it stays frozen until"
+                 " `migkit rollback {hop} --db DB --apply`",
+    "by hand": [
+        "switch off on the source the jobs it runs (pg_cron jobs, MySQL"
+        " events), so they write in one place",
+        "stop the application's writes to the source: stop it, or revoke"
+        " its write privileges and end its sessions - ending them is what"
+        " rolls back what they had not committed",
+        "migkit move {hop} --mode cdc --drop --go - migkit proves nothing"
+        " writes to the source and nothing is prepared there, waits for"
+        " the stream to pass where the source stands, and only then tears"
+        " it down{back}",
+        "migkit check {hop} - the final comparison",
+        "migkit sync {hop} --go --kind sequences --tag pre-cutover - the"
+        " target's counters past the source's",
+        "switch the jobs on on the target",
+        "point the application at the target",
+    ],
+    "off source": "nothing written at cutover: the operator stops its"
+                  " writes and its jobs",
+}
+
+
+def cutover_on(hop):
+    """Whether the hop turns the migkit-driven cutover on: its own
+    `cutover:` and nothing else - a goal never does."""
+    got = (hop.options or {}).get("cutover")
+    return got is not None and got is not False
+
+
+def cutover_lines(hop):
+    """What the cutover does on each side for this hop: with `cutover:`,
+    what it adds; without it, that no goal turns it on, the steps by hand,
+    and what turning it on would add."""
+    name = getattr(hop, "name", "HOP")
+    back = (" and starts the stream back"
+            if (hop.options or {}).get("reverse") == "at_cutover" else "")
+    adds = [f"    - {a}" for a in CUTOVER["adds"]]
+    if cutover_on(hop):
+        return (["cutover: on - migkit runs the cutover itself, as one"
+                 " timed path:"] + adds
+                + ["  on the source: "
+                   + CUTOVER["on source"].format(hop=name)])
+    return (["cutover: off - the goal does not turn it on; at the cutover"
+             " migkit writes nothing to the source, and the operator does"
+             " this by hand, in order:"]
+            + [f"    {i}. {s.format(hop=name, back=back)}"
+               for i, s in enumerate(CUTOVER["by hand"], 1)]
+            + ["  turning it on (options: cutover: true, or its settings)"
+               " adds:"] + adds)
+
+
+def explain_goal(hop, goal=None):
+    """The goal said plainly: what it is for, what it does on the source
+    and on the target, what it guarantees - and, for a hop that is cut
+    over, what `cutover:` on or off means for it."""
+    goal = goal or getattr(hop, "goal", "") or "copy"
+    g = GOALS[goal]
+    out = [f"goal {goal}: {g['what']}",
+           f"  on the source: {g['source']}",
+           f"  on the target: {g['target']}",
+           f"  it guarantees: {g['guarantees']}"]
+    if goal == "cutover" or cutover_on(hop):
+        out += ["  " + line for line in cutover_lines(hop)]
+    return out
+
+
+def explain_mode(command, mode, drop=False):
+    """What one mode of `move` or `sync` does on each side, in a line."""
+    key = (command, f"{mode} --drop" if drop and mode == "cdc" else mode)
+    got = MODES.get(key)
+    return f"--mode {key[1]}: {got}" if got else ""
 
 #: options that write, which a hop whose goal writes nothing contradicts
 WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover")
@@ -738,6 +931,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     f"goal copy moves the data once, and {k} keeps a"
                     " stream running - make the goal cutover or two-way,"
                     " or drop the option"))
+    out += _source_changes(where, opts, goal)
     from .interlock import CHOICES
     rows = opts.get("target_rows")
     if rows is not None and str(rows).lower() not in CHOICES:
@@ -760,6 +954,40 @@ def _contradictions(where, raw, opts, goal, engine):
             raw.get("databases"), (list, tuple)):
         out.append(Problem("error", f"{where}.databases",
                            "is not a list"))
+    return out
+
+
+def _source_changes(where, opts, goal):
+    """The answers a hop gives ahead to changes on the source: each yes,
+    no or dba, each named change one migkit knows - and a yes on a hop
+    whose goal writes nothing is a contradiction."""
+    from .sourcechange import DEFINITIONS, answer_word
+    out = []
+    raw = opts.get("source_changes")
+    given = []
+    if isinstance(raw, dict):
+        for name, v in raw.items():
+            given.append((f"{where}.options.source_changes.{name}", v))
+            if name not in DEFINITIONS:
+                near = _near(name, {d: Key("") for d in DEFINITIONS})
+                out.append(Problem("warn",
+                                   f"{where}.options.source_changes.{name}",
+                                   "not a change migkit knows" + near))
+    elif raw is not None:
+        given.append((f"{where}.options.source_changes", raw))
+    phys = opts.get("physical")
+    if isinstance(phys, dict) and "source_plugin" in phys:
+        given.append((f"{where}.options.physical.source_plugin",
+                      phys["source_plugin"]))
+    for at, v in given:
+        answer = answer_word(v)
+        if answer is None:
+            out.append(Problem("error", at, f"{v!r} - yes, no or dba"))
+        elif answer == "yes" and goal in GOALS and not GOALS[goal]["writes"]:
+            out.append(Problem("error", at,
+                               f"goal {goal} writes to neither side, and a"
+                               " yes lets migkit change the source - drop"
+                               " one of the two"))
     return out
 
 

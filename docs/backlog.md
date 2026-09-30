@@ -2826,6 +2826,54 @@ store). What was still nowhere:
   does on each side, and what turning `cutover:` on adds (the timed
   path, the freeze, the drain, the fenced check, the counters, the
   stream back, the undo, the outage measured).
+* **A way that is blocked or fails switches by itself** (added the same
+  day): "if one way is blocked or fails, switch to another way by
+  itself - automatically, don't ask, just say it in the log". Never on a
+  verdict, never to a way that gives less than the hop needs; all ways
+  gone stops with every way's reason. The source-change offer stays the
+  only question.
+
+*Built 2026-09-30, its tests written and not yet run (the owner's rule of
+2026-09-30: one run of the whole suite once the backlog is done):*
+* *One mechanism for a change on the source*: `decide.Change` on a rung
+  (`Rung.changes`), its probe read on the server into a `decide.Stand`
+  (present, possible, a DBA's, impossible), `decide.offered` for what the
+  answer buys; `sourcechange` holds the one list of changes
+  (`DEFINITIONS`, which `dba`'s scripts are now written from), the
+  answer (`source_changes`, `physical.source_plugin: install` as its
+  yes, a terminal's answer recorded), the offer in words with minutes
+  measured or estimated from `physical.MEASURED` and the source's load,
+  `making` behind the `source-setting` approval with its record and its
+  undo (a killed run's taken off by the next, a refusal the answer from
+  then on), and `for_the_dba`. Routed through it: MySQL's clone plugin
+  (offered), the copy of PostgreSQL's pages' replication right, WAL
+  senders, slots and `wal_level` (a DBA's, said without a question). The
+  requirements of following changes (PostgreSQL's `wal_level`, slots,
+  senders, replication, publication; MySQL's binary log, row format and
+  image, retention, replication grants; MongoDB's replica set and
+  DocumentDB's change streams; SQL Server's change tracking; Oracle's
+  archiving, supplemental logging, table logging and grants) stay
+  requirements, written from the same list with what not having them
+  means - in the DBA's script, `init`, SQL Server's refusals, MySQL's
+  `assess` and PostgreSQL's slot.
+* *Goals and modes explained* from one table (`hopkeys.GOALS` with each
+  side and the guarantee, `MODES`, `CUTOVER`), said by `init`, `assess`,
+  every dry run and `docs/goals-and-modes.md`; no goal turns `cutover:`
+  on, and a cutover hop without it is told the hand steps and what it
+  would add every time.
+* *The runtime switch*: `decide.attempt` (with `Blocked`, `Verdict`,
+  `Exhausted`, `operational`, `only_blocked`, the give-ups kept beside the
+  work's position with the facts that stopped them). Routed through it:
+  the bulk way of `move --mode full` down to the table copier, the
+  physical seed down to the logical copy, the servers' own replication
+  down to the change leg run from here, the grouped narrowing of a
+  differing table down to its own walk. Still one-off, in files other
+  work owns, to be routed through it: the per-table streaming copy to
+  ranges and `my_bulk_choice` (`movers`), SQL Server's bulk load to
+  statements (`engines/mssql`), ClickHouse's pull to the copier
+  (`engines/clickhouse`), the tail's ways (`engines/hetero`), the
+  localizer's groups (`leaves`), and `movers.stream_way`, whose facts
+  `cli._stream_facts` mirrors until it takes them.
 
 ## Decided by the owner 2026-09-28 - all of it is to be built
 
