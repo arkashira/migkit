@@ -1456,7 +1456,6 @@ class HeteroEngine(Engine):
         the log says so - restarting that one starts it over, which is the
         honest consequence of there being nothing to resume from.
         """
-        from .. import canon
         # a way of either side that fails as it writes a batch says its
         # switch in the copy's log (`Engine._attempt`)
         self.lend_log(log)
@@ -1498,6 +1497,22 @@ class HeteroEngine(Engine):
         if self._move_in_ranges(db, key, src_t, dst_t, src_cols, chunk, st,
                                 ck, log, src_where, dst_where):
             return
+        from .. import crossmove
+        timed = crossmove.whole(self, db, key, src_t, dst_t, st, ck, log)
+        if timed is True:
+            return
+        self._as_rows(db, key, src_t, dst_t, src_cols, dst_cols, chunk, st,
+                      ck, log, src_where, dst_where, read_scope)
+        if timed:
+            timed(int(st.get("moved") or 0))
+
+    def _as_rows(self, db, key, src_t, dst_t, src_cols, dst_cols, chunk, st,
+                 ck, log, src_where, dst_where, read_scope):
+        """The table copier's own way: rows read into this process and
+        written, resumed by key, a table with no key in one pass or by
+        where its rows are stored."""
+        from .. import canon
+        leaf = self._leaf(src_t)
         after = tuple(st["last"]) if st.get("last") is not None else None
         if after is None and "spans" not in st:
             # a fresh start, or a table with no key to resume from: what the
@@ -1651,6 +1666,7 @@ class HeteroEngine(Engine):
         st["done"] = True
         ck.save()
 
+
     def _copy_in_spans(self, db, key, src_t, dst_t, src_cols, dst_cols,
                        way, plan, st, ck, log, src_where, dst_where,
                        size=10_000):
@@ -1802,21 +1818,31 @@ class HeteroEngine(Engine):
         on a 2-CPU server). Each range empties its own span on the target,
         is copied and read back as every batch is, and is checkpointed when
         it is done; a run started again copies only the ranges not done.
-        Returns whether the table was copied this way."""
+        Returns whether the table was copied this way.
+
+        Each range climbs the ways a cross-engine table goes
+        (`crossmove.TableWay`, on the engine's own chooser): where it is
+        not the table copier's own, the rows go server to server and a
+        range the two servers do not hold alike is copied again this way.
+        Where such a way holds, one worker splits the table too - one
+        transaction of the whole table would restart from nothing."""
         import dataclasses
         import pickle
 
-        from .. import ranges
+        from .. import crossmove, ranges
         workers = int(getattr(self.hop, "workers", 1) or 1)
         src, dst = self.src_engine, self.dst_engine
         k = list(src.neutral_key("src", db, src_t) or [])
         # a target one writer at a time: ranges side by side waited on its
         # lock and stopped - measured, SQLite to SQLite, 500,000 rows,
         # `database is locked` in the seventh of eight ranges
-        if (workers < 2 or len(k) != 1 or not src.SQL_DIALECT
+        if (len(k) != 1 or not src.SQL_DIALECT
                 or not dst.SQL_DIALECT or not src.RESUMES_BY_KEY
                 or not getattr(dst, "WRITES_IN_PARALLEL", True)
                 or dict(src_cols).get(k[0]) != "integer"):
+            return False
+        others = crossmove.besides_the_copier(self, db, src_t, dst_t)
+        if workers < 2 and not others:
             return False
         try:
             rows = int((src.table_facts("src", db).get(src_t) or {})
@@ -1824,13 +1850,22 @@ class HeteroEngine(Engine):
         except Exception:  # noqa: BLE001 - not split, then
             rows = 0
         if "ranges" not in st and rows <= 2 * ranges.LEAST:
-            return False
+            # an estimate, which a table never analysed does not have:
+            # where a way besides the copier would take the ranges, the
+            # rows are counted as far as it matters
+            if not others:
+                return False
+            rows = crossmove.rows_upto(self, db, src_t, src_where,
+                                       2 * ranges.LEAST)
+            if rows <= 2 * ranges.LEAST:
+                return False
         # the hop as its fields say, without what a caller set on it here
         hop = dataclasses.replace(self.hop)
         try:
             pickle.dumps(hop)
         except Exception:  # noqa: BLE001 - one process, then
             return False
+        way = crossmove.TableWay(self, db, src_t, dst_t, log, key)
         (k,) = k
         q = src._quote_ident(k)
         table = src._qualified("src", db, src_t)
@@ -1849,22 +1884,34 @@ class HeteroEngine(Engine):
         st["key"] = k
         total = len(st["ranges"])
 
-        def finished(rng, moved):
+        def finished(item, got):
+            rng, asked = item[4:6], item[6]
+            moved, used, fell = got
             ranges.finished(st, rng[0], ck.save)
+            if fell:
+                way.fell(used, fell)
+            else:
+                way.took(used, moved, time.monotonic() - asked["began"])
             log(f"{key}: {k} {rng[0] + 1:,} to {rng[1]:,} copied,"
                 f" {moved:,} rows ({len(st['ranges_done'])} of {total}"
                 " ranges)")
+
+        def begin(item):
+            # what the source had made visible as the range is handed over,
+            # before its process reads it (`ranges.already_read`); and the
+            # way this range goes, climbed now on what the table's ranges
+            # have measured so far - the item is handed over after this
+            ranges.started(st, item[4], src.snapshot_mark("src", db),
+                           ck.save)
+            item[6]["way"] = way.pick()
+            item[6]["began"] = time.monotonic()
         # the move's slots where a move runs; the hop's workers where the
         # table is copied on its own
         slots = (ranges.active if ranges.active.workers > 1
                  else ranges.Slots(workers))
-        # what the source had made visible as each range is handed over,
-        # before its process reads it (`ranges.already_read`)
         slots.each_process(
-            [(hop, db, src_t, dst_t, a, u) for a, u in todo],
-            _copy_range, lambda item, moved: finished(item[4:], moved),
-            lambda item: ranges.started(
-                st, item[4], src.snapshot_mark("src", db), ck.save))
+            [(hop, db, src_t, dst_t, a, u, {}) for a, u in todo],
+            _copy_range, finished, begin)
         # a target row outside the source's whole range was in none of them
         dst_k = dict(zip([n for n, _ in src_cols],
                          [n for n, _ in self._move_columns(
@@ -1881,21 +1928,29 @@ class HeteroEngine(Engine):
         ck.save()
         return True
 
-    def copy_range(self, db, src_t, dst_t, after, upto):
-        """One range of `_move_in_ranges`, in the process running it: its
-        span emptied on the target, then copied and read back batch by
-        batch. Returns the rows it copied."""
+    def copy_range(self, db, src_t, dst_t, after, upto, way=None):
+        """One range of `_move_in_ranges`, in the process running it:
+        (rows copied, the way asked, why it fell or None). By `way` where
+        that is one of `crossmove`'s, and proved by the digest on both
+        servers; otherwise - or where that did not prove itself - its span
+        emptied on the target, then copied and read back batch by batch."""
+        from .. import crossmove
         src, dst = self.src_engine, self.dst_engine
         src_cols, dst_cols, _ = self._move_columns(src_t, dst_t, db)
         (k,) = src.neutral_key("src", db, src_t)
         dst_k = dict(zip([n for n, _ in src_cols],
                          [n for n, _ in dst_cols])).get(k, k)
+        way = way or crossmove.COPIER
+        fell = None
+        if way != crossmove.COPIER:
+            moved, fell = crossmove.range_by(self, db, src_t, dst_t, k, dst_k,
+                                             after, upto, way)
+            if not fell:
+                return moved, way, None
         src_where, dst_where = self._row_scope(db, src_t)
 
         def scope(eng, name, extra):
-            q = eng._quote_ident(name)
-            r = f"{q} > {int(after)} and {q} <= {int(upto)}"
-            return f"({extra}) and {r}" if extra else r
+            return crossmove.scoped(eng, name, after, upto, extra)
         dst.neutral_empty("dst", db, dst_t, where=scope(dst, dst_k,
                                                         dst_where))
         plan = (self._read_back_plan(db, src_t, dst_t, src_cols, [k])
@@ -1917,7 +1972,7 @@ class HeteroEngine(Engine):
             if last is None:
                 break
             point = last
-        return moved
+        return moved, way, fell
 
     def _write_checked(self, db, key, dst_t, dst_cols, plan, resumable,
                        rows, log):
@@ -4251,8 +4306,9 @@ class HeteroEngine(Engine):
 def _copy_range(item):
     """What a process of `_move_in_ranges` runs: one range, from a hop
     handed over whole."""
-    hop, db, src_t, dst_t, after, upto = item
-    return HeteroEngine(hop).copy_range(db, src_t, dst_t, after, upto)
+    hop, db, src_t, dst_t, after, upto, asked = item
+    return HeteroEngine(hop).copy_range(db, src_t, dst_t, after, upto,
+                                        asked.get("way"))
 
 
 class _CopiedRanges:

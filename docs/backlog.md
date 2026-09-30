@@ -7088,6 +7088,13 @@ range digest, the fenced re-check, exact batches or the final proof.
     the hop's row filter, column mapping and casts become its SQL,
     canon's rules its expressions. A rung chosen per table where it
     proves byte-equal by the range digest and measures faster.
+    **Done 2026-10-01** (`migkit/crossmove.py`): MySQL, SQLite, DuckDB,
+    Parquet, Delta and Iceberg into PostgreSQL, range by range, each range
+    held to both servers' leaf digest; the types it carries exactly listed
+    per engine and a table with any other refused with the reason; Delta
+    and Iceberg tables read through their logs as a Parquet source's
+    tables. Not into MySQL: measured 1,042.8s against the copier's 47.8s
+    for a million rows (its writer sends INSERT statements).
 14. **The source renders the target's load format in SQL:** a
     `SELECT` on the source that emits each row already in the target's
     bulk-load format (PostgreSQL COPY text, MySQL LOAD DATA fields),
@@ -7095,6 +7102,17 @@ range digest, the fenced re-check, exact batches or the final proof.
     work, nothing is parsed between them. Only for the types whose
     escaping is proved exhaustively (a property test over every canon
     class and every byte), the rest refused to the other rungs.
+    **Done 2026-10-01** (`migkit/loadtext.py`, `crossmove`): both ways
+    between MySQL and PostgreSQL; the two ways and the table copier are
+    rungs of the engine's own chooser, each range on the way its table
+    measured cheapest. Measured (`bench/cross_rates.py`, both servers in
+    one 2-CPU VM, four workers): PostgreSQL into MySQL 23.1s against the
+    copier's 56.1s a million rows, 186.1s against 337.5s at five million;
+    MySQL into PostgreSQL 101.6s against 402.0s at five million, and within
+    the spread of two runs at one million, where each range's proof - a
+    JSON column hashed in this process - is most of the time. The
+    property tests are written and not yet run (the owner's rule: one
+    run at the end).
 
 Why rows pass through Python today at all, and what the fast tools do
 instead: the generic range copier reads rows as Python objects because
