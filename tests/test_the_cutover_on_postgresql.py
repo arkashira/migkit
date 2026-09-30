@@ -281,8 +281,8 @@ def test_the_cutover_moves_the_application_and_loses_nothing(cut):
               (c.reports / "changelog.jsonl").read_text().splitlines()]
     steps = [r.get("phase") for r in record if r.get("op") == "cutover"
              and r.get("event") == "done"]
-    assert steps == ["jobs_off", "freeze", "drain", "verify", "counters",
-                     "stream", "reverse", "jobs_on"], steps
+    assert steps == ["prepare", "jobs_off", "freeze", "drain", "verify",
+                     "counters", "stream", "reverse", "jobs_on"], steps
     assert all(r.get("approved_by") == ["ann"] for r in record
                if r.get("op") == "cutover"), record[-3:]
     # going back: the old source's counters past the new primary's, and
@@ -299,8 +299,10 @@ def test_the_cutover_moves_the_application_and_loses_nothing(cut):
     conn.close()
 
 
-PHASES = ("jobs_off", "freeze", "drain", "verify", "counters", "stream",
-          "reverse", "jobs_on", "flip")
+#: "prepare" first: the hop streams back, and the stream back is made
+#: ahead of the clock where it can wait idle
+PHASES = ("prepare", "jobs_off", "freeze", "drain", "verify", "counters",
+          "stream", "reverse", "jobs_on", "flip")
 
 
 def test_a_failure_at_any_step_undoes_every_step(cut, monkeypatch):
@@ -688,3 +690,114 @@ def test_an_account_that_cannot_freeze_is_named_before_anything_moves(
     finally:
         psql(src, "drop table if exists public.theirs;"
                   " drop role if exists migkit_lim")
+
+
+# the stream back made ahead of the clock against one made at the flip:
+# each way's run keeps its numbers here, and the test after both says
+# the difference
+_MEASURED = {}
+
+
+@pytest.mark.parametrize("made", ["ahead", "at the flip"])
+def test_the_stream_back_made_ahead_takes_less_of_the_outage(cut,
+                                                              monkeypatch,
+                                                              made):
+    from migkit import cli
+    c = cut
+    c.hop({"budget": 20, "flip": f"printf dst > {c.route}"})
+    if made == "at the flip":
+        real = cli._stream_leg
+
+        def at_the_flip(*a, **k):
+            leg = real(*a, **k)
+            leg.back_arm = leg.back_fire = leg.back_proof = None
+            return leg
+        monkeypatch.setattr(cli, "_stream_leg", at_the_flip)
+    _follow(c)
+    w = _writing(c)
+    try:
+        got, said = _cli("move", HOP, "--mode", "cdc", "--drop", "--go")
+        assert got.exit_code == 0, said
+        flipped = time.time()
+        assert harness.wait_for(lambda: len(w.oks_after(flipped)) >= 30,
+                                30), w.errors()[-3:]
+    finally:
+        w.stop()
+    _nothing_lost_or_twice(c, w, c.pair["dst"])
+    # made ahead or not, the stream back carries what the new primary took
+    assert harness.wait_for(lambda: sorted(_tags(c.pair["src"]))
+                            == sorted(_tags(c.pair["dst"]))), \
+        "the old source did not follow the new primary"
+    run = [json.loads(x) for x in
+           (c.reports / "cutover-runs.jsonl").read_text().splitlines()][-1]
+    assert run["back"] == ("armed" if made == "ahead" else "at_flip"), run
+    assert ("prepare" in run["took"]) == (made == "ahead"), run["took"]
+    _MEASURED[made] = {"outage": w.outage(), "run": run["outage"],
+                       "stream": run["took"]["stream"],
+                       "reverse": run["took"]["reverse"]}
+    print(f"\nthe stream back made {made}: {w.outage():.2f}s without an"
+          f" acknowledged write; stream {run['took']['stream']:.2f}s,"
+          f" reverse {run['took']['reverse']:.2f}s")
+
+
+def test_the_measured_difference_of_the_stream_back_made_ahead():
+    if len(_MEASURED) < 2:
+        pytest.skip("measured by the two runs above, in this session")
+    ahead, flip = _MEASURED["ahead"], _MEASURED["at the flip"]
+    print(f"\noutage: made ahead {ahead['outage']:.2f}s, at the flip"
+          f" {flip['outage']:.2f}s; the stream step {ahead['stream']:.2f}s"
+          f" against {flip['stream']:.2f}s")
+    # the flip starts what was made ahead: it does not make it
+    assert ahead["stream"] < flip["stream"], _MEASURED
+
+
+def test_the_point_of_no_return_gives_the_old_source_back(cut):
+    c = cut
+    key, signers = _approver(c.tmp, "ann")
+    c.hop({"budget": 20, "flip": f"printf dst > {c.route}"},
+          approvals={"steps": ["point-of-no-return"],
+                     "signers": str(signers)})
+    _follow(c)
+    w = _writing(c)
+    try:
+        got, said = _cli("move", HOP, "--mode", "cdc", "--drop", "--go")
+        assert got.exit_code == 0 and "cut over:" in said, said
+        flipped = time.time()
+        assert harness.wait_for(lambda: len(w.oks_after(flipped)) >= 20,
+                                30), w.errors()[-3:]
+    finally:
+        w.stop()
+    frozen = _state(c.pair["src"])
+    # shown, and nothing done
+    got, said = _cli("move", HOP, "--mode", "cdc", "--drop")
+    assert got.exit_code == 0, said
+    assert "point of no return" in said and "the stream back: dropped" \
+        in said, said
+    assert _state(c.pair["src"]) == frozen
+    # asked for its own approval, and nothing done without it
+    got, said = _cli("move", HOP, "--mode", "cdc", "--drop", "--go")
+    assert got.exit_code != 0 and "needs 1 approval and has 0" in said, said
+    assert _state(c.pair["src"]) == frozen
+    request = c.reports / "approvals" / "point-of-no-return-all.request.json"
+    (request.parent / "point-of-no-return-all.ann.sig").write_bytes(
+        _sign(key, request))
+    got, said = _cli("move", HOP, "--mode", "cdc", "--drop", "--go")
+    assert got.exit_code == 0 and "past the point of no return" in said, said
+    # the old source is the application's again, and follows nothing
+    conn = c.connect("src")
+    conn.cursor().execute("insert into public.orders (tag) values"
+                          " ('given back')")
+    conn.commit()
+    conn.close()
+    assert _one(c.pair["src"], "select count(*) from pg_subscription") == "0"
+    assert harness.wait_for(lambda: _one(
+        c.pair["dst"], "select count(*) from pg_replication_slots") == "0",
+        30), "the stream back's slot is left on the new primary"
+    assert "given back" not in _tags(c.pair["dst"])
+    # going back is refused from here
+    got, said = _cli("rollback", HOP, "--db", "postgres", "--apply")
+    assert got.exit_code != 0 and "past the point of no return" in said, said
+    runs = [json.loads(x) for x in
+            (c.reports / "cutover-runs.jsonl").read_text().splitlines()]
+    assert [r["state"] for r in runs][-2:] == ["flipped", "no-return"]
+    assert runs[-1]["approved_by"] == ["ann"]

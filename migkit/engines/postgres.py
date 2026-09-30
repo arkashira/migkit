@@ -10420,7 +10420,64 @@ class PostgresEngine(Engine):
             "drop_dst": [f"drop subscription if exists {name};"],
             "status": "select subname, received_lsn, latest_end_lsn,"
                       " latest_end_time from pg_stat_subscription",
+            **self._armed_sql(name, conn, publish, streaming, origin),
         }
+
+    def _armed_sql(self, name, conn, publish, streaming, origin):
+        """The same stream made ahead and left idle, then started - what a
+        cutover makes before its freeze and starts at the flip (`cutover`,
+        a stream back made ahead): the publication, and a slot of the
+        stream's own on the side it reads, made now; the subscription made
+        on its own slot, disabled; and at the start, the slot moved on to
+        where its side's log is then - what was written there while it
+        waited is not the stream's to carry - and the subscription
+        enabled. `unarm_src` takes the slot away where the subscription's
+        own drop could not."""
+        slot = name.lower()
+        return {
+            "arm_src": [publish,
+                        "select pg_create_logical_replication_slot("
+                        f"'{slot}', 'pgoutput') where not exists (select 1"
+                        " from pg_replication_slots where slot_name ="
+                        f" '{slot}');"],
+            "arm_dst": [f"create subscription {name} connection '{conn}'"
+                        f" publication {name} with (copy_data = false"
+                        + (f", streaming = {streaming}" if streaming else "")
+                        + (", origin = none" if origin else "")
+                        + f", create_slot = false, slot_name = '{slot}',"
+                        " enabled = false);"],
+            "fire_src": ["select pg_replication_slot_advance("
+                         f"'{slot}', pg_current_wal_lsn());"],
+            "fire_dst": [f"alter subscription {name} enable;"],
+            "unarm_src": ["select pg_drop_replication_slot(slot_name) from"
+                          " pg_replication_slots where slot_name ="
+                          f" '{slot}' and not active;"],
+        }
+
+    def armed_status(self, db, sql):
+        """"" where the stream made ahead (`_armed_sql`) stands ready to be
+        started, or why not: its subscription on the side it applies to
+        knows every table the publication lists - made with the connection
+        it will stream on, so the sign-in and the publication are proven -
+        and its slot is held on the side it reads."""
+        name = self._repl_name().lower()
+        want = self._psql("src", db, "select count(*) from"
+                                     " pg_publication_tables where pubname"
+                                     f" = '{name}'").strip()
+        have = self._psql("dst", db, "select count(*) from"
+                                     " pg_subscription_rel r join"
+                                     " pg_subscription s on s.oid ="
+                                     f" r.srsubid where s.subname = '{name}'"
+                          ).strip()
+        slot = self._psql("src", db, "select count(*) from"
+                                     " pg_replication_slots where slot_name"
+                                     f" = '{name}'").strip()
+        if slot != "1":
+            return "its slot is not held on the side it reads"
+        if have != want:
+            return (f"its subscription knows {have} of the"
+                    f" {want} tables its publication lists")
+        return ""
 
     def published_tables(self, db):
         """The source's tables the hop moves, as a publication of its

@@ -4,9 +4,12 @@ against the hop's list of who may approve.
 
     options:
       approvals:
-        steps: [cutover, repair, rollback, source-setting]
+        steps: [cutover, repair, rollback, source-setting,
+                point-of-no-return]
         # source-setting: a change on the source a faster way needs, that
         # the operator answered yes to (`sourcechange.making`)
+        # point-of-no-return: the cutover taken past going back - the
+        # stream back dropped, the old source given back (`cutover`)
         count: 2                     # distinct approvers (1 by default)
         signers: /etc/migkit/allowed_signers   # ssh-keygen's format
         expires: 3600                # seconds a request stands (1 hour)

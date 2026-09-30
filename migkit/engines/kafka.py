@@ -469,6 +469,10 @@ class KafkaEngine(Engine):
         with tailctl.Running(token_path.parent):
             while True:
                 tailctl.hold_if_asked(token_path.parent, log)
+                if tailctl.stop_asked(token_path.parent):
+                    log(f"stopped as asked after {seen} messages; the"
+                        " positions are saved")
+                    break
                 went = 0
                 for _, topic in self.list_move_tables(db):
                     st = state.setdefault(self.move_key(db, "", topic), {})

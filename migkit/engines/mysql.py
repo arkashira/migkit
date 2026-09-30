@@ -7655,7 +7655,19 @@ class MySQLEngine(Engine):
             ]
         stop = ["stop slave;", "reset slave all;"] if brand == "mariadb" \
             else ["stop replica;", "reset replica all;"]
-        return {"src": src_cmds, "dst": dst_cmds,
+        # the same replica made ahead and left idle, then started - what a
+        # cutover makes before its freeze and starts at the flip: its
+        # receiver runs and takes the source's log as it grows, its
+        # applier waits (a managed target starts its replica only whole)
+        armed = {}
+        if "rds.amazonaws.com" not in (t.host or ""):
+            word = "slave" if brand == "mariadb" else "replica"
+            armed = {"arm_src": src_cmds,
+                     "arm_dst": dst_cmds[:-1] + [f"start {word} io_thread;"],
+                     "fire_src": [],
+                     "fire_dst": [f"start {word} sql_thread;"],
+                     "unarm_src": []}
+        return {**armed, "src": src_cmds, "dst": dst_cmds,
                 "drop_src": [f"drop user if exists '{self.REPL_USER}'@'%';"],
                 "drop_dst": stop,
                 "status": ("show slave status" if brand == "mariadb"
@@ -7732,6 +7744,32 @@ class MySQLEngine(Engine):
                        f" {', '.join(missing)} - it writes every database and"
                        " table of the source")
         return ", ".join(out)
+
+    def armed_status(self, db, sql, settle=15):
+        """"" where the replica made ahead (`replicate_sql`'s `arm_dst`)
+        stands ready to be started, or why not: its receiver signed in to
+        the side it will apply from and reading its log - read after the
+        receiver has had `settle` seconds to connect, since `START REPLICA
+        IO_THREAD` answers before it has - and its applier still
+        waiting."""
+        end = time.monotonic() + settle
+        while True:
+            rows = self._q_named("dst", sql["status"])
+            r = rows[0] if rows else {}
+            io = str(self._repl_field(r, self._REPL_FIELDS["io"]))
+            sq = str(self._repl_field(r, self._REPL_FIELDS["sql"]))
+            if io == "Yes" or time.monotonic() >= end:
+                break
+            time.sleep(0.25)
+        if not rows:
+            return "no replica is configured"
+        if io != "Yes":
+            err = (r.get("Last_IO_Error") or "").strip()
+            return ("its receiver is not reading the log it will apply"
+                    + (f": {err[:160]}" if err else f" ({io})"))
+        if sq == "Yes":
+            return "its applier is already running"
+        return ""
 
     def src_lsn(self, db):
         """Where the source is now, as its executed GTID set - the same

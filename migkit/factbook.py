@@ -259,6 +259,43 @@ for _name, _what, _group, _how in (
      GIVEN),
     ("bisection reader", "the bisection's reader", "context", GIVEN),
     ("localizer", "the localizer chosen for the table", "context", GIVEN),
+    # --- the cutover: a side's writes held, its drain, its stream back -------
+    ("others", "the server's databases, topics or indices the hop does not"
+     " move", "side", READ),
+    ("alter system", "whether migkit's account may change the server's"
+     " settings (ALTER SYSTEM)", "side", READ),
+    ("read only switch", "whether migkit's account may switch the server"
+     " read-only", "side", READ),
+    ("actions", "the server-wide actions migkit's account holds", "side",
+     READ),
+    ("acl", "whether the server keeps accounts of its own", "side", READ),
+    ("alter", "whether migkit's account may alter the database", "side",
+     READ),
+    ("alone in its group", "whether the database stands outside any"
+     " availability group", "side", READ),
+    ("control", "whether migkit's account may deny rights and give them"
+     " back", "side", READ),
+    ("kill", "whether migkit's account may end other sessions", "side",
+     READ),
+    ("authorizer", "whether the cluster checks access", "side", READ),
+    ("authorize", "whether migkit's role may grant and revoke on the"
+     " keyspace", "side", READ),
+    ("cache", "the seconds a cluster's permission cache holds a grant",
+     "side", READ),
+    ("stream back", "whether the hop starts a stream back at cutover",
+     "context", GIVEN),
+    ("budget", "the cutover's budget for the write outage, in seconds",
+     "limits", GIVEN),
+    ("cutover", "whether the hop turns cutover: on", "context", GIVEN),
+    ("operator", "whether the source is frozen by its operator", "context",
+     GIVEN),
+    ("positions", "whether the stream keeps a position for every database",
+     "side", READ),
+    ("why none", "why the stream keeps no position", "side", READ),
+    ("mark", "why a mark cannot be written and read on the pair, or"
+     " nothing", "side", READ),
+    ("arms", "whether the stream back's engine lets it wait idle", "side",
+     READ),
 ):
     declare(_name, _what, _group, _how)
 

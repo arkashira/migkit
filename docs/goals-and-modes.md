@@ -33,7 +33,7 @@ operator does the steps by hand, with migkit proving around them (below).
 | `move --mode full` | one copy of every table the hop carries: the source read, the target written |
 | `move --mode cdc` | the stream of changes started, or resumed from where it stood: the source's log read, the target written change by change |
 | `move --mode full+cdc` | the copy, then the stream from a position taken before the copy began, so nothing changed during it is lost |
-| `move --mode cdc --drop` | the cutover: the stream torn down, and what else happens on each side is what `cutover:` says |
+| `move --mode cdc --drop` | the cutover: the stream torn down, and what else happens on each side is what `cutover:` says; run again once a cutover of the hop has flipped, its point of no return |
 | `sync --mode reconcile` | the last check's differences shown; `--apply` writes the target to match the source |
 | `sync --mode verify` | read only: every table compared as of one moment |
 | `sync --mode seed` | the schema aligned, the copy, the differences repaired and a consistent check, one after another |
@@ -62,6 +62,9 @@ writes nothing to the source at the cutover. The operator, in order:
    target's counters past the source's
 6. switch the jobs on on the target
 7. point the application at the target
+8. once the application is on the target for good, the point of no
+   return: drop the stream back, if one runs, and give the old source
+   back its writes
 
 **On** (`cutover: true`, or its settings - [docs/cutover.md](cutover.md)):
 migkit does all of that itself, and adds:
@@ -69,28 +72,40 @@ migkit does all of that itself, and adds:
 - a timed path: the write outage clocked from the pooler's pause or the
   freeze to the flip, against the hop's budget - past it, all of it is
   undone
-- the freeze: migkit stops the source's writes itself - the whole server
-  made read-only where it may, or the application's grants revoked and
-  its sessions ended - and reads it back
+- the freeze: migkit stops the source's writes itself, the way chosen
+  from what the source allows - the whole server made read-only where it
+  may, or the application's accounts kept from writing and their
+  sessions ended - and reads it back; PostgreSQL, MySQL, MongoDB, Redis,
+  SQL Server, Cassandra, Kafka and OpenSearch sources alike
 - the drain: the source's position taken after the freeze, and the hop's
-  own stream waited for until it passes it
+  own stream waited for until it passes it - or, where the stream keeps
+  no position migkit can read, a mark written on the source after the
+  freeze and waited for on the target; a streaming pipeline and a leg run
+  from here drained by their own offsets and positions
 - the fenced check: the rows changed since the last verified pass
   compared inside the outage, and the schema compared with the
   preflight's
 - the counters: the target's sequences and auto-increments raised past
   every key the source handed out
-- the stream back: started from the new primary to the old source
-  (`reverse: at_cutover`) and proven to reach it
+- the stream back: from the new primary to the old source (`reverse:
+  at_cutover`), made and proven before the freeze where its engine lets
+  it wait idle, so the flip only starts it, and proven to reach the old
+  source
 - the undo: every step recorded before it acts and put back, the last
   first, on any failure, on the budget passing, or on the next run after
   one killed half way
 - the outage measured: each run's outage and each step's time recorded,
   and the next cutover refused where the last one's was past its budget
+- the point of no return: a step of its own behind an approval of its
+  own - the forward stream ended for good, the old source given back its
+  writes, the stream back dropped, what the cutover left taken away -
+  after which going back is refused
 
 With it on, the source is written during the cutover only - its jobs
 switched off, its writes frozen - each step reversible and behind the
 hop's approvals; after the flip it stays frozen until
-`migkit rollback HOP --db DB --apply`.
+`migkit rollback HOP --db DB --apply`, or until the point of no return
+gives it back.
 
 ## A change on the source a faster way needs
 

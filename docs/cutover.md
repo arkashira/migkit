@@ -52,15 +52,36 @@ Every command takes the hop's name; `--db` narrows one to a database.
        flip_undo: ./point-the-app-back.sh
        keys: exact               # exact | apart:<margin>
        jobs: move                # move | leave
-     approvals: {steps: [cutover, rollback], count: 2,
+       no_return: later          # later | at_flip
+     origin_table: keep          # keep | drop, at the point of no return
+     approvals: {steps: [cutover, rollback, point-of-no-return], count: 2,
                  signers: /etc/migkit/allowed_signers}
    ```
 
    `cutover: true` takes every default. A hop that turns it on lets
    migkit write to the source during the cutover - the freeze, the jobs
-   switched off - each step recorded first and undone from the record.
-   With `freeze: operator` migkit still writes nothing to the source: it
-   waits for the operator's stop and proves it.
+   switched off, a mark to drain by where the stream keeps no position -
+   each step recorded first and undone from the record. With `freeze:
+   operator` migkit still writes nothing to the source: it waits for the
+   operator's stop and proves it.
+
+   The freeze is one hold per engine (`freeze.Hold`), the way chosen from
+   what the source allows, in the order of what each holds - a switch
+   for the whole server before the application's accounts:
+
+   | Source | The whole server (where every database on it is the hop's) | The hop's databases alone | Read back |
+   |---|---|---|---|
+   | PostgreSQL | `default_transaction_read_only` (ALTER SYSTEM), migkit's role excepted | grants revoked, the right to connect taken from owners, sessions ended | no session from before, no role that writes, nothing prepared |
+   | MySQL | `super_read_only` (`read_only` on MariaDB), persisted | grants revoked, sessions ended | the switch on, no grant left, no XA or open write |
+   | MongoDB | users' writes blocked (6.0), or the server locked | write roles swapped for read, sessions ended | the block on, no account that writes, no open transaction |
+   | Redis | every client's writes held (`CLIENT PAUSE WRITE`, 6.2), not with a stream back | every account's writes refused (ACL), from 7.0 | each account refused a write (`ACL DRYRUN`), no connection from before, the count of writes still |
+   | SQL Server | - | the database read-only (`WITH ROLLBACK IMMEDIATE`), or the application's users denied writes and their sessions ended | read-only on, or every write denied; no prepared or open write |
+   | Cassandra, ScyllaDB | - | MODIFY revoked from the application's roles, the permission cache waited out | no role that writes the keyspace, the cache's time past |
+   | Kafka | the topics' writes denied to every principal, and transactional producers kept from committing | the topics' writes denied to every principal | the denies on record, the topics' ends still |
+   | OpenSearch | the whole cluster read-only | each index's write block, its writes in flight ended first | every block on, the count of writes still |
+
+   Another source is frozen by its operator (`freeze: operator`); where
+   migkit holds no writes of an engine, the preflight says why.
 
 ## Moving and following
 
@@ -85,7 +106,13 @@ Every command takes the hop's name; `--db` narrows one to a database.
 7. **See the plan.** `migkit move HOP --mode cdc --drop` checks, and
    writes nothing:
    - the stream's own position can be read, and the stream is less than
-     `start_below` behind it (it is waited for, not estimated)
+     `start_below` behind it (it is waited for, not estimated) - or,
+     where the stream keeps no position migkit can hold it to (a MySQL
+     replica without GTIDs, the streaming pipeline, a stream another
+     tool runs), that a mark on the source can drain it: a hop with
+     `cutover:`, a freeze of migkit's own that its own account writes
+     through, and a pair a mark is written and read on (PostgreSQL,
+     MySQL, MongoDB)
    - nothing prepared on either side (`pg_prepared_xacts`, `XA
      RECOVER`), and no write transaction on the source older than the
      budget: a prepared transaction commits whenever it is told, after
@@ -111,13 +138,14 @@ Every command takes the hop's name; `--db` narrows one to a database.
 
    | Step | What happens | Proof |
    |---|---|---|
+   | prepare | before the clock: the stream back made ahead and left idle where its engine lets it wait (a subscription made disabled on a slot of its own; a replica whose receiver runs and whose applier waits), and, for a drain by a mark, the mark's table made on the source | the stream back read back as ready (its subscription knows every published table, its slot held; its receiver signed in); a first mark found on the target - otherwise the stream back is made at the flip, or the cutover stops with nothing frozen |
    | jobs off | the jobs the source runs switched off there (pg_cron jobs, MySQL events) | recorded, to be switched on on the target |
    | pause | the pooler paused: the application's writes wait instead of failing | PAUSE returned within the budget |
    | freeze | chosen from what the source allows: the whole server where the hop's databases are all of it and migkit may change its settings (PostgreSQL `default_transaction_read_only` through ALTER SYSTEM, migkit's own role excepted; MySQL `super_read_only`, persisted); always, per database, the application's write grants revoked, the right to connect taken from a role that owns its tables, and every open session of the application ended, so what it had not committed is rolled back rather than committed late | read back: no application session left from before the freeze, no role that can still write, nothing holding a write transaction, nothing prepared, the server switch on |
-   | drain | the source's position taken **after** the freeze - on PostgreSQL the WAL insert position, which is where every acknowledged commit is | the hop's own stream (its slot by name, active or not; the target's executed GTIDs; migkit's tail's saved position) past it |
+   | drain | the source's position taken **after** the freeze - on PostgreSQL the WAL insert position, which is where every acknowledged commit is; where the stream keeps no position, a mark written on the source after the freeze; the leg run from here asked to end at the source's position of that moment | the hop's own stream (its slot by name, active or not; the target's executed GTIDs; migkit's tail's saved position) past it; or the mark on the target (in the pipeline's own topic), and then the stream's own offsets: the pipeline's sink applied to the end of every topic, the leg ended |
    | verify | the rows changed since the last verified pass compared, fenced - every table where no pass has run | the two the same, and the source's schema unchanged since the checks |
    | counters | the target's sequences and auto-increments past the source's (`keys: apart:<n>` adds a margin); a restore point `pre-cutover` kept first | the plan's undo recorded |
-   | stream | the stream torn down; with `reverse: at_cutover` the stream back started from the new primary to the old source | a statement a frozen MySQL source refuses (its replication account) is kept for when it is written again |
+   | stream | the stream torn down (a pipeline's connectors paused, taken down once the flip is done); with `reverse: at_cutover` the stream back started from the new primary to the old source - made ahead, only started: its slot moved on to the new primary's position and the subscription enabled, or the replica's applier started | a statement a frozen MySQL source refuses (its replication account) is kept for when it is written again |
    | reverse | - | the stream back has reached the old source: its position on the new primary passed |
    | jobs on | the jobs the source ran switched on on the target | recorded |
    | flip | the target given back its writes; the flip command run; the pooler repointed and resumed. The clock stops | the command exited 0 |
@@ -153,7 +181,30 @@ Every command takes the hop's name; `--db` narrows one to a database.
     fails there rather than writing where nobody reads. With `reverse:
     at_cutover` it follows the new primary; `migkit check` on a hop with
     the two sides swapped proves it keeps up.
-11. **If it has to go back:** stop the application on the target first.
+11. **The point of no return**, a step of its own behind an approval of
+    its own (`approvals.steps: [point-of-no-return]`): `migkit move HOP
+    --mode cdc --drop` again once the cutover has flipped shows it, and
+    `--go` takes it - or at the flip itself, with `no_return: at_flip`,
+    both approvals signed before the clock starts. In order, each step
+    recorded before it acts:
+
+    | Step | What happens |
+    |---|---|
+    | tail off | the forward tail, paused at the flip, ended for good |
+    | thaw | the old source given back exactly what the freeze took |
+    | back off | the stream back dropped: from here nothing the target takes reaches the old source |
+    | left | what the cutover left on the old source run or taken away: the statements its frozen state refused, the mark's table |
+    | origin | with `origin_table: drop`, migkit's own batch table taken off the target, once no tail of the hop runs |
+
+    Up to the stream back's drop, a failure freezes the old source again
+    and going back stays possible; a drop that failed half way leaves
+    the old source frozen again and the rest to the next run, which goes
+    on from the record; after it, a failure is said and kept. From then
+    on `migkit rollback` is refused: nothing carries the target back.
+    `origin_table: drop` takes the table away at a `--drop` without
+    `cutover:` too, once no tail runs; a hop streaming both ways keeps it.
+12. **If it has to go back** (before the point of no return): stop the
+    application on the target first.
     `migkit rollback HOP --db DB` shows, and `--apply` does: read the new
     primary's counters as they stand, put the target's own back to the
     `pre-cutover` restore point, wait for the stream back to carry
@@ -201,5 +252,9 @@ it, left the source writable and as it was.
 | final check | a difference flipped over, with nothing left to compare against |
 | counters | a key handed out twice on the first insert after the flip |
 | stream back, proven | a rollback that loses what was written after the flip |
+| stream back made ahead, its slot moved on at the flip | the making - a connection, a slot's wait for the target's open transactions - spent inside the outage; or what the target took before the flip carried back to the old source |
+| a mark where the stream keeps no position | a stream torn down with no proof it had carried what the source committed before the freeze |
+| a pipeline's offsets after its mark | a flip while its sink still applies another table's changes, which it applies apart from the mark's |
 | old source's counters on rollback | the first insert on the old source taking an id the new primary already used |
+| point of no return, approved on its own | an old source left frozen for ever, or given back while a stream back still writes into it, by nobody's decision |
 | budget, undo | a half-flipped cutover, or an outage nobody decided to take |
