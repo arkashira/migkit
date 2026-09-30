@@ -190,6 +190,30 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
          "sapodp", "saas", "hetero", "generic")
 
+#: what each engine is called where a person reads it - the manual, the
+#: site (`tools/gen_docs.py`) and the troubleshooting guide's headings; a
+#: name added to `NAMES` without one here fails
+#: `tests/test_the_manual_is_generated_from_the_code.py`
+TITLES = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
+          "mssql": "SQL Server", "redis": "Redis", "kafka": "Kafka",
+          "sqlite": "SQLite", "parquet": "Parquet files",
+          "clickhouse": "ClickHouse", "dynamodb": "DynamoDB",
+          "oracle": "Oracle Database", "db2": "Db2 (Linux, UNIX, Windows)",
+          "db2i": "Db2 for i", "db2zos": "Db2 for z/OS", "ase": "SAP ASE",
+          "teradata": "Teradata", "opensearch": "OpenSearch",
+          "cassandra": "Cassandra", "redshift": "Amazon Redshift",
+          "snowflake": "Snowflake", "bigquery": "BigQuery",
+          "kinesis": "Kinesis Data Streams", "pubsub": "Google Pub/Sub",
+          "duckdb": "DuckDB", "copybook": "Files described by COBOL copybooks",
+          "iceberg": "Iceberg tables", "delta": "Delta tables",
+          "tidb": "TiDB", "cockroachdb": "CockroachDB",
+          "dsql": "Aurora DSQL", "couchbase": "Couchbase",
+          "cosmosdb": "Cosmos DB for NoSQL",
+          "sapodp": "SAP application data (ODP)",
+          "saas": "SaaS applications, read by a connector program",
+          "hetero": "Any pair of two engines",
+          "generic": "Any other SQL engine"}
+
 
 def engines_with(method):
     """Canonical names of the engines that implement `method`.

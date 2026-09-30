@@ -249,18 +249,20 @@ class Step(str):
 _PREFIX = r"(?im)^[ \t]*{name}(?:\[\d+\])?:[ \t]*"
 
 
-def without_programs(text, names):
+def without_programs(text, names, instead="the copy"):
     """A program's message with the program taken out of it.
 
     What a failed copy printed is often the only useful diagnosis - the
     database's own error (`password authentication failed`, `connection
     refused`) is in there, and that is the database's vocabulary, which the
-    operator's DBA reads. The program's name around it is not.
+    operator's DBA reads. The program's name around it is not. `instead`
+    is what stands in its place: a release note's "the copy is the schema
+    differ" said less than "a program migkit drives is".
     """
     for name in sorted({str(n) for n in names if n}, key=len, reverse=True):
         text = re.sub(_PREFIX.format(name=re.escape(name)), "", text)
         text = re.sub(rf"(?i)(?<![\w/-]){re.escape(name)}(?![\w-])",
-                      "the copy", text)
+                      instead, text)
     return text.strip()
 
 

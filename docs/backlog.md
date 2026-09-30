@@ -3309,6 +3309,20 @@ once (P0, L).** Files: `migkit/engines/base.py`, `migkit/engines/hetero.py`
   exact-match test; the environment reference from `envkeys`; the exit-code
   table from `verdict`; the metric families from `ui`; command lists from
   the CLI; the hook regenerates and fails on a stale doc (LG15, LG16).
+* Done 2026-10-01 (not merged yet): `tools/gen_docs.py` writes
+  `docs/site/` (front page, quickstart, engines with the matrix, shapes,
+  stored-code pairs and managed services, goals and modes, recipes as
+  source -> target pairs each checked by `hopkeys.check` and held to the
+  matrix, options, environment, commands with every option and the metric
+  families, troubleshooting, evidence, releases per tag), `docs/index.html`,
+  the README's and `goals-and-modes.md`'s parts between `gen_docs`
+  markers and `docs/troubleshooting.md` (grouped by area, no module path);
+  `engines.TITLES`; `--help`'s engines from `NAMES`; the pre-commit hook
+  checks and writes again (exit 3 = behind). Tests:
+  `test_the_manual_is_generated_from_the_code.py`. The environment page is
+  `envkeys.VARS`. Waiting on others: the managed services come from the
+  catalogue (`managed`) once it merges (until then `clouds.LABELS`); the
+  exit-code table from AUD-A's one verdict table, which is not on master.
 
 ### Wave 3 (last, nothing else editing tests)
 

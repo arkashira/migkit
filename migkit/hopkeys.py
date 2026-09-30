@@ -403,8 +403,9 @@ ENDPOINT_OPTIONS = {
     "service_path": Key("where the SAP system publishes its OData services,"
                         " where not /sap/opu/odata/sap", "str",
                         ("sapodp",)),
-    "kind": Key("how a program source is spoken to: dlt, singer, airbyte"
-                " or salesforce - its address's scheme", "str", ("saas",)),
+    "kind": Key("how a program source is spoken to - the kind of"
+                " connector program it runs, its address's scheme", "str",
+                ("saas",)),
     "program": Key("what a program source runs: a tap's command, a"
                    " connector's image or command, a dlt source's"
                    " module:function, a Salesforce org's sign-in host",
@@ -601,6 +602,8 @@ ENDPOINT_OPTIONS = {
 #: 2026-09-30): the cutover migkit drives runs only where the hop sets it,
 #: and `CUTOVER` says what that adds.
 SUPPORTED = object()
+#: the goal of a hop that names none
+DEFAULT_GOAL = "copy"
 GOALS = {
     "copy": {"what": "move the data once and prove every row arrived",
              "options": {}, "writes": True,
@@ -1052,7 +1055,7 @@ def explain_goal(hop, goal=None):
     """The goal said plainly: what it is for, what it does on the source
     and on the target, what it guarantees - and, for a hop that is cut
     over, what `cutover:` on or off means for it."""
-    goal = goal or getattr(hop, "goal", "") or "copy"
+    goal = goal or getattr(hop, "goal", "") or DEFAULT_GOAL
     g = GOALS[goal]
     out = [f"goal {goal}: {g['what']}",
            f"  on the source: {g['source']}",

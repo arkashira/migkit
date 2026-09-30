@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commands and metrics - migkit 0.2.0</title>
+<meta name="description" content="The 13 commands, every option they take, and the metrics the dashboard serves.">
+<style>
+:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+--line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
+--code:#f3f4f6;--codeink:#1d232b}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
+--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
+--warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--code);color:var(--codeink);padding:.1em .35em;
+border-radius:4px;font-size:.9em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+.layout{display:flex;max-width:1240px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
+overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;font-size:19px}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
+nav a.here{color:var(--ink);font-weight:600}
+nav a.sub{padding-left:12px;font-size:12.5px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+h1{font-size:30px;margin:.2em 0 .1em}
+h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
+border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.6em 0 .4em}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
+.rule{background:var(--panel);border-left:3px solid var(--acc);
+border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.mut{color:var(--mut);font-size:13px}
+.wide{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
+vertical-align:top}
+th{background:var(--panel);font-weight:600}
+.wide table{font-size:12.5px}
+.wide td,.wide th{padding:4px 6px}
+td.y{color:var(--ok);font-weight:600}
+td.p{color:var(--warn);font-weight:600}
+td.na{color:var(--mut)}
+.pill{display:inline-block;background:var(--panel);
+border:1px solid var(--line);
+color:var(--mut);border-radius:20px;padding:2px 10px;font-size:12px;
+margin:2px 4px 2px 0}
+footer{color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);
+margin-top:40px;padding-top:16px}
+@media(max-width:820px){nav{display:none}main{padding:24px 18px 80px}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+<div class="brand">migkit</div>
+<div class="tag">version 0.2.0</div>
+<a href="index.html">Overview</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="engines.html">Engines</a>
+<a href="goals.html">Goals and modes</a>
+<a href="recipes.html">Recipes</a>
+<a href="options.html">Hop options</a>
+<a href="environment.html">Environment</a>
+<a href="commands.html" class="here">Commands</a>
+<a class="sub" href="#commands">Every command</a>
+<a class="sub" href="#aliases">Older names</a>
+<a class="sub" href="#metrics">Metrics</a>
+<a href="troubleshooting.html">Troubleshooting</a>
+<a href="evidence.html">Evidence</a>
+<a href="releases.html">Releases</a>
+</nav>
+<main>
+<h1>Commands and metrics</h1>
+<p class="lede">The 13 commands, every option they take, and the metrics the dashboard serves.</p>
+<h2 id="commands">Every command</h2>
+<table><tr><th>Command</th><th>What it does</th></tr><tr id="row-cmd-init"><td><a href="#cmd-init"><code>init</code></a></td><td>Set up a hop: in a terminal, asks for the two addresses and the passwords, connects, says what it found and what it will do, and writes the hop.</td></tr><tr id="row-cmd-doctor"><td><a href="#cmd-doctor"><code>doctor</code></a></td><td>What this machine can do, and whether the configured hops connect.</td></tr><tr id="row-cmd-advise"><td><a href="#cmd-advise"><code>advise</code></a></td><td>Show the migration playbook for this hop's service.</td></tr><tr id="row-cmd-assess"><td><a href="#cmd-assess"><code>assess</code></a></td><td>Premigration readiness check: CDC prerequisites, risky tables, encoding, extensions, accounts.</td></tr><tr id="row-cmd-schema"><td><a href="#cmd-schema"><code>schema</code></a></td><td>Target schema workflows: preparation plan (default), cross-engine DDL conversion (--convert), versioned migration files (--migration).</td></tr><tr id="row-cmd-check"><td><a href="#cmd-check"><code>check</code></a></td><td>Read-only validation of target vs source.</td></tr><tr id="row-cmd-sync"><td><a href="#cmd-sync"><code>sync</code></a></td><td>Make target equal to source, or run a full DMS-style migration.</td></tr><tr id="row-cmd-move"><td><a href="#cmd-move"><code>move</code></a></td><td>Move data for this hop.</td></tr><tr id="row-cmd-watch"><td><a href="#cmd-watch"><code>watch</code></a></td><td>Watch a running migration load: row counts, rate, ETA, replication state.</td></tr><tr id="row-cmd-report"><td><a href="#cmd-report"><code>report</code></a></td><td>Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the live localhost dashboard (with a Prometheus /metrics endpoint).</td></tr><tr id="row-cmd-history"><td><a href="#cmd-history"><code>history</code></a></td><td>Audit trail: saved rollback states and every write migkit made, read from the local changelog and state journals.</td></tr><tr id="row-cmd-rollback"><td><a href="#cmd-rollback"><code>rollback</code></a></td><td>Restore target sequences from a saved state, put back the rows the repairs since it wrote, where the target still holds what they wrote; where the hop streamed back or cut over, the old source's counters raised past the new primary's.</td></tr><tr id="row-cmd-users"><td><a href="#cmd-users"><code>users</code></a></td><td>Sync logins source -&gt; target keeping the same password.</td></tr></table>
+<h3 id="cmd-init"><code>init</code></h3>
+<pre><code>migkit init [OPTIONS]</code></pre>
+<p>Set up a hop: in a terminal, asks for the two addresses and the passwords, connects, says what it found and what it will do, and writes the hop. Without one, reads MIGKIT_SOURCE and MIGKIT_TARGET (MIGKIT_SOURCE_PASSWORD, MIGKIT_TARGET_PASSWORD, MIGKIT_GOAL, MIGKIT_HOP), or writes a template to edit.</p>
+<p>Installed from a package there is no checkout to copy an example out of, so migkit writes the template itself. Mode 600, because what goes in it next can be a secret's reference.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-init-here"><td><code>--here</code></td><td>write ./conf/hops.yaml in this directory instead of the user config directory</td></tr><tr id="opt-init-force"><td><code>--force</code></td><td>overwrite an existing file</td></tr></table>
+<h3 id="cmd-doctor"><code>doctor</code></h3>
+<pre><code>migkit doctor [OPTIONS]</code></pre>
+<p>What this machine can do, and whether the configured hops connect.</p>
+<p>Safe to run before anything is configured - that is the point of it.</p>
+<p>Every check/repair/move step migkit runs is a wrapper over a proven external program; <code>--install</code> pulls whichever are missing so any machine or teammate is one command from a full toolchain.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-doctor-install"><td><code>--install</code></td><td>auto-install every missing external tool via the platform package manager (brew/apt) - get a fresh machine ready</td></tr></table>
+<h3 id="cmd-advise"><code>advise</code></h3>
+<pre><code>migkit advise [OPTIONS] HOP_NAME</code></pre>
+<p>Show the migration playbook for this hop's service.</p>
+<h3 id="cmd-assess"><code>assess</code></h3>
+<pre><code>migkit assess [OPTIONS] HOP_NAME</code></pre>
+<p>Premigration readiness check: CDC prerequisites, risky tables, encoding, extensions, accounts. Run before starting any mover.</p>
+<h3 id="cmd-schema"><code>schema</code></h3>
+<pre><code>migkit schema [OPTIONS] HOP_NAME</code></pre>
+<p>Target schema workflows: preparation plan (default), cross-engine DDL conversion (--convert), versioned migration files (--migration).</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-schema-db"><td><code>--db</code></td><td>single database</td></tr><tr id="opt-schema-do_convert"><td><code>--convert</code></td><td>transpile source DDL to the target dialect (hetero hops)</td></tr><tr id="opt-schema-do_migration"><td><code>--migration</code></td><td>generate Flyway-style V/U files from the live schema diff</td></tr><tr id="opt-schema-do_apply"><td><code>--apply</code></td><td>with --convert: execute the DDL on target</td></tr><tr id="opt-schema-out"><td><code>--out</code></td><td>with --migration: output directory</td></tr></table>
+<h3 id="cmd-check"><code>check</code></h3>
+<pre><code>migkit check [OPTIONS] HOP_NAME</code></pre>
+<p>Read-only validation of target vs source. Never writes to either side.</p>
+<p>When counts and data both run, row counts ride along with the checksum query, so nothing is scanned twice. Suspect rows are proven in-flight or real via the replication fence (LSN-based) instead of guesswork.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-check-db"><td><code>--db</code></td><td>single database</td></tr><tr id="opt-check-table"><td><code>--table</code></td><td>single table (schema.table)</td></tr><tr id="opt-check-only"><td><code>--only</code></td><td>comma list: schema,counts,autoinc,data,deep,params</td></tr><tr id="opt-check-do_deep"><td><code>--deep</code></td><td>add deep checks: fk orphans, disabled triggers, column drift, matview/grants parity, boundary freshness</td></tr><tr id="opt-check-drill"><td><code>--drill</code></td><td>column-level sample diff for one table (needs --db and --table)</td></tr><tr id="opt-check-limit"><td><code>--limit</code></td><td>with --drill: sample rows</td></tr><tr id="opt-check-consistent"><td><code>--consistent</code></td><td>checksum every table of a db inside one repeatable-read transaction per side, with the src LSN captured as the convergence fence (postgres)</td></tr><tr id="opt-check-workers"><td><code>--workers</code></td><td>parallel databases, default from conf</td></tr><tr id="opt-check-resume"><td><code>--resume</code></td><td>skip checks already ok in last summary</td></tr><tr id="opt-check-exclude"><td><code>--exclude</code></td><td>comma list of db or db.schema.table patterns to skip, added to the hop's</td></tr></table>
+<h3 id="cmd-sync"><code>sync</code></h3>
+<pre><code>migkit sync [OPTIONS] HOP_NAME</code></pre>
+<p>Make target equal to source, or run a full DMS-style migration.</p>
+<p>Default (reconcile) shows/repairs the last check's diffs; --apply executes, --go checkpoints for rollback. --mode runs the whole flow end to end with verification wrapped around every step, so migkit can stand in for a managed migration service on a trusted VM.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-sync-db"><td><code>--db</code></td><td>one database, or all diffed dbs if omitted</td></tr><tr id="opt-sync-kind"><td><code>--kind</code></td><td>-</td></tr><tr id="opt-sync-mode"><td><code>--mode</code></td><td>run a whole flow: verify (read-only assurance), seed (schema + initial load + reconcile), stream (follow live changes + delta verify), migrate (seed then stream). default reconcile = repair the last check's diffs</td></tr><tr id="opt-sync-do_apply"><td><code>--apply</code></td><td>execute the repair plan, default is dry-run</td></tr><tr id="opt-sync-go"><td><code>--go</code></td><td>checkpointed check+repair sweep with rollback state</td></tr><tr id="opt-sync-serve"><td><code>--serve</code></td><td>incremental modes: run the verify loop forever (VM/service)</td></tr><tr id="opt-sync-interval"><td><code>--interval</code></td><td>--serve: seconds between cycles</td></tr><tr id="opt-sync-on_conflict"><td><code>--on-conflict</code></td><td>rows that differ: source-wins overwrites the target (default, source is truth); keep-target preserves them and fixes only missing/extra</td></tr><tr id="opt-sync-tag"><td><code>--tag</code></td><td>with --go: label this state, e.g. pre-cutover</td></tr></table>
+<h3 id="cmd-move"><code>move</code></h3>
+<pre><code>migkit move [OPTIONS] HOP_NAME</code></pre>
+<p>Move data for this hop. migkit picks how.</p>
+<p>full: the fastest bulk path available for the engine, falling back to a chunked copy that resumes after a crash. A single table always takes the resumable path - restartability matters more than raw speed there. cdc: the engine's native change feed where it has one, otherwise migkit stands up its own streaming pipeline.</p>
+<p>There is nothing to choose: the same command does the right thing on every engine, and <code>migkit doctor</code> says what this machine can do. Whatever moves the data, migkit verifies it.</p>
+<p>Use only over a trusted network (or run migkit on a cloud VM).</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-move-db"><td><code>--db</code></td><td>-</td></tr><tr id="opt-move-table"><td><code>--table</code></td><td>schema.table (full mode)</td></tr><tr id="opt-move-mode"><td><code>--mode</code></td><td>full = bulk copy, cdc = follow live changes, full+cdc = initial load plus stream until cutover</td></tr><tr id="opt-move-chunk"><td><code>--chunk</code></td><td>rows per resumable chunk, when a resumable copy is used</td></tr><tr id="opt-move-do_drop"><td><code>--drop</code></td><td>cdc modes: tear down replication</td></tr><tr id="opt-move-go"><td><code>--go</code></td><td>actually run, default shows the plan</td></tr></table>
+<h3 id="cmd-watch"><code>watch</code></h3>
+<pre><code>migkit watch [OPTIONS] HOP_NAME</code></pre>
+<p>Watch a running migration load: row counts, rate, ETA, replication state. --verify turns it into a continuous validation loop: transient diffs that heal next cycle are replication lag, persistent ones are real. --verify --delta verifies only what changed, so it can run forever against billion-row databases.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-watch-db"><td><code>--db</code></td><td>-</td></tr><tr id="opt-watch-interval"><td><code>--interval</code></td><td>seconds between samples (default 30, or 300 with --verify)</td></tr><tr id="opt-watch-count"><td><code>--count</code></td><td>samples/cycles then exit, 0 = forever</td></tr><tr id="opt-watch-verify"><td><code>--verify</code></td><td>re-run read-only checks each cycle instead of sampling row counts (continuous validation)</td></tr><tr id="opt-watch-only"><td><code>--only</code></td><td>with --verify: checks per cycle, add data for full checksum each cycle</td></tr><tr id="opt-watch-delta"><td><code>--delta</code></td><td>with --verify: O(changes) mode - each cycle re-verifies only the rows touched since the last verified point (WAL slot / binlog / change stream driven)</td></tr><tr id="opt-watch-teardown"><td><code>--teardown</code></td><td>with --delta: drop the delta slot/position and exit</td></tr></table>
+<h3 id="cmd-report"><code>report</code></h3>
+<pre><code>migkit report [OPTIONS] [HOP_NAME]</code></pre>
+<p>Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the live localhost dashboard (with a Prometheus /metrics endpoint).</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-report-do_open"><td><code>--open</code></td><td>open in browser</td></tr><tr id="opt-report-refresh"><td><code>--refresh</code></td><td>re-derive summary from evidence on disk (no re-check): settled checksum flickers become OK</td></tr><tr id="opt-report-serve"><td><code>--serve</code></td><td>serve the live dashboard for every hop instead of writing a file</td></tr><tr id="opt-report-metrics"><td><code>--metrics</code></td><td>print Prometheus metrics for every hop and exit (the dashboard also exposes them at /metrics)</td></tr><tr id="opt-report-port"><td><code>--port</code></td><td>with --serve: listen port</td></tr></table>
+<h3 id="cmd-history"><code>history</code></h3>
+<pre><code>migkit history [OPTIONS] HOP_NAME</code></pre>
+<p>Audit trail: saved rollback states and every write migkit made, read from the local changelog and state journals. migkit writes no bookkeeping into the destination, so the audit is local-only.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-history-db"><td><code>--db</code></td><td>-</td></tr><tr id="opt-history-show_ts"><td><code>--show</code></td><td>print one state in detail</td></tr></table>
+<h3 id="cmd-rollback"><code>rollback</code></h3>
+<pre><code>migkit rollback [OPTIONS] HOP_NAME</code></pre>
+<p>Restore target sequences from a saved state, put back the rows the repairs since it wrote, where the target still holds what they wrote; where the hop streamed back or cut over, the old source's counters raised past the new primary's.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-rollback-db"><td><code>--db</code></td><td>-</td></tr><tr id="opt-rollback-state_ts"><td><code>--state</code></td><td>state timestamp or tag, default latest</td></tr><tr id="opt-rollback-do_apply"><td><code>--apply</code></td><td>-</td></tr></table>
+<h3 id="cmd-users"><code>users</code></h3>
+<pre><code>migkit users [OPTIONS] HOP_NAME {test|create|verify|setpw|rollback}</code></pre>
+<p>Sync logins source -&gt; target keeping the same password.</p>
+<p>test compare users (read-only), write users.json to the report dir setpw mongo only: set the real passwords on users that already exist on the target, from --passwords (mongo credentials cannot be copied: SCRAM is one-way and DocumentDB blocks writes to system.users) create make the missing users on the target (dry-run unless --apply); mysql copies the password hash = same password, grants replayed from the source; postgres reads passwords from --passwords verify re-compare; exit 0 only when no gap remains rollback drop only the users this command created (dry-run unless --apply)</p>
+<p>Cloud system accounts (AWS_*, rds*, tencent*) are excluded on both sides. Never touches the source.</p>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-users-do_apply"><td><code>--apply</code></td><td>execute on the target (default is dry-run)</td></tr><tr id="opt-users-pw_file"><td><code>--passwords</code></td><td>yaml file <code>role: password</code> for postgres create and for mongo setpw (managed sources lock password hashes; mysql needs no file - the hash is copied so the password stays identical)</td></tr></table>
+<h2 id="aliases">Older names</h2>
+<p>Names earlier versions used, kept so scripts written for them still run:</p>
+<table><tr><th>Name</th><th>Now</th></tr><tr><td><code>hops</code></td><td>List configured hops - now part of migkit doctor.</td></tr><tr><td><code>setup-target</code></td><td>Now: migkit schema HOP.</td></tr><tr><td><code>repair</code></td><td>Now: migkit sync HOP [--apply].</td></tr><tr><td><code>replicate</code></td><td>Now: migkit move HOP --mode cdc / full+cdc.</td></tr><tr><td><code>tail</code></td><td>Now: migkit move HOP --mode cdc --db X.</td></tr><tr><td><code>convert-schema</code></td><td>Now: migkit schema HOP --convert.</td></tr><tr><td><code>gen-migration</code></td><td>Now: migkit schema HOP --migration.</td></tr><tr><td><code>sample-diff</code></td><td>Now: migkit check HOP --drill --db X --table Y.</td></tr><tr><td><code>ui</code></td><td>Now: migkit report --serve.</td></tr><tr><td><code>state</code></td><td>Now: migkit history HOP.</td></tr><tr><td><code>monitor</code></td><td>Now: migkit watch HOP --verify.</td></tr></table>
+<h2 id="metrics">Metrics</h2>
+<p><code>migkit report --serve</code> serves these at <code>/metrics</code>, for a scraper to alert on:</p>
+<table><tr><th>Family</th><th>Type</th><th>What it is</th></tr><tr id="metric-migkit_move_rows"><td><code>migkit_move_rows</code></td><td>gauge</td><td>Rows the copy has carried into a table</td></tr><tr id="metric-migkit_move_tables"><td><code>migkit_move_tables</code></td><td>gauge</td><td>Tables the copy of a database holds a place for</td></tr><tr id="metric-migkit_move_tables_done"><td><code>migkit_move_tables_done</code></td><td>gauge</td><td>Tables the copy of a database finished</td></tr><tr id="metric-migkit_copy_rows_per_second"><td><code>migkit_copy_rows_per_second</code></td><td>gauge</td><td>Rows a second the last copy by a way went at</td></tr><tr id="metric-migkit_copy_seconds"><td><code>migkit_copy_seconds</code></td><td>gauge</td><td>Seconds the last copy by a way took</td></tr><tr id="metric-migkit_check_seconds"><td><code>migkit_check_seconds</code></td><td>gauge</td><td>Seconds a check of a database took in the last run</td></tr><tr id="metric-migkit_verify_ranges_done"><td><code>migkit_verify_ranges_done</code></td><td>gauge</td><td>Ranges of a table the verify in progress has proved equal</td></tr><tr id="metric-migkit_verify_rows_done"><td><code>migkit_verify_rows_done</code></td><td>gauge</td><td>Rows in those ranges</td></tr><tr id="metric-migkit_table_rows"><td><code>migkit_table_rows</code></td><td>gauge</td><td>Rows a table held on a side at its last digest</td></tr><tr id="metric-migkit_table_same"><td><code>migkit_table_same</code></td><td>gauge</td><td>A table's rows and digest equal on both sides at its last digest (1) or not (0)</td></tr><tr id="metric-migkit_cutover_outage_seconds"><td><code>migkit_cutover_outage_seconds</code></td><td>gauge</td><td>Write outage the last cutover measured</td></tr><tr id="metric-migkit_cutover_phase_seconds"><td><code>migkit_cutover_phase_seconds</code></td><td>gauge</td><td>Seconds a phase of the last cutover took</td></tr><tr id="metric-migkit_cutover_running"><td><code>migkit_cutover_running</code></td><td>gauge</td><td>A cutover is under way (1)</td></tr><tr id="metric-migkit_two_way_conflicts"><td><code>migkit_two_way_conflicts</code></td><td>gauge</td><td>Rows a two-way tail found both sides had changed, by table, kind and what was decided, since its reports began</td></tr><tr id="metric-migkit_two_way_rows_parked"><td><code>migkit_two_way_rows_parked</code></td><td>gauge</td><td>Rows a two-way conflict set aside until they are decided on both sides</td></tr><tr id="metric-migkit_stream_behind_source_seconds"><td><code>migkit_stream_behind_source_seconds</code></td><td>gauge</td><td>How far the change stream's reader is behind the source, by its own account</td></tr><tr id="metric-migkit_stream_events_seen"><td><code>migkit_stream_events_seen</code></td><td>gauge</td><td>Changes the stream's reader has read since it started</td></tr><tr id="metric-migkit_stream_queue_remaining"><td><code>migkit_stream_queue_remaining</code></td><td>gauge</td><td>Room left in the stream reader's queue</td></tr><tr id="metric-migkit_stream_connected"><td><code>migkit_stream_connected</code></td><td>gauge</td><td>The stream's reader is connected to the source (1)</td></tr><tr id="metric-migkit_stream_snapshot_tables_remaining"><td><code>migkit_stream_snapshot_tables_remaining</code></td><td>gauge</td><td>Tables the stream's first read has still to read</td></tr><tr id="metric-migkit_stream_running"><td><code>migkit_stream_running</code></td><td>gauge</td><td>A part of the change stream is running (1) or not (0)</td></tr><tr id="metric-migkit_move_rate_rows_per_second"><td><code>migkit_move_rate_rows_per_second</code></td><td>gauge</td><td>A running move's recent rate (a moving average of its last windows)</td></tr><tr id="metric-migkit_move_workers"><td><code>migkit_move_workers</code></td><td>gauge</td><td>How many a running move carries at once</td></tr><tr id="metric-migkit_move_rows_done"><td><code>migkit_move_rows_done</code></td><td>gauge</td><td>Rows a running move has copied</td></tr><tr id="metric-migkit_move_eta_seconds"><td><code>migkit_move_eta_seconds</code></td><td>gauge</td><td>Time left of each phase of a move: quantile 0.5 and 0.9 as planned, live from the recent rate</td></tr><tr id="metric-migkit_move_phase_never"><td><code>migkit_move_phase_never</code></td><td>gauge</td><td>A phase that cannot finish at the rates measured (a catch-up slower than the changes arriving)</td></tr><tr id="metric-migkit_resource_bytes_per_second"><td><code>migkit_resource_bytes_per_second</code></td><td>gauge</td><td>What each resource of a move allows, by where the number came from</td></tr><tr id="metric-migkit_resource_binding"><td><code>migkit_resource_binding</code></td><td>gauge</td><td>The resource that sets a move's rate</td></tr><tr id="metric-migkit_worker_memory_bytes"><td><code>migkit_worker_memory_bytes</code></td><td>gauge</td><td>What one worker of a move holds for its widest rows</td></tr><tr id="metric-migkit_tail_running"><td><code>migkit_tail_running</code></td><td>gauge</td><td>A change tail is marked running here (0: its process is gone and it did not stop)</td></tr><tr id="metric-migkit_tail_paused"><td><code>migkit_tail_paused</code></td><td>gauge</td><td>The tail is holding still for a repair</td></tr><tr id="metric-migkit_tail_heartbeat_age_seconds"><td><code>migkit_tail_heartbeat_age_seconds</code></td><td>gauge</td><td>Since the tail last went round its loop</td></tr><tr id="metric-migkit_tail_behind_seconds"><td><code>migkit_tail_behind_seconds</code></td><td>gauge</td><td>Since the tail last read to the end of the source's log</td></tr><tr id="metric-migkit_tail_changes_applied"><td><code>migkit_tail_changes_applied</code></td><td>gauge</td><td>Changes this tail has applied since it started</td></tr><tr id="metric-migkit_tail_stopped"><td><code>migkit_tail_stopped</code></td><td>gauge</td><td>The tail stopped on an error and has not been started again</td></tr><tr id="metric-migkit_tail_retention_margin_seconds"><td><code>migkit_tail_retention_margin_seconds</code></td><td>gauge</td><td>How much longer the source keeps what the tail has not read (MySQL, MongoDB)</td></tr><tr id="metric-migkit_tail_retention_margin_bytes"><td><code>migkit_tail_retention_margin_bytes</code></td><td>gauge</td><td>What the source can still write before the tail's slot loses WAL (PostgreSQL)</td></tr><tr id="metric-migkit_tail_source_held_bytes"><td><code>migkit_tail_source_held_bytes</code></td><td>gauge</td><td>Log the source holds for the tail</td></tr><tr id="metric-migkit_tail_commit_lag_seconds"><td><code>migkit_tail_commit_lag_seconds</code></td><td>gauge</td><td>From the source's commit of the last change applied to the target's (the two clocks' difference included)</td></tr><tr id="metric-migkit_tail_applied_through_age_seconds"><td><code>migkit_tail_applied_through_age_seconds</code></td><td>gauge</td><td>Since the source committed the last change the tail applied</td></tr><tr id="metric-migkit_tail_tables"><td><code>migkit_tail_tables</code></td><td>gauge</td><td>Tables of the tail in each state: live, copying (added, copied beside the stream), parked (a DDL the target does not follow yet), removed</td></tr><tr id="metric-migkit_tail_set_aside_bytes"><td><code>migkit_tail_set_aside_bytes</code></td><td>gauge</td><td>Changes the tail holds on this machine for tables being copied or parked</td></tr><tr id="metric-migkit_follow_applying"><td><code>migkit_follow_applying</code></td><td>gauge</td><td>The change leg run from here is applying (0: it waits to be told to)</td></tr><tr id="metric-migkit_follow_behind_bytes"><td><code>migkit_follow_behind_bytes</code></td><td>gauge</td><td>Source log the change leg run from here has not received yet</td></tr><tr id="metric-migkit_follow_held_bytes"><td><code>migkit_follow_held_bytes</code></td><td>gauge</td><td>Log the change leg has received and not applied, by its own account (the target's origin is the proof)</td></tr><tr id="metric-migkit_hop_status"><td><code>migkit_hop_status</code></td><td>gauge</td><td>Overall hop status (0 ok 1 diff 2 error 3 na)</td></tr><tr id="metric-migkit_check_pass"><td><code>migkit_check_pass</code></td><td>gauge</td><td>Passing databases per check</td></tr><tr id="metric-migkit_check_total"><td><code>migkit_check_total</code></td><td>gauge</td><td>Databases per check</td></tr><tr id="metric-migkit_last_check_age_seconds"><td><code>migkit_last_check_age_seconds</code></td><td>gauge</td><td>Age of the last check</td></tr></table>
+<footer>migkit 0.2.0 - this page is written from the code by
+<code>tools/gen_docs.py</code>, so it says what this version does.
+Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migkit</a>.
+AGPL-3.0-or-later.</footer>
+</main>
+</div>
+</body>
+</html>

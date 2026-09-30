@@ -9,3 +9,24 @@ py=".venv/bin/python"; [ -x "$py" ] || py=python3
   echo "or use a placeholder (example.com / 10.0.0.x / CHANGE_ME) in docs."
   exit 1
 }
+
+# the manual and the site are written from the code (tools/gen_docs.py): a
+# page behind it is written again here and the commit stopped, so the pages
+# go in with the change that moved them. A checkout without its own
+# environment uses the one beside these hooks.
+docs=".venv/bin/python"
+[ -x "$docs" ] || docs="$(dirname "$0")/../.venv/bin/python"
+[ -x "$docs" ] || docs=python3
+"$docs" tools/gen_docs.py --check >/dev/null 2>&1
+case $? in
+  0) ;;
+  3)
+    "$docs" tools/gen_docs.py
+    echo
+    echo "commit stopped: the manual was behind the code and is written"
+    echo "again. Add the pages (git add docs README.md) and commit again."
+    exit 1 ;;
+  *)
+    echo "the manual could not be checked against the code here"
+    echo "(run: python tools/gen_docs.py --check); the commit goes on." ;;
+esac
