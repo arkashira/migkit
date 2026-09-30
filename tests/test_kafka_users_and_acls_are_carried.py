@@ -129,13 +129,15 @@ def test_create_carries_them_and_rollback_takes_back_only_those(
     before = _acls(DST)
     hop = _hop(tmp_path)
     said = []
-    # only app has a password: report is skipped and said, not guessed
-    users.create(hop, apply=True, passwords={"app": "CHANGE_ME-app"},
-                 say=said.append)
+    # only app has a password: report is skipped and said, not guessed,
+    # and create ends by comparing again: the gap it left fails it
+    with pytest.raises(SystemExit, match="still differs.*report"):
+        users.create(hop, apply=True, passwords={"app": "CHANGE_ME-app"},
+                     say=said.append)
     assert any("skipped report: no password" in m for m in said), said
     out, _ = users.compare(hop, [].append)
     assert out["missing_on_target"] == ["report"], out
-    assert out["acls_missing"] == [] and out["mechanisms_differ"] == []
+    assert out["acls_missing"] == [] and out["attributes_differ"] == []
     # the carried password is the one given: the target signs app in
     from migkit.engines.kafka import KafkaEngine
     hop.target.user, hop.target.password = "app", "CHANGE_ME-app"
@@ -168,6 +170,6 @@ def test_a_target_that_checks_no_acls_is_not_a_pass(clusters, tmp_path,
     out, _ = users.compare(_hop(tmp_path), said.append)
     assert out["result"] == "unknown", out
     assert any("the source holds 4 ACL(s) and the target checks none" in u
-               for u in out["unread"]), out["unread"]
+               for u in out["not_compared"]), out["not_compared"]
     with pytest.raises(SystemExit, match="checks none"):
         users.create(_hop(tmp_path), apply=True, say=[].append)

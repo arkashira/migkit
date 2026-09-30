@@ -11,12 +11,15 @@ programs started for a `check` of 2,000 tables (estimate from the code).
 
 So a side's catalogue is one `Catalog`, read in one pass by each engine:
 its tables; for each, its columns as `Column(name, declared, cls,
-nullable, default, collation)` in the server's order; its key; its
-indexes; its foreign keys. `shape()` is `{table: fingerprint}`, the hash
-of everything the server says about the table - never of migkit's own
-reading of it (`cls`), so a newer migkit does not see drift in a table
-nobody touched. `Shape.changes` says which tables differ, and
-`Catalog.explain` what differs in one, in words.
+nullable, default, collation, extra)` in the server's order; its key; its
+indexes; its foreign keys; and the rest the server says of it in its own
+words (`others`: a check, a trigger). `shape()` is `{table: fingerprint}`,
+the hash of everything the server says about the table - never of
+migkit's own reading of it (`cls`), so a newer migkit does not see drift
+in a table nobody touched. `Shape.changes` says which tables differ, and
+`Catalog.explain` what differs in one, in words - the one explanation
+drift, the resume, the cutover's gate and a schema check across a hop's
+two sides give (`drift`).
 """
 import hashlib
 import json
@@ -33,6 +36,9 @@ class Column(NamedTuple):
     nullable: bool = True
     default: str = None
     collation: str = None
+    #: what else the server declares of it, in its words - an identity,
+    #: a computed expression, an alias type - "" where nothing
+    extra: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,9 +73,29 @@ def _canon_fk(fk):
 
 
 def _canon_column(c):
+    # `extra` only where there is one: a table read without it hashes as
+    # it did
     return [c.name, str(c.declared or "").strip().lower(), bool(c.nullable),
             None if c.default is None else str(c.default),
-            None if c.collation is None else str(c.collation)]
+            None if c.collation is None else str(c.collation)] + (
+        [str(c.extra)] if c.extra else [])
+
+
+def _said(what, x):
+    """An index or a foreign key as `explain` names it: its name where it
+    has one, and what it is over."""
+    over = f"({', '.join(x.columns)})"
+    if what == "foreign key":
+        over += f" -> {x.ref_table} ({', '.join(x.ref_columns)})"
+        for word, action in (("delete", x.on_delete), ("update", x.on_update)):
+            if action and action.lower() not in ("no action", "no_action"):
+                over += f" on {word} {action.lower()}"
+    else:
+        if x.unique:
+            what = f"unique {what}"
+        if x.definition:
+            over += f" {x.definition}"
+    return f"{what} {x.name + ' ' if x.name else ''}{over}"
 
 
 class Shape(dict):
@@ -100,11 +126,15 @@ class Catalog:
     indexes: dict = field(default_factory=dict)
     #: {table: [ForeignKey]}
     fks: dict = field(default_factory=dict)
+    #: {table: [text]} - the rest the server says of a table, each part in
+    #: its words (a check with its expression, a trigger with a hash of
+    #: its body), compared as a set
+    others: dict = field(default_factory=dict)
 
     def __post_init__(self):
         known = list(self.tables)
         for t in list(self.columns) + list(self.keys) + list(
-                self.indexes) + list(self.fks):
+                self.indexes) + list(self.fks) + list(self.others):
             if t not in known:
                 known.append(t)
         self.tables = known
@@ -117,13 +147,16 @@ class Catalog:
                             for t, cols in (columns or {}).items()})
 
     def _canon(self, table):
-        return {"columns": [_canon_column(c)
-                            for c in self.columns.get(table) or []],
-                "key": list(self.keys.get(table) or ()),
-                "indexes": sorted(_canon_index(i)
-                                  for i in self.indexes.get(table) or []),
-                "fks": sorted(_canon_fk(f)
-                              for f in self.fks.get(table) or [])}
+        got = {"columns": [_canon_column(c)
+                           for c in self.columns.get(table) or []],
+               "key": list(self.keys.get(table) or ()),
+               "indexes": sorted(_canon_index(i)
+                                 for i in self.indexes.get(table) or []),
+               "fks": sorted(_canon_fk(f)
+                             for f in self.fks.get(table) or [])}
+        if self.others.get(table):
+            got["others"] = sorted(str(o) for o in self.others[table])
+        return got
 
     def fingerprint(self, table):
         """The hash of what the server says about `table`."""
@@ -134,22 +167,32 @@ class Catalog:
     def shape(self):
         return Shape({t: self.fingerprint(t) for t in self.tables})
 
-    def explain(self, other, table):
+    def explain(self, other, table, engine=None, added="added",
+                dropped="dropped"):
         """What differs in `table` from this catalogue to `other`, one
-        phrase each; [] where nothing does."""
+        phrase each; [] where nothing does. `engine`, where both are one
+        engine's, names a narrower type with why (`verdict.narrowing`);
+        `added` and `dropped` are the words for what only `other` has and
+        what only this one has - a schema check across a hop's two sides
+        says them its own way."""
         if table not in self.tables:
-            return ["created"] if table in other.tables else []
+            return [added if added != "added" else "created"] \
+                if table in other.tables else []
         if table not in other.tables:
-            return ["dropped"]
+            return [dropped]
         out = []
         was = {c.name: c for c in self.columns.get(table) or []}
         now = {c.name: c for c in other.columns.get(table) or []}
-        out += [f"column {n} added" for n in now if n not in was]
-        out += [f"column {n} dropped" for n in was if n not in now]
+        out += [f"column {n} {added}" for n in now if n not in was]
+        out += [f"column {n} {dropped}" for n in was if n not in now]
         for n in [n for n in was if n in now]:
             a, b = _canon_column(was[n]), _canon_column(now[n])
             if a[1] != b[1]:
-                out.append(f"column {n} {was[n].declared} ->"
+                from .verdict import narrowing
+                why = narrowing(engine, was[n].declared, now[n].declared) \
+                    if engine else None
+                out.append(f"column {n} {why}" if why else
+                           f"column {n} {was[n].declared} ->"
                            f" {now[n].declared}")
             if a[2] != b[2]:
                 out.append(f"column {n} "
@@ -158,6 +201,9 @@ class Catalog:
                 out.append(f"column {n} default {a[3]} -> {b[3]}")
             if a[4] != b[4]:
                 out.append(f"column {n} collation {a[4]} -> {b[4]}")
+            if (was[n].extra or "") != (now[n].extra or ""):
+                out.append(f"column {n} {was[n].extra or 'plain'} ->"
+                           f" {now[n].extra or 'plain'}")
         order_was = [n for n in was if n in now]
         order_now = [n for n in now if n in was]
         if order_was != order_now:
@@ -171,10 +217,14 @@ class Catalog:
                 ("foreign key", self.fks, other.fks, _canon_fk)):
             a = {json.dumps(canon(x)): x for x in mine.get(table) or []}
             b = {json.dumps(canon(x)): x for x in theirs.get(table) or []}
-            out += [f"{what} {b[k].name or ', '.join(b[k].columns)} added"
+            out += [f"{_said(what, b[k])} {added}"
                     for k in sorted(set(b) - set(a))]
-            out += [f"{what} {a[k].name or ', '.join(a[k].columns)} dropped"
+            out += [f"{_said(what, a[k])} {dropped}"
                     for k in sorted(set(a) - set(b))]
+        mine = set(self.others.get(table) or ())
+        theirs = set(other.others.get(table) or ())
+        out += [f"{o} {added}" for o in sorted(theirs - mine)]
+        out += [f"{o} {dropped}" for o in sorted(mine - theirs)]
         return out
 
     def as_dict(self):
@@ -188,7 +238,8 @@ class Catalog:
                             for t, ixs in self.indexes.items()},
                 "fks": {t: [[f.name, list(f.columns), f.ref_table,
                              list(f.ref_columns), f.on_delete, f.on_update]
-                            for f in fks] for t, fks in self.fks.items()}}
+                            for f in fks] for t, fks in self.fks.items()},
+                "others": {t: sorted(o) for t, o in self.others.items()}}
 
     @classmethod
     def from_dict(cls, got):
@@ -203,4 +254,6 @@ class Catalog:
                      for t, ixs in (got.get("indexes") or {}).items()},
             fks={t: [ForeignKey(f[0], tuple(f[1]), f[2], tuple(f[3]), f[4],
                                 f[5]) for f in fks]
-                 for t, fks in (got.get("fks") or {}).items()})
+                 for t, fks in (got.get("fks") or {}).items()},
+            others={t: list(o) for t, o in
+                    (got.get("others") or {}).items()})

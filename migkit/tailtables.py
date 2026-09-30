@@ -930,19 +930,31 @@ class TableSet:
         st = states.get(leaf) or {"state": "live", "name": change["table"]}
         if st["state"] == "removed" and kind not in ("create", "rename"):
             return None
+        stops = getattr(self.src, "DDL_STOPS", ("truncate",))
         if self.policy == "stop":
-            if kind in getattr(self.src, "DDL_STOPS", ("truncate",)):
+            # rows changed with no row event for them stop the tail
+            # wherever an emptied table does
+            if kind in stops or (kind == "reload" and "truncate" in stops):
                 raise SystemExit(
                     f"{self.db}: {change['table']} was "
                     + {"truncate": "emptied", "drop": "dropped",
                        "rename": f"renamed to {change.get('to')}",
-                       "create": "made", "alter": "altered"}[kind]
+                       "create": "made", "alter": "altered",
+                       "reload": "given or robbed of rows with no row"
+                                 " event for them (a partition's)"}[kind]
                     + f" on the source at {str(token)[:60]} or after, and"
                     " nothing after that position was applied. The hop's"
                     " `ddl` is stop: set `ddl: apply` to carry what can be"
                     " carried at its place, or `ddl: park` to set only that"
                     " table aside, and run the tail again; it resumes from"
                     " there")
+            return None
+        if kind == "reload":
+            # never emptied in place: the rows the rest of the table holds
+            # are the source's still
+            self._add(states, leaf, st.get("name") or leaf, token,
+                      "rows changed on the source with no row event for"
+                      " them (a partition's), copied again")
             return None
         if kind == "truncate":
             if st["state"] == "copying" or self.policy == "park" \

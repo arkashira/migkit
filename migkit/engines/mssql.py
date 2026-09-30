@@ -1,11 +1,12 @@
 import time
 
 from .. import canon, decide, pieces
-from ..util import run, which
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows
 
-SKIP_DBS = {"master", "tempdb", "model", "msdb"}
+#: the server's own databases, and the one a managed server keeps
+#: for its provider
+SKIP_DBS = frozenset({"master", "tempdb", "model", "msdb", "rdsadmin"})
 
 
 def plan_tables(xml):
@@ -54,39 +55,88 @@ class MSSQLEngine(DbapiRows, Engine):
     #: own reads from an older one again, while the retention keeps it
     REREADS_FROM_A_POSITION = True
 
+    def _kept(self, side, db):
+        """The connection this thread keeps to one side's database: every
+        catalogue and check statement goes through it, where each was a
+        client process and a sign-in of its own (W15)."""
+        import os
+        import threading
+        kept = self.__dict__.setdefault("_kept_conns", {})
+        # a process's own: a child forked with its parent's would share
+        # the parent's socket
+        at = (side, self._d(side, db), os.getpid(), threading.get_ident())
+        conn = kept.get(at)
+        if conn is None:
+            conn = self._connect(side, db)
+            conn.autocommit(True)
+            kept[at] = conn
+        return conn
+
+    def _forget(self, side, db):
+        import os
+        import threading
+        at = (side, self._d(side, db), os.getpid(), threading.get_ident())
+        conn = self.__dict__.get("_kept_conns", {}).pop(at, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - it is gone either way
+                pass
+
+    @staticmethod
+    def _cell(v):
+        """A value as the rows of `_cmd` carry it: text, NULL as `NULL`,
+        a flag as 1 or 0, bytes as the server writes a binary."""
+        if v is None:
+            return "NULL"
+        if isinstance(v, bool):
+            return "1" if v else "0"
+        if isinstance(v, (bytes, bytearray)):
+            return "0x" + bytes(v).hex().upper()
+        return str(v)
+
     def _cmd(self, side, db, sql):
-        ep = self.hop.source if side == "src" else self.hop.target
-        if not which("sqlcmd"):
-            raise SystemExit("the SQL Server client is not installed on"
-                             " this machine: migkit doctor --install")
-        # the password in the environment, which the client reads when
-        # `-P` is absent (without either it stops to prompt for one). The
-        # certificate a server makes for itself can carry a negative serial
-        # number, which the client refuses to parse since Go 1.23 - measured
-        # on SQL Edge: `x509: negative serial number`, and no check ran. It
-        # is trusted as it is (`-C`) either way. `-b`: without it a failed
-        # statement exits 0 and its message comes back as rows - measured,
-        # `Msg 8134 ... Divide by zero` with exit code 0 - which both sides
-        # of a comparison can print alike.
-        p = run(["sqlcmd", "-S", f"{ep.host},{ep.port}", "-U", ep.user,
-                 "-d", self._d(side, db), "-C", "-b", "-h", "-1", "-W",
-                 "-s", "|", "-Q", f"set nocount on; {sql}"],
-                env={"SQLCMDPASSWORD": ep.password,
-                     "GODEBUG": "x509negativeserial=1"}, check=False)
-        if p.returncode:
-            # the server's message is on stdout, where the rows would be
-            said = " ".join((p.stdout + p.stderr).split())
-            raise RuntimeError(f"the {'source' if side == 'src' else 'target'}"
-                               f" refused a statement: {said[-300:]}")
-        return [l.split("|") for l in p.stdout.splitlines() if l.strip()]
+        """Each row of `sql` as a list of texts (`_cell`), run on the
+        side's kept connection. A statement the server refuses is an error
+        naming the side, never rows: the client program this replaced
+        exited 0 with `Msg 8134 ... Divide by zero` printed as a row, which
+        both sides of a comparison can print alike; and it split every row
+        at `|`, so a value holding one was read as several - the deep
+        check's column comparison read a column's name and nothing of its
+        definition."""
+        return [[self._cell(v) for v in r]
+                for r in self._kept_rows(side, db, sql)]
+
+    def _kept_rows(self, side, db, sql, args=None):
+        """The rows of `sql` as the driver gives them, `args` bound at its
+        MARKs, on the side's kept connection; one that dropped is opened
+        again once."""
+        where = "source" if side == "src" else "target"
+        for attempt in (0, 1):
+            conn = self._kept(side, db)
+            try:
+                cur = conn.cursor()
+                self._run(cur, sql, args)
+                return [list(r) for r in cur.fetchall()] \
+                    if cur.description else []
+            except Exception as e:  # noqa: BLE001 - said, with the side
+                said = " ".join(str(e).split())
+                lost = any(w in said.lower() for w in (
+                    "connection", "closed", "dbprocess is dead",
+                    "not connected"))
+                self._forget(side, db)
+                if attempt == 0 and lost:
+                    continue
+                raise RuntimeError(f"the {where} refused a statement:"
+                                   f" {said[-300:]}") from None
 
     def databases(self):
         if self.hop.databases:
             return list(self.hop.databases)
         rows = self._cmd("src", "master",
-                       "select name from sys.databases where name not in"
-                       " ('master','tempdb','model','msdb') order by 1")
-        return [r[0] for r in rows]
+                         "select name from sys.databases order by 1")
+        return [r[0] for r in rows if r[0] not in SKIP_DBS
+                and not self.hop.excluded(r[0])]
 
     def check_params(self, db):
         def pull(side):
@@ -99,81 +149,207 @@ class MSSQLEngine(DbapiRows, Engine):
             "align sp_configure / server settings on the target"
             " (server collation compared separately)")
 
-    #: the columns of a key constraint's index, in key order
-    _KEY_COLUMNS = ("stuff((select ',' + c.name from sys.index_columns ic"
-                    " join sys.columns c on c.object_id = ic.object_id and"
-                    " c.column_id = ic.column_id where ic.object_id ="
-                    " {k}.parent_object_id and ic.index_id ="
-                    " {k}.unique_index_id order by ic.key_ordinal"
-                    " for xml path('')), 1, 1, '')")
+    #: the declared type as a column's whole definition takes it: DECLARED,
+    #: with a `datetimeoffset`'s digits after the second too
+    _SHAPE_DECLARED = ("case when type_name(c.system_type_id) ="
+                       " 'datetimeoffset' then 'datetimeoffset(' +"
+                       " cast(c.scale as varchar(2)) + ')' else {d} end")
+
+    def shape_catalog(self, side, db):
+        """The side's `catalog.Catalog`, read in six statements on the kept
+        connection whatever the number of tables: each column with its
+        declared type and every number, nullability, collation, default
+        and identity, computed expression or alias type (`extra`); each
+        table's key, its indexes by their columns, order, included columns
+        and filter, its foreign keys with their actions, and its checks and
+        triggers (`others`). A constraint the server named itself is said by
+        what it is, not by that name: the same key made in two databases is
+        named differently in each (`PK__o__3213E83F720CC3A2` and
+        `PK__o__3213E83FA19E373F`, measured on SQL Edge)."""
+        from ..catalog import Catalog, Column, ForeignKey, Index
+        declared = self._SHAPE_DECLARED.format(d=self.DECLARED.format(c="c"))
+        cat = Catalog()
+        for (table, name, typ, null, coll, seed, step, default, computed,
+             persisted, sparse, guid, alias) in self._kept_rows(
+                side, db,
+                f"select s.name + '.' + t.name, c.name, {declared},"
+                " c.is_nullable, c.collation_name, ic.seed_value,"
+                " ic.increment_value, dc.definition, cc.definition,"
+                " cc.is_persisted, c.is_sparse, c.is_rowguidcol,"
+                " case when c.user_type_id <> c.system_type_id then"
+                " type_name(c.user_type_id) end"
+                " from sys.tables t join sys.schemas s on s.schema_id ="
+                " t.schema_id join sys.columns c on c.object_id = t.object_id"
+                " left join sys.identity_columns ic on ic.object_id ="
+                " c.object_id and ic.column_id = c.column_id"
+                " left join sys.default_constraints dc on"
+                " dc.parent_object_id = c.object_id and dc.parent_column_id"
+                " = c.column_id left join sys.computed_columns cc on"
+                " cc.object_id = c.object_id and cc.column_id = c.column_id"
+                " where t.is_ms_shipped = 0 order by 1, c.column_id"):
+            extra = " ".join(x for x in (
+                f"identity({seed}, {step})" if seed is not None else "",
+                (f"computed {computed}" + (" persisted" if persisted else ""))
+                if computed is not None else "",
+                "sparse" if sparse else "", "rowguidcol" if guid else "",
+                f"type {alias}" if alias else "") if x)
+            cat.columns.setdefault(str(table), []).append(
+                Column(str(name), str(typ), "", bool(null), default, coll,
+                       extra))
+        cols = {}
+        for table, index, name, desc, included in self._kept_rows(
+                side, db,
+                "select s.name + '.' + t.name, ic.index_id, c.name,"
+                " ic.is_descending_key, ic.is_included_column from"
+                " sys.index_columns ic join sys.tables t on t.object_id ="
+                " ic.object_id join sys.schemas s on s.schema_id ="
+                " t.schema_id join sys.columns c on c.object_id ="
+                " ic.object_id and c.column_id = ic.column_id where"
+                " t.is_ms_shipped = 0 order by 1, 2, ic.is_included_column,"
+                " ic.key_ordinal, c.name"):
+            got = cols.setdefault((str(table), index), ([], []))
+            got[1 if included else 0].append(
+                str(name) + (" desc" if desc and not included else ""))
+        for (table, index, name, own, how, primary, constraint, unique,
+             where) in self._kept_rows(
+                side, db,
+                "select s.name + '.' + t.name, i.index_id, i.name,"
+                " coalesce(kc.is_system_named, 0), lower(i.type_desc),"
+                " i.is_primary_key, i.is_unique_constraint, i.is_unique,"
+                " case when i.has_filter = 1 then i.filter_definition end"
+                " from sys.indexes i join sys.tables t on t.object_id ="
+                " i.object_id join sys.schemas s on s.schema_id ="
+                " t.schema_id left join sys.key_constraints kc on"
+                " kc.parent_object_id = i.object_id and kc.unique_index_id"
+                " = i.index_id where t.is_ms_shipped = 0 and i.type > 0"):
+            table = str(table)
+            keyed, inc = cols.get((table, index), ([], []))
+            if primary:
+                cat.keys[table] = tuple(k.removesuffix(" desc")
+                                        for k in keyed)
+                cat.others.setdefault(table, []).append(
+                    f"primary key {how} ({', '.join(keyed)})")
+                continue
+            cat.indexes.setdefault(table, []).append(Index(
+                "" if own else str(name), tuple(keyed), bool(unique),
+                " ".join(x for x in (
+                    str(how), "constraint" if constraint else "",
+                    f"include ({', '.join(inc)})" if inc else "",
+                    f"where {where}" if where else "") if x)))
+        refs = {}
+        for fk, name, ref in self._kept_rows(
+                side, db,
+                "select f.constraint_object_id, col_name(f.parent_object_id,"
+                " f.parent_column_id), col_name(f.referenced_object_id,"
+                " f.referenced_column_id) from sys.foreign_key_columns f"
+                " order by 1, f.constraint_column_id"):
+            got = refs.setdefault(fk, ([], []))
+            got[0].append(str(name))
+            got[1].append(str(ref))
+        for table, fk, name, own, ref, on_delete, on_update in \
+                self._kept_rows(
+                    side, db,
+                    "select s.name + '.' + t.name, fk.object_id, fk.name,"
+                    " fk.is_system_named, schema_name(rt.schema_id) + '.' +"
+                    " rt.name, lower(fk.delete_referential_action_desc),"
+                    " lower(fk.update_referential_action_desc)"
+                    " from sys.foreign_keys fk join sys.tables t on"
+                    " t.object_id = fk.parent_object_id join sys.schemas s"
+                    " on s.schema_id = t.schema_id join sys.tables rt on"
+                    " rt.object_id = fk.referenced_object_id where"
+                    " t.is_ms_shipped = 0"):
+            mine, theirs = refs.get(fk, ([], []))
+            cat.fks.setdefault(str(table), []).append(ForeignKey(
+                "" if own else str(name), tuple(mine), str(ref),
+                tuple(theirs), str(on_delete).replace("_", " "),
+                str(on_update).replace("_", " ")))
+        for table, kind, name, own, a, b in self._kept_rows(
+                side, db,
+                "select s.name + '.' + t.name, 'check', cc.name,"
+                " cc.is_system_named, cc.definition, col_name("
+                "cc.parent_object_id, cc.parent_column_id)"
+                " from sys.check_constraints cc join sys.tables t on"
+                " t.object_id = cc.parent_object_id join sys.schemas s on"
+                " s.schema_id = t.schema_id where t.is_ms_shipped = 0"
+                " union all select s.name + '.' + t.name, 'trigger',"
+                " tr.name, 0, convert(varchar(64), hashbytes('SHA2_256',"
+                " isnull(object_definition(tr.object_id), '')), 2),"
+                " case when tr.is_instead_of_trigger = 1 then 'instead of'"
+                " else 'after' end"
+                " from sys.triggers tr join sys.tables t on t.object_id ="
+                " tr.parent_id join sys.schemas s on s.schema_id ="
+                " t.schema_id where t.is_ms_shipped = 0"):
+            if kind == "check":
+                said = (f"check{'' if own else ' ' + str(name)}"
+                        + (f" on {b}" if b else "") + f" {a}")
+            else:
+                said = f"trigger {name} {b} {str(a)[:16].lower()}"
+            cat.others.setdefault(str(table), []).append(said)
+        cat.tables = sorted(set(cat.columns) | set(cat.others)
+                            | set(cat.indexes) | set(cat.fks))
+        return cat
+
+    def column_catalog(self, side, db):
+        """`shape_catalog` as the (column, definition) pairs a shape is
+        kept in (`drift.pairs`) - what the cutover's schema gate reads."""
+        from .. import drift
+        return drift.pairs(self.shape_catalog(side, db))
 
     def _objects(self, side, db):
-        """{(name, kind): definition hash}. A constraint whose name the
-        server made up is named by what it is instead - measured on SQL
-        Edge, the same `primary key` made in two databases was called
-        `PK__o__3213E83F720CC3A2` in one and `PK__o__3213E83FA19E373F` in
-        the other, and read as one missing and one extra."""
-        key_cols = self._KEY_COLUMNS.format(k="kc")
+        """{(schema.name, kind): definition hash} of the views, routines,
+        sequences and synonyms - each by the text the server keeps of it; a
+        sequence by its type and numbers, a synonym by what it names. A
+        table, its keys, indexes, constraints and triggers are compared by
+        their whole definitions instead (`shape_catalog`)."""
         rows = self._cmd(side, db,
-                       "select s.name + '.' + case"
-                       " when kc.is_system_named = 1 then"
-                       " object_name(o.parent_object_id) + '.' + o.type_desc"
-                       f" + '(' + {key_cols} + ')' collate database_default"
-                       " when fk.is_system_named = 1 then"
-                       " object_name(o.parent_object_id) + '.' + o.type_desc"
-                       " + '(' + stuff((select ',' + col_name(f.parent_object_id,"
-                       " f.parent_column_id) from sys.foreign_key_columns f"
-                       " where f.constraint_object_id = o.object_id order by"
-                       " f.constraint_column_id for xml path('')), 1, 1, '')"
-                       " + ')->' + object_name(fk.referenced_object_id)"
-                       " collate database_default"
-                       " when dc.is_system_named = 1 then"
-                       " object_name(o.parent_object_id) + '.' + o.type_desc"
-                       " + '(' + col_name(dc.parent_object_id,"
-                       " dc.parent_column_id) + ')' collate database_default"
-                       " when cc.is_system_named = 1 then"
-                       " object_name(o.parent_object_id) + '.' + o.type_desc"
-                       " + '(' + convert(varchar(16), hashbytes('SHA2_256',"
-                       " isnull(cc.definition, '')), 2) + ')'"
-                       " collate database_default"
-                       " else o.name collate database_default end,"
-                       " o.type_desc,"
-                       " convert(varchar(64), hashbytes('SHA2_256',"
-                       " isnull(object_definition(o.object_id),'')), 2)"
-                       " from sys.objects o join sys.schemas s on s.schema_id=o.schema_id"
-                       " left join sys.key_constraints kc on kc.object_id = o.object_id"
-                       " left join sys.foreign_keys fk on fk.object_id = o.object_id"
-                       " left join sys.default_constraints dc on dc.object_id = o.object_id"
-                       " left join sys.check_constraints cc on cc.object_id = o.object_id"
-                       " where o.is_ms_shipped=0 and o.type in"
-                       " ('U','V','P','FN','TF','IF','TR','PK','F','UQ','C','D')"
-                       " order by 1,2")
-        return {(r[0], r[1]): r[2] for r in rows}
-
-    def _indexes(self, side, db):
-        """{name: (kind, unique)}, an index behind a constraint the server
-        named by the constraint's kind and columns, as `_objects` names
-        it."""
-        key_cols = self._KEY_COLUMNS.format(k="kc")
-        rows = self._cmd(side, db,
-                       "select s.name+'.'+t.name+'.'+case when"
-                       " kc.is_system_named = 1 then kc.type_desc + '('"
-                       f" + {key_cols} + ')' collate database_default"
-                       " else i.name collate database_default end,"
-                       " i.type_desc,"
-                       " i.is_unique from sys.indexes i"
-                       " join sys.tables t on t.object_id=i.object_id"
-                       " join sys.schemas s on s.schema_id=t.schema_id"
-                       " left join sys.key_constraints kc on"
-                       " kc.parent_object_id = i.object_id and"
-                       " kc.unique_index_id = i.index_id"
-                       " where i.name is not null order by 1")
-        return {r[0]: (r[1], r[2]) for r in rows}
+                         "select s.name + '.' + o.name, o.type_desc,"
+                         " convert(varchar(64), hashbytes('SHA2_256',"
+                         " coalesce(object_definition(o.object_id),"
+                         " (select type_name(q.user_type_id) + ' '"
+                         " + convert(nvarchar(64), q.start_value) + ' '"
+                         " + convert(nvarchar(64), q.increment) + ' '"
+                         " + convert(nvarchar(64), q.minimum_value) + ' '"
+                         " + convert(nvarchar(64), q.maximum_value) + ' '"
+                         " + convert(nvarchar(4), q.is_cycling) + ' '"
+                         " + convert(nvarchar(16), isnull(q.cache_size, 0))"
+                         " from sys.sequences q where q.object_id ="
+                         " o.object_id),"
+                         " (select y.base_object_name from sys.synonyms y"
+                         " where y.object_id = o.object_id), '')), 2),"
+                         " s.name, o.name"
+                         " from sys.objects o join sys.schemas s on"
+                         " s.schema_id = o.schema_id where o.is_ms_shipped = 0"
+                         " and o.type in ('V', 'P', 'FN', 'TF', 'IF', 'SO',"
+                         " 'SN') order by 1, 2")
+        return {(r[0], r[1]): r[2] for r in rows
+                if not self.hop.excluded(db, r[3], r[4])}
 
     def check_schema(self, db):
+        """Every table compared whole on both sides, by the one comparer
+        (`catalog.Catalog.explain`): its columns by their declared types
+        with length, precision and scale - a narrower target column named
+        with why (`verdict.narrowing`) - nullability, collation, default,
+        identity or expression; its key, its indexes by their columns, its
+        foreign keys, checks and triggers (`shape_catalog`). Views,
+        routines, sequences and synonyms by their definitions. It compared
+        a hash of `object_definition`, which is NULL for a table, a key and
+        a foreign key: a dropped, narrowed or nullability-changed column
+        read ok."""
+        from .. import drift
+        src, dst = self.shape_catalog("src", db), self.shape_catalog("dst",
+                                                                     db)
+        keep = [set(drift.in_scope(self, db, dict.fromkeys(c.tables)))
+                for c in (src, dst)]
         so, do = self._objects("src", db), self._objects("dst", db)
-        si, di = self._indexes("src", db), self._indexes("dst", db)
-        bad = []
+        bad = [f"missing table {t}" for t in sorted(keep[0] - keep[1])]
+        bad += [f"extra table {t}" for t in sorted(keep[1] - keep[0])]
+        for t in sorted(keep[0] & keep[1]):
+            if src.fingerprint(t) == dst.fingerprint(t):
+                continue
+            said = src.explain(dst, t, self.CANON_ENGINE,
+                               added="only on the target",
+                               dropped="missing on the target")
+            bad.append(f"{t}: {', '.join(said)}")
         for k in sorted(set(so) | set(do)):
             if k not in do:
                 bad.append(f"missing {k[1]} {k[0]}")
@@ -181,18 +357,27 @@ class MSSQLEngine(DbapiRows, Engine):
                 bad.append(f"extra {k[1]} {k[0]}")
             elif so[k] != do[k]:
                 bad.append(f"definition differs {k[1]} {k[0]}")
-        for k in sorted(set(si) | set(di)):
-            if si.get(k) != di.get(k):
-                bad.append(f"index differs {k}")
         d = self.hop.report_dir(db)
-        (d / "schema-src.txt").write_text("\n".join(f"{k} {v}" for k, v in sorted(so.items())))
-        (d / "schema-dst.txt").write_text("\n".join(f"{k} {v}" for k, v in sorted(do.items())))
+        for side, cat, mine, objs in (("src", src, keep[0], so),
+                                      ("dst", dst, keep[1], do)):
+            (d / f"schema-{side}.txt").write_text(
+                drift.said({t: v for t, v in drift.pairs(cat).items()
+                            if t in mine})
+                + "".join(f"{k[1]} {k[0]} {v}\n"
+                          for k, v in sorted(objs.items())))
+        columns = sum(len(src.columns.get(t) or []) for t in keep[0])
         if bad:
-            (d / "schema.diff").write_text("\n".join(bad))
+            (d / "schema.diff").write_text("\n".join(bad) + "\n")
             return [Result("schema", db, "diff", "; ".join(bad[:8]),
                            str(d / "schema.diff"),
-                           "script objects from source (mssql-scripter) and apply")]
-        return [Result("schema", db, "ok", f"{len(so)} objects, {len(si)} indexes")]
+                           "make the target's tables, keys, indexes and"
+                           " code the source's before loading: each"
+                           " difference is in schema.diff")]
+        return [Result("schema", db, "ok",
+                       f"{len(keep[0])} tables, {columns} columns with their"
+                       " keys, indexes, constraints and triggers, and"
+                       f" {len(so)} views, routines, sequences and synonyms"
+                       " the same on both sides")]
 
     def check_counts(self, db):
         q = ("select s.name+'.'+t.name, sum(p.rows) from sys.tables t"
@@ -228,8 +413,10 @@ class MSSQLEngine(DbapiRows, Engine):
         collide = []
         for tbl, col in sorted(dcol.items()):
             try:
-                mx = int(self._cmd("dst", db, f"select isnull(max([{col}]),0)"
-                                 f" from {tbl} with (nolock)")[0][0] or 0)
+                mx = int(self._cmd(
+                    "dst", db, f"select isnull(max({self._q(col)}),0) from"
+                               f" {self._qualified('dst', db, tbl)} with"
+                               " (nolock)")[0][0] or 0)
             except (RuntimeError, IndexError, ValueError):
                 continue
             cur = int(dcur.get(tbl, 0) or 0)
@@ -264,16 +451,16 @@ class MSSQLEngine(DbapiRows, Engine):
     DRILL_MAX_ROWS = 2_000_000
 
     def _pk_cols(self, db, t):
-        sch, tbl = t.split(".", 1)
-        rows = self._cmd("src", db,
-                       "select c.name from sys.index_columns ic"
+        rows = self._kept_rows(
+            "src", db, "select c.name from sys.index_columns ic"
                        " join sys.indexes i on i.object_id=ic.object_id"
                        " and i.index_id=ic.index_id and i.is_primary_key=1"
                        " join sys.columns c on c.object_id=ic.object_id"
                        " and c.column_id=ic.column_id"
-                       f" where ic.object_id=object_id('{sch}.{tbl}')"
-                       " order by ic.key_ordinal")
-        return [r[0] for r in rows]
+                       f" where ic.object_id=object_id({MARK})"
+                       " order by ic.key_ordinal",
+            (self._qualified("src", db, t),))
+        return [str(r[0]) for r in rows]
 
     def _drilldown(self, db, t):
         """Row-level compare via canonical FOR JSON rendering: SQL Server
@@ -281,15 +468,16 @@ class MSSQLEngine(DbapiRows, Engine):
         pks = self._pk_cols(db, t)
         if not pks:
             return None
-        n = int(self._cmd("src", db,
-                        f"select count_big(*) from {t} with (nolock)")[0][0]
-                or 0)
+        named = self._qualified("src", db, t)
+        n = int(self._cmd("src", db, f"select count_big(*) from {named}"
+                                     " with (nolock)")[0][0] or 0)
         if n > self.DRILL_MAX_ROWS:
             return None
-        pkexpr = "+'\t'+".join(f"cast(t.{c} as varchar(100))" for c in pks)
+        pkexpr = "+'\t'+".join(f"cast(t.{self._q(c)} as varchar(100))"
+                               for c in pks)
         row, _ = self._row_json(db, t)
         q = (f"select {pkexpr}, convert(varchar(64), hashbytes('SHA2_256',"
-             f" {row}), 2) from {t} t with (nolock)")
+             f" {row}), 2) from {named} t with (nolock)")
         src = {r[0]: r[1] for r in self._cmd("src", db, q)}
         dst = {r[0]: r[1] for r in self._cmd("dst", db, q)}
         missing = sorted(k for k in src if k not in dst)
@@ -359,7 +547,7 @@ class MSSQLEngine(DbapiRows, Engine):
         tables = [table] if table else [t for t in st if t in dt]
         bad, left = [], []
         rows_a = rows_b = 0
-        bad_counts = []
+        bad_counts, settled = [], []
         salt = self.digest_salt()
         for t in tables:
             # each row's hash as the server writes the row out, the same
@@ -377,7 +565,7 @@ class MSSQLEngine(DbapiRows, Engine):
             cq = ("select count_big(*), isnull(sum(h), 0) from (select"
                   " cast(convert(bigint, substring(hashbytes('SHA2_256',"
                   f" N'{salt}' + {row}), 1, 8)) as decimal(38, 0)) h"
-                  f" from {t} t) rows_hashed")
+                  f" from {self._qualified('src', db, t)} t) rows_hashed")
             try:
                 with gate.unit():
                     a = self._cmd("src", db, cq)[0]
@@ -396,12 +584,15 @@ class MSSQLEngine(DbapiRows, Engine):
                 if drill == (0, 0, 0):
                     # The sums differed and no row does: a write between
                     # the reads, if they now agree - asked, not assumed.
-                    # Still different, nothing found where, and it is said.
+                    # Still different, nothing found where, and it is said;
+                    # agreeing, the table's answer is this check's own `ok`
                     if self._cmd("src", db, cq)[0] != \
                             self._cmd("dst", db, cq)[0]:
                         bad.append(f"{t} differs, not localized: the sums"
                                    " still differ and no row differs by"
                                    " key")
+                    else:
+                        settled.append(t)
                     continue
                 if drill:
                     # confirmed before it is called different: where a tail
@@ -441,9 +632,12 @@ class MSSQLEngine(DbapiRows, Engine):
                               f" {db} --kind rows shows the repair, --apply"
                               " runs it"))
         else:
+            again = (f"; {len(settled)} read while rows changed, every row"
+                     " equal by key and the sums equal when read again: "
+                     + ", ".join(settled[:8]) if settled else "")
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
-                              " row's hash equal both sides" + said))
+                              " row's hash equal both sides" + again + said))
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -519,7 +713,8 @@ class MSSQLEngine(DbapiRows, Engine):
         pks = self._pk_cols(db, table)
         if not pks:
             return None
-        pkexpr = "+'\t'+".join(f"cast(t.{c} as varchar(100))" for c in pks)
+        pkexpr = "+'\t'+".join(f"cast(t.{self._q(c)} as varchar(100))"
+                               for c in pks)
         row, _ = self._row_json(db, table)
         keys = sorted(keys)
         got = {"src": {}, "dst": {}}
@@ -528,7 +723,8 @@ class MSSQLEngine(DbapiRows, Engine):
                              for k in keys[i:i + 500])
             q = (f"select {pkexpr}, convert(varchar(64), hashbytes("
                  f"'SHA2_256', {row}), 2)"
-                 f" from {table} t where {pkexpr} in ({part})")
+                 f" from {self._qualified('src', db, table)} t where"
+                 f" {pkexpr} in ({part})")
             for side in got:
                 got[side].update({r[0]: r[1] for r in
                                   self._cmd(side, db, q)})
@@ -640,10 +836,10 @@ class MSSQLEngine(DbapiRows, Engine):
         for t, c in pk_rows:
             n += 1
             try:
-                a = int(self._cmd("src", db, f"select isnull(max({c}),0)"
-                                f" from {t} with (nolock)")[0][0] or 0)
-                b = int(self._cmd("dst", db, f"select isnull(max({c}),0)"
-                                f" from {t} with (nolock)")[0][0] or 0)
+                q = (f"select isnull(max({self._q(c)}),0) from"
+                     f" {self._qualified('src', db, t)} with (nolock)")
+                a = int(self._cmd("src", db, q)[0][0] or 0)
+                b = int(self._cmd("dst", db, q)[0][0] or 0)
             except RuntimeError:
                 continue
             if b > a:
@@ -820,11 +1016,17 @@ class MSSQLEngine(DbapiRows, Engine):
                                " from sys.tables t join sys.schemas s"
                                " on s.schema_id=t.schema_id where"
                                " objectproperty(t.object_id,'TableHasIdentity')=1"))
-            stmts = [f"dbcc checkident ('{t}', reseed, {v});"
+            def lit(t):
+                # the table's quoted name, as a literal: a quote in a name
+                # stays in the name
+                return self._qualified("dst", db, t).replace("'", "''")
+            stmts = [f"dbcc checkident ('{lit(t)}', reseed, {int(v)});"
                      f"  -- dst now {dst.get(t, 'MISSING')}"
-                     for t, v in sorted(src.items()) if dst.get(t) != v]
-            undo = [f"dbcc checkident ('{t}', reseed, {dst[t]});"
-                    for t in sorted(src) if t in dst and dst.get(t) != src[t]]
+                     for t, v in sorted(src.items())
+                     if dst.get(t) != v and v != "NULL"]
+            undo = [f"dbcc checkident ('{lit(t)}', reseed, {int(dst[t])});"
+                    for t in sorted(src) if t in dst and dst.get(t) != src[t]
+                    and dst[t] != "NULL"]
             same = sum(1 for t, v in src.items() if dst.get(t) == v)
             if stmts:
                 actions.append(RepairAction(
@@ -938,11 +1140,14 @@ class MSSQLEngine(DbapiRows, Engine):
 
     def setup_target_plan(self, db):
         return [
-            "python -m pip install mssql-scripter",
-            f"mssql-scripter -S <src> -d {db} --schema-and-data=schema > {db}.schema.sql",
-            f"sqlcmd -S <dst> -Q \"create database [{db}]\"",
-            f"sqlcmd -S <dst> -d {db} -i {db}.schema.sql",
-            "-- disable FK/triggers on target during load, then start the migration service",
+            f"script the schema of {db} from the source: its tables, keys,"
+            " indexes, views and routines",
+            f"create database {self._q(self.hop.target_db(db))} on the"
+            " target",
+            f"run that script on the target, in"
+            f" {self._q(self.hop.target_db(db))}",
+            "-- disable FK/triggers on target during load, then start the"
+            " migration service",
         ]
 
     def delta_verify(self, db, limit=20000, log=None):
@@ -977,7 +1182,8 @@ class MSSQLEngine(DbapiRows, Engine):
             out = {}
             for tbl in tabs:
                 self._run(c, "select count(*) from changetable(changes"
-                             f" {tbl}, {MARK}) ct", (int(last),))
+                             f" {self._qualified('src', db, tbl)}, {MARK})"
+                             " ct", (int(last),))
                 out[tbl] = int(c.fetchone()[0])
             return out
         try:
@@ -1001,6 +1207,15 @@ class MSSQLEngine(DbapiRows, Engine):
             r = self._drilldown(db, tbl)
             ok = r == (0, 0, 0)
             clean = clean and ok
+            if r is None:
+                # not compared row by row is not a difference found, nor
+                # one ruled out: the version stays where it was
+                res.append(Result("delta", f"{db}.{tbl}", "skip",
+                                  f"{n} rows changed since v{last}, not"
+                                  " compared again row by row: the table"
+                                  " has no primary key or holds more than"
+                                  f" {self.DRILL_MAX_ROWS:,} rows"))
+                continue
             res.append(Result("delta", f"{db}.{tbl}", "ok" if ok else "diff",
                               f"{n} rows changed since v{last}, table"
                               f" {'verified equal' if ok else 'DIFFERS'}"))
@@ -1008,7 +1223,9 @@ class MSSQLEngine(DbapiRows, Engine):
                 log(f"{tbl}: {n} changed, {'ok' if ok else 'DIFF'}")
         if clean:
             state.write_text(json.dumps({"ver": cur}))
-        res.insert(0, Result("delta", db, "ok" if clean else "diff",
+        found = any(r.status == "diff" for r in res)
+        res.insert(0, Result("delta", db, "diff" if found else "ok" if clean
+                             else "warn",
                              f"{total} changed rows across {len(res)} tables"
                              f" since v{last}, version"
                              f" {'advanced' if clean else 'NOT advanced'}"))
@@ -1083,7 +1300,8 @@ class MSSQLEngine(DbapiRows, Engine):
                                charset="UTF-8", tds_version="7.4",
                                **ep.mssql_tls())
 
-    def _q(self, name):
+    @staticmethod
+    def _q(name):
         return "[" + str(name).replace("]", "]]") + "]"
 
     _bracket = _q

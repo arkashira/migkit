@@ -75,7 +75,8 @@ def test_it_says_what_changed_in_words():
     assert "column code varchar(50) -> varchar(100)" in said, said
     assert "column code now NOT NULL" in said, said
     assert "column note added" in said, said
-    assert "foreign key orders_cust dropped" in said, said
+    assert ("foreign key orders_cust (cust) -> public.customers (id)"
+            " dropped") in said, said
     assert a.explain(Catalog(), "public.orders") == ["dropped"]
     assert Catalog().explain(a, "public.orders") == ["created"]
 

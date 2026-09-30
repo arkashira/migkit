@@ -54,11 +54,59 @@ def hop(server):
 
 def test_constraints_the_server_named_are_compared_by_what_they_are(hop):
     assert [(r.status, r.detail) for r in hop.check_schema("shop")] == [
-        ("ok", "9 objects, 3 indexes")]
+        ("ok", "2 tables, 6 columns with their keys, indexes, constraints"
+               " and triggers, and 0 views, routines, sequences and synonyms"
+               " the same on both sides")]
     _sql("shop", "alter table dbo.p add constraint named_ck check (id > 0)")
     got = hop.check_schema("shop")
     assert [(r.status, r.detail) for r in got] == [
-        ("diff", "missing CHECK_CONSTRAINT dbo.named_ck")], got
+        ("diff", "dbo.p: check named_ck ([id]>(0)) missing on the target")
+    ], got
+
+
+def test_every_part_of_a_column_and_a_table_is_compared(hop):
+    """Each of these read `ok` when the check hashed `object_definition`,
+    which is NULL for a table: a narrower column, a scale, a collation, a
+    nullability, a default, an index over other columns, a foreign key."""
+    for db in ("shop", "shop_new"):
+        _sql(db, "create table dbo.q (id int primary key, a decimal(12,4),"
+                 " s varchar(20) collate Latin1_General_CI_AS, d int"
+                 " constraint q_d default 1, x int, y int)",
+             "create index ix_q on dbo.q (x, y)")
+    _sql("shop_new", "alter table dbo.o alter column v nvarchar(5)",
+         "alter table dbo.q alter column a decimal(12,2) not null",
+         "alter table dbo.q alter column s varchar(20) collate"
+         " Latin1_General_BIN2",
+         "alter table dbo.q drop constraint q_d",
+         "alter table dbo.q add constraint q_d default 2 for d",
+         "drop index ix_q on dbo.q", "create index ix_q on dbo.q (y, x)",
+         "alter table dbo.q add constraint fk_q foreign key (id) references"
+         " dbo.o (id)")
+    (got,) = hop.check_schema("shop")
+    assert got.status == "diff", got
+    said = pathlib.Path(got.report).read_text()
+    for part in ("dbo.o: column v nvarchar(10) -> nvarchar(5) (longer values"
+                 " are cut)",
+                 "column a decimal(12,4) -> decimal(12,2) (scale 4 -> 2:"
+                 " rounds)", "column a now NOT NULL",
+                 "column d default ((1)) -> ((2))",
+                 "column s collation Latin1_General_CI_AS ->"
+                 " Latin1_General_BIN2",
+                 "index ix_q (x, y) nonclustered missing on the target",
+                 "index ix_q (y, x) nonclustered only on the target",
+                 "foreign key fk_q (id) -> dbo.o (id) only on the target"):
+        assert part in said, (part, said)
+    # the same shape, read as the drift of one side over time
+    from migkit import drift
+    before = drift.shape(hop, "src", "shop")
+    _sql("shop", "alter table dbo.q add note nvarchar(40) not null default"
+                 " ''", "create unique index uq_q on dbo.q (x)")
+    after = drift.shape(hop, "src", "shop")
+    assert drift.changed_tables(before, after) == {"dbo.q"}
+    moved = drift.changes(before, after, "mssql")
+    assert any("dbo.q: column note added" in m
+               and "unique index uq_q (x) nonclustered added" in m
+               for m in moved), moved
 
 
 def test_a_statement_that_fails_is_an_error_not_rows(hop):

@@ -615,7 +615,7 @@ def test_users_and_rights_are_compared_and_granted(fake, tmp_path):
     lines = []
     out, s = users.compare(hop, lines.append)
     assert out["missing_on_target"] == ["role:READERS"]
-    assert out["grants_differ"] == ["user:ANA"]
+    assert out["grants_missing"] == ["user:ANA"]
     assert "user:DBC" not in s
     assert s["user:ANA"]["grants"] == ['GRANT INSERT ON "shop"',
                                        'GRANT SELECT ON "shop"."orders"']

@@ -3190,6 +3190,26 @@ the offline bundle (P0/P1, L).** Files: `migkit/runner.py` (new),
   `uuid_text` faster (SP14, SP18 canon part); version parsing in one place
   (DU23).
 * Running work: `canon.py` (P0-PARITY large values).
+* Done 2026-10-01: every account and role name into target DDL through the
+  engine's own quoting and every value bound, on every engine `users`
+  carries, `dba`'s scripts and the PostgreSQL and MySQL grant repairs
+  (`_grant_sql`, `_retarget_grant`); `drift` on `catalog.Catalog` (kept as
+  (column, text) pairs, read back whole, one comparer and one explanation,
+  a narrowing named by `verdict.narrowing`) with SQL Server's
+  `shape_catalog`; SQL Server's check compares every table whole, its
+  permissions by class and column with their grant option, logins by SID
+  and policy, one kept connection, its own `ok`; users' one result shape,
+  roles first and a ledger with undo, `create` ending on a compare, the
+  target's auth plugins asked; `reload` for rows a partition DDL changes;
+  every clause of an ALTER read; `canon.limits`, `citext`, faster
+  `sql_rows`/`digest_step`/`uuid_text`. Left, with why: PostgreSQL and
+  MySQL `shape_catalog` (AUD-G1/G2's files); exact-width integers and
+  routines typed through `ddl_type` - either changes every cross-engine
+  build or cuts a routine's text at 1,024 characters, and the stored-code
+  rules are the conversion-breadth work's; `system_principals_sql` adopted
+  in the PostgreSQL and MySQL grant and assess filters, `freeze`, and
+  `toolversion.server_major` in `physical._series`/`jobs._my_off` (their
+  owners' files).
 
 **AUD-G1. The PostgreSQL engine: one connection, one catalogue read, one
 quoting (P0, L).** Files: `migkit/engines/postgres.py`,

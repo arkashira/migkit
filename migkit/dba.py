@@ -199,10 +199,30 @@ def _setting(engine, where, name, value, restart, target_label):
 
 # ---- PostgreSQL ----------------------------------------------------------
 
+#: PostgreSQL's reserved words: one of these bare is not a name
+PG_RESERVED = frozenset("""all analyse analyze and any array as asc asymmetric
+authorization binary both case cast check collate collation column
+concurrently constraint create cross current_catalog current_date
+current_role current_schema current_time current_timestamp current_user
+default deferrable desc distinct do else end except false fetch for foreign
+freeze from full grant group having ilike in initially inner intersect into
+is isnull join lateral leading left like limit localtime localtimestamp
+natural not notnull null offset on only or order outer overlaps placing
+primary references returning right select session_user similar some
+symmetric system_user table tablesample then to trailing true union unique
+user using variadic verbose when where window with""".split())
+
+
 def _pgi(name):
-    """An identifier as PostgreSQL reads it back unchanged."""
-    return name if re.fullmatch(r"[a-z_][a-z0-9_]*", str(name)) else \
-        '"' + str(name).replace('"', '""') + '"'
+    """An identifier as PostgreSQL reads it back unchanged: bare where it
+    is a plain lower-case word that is not a reserved one, quoted with any
+    double quote doubled everywhere else - a name read off a catalogue
+    goes into the script the DBA runs as that name and nothing more."""
+    text = str(name)
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", text) and \
+            text not in PG_RESERVED:
+        return text
+    return '"' + text.replace('"', '""') + '"'
 
 
 def _pg_rows(e, key, db, sql):
@@ -411,6 +431,7 @@ def _my_privileges(e, key):
     except Exception:  # noqa: BLE001 - before 8.0
         role = "NONE"
     if role and role != "NONE":
+        # current_role() names each role quoted, as the server writes it
         try:
             rows += [r[0] for r in e._q(
                 key, f"show grants for current_user() using {role}")]
@@ -440,6 +461,12 @@ def _myi(name):
     return "`" + str(name).replace("`", "``") + "`"
 
 
+def _my_lit(text):
+    """A MySQL string literal, as the default sql_mode reads one: the
+    backslash escaped, the quote doubled."""
+    return "'" + str(text).replace("\\", "\\\\").replace("'", "''") + "'"
+
+
 #: what a MySQL target needs on the database migkit writes
 MY_WRITE = ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER",
             "DROP", "INDEX", "REFERENCES", "CREATE VIEW", "SHOW VIEW",
@@ -450,7 +477,7 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
     out = []
     user, host = e._q(key, "select substring_index(current_user(), '@', 1),"
                            " substring_index(current_user(), '@', -1)")[0]
-    who = f"'{user}'@'{host}'"
+    who = f"{_my_lit(user)}@{_my_lit(host)}"
     privs = _my_privileges(e, key)
     label = f"the {side}"
     if read:
@@ -1064,12 +1091,14 @@ def _crdb(hop, e, key, side, dbs, where, read, write, follow, native):
     if not admin:
         for d in dbs:
             for t in e.neutral_tables(key, d):
+                sch, tbl = e._split(t)
                 got = _pgwire_rows(e, key, d, "select privilege_type from"
-                                              f" [show grants on table {t}"
+                                              " [show grants on table"
+                                              f" {_pgi(sch)}.{_pgi(tbl)}"
                                               f" for {_pgi(me)}]")
                 if not {str(p).upper() for (p,) in got} & {"CHANGEFEED",
                                                             "ALL"}:
-                    lack.append(f"{d}.{t}")
+                    lack.append(f"{_pgi(d)}.{_pgi(sch)}.{_pgi(tbl)}")
     found.append(Need(side, "make a changefeed on every table in scope",
                       not lack, f"not on {len(lack)} tables" if lack
                       else "may",
@@ -1123,6 +1152,8 @@ def _couchbase(hop, e, key, side, dbs, where, read, write, follow, native):
     roles = {(r.get("role"), r.get("bucket_name") or "*")
              for r in me.get("roles", [])}
     user = me.get("id") or "<user>"
+    # each name one argument of the command, whatever it holds
+    from shlex import quote as sh
 
     def has(bucket, *names):
         return any((n, b) in roles for n in names + ("admin",)
@@ -1135,26 +1166,28 @@ def _couchbase(hop, e, key, side, dbs, where, read, write, follow, native):
             out.append(Need(side, f"read every document of {name}", ok,
                             "may" if ok else "may not", [],
                             [f"couchbase-cli user-manage --set --rbac-username"
-                             f" {user} --roles data_reader[{name}]"
+                             f" {sh(user)} --roles"
+                             f" {sh(f'data_reader[{name}]')}"
                              " --auth-domain local"]))
         if key == "dst" and write:
             ok = has(name, "bucket_full_access", "bucket_admin") or (
                 has(name, "data_writer") and has(name, "scope_admin",
                                                  "bucket_admin"))
+            writes = f"data_writer[{name}],scope_admin[{name}]"
             out.append(Need(side, f"write documents and make collections"
                             f" in {name}", ok, "may" if ok else "may not",
                             [], [f"couchbase-cli user-manage --set"
-                                 f" --rbac-username {user} --roles"
-                                 f" data_writer[{name}],scope_admin[{name}]"
-                                 " --auth-domain local"]))
+                                 f" --rbac-username {sh(user)} --roles"
+                                 f" {sh(writes)} --auth-domain local"]))
         if key == "src" and follow:
             ok = has(name, "data_monitoring", "bucket_admin", "ro_admin",
                      "cluster_admin")
             out += _following([Need(
                 side, f"read {name}'s sequence numbers, the follow's"
                       " fence", ok, "may" if ok else "may not", [],
-                [f"couchbase-cli user-manage --set --rbac-username {user}"
-                 f" --roles data_monitoring[{name}] --auth-domain local"])])
+                [f"couchbase-cli user-manage --set --rbac-username"
+                 f" {sh(user)} --roles {sh(f'data_monitoring[{name}]')}"
+                 " --auth-domain local"])])
     if follow and key == "src":
         out += _following(_feed(e, key, side, dbs, "the Kafka connector's"
                                 " topic the hop reads",
