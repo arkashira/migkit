@@ -2883,6 +2883,31 @@ fallback and the source-change offer. Flat, to be made smart:
 6. **The cross-engine copier carries rows through Python** - being
    removed (R20 cross-engine, running).
 
+*Built with P0-SMART 2026-10-01, tests written and not yet run:*
+* *3*: `tuning` - every reasoned number declared with today's value as
+  its prior and what measures it (`TUNABLES`: the probe floor, the tie,
+  `canon.WIDE`, `ranges.BUCKET_ROWS`, `throttle.REPLICA_RISE`, the
+  PostgreSQL digest's memory); `observe` keeps what a run measured per
+  machine (the knowledge base) and per hop, `value` the geometric mean
+  with the prior (weighing three runs), within x8 of it. Adopted: the probe
+  floor (`model.probe_floor`, tuned by the bytes a move carried in the
+  time its probes took, `MIGKIT_PROBE_FROM` still the operator's) and the
+  tie (the noise of ways that ran five units or more). The others wait
+  for their modules to read `tuning.value`; the per-table program
+  threshold was not found as a constant.
+* *4*: the resource model's readings enter the cost model as a prior as
+  wide as each coefficient (`costmodel.MODEL_SHARE`), and the joint plan
+  gives a way the probes alone measured a spread of at least 50%
+  (`jointplan.MODEL_SPREAD`). Measured: with the prediction off by x2, the
+  cost model's regret 1.5-12.1% against the prediction alone's 10-15%.
+* *5*: `sizing.Held` - a limit of the hop as a target: over it, a cut in
+  proportion; under it, one back only where one more stays within it.
+  `sizing.held` makes them from `limits: source_load` (the move's own
+  rate over what the source's reads carry) and `limits: replica_lag`;
+  `resources` adds them to the pace. Simulated: held at the target 75% of
+  the windows against 21% for the same limit backed off from as a strain.
+  And a cut is no longer floored one short by floating point.
+
 ## P0-PARITY. Every engine as deep as PostgreSQL and MySQL (owner, 2026-10-01)
 
 Asked: "can the other engines do better - smart, deep, not flat; if they
@@ -2998,6 +3023,97 @@ prediction):
   `MIGKIT_EXPLAIN=1`. No way or program is named on the console.
 * **Counterfactuals in the plan and the evidence export:** the chosen
   rung, its predicted time with spread, the next best and why not.
+
+*Built 2026-09-30/10-01, its tests written and not yet run (the owner's
+rule: one run of the whole suite at the end). The research and every
+number: `docs/research/smart-decisions-2026-09-30.md`,
+`bench/smart_decisions.py` (in-process simulations, no server):*
+* *Cost as a function of the unit* (`costmodel`): `CostModel`, a Bayesian
+  linear regression (normal-inverse-gamma, sufficient statistics, each
+  unit weighed by its size) of seven features - start-up, MB, rows, large
+  values, keyless bytes, round trips, busy bytes - per way and engine
+  pair; `Estimate` (mean, spread, measured or predicted, p10/p90, the
+  noise of a unit about the line). Measured regret against one number a
+  row: 1.3% against 30.9% as timed, 4.6-7.4% against 71-1175% on shapes
+  never timed. Keeps the `Costs` interface (`get`, `saw`).
+* *Predict before measuring*: the prior from this hop's earlier runs
+  (measured, `costs.json` beside its rates), other hops here (the local
+  knowledge base `Knowledge`, `MIGKIT_KNOWLEDGE` or the user's data
+  directory, never sent anywhere), the resource model where a rung says
+  what a byte of it loads (`Rung.loads`, `startup`, `trips`; its spread
+  the coefficient's own - P0-DEPTH 4), migkit's benchmarks (`seeds`:
+  `movers.MY_RUNGS` solved for seconds a MB and a thousand rows,
+  `physical.MEASURED`). `climb(..., unit=, explore=)` ranks measured
+  ways by what they cost, a tie within their noise to the footprint; a
+  predicted way goes first where its p10 beats the measured best (tried),
+  or its p90 does where the climb commits; where nothing is measured the
+  predictions rank; a way nothing says anything of is tried first, as
+  before. `Costs`/`HopCosts` rank as they always did.
+* *Explore safely* (`Trials(model=, unit=, ahead=, critical=, log=,
+  limits=)`, `pick(unit)`, `took(..., unit)`, `save()`): a new way only on
+  a unit no larger than the median, never on the critical path, never
+  where its p10 is above the measured best, a measured way timed again
+  while it has fewer than two units and its p10 is below the best, within
+  a 5% conservative budget. A table's time over its best: 60.6% each way
+  once, 22.6% safe with nothing predicted, 5.7% safe with a prediction.
+  `Trials` without a model is what it was.
+* *One plan, jointly* (`jointplan`): each table's way as one mix (a local
+  search on the fluid bound, money a hard limit), the order, the tables
+  at once, index builds beside the copy, each check once its table is in,
+  the fewest workers within 2% - simulated as max-min fair flows through
+  the resources. 8.7% sooner than the per-choice greedy on average, 18.4%
+  at p10, 32% at best, within 3.6% of the lower bound at the median;
+  CP-SAT measured beside it, 2.3% later and 5 s a plan, not taken. The dry
+  run says its end with p90 and what sets it (`cli._joint_lines`); the
+  move starts its tables in its order (`_largest_first`, the one-at-a-time
+  path too), with its tables at once and workers (`_joint_for_move`), and
+  keeps it beside its reports (`jointplan.PLAN_FILE`, `order_of`,
+  `planned_way` for the copier choosing a table's way).
+* *Re-plan while running*: a unit whose time leaves its spread
+  (`costmodel.SURPRISE`) halves what was learned before it and the next
+  unit re-climbs; a limit of the pace cut (`sizing.Limit`, `Trials(limits
+  =)`) costs the ways that load that resource at the limit's cut; a switch
+  is said in one line. No second controller.
+* *Risk in the cost*: tries and failures per way, engine pair, version and
+  service (`Knowledge.failures`, a Beta(1, 19) prior, `CostModel.risk`);
+  `costmodel.risked` - the thrown-away work (a range's where the way goes
+  on by range, `guarantees.lost`) - in every estimate the climb ranks;
+  `attempt` keeps each failure and success where its costs are a model.
+* *Limits as hard needs* (`hopkeys` `limits:` - source_load, money,
+  bytes_billed, outage, replica_lag, target_memory, target_connections -
+  and `deadline:`; `hopkeys.LIMITS`, `explain_limits`,
+  `jointplan.limits_of`, `outage_line`, `docs/goals-and-modes.md`).
+* *Counterfactuals*: `Choice.costs`, `runner_up`, `why_not`,
+  `guarantees`, `asked`, and `Choice.as_evidence()` (in the operator's
+  words, no label) for R23.1; `Strategy.estimate`, `guarantees`,
+  `runners`, `as_evidence()`.
+* *Every way* (`decide.space`, `Space`): every combination that fits,
+  walked depth first and left out only by the proved bound of the best
+  guarantees a subtree can reach; ranked by cost on the unit; counted
+  (combinations, weighed, unfit, weaker, bounded, slower beyond doubt);
+  the structural walk kept per parts and need; the strategy taken told to
+  `LISTENERS`. `jointplan.ways_of_space` feeds the best strategies to the
+  plan as ways.
+* *Every factor* (`factbook`): the catalogue of every fact a choice may
+  read, by group and how it is known; `account` (known, measured,
+  predicted, unknown); `Facts.asked`; `tests/test_every_fact_is_declared
+  .py` reads the code and fails on an undeclared fact; `doctor` says what
+  each last plan stood on (`cli._decisions_said`).
+* *Guarantees never traded* (`guarantees`): five ladders (correct,
+  consistent, idempotent, exactly once, resumable), a rung's levels
+  (`Rung.holds`, or read from its capabilities), a strategy the weakest of
+  its parts, `Lift`s to a fixed point, the lexicographic strongest; the
+  climb filters where a rung says its own, the strategy space always;
+  property-tested. How much a stop throws away is a cost (`lost`), not a
+  guarantee.
+* *The choices stay inside*: `decide.record` appends the decision in full
+  to the run's own `decisions.jsonl` (the session's shape, the whole under
+  "detail"), `explaining()` - `MIGKIT_EXPLAIN=1` - puts it on the console;
+  the console says only the plan's end, what sets it and the limits.
+* Not done here, in files others own: routing the copier's ways
+  (`pg_pass`, `movers.my_bulk_choice`, `legs`) through `Trials(model=...)`
+  with `Rung.loads` declared, and the verify passes (`leaves.PASSES`)
+  through `space` - the API is there for the ladder agent.
 
 ## Decided by the owner 2026-09-30
 

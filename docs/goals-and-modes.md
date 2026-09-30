@@ -114,3 +114,41 @@ nobody (a managed service that refuses it), and:
   its load on the source - and goes on with it.
 
 No is a normal answer: many teams allow no change on a production source.
+
+## Limits the move keeps to
+
+A hop may say what its move may take at most. Each is a hard limit: the
+plan keeps to it wherever some way can, and where none can it says what
+binds and what would help. A hop that sets none is planned for the
+soonest end.
+
+```yaml
+options:
+  deadline: 6h                  # or a moment: 2026-10-01T02:00
+  limits:
+    source_load: 30%            # the share of the source's reads
+    replica_lag: 30             # seconds the source's replica may fall behind
+    money: 50                   # in the currency transfer_price_per_gb is in
+    bytes_billed: 500GB         # what a warehouse may bill, read as money
+    outage: 60                  # seconds of write outage at the cutover
+    target_connections: 40      # the target's connections the move may take
+    target_memory: 4GB          # the target's memory the move may take
+```
+
+- **deadline**: the whole move - copy, index builds and check - planned to
+  end within it.
+- **source_load**: the source planned as if it read only that fast, and
+  while the move runs the pace holds the move's reads at that share.
+- **replica_lag**: the pace holds the move to it while the replica is read.
+- **money** and **bytes_billed**: the ways that bill less are taken first
+  where the budget would be passed.
+- **outage**: the dry run says whether the cutover's predicted outage keeps
+  within it (with `cutover:` on, the cutover's own budget is this limit).
+- **target_connections** and **target_memory**: as many writers at once as
+  they carry.
+
+The dry run says the outcome - the end with its spread, what sets it,
+whether it keeps within the limits. How migkit chose each table's way,
+the order, the tables and workers at once, and what it stood on, is kept
+in the run's decision record; `MIGKIT_EXPLAIN=1` shows it on the console
+too.

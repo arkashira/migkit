@@ -41,12 +41,40 @@ need a change on the source (`Change`): it is offered, never assumed -
 the only thing migkit asks (`offered`, `sourcechange`). And a way that
 is blocked or fails as it runs is switched from by itself and said, never
 asked (`attempt`): the next rung that holds everything the work needs.
+
+And what the owner asked on 2026-09-30 - "really smart, not flat"
+(backlog P0-SMART) - is here too, each part where it is measured:
+* a rung's cost is a function of the unit with its spread
+  (`costmodel.CostModel`, an `Estimate` a unit), fitted from every unit
+  it ran, predicted where nothing is measured - from this hop's earlier
+  runs, other hops here (the local knowledge base), the resource model,
+  migkit's benchmarks - and a measurement always beats a prediction
+  (`rank`);
+* a rung's chance of failing times the work a failure throws away is in
+  its expected time (`costmodel.risked`);
+* exploration is safe (`Trials` with a model): a rung never measured is
+  tried on a small unit only, never on a deadline's critical path, never
+  where its prediction's best is slower than what was measured, and
+  within `EXPLORE_BUDGET` of the work's time; a unit that leaves its
+  prediction's spread re-climbs the ranges left and says so in a line;
+* guarantees are never traded (`guarantees`): where rungs declare them,
+  only those reaching the strongest the engines allow are ranked;
+* every way of a strategy is weighed (`space`): every combination of the
+  parts that fits, bounded by what a combination can at best reach and
+  cost, not by guessing; and a move's tables are planned as one schedule
+  (`jointplan`);
+* every `Choice` carries its runner-up and why not, with the times
+  (`Choice.as_evidence`), the facts it read (`factbook`), and is kept in
+  the run's decision record (`record`) - which the console shows only
+  where `MIGKIT_EXPLAIN=1`: the choices stay inside, the outcomes are
+  said.
 """
 import contextlib
 import dataclasses
 import hashlib
 import itertools
 import json
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -119,6 +147,15 @@ class Facts(dict):
     def __init__(self, known=None, **readers):
         super().__init__(known or {})
         self._readers = readers
+        #: every fact asked, in the order first asked: what a decision
+        #: stood on (`Choice.asked`, `factbook.account`)
+        self.asked = []
+
+    def __getitem__(self, key):
+        asked = self.__dict__.setdefault("asked", [])
+        if key not in asked:
+            asked.append(key)
+        return super().__getitem__(key)
 
     def __missing__(self, key):
         if key not in self._readers:
@@ -131,6 +168,10 @@ class Facts(dict):
             return self[key]
         except KeyError:
             return default
+
+    def unread(self):
+        """The facts a reader could answer that nobody asked."""
+        return [k for k in self._readers if k not in self]
 
 
 @dataclass(frozen=True)
@@ -173,6 +214,30 @@ class Rung:
     #: (facts, error) -> None: what it began, undone where it fails as it
     #: runs (`attempt`), so the next rung starts from what was there
     cleanup: object = None
+    #: the guarantees it holds, ((guarantee, level), ...) or a dict
+    #: (`guarantees.LEVELS`): a choice whose rungs say them ranks only
+    #: those reaching the strongest any of them does
+    holds: tuple = ()
+    #: `guarantees.Lift`s: what it tops up in a strategy it is part of
+    lifts: tuple = ()
+    #: the resources a byte of it passes and how often, ((resource,
+    #: passes), ...) or a dict (`model.Stage.name`): what its cost is
+    #: predicted from where it never ran (`costmodel`), and what a
+    #: resource's limit being cut slows (`Trials`)
+    loads: tuple = ()
+    #: seconds before its first byte, and round trips a thousand rows take
+    startup: float = 0.0
+    trips: float = 0.0
+
+    def __post_init__(self):
+        for name in ("holds", "loads"):
+            got = getattr(self, name)
+            if isinstance(got, dict):
+                object.__setattr__(self, name, tuple(sorted(got.items())))
+
+    @property
+    def load_map(self):
+        return dict(self.loads or ())
 
     def lacks(self, need):
         """The first needed capability this rung does not give, or None."""
@@ -191,6 +256,16 @@ class Choice:
     reason: str
     passed: tuple = ()              #: ((Rung, why), ...)
     ranked: tuple = ()              #: the rungs that hold, in rank order
+    #: ((rung name, its cost on the unit: an `Estimate`, seconds a unit,
+    #: or None), ...) of the ranked rungs
+    costs: tuple = ()
+    #: the next rung that holds and why it was not taken
+    runner_up: object = None
+    why_not: str = ""
+    #: ((guarantee, level), ...) the chosen rung reaches
+    guarantees: tuple = ()
+    #: the facts the climb read, in the order it read them
+    asked: tuple = ()
 
     @property
     def path(self):
@@ -200,8 +275,54 @@ class Choice:
     def said(self):
         return self.rung.said if self.rung else "no way here"
 
+    def cost(self, name=None):
+        """The cost of the chosen rung (or `name`) on the unit, or None."""
+        name = name or self.path
+        return dict(self.costs).get(name)
+
     def __str__(self):
         return f"{self.work}: {self.said} - {self.reason}"
+
+    def as_evidence(self):
+        """The choice as data - for the evidence export (backlog R23.1)
+        and the run's decision record: the way taken and why, its time on
+        the unit with its spread (measured or predicted), the guarantees
+        it reaches, the runner-up with its time and why not, every way
+        passed over with why, and the facts it read. In the operator's
+        words: no rung is named by its label, no program by its name."""
+        def cost(name):
+            got = dict(self.costs).get(name)
+            if got is None:
+                return None
+            if hasattr(got, "as_evidence"):
+                return got.as_evidence()
+            return {"seconds_a_unit": got, "truth": "measured"}
+        from . import factbook
+        known = [str(k) for k in self.asked]
+        measured = [f"cost of {r.said}" for r in self.ranked
+                    if getattr(dict(self.costs).get(r.name), "measured",
+                               dict(self.costs).get(r.name) is not None)]
+        predicted = [f"cost of {r.said}" for r in self.ranked
+                     if getattr(dict(self.costs).get(r.name), "truth", "")
+                     == "predicted"]
+        return {
+            "work": str(self.work),
+            "chosen": ({"way": self.rung.said,
+                        "predicted": cost(self.rung.name)}
+                       if self.rung else None),
+            "reason": self.reason,
+            "guarantees": dict(self.guarantees),
+            "runner_up": ({"way": self.runner_up.said,
+                           "predicted": cost(self.runner_up.name),
+                           "why_not": self.why_not}
+                          if self.runner_up is not None else None),
+            "ranked": [{"way": r.said, "predicted": cost(r.name)}
+                       for r in self.ranked],
+            "passed": [{"way": r.said, "why": why}
+                       for r, why in self.passed],
+            "facts": factbook.account(known, measured, predicted,
+                                      factors=()),
+        }
 
 
 class Costs(dict):
@@ -273,6 +394,45 @@ class _InFlight:
         return _TIMING if name in self.timing else default
 
 
+#: exploring may cost at most this share of the work's time so far: a
+#: conservative bandit's budget (Wu et al., 2016). Measured
+#: (`bench/smart_decisions.py explore`, 300 tables of 60 ranges of skewed
+#: sizes, three ways, 2026-09-30), the table's time over the time with
+#: every range on its fastest way: each way tried once and then the least
+#: seconds a row, 60.6% longer on average (47.2% median, 117.8% p90); the
+#: trials here with nothing predicted, 22.6% (15.3%, 41.9%); with each
+#: way predicted to within x1.6, 5.7% (5.2%, 11.3%). A budget of 2% gave
+#: 23.7% and 10% gave 21.7% with nothing predicted, the same within 0.2%
+#: with a prediction: 5% is the least that loses nothing measurable
+EXPLORE_BUDGET = 0.05
+#: a unit is small enough to explore on where it holds no more rows than
+#: this many times the median unit so far
+EXPLORE_SIZE = 1.0
+
+
+class _InFlightModel:
+    """A cost model with the rungs being tried for the first time now
+    ranked last, so the next unit tries another."""
+
+    def __init__(self, model, timing, pressure=None):
+        self.model, self.timing = model, timing
+        self.pressure = pressure or (lambda name: 1.0)
+
+    def estimate(self, name, unit=None):
+        if name in self.timing and not self.model.measured(name):
+            from .costmodel import Estimate
+            return Estimate(_TIMING)
+        got = self.model.estimate(name, unit)
+        k = self.pressure(name)
+        return got.scaled(k) if got is not None and k != 1.0 else got
+
+    def risk(self, name):
+        return self.model.risk(name)
+
+    def get(self, name, default=None):
+        return self.model.get(name, default)
+
+
 class Trials:
     """One climb for each unit of a larger work - the ranges of one table -
     on that work's own measurements, from threads copying units side by
@@ -281,9 +441,27 @@ class Trials:
     trial of the same one, and once every rung holding is timed each unit
     takes the cheapest. A rung that failed on this work (`give_up`) is
     passed over for the rest of it, and the reason is said the way any
-    other rung's is."""
+    other rung's is.
 
-    def __init__(self, work, rungs, facts=None, need=(), costs=None):
+    With a cost model (`model`, a `costmodel.CostModel`; `unit` the
+    typical unit) the trials are safe (backlog P0-SMART, item 3): a rung
+    is tried only on a unit no larger than the median so far
+    (`EXPLORE_SIZE`), never where the work is on a deadline's critical
+    path (`critical`), never where even its best is slower than the
+    measured best (its prediction's p10 above it: the lead is outside the
+    spread), and only while what exploring cost over the best stays within
+    `EXPLORE_BUDGET` of the work's time. A unit whose time leaves its
+    prediction's spread (`costmodel.SURPRISE`) re-plans what is left: the
+    next unit climbs again on what was just learned, and the switch, if
+    any, is said in one line through `log` - as is a switch because a
+    resource's limit was cut (`limits`, the pace's `sizing.Limit`s: a way
+    that loads a resource cut to half its workers is costed at twice its
+    time). Nothing here is a second controller: the pace moves the
+    workers, the trials move the way."""
+
+    def __init__(self, work, rungs, facts=None, need=(), costs=None,
+                 model=None, unit=None, log=None, critical=False,
+                 limits=None, ahead=None):
         import dataclasses
         import threading
         self.work, self.need = work, need
@@ -297,28 +475,131 @@ class Trials:
                  lambda f, n=r.name: n not in self.given_up,
                  lambda f, n=r.name: self.given_up.get(n)),))
             for r in rungs)
+        self.model, self.unit, self.log = model, unit, log
+        self.critical = critical
+        self.limits = limits or {}
+        self._sizes, self._spent, self._extra = [], 0.0, 0.0
+        self._on, self._why = None, ""
+        #: the rows of every unit the work has, where known ahead (the
+        #: ranges of a table): what a small unit is measured against
+        self._median = None
+        if ahead:
+            got = sorted(int(x) for x in ahead)
+            self._median = got[len(got) // 2]
+        if model is not None and not getattr(model, "rungs", None):
+            model.rungs = {r.name: r for r in rungs}
 
-    def pick(self):
-        """The `Choice` for the next unit."""
+    # --- the way for the next unit ------------------------------------------
+
+    def pick(self, unit=None):
+        """The `Choice` for the next unit (`unit`: its rows and bytes,
+        where the caller knows them)."""
         with self._lock:
-            got = climb(self.work, self.rungs, self.facts, self.need,
-                        _InFlight(self.costs, self._timing))
-            if got.rung is not None and \
-                    self.costs.get(got.rung.name) is None:
-                self._timing.add(got.rung.name)
+            if self.model is None:
+                got = climb(self.work, self.rungs, self.facts, self.need,
+                            _InFlight(self.costs, self._timing))
+                if got.rung is not None and \
+                        self.costs.get(got.rung.name) is None:
+                    self._timing.add(got.rung.name)
+                return got
+            u = unit if unit is not None else self.unit
+            costs = _InFlightModel(self.model, self._timing, self._pressure)
+            got = climb(self.work, self.rungs, self.facts, self.need, costs,
+                        unit=u, explore=AGAIN if self._may_explore(u)
+                        else False)
+            if got.rung is not None and not self._measured_best(got, u):
+                if not self.model.measured(got.rung.name):
+                    self._timing.add(got.rung.name)
+            else:
+                self._settle(got)
             return got
 
-    def took(self, name, units, seconds):
+    def _may_explore(self, unit):
+        """Whether this unit may try a way not measured here yet."""
+        if self.critical:
+            return False
+        rows = int((unit or {}).get("rows") or 0)
+        if rows:
+            median = self._median or (sorted(self._sizes)[
+                len(self._sizes) // 2] if self._sizes else None)
+            self._sizes.append(rows)
+            if median is not None and rows > EXPLORE_SIZE * median:
+                return False
+        return self._extra <= EXPLORE_BUDGET * max(self._spent, 0.0) \
+            or not self._spent
+
+    def _measured_best(self, got, unit):
+        """Whether the choice is the best of what was measured (not a
+        trial)."""
+        c = got.cost()
+        return c is not None and _measured(c) and c.mean < _TIMING
+
+    def _pressure(self, name):
+        """How much slower `name` goes with the resources it loads cut to
+        what their limits allow now."""
+        rung = next((r for r in self.rungs if r.name == name), None)
+        if rung is None or not self.limits or not rung.loads:
+            return 1.0
+        from .sizing import stage_of
+        k = 1.0
+        for resource, limit in self.limits.items():
+            stage = stage_of(resource)
+            if stage in rung.load_map and limit.value < limit.most:
+                k = max(k, limit.most / max(limit.value, 1))
+                self._why = (f"{resource} held to {limit.value} of"
+                             f" {limit.most} at a time")
+        return k
+
+    def _settle(self, got):
+        """The way the work stands on now; a change of it said."""
+        if got.rung is None:
+            return
+        was, self._on = self._on, got.rung
+        if was is None or was.name == got.rung.name or self.log is None:
+            return
+        why = self._why or "what was measured since"
+        self.log(f"{self.work}: {got.rung.said} for what is left, where"
+                 f" {was.said} went before - {why}")
+        self._why = ""
+
+    # --- what a unit took -----------------------------------------------------
+
+    def took(self, name, units, seconds, unit=None):
         """A unit done on `name`: `units` of work in `seconds`."""
         with self._lock:
             self.costs.saw(name, units, seconds)
             self._timing.discard(name)
+            if self.model is None:
+                return
+            before = self.model.estimate(name, unit)
+            z = self.model.saw(name, units, seconds, unit)
+            self._spent += float(seconds or 0)
+            if self._on is not None and name != self._on.name:
+                best = self.model.estimate(self._on.name, unit)
+                if best is not None:
+                    self._extra += max(0.0, float(seconds) - best.mean)
+            self.model.outcome(name, True)
+            from .costmodel import SURPRISE
+            if z is not None and abs(z) > SURPRISE and before is not None:
+                # the next unit climbs again on what this one taught; the
+                # switch, if there is one, is said with this as its why
+                rung = next((r for r in self.rungs if r.name == name), None)
+                self._why = (f"{rung.said if rung else name} took"
+                             f" {seconds:,.1f}s where"
+                             f" {before.said()} was predicted")
 
     def give_up(self, name, why):
         """`name` failed here and is not tried again on this work."""
         with self._lock:
             self.given_up.setdefault(name, why)
             self._timing.discard(name)
+            if self.model is not None:
+                self.model.outcome(name, False, why)
+
+    def save(self):
+        """What the trials learned, kept with the hop and the machine."""
+        if self.model is not None:
+            self.model.save()
 
 
 def from_model(model):
@@ -354,11 +635,176 @@ def _order(entries):
     return [e[3] for e in untried + out]
 
 
-def rank(rungs, costs=None):
-    """The rungs in the order the climb tries them."""
-    get = (costs or {}).get
-    return _order([(get(r.name), r.footprint, i, r)
-                   for i, r in enumerate(rungs)])
+def rank(rungs, costs=None, unit=None, explore=True):
+    """The rungs in the order the climb tries them. Where `costs` answers
+    for a unit (`costmodel.CostModel`), by what each costs on `unit`
+    (`_order_estimates`); by one number a rung otherwise, as always."""
+    rungs = list(rungs)
+    return _ranked(rungs, _priced(rungs, costs, unit), explore)
+
+
+def _estimating(costs):
+    return costs is not None and callable(getattr(costs, "estimate", None))
+
+
+def costed(rung, costs, unit=None, ranges=1):
+    """What `rung` costs on `unit`: an `Estimate` - its chance of failing
+    times the work a failure throws away counted in (`costmodel.risked`) -
+    where `costs` answers for a unit, seconds a unit where it keeps one
+    number, None where nothing is measured or predicted."""
+    if costs is None:
+        return None
+    if not _estimating(costs):
+        return costs.get(rung.name)
+    got = costs.estimate(rung.name, unit)
+    if got is None or not got.mean:
+        return got
+    p = costs.risk(rung.name) if callable(getattr(costs, "risk", None)) \
+        else 0.0
+    if p:
+        from .costmodel import risked
+        from .guarantees import lost
+        got = got.scaled(risked(got.mean, p, lost(rung, ranges)) / got.mean)
+    return got
+
+
+def _priced(rungs, costs, unit=None):
+    return {r.name: costed(r, costs, unit) for r in rungs}
+
+
+def _ranked(rungs, priced, explore=True):
+    entries = [(priced.get(r.name), r.footprint, i, r)
+               for i, r in enumerate(rungs)]
+    if any(hasattr(e[0], "mean") for e in entries):
+        return _order_estimates(entries, explore)
+    return _order(entries)
+
+
+def _measured(cost):
+    """Whether a cost was measured here (a number always was)."""
+    if cost is None:
+        return False
+    return getattr(cost, "measured", True)
+
+
+def _tied_estimates(a, b):
+    """Two costs within `TIE` of each other, or within the noise of one
+    unit's time about their lines (`Estimate.noise`): a difference timing
+    the units again could reverse. How far a line is stretched from the
+    units it was fitted on is not noise: the lower mean is the better
+    bet, and exploring is where that spread counts (`Trials`)."""
+    share = max(_tie(), getattr(a, "noise", 0.0) or 0.0,
+                getattr(b, "noise", 0.0) or 0.0)
+    return abs(a.mean - b.mean) <= share * max(abs(a.mean), abs(b.mean))
+
+
+def _tie():
+    """`TIE` as the timing noise measured on this machine has tuned it
+    (`tuning`); a number a unit always ties at `TIE` itself."""
+    from . import tuning
+    try:
+        return tuning.value("decide.TIE")
+    except Exception:  # noqa: BLE001 - the prior, then
+        return TIE
+
+
+def _by_mean(entries):
+    tried = sorted(entries, key=lambda e: (e[0].mean, e[2]))
+    out = []
+    while tried:
+        first = tried[0][0]
+        tie = [e for e in tried if _tied_estimates(e[0], first)]
+        out += sorted(tie, key=lambda e: (e[1], e[2]))
+        tried = [e for e in tried if e not in tie]
+    return out
+
+
+def _order_estimates(entries, explore=True):
+    """[(Estimate or None, footprint, position, item)] -> [item]. A rung
+    nothing measured or predicted is tried first, in its list's order, as
+    always. A measurement always beats a prediction: the measured rungs
+    by what they cost, a tie (within the noise) to the smaller footprint;
+    a rung only predicted goes before them where it may be faster - its
+    p10 below the measured best, so it is worth its trial (`explore`), or
+    its p90 below it, so it is faster for sure (committing) - and after
+    them otherwise. Where nothing is measured, the predictions rank. A
+    rung nothing says anything of goes last where the climb commits.
+    `explore` AGAIN - the trials of a work of many units - also times
+    again a measured rung whose p10 is below the best and that ran fewer
+    than `AGAIN_UNITS` units: its lead is not yet outside the spread."""
+    unknown = sorted((e for e in entries if e[0] is None),
+                     key=lambda e: e[2])
+    measured = _by_mean([e for e in entries
+                         if e[0] is not None and e[0].measured])
+    predicted = [e for e in entries
+                 if e[0] is not None and not e[0].measured]
+    if not measured:
+        head, tail = _by_mean(predicted), []
+    else:
+        best = measured[0][0].mean
+        ahead = ((lambda e: e[0].low() < best) if explore
+                 else (lambda e: e[0].high() < best))
+        head = _by_mean([e for e in predicted if ahead(e)])
+        tail = _by_mean([e for e in predicted if not ahead(e)])
+        if explore == AGAIN:
+            again = [e for e in measured[1:] if e[0].n < AGAIN_UNITS
+                     and e[0].low() < best]
+            head = sorted(head + again, key=lambda e: (e[0].low(), e[2]))
+            measured = [e for e in measured if e not in again]
+    if not explore and (measured or predicted):
+        return [e[3] for e in head + measured + tail + unknown]
+    return [e[3] for e in unknown + head + measured + tail]
+
+
+#: `explore` for the trials of a work of many units (`Trials`)
+AGAIN = "again"
+#: units a measured rung is timed on before its lead or its lag is taken
+#: as it stands
+AGAIN_UNITS = 2
+
+
+def _why_not(chosen, runner, priced):
+    """Why `runner`, the next way that holds, was not taken over
+    `chosen`, with each one's time where there is one."""
+    a, b = priced.get(chosen.name), priced.get(runner.name)
+    if a is None and b is None:
+        return (f"{chosen.said} comes first in its list, and neither was"
+                " measured or predicted here")
+    if a is None:
+        return (f"{chosen.said} is tried first: nothing has measured or"
+                " predicted it here yet")
+    if b is None:
+        return "nothing has measured or predicted it here yet"
+    if hasattr(a, "mean") and hasattr(b, "mean"):
+        if _tied_estimates(a, b):
+            return (f"within the noise ({b.said()} against {a.said()}),"
+                    + (" and it leaves more behind"
+                       if runner.footprint > chosen.footprint
+                       else " and it comes later in its list"))
+        if b.measured:
+            return f"measured slower: {b.said()} against {a.said()}"
+        return (f"predicted slower: {b.said()} against {a.said()}"
+                + ("; the lead is outside its spread"
+                   if b.low() >= a.mean else ""))
+    if hasattr(a, "mean") or hasattr(b, "mean"):
+        return "measured or predicted slower here"
+    if _tied(a, b):
+        return ("within what timing a busy server twice can give, and it"
+                + (" leaves more behind" if runner.footprint
+                   > chosen.footprint else " comes later in its list"))
+    return (f"measured {b / a:,.1f} times the time a unit of"
+            f" {chosen.said} took" if a else "measured slower here")
+
+
+def _strongest(kept):
+    """(the rungs reaching the strongest guarantees any of them does,
+    [(rung, why not)]) - only where a rung says its guarantees itself: a
+    list that says none is ranked as it always was."""
+    from . import guarantees as g
+    if not any(g.explicit(r) for r in kept):
+        return list(kept), []
+    keep, short = g.reaching(kept, lambda r: g.of([r]))
+    return keep, [(r, f"{r.said} gives {why}") for r, why in short]
 
 
 # --- a change on the source a rung needs -------------------------------------
@@ -588,30 +1034,41 @@ def _told(fn):
 
 @_told
 def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
-          prove=True):
+          prove=True, unit=None, explore=True):
     """The `Choice` for one unit of work from its `rungs`.
 
     `need` is what the work must have (capabilities); `facts` what the
     needs and proofs read (a dict, or `Facts` to read lazily); `costs`
     where the rungs' measurements are (`Costs`, `HopCosts`, any mapping of
-    name to seconds a unit); `keep` the rung a restart stands on
-    (`remembered`), taken first where it still holds and proves.
+    name to seconds a unit - or a `costmodel.CostModel`, which answers
+    for `unit` with a spread and predicts what was never measured); `keep`
+    the rung a restart stands on (`remembered`), taken first where it
+    still holds and proves. Where the rungs say their guarantees, only
+    those reaching the strongest any of them does are ranked (`_strongest`).
+    `explore` False commits: a rung only predicted ranks above one
+    measured only where it is faster even at its p90.
 
     The reason is why the ways the list prefers were passed over, or the
     chosen rung's own `because` where none was: a way the list puts below
-    the chosen one is no reason for it."""
+    the chosen one is no reason for it. The runner-up, the costs and the
+    facts read are kept on the `Choice` (`as_evidence`)."""
     facts = facts if facts is not None else Facts()
     rungs = tuple(rungs)
     at = {id(r): i for i, r in enumerate(rungs)}
     kept, out = prune(rungs, facts, need)
-    ranked = rank(kept, costs)
+    kept, short = _strongest(kept)
+    out = sorted(out + short, key=lambda x: at[id(x[0])])
+    priced = _priced(kept, costs, unit)
+    ranked = _ranked(kept, priced, explore)
     order, passed = list(ranked), []
     if keep:
         held = [r for r in ranked if r.name == keep]
         order = held + [r for r in ranked if r.name != keep]
         passed = [(r, f"the way the last run took: {why}")
                   for r, why in out if r.name == keep]
-    for r in order:
+    costs_of = tuple((r.name, priced.get(r.name)) for r in ranked)
+    asked = tuple(getattr(facts, "asked", ()) or ())
+    for i, r in enumerate(order):
         why = r.prove(facts) if prove and r.prove else None
         if why:
             passed.append((r, f"{r.said} did not prove itself: {why}"))
@@ -626,14 +1083,21 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
             reason = _joined(above)
         else:
             reason = r.because or f"{r.said}: the first way that holds"
-            timed = [o for o in ranked if (costs or {}).get(o.name)
-                     is not None]
+            timed = [o for o in ranked if _measured(priced.get(o.name))]
+            mine = priced.get(r.name)
             if len(timed) > 1 and r in timed:
                 reason += "; measured the cheapest of the ways timed here"
-        return Choice(work, r, reason, tuple(out + passed), tuple(ranked))
+            elif mine is not None and not _measured(mine) and not timed:
+                reason += f"; predicted the fastest here, {mine.said()}"
+        runner = next(iter(order[i + 1:]), None)
+        from . import guarantees as g
+        return Choice(work, r, reason, tuple(out + passed), tuple(ranked),
+                      costs_of, runner,
+                      _why_not(r, runner, priced) if runner else "",
+                      tuple(g.named(g.of([r])).items()), asked)
     return Choice(work, None,
                   _joined(w for _, w in out + passed) or "no way was given",
-                  tuple(out + passed), tuple(ranked))
+                  tuple(out + passed), tuple(ranked), costs_of, asked=asked)
 
 
 def remember(where, work, name):
@@ -947,6 +1411,10 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
             if not operational(e) or not switch(e):
                 raise
             why, last_error = _first(e), e
+            if callable(getattr(costs, "outcome", None)):
+                # its chance of failing, for the next climb here and the
+                # next hop of these engines (`costmodel.risk`)
+                costs.outcome(rung.name, False, why)
             try:
                 if rung.cleanup is not None:
                     rung.cleanup(facts, e)
@@ -972,6 +1440,8 @@ def attempt(work, rungs, run, facts=None, need=(), costs=None, where=None,
             continue
         if where is not None:
             remember(where, work, rung.name)
+        if callable(getattr(costs, "outcome", None)):
+            costs.outcome(rung.name, True)
         return choice, result
 
 
@@ -1002,6 +1472,27 @@ class Strategy:
     parts: dict = field(default_factory=dict)    #: {part name: Rung}
     reasons: dict = field(default_factory=dict)  #: {part name: reason}
     why_not: str = ""                             #: when nothing fits
+    #: what the whole strategy costs on the unit (`space`), the guarantees
+    #: it reaches ({guarantee: level}), and the runners-up with why not:
+    #: ((Strategy, why not), ...)
+    estimate: object = None
+    guarantees: dict = field(default_factory=dict)
+    runners: tuple = ()
+
+    def as_evidence(self):
+        """The strategy as data, in the operator's words."""
+        def cost(e):
+            return e.as_evidence() if hasattr(e, "as_evidence") else e
+        return {"work": str(self.work),
+                "parts": {p: r.said for p, r in self.parts.items()},
+                "reasons": dict(self.reasons), "why_not": self.why_not,
+                "predicted": cost(self.estimate),
+                "guarantees": dict(self.guarantees),
+                "runners_up": [{"parts": {p: r.said
+                                          for p, r in s.parts.items()},
+                                "predicted": cost(s.estimate),
+                                "why_not": why}
+                               for s, why in self.runners]}
 
     def __bool__(self):
         return bool(self.parts)
@@ -1120,6 +1611,395 @@ def compose(work, parts, facts=None, need=(), costs=None, keep=None):
     proofs = _joined(w for w in failed.values() if w)
     return Strategy(work, why_not=_joined([first_unfit or "", proofs])
                     or "no combination of the parts fits")
+
+
+# --- every way of a strategy, weighed (backlog P0-SMART, note A) ------------
+# `compose` ranks the combinations of the parts and takes the first that
+# fits and proves. `space` weighs every one of them: each combination that
+# fits, its guarantees computed from its parts (`guarantees.of`) - only
+# those reaching the strongest any combination reaches go on - each costed
+# on the unit and ranked. The enumeration is a depth-first walk that leaves
+# a subtree out only where a bound proves nothing in it can be taken: its
+# best possible guarantees are below a combination already found
+# (`guarantees.optimistic`). A combination whose cheapest possible cost is
+# above the p90 of the best one is counted slower beyond doubt. What the
+# walk found of the combinations' fit and guarantees - not their costs,
+# which move with every unit - is kept for the same parts and need.
+
+#: the structural walks kept, the oldest dropped past this many
+SPACES_KEPT = 256
+_SPACES = {}
+
+
+@dataclass
+class Space:
+    """Every way a work can go, weighed: the one taken (`best`), the ones
+    ranked behind it, the strongest guarantees reached and how many
+    combinations were weighed, left out and why."""
+    work: str
+    best: object
+    ranked: list = field(default_factory=list)
+    strongest: dict = field(default_factory=dict)
+    counts: dict = field(default_factory=dict)
+    weaker: list = field(default_factory=list)
+
+    def said(self):
+        """One line for the decision record: how much was weighed."""
+        c = self.counts
+        return (f"{self.work}: {c.get('combinations', 0):,} combinations,"
+                f" {c.get('evaluated', 0):,} weighed ({c.get('unfit', 0):,}"
+                f" do not fit, {c.get('weaker', 0):,} give less than the"
+                f" strongest, {c.get('bounded', 0):,} left out by a bound,"
+                f" {c.get('dominated', 0):,} slower beyond doubt)")
+
+    def as_evidence(self):
+        return {"work": str(self.work),
+                "chosen": self.best.as_evidence() if self.best else None,
+                "strongest": dict(self.strongest),
+                "counts": dict(self.counts),
+                "weaker": [{"parts": [r.said for r in c], "why": why}
+                           for c, why in self.weaker[:20]]}
+
+
+def _part_cost(costs, part, rung, unit):
+    if costs is None:
+        return None
+    name = f"{part}/{rung.name}"
+    if _estimating(costs):
+        rungs = getattr(costs, "rungs", None)
+        if isinstance(rungs, dict) and name not in rungs:
+            rungs[name] = rung
+    return costed(dataclasses.replace(rung, name=name), costs, unit)
+
+
+def _sum_costs(cs):
+    """The cost of a combination: None where a part's is unknown, the sum
+    otherwise - an `Estimate`'s spreads added as variances."""
+    if any(c is None for c in cs):
+        return None
+    if not any(hasattr(c, "mean") for c in cs):
+        return sum(cs)
+    from .costmodel import MEASURED_TRUTH, PREDICTED, Estimate
+    return Estimate(sum(c.mean for c in cs),
+                    math.sqrt(sum(c.sd ** 2 for c in cs)),
+                    MEASURED_TRUTH if all(c.measured for c in cs)
+                    else PREDICTED, "the parts' own",
+                    min(c.n for c in cs), min(c.dof for c in cs),
+                    max(c.noise for c in cs))
+
+
+def _low(c):
+    if c is None:
+        return 0.0
+    return c.low() if hasattr(c, "low") else float(c)
+
+
+def _high(c):
+    if c is None:
+        return math.inf
+    return c.high() if hasattr(c, "high") else float(c)
+
+
+def _structure(names, ladders):
+    """Every combination that fits with its guarantees, what the walk
+    counted, the first reason one did not fit, and {(part, rung name):
+    why a combination with it did not fit}."""
+    from . import guarantees as g
+    key = (tuple(names), tuple(tuple(id(r) for r in lad)
+                               for lad in ladders))
+    got = _SPACES.get(key)
+    if got is not None and all(len(la) == len(lb) and all(
+            a is b for a, b in zip(la, lb))
+            for la, lb in zip(got[0], ladders)):
+        return got[1]
+    strong = [sorted(lad, key=lambda r: g.vector(g.of([r])), reverse=True)
+              for lad in ladders]
+    fits, counts = [], {"evaluated": 0, "unfit": 0, "bounded": 0}
+    best = [None]
+    unfit_with, first = {}, [None]
+    sizes = [len(lad) for lad in ladders]
+
+    def left(i):
+        n = 1
+        for k in sizes[i:]:
+            n *= k
+        return n
+
+    def walk(i, chosen):
+        if best[0] is not None and i < len(ladders):
+            if g.vector(g.optimistic(chosen, strong[i:])) < best[0]:
+                counts["bounded"] += left(i)
+                return
+        if i == len(ladders):
+            counts["evaluated"] += 1
+            combo = tuple(chosen)
+            why = _unfit(dict(zip(names, combo)))
+            if why:
+                counts["unfit"] += 1
+                first[0] = first[0] or why
+                for n, r in zip(names, combo):
+                    unfit_with.setdefault((n, r.name), why)
+                return
+            lv = g.of(combo)
+            v = g.vector(lv)
+            if best[0] is None or v > best[0]:
+                best[0] = v
+            fits.append((combo, lv))
+            return
+        for r in strong[i]:
+            walk(i + 1, chosen + [r])
+    walk(0, [])
+    counts["combinations"] = left(0)
+    # the combinations in the ladders' own order, as `compose` ranks them
+    at = [{id(r): k for k, r in enumerate(lad)} for lad in ladders]
+    fits.sort(key=lambda x: tuple(at[i][id(r)] for i, r in
+                                  enumerate(x[0])))
+    out = (fits, counts, first[0], unfit_with)
+    if len(_SPACES) >= SPACES_KEPT:
+        _SPACES.pop(next(iter(_SPACES)))
+    _SPACES[key] = (tuple(tuple(lad) for lad in ladders), out)
+    return out
+
+
+def space(work, parts, facts=None, need=(), costs=None, keep=None,
+          unit=None, explore=True, runners=3):
+    """Every way `work` can go, weighed: a `Space` whose `best` is the
+    `Strategy` taken - the fastest of the combinations that fit and reach
+    the strongest guarantees any combination does, proved - with its cost
+    on `unit`, its guarantees and its `runners` runners-up, each with why
+    not. `compose`'s arguments, and its rules for what is never measured,
+    the footprint and a kept strategy."""
+    from . import guarantees as g
+    facts = facts if facts is not None else Facts()
+    parts = [p if isinstance(p, Part) else Part(*p) for p in parts]
+    given = set()
+    for p in parts:
+        given |= p.owns
+    missing = [c for c in need if c not in given]
+    if missing:
+        return Space(work, Strategy(work, why_not="no way here gives what"
+                                    " it needs: " + ", ".join(missing)))
+    ladders, out = [], {}
+    for p in parts:
+        kept, dropped = prune(p.rungs, facts,
+                              tuple(c for c in need if c in p.owns))
+        out[p.name] = dropped
+        if not kept:
+            return Space(work, Strategy(work, why_not=_joined(
+                w for _, w in dropped)))
+        ladders.append(kept)
+    names = [p.name for p in parts]
+    fits, counts, first_unfit, unfit_with = _structure(names, ladders)
+    counts = dict(counts)
+    if not fits:
+        return Space(work, Strategy(work, why_not=first_unfit or "no"
+                                    " combination of the parts fits"),
+                     counts=counts)
+    top = max(g.vector(lv) for _, lv in fits)
+    admissible, weaker = [], []
+    for combo, lv in fits:
+        if g.vector(lv) >= top:
+            admissible.append((combo, lv))
+        else:
+            weaker.append((combo, lv))
+    counts["weaker"] = len(weaker)
+    part_cost = [{r.name: _part_cost(costs, n, r, unit) for r in lad}
+                 for n, lad in zip(names, ladders)]
+    best_high = min((_high(_sum_costs([part_cost[i][r.name] for i, r in
+                                       enumerate(c)]))
+                     for c, _ in admissible), default=math.inf)
+    # a combination whose cheapest is above the best one's dearest is
+    # slower beyond doubt: counted as such, and still ranked behind, so
+    # the runners-up are what they are
+    costed_, dominated = [], 0
+    for combo, lv in admissible:
+        cs = [part_cost[i][r.name] for i, r in enumerate(combo)]
+        if None not in cs and sum(_low(c) for c in cs) > best_high:
+            dominated += 1
+        costed_.append((combo, lv, _sum_costs(cs)))
+    counts["dominated"] = dominated
+    entries = [(total, sum(r.footprint for r in combo),
+                tuple(lad.index(r) for lad, r in zip(ladders, combo)),
+                (combo, lv, total))
+               for combo, lv, total in costed_]
+    if any(hasattr(e[0], "mean") for e in entries):
+        order = _order_estimates(entries, explore)
+    else:
+        order = _order(entries)
+    if keep:
+        order.sort(key=lambda x: tuple(r.name for r in x[0]) != tuple(
+            keep.get(n) for n in names))
+    failed, chosen = {}, None
+    for item in order:
+        bad = False
+        for n, r in zip(names, item[0]):
+            if (n, r.name) not in failed:
+                failed[(n, r.name)] = r.prove(facts) if r.prove else None
+            bad = bad or bool(failed[(n, r.name)])
+        if not bad:
+            chosen = item
+            break
+    ranked = [(x[0], x[2]) for x in order]
+    strongest = g.named(dict(zip(g.ORDER, top)))
+    said_weaker = [(c, g.short(lv, top)) for c, lv in weaker]
+    if chosen is None:
+        return Space(work, Strategy(work, why_not=_joined(
+            w for w in failed.values() if w) or "no combination proved"),
+            ranked, strongest, counts, said_weaker)
+    combo, lv, total = chosen
+    reasons = {}
+    for i, (p, lad, r) in enumerate(zip(parts, ladders, combo)):
+        above = [w for o, w in out[p.name]
+                 if p.rungs.index(o) < p.rungs.index(r)]
+        for o in lad[:lad.index(r)]:
+            if failed.get((p.name, o.name)):
+                above.append(f"{o.said} did not prove itself:"
+                             f" {failed[(p.name, o.name)]}")
+            elif not any(c[i] is o for c, _ in fits):
+                above.append(unfit_with.get((p.name, o.name))
+                             or f"{o.said} does not go with the rest")
+            elif not any(c[i] is o for c, _ in admissible):
+                # the strongest any way with it reaches, and where that
+                # falls short
+                lv = max((x for c, x in weaker if c[i] is o),
+                         key=g.vector)
+                above.append(f"{o.said} gives {g.short(lv, top)} with any"
+                             " way the other parts can go")
+            else:
+                above.append(f"the whole way costs less without {o.said}")
+        reasons[p.name] = _joined(above) or r.because or (
+            f"{r.said}: the first way that fits")
+    behind = []
+    for c, t in ranked:
+        if c is combo or len(behind) >= runners:
+            continue
+        behind.append((Strategy(work, dict(zip(names, c)), estimate=t,
+                                guarantees=g.named(g.of(c))),
+                       _strategy_why_not(total, t, combo, c)))
+    best = Strategy(work, dict(zip(names, combo)), reasons, estimate=total,
+                    guarantees=g.named(lv), runners=tuple(behind))
+    for listen in list(LISTENERS):
+        try:
+            listen(best)
+        except Exception:  # noqa: BLE001 - the choice stands
+            pass
+    return Space(work, best, ranked, strongest, counts, said_weaker)
+
+
+def _strategy_why_not(a, b, mine, other):
+    """Why the combination `other`, costing `b`, was not taken over
+    `mine`, costing `a`."""
+    if a is None or b is None:
+        return "not every part of it was measured or predicted here"
+    if hasattr(a, "mean"):
+        if _tied_estimates(a, b):
+            more = sum(r.footprint for r in other) > sum(
+                r.footprint for r in mine)
+            return (f"within the noise ({b.said()} against {a.said()})"
+                    + (", and it leaves more behind" if more else ""))
+        return (f"{'measured' if b.measured else 'predicted'} slower:"
+                f" {b.said()} against {a.said()}")
+    if _tied(a, b):
+        return "within what timing a busy server twice can give"
+    return (f"measured {b / a:,.1f} times the time" if a
+            else "measured slower here")
+
+
+# --- the run's decision record (backlog P0-SMART, the owner's note on D) -----
+# The owner, 2026-09-30: "the logic and the choices inside - the user
+# doesn't need to know them". The console says outcomes: what happens to
+# each side, the time with its spread, the guarantees reached, what the
+# operator must do or approve, a line where a way switched. Every choice
+# in full - the strategies weighed, the runners-up and why not, the facts
+# that decided it and the ones not known, predictions against
+# measurements - goes to the run's decision record (the hop's
+# `decisions.jsonl`, which the run keeps every choice in as it is made,
+# `session.Decisions`), to `Choice.as_evidence` for the evidence export,
+# and to the console only where `MIGKIT_EXPLAIN=1`.
+
+
+def explaining():
+    """Whether the console shows the decision record as well."""
+    return os.environ.get("MIGKIT_EXPLAIN", "").strip().lower() in (
+        "1", "yes", "true", "on")
+
+
+def _record_path(hop):
+    from .session import DECISIONS
+    return os.path.join(str(hop.report_dir()), DECISIONS)
+
+
+def record(hop, what, say=None, work=None, way=None, reason=""):
+    """One decision in full - a `Choice`, a `Strategy`, a `Space`, a joint
+    plan, or a dict - appended to the run's decision record in the run's
+    own shape (work, way, reason, what was passed over) with the whole of
+    it under "detail", and said through `say` line by line where
+    `explaining()`. `hop` None keeps it nowhere."""
+    from . import session
+    detail = what.as_evidence() if hasattr(what, "as_evidence") \
+        else dict(what)
+    if hasattr(what, "reason") or hasattr(what, "parts"):
+        head = session.choice_record(what)
+    else:
+        head = {"work": str(work or detail.get("work") or ""),
+                "way": way or "", "reason": reason, "passed": []}
+    got = {"session": session.current(),
+           "at": time.strftime("%Y-%m-%d %H:%M:%S"), **head,
+           "detail": detail}
+    if hop is not None:
+        try:
+            path = _record_path(hop)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a") as f:
+                f.write(json.dumps(got, default=str) + "\n")
+        except (OSError, AttributeError, TypeError):
+            pass
+    if say is not None and explaining():
+        for line in explained(detail):
+            say(line)
+    return got
+
+
+def explained(got, indent="  ", most=12):
+    """A decision record entry as lines to read, `most` items a level."""
+    out = []
+
+    def said(x):
+        return f"{x:.3g}" if isinstance(x, float) else str(x)
+
+    def walk(v, depth):
+        pad = indent * depth
+        items = (list(v.items()) if isinstance(v, dict)
+                 else list(enumerate(v)))
+        for k, x in items[:most]:
+            if x in (None, [], {}, ""):
+                continue
+            head = f"{pad}{k}:" if isinstance(v, dict) else f"{pad}-"
+            if isinstance(x, (dict, list)):
+                out.append(head)
+                walk(x, depth + 1)
+            else:
+                out.append(f"{head} {said(x)}")
+        if len(items) > most:
+            out.append(f"{pad}... and {len(items) - most:,} more")
+    walk(got, 0)
+    return ["decision:"] + [indent + line for line in out]
+
+
+def recorded(hop, last=200):
+    """The last entries of the run's decision record of `hop`."""
+    try:
+        with open(_record_path(hop)) as f:
+            lines = f.readlines()[-last:]
+    except (OSError, AttributeError, TypeError):
+        return []
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
 
 
 # --- every shape has a way, engine by engine --------------------------------
