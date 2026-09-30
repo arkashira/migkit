@@ -331,17 +331,15 @@ class DynamoDBEngine(NeutralCopier, Engine):
         if where:
             raise SystemExit(f"{table} moves under a row filter, which is"
                              " SQL, and DynamoDB takes none")
+        from .. import pieces
         declared = self._declared(side, db, table)
         names = [n for n, _ in columns]
-        batch = []
-        for item in self._scan(side, db, table, names):
-            batch.append([self._from_attr(declared.get(n, ""), item.get(n))
-                          for n in names])
-            if len(batch) >= size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+        # an item is 400 KB at most and a scan page 1 MB: handed on in
+        # batches of `size` rows or `pieces.BATCH_BYTES`
+        yield from pieces.by_bytes(
+            ([self._from_attr(declared.get(n, ""), item.get(n))
+              for n in names] for item in self._scan(side, db, table, names)),
+            most_rows=int(size))
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):

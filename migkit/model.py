@@ -494,6 +494,11 @@ def worker_memory(eng, sizes, tables=None, db=None):
                  if x]
         batch = min(int(most_bytes), int(count * max(means or [0])))
     most = widest[1] if widest else 0
+    # a copier that carries a value past a piece a piece at a time holds a
+    # piece of it, never the value (`CARRIES_IN_PIECES`, `pieces`)
+    piece = getattr(eng, "CARRIES_IN_PIECES", None)
+    if piece and most > piece:
+        most = int(piece)
     # never under what a worker was measured to hold before rows were
     # sized: this only ever holds a move of wide rows back
     return max(WORKER_MEMORY, int(own + per * max(batch, most))), widest
@@ -634,6 +639,11 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
         m.arrival = (arrived[0] / arrived[1], CATALOGUED,
                      f"the source's own count over its last"
                      f" {arrived[1] / 3600:,.1f}h")
+    from .pieces import PIECE
+    way = getattr(eng, "LARGE_VALUES", None)
+    if widest and widest[1] > PIECE and way is not None:
+        # how the rows wider than a piece go, where there are any
+        m.notes.append(f"large values: {way.said}")
     if probe is None:
         probe = disk >= probe_floor(hop)
     if probe and carried:

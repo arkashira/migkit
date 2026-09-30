@@ -74,14 +74,18 @@ def renderer(cls):
 def digest_renderer(cls):
     """f(value) giving what `canon.digest_value(cls, value)` gives: the
     column's `renderer`, and a text or byte value wider than `canon.WIDE`
-    as its length and md5, as every server's digest writes it."""
+    as its length and md5, as every server's digest writes it - one the
+    server hashed where it lies (`pieces.Hashed`) as what it wrote."""
     from . import canon
+    from .pieces import Hashed
     one = renderer(cls)
     if cls == "bytes":
         def wide(v):
             if isinstance(v, (bytes, bytearray, memoryview)) \
                     and len(v) > canon.WIDE:
                 return canon.wide_bytes(v)
+            if type(v) is Hashed:
+                return v.text()
             return one(v)
         return wide
     if cls == "text":
@@ -90,6 +94,8 @@ def digest_renderer(cls):
                 got = canon.wide_text(v)
                 if got is not None:
                     return got
+            if type(v) is Hashed:
+                return v.text()
             return one(v)
         return wide
     return one

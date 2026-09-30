@@ -3481,6 +3481,23 @@ they are three cross-cutting gaps, not 26 engine problems:
   Oracle): values read, written and hashed in pieces, memory sized from
   the widest row (R22 `model.row_sizes`), wide values digested where
   they lie (`canon.WIDE`) - one mechanism, an adapter per engine.
+  **Built (2026-10-01): `migkit/pieces.py`**, each engine's adapter its
+  `LARGE_VALUES`. Rows sized where they lie (`sql_row_sizes`; `$bsonSize`,
+  `MEMORY USAGE`, the file's own lengths), every read ending at
+  `BATCH_BYTES` or one row (`fetch_until`, `by_bytes`, `arrow_rows`), byte
+  values past `PIECE` read in pieces by key on SQL Server and Db2
+  (`ReadPlan`) and `(max)` values written a piece a statement on SQL Server
+  (`written_in_pieces`), Redis keys past a piece read, written and compared
+  by their type's own commands, wide values hashed where they lie in every
+  warehouse dialect's digest and in each fold (`DigestPlan`, `Hashed`), the
+  pair comparing a read-back batch by digest texts, Kafka's producer sized
+  to the topic's bound with every send checked, ASE sessions taking whole
+  text values (32 KB cut otherwise). Not applicable with the bound as the
+  reason: DynamoDB (400 KB item), Cassandra (a mutation, 16 MB), Redshift
+  (16 MB value). Left: the generic engine (it moves nothing; item 33),
+  and the per-row factors of `PAIR_MEMORY`, `KafkaEngine.COPY_MEMORY`
+  counted from the code, measured by `CAP_CALIBRATE=1` on
+  `tests/test_large_values_on_every_engine.py`.
 * **Partitioned** - not yet on 15: copy by partition (the partition as
   the range), partition coverage checked (deep checks did it for
   PostgreSQL and MySQL), partition-aware workers.

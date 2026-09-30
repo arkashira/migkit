@@ -10,6 +10,7 @@ shares.
 Written 2026-09-25 without a server to run it against: IBM's Db2 image
 runs on x86 only, and this machine is arm64.
 """
+from .. import pieces
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 
@@ -77,6 +78,21 @@ def db2_connect_licence():
     return found[0] if found else None
 
 
+def large_values(sample=None):
+    """What Db2 does with its large values (`pieces`), on each platform: a
+    value's length as the server keeps it (`LENGTH`, off a LOB's
+    descriptor), a byte value past a piece read by `SUBSTR` of it; a LOB
+    is bound whole by the driver when written, and a wide value is hashed
+    here as it is folded - no platform's MD5 takes every length. `sample`
+    reads a share of a large table, where the platform has one."""
+    return pieces.Sql(
+        "sized by the server, a byte value read a piece at a time",
+        length="length({c})",
+        types=("blob", "clob", "dbclob", "varchar", "varbinary", "varbin",
+               "vargraphic", "long varchar", "long vargraphic"),
+        piece="substr({c}, {at}, {n})", sample=sample)
+
+
 def _twelve(text):
     """A Db2 timestamp's text of twelve digits after the second as the
     value, nine kept; one with a digit past the ninth, which no other
@@ -101,6 +117,9 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
     LIMIT = "fetch"
     PADDED = ("CHARACTER", "CHAR", "GRAPHIC")
     SCALED = ("DECIMAL", "NUMERIC")
+    #: large values: Linux, UNIX and Windows sizes a large table over a
+    #: sample of its pages
+    LARGE_VALUES = large_values("tablesample system ({pct})")
 
     def _nanos_text(self, quoted, declared):
         """A `TIMESTAMP(p)` of more than six digits as the server writes

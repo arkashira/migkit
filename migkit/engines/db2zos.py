@@ -22,7 +22,7 @@ Written 2026-09-30 without a z/OS to run it against; IBM Z Xplore gives a
 free shared z/OS with Db2 for a manual proof.
 """
 from .base import Result
-from .db2 import Db2Engine
+from .db2 import Db2Engine, large_values
 from .dbapi import MARK
 
 #: the declared type from `SYSIBM.SYSCOLUMNS`, with the numbers a
@@ -60,6 +60,9 @@ class Db2ZosEngine(Db2Engine):
                       " one of z/OS's")
     PADDED = ("CHAR", "GRAPHIC")
     SCALED = ("DECIMAL",)
+    #: large values as Db2's, a large table sized over every row: a
+    #: sample of its pages is asked of Linux, UNIX and Windows only
+    LARGE_VALUES = large_values()
 
     def neutral_tables(self, side, db):
         return [t for t in (self._said(n.strip()) for (n,) in self._rows(

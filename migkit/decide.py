@@ -2127,6 +2127,23 @@ WAYS = {
                                " answer: there is no piece of it to read"
                                " apart") for n in _READ_ONLY},
         "oracle": ("yes", "@_read_in_pieces"),
+        # the one way of `pieces` - sized where they lie, batches cut by
+        # bytes, read and written in pieces, hashed where they lie - each
+        # engine's adapter its `LARGE_VALUES`
+        **{n: ("yes", "@LARGE_VALUES") for n in (
+            "mongodb", "mssql", "redis", "kafka", "sqlite", "parquet",
+            "clickhouse", "db2", "db2i", "db2zos", "ase", "opensearch",
+            "snowflake", "bigquery", "duckdb", "iceberg", "delta",
+            "hetero")},
+        "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
+                                     " under the 1 MB a scan page returns"),
+        "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
+                                      " most half a commit-log segment:"
+                                      " 16 MB by default"),
+        "redshift": (NOT_APPLICABLE, "a value is 16 MB at most (a VARBYTE"
+                                     " or a SUPER) and a VARCHAR 65,535"
+                                     " bytes, each read whole in batches"
+                                     " cut by bytes"),
         "*": (NOT_YET, "R10"),
     },
     "partitioned": {

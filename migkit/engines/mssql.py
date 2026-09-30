@@ -1,6 +1,6 @@
 import time
 
-from .. import canon, decide
+from .. import canon, decide, pieces
 from ..util import run, which
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows
@@ -1054,6 +1054,26 @@ class MSSQLEngine(DbapiRows, Engine):
     PARAMSTYLE = "pyformat"
     LIMIT = "top"
 
+    #: large values (`pieces`): a value's bytes as the server keeps them,
+    #: `datalength` - read off the value's root, not the value; a byte
+    #: value past a piece read by `substring` of it, and a value of a
+    #: `(max)` type written a piece a statement through `.write`: the
+    #: driver writes a parameter into the statement's own text, a byte
+    #: value as hex twice its size. A byte value's md5 by `hashbytes`,
+    #: which takes any length from SQL Server 2016; a large table sized over
+    #: a sample of its pages
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, a byte value read and every (max) value"
+        " written a piece at a time, byte values hashed where they lie",
+        length="datalength({c})",
+        types=("varbinary", "varchar", "nvarchar", "text", "ntext", "image",
+               "xml", "binary"),
+        piece="substring({c}, {at}, {n})",
+        append="{c}.write({v}, null, null)",
+        appends=("varbinary(max)", "varchar(max)", "nvarchar(max)"),
+        md5="convert(varchar(32), hashbytes('MD5', {c}), 2)",
+        sample="tablesample system ({pct} percent)")
+
     def _connect(self, side, db):
         import pymssql
         ep = self.hop.source if side == "src" else self.hop.target
@@ -1561,7 +1581,12 @@ class MSSQLEngine(DbapiRows, Engine):
     WRITE_WAYS = (
         decide.Rung("bulk load", "SQL Server's bulk load, staged and"
                                  " promoted",
-                    needs=(decide.Need("its driver",
+                    # the stage takes the batch whole; a value past a
+                    # piece goes in a piece a statement (`LARGE_VALUES`)
+                    needs=(decide.Need("no value to write in pieces",
+                                       lambda f: not f["past a piece"],
+                                       "{rung} writes no value in pieces"),
+                           decide.Need("its driver",
                                        lambda f: f["driver"] is None,
                                        lambda f: f["driver"]),
                            decide.Need("a table that has not refused it",
@@ -1692,12 +1717,14 @@ class MSSQLEngine(DbapiRows, Engine):
     def _base(declared):
         return str(declared or "").split("(")[0].strip().lower()
 
-    def _write_ladder(self, side, db, table, columns, rows):
+    def _write_ladder(self, side, db, table, columns, rows, wide=False):
         """(facts, costs, key) of a batch of `rows` rows into `table`
         climbing `WRITE_WAYS`: the costs - what each way was measured to
         cost (`WRITE_COSTS`) until each is timed here, for batches of this
-        size - only where both ways hold, and the batch is then timed."""
+        size - only where both ways hold, and the batch is then timed.
+        `wide`: the batch holds a value past a piece (`LARGE_VALUES`)."""
         facts = decide.Facts(
+            **{"past a piece": lambda: wide},
             driver=self._bulk_unusable,
             refused=lambda: self.__dict__.get("_refused", {}).get(
                 (side, db, str(table))),
@@ -1743,7 +1770,8 @@ class MSSQLEngine(DbapiRows, Engine):
             return 0
         self._target_only(side, "write rows")
         facts, costs, key = self._write_ladder(side, db, table, columns,
-                                               len(rows))
+                                               len(rows),
+                                               pieces.wider_than(rows))
         by_statements = super().neutral_write
 
         def run(choice):

@@ -37,6 +37,7 @@ import json
 import os
 import posixpath
 
+from .. import pieces
 from .base import Engine, NeutralCopier
 from .warehouse import arrow_array
 
@@ -56,6 +57,15 @@ class _Lake(NeutralCopier, Engine):
     #: the tail numbers its batches, and each commit says which it holds
     EXACT_BATCHES = True
     PROOF_ROWS = 64
+    #: large values - a table's files are Parquet, whose pages hold a value
+    #: whole: read as the format's record batches, each made values a slice
+    #: cut by bytes at a time (`_rows`) and handed on in batches of
+    #: `pieces.BATCH_BYTES`; hashed where they lie by DuckDB's digest over
+    #: the rows as Arrow, a wide value as its length and md5
+    #: (`warehouse_sql`); one commit a batch written
+    LARGE_VALUES = pieces.Way(
+        "read in batches cut by bytes, wide values hashed where they lie,"
+        " one commit a batch written")
 
     def _endpoint(self, side):
         return self.hop.source if side == "src" else self.hop.target
@@ -90,10 +100,11 @@ class _Lake(NeutralCopier, Engine):
         return list(self._key_names(side, db, table))
 
     def _rows(self, reader, names):
+        """The reader's rows, each record batch made values a slice cut by
+        bytes at a time (`pieces.arrow_rows`): a batch of wide values is
+        never all Python values at once."""
         for batch in reader:
-            cols = [batch.column(batch.schema.get_field_index(n))
-                    .to_pylist() for n in names]
-            yield [list(r) for r in zip(*cols)] if cols else []
+            yield from pieces.arrow_rows(batch, names)
 
     def _where(self, reader, names, where):
         """The reader's rows through a SQL filter, which DuckDB applies."""
@@ -111,14 +122,9 @@ class _Lake(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         reader = self._where(self._reader(side, db, table, names), names,
                              where)
-        out = []
-        for rows in self._rows(reader, names):
-            out += rows
-            while len(out) >= size:
-                yield out[:size]
-                out = out[size:]
-        if out:
-            yield out
+        # batches of `size` rows or `pieces.BATCH_BYTES`
+        yield from pieces.by_bytes((r for rows in self._rows(reader, names)
+                                    for r in rows), most_rows=int(size))
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):

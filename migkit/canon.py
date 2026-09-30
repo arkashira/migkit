@@ -63,6 +63,7 @@ a value the target would not keep as it is - rounded, cut, turned into a
 double or a default - is counted on the source and refused before the move
 (`unfit`), rather than found by the digest after it.
 """
+from .pieces import Hashed as _Hashed
 
 # Neutral classes. An engine's declared type is mapped onto one of these and
 # the rendering is chosen from the class, so adding an engine is a mapping
@@ -203,7 +204,10 @@ def wide_text(value):
 
 def digest_value(cls, value):
     """A value's text in a digest's row: `render_value`'s, except a text or
-    byte value wider than `WIDE`, which is its length and md5."""
+    byte value wider than `WIDE`, which is its length and md5 - and one a
+    server hashed where it lies (`pieces.Hashed`), which is what it wrote."""
+    if type(value) is _Hashed:
+        return value.text()
     if cls == "bytes" and isinstance(value, (bytes, bytearray, memoryview)) \
             and len(value) > WIDE:
         return wide_bytes(value)
@@ -1686,7 +1690,10 @@ DDL = {
         "text": ("VARCHAR(4000)", "VARCHAR({0})"),
         "uuid": ("CHAR(36)", "CHAR(36)"),
         "inet": ("VARCHAR(49)", "VARCHAR(49)"),
-        "bytes": ("BLOB", "VARBINARY({0})"),
+        # a byte value of no declared size as a LOB of the most Db2 logs:
+        # a BLOB with no size is 1 MB, and a larger value was refused
+        # halfway through the load
+        "bytes": ("BLOB(1G)", "VARBINARY({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),
@@ -1704,7 +1711,7 @@ DDL = {
         "text": ("VARCHAR(4000)", "VARCHAR({0})"),
         "uuid": ("CHAR(36)", "CHAR(36)"),
         "inet": ("VARCHAR(49)", "VARCHAR(49)"),
-        "bytes": ("BLOB", "VARBINARY({0})"),
+        "bytes": ("BLOB(1G)", "VARBINARY({0})"),
         "date": ("DATE", "DATE"),
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),

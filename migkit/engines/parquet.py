@@ -22,6 +22,7 @@ import json
 import os
 import posixpath
 
+from .. import pieces
 from .base import Engine, NeutralCopier, Result
 
 #: the description of a table, beside its part files
@@ -109,6 +110,15 @@ class ParquetEngine(NeutralCopier, Engine):
     FOLDED_BECAUSE = "is files, with no server to fold them in"
     #: a key-ordered read would sort the whole table each time: one pass
     RESUMES_BY_KEY = False
+    #: large values - a binary or string value is up to 2 GB in a file, and
+    #: a page holds its values whole, so none is read in pieces: a row group
+    #: is read in batches of as many rows as `pieces.BATCH_BYTES` holds at
+    #: its own bytes a row (its footer's count), and each batch becomes
+    #: values a slice cut by the rows' own bytes at a time
+    #: (`pieces.arrow_rows`); a batch written is one file part
+    LARGE_VALUES = pieces.Way(
+        "read a row group at a time in batches cut by bytes, one file part"
+        " a batch written")
 
     # ---- where the files are ----------------------------------------------
 
@@ -302,10 +312,16 @@ class ParquetEngine(NeutralCopier, Engine):
         fs, parts = self._parts(side, db, table)
         for p in parts:
             with fs.open_input_file(p) as f:
-                for batch in pq.ParquetFile(f).iter_batches(
-                        batch_size=size, columns=list(names)):
-                    cols = [batch.column(n).to_pylist() for n in names]
-                    yield [list(r) for r in zip(*cols)] if cols else []
+                pf = pq.ParquetFile(f)
+                for g in range(pf.metadata.num_row_groups):
+                    group = pf.metadata.row_group(g)
+                    step = pieces.rows_for(
+                        group.total_byte_size // max(group.num_rows, 1),
+                        size)
+                    for batch in pf.iter_batches(batch_size=step,
+                                                 row_groups=[g],
+                                                 columns=list(names)):
+                        yield from pieces.arrow_rows(batch, list(names))
 
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):

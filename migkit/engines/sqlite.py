@@ -2,6 +2,7 @@ import difflib
 import hashlib
 import time
 
+from .. import pieces
 from .base import Engine, NeutralCopier, RepairAction, Result
 
 
@@ -252,33 +253,40 @@ class SQLiteEngine(NeutralCopier, Engine):
 
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):
-        """The whole table in one pass, `size` rows at a time, for a table
-        with no key to resume from - read through a cursor the server keeps,
-        so no more than a batch is ever held here."""
+        """The whole table in one pass, `size` rows or
+        `pieces.BATCH_BYTES` at a time, for a table with no key to resume
+        from - read through a cursor the server keeps, so no more than a
+        batch is ever held here."""
         sql, _, _ = self._read_query(side, db, table, columns, None, None,
                                      where)
         conn = self._reader(side)
         try:
             cur = conn.execute(sql)
-            while True:
-                rows = cur.fetchmany(size)
-                if not rows:
-                    break
+            for rows in pieces.batches(cur, size):
                 yield [list(r) for r in rows]
         finally:
             conn.close()
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):
+        """In key order, ending at `limit` rows or at the row that brings
+        the read to `pieces.BATCH_BYTES`: the next read goes on from its
+        last row. A table with no key is read whole."""
         sql, key, names = self._read_query(side, db, table, columns, after,
                                            limit, where)
-        rows = [list(r) for r in self._q(side, sql)]
-        if not rows or not key:
+        keyed = bool(key) and all(k in names for k in key)
+        if keyed:
+            conn = self._reader(side)
+            try:
+                rows = [list(r) for r in pieces.fetch_until(
+                    conn.execute(sql))]
+            finally:
+                conn.close()
+        else:
+            rows = [list(r) for r in self._q(side, sql)]
+        if not rows or not keyed:
             return (rows, None)
-        idx = [names.index(k) for k in key if k in names]
-        if len(idx) != len(key):
-            return (rows, None)
-        return (rows, tuple(rows[-1][i] for i in idx))
+        return (rows, tuple(rows[-1][names.index(k)] for k in key))
 
     def neutral_rows_by_key(self, side, db, table, columns, key, keys,
                             where=None):
@@ -473,6 +481,45 @@ class SQLiteEngine(NeutralCopier, Engine):
         got = self._q(side, f"select count(*), {canon.digest_expr('sqlite', row)}"
                             f' from "{table}"' + self._where(where))[0]
         return (int(got[0]), str(got[1]))
+
+    #: large values - a value is up to SQLite's own limit, a billion bytes
+    #: by default: sized in the file, read in batches cut by bytes, and
+    #: hashed one value at a time as the digest passes it (`_register`).
+    #: The file is on this machine and the library hands a value over
+    #: whole, so none is read in pieces
+    LARGE_VALUES = pieces.Way(
+        "sized in the file, read in batches cut by bytes, each value"
+        " hashed as the digest passes it")
+
+    def row_sizes(self, side, db, tables=None):
+        """Each row's bytes as the file keeps them - a blob's `length` is
+        its bytes, a text's its characters, a number's its digits - over
+        every row: the file is here, and only numbers are read."""
+        from .base import sizes_of
+        out = {}
+        for t in (tables if tables is not None else self._tables(side)):
+            try:
+                cols = [r[1] for r in self._q(side,
+                                              f'pragma table_info("{t}")')]
+                if not cols:
+                    continue
+                expr = " + ".join([f'coalesce(length("{c}"), 0)'
+                                   for c in cols] + ["1"])
+                most, mean, n = self._q(
+                    side, f"select max(s), avg(s), count(*) from (select"
+                          f' {expr} as s from "{t}")')[0]
+                if not n:
+                    continue
+                first = [int(r[0]) for r in self._q(
+                    side, f'select {expr} from "{t}" limit'
+                          f" {int(self.SIZE_SAMPLE)}")]
+            except Exception:  # noqa: BLE001 - that table is not sized
+                continue
+            got = sizes_of(first, exact=True, rows=int(n))
+            got["largest"] = max(int(most), got["largest"])
+            got["mean"] = float(mean)
+            out[t] = got
+        return out
 
     def databases(self):
         return ["main"]

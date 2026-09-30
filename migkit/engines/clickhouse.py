@@ -14,6 +14,7 @@ follow copies again the partitions whose parts changed (`native_bulk`,
 `tail_apply`); each partition is held to the source's by the fingerprint
 both servers compute.
 """
+from .. import pieces
 from .base import Engine, NeutralCopier, Result
 
 SKIP_DBS = {"system", "information_schema", "INFORMATION_SCHEMA"}
@@ -52,6 +53,15 @@ class ClickHouseEngine(NeutralCopier, Engine):
                       " a ClickHouse one nobody has measured")
     OVER_NETWORK = True
     TEXT_HOLDS_BYTES = ("string", "fixedstring")
+    #: large values - a String holds any length: sized by the server
+    #: (`length`, its bytes), a wide value hashed where it lies (`MD5`) when
+    #: a digest is folded here, and blocks read sized by the table's widest
+    #: row so a block of wide rows is never read at once (`_block_rows`)
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read in blocks cut by bytes, wide values"
+        " hashed where they lie",
+        length="length({c})", types=("string", "fixedstring"),
+        md5="lower(hex(MD5({c})))", md5_classes=("bytes", "text"))
 
     def _client(self, side, db=None, wait=None):
         import clickhouse_connect
@@ -206,7 +216,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
         # an expression in the sorting key is no column to read a key by
         return key if key and set(key) <= names else []
 
-    def _read_query(self, side, db, table, columns, after, limit, where):
+    def _read_query(self, side, db, table, columns, after, limit, where,
+                    select=None):
         from .. import canon
         names = [n for n, _ in columns]
         key = self.neutral_key(side, db, table)
@@ -221,7 +232,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
         if where:
             conds.append(f"({where})")
         wide = self._wide_times(side, db, table)
-        sql = (f"select {', '.join(wide.get(n, self._q(n)) for n in names)}"
+        select = select or ", ".join(wide.get(n, self._q(n)) for n in names)
+        sql = (f"select {select}"
                f" from {self._qualified(side, db, table)}"
                + (f" where {' and '.join(conds)}" if conds else "")
                + (f" order by {', '.join(self._q(k) for k in key)}"
@@ -247,34 +259,64 @@ class ClickHouseEngine(NeutralCopier, Engine):
             return "Decimal(76, 38)"
         return "String"
 
+    def _block_rows(self, side, db, table, most):
+        """Rows a block of a read of this table holds at most: `most`, or
+        as many as `pieces.BATCH_BYTES` holds at the table's widest row
+        (`pieces.widest`) - the driver decodes a block whole."""
+        return pieces.rows_for(pieces.widest(self, side, db, table),
+                               max(int(most or 1000), 1))
+
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):
+        """In key order, in blocks sized by the table's widest row, ending
+        at `limit` rows or at the row that brings the read to
+        `pieces.BATCH_BYTES`: the next read goes on from its last row."""
         sql, params, key, names = self._read_query(side, db, table, columns,
                                                    after, limit, where)
+        keyed = bool(key) and set(key) <= set(names)
+        raw, held = [], 0
         client = self._client(side, db)
         try:
-            rows = self._values(columns, client.query(
-                sql, parameters=params,
-                query_formats=self.AS_BYTES).result_rows,
-                self._wide_times(side, db, table))
+            with client.query_row_block_stream(
+                    sql, parameters=params, query_formats=self.AS_BYTES,
+                    settings={"max_block_size": self._block_rows(
+                        side, db, table, limit)}) as stream:
+                for block in stream:
+                    for r in block:
+                        raw.append(r)
+                        held += pieces.row_bytes(r)
+                        if keyed and held >= pieces.BATCH_BYTES:
+                            break
+                    if keyed and held >= pieces.BATCH_BYTES:
+                        break
         finally:
             client.close()
-        if not rows or not key or not set(key) <= set(names):
+        rows = self._values(columns, raw, self._wide_times(side, db, table))
+        if not rows or not keyed:
             return rows, None
         return rows, tuple(rows[-1][names.index(k)] for k in key)
 
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):
-        sql, params, _, _ = self._read_query(side, db, table, columns, None,
-                                             None, where)
+        """The whole table in one pass, in batches of `size` rows or
+        `pieces.BATCH_BYTES`; inside a digest folded here, each value wider
+        than `canon.WIDE` read as its length and md5 (`pieces.hashing`)."""
+        wide = self._wide_times(side, db, table)
+        plan = (pieces.DigestPlan(self, side, db, table, columns, wide)
+                if pieces.is_hashing(self) else None)
+        sql, params, _, _ = self._read_query(
+            side, db, table, columns, None, None, where,
+            select=plan.select if plan is not None else None)
         client = self._client(side, db)
         try:
             with client.query_row_block_stream(
                     sql, parameters=params, query_formats=self.AS_BYTES,
-                    settings={"max_block_size": int(size)}) as stream:
-                wide = self._wide_times(side, db, table)
+                    settings={"max_block_size": self._block_rows(
+                        side, db, table, size)}) as stream:
                 for block in stream:
-                    yield self._values(columns, block, wide)
+                    rows = plan.finish(block) if plan is not None else block
+                    for batch in pieces.by_bytes(rows, most_rows=int(size)):
+                        yield self._values(columns, batch, wide)
         finally:
             client.close()
 
@@ -307,14 +349,22 @@ class ClickHouseEngine(NeutralCopier, Engine):
         return self._by_key_map(columns, key, rows)
 
     def neutral_digest(self, side, db, table, columns, where=None):
+        """Folded here, each value wider than `canon.WIDE` hashed where it
+        lies (`LARGE_VALUES`): its length and md5 cross, not the value."""
         from .. import canon
         classes = [c for _, c in columns]
         total, n = 0, 0
-        for batch in self.neutral_batches(side, db, table, columns, 10000,
-                                          where):
-            k, total = canon.fold_rows(classes, batch, total)
-            n += k
+        with pieces.hashing(self):
+            for batch in self.neutral_batches(side, db, table, columns,
+                                              10000, where):
+                k, total = canon.fold_rows(classes, batch, total)
+                n += k
         return (n, str(total))
+
+    def row_sizes(self, side, db, tables=None):
+        """Measured by the server (`pieces.sql_row_sizes`): each row's
+        String values by their bytes, only the numbers crossing."""
+        return pieces.sql_row_sizes(self, side, db, tables)
 
     def table_facts(self, side, db):
         out = {}

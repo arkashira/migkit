@@ -51,7 +51,7 @@ import struct
 from decimal import Decimal
 
 from .base import Result
-from .db2 import Db2Engine, _twelve, db2_connect_licence
+from .db2 import Db2Engine, _twelve, db2_connect_licence, large_values
 from .dbapi import MARK
 
 #: the name IBM's ODBC driver for IBM i registers itself by
@@ -256,6 +256,9 @@ class Db2iEngine(Db2Engine):
                       " one of IBM i's")
     PADDED = ("CHAR", "GRAPHIC")
     SCALED = ("DECIMAL", "NUMERIC")
+    #: large values as Db2's, a large table sized over every row: a
+    #: sample of its pages is asked of Linux, UNIX and Windows only
+    LARGE_VALUES = large_values()
     #: the journal is read by sequence, never consumed
     CHANGE_POINT_READS_ONLY = True
 

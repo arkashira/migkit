@@ -2,6 +2,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from ..pieces import BATCH_BYTES, PAIR_MEMORY, PAIR_ROWS, row_bytes
+
 # Engine-independent name for what a finding is about.
 #
 # Every engine words its own checks differently - postgres calls it `encoding`,
@@ -4180,19 +4182,21 @@ class Engine:
         takes as carried - its largest, its 99th percentile and its mean -
         what one worker holds depends on the widest row, not the table's
         average. `exact` where every row was measured. Here: the first
-        `SIZE_SAMPLE` rows of each table through the neutral reader."""
+        `SIZE_SAMPLE` rows of each table through the neutral reader, a few
+        at a time and only their sizes kept (`pieces.sample_sizes`) - read
+        in one go, a sample of wide rows was two thousand of them held at
+        once before the move they were to size had begun."""
+        from .. import pieces
         out = {}
         for t in (tables if tables is not None
                   else self.neutral_tables(side, db)):
             try:
                 cols = self.neutral_columns(side, db, t)
-                rows, after = self.neutral_read(side, db, t, cols, None,
-                                                self.SIZE_SAMPLE)
+                lengths, whole = pieces.sample_sizes(
+                    self, side, db, t, cols, self.SIZE_SAMPLE)
             except Exception:  # noqa: BLE001 - that table is not sized
                 continue
-            out[t] = sizes_of([_row_bytes(r) for r in rows],
-                              exact=after is None
-                              or len(rows) < self.SIZE_SAMPLE)
+            out[t] = sizes_of(lengths, exact=whole)
         return out
 
     #: rows from which a table copied from its start is written with its
@@ -5508,20 +5512,8 @@ class Counted:
                 "sample": kept, "columns": columns}
 
 
-def _row_bytes(row):
-    """Bytes one row of values takes as carried: its strings and bytes by
-    length, anything else as eight."""
-    n = 0
-    for v in row:
-        if isinstance(v, (bytes, bytearray, memoryview)):
-            n += len(v)
-        elif isinstance(v, str):
-            n += len(v.encode("utf-8", "surrogatepass"))
-        elif v is None:
-            n += 1
-        else:
-            n += 8
-    return n + 1
+#: bytes one row of values takes as carried (`pieces.row_bytes`)
+_row_bytes = row_bytes
 
 
 def sizes_of(lengths, exact=False, rows=None):
@@ -5581,6 +5573,10 @@ class NeutralCopier:
     engine and hands the table to that one. A fix to the copier is then a
     fix for every engine it serves.
     """
+    #: what one worker holds is then the pair's copier's, whose reads are
+    #: `PAIR_ROWS` rows or `BATCH_BYTES` at most (`model.worker_memory`)
+    COPY_MEMORY = PAIR_MEMORY
+    COPY_BATCH, COPY_BYTES = PAIR_ROWS, BATCH_BYTES
 
     def list_move_tables(self, db):
         return self._as_pair().list_move_tables(db)
