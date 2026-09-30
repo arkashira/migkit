@@ -28,7 +28,6 @@ from the copy's own position.
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 
 from . import tooluse
@@ -77,11 +76,11 @@ def flags_here():
     except OSError:
         return None
     if (argv[0], stamp) not in _FLAGS:
+        from . import runner
         try:
-            out = subprocess.run(argv + ["--help"], capture_output=True,
-                                 text=True, timeout=60,
-                                 env={**os.environ, **env})
-        except (OSError, subprocess.TimeoutExpired):
+            out = runner.run(argv + ["--help"], env, check=False,
+                             timeout=60, what="the snapshot reader")
+        except (OSError, runner.Failed, runner.Blocked):
             return None
         _FLAGS[(argv[0], stamp)] = frozenset(re.findall(
             r"--[a-z][a-z0-9-]+", out.stdout + out.stderr))
@@ -189,47 +188,75 @@ def args(eng, db, table, workers, lucene, s3_local):
 def copy_index(eng, db, table, workers, log):
     """One index out of the snapshot into the target, the reader run until
     it has no work left. Returns the documents the target then holds;
-    raises where the reader fails."""
-    from . import movers
+    raises where the reader fails.
+
+    As many readers run at once as the index has shards and the sizing
+    gives workers, each with its own directory to unpack a shard into:
+    they share the work through the reader's working index on the target,
+    each taking a piece no other holds - where one ran after another, an
+    index of 40 shards was 40 reads one at a time. The working index is
+    kept where the copy stops part way, so the next run takes only the
+    pieces not done, as its docstring always said; it is removed once the
+    index is copied."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import runner
     from .util import PrivateFile
-    from .wording import without_programs
     got = program()
     if got is None:
         raise SystemExit("this way needs a component this machine does not"
                          " have - migkit doctor --install puts it in place")
     argv, env = got
-    lucene = tempfile.mkdtemp(prefix="migkit-shards-")
-    s3_local = tempfile.mkdtemp(prefix="migkit-snapshot-")
-    for d in (lucene, s3_local):
-        os.chmod(d, 0o700)
-    try:
-        text = "\n".join(args(eng, db, table, workers, lucene, s3_local))
+    src = eng._index("src", db, table)
+    readers = max(1, min(int(workers), _shards(eng, src) or 1))
+    dirs = []
+    for _ in range(readers):
+        pair = (tempfile.mkdtemp(prefix="migkit-shards-"),
+                tempfile.mkdtemp(prefix="migkit-snapshot-"))
+        for d in pair:
+            os.chmod(d, 0o700)
+        dirs.append(pair)
+
+    def one(pair):
+        """One reader, run until the work is done or it fails."""
+        lucene, s3_local = pair
+        each = max(1, int(workers) // readers)
+        text = "\n".join(args(eng, db, table, each, lucene, s3_local))
         with PrivateFile(text + "\n", ".args") as path:
-            cmd = argv + [f"@{path}"]
             for _ in range(MOST_RUNS):
-                movers._debug(cmd)
-                with movers._spawned(subprocess.Popen(
-                        cmd, env={**os.environ, **env}, text=True,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT),
-                        cmd[0]) as p:
-                    out = p.communicate()[0]
+                p = runner.run(argv + [f"@{path}"], env, check=False,
+                               merge=True, whole=False,
+                               what=f"{table}: the snapshot reader")
                 if p.returncode == NO_WORK:
-                    break
+                    return
                 if p.returncode not in (DONE, AGAIN):
-                    raise RuntimeError(
-                        f"{table}: the snapshot reader stopped: "
-                        + without_programs(out[-400:], movers.DRIVEN))
-            else:
-                raise RuntimeError(f"{table}: the snapshot reader still had"
-                                   f" work after {MOST_RUNS} runs")
+                    raise runner.classify(p.returncode, p.stdout,
+                                          f"{table}: the snapshot reader"
+                                          " stopped")
+        raise runner.Failed(f"{table}: the snapshot reader still had work"
+                            f" after {MOST_RUNS} runs")
+    try:
+        with ThreadPoolExecutor(max_workers=readers) as pool:
+            for done in [pool.submit(one, pair) for pair in dirs]:
+                done.result()
     finally:
-        shutil.rmtree(lucene, ignore_errors=True)
-        shutil.rmtree(s3_local, ignore_errors=True)
-        eng._call("dst", "DELETE", f"/{WORKING}", missing_ok=True)
+        for pair in dirs:
+            for d in pair:
+                shutil.rmtree(d, ignore_errors=True)
+    # finished: the reader's working index has nothing left to go on from
+    eng._call("dst", "DELETE", f"/{WORKING}", missing_ok=True)
     index = eng._index("dst", db, table)
     eng._call("dst", "POST", f"/{index}/_refresh")
     return int((eng._call("dst", "GET", f"/{index}/_count") or {})
                .get("count", 0))
+
+
+def _shards(eng, index):
+    """How many primary shards `index` has on the source - the pieces the
+    readers share - or None where it will not say."""
+    got = eng._call("src", "GET", f"/_cat/shards/{index}?format=json"
+                                  "&h=prirep") or []
+    return len([r for r in got if r.get("prirep") == "p"]) or None
 
 
 # ---- the account of what is used (backlog 0f) ----------------------------

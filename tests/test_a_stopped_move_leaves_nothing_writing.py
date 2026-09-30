@@ -10,9 +10,10 @@ without its keys.
 
 Now:
 * `kill` (SIGTERM) stops what the move started, the way ctrl-c does
-* `kill -9` cannot be answered by anybody, so the programs a move runs are
+* `kill -9` cannot be answered by migkit, so the programs a move runs are
   listed while they run, and the next move finds one still running and
-  stops before it writes, naming the process to wait for
+  stops before it writes, naming the process to wait for - on Linux the
+  program is told to end with the move (`PR_SET_PDEATHSIG`) and ends too
 """
 import json
 import os
@@ -101,6 +102,15 @@ def test_after_kill_9_the_next_move_waits_for_the_program(tmp_path):
     child, listing, pid = _start(tmp_path)
     child.send_signal(signal.SIGKILL)
     child.wait(timeout=30)
+    if sys.platform.startswith("linux"):
+        # told to end when the move that started it goes (the runner's
+        # PR_SET_PDEATHSIG), it ended with it; the listing it left is a
+        # stale one, dropped by the next move
+        time.sleep(1)
+        assert not _alive(pid), "the program outlived kill -9 of the move"
+        assert movers._still_running(listing) == []
+        assert not listing.exists()
+        return
     try:
         # nothing could answer that: the program runs on, and is listed
         assert _alive(pid)

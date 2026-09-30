@@ -287,8 +287,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> has fewer partitions on the target than on the source: a key's messages would land in another partition, out of the order its consumers read them
 
-* the cluster mirror carried nothing for <...>s with <...> partitions still short of where the source stood: <...>
-
 * MIGKIT_MOVER=<...> is not one of <...>
 
 * MIGKIT_MOVER=<...> does not apply to a <...> hop
@@ -317,13 +315,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the CDC leg exited <...> before it finished catching up; its log is <...>
 
-* the CDC leg did not reach its end position in <...>s. It is still running; its log is <...>. Nothing has been marked as caught up - raise MIGKIT_FOLLOW_TIMEOUT if the backlog is simply larger than that
+* the CDC leg did not reach its end position in <...>s, and was stopped there; its log is <...>. Nothing has been marked as caught up - raise MIGKIT_FOLLOW_TIMEOUT if the backlog is simply larger than that
 
 * the CDC leg never became ready to be told to apply; its log is <...>
 
 * the CDC leg exited before it was told to apply anything, so nothing reached the target; its log is <...>
 
-* could not set the <...> on the CDC leg:<...>
+* could not set the <...> on the CDC leg: <...>
 
 * <...>: the columns the hop keeps could not be matched against the source's, so the stream cannot be told which to leave out. Nothing has been started
 
@@ -1376,5 +1374,17 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: the parts are the bulk load's lines, and the target's table does not take them: <...>
 
 * <...>: every part is in, and the target holds <...> rows digesting <...>, where the parts add up to <...> rows and <...> - something else writes this table, or the target changes what it is given
+
+* MIGKIT_BUNDLE_PLATFORM=<...> names no machine migkit builds bundles for: linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64, a Linux named after them (linux-x86_64-ubuntu-22.04)
+
+* <...> is not an offline bundle migkit made: it has no sums
+
+* the offline bundle is not signed, and MIGKIT_BUNDLE_SIGNERS asks for a signed one. Nothing has been installed from it
+
+* the offline bundle's sums are not signed by anyone MIGKIT_BUNDLE_SIGNERS names. Nothing has been installed from it
+
+* the offline bundle's <...> is not what its sums say. Nothing has been installed from it
+
+* the offline bundle's <...> is not in its sums
 
 * MIGKIT_UI_USER_HEADER names the header a signing-in proxy puts who it let in into, and anything that reaches the view can send that header: set MIGKIT_UI_PROXY_SECRET too - the value the proxy sends in <...> - and the view believes only the proxy

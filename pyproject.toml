@@ -159,8 +159,9 @@ version = { attr = "migkit.__version__" }
 include = ["migkit*"]
 
 [tool.setuptools.package-data]
-# the instance catalog the machine advice weighs (`migkit.machine`)
-migkit = ["data/*.json"]
+# the instance catalog the machine advice weighs (`migkit.machine`), and
+# the locks of what `doctor --install` fetches (`migkit.tools`)
+migkit = ["data/*.json", "data/*.txt"]
 
 [tool.pytest.ini_options]
 markers = ["docker: needs a docker daemon",

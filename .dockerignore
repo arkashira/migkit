@@ -1,0 +1,22 @@
+# What never enters migkit's image (deploy/Dockerfile builds from the
+# repository root): the hops' configuration and its passwords, the reports
+# and the values they hold, and everything a checkout carries beside the
+# package.
+conf/
+deploy/conf/
+reports/
+state/
+migrations/
+.git
+.github
+.githooks
+.claude
+.venv*
+**/__pycache__
+**/*.pyc
+.pytest_cache
+tests/
+bench/
+docs/
+tools/
+packaging/

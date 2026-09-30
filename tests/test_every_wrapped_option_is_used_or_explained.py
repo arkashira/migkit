@@ -289,12 +289,19 @@ def test_terms_gate_a_task_where_they_say_so():
         tooluse.REGISTRY.pop("closed-x", None)
 
 
-def _hop(engine, **kw):
+#: each side's TLS, as the hop writes it for each engine family
+TLS = {"postgres": {"sslmode": "verify-full", "sslrootcert": "/etc/ca.pem",
+                    "sslcert": "/etc/c.pem", "sslkey": "/etc/k.pem"},
+       "mysql": {"ssl_ca": "/etc/ca.pem"}}
+
+
+def _hop(engine, tls=False, **kw):
+    opts = dict(TLS[engine]) if tls else {}
     return Hop(name="acct", engine=engine,
                source=Endpoint(host="10.0.0.1", port=1, user="u",
-                               password="CHANGE_ME"),
+                               password="CHANGE_ME", options=dict(opts)),
                target=Endpoint(host="10.0.0.2", port=2, user="u",
-                               password="CHANGE_ME"),
+                               password="CHANGE_ME", options=dict(opts)),
                databases=["appdb"], **kw)
 
 
@@ -369,7 +376,8 @@ def _written(tmp_path, monkeypatch):
     got = {"postgres": set(), "mysql": set(), "jdbc-sink": set()}
     for engine, name in (("postgres", "postgres"), ("mysql", "mysql")):
         for kw in ({}, {"exclude": ["audit"],
-                        "mapping": {"columns": {"t": {"drop": ["b"]}}}}):
+                        "mapping": {"columns": {"t": {"drop": ["b"]}}}},
+                   {"tls": True}):
             src, sink = _configs(tmp_path / f"{engine}{len(kw)}",
                                  monkeypatch, engine, **kw)
             got[name] |= set(src)

@@ -2432,15 +2432,13 @@ class Engine:
         `migkit.toolversion` for the two measurements behind it.
         """
         from .. import toolversion as _tv
-        from ..util import run, which
+        from ..util import which
         got = {}
         for tool in tools:
             if not which(tool):
                 continue
-            try:
-                got[tool] = run([tool, "--version"], check=False).stdout
-            except Exception:
-                got[tool] = None
+            # asked once per build, however often an assessment asks
+            got[tool] = _tv.probe(tool)
         out = []
         for level, tool, detail in _tv.report(got, server_version,
                                               self.ENGINE_FAMILY):

@@ -175,6 +175,20 @@ VARS = {
                            " this file", "path"),
     "MIGKIT_ACCEPT_TERMS": Var("the programs whose terms are accepted for"
                                " an unattended install, or all", "list"),
+    "MIGKIT_BUNDLE": Var("an offline bundle `doctor --install` installs"
+                         " from, with no network", "path"),
+    "MIGKIT_BUNDLE_BUILD": Var("the directory `doctor --install` builds an"
+                               " offline bundle in, installing nothing",
+                               "path"),
+    "MIGKIT_BUNDLE_PLATFORM": Var("the machine an offline bundle is built"
+                                  " for: linux-x86_64, darwin-arm64, or a"
+                                  " Linux named after them"
+                                  " (linux-x86_64-ubuntu-22.04)", "text"),
+    "MIGKIT_BUNDLE_KEY": Var("the private SSH key an offline bundle's sums"
+                             " are signed with", "path"),
+    "MIGKIT_BUNDLE_SIGNERS": Var("the allowed signers file an offline"
+                                 " bundle's signature is checked against",
+                                 "path"),
     "MIGKIT_DB2_CONNECT_LICENSE": Var("the Db2 Connect licence file",
                                       "path"),
     "MIGKIT_UI_HOSTS": Var("the host names the dashboard answers to",

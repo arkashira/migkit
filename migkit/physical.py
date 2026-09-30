@@ -1189,25 +1189,32 @@ def _source_address(hop, opts):
 def _on_target(opts, script, secret="", timeout=None):
     """`script`, a shell command line, run where the target's data
     directory is, with `secret` as its first line of input - never on a
-    command line, where the host's process list would show it."""
+    command line, where the host's process list would show it. Through the
+    one runner (`runner.run`): stopped with what it started when migkit
+    is, which stops the connection to that host; what the script started
+    there is held by its lock (`runner.locked_script`)."""
+    from . import runner
     argv = shlex.split(str(opts["run"])) + [script]
     try:
-        return subprocess.run(argv, input=f"{secret}\n", capture_output=True,
-                              text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(argv, 124, e.stdout or "",
+        return runner.run(argv, input=f"{secret}\n", check=False,
+                          timeout=timeout, secrets=(secret,),
+                          check_flags=False)
+    except runner.Transient:
+        return subprocess.CompletedProcess(argv, 124, "",
                                            f"no answer in {timeout}s")
-    except OSError as e:
+    except runner.Blocked as e:
         return subprocess.CompletedProcess(argv, 127, "", str(e))
 
 
 def _local(command, what, timeout=600):
     """One of the hop's own commands (`stop`, `start`, `restart`), run
-    here as written; a failure stops the move with its own words."""
+    here as written, through the one runner; a failure stops the move with
+    its own words."""
+    from . import runner
     try:
-        got = subprocess.run(shlex.split(str(command)), capture_output=True,
-                             text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        got = runner.run(shlex.split(str(command)), check=False,
+                         timeout=timeout, check_flags=False)
+    except (runner.Transient, runner.Blocked) as e:
         raise SystemExit(f"the hop's {what} command failed: {e}")
     if got.returncode != 0:
         raise SystemExit(f"the hop's {what} command failed"
@@ -1397,8 +1404,13 @@ def _pg_copy(hop, eng, opts, version, log):
     log("the target's server stopped; copying the source's pages into its"
         f" data directory, {way.said} ({why})")
     began = time.time()
-    got = _on_target(opts, _pg_script(hop, opts, way is ZSTD),
-                     hop.source.password)
+    # under a lock beside the data directory: a copy migkit was stopped
+    # during goes on on that host, and a run after it that emptied the
+    # directory under it would take two copies into one
+    from . import runner
+    got = _on_target(opts, runner.locked_script(
+        _pg_script(hop, opts, way is ZSTD), f"{opts['data']}.migkit-lock"),
+        hop.source.password)
     if got.returncode != 0 or "verified" not in got.stdout:
         raise SystemExit(
             "the copy of the source's pages failed, and the target's server"

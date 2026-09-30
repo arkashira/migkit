@@ -4110,8 +4110,11 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
                model=resource_model.for_move(hop, eng, d))
     steps = movers.run_via(v, hop, d, hop.workers, go,
                            lambda m: chat(f"  {m}"))
+    # the way that ran, which is another where the one asked for handed
+    # its work on (`movers.Ran`): its rate and its record are that way's
+    ran = getattr(steps, "via", v)
     if go:
-        _record_run(hop, eng, d, v, rows, began, spent)
+        _record_run(hop, eng, d, ran, rows, began, spent)
     for s0 in steps:
         console.print(f"  {s0}")
     if not go:
@@ -4123,7 +4126,7 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
     _refuse_if_nothing_arrived(hop, eng, d, "the bulk copy",
                                lambda m: chat(f"  {m}"))
     _held_to_the_source(hop, eng, d, lambda m: chat(f"  {m}"))
-    _changelog(hop, {"op": f"move-{v}", "db": d})
+    _changelog(hop, {"op": f"move-{ran}", "db": d})
     _record_copy(hop, d, point)
     # the load left the statistics behind it; the engine puts them right
     # before anybody queries the target

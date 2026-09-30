@@ -14,16 +14,16 @@ import functools
 import json
 import math
 import re
-import socket
-import subprocess
 import threading
 import time
 from urllib.parse import quote
 
-from . import leftovers, tooluse
-from .tools import IMAGES
+from . import envkeys, leftovers, runner, toolversion, tooluse
+from .runner import run
+from .tools import IMAGES, PROGRAM
+from .tools import names as tool_names
 from .tooluse import TOPPED, UNUSED, USED
-from .util import quiet_argv, run, tool_env, which
+from .util import PrivateFile, report_name, tool_env, which  # noqa: F401
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
         "pgloader", "mongodump", "mongosync", "riotx", "native", "pgpull",
@@ -432,170 +432,46 @@ def stream_supported(engine):
     return engine in ("postgres", "mysql", "hetero")
 
 
-#: the programs the bulk paths drive. Their names never reach the operator:
-#: the command lines go to the run's debug log, and what a failing one said
-#: is passed on with its name taken out.
-DRIVEN = ("pg_dump", "pg_restore", "pgcopydb", "psql", "mydumper",
-          "myloader", "mysqlsh", "pgloader", "mongodump", "mongorestore",
-          "mongosync", "riotx", "redis-shake", "connect-mirror-maker.sh",
-          "dsbulk", "DocumentsFromSnapshotMigration")
-#: environment variables whose values are secrets, for the debug log
-_SECRET_ENV = re.compile(r"PASS|PWD|SECRET|TOKEN", re.I)
-#: (DebugLog, secrets) for the run in progress, set by `run_via`
-_DEBUG = None
-
-
-#: the file the programs a bulk path is running are listed in while they
-#: run (`_spawned`); set by `run_via` for the database it moves
-_RUNNING = None
-_RUNNING_LOCK = threading.Lock()
-LOADERS = ("pg_restore", "myloader", "mongorestore")
-COPIERS = ("pgcopydb", "pgloader", "mongosync", "riotx", "mysqlsh",
-           "redis-shake", "connect-mirror-maker.sh", "dsbulk",
-           "DocumentsFromSnapshotMigration")
+#: the programs the bulk paths drive, by every name each goes by, read off
+#: the registry (`tools.PROGRAM`). Their names never reach the operator:
+#: the command lines go to the run's debug log, and what a failing one
+#: said is passed on with its name taken out (`runner`)
+DRIVEN = tuple(sorted(tool_names()))
 
 
 def _program_role(program):
-    name = str(program).rsplit("/", 1)[-1]
-    return ("load program" if name in LOADERS
-            else "copy program" if name in COPIERS else "dump program")
-
-
-class _spawned:
-    """Lists a program in the run's file for as long as it runs, and
-    stops it if the run is stopped before it finishes.
-
-    Measured, MySQL: migkit killed while the load ran, and the load went
-    on without it - 375,000 rows when migkit died, 1,500,000 by the time a
-    person could look. A move started again at once emptied the tables
-    under it and stopped on `Duplicate entry`, naming neither. A signal
-    that migkit can handle now stops what it started (`kill` sends one);
-    one it cannot (`kill -9`, the out-of-memory killer) leaves the listing
-    behind, and the next run finds the program still running and waits
-    for a person rather than writing beside it."""
-
-    def __init__(self, proc, program):
-        self.proc, self.program = proc, program
-
-    def __enter__(self):
-        if _RUNNING is not None:
-            with _RUNNING_LOCK:
-                got = _read_running(_RUNNING)
-                got[str(self.proc.pid)] = {
-                    "host": socket.gethostname(),
-                    "program": str(self.program).rsplit("/", 1)[-1],
-                    "since": time.time()}
-                _RUNNING.write_text(json.dumps(got))
-        return self.proc
-
-    def __exit__(self, kind, exc, tb):
-        if kind is not None and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait()
-        if _RUNNING is not None:
-            with _RUNNING_LOCK:
-                got = _read_running(_RUNNING)
-                got.pop(str(self.proc.pid), None)
-                if got:
-                    _RUNNING.write_text(json.dumps(got))
-                else:
-                    _RUNNING.unlink(missing_ok=True)
-        return False
-
-
-def _read_running(path):
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
+    """What a report calls a program: the dump's, the load's, the copy's
+    - never its name (`tools.PROGRAM`)."""
+    from .tools import ROLES
+    return ROLES.get(str(program).rsplit("/", 1)[-1], "copy program")
 
 
 def _still_running(path):
     """[(pid, program, since)] a run that is gone listed and that still
-    run. A listing whose process is gone, or is now another program under
-    the same number, is dropped."""
-    from . import tailctl
-    alive, got = [], _read_running(path)
-    for pid, rec in list(got.items()):
-        if rec.get("host") != socket.gethostname():
-            # another machine's process cannot be asked about; it counts
-            alive.append((pid, rec.get("program"), rec.get("since")))
-            continue
-        if tailctl.process_alive(rec.get("host"), pid):
-            p = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
-                               capture_output=True, text=True)
-            if p.stdout.strip().rsplit("/", 1)[-1] == rec.get("program"):
-                alive.append((pid, rec.get("program"), rec.get("since")))
-                continue
-        got.pop(pid)
-    if got:
-        path.write_text(json.dumps(got))
-    else:
-        path.unlink(missing_ok=True)
-    return alive
+    run (`runner.still_running`): a listing whose process is gone, or is
+    now another process under the same number, is dropped."""
+    return runner.still_running(path)
 
 
-def _debug(cmd, env=None):
-    """Write a command line to the run's debug log, secrets removed."""
-    if _DEBUG is not None:
-        secrets = [v for k, v in (env or {}).items() if _SECRET_ENV.search(k)]
-        _DEBUG[0].command(cmd, secrets + list(_DEBUG[1]))
-
-
-def _sh(cmd, env=None, log=None, progress=None):
-    """Run one program, and keep its command line off the screen.
+def _sh(cmd, env=None, log=None, progress=None, what="", stall=None,
+        timeout=None, retries=0):
+    """Run one program through the runner, and keep its command line off
+    the screen.
 
     This printed `$ <command line>` to the operator for every program it
     ran, and let a failing program's own message out as it was
     (`pg_restore: error: ...`). The command line now goes to the run's
     debug log with every secret removed, and a failure keeps the
-    database's words and loses the program's name. What the operator reads
-    while the step runs is the phase line its caller logs.
+    database's words and loses the program's name (`runner.classify`).
+    What the operator reads while the step runs is the phase line its
+    caller logs. With a progress reader the program's two streams are read
+    as one, so a program that fills the other cannot stall while this one
+    is read; the reader's lines are migkit's, the rest is kept only for
+    the words of a failure.
     """
-    from . import wording
-    cmd = quiet_argv(cmd)
-    _debug(cmd, env)
-    if progress is None:
-        with _spawned(subprocess.Popen(cmd, env=tool_env(env), text=True,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE),
-                      cmd[0]) as p:
-            out, err = p.communicate()
-    else:
-        # read what the program says as it says it, and turn the lines that
-        # mark progress into migkit's own; the rest is kept only for the
-        # error message if it fails
-        # one stream, so a program that fills the other pipe cannot stall
-        # while this one is being read
-        with _spawned(subprocess.Popen(cmd, env=tool_env(env), text=True,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT),
-                      cmd[0]) as p:
-            tail = []
-            for line in p.stdout:
-                said = progress(line)
-                if said and log:
-                    log(said)
-                tail.append(line)
-                del tail[:-40]
-            p.wait()
-        out = err = "".join(tail)
-    if p.returncode:
-        # a reader that parsed the program's log knows its error messages;
-        # the raw tail of a machine log is not something to show anyone
-        explain = getattr(progress, "failure", None)
-        # a program whose log a reader parses is explained by the reader,
-        # which also knows which of its lines are tolerated
-        said = ((explain() if explain else None)
-                or (progress is None
-                    and wording.database_words((err or "") + (out or "")))
-                or (err or out)[-500:])
-        raise RuntimeError(wording.without_programs(said, DRIVEN))
-    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+    return runner.run(cmd, env, progress=progress, log=log,
+                      merge=progress is not None, what=what, stall=stall,
+                      timeout=timeout, retries=retries)
 
 
 #: {table: bytes} of the database the running bulk path carries, from the
@@ -1251,7 +1127,7 @@ def pgdump_move(hop, db, workers, go, log):
         _pg_truncate_target(hop, db, log)
         with _IndexWindow(hop, db, workers, log):
             _pgdump_restore(load, env_t, log)
-    _pg_finish_created(hop, db, log)
+    _pg_finish_created(hop, db, log, workers)
     return steps
 
 
@@ -1435,7 +1311,7 @@ def _pg_missing_tables(hop, db):
     return [t for t in want if t not in have], not have
 
 
-def _pg_schema(hop, db, section, tables, whole, log=None):
+def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
     """One section of the source's schema, restored onto the target.
 
     `whole` is a target with no tables at all: everything the source's
@@ -1444,7 +1320,9 @@ def _pg_schema(hop, db, section, tables, whole, log=None):
     functions the target has to have already; a definition it cannot take
     stops the move with the server's words. Without owners or grants: the
     roles are `migkit users`' business, and `check` names the grants that
-    differ.
+    differ. `workers`: the post-data section's keys and indexes built that
+    many at once, as the move's sizing gives them, where they were built
+    one at a time.
     """
     from .engines.postgres import PostgresEngine
     s, t = hop.source, hop.target
@@ -1463,7 +1341,9 @@ def _pg_schema(hop, db, section, tables, whole, log=None):
             "-f", str(out)]
     load = ["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
             "-d", hop.target_db(db), f"--section={section}", "--no-owner",
-            "--no-privileges", str(out)]
+            "--no-privileges",
+            *(["-j", str(int(workers))] if section == "post-data"
+              and int(workers or 1) > 1 else []), str(out)]
     try:
         _sh(dump, {**s.libpq_env(),
                    "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
@@ -1504,9 +1384,9 @@ def _pg_create_missing(hop, db, log=None):
     _pg_schema(hop, db, "pre-data", missing, whole, log)
 
 
-def _pg_finish_created(hop, db, log=None):
+def _pg_finish_created(hop, db, log=None, workers=1):
     """The keys, indexes and constraints of the tables `_pg_create_missing`
-    made, once their rows are in."""
+    made, once their rows are in, `workers` at once."""
     import json
     record = _pg_created_path(hop, db)
     try:
@@ -1516,7 +1396,8 @@ def _pg_finish_created(hop, db, log=None):
     if log:
         from .wording import phase
         log(phase("finish-created", tables=len(made["tables"])))
-    _pg_schema(hop, db, "post-data", made["tables"], made["whole"], log)
+    _pg_schema(hop, db, "post-data", made["tables"], made["whole"], log,
+               workers)
     record.unlink()
 
 
@@ -1994,6 +1875,9 @@ def pgcopydb_filters(hop, db, tables, also=()):
     out += [n for n in also if n not in out]
     if not out:
         return None
+    # a name with a line break in it would be two lines of the file, the
+    # second of them anything - a section of its own where it starts `[`
+    _filter_names_hold(out)
     return "[exclude-table]\n" + "\n".join(out) + "\n"
 
 
@@ -2027,12 +1911,13 @@ def schema_diff(frm, to, excludes=(), timeout=180):
         cfg = os.path.join(d, "schema.hcl")
         with open(cfg, "w") as f:
             f.write(SCHEMA_DIFF_CONFIG)
-        return run(["atlas", "schema", "diff", "--config", f"file://{cfg}",
-                    "--env", "migkit", "--from", "env://url",
-                    "--to", "env://src",
-                    *[a for e in excludes for a in ("--exclude", e)]],
-                   env={"MIGKIT_SCHEMA_FROM": frm, "MIGKIT_SCHEMA_TO": to},
-                   check=False, timeout=timeout)
+        return runner.run(
+            ["atlas", "schema", "diff", "--config", f"file://{cfg}",
+             "--env", "migkit", "--from", "env://url", "--to", "env://src",
+             *[a for e in excludes for a in ("--exclude", e)]],
+            {"MIGKIT_SCHEMA_FROM": frm, "MIGKIT_SCHEMA_TO": to},
+            check=False, timeout=timeout, what="the schema comparison",
+            retries=3)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -2130,76 +2015,14 @@ def mydumper_defaults(hop, db, sections=None):
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
-def _long_options(program, *sub):
-    """The long options this installed build of `program` really has - of
-    its subcommand `sub` where it has subcommands.
-
-    Read from the option column of its own `--help`, not from the whole
-    text: mydumper 1.0.5 names `--overwrite-tables` inside the description
-    of `--overwrite-unsafe`, and the binary answers `Unknown option
-    --overwrite-tables`. Measured, the column holds 136 options for mydumper
-    and 99 for myloader, and that one is in neither.
-
-    A program with subcommands keeps its options there: pgcopydb 0.18's own
-    `--help` lists none, and `copy table-data --help` lists 11. Asked
-    without the subcommand, every option the copy was passed looked absent
-    and nothing could be checked.
-    """
-    import os
-    # asked once per build: the build on the path, and the file as it is
-    # now - a program upgraded under a long-running process is a new build
-    path = which(program) or program
-    try:
-        stamp = os.stat(path).st_mtime_ns
-    except OSError:
-        stamp = None
-    return _options_of(path, stamp, tuple(sub))
-
-
-_SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
-
-
-def _subcommand(argv):
-    """The subcommand words of one command line: the words after the
-    program and before its first option (`copy table-data`), none where
-    the first is an option or an address."""
-    out = []
-    for a in list(argv)[1:4]:
-        if not _SUBCOMMAND.fullmatch(str(a)):
-            break
-        out.append(str(a))
-    return tuple(out)
-
-
-@functools.lru_cache(maxsize=None)
-def _options_of(path, stamp, sub=()):
-    p = subprocess.run([path, *sub, "--help"], env=tool_env(None), text=True,
-                       capture_output=True)
-    return _option_column((p.stdout or "") + (p.stderr or ""))
-
-
-def _option_column(text):
-    """The long options in the option column of a `--help` text."""
-    # the option column: the flag, then the column gap, the end of the
-    # line, or its `=VALUE`. Measured, the MongoDB tools spell theirs in
-    # camelCase with `=<value>` (`--bypassDocumentValidation`), and the old
-    # lower-case, gap-only pattern found 6 of mongodump's 37 flags. The
-    # online sync names its value after one space (`--config value`), and
-    # 5 of its 15 were found until that shape was read too; every other
-    # program's count stayed the same. The MySQL copy program lists an
-    # option beside its alias (`--py, --python`, `--nw, --no-wizard`):
-    # 81 of its 91 were found until both halves were read, and the others'
-    # counts stayed the same (136, 99, 73, 51, 37, 53, 34). pgcopydb's
-    # column is one space short for its longest flag (`--large-objects-jobs
-    # Number of ...`, `--summary List ...`), read as the flag and its
-    # capitalised description; that added those two and nothing to any
-    # other program
-    name = r"--[a-zA-Z0-9][a-zA-Z0-9-]*"
-    return frozenset(re.findall(
-        rf"(?m)^\s+(?:-\w,\s+|{name},\s+)?({name})"
-        r"(?=\s{2,}|$|=|\[=|\s[A-Za-z_<][\w<>.-]*\s{2,}|\s[A-Z][a-z]+\s)",
-        text)
-        + re.findall(rf"(?m)^\s+({name})(?=,\s+--)", text))
+#: the long options an installed build really has, asked once per build
+#: (`toolversion.options`), and the pieces of that question the flag checks
+#: read: the subcommand of a command line (`runner._subcommand`) and the
+#: option column of a `--help` text
+_long_options = toolversion.options
+_options_of = toolversion.options_of
+_option_column = toolversion.option_column
+_subcommand = runner._subcommand
 
 
 def tool_flag(program, *spellings):
@@ -2422,19 +2245,22 @@ def _my_orphans_left(hop, db, log):
 
 
 def _my_tls(ep, program):
-    """The endpoint's TLS options as the program's flags (dump and load) or
-    connection keys (the straight copy), the way `Endpoint.mysql_tls`
-    reads them for migkit's own connections. The bulk programs used to be
-    given none of them, and connected with whatever the server offered."""
+    """The endpoint's TLS as the program's flags (dump and load) or
+    connection keys (the straight copy), from what `Endpoint.mysql_tls`
+    decides for migkit's own connections - the automatic answer included:
+    a server whose certificate verifies against the system's authorities
+    is checked by the programs too, where they were given only what the
+    hop wrote and connected with whatever the server offered."""
     o = getattr(ep, "options", None) or {}
+    got = ep.mysql_tls() if hasattr(ep, "mysql_tls") else {}
+    ca = got.get("ssl_ca")
     cert, key = o.get("ssl_cert"), o.get("ssl_key")
+    identity = bool(got.get("ssl_verify_identity", True))
     if program == "mysqlsh":
-        if o.get("ssl_ca"):
-            out = {"ssl-mode": ("VERIFY_IDENTITY"
-                                if o.get("ssl_verify_identity", True)
-                                else "VERIFY_CA"),
-                   "ssl-ca": str(o["ssl_ca"])}
-        elif o.get("ssl"):
+        if ca:
+            out = {"ssl-mode": "VERIFY_IDENTITY" if identity
+                   else "VERIFY_CA", "ssl-ca": str(ca)}
+        elif got.get("ssl") is not None or o.get("ssl"):
             out = {"ssl-mode": "REQUIRED"}
         else:
             return {}
@@ -2443,11 +2269,11 @@ def _my_tls(ep, program):
         if key:
             out["ssl-key"] = str(key)
         return out
-    if o.get("ssl_ca"):
+    if ca:
         # the dump and load programs know two modes: REQUIRED checks
         # nothing, so a named authority is held to the server's name too
-        out = ["--ssl-mode", "VERIFY_IDENTITY", "--ca", str(o["ssl_ca"])]
-    elif o.get("ssl"):
+        out = ["--ssl-mode", "VERIFY_IDENTITY", "--ca", str(ca)]
+    elif got.get("ssl") is not None or o.get("ssl"):
         out = ["--ssl"]
     else:
         return []
@@ -2539,8 +2365,7 @@ def mydumper_table(hop, db, table, workers, rows, log=None):
     import shutil
 
     from .engines.mysql import MySQLEngine
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", table)
-    outdir = hop.report_dir(db) / f"dump-table-{safe}"
+    outdir = hop.report_dir(db) / f"dump-table-{report_name(table)}"
     shutil.rmtree(outdir, ignore_errors=True)
     dump, load = _mydumper_commands(
         hop, db, workers, outdir, logs=_my_target_logs(hop, quick=False))
@@ -3841,39 +3666,52 @@ def _my_dump_position(hop, db, outdir):
 def pgloader_move(hop, db, workers, go, log):
     """MySQL to PostgreSQL in one pass, through a load file.
 
-    The load file carries both passwords, so it lives only for the run:
-    written with owner-only permissions, and removed afterwards whether
-    the load worked or not. It named the source's database on the target
-    side too, so a hop whose `db_map` renames the database loaded into the
-    wrong one.
+    The load file carries both passwords, so it lives only for the run: a
+    file of this user's made new under a name of its own (`PrivateFile`),
+    gone however the load ends - it was written into the reports and then
+    narrowed, and a stopped run left it there. It named the source's
+    database on the target side too, so a hop whose `db_map` renames the
+    database loaded into the wrong one.
+
+    Its connections take TLS without checking a certificate
+    (`sslmode=require` is the most its PostgreSQL side is given, its MySQL
+    side none), so a hop whose TLS checks one - asked, or found to verify
+    (`tls.auto`) - or that asks for TLS on its MySQL side is not carried
+    this way (`runner.Blocked`, another way is taken): it connected with
+    no TLS at all while `doctor` said verified.
     """
     from .wording import Step, phase
     s, t = hop.source, hop.target
-    loadfile = hop.report_dir(db) / "pgloader.load"
+    copy = Step(phase("stream-copy", workers=workers),
+                ["pgloader", "<private load file>"])
+    steps = [_truncate_step(hop, db), copy]
+    if not go:
+        return steps + ["# dry-run, add --go to execute"]
+    pg_tls = t.libpq_tls()
+    my_tls = s.mysql_tls() if hasattr(s, "mysql_tls") else {}
+    if (str(pg_tls.get("sslmode") or "").startswith("verify")
+            or my_tls.get("ssl_ca") or my_tls.get("ssl") is not None):
+        raise runner.Blocked(
+            "the hop's TLS checks the servers' certificates, or asks for"
+            " TLS on the source, which this way of copying cannot say;"
+            " nothing has been copied by it")
+    tail = ("?sslmode=require" if pg_tls.get("sslmode") not in (
+        None, "", "disable", "allow", "prefer") else "")
     body = f"""LOAD DATABASE
   FROM mysql://{s.user}:{quote(s.password, safe='')}@{s.host}:{s.port}/{db}
-  INTO postgresql://{t.user}:{quote(t.password, safe='')}@{t.host}:{t.port}/{hop.target_db(db)}
+  INTO postgresql://{t.user}:{quote(t.password, safe='')}@{t.host}:{t.port}/{hop.target_db(db)}{tail}
 WITH data only, workers = {workers}, concurrency = {min(workers, 4)},
      on error stop
 ALTER SCHEMA '{db}' RENAME TO 'public';
 """
-    copy = Step(phase("stream-copy", workers=workers),
-                ["pgloader", loadfile])
-    steps = [_truncate_step(hop, db), copy]
-    if not go:
-        return steps + ["# dry-run, add --go to execute"]
     # a data-only load appends: run again, it doubled every row or stopped
     # on the first key already there. Emptied first, as the other bulk
     # paths into PostgreSQL empty it, so a second run replaces the first
     _pg_truncate_target(hop, db, log)
-    loadfile.write_text(body)
-    loadfile.chmod(0o600)
-    try:
-        if log:
-            log(copy)
-        done = _sh(copy.argv, None, log)
-    finally:
-        loadfile.unlink(missing_ok=True)
+    if log:
+        log(copy)
+    with PrivateFile(body, ".load") as loadfile:
+        done = _sh(["pgloader", loadfile], None, log)
     # it says an error in its log and exits 0: measured, 3.6.10 could not
     # sign in to MySQL 8.4 (`The value of SEQUENCE ... is not of type
     # (SIMPLE-ARRAY (UNSIGNED-BYTE 8))`), loaded nothing and ended as if
@@ -3881,9 +3719,8 @@ ALTER SCHEMA '{db}' RENAME TO 'public';
     failed = [ln for ln in f"{done.stdout}\n{done.stderr}".splitlines()
               if " ERROR " in ln or " FATAL " in ln]
     if failed:
-        from .wording import database_words, without_programs
-        said = database_words("\n".join(failed)) or failed[0][-300:]
-        raise RuntimeError(without_programs(said, DRIVEN))
+        raise runner.classify(1, "\n".join(failed), secrets=(
+            s.password, t.password))
     return steps
 
 
@@ -3956,55 +3793,39 @@ def mongodump_move(hop, db, workers, go, log):
         raise _unresolved_exclusion(db, unresolved)
     if log:
         log(copy)
-    _debug(copy.argv)
-    with _MongoSecrets(hop.report_dir(db), s, t) as files:
-        dump_cmd = dump + files["src"]
-        restore_cmd = restore + files["dst"]
-        dump = subprocess.Popen(dump_cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, env=tool_env())
-        restore = subprocess.Popen(restore_cmd, stdin=dump.stdout,
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.PIPE, env=tool_env())
-        dump.stdout.close()
-        with _spawned(dump, dump_cmd[0]), _spawned(restore, restore_cmd[0]):
-            return _mongo_piped(db, dump, restore, log, steps)
+    with _MongoSecrets(s, t) as files:
+        return _mongo_piped(db, dump + files["src"], restore + files["dst"],
+                            log, steps, (s.password, t.password))
 
 
 class _MongoSecrets:
     """Each side's password in a file of its own, readable by this user
     only, for as long as the programs run: `{side: ["--config=<file>"]}`,
-    empty for a side with no password. Measured with the Database Tools
-    100.16: `--config` holding `password:` beside a `--uri` without one
-    signed in, and a wrong one there exited 1."""
+    empty for a side with no password - each a `PrivateFile`, made new
+    under a name of its own. Measured with the Database Tools 100.16:
+    `--config` holding `password:` beside a `--uri` without one signed in,
+    and a wrong one there exited 1."""
 
-    def __init__(self, where, src, dst):
-        import tempfile
-        self.where, self.eps = where, {"src": src, "dst": dst}
-        self.dir = None
-        self._tmp = tempfile
+    def __init__(self, src, dst):
+        self.eps = {"src": src, "dst": dst}
+        self.files = []
 
     def __enter__(self):
-        import os
-
         import yaml
-        self.where.mkdir(parents=True, exist_ok=True)
-        self.dir = self._tmp.mkdtemp(prefix="mongo-auth-", dir=self.where)
-        os.chmod(self.dir, 0o700)
         out = {}
         for side, ep in self.eps.items():
             if not ep.password:
                 out[side] = []
                 continue
-            path = f"{self.dir}/{side}.yaml"
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(yaml.safe_dump({"password": ep.password}))
-            out[side] = [f"--config={path}"]
+            f = PrivateFile(yaml.safe_dump({"password": ep.password}),
+                            ".yaml")
+            self.files.append(f)
+            out[side] = [f"--config={f.__enter__()}"]
         return out
 
     def __exit__(self, *exc):
-        import shutil
-        shutil.rmtree(self.dir, ignore_errors=True)
+        for f in self.files:
+            f.__exit__(*exc)
         return False
 
 
@@ -4228,20 +4049,23 @@ def mongosync_move(hop, db, workers, go, log):
     if log:
         log(sync)
     with PrivateFile(conf, ".yaml") as path:
-        argv = ["mongosync", "--config", path]
-        _debug(argv)
-        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, env=tool_env(),
-                                cwd=here)
-        with _spawned(proc, "mongosync"):
-            _mongosync_run(port, proc, start, db, log)
-            # committed: it has nothing more to do, and does not stop
-            proc.terminate()
+        import subprocess
+        proc = runner.start(["mongosync", "--config", path],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, cwd=here)
+        # what it says is read as it says it: a pipe nobody reads fills in
+        # an hours-long sync and holds the program up
+        said = runner._Reader(proc.popen.stderr, None, False)
+        with runner.stopping(), proc:
             try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+                _mongosync_run(port, proc, start, db, log,
+                               said=lambda: runner.said(
+                                   "".join(said.lines)))
+            finally:
+                # committed, it has nothing more to do and does not stop;
+                # stopped part way, it is stopped with what it started
+                proc.stop(grace=30)
     return steps
 
 
@@ -4267,7 +4091,10 @@ def commit_ready(progress):
             and lag <= COMMIT_LAG), lag
 
 
-def _mongosync_run(port, proc, start, db, log):
+def _mongosync_run(port, proc, start, db, log, said=lambda: ""):
+    """The sync started, followed and committed through its own API;
+    `said()` is what the program said, in migkit's words, for a start
+    that fails."""
     import time as _t
     end = _t.time() + 60
     while True:
@@ -4276,12 +4103,10 @@ def _mongosync_run(port, proc, start, db, log):
             break
         except OSError:
             if proc.poll() is None and _t.time() > end:
-                proc.terminate()
-                proc.wait()
+                proc.stop()
             if proc.poll() is not None:
-                raise RuntimeError("the online sync did not start: "
-                                   + (proc.stderr.read() or b"").decode(
-                                       errors="replace")[-300:])
+                raise runner.Failed("the online sync did not start: "
+                                    + (said() or "it said nothing")[-300:])
             _t.sleep(0.5)
     got = _sync_api(port, "POST", "start", start)
     if not got.get("success"):
@@ -4333,29 +4158,22 @@ def _mongosync_run(port, proc, start, db, log):
         log(f"{db}: copied, and committed with nothing left to apply")
 
 
-def _mongo_piped(db, dump, restore, log, steps):
-    # what the load says as it finishes each collection, in migkit's words,
-    # and how many documents it could not load - which it reports and then
-    # exits 0 over
+def _mongo_piped(db, dump, restore, log, steps, secrets=()):
+    """The dump piped straight into the load (`runner.pipe`): what the load
+    says as it finishes each collection, in migkit's words, and how many
+    documents it could not load - which it reports and then exits 0
+    over."""
     loaded = _tables_done(MONGO_RESTORED, "loaded")
-    tail, failed = [], []
-    for raw in restore.stderr:
-        line = raw.decode(errors="replace")
-        said = loaded(line)
-        if said and log:
-            log(said)
+    failed = []
+
+    def read(line):
         m = re.search(MONGO_RESTORED, line)
         if m and int(m.group("failed")):
             failed.append(f"{m.group('table')} {m.group('failed')} of"
                           f" {int(m.group('docs')) + int(m.group('failed'))}")
-        tail.append(line)
-        del tail[:-40]
-    restore.wait()
-    _, err_d = dump.communicate()
-    if dump.returncode or restore.returncode:
-        from .wording import without_programs
-        raise RuntimeError(without_programs(
-            (err_d.decode(errors="replace") + "".join(tail))[-500:], DRIVEN))
+        return loaded(line)
+    runner.pipe(dump, restore, progress=read, log=log, what="the copy",
+                secrets=secrets)
     if failed:
         raise RuntimeError(
             "documents that did not load: " + ", ".join(failed[:6])
@@ -4410,6 +4228,9 @@ def pgcopydb_available():
 
 
 _PGCOPYDB_HOW = None
+#: seconds an answer of `pgcopydb_runner` stands: a long `sync --serve`
+#: sees an image pulled, or a build installed, after it started
+PGCOPYDB_HOW_FOR = 300
 
 
 def pgcopydb_runner():
@@ -4433,22 +4254,25 @@ def pgcopydb_runner():
     as a completed migration.
     """
     global _PGCOPYDB_HOW
-    if _PGCOPYDB_HOW is not None:
-        return _PGCOPYDB_HOW
+    now = time.monotonic()
+    if _PGCOPYDB_HOW is not None and now - _PGCOPYDB_HOW[1] \
+            < PGCOPYDB_HOW_FOR:
+        return _PGCOPYDB_HOW[0]
     how = ""
     if which("docker"):
         try:
-            p = run(["docker", "image", "inspect", PGCOPYDB_IMAGE],
-                    check=False, timeout=20)
+            p = runner.run(["docker", "image", "inspect", PGCOPYDB_IMAGE],
+                           check=False, timeout=20)
             if p.returncode == 0:
                 how = "image"
-        except Exception:
+        except Exception:  # noqa: BLE001 - no docker to ask
             how = ""
     if not how and which("pgcopydb"):
         how = "local"
-    # cached: `pick` is called per table, and starting a docker client each
-    # time to ask the same question would cost more than the answer is worth
-    _PGCOPYDB_HOW = how
+    # kept a while: `pick` is called per table, and starting a docker
+    # client each time to ask the same question would cost more than the
+    # answer is worth
+    _PGCOPYDB_HOW = (how, now)
     return how
 
 
@@ -4464,11 +4288,12 @@ def _pgcopydb_options(*sub):
 @functools.lru_cache(maxsize=None)
 def _image_options(image, sub):
     try:
-        p = run(["docker", "run", "--rm", image, "pgcopydb", *sub, "--help"],
-                check=False, timeout=60)
+        p = runner.container(image, ["pgcopydb", *sub, "--help"],
+                             network=None, check=False, timeout=60,
+                             init=False)
     except Exception:  # noqa: BLE001 - an image that cannot be asked
         return frozenset()
-    return _option_column((p.stdout or "") + (p.stderr or ""))
+    return _option_column(p.stdout or "")
 
 
 #: a part of a split table is not worth making under this many seconds of
@@ -4814,20 +4639,14 @@ def pgcopydb_move(hop, db, workers, go, log):
     somebody may have been using, which is not a decision a mover should make
     on its own.
     """
-    import os
-    from urllib.parse import quote
     s, t = hop.source, hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
     # no password in either connection string: they went on the program's
     # command line, where any process listing on the machine read them
     # while it ran. The passwords go in a password file only this user can
-    # read, for the run's length.
-    src = (f"postgresql://{quote(s.user or '', safe='')}"
-           f"@{s.host}:{s.port}/{db}")
-    dst = (f"postgresql://{quote(t.user or '', safe='')}"
-           f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
-    passfile = hop.report_dir(db) / "streaming.pgpass"
-    net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
+    # read, for the run's length; the hop's TLS goes in the addresses
+    src, dst = _pg_uri(s, db), _pg_uri(t, ddb, quiet_triggers=True)
+    net = envkeys.text("MIGKIT_PGCOPYDB_NETWORK")
     how = pgcopydb_runner()
     # what the copy carries and how many large objects follow it, asked
     # while the plan asks the rest: a plan waits for none of it for long
@@ -4858,7 +4677,6 @@ def pgcopydb_move(hop, db, workers, go, log):
                             " the source")
             if routed:
                 filters_note += "\n" + _routed_note(routed)
-    uris = {}
     resume = stopped_split = False
     # the blocking questions first, so the ones asked beside them have had
     # as long as these took
@@ -4875,6 +4693,7 @@ def pgcopydb_move(hop, db, workers, go, log):
     split = _copy_split(hop, workers, carried,
                         _pgcopydb_options("copy", "table-data")
                         if how else frozenset())
+    work = begun = None
     if how == "local":
         # its own directory for the hop's database, kept under its reports
         # while a copy is under way. pgcopydb keeps its state - including
@@ -4896,29 +4715,19 @@ def pgcopydb_move(hop, db, workers, go, log):
             stopped_split = kept.way == "split"
             resume = not stopped_split
             split = kept if resume else split
-        cmd = (["pgcopydb", "copy", "table-data", "--dir", str(work),
-                "--source", src, "--target", dst]
-               + _copy_args(workers, split, resume, filters_path))
+        args = ["copy", "table-data", "--dir", str(work), "--source", src,
+                "--target", dst,
+                *_copy_args(workers, split, resume, filters_path)]
     else:
-        # the container still takes them in its environment: whether it
-        # can read a file mounted from here depends on the user it runs as,
-        # which this machine cannot measure without the image. Named on
-        # the command line and valued from this process's environment
-        # (`-e NAME`), which docker passes through - measured - so the
-        # passwords are not on a command line anyone can list.
-        def full(ep, name, tail=""):
-            return (f"postgresql://{quote(ep.user or '', safe='')}"
-                    f":{quote(ep.password or '', safe='')}"
-                    f"@{ep.host}:{ep.port}/{name}{tail}")
-        uris = {"PGCOPYDB_SOURCE_PGURI": full(s, db),
-                "PGCOPYDB_TARGET_PGURI": full(t, ddb, QUIET_TRIGGERS)}
-        cmd = ["docker", "run", "--rm", "--network", net,
-               "-e", "PGCOPYDB_SOURCE_PGURI", "-e", "PGCOPYDB_TARGET_PGURI"]
-        if filters_path:
-            cmd += ["-v", f"{filters_path}:/tmp/migkit-filters.ini:ro"]
-        cmd += [PGCOPYDB_IMAGE, "pgcopydb", "copy", "table-data"]
-        cmd += _copy_args(workers, split, False, filters_path and
-                          "/tmp/migkit-filters.ini")
+        # the container takes the addresses, passwords and all, from an
+        # environment file of this user's the docker client reads
+        # (`runner.container`): whether it could read a password file
+        # mounted from here depends on the user it runs as, which this
+        # machine cannot measure without the image
+        args = ["copy", "table-data",
+                *_copy_args(workers, split, False, filters_path and
+                            "/tmp/migkit-filters.ini")]
+    stream = _Streaming(hop, db, ddb, how, net, filters_path)
     # the plan says what happens; the command stays on the step and goes
     # only to the run's debug log
     from .wording import Step, phase
@@ -4926,15 +4735,17 @@ def pgcopydb_move(hop, db, workers, go, log):
         # measured: the streaming copy empties each table it loads on its
         # own, one at a time, and the target refuses to empty a table
         # another one references - `cannot truncate a table referenced in
-        # a foreign key constraint` - so on such a target it can only fail
+        # a foreign key constraint` - so on such a target it can only fail.
+        # The dump and load that carry it instead are recorded as
+        # themselves (`Ran`), never as this way's time
         if log:
             log(f"the target's foreign keys ({', '.join(blocked[:3])}"
                 + (" ..." if len(blocked) > 3 else "") + ") keep the"
                 " streaming copy from emptying the tables it loads, so this"
                 " goes through a local copy instead")
-        return pgdump_move(hop, db, workers, go, log)
+        return Ran(pgdump_move(hop, db, workers, go, log), "pgdump")
     copy = Step(phase("stream-copy", workers=workers,
-                      split=len(split.tables)), cmd)
+                      split=len(split.tables)), stream.argv(args))
     steps = [_truncate_step(hop)]
     if note:
         steps.insert(0, note)
@@ -4955,64 +4766,58 @@ def pgcopydb_move(hop, db, workers, go, log):
     # from inside it: the container has its own network view, and on a laptop
     # `--network host` is the VM's host, not this one. `ping` is the tool's
     # own answer to that question, and asking it first turns a failed move
-    # into a fallback rather than an outage.
-    if how == "local":
+    # into a fallback rather than an outage - the dump and load, recorded as
+    # themselves. A refusal of the database's is not that: every way would
+    # meet it, and it stops the move (`runner.Refused`)
+    try:
         # `ping` does not take `--dir` - it answers with its usage if you
         # give it one, which reads as a connectivity failure and sends the
         # move down the fallback path for no reason
-        ping = ["pgcopydb", "ping", "--source", src, "--target", dst]
-    else:
-        ping = cmd[:cmd.index(PGCOPYDB_IMAGE) + 1] + ["pgcopydb", "ping"]
-    _pgpass(passfile, hop, db, ddb)
-    env = {"PGPASSFILE": str(passfile), **uris}
-    try:
-        _sh(ping, env)
-    except Exception as e:
-        passfile.unlink(missing_ok=True)
+        stream.run(["ping"] + (["--source", src, "--target", dst]
+                               if how == "local" else []),
+                   what="the streaming copy's first reach")
+    except (RuntimeError, runner.Blocked) as e:
         if log:
             where = ("from its container"
                      f" (network={net})" if how != "local" else "")
             log(f"the streaming copy cannot reach both databases {where}:"
                 f" {str(e).splitlines()[-1][:120]}")
             log("copying through a local dump instead")
-        return pgdump_move(hop, db, workers, go, log)
+        return Ran(pgdump_move(hop, db, workers, go, log), "pgdump")
 
     took = None
-    try:
-        _pg_create_missing(hop, db, log)
-        if resume:
-            # what the stopped copy put in is what it goes on from
-            if log:
-                log("an earlier streaming copy of this database stopped part"
-                    " way; going on from the tables it finished")
-        else:
-            if stopped_split and log:
-                log("an earlier streaming copy of this database stopped part"
-                    " way through a table it was copying in parts, and a"
-                    " copy cut that way cannot be gone on from without"
-                    " losing rows; it starts over")
-            _pg_truncate_target(hop, db, log)
-            if how == "local":
-                import shutil
-                shutil.rmtree(work, ignore_errors=True)
-                work.mkdir(parents=True)
-                begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
-                split.keep(begun)
-        with _IndexWindow(hop, db, workers, log):
-            if log:
-                log(copy)
-                log(split.why)
-            began = time.monotonic()
-            try:
-                with _CopyProgress(work if how == "local" else None, log):
-                    _sh(copy.argv, env)
-            except RuntimeError as e:
-                if "message queue" in str(e):
-                    raise RuntimeError(QUEUES_GONE) from None
-                raise
-            took = time.monotonic() - began
-    finally:
-        passfile.unlink(missing_ok=True)
+    _pg_create_missing(hop, db, log)
+    if resume:
+        # what the stopped copy put in is what it goes on from
+        if log:
+            log("an earlier streaming copy of this database stopped part"
+                " way; going on from the tables it finished")
+    else:
+        if stopped_split and log:
+            log("an earlier streaming copy of this database stopped part"
+                " way through a table it was copying in parts, and a"
+                " copy cut that way cannot be gone on from without"
+                " losing rows; it starts over")
+        _pg_truncate_target(hop, db, log)
+        if how == "local":
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True)
+            begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
+            split.keep(begun)
+    with _IndexWindow(hop, db, workers, log):
+        if log:
+            log(copy)
+            log(split.why)
+        began = time.monotonic()
+        try:
+            with _CopyProgress(work if how == "local" else None, log):
+                stream.run(args, what="the streaming copy")
+        except RuntimeError as e:
+            if "message queue" in str(e):
+                raise runner.Failed(QUEUES_GONE) from None
+            raise
+        took = time.monotonic() - began
     if how == "local":
         # a resumed copy's time is not the whole copy's, so only a copy
         # from the start is a rate
@@ -5024,11 +4829,93 @@ def pgcopydb_move(hop, db, workers, go, log):
         from .decide import forget
         forget(begun)
         begun.unlink(missing_ok=True)
-    _pg_finish_created(hop, db, log)
+    _pg_finish_created(hop, db, log, workers)
     _pg_carry_sequences(hop, db, log)
     from .engines.postgres import PostgresEngine
     PostgresEngine(hop).carry_database_objects(db, log)
     return steps
+
+
+class Ran(list):
+    """A bulk path's steps, and the way that ran them where it was another
+    than the one asked for: a streaming copy that could not reach both
+    databases is carried by the dump and load, and its time is theirs -
+    kept under the streaming copy's name, it corrupted the rates every
+    later choice is made on."""
+
+    def __init__(self, steps, via):
+        super().__init__(steps or [])
+        self.via = getattr(steps, "via", via)
+
+
+def _pg_uri(ep, name, secret=False, quiet_triggers=False):
+    """A PostgreSQL address as a program is given it: the user, the
+    database, the hop's TLS as libpq reads it in the address
+    (`Endpoint.libpq_tls`, the automatic answer included - the streaming
+    copy connected with no `sslmode` at all while `doctor` said verified),
+    and the password only where `secret` asks for it: an address on a
+    command line takes none, and its password goes in a file of this
+    user's. `quiet_triggers`: the loading connection keeps the target's
+    triggers off its rows (`QUIET_TRIGGERS`)."""
+    from urllib.parse import urlencode
+    auth = quote(ep.user or "", safe="")
+    if secret:
+        auth += ":" + quote(ep.password or "", safe="")
+    query = dict(ep.libpq_tls())
+    if quiet_triggers:
+        query["options"] = "-c session_replication_role=replica"
+    host = f"[{ep.host}]" if ":" in str(ep.host) else ep.host
+    tail = urlencode(query, quote_via=quote)
+    return (f"postgresql://{auth}@{host}:{ep.port}/{quote(str(name), safe='')}"
+            + (f"?{tail}" if tail else ""))
+
+
+def _pg_tls_files(ep):
+    """The files the hop's TLS names for `ep` (its authority, its client
+    certificate and key, its revocation list): what a container is given
+    read-only, at the same paths."""
+    return [v for k, v in ep.libpq_tls().items()
+            if k in ("sslrootcert", "sslcert", "sslkey", "sslcrl")]
+
+
+class _Streaming:
+    """The streaming copy of one database as it runs here: its local build
+    with the passwords in a password file of this user's, or its image
+    with the addresses in an environment file of this user's - either made
+    new for each run under a name of its own, and gone with it."""
+
+    def __init__(self, hop, db, ddb, how, net, filters=None):
+        self.hop, self.db, self.ddb = hop, db, ddb
+        self.how, self.net, self.filters = how, net, filters
+
+    def argv(self, args):
+        """The command line as the plan and the debug log show it."""
+        if self.how == "local":
+            return ["pgcopydb", *args]
+        return (["docker", "run", "--rm", "--network", self.net,
+                 "--env-file", "<private environment file>"]
+                + (["-v", f"{self.filters}:/tmp/migkit-filters.ini:ro"]
+                   if self.filters else [])
+                + [PGCOPYDB_IMAGE, "pgcopydb", *args])
+
+    def run(self, args, what="", stall=None, log=None, progress=None):
+        s, t = self.hop.source, self.hop.target
+        if self.how == "local":
+            with PrivateFile(_pgpass_text(self.hop, self.db, self.ddb),
+                             ".pgpass") as passfile:
+                return _sh(["pgcopydb", *args], {"PGPASSFILE": passfile},
+                           log, progress)
+        mounts = [(p, p) for ep in (s, t) for p in _pg_tls_files(ep)]
+        if self.filters:
+            mounts.append((str(self.filters), "/tmp/migkit-filters.ini"))
+        return runner.container(
+            PGCOPYDB_IMAGE, ["pgcopydb", *args],
+            secrets={"PGCOPYDB_SOURCE_PGURI": _pg_uri(s, self.db,
+                                                      secret=True),
+                     "PGCOPYDB_TARGET_PGURI": _pg_uri(
+                         t, self.ddb, secret=True, quiet_triggers=True)},
+            mounts=mounts, network=self.net, what=what, stall=stall,
+            log=log, progress=progress)
 
 
 def _ask_soon(ask):
@@ -5270,18 +5157,21 @@ def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
     by the copy itself. Raises where the copy fails; the caller proves the
     rest.
 
+    Tables are copied side by side, each in a directory of its own named
+    from the table (`report_name`, so a name with `/` or `..` in it stays
+    inside the reports) and with a password file of its own
+    (`_Streaming`): one fixed file for all of them was removed under the
+    others' connections by the first to finish.
+
     What the table copier's own pass-through is timed against, table by
     table (`PostgresEngine.TABLE_WAYS`)."""
-    import os
     import shutil
-    from urllib.parse import quote
-    s, t = hop.source, hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
     how = pgcopydb_runner()
     if not how:
-        raise RuntimeError("the streaming copy is not installed here")
-    base = hop.report_dir(db)
-    work = base / f"streaming-table-{re.sub(r'[^A-Za-z0-9_.-]', '_', table)}"
+        raise runner.Blocked("the streaming copy is not installed here")
+    _filter_names_hold([table])
+    work = hop.report_dir(db) / f"streaming-table-{report_name(table)}"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     filters = work / "filters.ini"
@@ -5290,37 +5180,32 @@ def pgcopydb_table(hop, db, table, snapshot, workers, size, log=None):
                         _pgcopydb_options("copy", "table-data"))
     if log:
         log(f"{table}: {split.why}")
-    args = ["copy", "table-data"]
-    passfile = base / "streaming-table.pgpass"
-    uris = {}
+    net = envkeys.text("MIGKIT_PGCOPYDB_NETWORK")
     if how == "local":
-        src = (f"postgresql://{quote(s.user or '', safe='')}"
-               f"@{s.host}:{s.port}/{db}")
-        dst = (f"postgresql://{quote(t.user or '', safe='')}"
-               f"@{t.host}:{t.port}/{ddb}{QUIET_TRIGGERS}")
-        cmd = ["pgcopydb", *args, "--dir", str(work / "state"),
-               "--source", src, "--target", dst,
-               *_copy_args(workers, split, False, filters, snapshot)]
+        args = ["copy", "table-data", "--dir", str(work / "state"),
+                "--source", _pg_uri(hop.source, db), "--target",
+                _pg_uri(hop.target, ddb, quiet_triggers=True),
+                *_copy_args(workers, split, False, filters, snapshot)]
     else:
-        def full(ep, name, tail=""):
-            return (f"postgresql://{quote(ep.user or '', safe='')}"
-                    f":{quote(ep.password or '', safe='')}"
-                    f"@{ep.host}:{ep.port}/{name}{tail}")
-        uris = {"PGCOPYDB_SOURCE_PGURI": full(s, db),
-                "PGCOPYDB_TARGET_PGURI": full(t, ddb, QUIET_TRIGGERS)}
-        net = os.environ.get("MIGKIT_PGCOPYDB_NETWORK", "host")
-        cmd = ["docker", "run", "--rm", "--network", net,
-               "-e", "PGCOPYDB_SOURCE_PGURI", "-e", "PGCOPYDB_TARGET_PGURI",
-               "-v", f"{filters}:/tmp/migkit-filters.ini:ro",
-               PGCOPYDB_IMAGE, "pgcopydb", *args,
-               *_copy_args(workers, split, False, "/tmp/migkit-filters.ini",
-                           snapshot)]
-    _pgpass(passfile, hop, db, ddb)
+        args = ["copy", "table-data",
+                *_copy_args(workers, split, False, "/tmp/migkit-filters.ini",
+                            snapshot)]
     try:
-        _sh(cmd, {"PGPASSFILE": str(passfile), **uris}, log)
+        _Streaming(hop, db, ddb, how, net, filters).run(
+            args, what=f"{table}: the streaming copy", log=log)
     finally:
-        passfile.unlink(missing_ok=True)
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _filter_names_hold(names):
+    """Refuses a table the streaming copy's filter file cannot name: one
+    whose name holds a line break, which the file reads as a line of its
+    own - a section of its own, where it starts with `[`."""
+    bad = [n for n in names if "\n" in str(n) or "\r" in str(n)]
+    if bad:
+        raise runner.Blocked(
+            f"{bad[0]!r}: its name holds a line break, which the streaming"
+            " copy's list of tables cannot say; the table copier carries it")
 
 
 def _streaming_work(hop, db):
@@ -5330,20 +5215,28 @@ def _streaming_work(hop, db):
     return base / "streaming-work", base / "streaming-work.begun"
 
 
-def _pgpass(path, hop, db, ddb):
-    """A password file holding the source's and the target's passwords,
-    readable by this user only. `:` and `\\` in a field are escaped, as
-    the file's format asks."""
+def _pgpass_text(hop, db, ddb):
+    """A password file's lines for the source's and the target's
+    passwords. `:` and `\\` in a field are escaped, as the file's format
+    asks."""
     def field(v):
         return str(v).replace("\\", "\\\\").replace(":", "\\:")
     s, t = hop.source, hop.target
-    lines = [":".join(field(x) for x in (e.host, e.port, name, e.user,
-                                         e.password or ""))
-             for e, name in ((s, db), (t, ddb))]
+    return "\n".join(":".join(field(x) for x in (e.host, e.port, name,
+                                                 e.user, e.password or ""))
+                     for e, name in ((s, db), (t, ddb))) + "\n"
+
+
+def _pgpass(path, hop, db, ddb):
+    """The password file at `path`, readable by this user only from the
+    moment it exists - made 0600, never made and then narrowed."""
+    import os
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch(mode=0o600)
-    path.chmod(0o600)
-    path.write_text("\n".join(lines) + "\n")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(_pgpass_text(hop, db, ddb))
 
 
 def follow_selected():
@@ -5567,7 +5460,6 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     with the reason.
     """
     import os
-    import subprocess as _sp
 
     from . import physical
     from .engines.postgres import PostgresEngine
@@ -5577,10 +5469,10 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     slot = seed["slot"] if seed else eng.follow_slot(db)
     d = follow_dir(hop, db)
     s, t = hop.source, hop.target
-    src = (f"postgresql://{s.user}:{quote(s.password or '', safe='')}"
-           f"@{s.host}:{s.port}/{db}")
-    dst = (f"postgresql://{t.user}:{quote(t.password or '', safe='')}"
-           f"@{t.host}:{t.port}/{hop.target_db(db)}")
+    # passwords and the hop's TLS in the addresses, which reach the leg in
+    # its environment, never on its command line
+    src = _pg_uri(s, db, secret=True)
+    dst = _pg_uri(t, hop.target_db(db), secret=True)
     argv = ["pgcopydb", "follow", "--dir", str(d), "--slot-name", slot,
             *([] if seed else ["--create-slot"]), "--origin", origin,
             "--plugin", "pgoutput", "--not-consistent"]
@@ -5645,9 +5537,8 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     d.mkdir(parents=True, exist_ok=True)
     if seed:
         _seed_origin(eng, db, origin, seed["lsn"])
-    env = tool_env({"PGCOPYDB_SOURCE_PGURI": src, "PGCOPYDB_TARGET_PGURI": dst})
+    env = {"PGCOPYDB_SOURCE_PGURI": src, "PGCOPYDB_TARGET_PGURI": dst}
     out = d / "follow.log"
-    _debug(argv, env)
     if log:
         log(steps[0])
     # what the target had taken before the leg, for its cost: the rows it
@@ -5656,29 +5547,29 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     # the catch-up with an end, as it always was; or, where the hop's
     # `follow_until` is stopped, a leg that runs until asked to end
     running = _follow_runs(hop) and timeout is None
+    import subprocess
     with out.open("ab") as fh:
-        proc = _sp.Popen(argv, stdout=fh, stderr=fh, env=env)
-    try:
-        _follow_sentinel(d, env, proc, log, end=not running)
-        applying = time.monotonic()
-        if running:
-            _follow_until_asked(hop, db, d, env, proc, log)
-        limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
+        proc = runner.start(argv, env, stdin=subprocess.DEVNULL, stdout=fh,
+                            stderr=fh, secrets=(s.password, t.password))
+    limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
+    with runner.stopping(), proc:
         try:
-            proc.wait(timeout=limit)
-        except _sp.TimeoutExpired:
-            raise SystemExit(
-                f"the CDC leg did not reach its end position in {limit}s."
-                f" It is still running; its log is {out}. Nothing has been"
-                " marked as caught up - raise MIGKIT_FOLLOW_TIMEOUT if the"
-                " backlog is simply larger than that")
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
+            _follow_sentinel(d, env, proc, log, end=not running)
+            applying = time.monotonic()
+            if running:
+                _follow_until_asked(hop, db, d, env, proc, log)
             try:
-                proc.wait(timeout=30)
-            except _sp.TimeoutExpired:
-                proc.kill()
+                proc.wait(timeout=limit)
+            except subprocess.TimeoutExpired:
+                raise SystemExit(
+                    f"the CDC leg did not reach its end position in"
+                    f" {limit}s, and was stopped there; its log is {out}."
+                    " Nothing has been marked as caught up - raise"
+                    " MIGKIT_FOLLOW_TIMEOUT if the backlog is simply larger"
+                    " than that") from None
+        finally:
+            if proc.poll() is None:
+                proc.stop(grace=30)
     if proc.returncode:
         raise SystemExit(f"the CDC leg exited {proc.returncode} before it"
                          f" finished catching up; its log is {out}")
@@ -5825,13 +5716,29 @@ def _follow_end(d, env, log=None):
                   log)
 
 
+def _sentinel(d, env, timeout=30):
+    """The running leg's sentinel as its own JSON says it (`sentinel get
+    --json`, the reading `follow_lag` takes too), or None where it has
+    none yet."""
+    got = runner.run(["pgcopydb", "stream", "sentinel", "get", "--json",
+                      "--dir", str(d)], env, check=False, timeout=timeout,
+                     what="the change leg's state")
+    try:
+        reading = json.loads(got.stdout or "")
+    except ValueError:
+        return None
+    return reading if got.returncode == 0 and isinstance(reading, dict) \
+        else None
+
+
 def _follow_sentinel(d, env, proc, log=None, end=True):
     """Turn the apply on and name the stop, once the run has made its
     sentinel. `follow` creates it at startup, so this cannot be done before
     the process exists - which is exactly why it is migkit's job and not a
     line in a runbook somebody forgets. `end` False leaves the stop to be
-    named later (`_follow_end`), for a leg that runs until asked."""
-    import subprocess as _sp
+    named later (`_follow_end`), for a leg that runs until asked. Ready is
+    read by field from its JSON, where the text it prints for people was
+    searched for the word `apply`."""
     import time as _t
     ready_by = _t.monotonic() + 120
     while _t.monotonic() < ready_by:
@@ -5839,9 +5746,8 @@ def _follow_sentinel(d, env, proc, log=None, end=True):
             raise SystemExit("the CDC leg exited before it was told to"
                              " apply anything, so nothing reached the"
                              f" target; its log is {d / 'follow.log'}")
-        got = _sp.run(["pgcopydb", "stream", "sentinel", "get", "--dir",
-                       str(d)], capture_output=True, text=True, env=env)
-        if got.returncode == 0 and "apply" in got.stdout:
+        reading = _sentinel(d, env)
+        if reading is not None and "apply" in reading:
             break
         _t.sleep(2)
     else:
@@ -5855,14 +5761,13 @@ def _follow_sentinel(d, env, proc, log=None, end=True):
 def _sentinel_set(d, env, args, why, log=None):
     """One setting of a running leg's sentinel, or a stop that says which
     could not be set."""
-    import subprocess as _sp
-    p = _sp.run(["pgcopydb", "stream", "sentinel"] + args + ["--dir",
-                str(d)], capture_output=True, text=True, env=env)
+    p = runner.run(["pgcopydb", "stream", "sentinel"] + args
+                   + ["--dir", str(d)], env, check=False, timeout=60,
+                   what=f"the change leg's {why}")
     if p.returncode:
-        from .wording import without_programs
-        raise SystemExit(f"could not set the {why} on the CDC leg:"
-                         + without_programs(
-                             " " + (p.stderr or p.stdout)[-200:], DRIVEN))
+        raise SystemExit(f"could not set the {why} on the CDC leg: "
+                         + runner.said((p.stderr or "") + (p.stdout or ""))
+                         [-200:])
     if log:
         log(f"change stream {why} set")
 
@@ -5948,16 +5853,12 @@ def follow_lag(hop, db):
         os.kill(pid, 0)
     except (OSError, ValueError, IndexError):
         return None
-    s = hop.source
-    src = (f"postgresql://{quote(s.user or '', safe='')}"
-           f"@{s.host}:{s.port}/{db}")
     try:
-        got = subprocess.run(["pgcopydb", "stream", "sentinel", "get",
-                              "--json", "--dir", str(d)],
-                             capture_output=True, text=True, timeout=15,
-                             env=tool_env({"PGCOPYDB_SOURCE_PGURI": src}))
-        reading = json.loads(got.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+        reading = _sentinel(d, {"PGCOPYDB_SOURCE_PGURI":
+                                _pg_uri(hop.source, db)}, timeout=15)
+    except (OSError, runner.Failed, runner.Blocked):
+        return None
+    if reading is None:
         return None
     write, replay = _lsn(reading.get("write_lsn")), _lsn(
         reading.get("replay_lsn"))
@@ -6146,7 +6047,10 @@ def stream_codegen(hop, dbs, engine):
             "database.hostname": s.host,
             "database.port": str(s.port),
             "database.user": s.user,
-            "database.password": s.password,
+            # the password from the runtime's environment (`connect.env`),
+            # never in the connector's configuration, which its API hands
+            # anyone who asks and its configuration topic keeps
+            "database.password": "${env:MIGKIT_SOURCE_PASSWORD}",
             "topic.prefix": name,
             "snapshot.mode": "initial",
             # A signal channel, so one table can be snapshotted again
@@ -6210,19 +6114,25 @@ def stream_codegen(hop, dbs, engine):
     left_out = _stream_columns_left_out(hop, dbs, tables, src_is_mysql)
     if left_out:
         source["config"]["column.exclude.list"] = left_out
+    # the hop's TLS, as each connector takes it; the files it names are
+    # given to the runtime read-only, at the same paths
+    tls_src, files = _debezium_tls(s, src_is_mysql)
+    source["config"].update(tls_src)
 
     dst_is_pg = engine in ("postgres", "hetero")
     jdbc = (f"jdbc:postgresql://{t.host}:{t.port}/" if dst_is_pg
             else f"jdbc:mysql://{t.host}:{t.port}/")
+    query, more = _jdbc_tls(t, dst_is_pg)
+    files += more
     sink = {
         "name": f"{name}-sink",
         "config": {
             "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
             # every table's topic, and not the transactions' one beside them
             "topics.regex": f"{name}\\.(?!{TRANSACTION_TOPIC}$).*",
-            "connection.url": jdbc + (dbs[0] if dbs else ""),
+            "connection.url": jdbc + (dbs[0] if dbs else "") + query,
             "connection.username": t.user,
-            "connection.password": t.password,
+            "connection.password": "${env:MIGKIT_TARGET_PASSWORD}",
             "insert.mode": "upsert",
             "delete.enabled": "true",
             "truncate.enabled": "true",
@@ -6250,7 +6160,13 @@ def stream_codegen(hop, dbs, engine):
       # its readings over HTTP on this machine only, which `/metrics`
       # carries out under migkit's names (`stream_readings`)
       ENABLE_JOLOKIA: "true"
-"""
+      # the connectors' passwords read from this environment
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: {ENV_PROVIDER}
+    env_file: [connect.env]
+""" + ("    volumes:\n" + "".join(f"      - {json.dumps(f + ':' + f + ':ro')}\n"
+                                   for f in sorted(set(files)))
+       if files else "")
     readme = f"""# Streaming pipeline for hop {hop.name} (generated by migkit)
 
 migkit owns this stack. Drive it with migkit, not by hand:
@@ -6261,8 +6177,9 @@ migkit owns this stack. Drive it with migkit, not by hand:
              migkit watch {hop.name} --verify --delta
   tear down  migkit move {hop.name} --mode cdc --drop --go
 
-These files hold credentials from hops.yaml - keep this directory private
-(chmod 700, never commit). Tearing down also drops the replication slot /
+connect.env holds the databases' passwords from hops.yaml; the connectors
+read them from there and carry none. Keep this directory private (chmod
+700, never commit). Tearing down also drops the replication slot /
 binlog reader left on the source.
 
 Third-party components are pinned in docker-compose.yml; see NOTICE for
@@ -6270,6 +6187,9 @@ licences and attribution.
 """
     import json as _json
     (out / "docker-compose.yml").write_text(compose)
+    _write_private(out / "connect.env", _env_file({
+        "MIGKIT_SOURCE_PASSWORD": s.password or "",
+        "MIGKIT_TARGET_PASSWORD": t.password or ""}))
     (out / "source-connector.json").write_text(
         _json.dumps(source, indent=2) + "\n")
     (out / "sink-connector.json").write_text(
@@ -6279,6 +6199,83 @@ licences and attribution.
         f.chmod(0o600)
     out.chmod(0o700)
     return out
+
+
+#: the connector runtime's provider that reads `${env:NAME}` from its own
+#: environment (Kafka 3.5 and later; the runtime's image is 3.0 on Kafka
+#: 3.8), which reads it off `connect.env`
+ENV_PROVIDER = "org.apache.kafka.common.config.provider.EnvVarConfigProvider"
+
+
+def _debezium_tls(ep, mysql):
+    """({field: value}, [file]): the side's TLS as the source connector
+    takes it - PostgreSQL's `database.sslmode` and its files, the ones
+    `Endpoint.libpq_tls` decides for migkit's own connections; MySQL's
+    `database.ssl.mode` from `Endpoint.mysql_tls`. Both with the automatic
+    answer: the pipeline connected with no TLS at all while `doctor` said
+    verified. MySQL's connector checks a certificate against Java's own
+    store of authorities, which a hop's own authority file is not."""
+    if not mysql:
+        got = ep.libpq_tls()
+        out = {f"database.{k}": v for k, v in got.items()
+               if k in ("sslmode", "sslrootcert", "sslcert", "sslkey")}
+        return out, [v for k, v in got.items()
+                     if k in ("sslrootcert", "sslcert", "sslkey")]
+    got = ep.mysql_tls() if hasattr(ep, "mysql_tls") else {}
+    if got.get("ssl_ca"):
+        return {"database.ssl.mode": "verify_identity"
+                if got.get("ssl_verify_identity", True)
+                else "verify_ca"}, []
+    if got.get("ssl") is not None:
+        return {"database.ssl.mode": "required"}, []
+    return {}, []
+
+
+def _jdbc_tls(ep, pg):
+    """(the query of the sink's JDBC address, [file]): the target's TLS as
+    each driver reads it in the address - PostgreSQL's `sslmode` and its
+    files, MySQL's `sslMode`."""
+    from urllib.parse import urlencode
+    if pg:
+        got = {k: v for k, v in ep.libpq_tls().items()
+               if k in ("sslmode", "sslrootcert", "sslcert", "sslkey")}
+        return ("?" + urlencode(got) if got else "",
+                [v for k, v in got.items() if k != "sslmode"])
+    got = ep.mysql_tls() if hasattr(ep, "mysql_tls") else {}
+    if got.get("ssl_ca"):
+        return ("?sslMode=" + ("VERIFY_IDENTITY"
+                               if got.get("ssl_verify_identity", True)
+                               else "VERIFY_CA"), [])
+    if got.get("ssl") is not None:
+        return "?sslMode=REQUIRED", []
+    return "", []
+
+
+def _env_file(values):
+    """An environment file's lines, each value taken as it is written: in
+    single quotes, or in double quotes with what they read escaped where
+    the value holds a single quote."""
+    out = []
+    for k, v in values.items():
+        v = str(v)
+        if "'" not in v:
+            out.append(f"{k}='{v}'")
+        else:
+            v = v.replace("\\", "\\\\").replace('"', '\\"').replace(
+                "$", "$$")
+            out.append(f'{k}="{v}"')
+    return "\n".join(out) + "\n"
+
+
+def _write_private(path, text):
+    """`text` as the file `path`, readable by this user only from the
+    moment it exists."""
+    import os
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
 
 
 #: the connectors the pipeline runs, as its option account names them
@@ -6519,12 +6516,17 @@ def _debezium_account():
     put(pg, "replica.identity.autoset.values", UNUSED, "it changes a table's"
         " replica identity on the source, which migkit does not change")
     put(pg, "database.dbname", USED, "the hop's first database")
-    for f in ("database.sslmode", "database.sslcert", "database.sslpassword",
-              "database.sslkey", "database.sslrootcert", "database.sslfactory",
-              "database.tcpKeepAlive"):
-        put(pg, f, UNUSED, "not yet: the pipeline connects the way the"
-            " connector does by default; the hop's TLS options reach"
-            " migkit's own paths")
+    for f in ("database.sslmode", "database.sslcert", "database.sslkey",
+              "database.sslrootcert"):
+        put(pg, f, USED, "the hop's TLS as migkit's own connections take"
+            " it, the automatic answer included (`_debezium_tls`); the"
+            " files it names given to the runtime read-only")
+    put(pg, "database.sslpassword", UNUSED, "a client key is read as the"
+        " hop gives it, unprotected, as migkit's own connections read it")
+    put(pg, "database.sslfactory", UNUSED, _DEFAULT + " the driver's own"
+        " checks, which the mode and the authority file steer")
+    put(pg, "database.tcpKeepAlive", UNUSED, "not yet: the connector's"
+        " heartbeat keeps the connection in use")
     for f in ("schema.include.list", "schema.exclude.list"):
         put(pg, f, UNUSED, "the hop's exclusions reach it table by table on"
             " the table exclude list")
@@ -6549,14 +6551,19 @@ def _debezium_account():
         " and no other")
     put(my, "database.exclude.list", UNUSED, "the hop names its databases;"
         " the include list says the same")
-    for f in ("database.ssl.mode", "database.ssl.keystore",
-              "database.ssl.keystore.password", "database.ssl.truststore",
-              "database.ssl.truststore.password", "database.jdbc.driver",
-              "connect.timeout.ms", "connect.keep.alive",
-              "connect.keep.alive.interval.ms", "use.nongraceful.disconnect"):
+    put(my, "database.ssl.mode", USED, "the hop's TLS as migkit's own"
+        " connections take it, the automatic answer included"
+        " (`_debezium_tls`)")
+    for f in ("database.ssl.keystore", "database.ssl.keystore.password",
+              "database.ssl.truststore", "database.ssl.truststore.password"):
+        put(my, f, UNUSED, "not yet: the connector checks a certificate"
+            " against its runtime's own authorities, and the hop names an"
+            " authority as a file of another form")
+    for f in ("database.jdbc.driver", "connect.timeout.ms",
+              "connect.keep.alive", "connect.keep.alive.interval.ms",
+              "use.nongraceful.disconnect"):
         put(my, f, UNUSED, "not yet: the pipeline connects the way the"
-            " connector does by default; the hop's TLS options reach"
-            " migkit's own paths")
+            " connector does by default")
     for f in ("include.schema.changes", "include.schema.comments",
               "include.query"):
         put(my, f, UNUSED, _DEFAULT + " schema changes go on the prefix's"
@@ -6834,10 +6841,11 @@ def send_signal(out, hop_name, signal, tables=(), kind="blocking"):
     cmd = ["docker", "compose", "-f", str(out / "docker-compose.yml"),
            "exec", "-T", "redpanda",
            "rpk", "topic", "produce", topic, "-f", "%k\\t%v\\n"]
-    p = run(cmd, check=False, input=line)
+    # sent once: a signal sent twice asks for the same re-read twice
+    p = run(cmd, check=False, input=line, timeout=60, what="the signal")
     if p.returncode:
-        raise RuntimeError(
-            f"could not reach the signal topic: {p.stderr[-200:]}")
+        raise runner.Failed("could not reach the signal topic: "
+                            + runner.said(p.stderr or p.stdout)[-200:])
     return topic
 
 
@@ -6882,7 +6890,8 @@ def _notifications(out, hop_name):
            "exec", "-T", "redpanda", "rpk", "topic", "consume", topic,
            "--offset", ":end", "--format", "%v\\n"]
     try:
-        p = run(cmd, check=False, timeout=30)
+        p = run(cmd, check=False, timeout=30, retries=3,
+                what="the stream's notifications")
     except Exception:  # noqa: BLE001 - progress, never a failure
         return []
     got = []
@@ -7048,7 +7057,8 @@ def stream_readings(attributes, port, timeout=2, server=None):
     another's readings was told it was behind when that one was."""
     import json as _json
     import urllib.request
-    pattern = "debezium.*:type=connector-metrics,*"
+    pattern = (f"debezium.*:type=connector-metrics,server={server},*"
+               if server else "debezium.*:type=connector-metrics,*")
     url = (f"http://localhost:{port}/jolokia/read/"
            + quote(pattern, safe=""))
     try:
@@ -7128,11 +7138,9 @@ PROGRAMS = {"pgdump": ("pg_dump", "pg_restore"),
 ALSO = {"mydumper": ("mysqlsh",)}
 #: how a report names them: never by the program's own name
 ROLES = ("dump program", "load program")
-#: the builds each program was measured with here (backlog 46)
-MEASURED = {"pg_dump": "18.6", "pg_restore": "18.6",
-            "mydumper": "1.0.5", "myloader": "1.0.5", "mysqlsh": "26.7.1",
-            "mongodump": "100.16.1", "mongorestore": "100.16.1",
-            "mongosync": "1.21.0", "pgcopydb": "0.18"}
+#: the builds each program was measured with here (backlog 46), as the
+#: registry has them (`tools.PROGRAM`)
+MEASURED = {n: p.measured for n, p in PROGRAM.items() if p.measured}
 
 
 def programs(via):
@@ -7148,11 +7156,9 @@ def programs(via):
 
 
 def program_version(program):
-    """The installed build's version, as its `--version` prints it."""
-    p = subprocess.run([program, "--version"], env=tool_env(None),
-                       text=True, capture_output=True)
-    m = re.search(r"(\d+\.\d+(?:\.\d+)?)", (p.stdout or "") + (p.stderr or ""))
-    return m.group(1) if m else None
+    """The installed build's version, as it prints it - asked once per
+    build (`toolversion.version`)."""
+    return toolversion.version(program)
 
 
 def options_missing(hop, db, via):
@@ -7241,6 +7247,19 @@ def bulk_path_report(hop, db, via):
 
 
 def run_via(via, hop, db, workers, go, log):
+    """The bulk path `via` over database `db`: the steps it says, and with
+    `go` what it ran - its programs run through the runner (`runner`),
+    each listed in the database's list of running programs while it runs,
+    its command line in the run's debug log, `kill` taken as ctrl-c while
+    it runs. Returns `Ran`: the way that ran them, which is another where
+    the one asked for handed its work on (`pgcopydb_move`).
+
+    Each program's options are held to its installed build on the very
+    command line about to start (`runner.flags_refused`), not on a
+    rehearsal of the whole path run first: the rehearsal asked the source
+    again for everything the path asks, on every move. Only a build other
+    than the one measured is rehearsed as well, first, so that nothing is
+    written before it is refused."""
     fns = _movers()
     if via not in fns:
         # a mover nobody has taught this function about must stop here rather
@@ -7261,7 +7280,7 @@ def run_via(via, hop, db, workers, go, log):
                          " puts it in place")
     running = hop.report_dir(db) / "running-programs.json"
     if go:
-        left = _still_running(running)
+        left = runner.still_running(running, log)
         if left:
             pid, program, since = left[0]
             raise SystemExit(
@@ -7273,11 +7292,16 @@ def run_via(via, hop, db, workers, go, log):
                 " empty the tables under it. Wait for it to finish, or stop"
                 f" it (`kill {pid}`), then run the move again. Nothing has"
                 " been written by this run")
-    if go:
+    odd = [p for p in programs(via) + ALSO.get(via, ())
+           if go and p in MEASURED and which(p)
+           and program_version(p) != MEASURED[p]]
+    if odd:
+        # a build other than the one measured is held to what the move
+        # passes it before anything is written, through a rehearsal of
+        # the path's command lines; the measured build takes them all
+        # (`tests/test_wrapped_flags_exist.py`), and is not rehearsed
         refused = options_missing(hop, db, via)
         if refused:
-            # before anything is written: the program would stop at option
-            # parsing with the move already begun
             raise SystemExit(
                 "the installed "
                 + " and ".join(f"{_role(via, p)} ({program_version(p)})"
@@ -7286,28 +7310,22 @@ def run_via(via, hop, db, workers, go, log):
                 + "; ".join(", ".join(v) for v in refused.values())
                 + ". Nothing has been written. migkit doctor --install"
                 " puts a build that does in place")
-    global _DEBUG, _RUNNING, _SIZES
+    global _SIZES
+    from contextlib import ExitStack
+
     from .wording import DebugLog
-    _DEBUG = (DebugLog(hop.report_dir(db) / "commands.log"),
-              (hop.source.password, hop.target.password))
-    _RUNNING = running if go else None
     _SIZES = _source_sizes(hop, db) if go else None
-    # stopped by a service manager or `kill`: taken as ctrl-c, so the
-    # programs this run started are stopped with it (`_spawned`)
-    import signal
     try:
-        term = signal.signal(signal.SIGTERM, _stop_on_term) if go else None
-    except ValueError:
-        term = None
-    try:
-        return fns[via](hop, db, workers, go, log)
+        with ExitStack() as stack:
+            stack.enter_context(runner.recording(
+                DebugLog(hop.report_dir(db) / "commands.log"),
+                (hop.source.password, hop.target.password)))
+            if go:
+                stack.enter_context(runner.listing(running))
+                # stopped by a service manager or `kill`: taken as ctrl-c,
+                # so the programs this run started are stopped with it
+                stack.enter_context(runner.stopping())
+            got = fns[via](hop, db, workers, go, log)
     finally:
-        _DEBUG = None
-        _RUNNING = None
         _SIZES = None
-        if term is not None:
-            signal.signal(signal.SIGTERM, term)
-
-
-def _stop_on_term(signum, frame):
-    raise KeyboardInterrupt
+    return got if isinstance(got, Ran) else Ran(got, via)
