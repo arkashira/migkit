@@ -663,6 +663,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## PostgreSQL
 
+* the <...>: <...>. The connection was refused before it ran anything.
+
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
 
 * two_way: the replication origin <...> stayed held by another session for 30s - is another tail of this hop applying?
@@ -681,9 +683,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: a tail applies into <...> under a replication origin of migkit's (<...>), and <...> applies into it too. Leaving out what migkit applied there would leave out what the other applies, and those changes would never reach the other side. Tear the two-way tail into this side down (move --mode cdc --drop), or the other; its next start chooses another way to mark what it applies
 
-* no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance('<...>', pg_current_wal_lsn()); -- skips everything pending, including this
-
-* the <...>: <...>. The connection was refused before it ran anything.
+* no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance(<...>, pg_current_wal_lsn()); -- skips everything pending, including this
 
 * <...>: the key column <...> has no text both sides render, so the repair could not be recorded row by row. Nothing was repaired on this table.
 

@@ -579,11 +579,12 @@ def test_a_side_that_will_not_export_its_snapshot_is_read_in_one_go(
                 " one transaction reading every table in turn") in text, text
 
 
-def _repair(monkeypatch, tmp_path, quiet):
+def _repair(monkeypatch, tmp_path, quiet, refuse=None):
     """A PostgreSQL row repair over one extra key, the load's reading of
     what the target's user may do given as `quiet` (a mode, or the
-    refusal it raises), and each target script kept with the options its
-    session ran under."""
+    refusal it raises), and each target session kept with the options it
+    was opened with and the statements it ran - `refuse` raised at the
+    first statement that holds it."""
     from migkit import movers
     from migkit.engines.postgres import PostgresEngine
     eng = _postgres(tmp_path)
@@ -609,11 +610,57 @@ def _repair(monkeypatch, tmp_path, quiet):
         return quiet
     monkeypatch.setattr(movers, "_pg_quiet_triggers", asked)
     ran = []
+    import contextlib
 
-    def psql_run(self, side, db, script):
-        ran.append((side, self.replica_env(db).get("PGOPTIONS", ""), script))
-        return ""
-    monkeypatch.setattr(PostgresEngine, "_psql_run", psql_run)
+    from migkit.engines import postgres
+
+    class Cursor:
+        def __init__(self, said):
+            self.said = said
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, *a):
+            self.said.append(sql)
+            if refuse and refuse in sql:
+                raise RuntimeError("ERROR:  update or delete on table \"t\""
+                                   " violates foreign key constraint")
+
+        @contextlib.contextmanager
+        def copy(self, sql):
+            self.said.append(sql)
+
+            class Copy:
+                def write(self, data):
+                    pass
+
+                def __iter__(self):
+                    return iter(())
+            yield Copy()
+
+    class Conn:
+        def __init__(self, said):
+            self.said = said
+
+        def transaction(self):
+            return contextlib.nullcontext()
+
+        def cursor(self):
+            return Cursor(self.said)
+
+        def close(self):
+            pass
+
+    def connect(ep, dbname, driver="psycopg2", options="", **kw):
+        said = []
+        side = "dst" if ep is eng.hop.target else "src"
+        ran.append((side, options, said))
+        return Conn(said)
+    monkeypatch.setattr(postgres, "connect", connect)
     return eng, ran
 
 
@@ -623,7 +670,7 @@ def test_a_repair_writes_as_a_replica_where_the_load_would(monkeypatch,
     eng._repair_rows_native("app", "public.t")
     assert [(side, opts) for side, opts, _ in ran] == [
         ("dst", "-c session_replication_role=replica")]
-    assert "delete from" in ran[0][2]
+    assert any(s.startswith("delete from") for s in ran[0][2]), ran
 
 
 def test_a_repair_writes_the_tables_as_they_are_only_without_triggers(
@@ -650,14 +697,8 @@ def test_a_repair_the_load_would_refuse_is_refused_before_a_row_is_written(
 
 def test_a_repair_the_target_refuses_otherwise_is_never_run_again(
         monkeypatch, tmp_path):
-    from migkit.engines.postgres import PostgresEngine
-    eng, ran = _repair(monkeypatch, tmp_path, "session")
-
-    def refused(self, side, db, script):
-        ran.append(script)
-        raise RuntimeError("ERROR:  update or delete on table \"t\" violates"
-                           " foreign key constraint")
-    monkeypatch.setattr(PostgresEngine, "_psql_run", refused)
+    eng, ran = _repair(monkeypatch, tmp_path, "session",
+                       refuse="delete from")
     with pytest.raises(RuntimeError, match="foreign key constraint"):
         eng._repair_rows_native("app", "public.t")
     assert len(ran) == 1

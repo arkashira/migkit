@@ -96,8 +96,11 @@ def test_postgresql_says_what_its_own_connection_is(ssl_server, tmp_path):
         return PostgresEngine(hop)
     got = eng(sslmode="require").leg_encryption("src", "postgres")
     assert got["encrypted"] and got["how"].startswith("TLSv1."), got
+    # encrypted, and said not verified: `require` checks no certificate
+    assert got["verified"] is False, got
     got = eng(sslmode="disable").leg_encryption("src", "postgres")
-    assert got == {"encrypted": False, "how": ""}, got
+    assert got == {"encrypted": False, "how": "", "verified": False,
+                   "unverified": []}, got
 
 
 @needs_docker

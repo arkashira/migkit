@@ -69,14 +69,16 @@ def test_an_ordinary_statement_is_still_unbounded(tmp_path):
 
 
 def test_the_statement_that_dials_across_is_bounded(tmp_path):
+    """On a session of its own (`_dial`): it carries the source's
+    credentials, so it is also asked not to be logged there."""
     eng = _engine(tmp_path)
     seen = {}
-    eng._psql = lambda side, db, sql, statement_timeout=0: seen.setdefault(
-        "t", statement_timeout)
+    eng._psql = lambda *a, **k: seen.setdefault("psql", a)
+    eng._dial = lambda side, db, sql, secs: seen.setdefault("t", secs)
     eng.apply_replication_stmt("dst", "postgres",
                                "create subscription migkit_unreach"
                                " connection '...' publication x;")
-    assert seen["t"] == "45s", seen
+    assert seen == {"t": 45}, seen
 
 
 def test_the_default_of_psql_itself_did_not_change(tmp_path):
@@ -92,10 +94,9 @@ def test_the_wait_can_be_raised(tmp_path, monkeypatch):
     monkeypatch.setenv("MIGKIT_SUBSCRIBE_TIMEOUT", "600")
     eng = _engine(tmp_path)
     seen = {}
-    eng._psql = lambda side, db, sql, statement_timeout=0: seen.setdefault(
-        "t", statement_timeout)
+    eng._dial = lambda side, db, sql, secs: seen.setdefault("t", secs)
     eng.apply_replication_stmt("dst", "postgres", "create subscription s ...")
-    assert seen["t"] == "600s", seen
+    assert seen["t"] == 600, seen
 
 
 @pytest.mark.parametrize("bad", ["soon", "-5", "0", "15s", "1.5"])
