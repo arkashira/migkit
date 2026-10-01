@@ -6,7 +6,7 @@
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
 [![engines](https://img.shields.io/badge/engines-34-2a78d6)](#supported-engines)
 [![pairs](https://img.shields.io/badge/cross--engine-any_pair-0ca30c)](#cross-engine-hetero)
-[![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
+[![python](https://img.shields.io/badge/python-3.10.12+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-0ca30c)](LICENSE)
 <!-- /gen_docs: badge -->
 
@@ -420,8 +420,9 @@ row-and-schema repair with undo, and rollback, across engines, for free.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
+python tools/final_suite.py         # the whole suite: pure tests side by side,
+                                    # docker tests in lanes, a report
 ```
 
 100+ tests: pure-logic units, CLI-surface tests (every visible command, legacy
