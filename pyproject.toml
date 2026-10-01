@@ -104,6 +104,29 @@ dependencies = [
     "azure-mgmt-postgresqlflexibleservers",
     "azure-mgmt-mysqlflexibleservers",
     "google-api-python-client",
+    # every provider's managed databases through its own API (`cloudapi`):
+    # restore points before a cutover, clones, instance facts and the
+    # parameters a change is offered through. Huawei Cloud's pins older
+    # releases of two of these and lives in its own environment
+    # (`migkit doctor --install`)
+    "azure-mgmt-sql",
+    "azure-mgmt-redis",
+    "azure-mgmt-cosmosdb",
+    "tencentcloud-sdk-python-common",
+    "tencentcloud-sdk-python-cdb",
+    "tencentcloud-sdk-python-postgres",
+    "tencentcloud-sdk-python-mongodb",
+    "tencentcloud-sdk-python-redis",
+    "tencentcloud-sdk-python-cynosdb",
+    "tencentcloud-sdk-python-sqlserver",
+    "tencentcloud-sdk-python-mariadb",
+    "alibabacloud_credentials",
+    "alibabacloud_rds20140815",
+    "alibabacloud_dds20151201",
+    "alibabacloud_polardb20170801",
+    "alibabacloud_r_kvstore20150101",
+    "oci",
+    "ibm-cloud-sdk-core",
     # the passwords `migkit init` keeps, in the OS keychain
     "keyring>=25",
     # Couchbase and Cosmos DB as sides of a pair: the key-value range
@@ -152,7 +175,8 @@ s3 = []
 pgschema = []
 # pytest-xdist runs the pure tests side by side; pytest-timeout ends a test
 # that hangs (tools/final_suite.py)
-dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]",
+dev = ["pytest", "faker", "hypothesis", "pexpect",
+       "moto[rds,ec2,dynamodb]",
        "pytest-xdist", "pytest-timeout",
        # moto's server, the S3-compatible endpoint an appliance stands in as
        "flask", "flask-cors", "prometheus-client"]
@@ -173,14 +197,16 @@ version = { attr = "migkit.__version__" }
 include = ["migkit*"]
 
 [tool.setuptools.package-data]
-# the instance catalog the machine advice weighs (`migkit.machine`), and
-# the locks of what `doctor --install` fetches (`migkit.tools`)
-migkit = ["data/*.json", "data/*.txt"]
+# the instance catalog the machine advice weighs (`migkit.machine`), the
+# managed-service catalogue (`migkit.managed`), and the locks of what
+# `doctor --install` fetches (`migkit.tools`)
+migkit = ["data/*.json", "data/*.yaml", "data/*.txt"]
 
 [tool.pytest.ini_options]
 markers = ["docker: needs a docker daemon",
            "vm: needs the migkit VM (Oracle, SQL Server, Db2, ASE, x86 images)",
            "long: takes minutes by design; its timeout is an hour",
+           "release_gate: the scenario a release is held to (a managed pair's whole path, rehearsal to evidence)",
            "mssql: runs against SQL Server (the x86 workflow runs these)",
            "db2: runs against Db2 (the x86 workflow runs these)",
            "ase: runs against SAP ASE (the x86 workflow runs these)",

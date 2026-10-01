@@ -53,6 +53,7 @@ Every command takes the hop's name; `--db` narrows one to a database.
        keys: exact               # exact | apart:<margin>
        jobs: move                # move | leave
        no_return: later          # later | at_flip
+       restore_points: [source, target]   # through each side's provider
      origin_table: keep          # keep | drop, at the point of no return
      approvals: {steps: [cutover, rollback, point-of-no-return], count: 2,
                  signers: /etc/migkit/allowed_signers}
@@ -71,9 +72,9 @@ Every command takes the hop's name; `--db` narrows one to a database.
 
    | Source | The whole server (where every database on it is the hop's) | The hop's databases alone | Read back |
    |---|---|---|---|
-   | PostgreSQL | `default_transaction_read_only` (ALTER SYSTEM), migkit's role excepted | grants revoked, the right to connect taken from owners, sessions ended | no session from before, no role that writes, nothing prepared |
-   | MySQL | `super_read_only` (`read_only` on MariaDB), persisted | grants revoked, sessions ended | the switch on, no grant left, no XA or open write |
-   | MongoDB | users' writes blocked (6.0), or the server locked | write roles swapped for read, sessions ended | the block on, no account that writes, no open transaction |
+   | PostgreSQL | `default_transaction_read_only` (ALTER SYSTEM), migkit's role excepted | grants revoked, the right to connect taken from owners, sessions ended; on a managed server whose databases are not its admin's own, owners kept out by a connection limit of none | no session from before, no role that writes or connects, nothing prepared |
+   | MySQL | `super_read_only` (`read_only` on MariaDB), persisted; on a managed server, `read_only` through its provider's parameter group where the operator answers yes (`source_changes: {param_read_only: yes}`) | grants revoked, sessions ended - through the service's own procedure where its admin may not kill (`mysql.rds_kill`) | the switch on, no grant left, no XA or open write |
+   | MongoDB | users' writes blocked (6.0), or the server locked - where the server has the command | write roles swapped for read, sessions ended (operation by operation where the service ends no session by its id) | the block on, no account that writes, no open transaction |
    | Redis | every client's writes held (`CLIENT PAUSE WRITE`, 6.2), not with a stream back | every account's writes refused (ACL), from 7.0 | each account refused a write (`ACL DRYRUN`), no connection from before, the count of writes still |
    | SQL Server | - | the database read-only (`WITH ROLLBACK IMMEDIATE`), or the application's users denied writes and their sessions ended | read-only on, or every write denied; no prepared or open write |
    | Cassandra, ScyllaDB | - | MODIFY revoked from the application's roles, the permission cache waited out | no role that writes the keyspace, the cache's time past |
@@ -82,6 +83,17 @@ Every command takes the hop's name; `--db` narrows one to a database.
 
    Another source is frozen by its operator (`freeze: operator`); where
    migkit holds no writes of an engine, the preflight says why.
+
+   A managed side - any provider's, either end - is read one way
+   (`migkit.managed`, its catalogue `migkit/data/managed.yaml`): which
+   service it is (the server's own word, the side's `managed: {service:
+   ...}`, its address last), what its admin may do, how a setting is
+   changed on it in its provider's words, and its restore points. With
+   `restore_points` a restore point of each side named is taken through
+   its provider's API before the clock and waited for - the side names
+   its instance where its address does not find it (`managed: {id,
+   region, profile, role}`), its credentials found the way the
+   provider's own CLI finds them.
 
 ## Moving and following
 

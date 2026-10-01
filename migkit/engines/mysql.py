@@ -1774,25 +1774,31 @@ class MySQLEngine(Engine):
         purge runs when a file rotates, so the time given is the soonest.
 
         None where nothing purges (`binlog_expire_logs_auto_purge` off, or
-        no expiry) and on a managed server, whose retention is its own
-        setting and not this variable."""
+        no expiry). A managed server whose retention is its own setting
+        and not this variable - the server says so by the procedure that
+        shows it (`mysql.rds_show_configuration`) - is held to that: its
+        hours, or, where none are set, the few minutes it keeps a file
+        before it is purged (`OWN_PURGE`)."""
         import pymysql
-        ep = self.hop.source if side == "src" else self.hop.target
-        if "rds.amazonaws.com" in (ep.host or "") or not token:
+        if not token:
             return None
-        try:
-            expire = int(self._q(side, "select"
-                                 " @@binlog_expire_logs_seconds")[0][0])
-        except pymysql.err.MySQLError:
-            # MariaDB before 10.6
-            expire = int(float(self._q(side, "select @@expire_logs_days"
-                                       )[0][0]) * 86400)
-        try:
-            if not int(self._q(side, "select"
-                               " @@binlog_expire_logs_auto_purge")[0][0]):
-                return None
-        except pymysql.err.MySQLError:
-            pass
+        own = self._own_retention(side)
+        if own is not None:
+            expire = own
+        else:
+            try:
+                expire = int(self._q(side, "select"
+                                     " @@binlog_expire_logs_seconds")[0][0])
+            except pymysql.err.MySQLError:
+                # MariaDB before 10.6
+                expire = int(float(self._q(side, "select @@expire_logs_days"
+                                           )[0][0]) * 86400)
+            try:
+                if not int(self._q(side, "select"
+                                   " @@binlog_expire_logs_auto_purge")[0][0]):
+                    return None
+            except pymysql.err.MySQLError:
+                pass
         if expire <= 0:
             return None
         files = [r[0] for r in self._q(side, "show binary logs")]
@@ -1805,6 +1811,30 @@ class MySQLEngine(Engine):
         if closed is None:
             return None
         return {"seconds": max(int(closed + expire - time.time()), 0)}
+
+    #: seconds a managed server with no retention hours set keeps a binlog
+    #: file once it is closed, as its documentation says (RDS: purged
+    #: once no replica needs it, within about five minutes)
+    OWN_PURGE = 300
+
+    def _own_retention(self, side):
+        """Seconds a managed server keeps a closed binlog file by its own
+        setting (`call mysql.rds_show_configuration`), or None where the
+        server keeps no such setting and its variables say."""
+        try:
+            listed = self._q(side, "select count(*) from"
+                                   " information_schema.routines where"
+                                   " routine_schema = 'mysql' and"
+                                   " routine_name = 'rds_show_configuration'")
+        except Exception:  # noqa: BLE001 - its variables then
+            return None
+        if not listed or not int(listed[0][0]):
+            return None
+        rows = self._q(side, "call mysql.rds_show_configuration")
+        hours = next((r[1] for r in rows
+                      if str(r[0]) == "binlog retention hours"), None)
+        return int(hours) * 3600 if hours not in (None, "", "NULL") \
+            else self.OWN_PURGE
 
     def _binlog_started(self, side, name):
         """The time on the format event a binlog file opens with."""
@@ -7814,6 +7844,31 @@ class MySQLEngine(Engine):
         got = climb(db, (self.BOTH_WAYS,), Facts(said, keyed=keyed))
         return "" if got.rung else got.reason
 
+    #: the procedures a managed MySQL takes its replica's source through,
+    #: in place of `CHANGE REPLICATION SOURCE TO` its admin may not run
+    #: (RDS and Aurora: the newer name first), and what stops and forgets
+    #: it
+    REPLICA_PROCEDURES = ("rds_set_external_source",
+                          "rds_set_external_master")
+
+    def _replica_procedure(self, side="dst"):
+        """The procedure the replica side's server takes its source
+        through (`REPLICA_PROCEDURES`), where it has one - read from the
+        server; the address is the hint only where it cannot be asked -
+        or None where it takes `CHANGE REPLICATION SOURCE TO` itself."""
+        ep = self.hop.target if side == "dst" else self.hop.source
+        listed = ", ".join(f"'{p}'" for p in self.REPLICA_PROCEDURES)
+        try:
+            got = {str(r[0]) for r in self._q(
+                side, "select routine_name from information_schema.routines"
+                      " where routine_schema = 'mysql' and routine_name in"
+                      f" ({listed})")}
+        except Exception:  # noqa: BLE001 - not reached: the address says
+            return (f"mysql.{self.REPLICA_PROCEDURES[0]}"
+                    if "rds.amazonaws.com" in (ep.host or "") else None)
+        return next((f"mysql.{p}" for p in self.REPLICA_PROCEDURES
+                     if p in got), None)
+
     def replicate_sql(self, db, copy_data=True, secret=None, copied=None):
         """The statements that make the target a replica of the source.
 
@@ -7869,7 +7924,8 @@ class MySQLEngine(Engine):
             keep += (f"; {applier} gives the replica {self.APPLIERS}"
                      " appliers where it had one, and lasts only until the"
                      " target restarts as well")
-        if "rds.amazonaws.com" in (t.host or ""):
+        procedure = self._replica_procedure("dst")
+        if procedure:
             # a managed target takes filters from its parameter group only
             filters = parallel = []
             keep = ("; set these in the target's parameter group before"
@@ -7878,7 +7934,7 @@ class MySQLEngine(Engine):
             if applier:
                 keep += (f"; and {applier}, or it applies with one")
             dst_cmds = [
-                f"call mysql.rds_set_external_source ('{s.host}', {s.port},"
+                f"call {procedure} ('{s.host}', {s.port},"
                 f" '{self.REPL_USER}', '{secret}',"
                 + (f" '{pos[0]}', {pos[1]}," if pos else " '', 4,")
                 + " 0);",
@@ -7926,12 +7982,18 @@ class MySQLEngine(Engine):
             ]
         stop = ["stop slave;", "reset slave all;"] if brand == "mariadb" \
             else ["stop replica;", "reset replica all;"]
+        if procedure:
+            # the admin of a managed server stops and forgets its replica
+            # through the service's procedures as well
+            stop = ["call mysql.rds_stop_replication;",
+                    "call " + procedure.replace("set_external",
+                                                "reset_external") + ";"]
         # the same replica made ahead and left idle, then started - what a
         # cutover makes before its freeze and starts at the flip: its
         # receiver runs and takes the source's log as it grows, its
         # applier waits (a managed target starts its replica only whole)
         armed = {}
-        if "rds.amazonaws.com" not in (t.host or ""):
+        if not procedure:
             word = "slave" if brand == "mariadb" else "replica"
             armed = {"arm_src": src_cmds,
                      "arm_dst": dst_cmds[:-1] + [f"start {word} io_thread;"],

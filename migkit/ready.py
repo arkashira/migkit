@@ -7,7 +7,15 @@ known now would stop it half way:
 
 * the servers: each side's version, connection and scope (the engine's own
   `assess`), and what the goal needs each to allow (`dba.needs`), with the
-  exact statements a DBA runs;
+  exact statements a DBA runs - in the words of the provider that runs
+  each side;
+* the pair of services (`managed`): which managed service each side is,
+  the plan of the pair (the engine it runs through, what following the
+  source needs, what the target's admin can and cannot do, the freeze
+  the source's admin allows, the restore points), and what the servers
+  say against it - a collation the source's tables use that the target
+  lacks, a time zone that reads a time another way, fewer connections
+  than the application holds now;
 * the target: the interlock's word on it (`interlock.refusals` - the
   source itself, production the hop does not name, rows it did not write),
   the room its disk has for the tables, and what one worker of the copy
@@ -114,13 +122,15 @@ def _servers(hop, eng, mode):
     goal = _goal(hop)
     if goal == "verify":
         return []
+    wheres = _wheres(hop, eng)
     try:
-        found = dba.needs(hop, eng, goal, streaming=_streams(hop, mode))
+        found = dba.needs(hop, eng, goal, wheres,
+                          streaming=_streams(hop, mode))
     except Exception as e:  # noqa: BLE001 - unknown, said so
         return [Item("warn", BEFORE, "what the servers allow",
                      f"could not be asked: {_last(e)} - unknown, not clean")]
     try:
-        written = dba.write(hop, eng, found)
+        written = dba.write(hop, eng, found, wheres)
     except Exception:  # noqa: BLE001 - the items say it all the same
         written = {}
     out = []
@@ -149,6 +159,27 @@ def _servers(hop, eng, mode):
         out.append(Item("pass", BEFORE, "what the servers allow",
                         f"everything goal {goal} needs of both sides"))
     return out
+
+
+def _wheres(hop, eng):
+    """{side: clouds.Where} of who runs each side (`managed.side`), so what
+    a DBA must change is written in its provider's words; {} where it
+    cannot be read."""
+    from . import managed
+    out = {}
+    for side in ("source", "target"):
+        try:
+            out[side] = managed.side(hop, eng, side).where
+        except (Exception, SystemExit):  # noqa: BLE001 - the server's own
+            continue
+    return out
+
+
+def _managed(hop, eng, dbs, quick):
+    """The pair of services, its plan, and what the servers say against
+    it (`managed.items`)."""
+    from . import managed
+    return managed.items(hop, eng, dbs, quick)
 
 
 def _target(hop, eng, dbs):
@@ -458,6 +489,7 @@ def items(hop, eng, dbs=None, mode=None, quick=False):
     else:
         out += _mapping(eng)
     for part in (lambda: _servers(hop, eng, mode),
+                 lambda: _managed(hop, eng, dbs, quick),
                  lambda: _target(hop, eng, dbs),
                  lambda: _resources(hop, eng, dbs),
                  lambda: _case(hop, eng, dbs, quick),
