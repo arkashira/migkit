@@ -46,13 +46,15 @@ class OceanBaseEngine(OnMySQLWire):
     def change_point(self, side, db):
         try:
             return super().change_point(side, db)
-        except SystemExit:
+        except (SystemExit, Exception) as e:  # noqa: BLE001 - said, with where
             raise SystemExit(
-                "OceanBase answers no binlog position here: its binlog is"
-                " written by its binlog service and served through OBProxy."
-                " Reach the tenant through a proxy that names the service"
-                " (binlog_service_ip), with the binlog service running for"
-                " the tenant, to follow its changes")
+                "OceanBase answers no binlog position here"
+                f" ({str(e).strip().splitlines()[0][:80] if str(e).strip() else type(e).__name__}):"
+                " its binlog is written by its binlog service and served"
+                " through OBProxy. Reach the tenant through a proxy that"
+                " names the service (binlog_service_ip), with the binlog"
+                " service running for the tenant, to follow its changes"
+            ) from None
 
     def reach_items(self, side):
         items = [{"level": "pass", "scope": "reach",

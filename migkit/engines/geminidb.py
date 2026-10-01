@@ -43,11 +43,11 @@ class GeminiCassandraEngine(CassandraEngine):
             " the source and move it, then prove it with migkit check")
 
     # a Cassandra source is followed through ScyllaDB's change log only:
-    # GeminiDB keeps none, and has nothing to follow by
+    # GeminiDB keeps none, and has nothing to follow by (its change
+    # reader, asked anyway, says so - `_logged`)
     tail_start = NotHere()
     tail_seed = NotHere()
     tail_apply = NotHere()
-    neutral_changes = NotHere()
     fence_wait = NotHere()
     delta_verify = NotHere()
 

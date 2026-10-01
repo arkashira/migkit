@@ -13,8 +13,9 @@ is a document: `__name__` its path in the database, which it is keyed and
 ordered by, and its top-level fields as columns, described by the kinds
 their values hold (a field holding several kinds is JSON). A reference is
 its document's path, a point its latitude and longitude, a map or an array
-JSON in which a timestamp, bytes, a reference, a point or a vector is kept
-as `{"$timestamp" | "$bytes" | "$ref" | "$geo" | "$vector": ...}` - so a
+JSON in which a timestamp, bytes, a reference, a point, a vector or a whole
+double is kept as `{"$timestamp" | "$bytes" | "$ref" | "$geo" | "$vector"
+| "$double": ...}` - so a
 document copied to another Firestore database comes back field for field
 and kind for kind (a reference stays a reference, an integer is never a
 double). A group is read by the service's own partitions, side by side,
@@ -115,7 +116,8 @@ def ds_kind(value):
 
 def to_ext(value):
     """A value inside a map or an array as JSON, a kind JSON has none of
-    marked (`$timestamp`, `$bytes`, `$ref`, `$geo`, `$vector`, `$key`)."""
+    marked (`$timestamp`, `$bytes`, `$ref`, `$geo`, `$vector`, `$key`, and
+    `$double` for a double JSON would read as an integer)."""
     kind = ds_kind(value)
     if kind in ("map", "entity"):
         return {str(k): to_ext(v) for k, v in dict(value).items()}
@@ -135,6 +137,10 @@ def to_ext(value):
         return {"$geo": [value.latitude, value.longitude]}
     if kind == "vector":
         return {"$vector": list(value)}
+    if kind == "double" and value.is_integer():
+        # JSON's numbers are compared by value, where 3 and 3.0 are one:
+        # a whole double is marked, so an integer made a double is seen
+        return {"$double": repr(value)}
     return value
 
 
@@ -154,6 +160,8 @@ def from_ext(value, ref=None, key=None):
                 if v.tzinfo is None else v
         if mark == "$bytes":
             return base64.b64decode(got)
+        if mark == "$double":
+            return float(got)
         if mark == "$ref" and ref is not None:
             return ref(got)
         if mark == "$key" and key is not None:
@@ -547,6 +555,12 @@ class FirestoreEngine(_Documents):
         client = self._client(side, db)
         return {"ref": client.document}
 
+    def _field(self, side, db, kind, v):
+        if kind == "reference" and isinstance(v, str):
+            # a reference stays one: its path's text is another kind
+            return self._client(side, db).document(v)
+        return super()._field(side, db, kind, v)
+
     def _ident_from_text(self, table, text):
         return f"{table}/{text}"
 
@@ -650,7 +664,7 @@ class FirestoreEngine(_Documents):
                     " another engine's rows, and are followed from that"
                     " engine, not from here")
             held[db] = changetopic.Follower(
-                _Listened(), ListenerLanes(self, db, tables),
+                _Listened(), listening(self, db, tables),
                 name=lambda row: row.table,
                 shape=lambda t, row, db=db: self._shape(db, t, row))
         return held[db]
@@ -755,6 +769,26 @@ class _Listened:
             return []
         return [Row(None, topic, value["op"], {NAME: value["path"]},
                     value.get("body"), int(value["at"]))]
+
+
+#: the listeners this process holds, by the source and groups they
+#: listen to: kept past the engine that began them - each pair a hop is
+#: carried by is made anew - for as long as the process runs
+_LISTENING = {}
+_LISTENING_LOCK = threading.Lock()
+
+
+def listening(engine, db, tables):
+    """This process's listeners on these groups of this source, begun
+    where there are none yet."""
+    ep = engine.hop.source
+    at = (str(ep.options.get("emulator") or ""), str(
+        ep.options.get("project") or ep.host), engine._d("src", db),
+        tuple(tables))
+    with _LISTENING_LOCK:
+        if at not in _LISTENING:
+            _LISTENING[at] = ListenerLanes(engine, db, tables)
+        return _LISTENING[at]
 
 
 #: seconds a follow's fence stands past this machine's clock: a snapshot

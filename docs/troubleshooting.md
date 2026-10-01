@@ -1203,7 +1203,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## OceanBase (MySQL mode) and OceanBase (Oracle mode)
 
-* OceanBase answers no binlog position here: its binlog is written by its binlog service and served through OBProxy. Reach the tenant through a proxy that names the service (binlog_service_ip), with the binlog service running for the tenant, to follow its changes
+* OceanBase answers no binlog position here (<...>): its binlog is written by its binlog service and served through OBProxy. Reach the tenant through a proxy that names the service (binlog_service_ip), with the binlog service running for the tenant, to follow its changes
 
 * the <...> is not an OceanBase Oracle-mode tenant (<...>)
 
@@ -1211,7 +1211,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...> is not <...> (<...>, <...>): name its engine mysql
 
-* PolarDB-X answers no binlog position: its global binlog is written by its CDC component, which the instance must have running (and the account REPLICATION SLAVE and REPLICATION CLIENT) before its changes can be followed
+* PolarDB-X answers no binlog position (<...>): its global binlog is written by its CDC component, which the instance must have running (and the account REPLICATION SLAVE and REPLICATION CLIENT) before its changes can be followed
 
 * <...> has no key to shard by: give it one, or say shardkey: none for it on the target
 

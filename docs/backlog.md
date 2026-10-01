@@ -2838,7 +2838,7 @@ provider." Two parts:
    lacks: Spanner, Bigtable, Firestore, GaussDB, OceanBase, TDSQL
    (distributed), PolarDB-X, Keyspaces, Neptune, Timestream, Lindorm,
    GeminiDB - each a side with copy, check and follow where the service
-   exposes changes.
+   exposes changes. *Built 2026-10-01 (CN0); still open CN1-CN5.*
 
 ## P0-SCENARIOS. Every reason a database is migrated (owner, 2026-10-01)
 
@@ -4320,6 +4320,104 @@ compared (partition key, TTL, unique keys, indexing), conflicts feed as
 the deep check. Test written, not run:
 `test_cosmosdb_as_a_side_of_a_pair.py` (the vNext emulator, arm64).
 Still open: bulk paths (container copy jobs), point-in-time snapshots.
+
+**CN0. The cloud-native services as sides (P0-CLOUDS part 2).** *Built
+2026-10-01.* Sixteen engines, each with copy, check and - where the
+service hands its changes to a client - follow, through the pair machinery
+every engine shares:
+* `spanner` (both dialects, through its SDK): reads by key at low priority
+  where asked, writes as insert-or-update mutations under the commit
+  limit, a child's rows waited for its parent's; a same-engine target made
+  from the source's own definition (interleaving, indexes, foreign keys,
+  sequences; change streams left out). Digest in GoogleSQL by the server
+  where proved on the table's first rows (`warehouse_sql`'s `spanner`
+  dialect, nine digits of a timestamp), else folded by the table's
+  partitions side by side (Data Boost where asked). Follow: the change
+  stream partition by partition (`SpannerLanes`), heartbeats as marks, one
+  TrueTime clock, rows read back at each batch's commit timestamp (exact
+  within the version retention). Sequences' counters compared; interleave,
+  row deletion policy and retention compared; secondary indexes as the
+  deep check; `ANALYZE` after a load.
+* `bigtable`: every cell version with its timestamp, a family a JSON
+  value; digest by the table's own key ranges; whole-row mutations with
+  each row's status read back; another engine's table described on this
+  machine (`described`). Follow: change stream partitions with low
+  watermarks as marks, splits and merges by continuation tokens, rows read
+  back as they are (Bigtable reads no row at a moment). Not provable here:
+  the emulator serves no change stream (recorded answers only).
+* `firestore` (native) and `datastore` (Datastore mode): documents and
+  entities whose fields keep their kinds (a reference, a point, a whole
+  double inside a map marked); collection groups by the service's
+  partitions. Firestore follows by listeners: exact while this process
+  holds them; begun again elsewhere, every document is written again and
+  the target's extras deleted. Datastore mode has nothing to follow by.
+* `gaussdb` (openGauss on PostgreSQL's wire): proved server digest
+  (`provedsql`), logical decoding through the SQL functions with a slot of
+  migkit's own (`mppdb_decoding` or `test_decoding`), consumed only up to
+  what the tail applied; sequences compared; held by the PostgreSQL hold.
+* `oceanbase` (MySQL mode, binlog service through OBProxy),
+  `oceanbase-oracle` (Oracle catalogue over the same wire; not followed -
+  its changes leave only through OceanBase's change-data library),
+  `polardbx` (global binlog, `AUTO_SEQ_` sequences, `CHECK TABLE` as the
+  deep check), `dcdb` (TDSQL distributed: tables made sharded by their
+  key, followed set by set where each set's primary is named): all on
+  MySQL's wire with what makes a native replica taken away, and a server
+  digest trusted only once proved (`provedsql`).
+* `keyspaces` (Cassandra's engine, CQL at LOCAL_QUORUM over TLS, AWS's
+  signature, tables waited ACTIVE, emptied row by row; its CDC stream read
+  shard by shard), `geminidb-cassandra`, `geminidb-redis`,
+  `geminidb-mongo` (their engines', what a GeminiDB instance cannot do
+  taken away: no replica, no change log of the Cassandra API).
+* `neptune`: property graph by Gremlin traversals (or read by openCypher),
+  vertices and edges by id with set-valued properties sorted; RDF quads by
+  SPARQL; Neptune Streams as one ordered log, elements read back as they
+  are, quads applied as they are; statistics refreshed after a load.
+* `timestream`: records by dimensions, measure name and time, read by
+  pages, written at a rising version; nothing to follow.
+* `lindorm`: wide tables by LindormTable's SQL, written by `UPSERT`.
+Shared: `engines.WIRE`, `canon`'s separate block of types, `same_engine`,
+`Engine.PAIR_ENGINE`, `gcp` clients, `described`, `provedsql`, the
+envelopes in `changetopic`, the source changes in `sourcechange` and the
+DBA's asks in `dba`, `clouds` hosts. Tests written, not run: the
+no-server file `test_the_cloud_native_services_as_sides.py`, and against
+emulators or stand-ins `test_spanner_as_a_side_of_a_pair.py`,
+`test_bigtable_as_a_side_of_a_pair.py`,
+`test_firestore_as_a_side_of_a_pair.py`,
+`test_gaussdb_as_a_side_of_a_pair.py` (x86, `--vm migkit`),
+`test_oceanbase_as_a_side_of_a_pair.py` (six gigabytes, `--vm migkit`),
+`test_tdsql_is_followed_set_by_set.py`,
+`test_keyspaces_on_a_cassandra_stand_in.py`,
+`test_neptune_on_gremlin_and_sparql_servers.py`,
+`test_geminidb_on_its_apis_stand_ins.py`. Proved only on a real account:
+Spanner's IAM and Data Boost, Bigtable's change streams, Keyspaces'
+service and CDC, Neptune's streams and signature, Timestream's service,
+Lindorm, OceanBase's Oracle mode and binlog service, TDSQL's proxy,
+GeminiDB's APIs.
+
+**CN1. The cloud-native services' own bulk paths.** Spanner's and
+Firestore's managed exports and imports, Bigtable's, OceanBase's and
+PolarDB-X's loaders, Neptune's bulk loader, Timestream's batch load: each
+a rung of the table-way ladder where its terms and the hop allow, proved
+by the same digest.
+
+**CN2. Their accounts and grants.** Spanner's database roles, GaussDB's
+roles, OceanBase, PolarDB-X, TDSQL and Lindorm accounts, GeminiDB's
+roles, carried and compared as `users` does.
+
+**CN3. Their restore points.** Spanner and Bigtable backups, Firestore's
+point-in-time recovery and exports, GaussDB, OceanBase and PolarDB-X
+backups, Neptune and Timestream snapshots: the target snapshotted before a
+cutover, as `snapshot_state`.
+
+**CN4. The follows not built.** OceanBase's Oracle mode through its
+change-data library, Lindorm through its data subscription, TDSQL on a
+cloud through its data subscription topic (only per-set binlogs are
+read).
+
+**CN5. Their deep checks, settings and statistics.** Bigtable, Firestore
+and Datastore indexes and TTL policies, GaussDB's and Lindorm's settings,
+GaussDB's statistics, Neptune's settings, OceanBase's Oracle mode's
+sequences and settings.
 
 **Done 2026-10-01: ER3, ER6, ER7.**
 * **ER3 Teradata** (`engines/teradata.py`): Teradata's driver, installed by

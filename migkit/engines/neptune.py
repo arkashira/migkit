@@ -333,11 +333,10 @@ class NeptuneEngine(NeutralCopier, Engine):
 
     def _sparql_url(self, side, update=False):
         ep = self._ep(side)
-        said = ep.options.get("sparql_update" if update else "sparql")
-        if said:
-            return str(said)
-        if update and ep.options.get("sparql"):
-            return str(ep.options["sparql"])
+        query = ep.options.get("sparql")
+        said = ep.options.get("sparql_update") if update else None
+        if said or query:
+            return str(said or query)
         return (f"{'https' if self._tls(side) else 'http'}://{ep.host}:"
                 f"{ep.port or 8182}/sparql")
 

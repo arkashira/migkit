@@ -466,3 +466,9 @@ names, `LADDER.table` and `P0-AUDIT` (WAVE queue items).
 | 393 | R25.1 | Driving the managed services (creating, starting, stopping DMS or DTS tasks): migkit watches the databases while the service moves them, proves what it carried and repairs what it did not | NOT PURSUED (the owner, 2026-09-29) | S | operations/scale | L6947-6953 |
 | 394 | R25.2 | The cloud side of readiness: the clusters' network (VPC, subnets, security groups, routes), maintenance windows and pending maintenance, instance classes on both sides, snapshots and restores through the provider's API, audited before the move and in `assess` | OPEN | M | operations/scale | L6954-6957 |
 | 395 | R25.3 | The organisation's own change sheet: the plan's steps exported with ids that map onto a team's task sheet, each step's progress and evidence written back | OPEN | M | operations/scale | L6958-6961 |
+| 396 | CN0 | The cloud-native services as sides (P0-CLOUDS part 2): Spanner, Bigtable, Firestore and Datastore mode, GaussDB, OceanBase (both modes), PolarDB-X, TDSQL distributed, Keyspaces, Neptune, Timestream, Lindorm, GeminiDB's APIs | DONE (P0-CLOUDS part 2 merge; tests written, not run) | L | engines | L4324-4396 |
+| 397 | CN1 | The cloud-native services' own bulk paths as table-way rungs | OPEN | M | engines | L4397-4402 |
+| 398 | CN2 | Their accounts and grants carried and compared | OPEN | M | engines | L4403-4406 |
+| 399 | CN3 | Their restore points before a cutover | OPEN | M | engines | L4407-4411 |
+| 400 | CN4 | The follows not built: OceanBase Oracle mode, Lindorm, TDSQL through its subscription topic | OPEN | M | engines | L4412-4416 |
+| 401 | CN5 | Their deep checks, settings and statistics | OPEN | S | engines | L4417-4420 |

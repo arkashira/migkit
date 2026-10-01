@@ -244,8 +244,8 @@ def same_engine(eng):
     if own != "hetero":
         return own == name
     opts = hop.options or {}
-    return all(ALIASES.get(opts.get(k), opts.get(k)) == name
-               for k in ("source_engine", "target_engine"))
+    sides = (opts.get("source_engine"), opts.get("target_engine"))
+    return all(ALIASES.get(e, e) == name for e in sides)
 
 
 #: every canonical engine name, in the order a report lists them

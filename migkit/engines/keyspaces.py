@@ -109,7 +109,9 @@ class KeyspacesEngine(CassandraEngine):
             else:
                 auth = PlainTextAuthProvider(ep.user, ep.password)
             tls = ep.cassandra_tls()
-            if not tls and not ep.options.get("tls_insecure"):
+            if not tls and ep.options.get("tls") is not False:
+                # Keyspaces takes TLS only: the system's authorities check
+                # its certificate unless the side names its own
                 import ssl
                 ctx = ssl.create_default_context()
                 tls = {"ssl_context": ctx,
@@ -136,11 +138,16 @@ class KeyspacesEngine(CassandraEngine):
     def _await_active(self, side, what, where, args):
         """Wait until the service says a keyspace or table it is making is
         ACTIVE: it is made in the background, and used before that it
-        refuses."""
+        refuses. A server that keeps no such table (Cassandra's CQL, where
+        a statement returns once the thing is made) is not waited on."""
+        from cassandra import InvalidRequest
         for _ in range(300):
-            got = list(self._session(side).execute(
-                f"select status from system_schema_mcs.{what} where {where}",
-                args))
+            try:
+                got = list(self._session(side).execute(
+                    f"select status from system_schema_mcs.{what} where"
+                    f" {where}", args))
+            except InvalidRequest:
+                return
             if got and str(got[0].status).upper() == "ACTIVE":
                 return
             time.sleep(2)

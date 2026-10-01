@@ -202,12 +202,14 @@ class PolarDBXEngine(OnMySQLWire):
     def change_point(self, side, db):
         try:
             return super().change_point(side, db)
-        except SystemExit:
+        except (SystemExit, Exception) as e:  # noqa: BLE001 - said, with where
             raise SystemExit(
-                "PolarDB-X answers no binlog position: its global binlog"
-                " is written by its CDC component, which the instance must"
-                " have running (and the account REPLICATION SLAVE and"
-                " REPLICATION CLIENT) before its changes can be followed")
+                "PolarDB-X answers no binlog position"
+                f" ({str(e).strip().splitlines()[0][:80] if str(e).strip() else type(e).__name__}):"
+                " its global binlog is written by its CDC component, which"
+                " the instance must have running (and the account"
+                " REPLICATION SLAVE and REPLICATION CLIENT) before its"
+                " changes can be followed") from None
 
     def _sequences(self, side):
         """{sequence name: its next value}."""

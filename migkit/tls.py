@@ -495,6 +495,34 @@ def _bigquery(ep):
     return _cloud("api_endpoint", "BigQuery")(ep)
 
 
+def _emulated(what):
+    """A Google service reached through its SDK over TLS, the certificate
+    checked by its client - or its emulator, which the SDK speaks to in
+    plain text."""
+    def one(ep):
+        if (ep.options or {}).get("emulator"):
+            return {"state": "plain",
+                    "detail": "an emulator at host and port, spoken to"
+                              " without TLS"}
+        return {"state": "verified",
+                "detail": f"{what} over TLS, the certificate checked by its"
+                          " client"}
+    one.service = True
+    return one
+
+
+def _neptune(ep):
+    """Neptune over wss and https, the certificate checked by the client,
+    unless the side says `tls: false` (a Gremlin server reached without
+    it)."""
+    if (ep.options or {}).get("tls") is False:
+        return {"state": "plain",
+                "detail": "tls: false - every element crosses the network"
+                          f" as it is: {_TUNNEL_FIX}"}
+    return {"state": "verified",
+            "detail": "wss and https, the certificate checked by the client"}
+
+
 def _opensearch(ep):
     o = ep.options or {}
     if not o.get("tls"):
@@ -621,6 +649,16 @@ _POSTURE = {
     "teradata": _teradata,
     "sapodp": _sapodp,
     "saas": _saas,
+    # the cloud-native services (P0-CLOUDS part 2): Google's by their
+    # SDKs unless an emulator is named, Neptune over wss and https unless
+    # `tls: false`, the MySQL client's TLS where a side speaks through one
+    **{name: _emulated(title) for name, title in (
+        ("spanner", "Spanner"), ("bigtable", "Bigtable"),
+        ("firestore", "Firestore"), ("datastore", "Datastore"))},
+    "neptune": _neptune,
+    "timestream": _cloud("endpoint_url", "Timestream"),
+    "oceanbase-oracle": _my,
+    "lindorm": _my,
     **{name: _files for name in ("sqlite", "duckdb", "parquet", "copybook",
                                  "iceberg", "delta")},
 }

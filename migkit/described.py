@@ -12,7 +12,6 @@ itself, as the engine reads it.
 """
 import hashlib
 import json
-import os
 from pathlib import Path
 
 
@@ -25,41 +24,32 @@ def _path(engine, where):
 
 
 def read(engine, where, name):
-    """([(column, class)], [key column]) of a table migkit made, or None."""
-    try:
-        got = json.loads(_path(engine, where).read_text()).get(name)
-    except (OSError, ValueError):
-        got = None
+    """([(column, class)], [key column]) of a table migkit made, or None.
+    A description that cannot be read whole stops (`durable`): read as
+    none, the table would be read as something else than it holds."""
+    from . import durable
+    got = (durable.read_state(_path(engine, where), "state") or {}).get(name)
     if not got:
         return None
     return [tuple(c) for c in got["columns"]], list(got["key"])
 
 
 def keep(engine, where, name, columns, key):
-    """Keep a table's description, the file replaced whole: a run stopped
-    half way leaves the one before it, never half of one."""
+    """Keep a table's description, the file replaced whole (`durable`): a
+    run stopped half way leaves the one before it, never half of one."""
+    from . import durable
     path = _path(engine, where)
-    try:
-        kept = json.loads(path.read_text())
-    except (OSError, ValueError):
-        kept = {}
+    kept = durable.read_state(path, "state") or {}
     kept[name] = {"columns": [list(c) for c in columns], "key": list(key)}
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        f.write(json.dumps(kept, indent=1))
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(path)
+    durable.write_json(path, kept, indent=1)
 
 
 def forget(engine, where, name):
+    from . import durable
     path = _path(engine, where)
-    try:
-        kept = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return
+    kept = durable.read_state(path, "state") or {}
     if kept.pop(name, None) is not None:
-        path.write_text(json.dumps(kept, indent=1))
+        durable.write_json(path, kept, indent=1)
 
 
 def key_text(classes, key, values):
@@ -74,7 +64,6 @@ def key_text(classes, key, values):
 
 def key_values(classes, key, text):
     """{key column: value} back from `key_text`."""
-    from . import changetopic
     texts = [text] if len(key) == 1 else json.loads(text)
     return {k: value_of(classes.get(k) or "text", t)
             for k, t in zip(key, texts)}
