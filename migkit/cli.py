@@ -1109,9 +1109,15 @@ def _leg_said(eng, side, db, ep):
         return (f"verified: {pos['detail']}" if pos
                 and pos["state"] == "verified" else "")
     if got["encrypted"]:
-        return f"encrypted: {got['how']}" + (
-            ", the certificate verified" if pos
-            and pos["state"] == "verified" else "")
+        # the engine says what this connection used where it can; the
+        # hop's own settings speak only for an engine that cannot
+        checked = got.get("verified")
+        if checked is None:
+            checked = bool(pos and pos["state"] == "verified")
+        left = got.get("unverified") or []
+        return (f"encrypted: {got['how']}"
+                + (", the certificate verified" if checked else "")
+                + (f"; not verified on: {', '.join(left)}" if left else ""))
     through = (ep.options or {}).get("tunnel_to")
     if through and tls.tunnel_kind(ep) == "ssh":
         return (f"not encrypted by the database; carried through the"
