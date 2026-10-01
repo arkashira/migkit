@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}API - migkit{% endblock %}
+{% block main %}
+<section class="card">
+  <h1>The API, {{ doc.info.version }}</h1>
+  <p>Every route below is served at <code>{{ base }}</code>, answers JSON,
+  and needs an API token (<code>Authorization: Bearer ...</code>, made on
+  your <a href="/account">account</a>) or a signed-in page. A hop you may
+  not see answers 404; a role too low answers 403 and says which it needs.
+  The whole document: <a href="{{ base }}/openapi.json">openapi.json</a>.</p>
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Needs</th><th>What it does</th></tr></thead>
+    <tbody>{% for r in routes %}<tr><td><code>{{ r.method }}</code></td><td><code>{{ base }}{{ r.path }}</code></td><td>{{ r.need }}</td><td>{{ r.summary }}</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% endblock %}

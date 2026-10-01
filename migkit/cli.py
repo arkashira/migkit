@@ -5157,8 +5157,8 @@ def _watch_stream(hop, eng, dbs, out, seen, held):
                    " on disk (no re-check); the answers stay as the check"
                    " took them")
 @click.option("--serve", is_flag=True,
-              help="serve the live dashboard for every hop instead of"
-                   " writing a file")
+              help="serve the web view and the API for every hop - signed"
+                   " in, with roles - instead of writing a file")
 @click.option("--metrics", is_flag=True,
               help="print Prometheus metrics for every hop and exit"
                    " (the dashboard also exposes them at /metrics)")
@@ -5167,8 +5167,10 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
     """Render the HTML report from the last check run and export the
     hop's evidence (what moved, every verdict with both sides' counts and
     digests and how to take them again, decisions, approvals, repairs,
-    outages - HTML, Markdown, JSON, CSV), or --serve the live localhost
-    dashboard (with a Prometheus /metrics endpoint)."""
+    outages - HTML, Markdown, JSON, CSV), or --serve the web view: every
+    hop's outcomes, progress, approvals, offers and evidence for the
+    people each hop names, the REST API, and a Prometheus /metrics
+    endpoint (`migkit.web`)."""
     from .verdict import Usage
     if (serve or metrics) and (refresh or do_open or hop_name):
         raise Usage("--serve and --metrics are for every hop; --refresh,"
@@ -5180,7 +5182,7 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
         print(prometheus(load_hops()), end="")
         return
     if serve:
-        from .ui import serve as _serve
+        from .web import serve as _serve
         return _serve(port)
     if not hop_name:
         from .config import REPORTS
