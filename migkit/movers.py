@@ -5594,12 +5594,13 @@ def _seed_origin(eng, db, origin, lsn):
     there, and advanced only where it holds no progress yet: a leg that
     ran before moved it on, and it is never set back."""
     name = origin.replace("'", "''")
-    tdb = eng._d("dst", db)
-    eng._psql("dst", tdb, f"select pg_replication_origin_create('{name}')"
+    # the engine maps the target's name for this database itself; mapping
+    # it here as well asked a database the hop's `db_map` never named
+    eng._psql("dst", db, f"select pg_replication_origin_create('{name}')"
                           " where not exists (select 1 from"
                           " pg_replication_origin where roname ="
                           f" '{name}')")
-    eng._psql("dst", tdb, f"select pg_replication_origin_advance('{name}',"
+    eng._psql("dst", db, f"select pg_replication_origin_advance('{name}',"
                           f" '{lsn}') where pg_replication_origin_progress("
                           f"'{name}', false) is null")
 
