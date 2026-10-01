@@ -354,6 +354,7 @@ def test_capabilities_and_install_selection(monkeypatch):
     monkeypatch.setattr(tools, "ase_driver_present", lambda: True)
     monkeypatch.setattr(tools, "install_second_reader",
                         lambda log=None: pytest.fail("nothing to install"))
+    monkeypatch.setattr(tools, "own_env_python", lambda name: "/bin/python")
     assert {st for _, _, st, _ in tools.capabilities()} == {"ready"}
     assert tools.install_missing(lambda m: None) == []
 

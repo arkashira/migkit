@@ -56,6 +56,8 @@ def _pg(super_=False):
         ("src", "show wal_level"): "logical" if super_ else "replica",
         ("src", "max_replication_slots"): f"10{SEP}10",
         ("src", "pg_publication"): "0",
+        # tables the account does not own, which it may not publish
+        ("src", "pg_has_role(current_user, c.relowner"): "1",
         ("src", "rds_replication"): "0",
         ("src", "rds_superuser"): "0",
         ("dst", "rds_superuser"): "0",

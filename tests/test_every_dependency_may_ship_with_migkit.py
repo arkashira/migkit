@@ -165,6 +165,8 @@ def _install(monkeypatch, home, accept=""):
     monkeypatch.setattr(tools, "teradata_driver_present", lambda: False)
     monkeypatch.setattr(tools, "install_teradata", lambda log: False)
     monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
+    # every environment of its own in place: nothing is fetched for one
+    monkeypatch.setattr(tools, "own_env_python", lambda name: "/bin/python")
     # a machine the redo-file reader runs on, whatever this one is
     monkeypatch.setattr(tools, "_redo_reader_here", lambda: True)
     from migkit.engines import oracle_redo

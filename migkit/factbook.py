@@ -286,8 +286,28 @@ for _name, _what, _group, _how in (
      " availability group", "side", READ),
     ("control", "whether migkit's account may deny rights and give them"
      " back", "side", READ),
-    ("kill", "whether migkit's account may end other sessions", "side",
+    ("kill", "whether migkit's account may end other sessions - on MySQL,"
+     " how: its own KILL or a procedure of its service's", "side", READ),
+    ("owner roles", "whether an application's role writes past its own"
+     " grants (it owns its tables, or writes through another role)",
+     "side", READ),
+    ("connect revoke", "whether migkit's account may take the right to"
+     " connect to the hop's databases (their owner, or a superuser)",
+     "side", READ),
+    ("alter roles", "whether migkit's account may change the application's"
+     " roles (CREATEROLE, and from 16 the admin option on each)", "side",
      READ),
+    ("roles elsewhere", "the server's other databases the application's"
+     " roles are in", "side", READ),
+    ("grant option", "whether migkit's account may revoke and give back"
+     " grants", "side", READ),
+    ("commands", "the commands the server lists (a MongoDB-compatible"
+     " service keeps some from every account)", "side", READ),
+    ("param read_only", "where the source's read_only stands through its"
+     " provider's API: its own parameter group, a shared one, none",
+     "side", READ),
+    ("where", "the managed service that runs a side, as the server, the"
+     " hop or its address says (`managed`)", "side", READ),
     ("authorizer", "whether the cluster checks access", "side", READ),
     ("authorize", "whether migkit's role may grant and revoke on the"
      " keyspace", "side", READ),
