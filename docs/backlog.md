@@ -3288,6 +3288,33 @@ final run (P0, M).** Files: `tests/conftest.py`, `tests/servers.py` (new),
   check reads `migkit/__init__.py`; `requires-python = ">=3.10.12"` (T12,
   W21, W24).
 
+*Done 2026-10-01.* As built, where it differs from the plan above: the
+docker tests run in **lanes** - one pytest process each, on the default
+colima profile and on the migkit VM at once, as many as each daemon's free
+memory holds - not in xdist groups, because the modules not yet moved fix
+host ports and container names: files that fix one port or name share a
+lane, files naming the `pg_pair` pair's fixed 55432/`migkit-test-pg-*` run
+on lane 0 (the only lane that keeps them; any other fails such a file
+loudly), heavy files only where a lane may hold them, balanced by
+`reports/final-suite/times.json`. A lane (`MIGKIT_TEST_LANE`) and an xdist
+worker give each process its port block (20000 + 60 x index, under the
+ephemeral ports the colima VM hands out) and name
+suffix. `vm` is marked by what a test reaches (its fixtures and the helpers
+they call name an x86 or Oracle image), not by file name, so the pure and
+PostgreSQL-only tests in `oracle`/`sql_server` files stay where they were.
+`with_docker_lock.py` hands out lanes: a command waits only for the host
+ports and names its test files fix (and lane 0 for the pinned ones); one it
+cannot read takes the whole of docker as before; the VM is stopped by the
+last user. `pg_pair` and `my_pair` are the shared `pg`/`mysql` profiles,
+module-scoped, reset at module end. `MIGKIT_TEST_STRICT` takes `1` or the
+kinds (`server`, as CI, where programs needing accepted terms are absent).
+`final_suite.py` refuses a checkout the installed editable migkit has
+modules beyond (a run would import them from the other tree), stops a lane
+silent past its test's timeout and goes on, and records the run in
+`reports/final-suite/<stamp>/`. Estimate with no measured times: ~53 min a
+lane in four lanes (default profile 1, VM 3) plus the pure phase, from the
+2026-09-27 whole run scaled; AUD-T2 replaces it with the measured run.
+
 ### Wave 2 (after wave 1 merges)
 
 **AUD-H. The pair's core: one schema comparer, one catalogue, both sides at
@@ -3353,7 +3380,16 @@ nothing `pg_pair` lacks; 43 MySQL files a stock server), hard-coded ports
 and names gone, the 144 fixed waits on `until()` and the tail's own
 caught-up sign, `docker exec` SQL through the driver; then the final run
 measured and its numbers written into `tools/final_suite.py` (T1, T4, T9,
-T10).
+T10). The pattern is at the top of `tests/servers.py` (a module fixture
+from `servers.fixture("<profile>")`, the module's `.name` for what the hop
+names, `server.sql()`, `servers.private()` for a server a test must own,
+`servers.image()` for a built image). Then: the 24 files pinned to lane 0
+read `pg_pair`'s ports instead of 55432/`migkit-test-pg-*`; `cap_pairs`,
+`typepair` (whose session fixture is also called `servers`) and the other
+helpers move onto profiles; every `-p` mapping binds 127.0.0.1 and a lint
+test in `test_the_suite_runs_in_lanes.py` holds every test file to no fixed
+host port (today it holds only the lanes' range and the shared helpers);
+the image scan reads only images a file runs, not ones its strings name.
 
 **AUD-Z. The sweep: every leftover site on the one helper, lint tests that
 keep it so (P1, M).** Files: whatever no group held -
