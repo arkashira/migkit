@@ -10,118 +10,213 @@ has accepted its terms - asked at the terminal, or named in
 `MIGKIT_ACCEPT_TERMS` for an unattended install - and never silently; where
 they are declined, the open build or the open path takes its place, and
 that is said.
+
+Every program and image migkit runs is one entry of `PROGRAM`: its licence,
+the packages that install it, the words a report calls it by, how its build
+is asked its version, the build measured with migkit and the oldest taken
+as it is, the version fetched from its vendor, the image it runs from. The
+tables the rest reads - `PROGRAMS`, `PROGRAM_LICENCES`, `IMAGES`, `VENDOR`,
+`movers.DRIVEN`, `toolversion`'s patterns, the words filter, the container
+image's recipe - are read off it, so a fact about a program is written
+once.
+
+What is fetched is pinned twice over (`LOCK`, `data/programs.lock.json`):
+by version, and by the digest of every file for every machine and of every
+image, read from where each vendor publishes it (`tools/pin_programs.py`
+writes it). A file is held to its digest before anything of it is unpacked
+or run; one whose vendor publishes none is held to the digest it had the
+first time this machine fetched it (`PINS`), and said. `MIGKIT_BUNDLE_BUILD`
+on `doctor --install` puts all of it - the files, migkit's wheels, the
+second reading's and the images - in one directory with its sums, signed;
+`MIGKIT_BUNDLE` installs from one with no network at all.
 """
 import platform
 import shutil
-import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from .util import which
 
-# (command, brew formula, apt package). apt package "" means not in the
-# default apt repos (needs a vendor step) - reported, not attempted.
-PROGRAMS = {
-    "psql": ("libpq", "postgresql-client"),
-    "pg_dump": ("libpq", "postgresql-client"),
-    "pg_restore": ("libpq", "postgresql-client"),
-    "mysql": ("mysql-client", "default-mysql-client"),
-    "mysqldump": ("mysql-client", "default-mysql-client"),
-    "mongodump": ("mongodb-database-tools", ""),
-    "mongorestore": ("mongodb-database-tools", ""),
-    # not in any package manager: fetched from its vendor (`install_vendor`)
-    "mongosync": ("", ""),
-    "mydumper": ("mydumper", "mydumper"),
-    "myloader": ("mydumper", "mydumper"),
-    "pgloader": ("pgloader", "pgloader"),
-    "pt-table-sync": ("percona-toolkit", "percona-toolkit"),
+
+@dataclass(frozen=True)
+class Program:
+    """Everything migkit knows about one program or image it runs."""
+    #: its licence, as SPDX names it
+    licence: str
+    #: the Homebrew formula and the apt package that install it; "" where
+    #: no package manager carries it (fetched from its vendor, built from
+    #: its source, pulled as an image or put in place by hand)
+    brew: str = ""
+    apt: str = ""
+    #: what a report calls it - never by its own name
+    role: str = "copy program"
+    #: the engine family whose client it is, for the version check
+    #: against the server (`toolversion`)
+    client_of: str = ""
+    #: how its build is asked its version - () where it is asked nothing
+    #: and its install proves the build - and the version in the answer
+    version_args: tuple = ("--version",)
+    version_pattern: str = r"(\d+\.\d+(?:\.\d+)?)"
+    #: the build migkit was measured with (backlog 46)
+    measured: str = ""
+    #: the oldest build taken as it is: an older one is replaced where the
+    #: lock has a build for this machine, and said where it has none
+    lowest: str = ""
+    #: the version fetched from its vendor
+    vendor: str = ""
+    #: the image it runs from, by name and tag; the digest is the lock's
+    image: str = ""
+    #: the package that brings a Java 17 where it runs on one: (brew
+    #: formula, apt package)
+    java: tuple = ()
+    #: the other names it goes by in what it prints
+    also: tuple = ()
+
+
+_PG = r"\(PostgreSQL\)\s+(\d+(?:\.\d+)*)"
+_MY = r"Ver\s+(\d+(?:\.\d+)*)"
+_JAVA = ("openjdk", "openjdk-17-jre-headless")
+
+#: every program and image migkit runs. The PostgreSQL and MySQL clients
+#: print their versions each its own way (`pg_dump (PostgreSQL) 18.6`,
+#: `mysqldump  Ver 9.7.1 for macos26.4`); the rest print theirs as the
+#: first dotted number
+PROGRAM = {
+    "psql": Program("PostgreSQL", "libpq", "postgresql-client",
+                    "client program", "postgres", version_pattern=_PG,
+                    lowest="14"),
+    "pg_dump": Program("PostgreSQL", "libpq", "postgresql-client",
+                       "dump program", "postgres", version_pattern=_PG,
+                       measured="18.6", lowest="14"),
+    "pg_restore": Program("PostgreSQL", "libpq", "postgresql-client",
+                          "load program", "postgres", version_pattern=_PG,
+                          measured="18.6", lowest="14"),
+    "pg_dumpall": Program("PostgreSQL", "libpq", "postgresql-client",
+                          "dump program", "postgres", version_pattern=_PG),
+    "vacuumdb": Program("PostgreSQL", "libpq", "postgresql-client",
+                        "client program", "postgres", version_pattern=_PG),
+    "pg_basebackup": Program("PostgreSQL", "libpq", "postgresql-client",
+                             "page copy program", "postgres",
+                             version_pattern=_PG),
+    "pg_verifybackup": Program("PostgreSQL", "libpq", "postgresql-client",
+                               "page copy program", "postgres",
+                               version_pattern=_PG),
+    "mysql": Program("GPL-2.0-only", "mysql-client", "default-mysql-client",
+                     "client program", "mysql", version_pattern=_MY),
+    "mysqldump": Program("GPL-2.0-only", "mysql-client",
+                         "default-mysql-client", "dump program", "mysql",
+                         version_pattern=_MY),
+    "mongodump": Program("Apache-2.0", "mongodb-database-tools", "",
+                         "dump program", measured="100.16.1",
+                         lowest="100.9"),
+    "mongorestore": Program("Apache-2.0", "mongodb-database-tools", "",
+                            "load program", measured="100.16.1",
+                            lowest="100.9"),
+    # not in any package manager: fetched from its vendor
+    "mongosync": Program("LicenseRef-MongoDB-Customer-Agreement",
+                         role="sync program", measured="1.21.0",
+                         vendor="1.21.0"),
+    "mydumper": Program("GPL-3.0-or-later", "mydumper", "mydumper",
+                        "dump program", measured="1.0.5", lowest="0.21"),
+    "myloader": Program("GPL-3.0-or-later", "mydumper", "mydumper",
+                        "load program", measured="1.0.5", lowest="0.21"),
+    "pgloader": Program("PostgreSQL", "pgloader", "pgloader"),
+    "pt-table-sync": Program("GPL-2.0-only", "percona-toolkit",
+                             "percona-toolkit", "repair program"),
     # fetched from its vendor, at the build its terms decide (`build_of`)
-    "atlas": ("", ""),
-    "liquibase": ("", ""),
-    "riotx": ("", ""),
+    "atlas": Program("LicenseRef-Atlas-EULA", role="schema reader",
+                     version_args=("version",), vendor="1.3.0"),
+    "liquibase": Program("FSL-1.1-ALv2", role="schema reader",
+                         version_pattern=r"(?i)liquibase version:?\s*v?"
+                                         r"(\d+\.\d+\.\d+)",
+                         vendor="5.0.4", java=_JAVA),
+    "riotx": Program("BUSL-1.1", vendor="1.15.1"),
     # fetched from their vendors too: the Redis copy by the replica
-    # protocol, the Cassandra bulk loader, and Kafka's own cluster mirror
-    # (the script of the Kafka release that starts it)
-    "redis-shake": ("", ""),
-    "dsbulk": ("", ""),
-    "connect-mirror-maker.sh": ("", ""),
-    # the brew package is an installer that asks for an administrator's
-    # password, and no apt repository of the defaults carries it
-    "mysqlsh": ("", ""),
-    "sqlcmd": ("sqlcmd", ""),
-    "docker": ("", ""),
+    # protocol (asked nothing - it takes only a configuration file, so the
+    # archive fetched by its versioned name is the build), the Cassandra
+    # bulk loader, and Kafka's own cluster mirror (the start script of the
+    # Kafka release, which takes only its properties file; also run from
+    # Kafka's own image)
+    "redis-shake": Program("MIT", vendor="4.6.2", version_args=()),
+    "dsbulk": Program("Apache-2.0", vendor="1.11.0", java=_JAVA),
+    "connect-mirror-maker.sh": Program(
+        "Apache-2.0", vendor="3.8.0", java=_JAVA, version_args=(),
+        image="apache/kafka:3.8.0", also=("MirrorMaker",
+                                           "connect-mirror-maker")),
+    # GPLv2 with the Universal FOSS Exception, driven as a program: its
+    # Python API lives only inside its own process (no package carries
+    # it). The brew package is an installer that asks for an
+    # administrator's password, and no apt repository of the defaults
+    # carries it: fetched from its vendor
+    "mysqlsh": Program("GPL-2.0-only", measured="26.7.1", vendor="26.7.1",
+                       also=("MySQL Shell",)),
+    "sqlcmd": Program("MIT", "sqlcmd", "", "client program"),
+    "docker": Program("Apache-2.0", role="container runtime"),
+    # the images migkit runs: its version-matched PostgreSQL copy, and the
+    # streaming pipeline's connectors and its log
+    "pgcopydb": Program("PostgreSQL", measured="0.18",
+                        image="dimitri/pgcopydb:v0.18"),
+    "debezium": Program("Apache-2.0", role="change stream",
+                        image="quay.io/debezium/connect:3.0"),
+    "redpanda": Program("BUSL-1.1", role="change log",
+                        image="redpandadata/redpanda:v26.2.3"),
     # built from source where the redo is (`install_redo_reader`), with
     # Oracle's client it connects through
-    "OpenLogReplicator": ("", ""),
-    "oracle-instant-client": ("", ""),
+    "OpenLogReplicator": Program("AGPL-3.0-or-later", role="redo reader"),
+    "oracle-instant-client": Program("LicenseRef-Oracle-Free-Use-Terms",
+                                     role="client library"),
     # not a program: FreeTDS's ODBC driver and the ODBC manager it loads
-    # through, which SAP ASE is reached by (`ASE_DRIVER`)
-    "ase-odbc": ("freetds unixodbc", "tdsodbc unixodbc"),
+    # through, which SAP ASE is reached by (`ASE_DRIVER`) - FreeTDS under
+    # the Library GPL 2 "or any later version", taken as 2.1; the ODBC
+    # manager under the LGPL 2.1
+    "ase-odbc": Program("LGPL-2.1-or-later", "freetds unixodbc",
+                        "tdsodbc unixodbc", "driver"),
     # not programs: IBM's ODBC driver for IBM i, from IBM's own package
     # repository (`install_ibm`), and the operator's Db2 Connect licence
-    # put beside the IBM data server driver
-    "ibmi-odbc": ("", ""),
-    "db2-connect": ("", ""),
+    # put beside the IBM data server driver - IBM's, not open source:
+    # each is used on the operator's acceptance of IBM's terms (`TERMS`)
+    "ibmi-odbc": Program("LicenseRef-IBM-i-Access-Client-Solutions",
+                         role="driver"),
+    "db2-connect": Program("LicenseRef-IBM-Db2-Connect", role="licence"),
+    # built here from its source (`SOURCE_BUILDS`), never on PATH by
+    # another name
+    "reindex-from-snapshot": Program(
+        "Apache-2.0", role="snapshot reader",
+        also=("DocumentsFromSnapshotMigration",)),
     # not programs either: Teradata's own driver for Python, installed into
-    # migkit's environment (`install_teradata`), and the connectors of the
-    # program sources' container kind, which docker pulls where a hop
-    # runs one (`engines.saas`)
-    "teradatasql": ("", ""),
-    "airbyte-connectors": ("", ""),
+    # migkit's environment (`install_teradata`) - Teradata's licence, free
+    # to use and not open source - and the connectors of the program
+    # sources' container kind, which docker pulls where a hop runs one
+    # (`engines.saas`), under the Elastic License 2.0 they carry: any use
+    # but offering them to others as a managed service
+    "teradatasql": Program("LicenseRef-Teradata-SQL-Driver", role="driver"),
+    "airbyte-connectors": Program("Elastic-2.0", role="connectors"),
 }
 
+#: (brew formula, apt package) of each program: "" where no package
+#: manager carries it - reported, not attempted. The images, which docker
+#: pulls where they run, are not among them
+PROGRAMS = {n: (p.brew, p.apt) for n, p in PROGRAM.items()
+            if not p.image or p.vendor}
 #: each program's licence, as SPDX names it. Every one is run as a program
 #: of its own, never imported, so a copyleft licence is no bar to it; one
 #: that is not open source at all is in `TERMS` and runs only on the
 #: operator's acceptance (`tests/test_every_dependency_may_ship_with_
 #: migkit.py` holds both)
-PROGRAM_LICENCES = {
-    "psql": "PostgreSQL", "pg_dump": "PostgreSQL", "pg_restore": "PostgreSQL",
-    "mysql": "GPL-2.0-only", "mysqldump": "GPL-2.0-only",
-    "mongodump": "Apache-2.0", "mongorestore": "Apache-2.0",
-    "mongosync": "LicenseRef-MongoDB-Customer-Agreement",
-    "mydumper": "GPL-3.0-or-later", "myloader": "GPL-3.0-or-later",
-    "pgloader": "PostgreSQL", "pt-table-sync": "GPL-2.0-only",
-    "atlas": "LicenseRef-Atlas-EULA", "liquibase": "FSL-1.1-ALv2",
-    "riotx": "BUSL-1.1", "sqlcmd": "MIT", "docker": "Apache-2.0",
-    # GPLv2 with the Universal FOSS Exception, driven as a program: its
-    # Python API lives only inside its own process (no package carries it)
-    "mysqlsh": "GPL-2.0-only",
-    # the images migkit pulls (`IMAGES`): its version-matched PostgreSQL
-    # copy, and the streaming pipeline's connectors and its log
-    "pgcopydb": "PostgreSQL", "debezium": "Apache-2.0",
-    "redpanda": "BUSL-1.1",
-    "OpenLogReplicator": "AGPL-3.0-or-later",
-    "oracle-instant-client": "LicenseRef-Oracle-Free-Use-Terms",
-    # FreeTDS under the Library GPL 2 "or any later version", taken as
-    # 2.1; the ODBC manager under the LGPL 2.1
-    "ase-odbc": "LGPL-2.1-or-later",
-    # IBM's, not open source: each is used on the operator's acceptance
-    # of IBM's terms (`TERMS`)
-    "ibmi-odbc": "LicenseRef-IBM-i-Access-Client-Solutions",
-    "db2-connect": "LicenseRef-IBM-Db2-Connect",
-    # Teradata's licence for its driver: free to use, not open source
-    "teradatasql": "LicenseRef-Teradata-SQL-Driver",
-    # the Elastic License 2.0 its certified connectors carry: any use but
-    # offering them to others as a managed service
-    "airbyte-connectors": "Elastic-2.0",
-    "redis-shake": "MIT", "dsbulk": "Apache-2.0",
-    "connect-mirror-maker.sh": "Apache-2.0",
-    # built here from its source (`SOURCE_BUILDS`), never on PATH by
-    # another name
-    "reindex-from-snapshot": "Apache-2.0",
-}
-
-#: the container images migkit runs, pulled by docker where they are run
-#: rather than installed: {name as `PROGRAM_LICENCES` and `TERMS` know it:
-#: image}. Pulled, not installed, and a closed one's terms accepted with
-#: every other's all the same (`install_missing`)
-IMAGES = {"pgcopydb": "dimitri/pgcopydb:latest",
-          "debezium": "quay.io/debezium/connect:3.0",
-          "redpanda": "redpandadata/redpanda:latest",
-          # Kafka's own, which carries the cluster mirror's start script:
-          # the build `VENDOR` pins, where the release is not installed
-          "connect-mirror-maker.sh": "apache/kafka:3.8.0"}
+PROGRAM_LICENCES = {n: p.licence for n, p in PROGRAM.items()}
+#: programs no package manager carries, fetched from their vendor at the
+#: build measured here: {program: version}
+VENDOR = {n: p.vendor for n, p in PROGRAM.items() if p.vendor}
+#: vendor programs that run on Java, and the package that brings a Java 17
+#: - what the Liquibase 5 archive asks for - where none is found: (brew
+#: formula, apt package)
+NEEDS_JAVA = {n: p.java for n, p in PROGRAM.items() if p.java}
+#: how each asks its build for its version, where not `--version`
+VERSION_ARGS = {n: list(p.version_args) for n, p in PROGRAM.items()
+                if p.version_args and p.version_args != ("--version",)}
+#: the programs a report calls the dump's, the load's and the copy's
+ROLES = {n: p.role for n, p in PROGRAM.items()}
 
 #: not a program on PATH: the second reader lives in an environment of its
 #: own (`migkit.second_reader`), because it pins an older numeric stack
@@ -129,6 +224,78 @@ SECOND_READER = "second-reader"
 #: the version measured to write nothing to either side
 SECOND_READER_PACKAGE = "google-pso-data-validator==8.9.3"
 SECOND_READER_LICENCE = "Apache-2.0"
+
+
+def names():
+    """Every name a program migkit runs goes by, in the registry and in
+    what the programs print - what no operator is shown. A database's own
+    name stays (its client is called what the database is: `mysql`), and
+    so does the container runtime's, which the operator installs."""
+    from .engines import ALIASES, NAMES
+    engines = set(NAMES) | set(ALIASES)
+    out = set()
+    for n, p in PROGRAM.items():
+        if n == "docker" or n in engines:
+            continue
+        out.add(n)
+        out.update(p.also)
+    out |= set(SOURCE_BUILDS) | {SECOND_READER, "data-validation",
+                                 "data_validation", RFS_SCRIPT}
+    return out
+
+
+# ---- the lock: every file and image by version and digest --------------------
+
+#: where the lock is kept, beside migkit's other data
+LOCK_FILE = Path(__file__).parent / "data" / "programs.lock.json"
+_LOCK = None
+
+
+def lock():
+    """{"files": {url: {"program", "version", "digest", "size"}},
+    "images": {name: "ref@digest"}}: what `tools/pin_programs.py` read of
+    each vendor's published digests. A digest is `sha256:<hex>` (or the
+    `sha512:`/`sha1:` a vendor publishes instead), None where the vendor
+    publishes none."""
+    global _LOCK
+    if _LOCK is None:
+        import json
+        try:
+            _LOCK = json.loads(LOCK_FILE.read_text())
+        except (OSError, ValueError):
+            _LOCK = {"files": {}, "images": {}}
+    return _LOCK
+
+
+def pinned(url):
+    """The lock's entry for a file fetched from `url`, or {}."""
+    return dict((lock().get("files") or {}).get(url) or {})
+
+
+#: the image migkit's own image is built on (`deploy/Dockerfile`), pinned
+#: in the lock by digest as the images it runs are
+BASE_IMAGE = "python:3.12-slim-bookworm"
+#: the Python packages migkit needs, each by the digests of its files: what
+#: its image installs and an offline bundle carries
+REQUIREMENTS_LOCK = Path(__file__).parent / "data" / "requirements.txt"
+
+
+def image(name):
+    """The image `name` runs from, pinned by digest where the lock has
+    one (`name:tag@sha256:...`), by its tag where it has not - or, loaded
+    from an offline bundle here, by the id docker loaded it as, which a
+    run finds with no registry to ask (`_load_images`)."""
+    import json
+    ref = PROGRAM[name].image
+    got = (lock().get("images") or {}).get(name)
+    pinned_ref = got if got and got.split("@")[0] == ref else ref
+    try:
+        loaded = json.loads((tools_home() / LOADED).read_text()).get(name)
+    except (OSError, ValueError, AttributeError):
+        loaded = None
+    if loaded and loaded.get("ref") == pinned_ref and loaded.get("id"):
+        return loaded["id"]
+    return pinned_ref
 
 
 @dataclass(frozen=True)
@@ -409,10 +576,7 @@ def install_teradata(log=print):
     step = ([uv, "pip", "install", "--python", sys.executable,
              TERADATA_DRIVER] if uv else
             [sys.executable, "-m", "pip", "install", "-q", TERADATA_DRIVER])
-    got = subprocess.run(step, capture_output=True, text=True)
-    if got.returncode != 0:
-        log("  it did not install: "
-            f"{(got.stderr.strip().splitlines() or [''])[-1][:120]}")
+    if not _step(step, log, "it did not install"):
         return False
     import importlib
     importlib.invalidate_caches()
@@ -424,7 +588,8 @@ def install_ibm(component, log=print):
     the ODBC manager it loads through; or the operator's Db2 Connect
     licence file (`MIGKIT_DB2_CONNECT_LICENSE`) copied beside the IBM data
     server driver. Called once the terms are accepted. True once it is in
-    place."""
+    place. The repository's list is fetched and held to the lock like any
+    other file, then put where the package manager reads it."""
     import os
     if component == DB2_CONNECT:
         path = os.environ.get("MIGKIT_DB2_CONNECT_LICENSE", "")
@@ -449,26 +614,58 @@ def install_ibm(component, log=print):
         steps = [["brew", "tap", "ibm/iaccess", IBMI_TAP],
                  ["brew", "install", "unixodbc", "ibm-iaccess"]]
     elif shutil.which("apt-get"):
-        steps = [["sudo", "sh", "-c", f"curl -fsSL {IBMI_APT} >"
-                  " /etc/apt/sources.list.d/ibmi-acs-1.1.0.list"],
-                 ["sudo", "apt-get", "update"],
-                 ["sudo", "apt-get", "install", "-y", "unixodbc",
-                  "ibm-iaccess"]]
+        steps = [(IBMI_APT, "/etc/apt/sources.list.d/ibmi-acs-1.1.0.list"),
+                 _sudo(["apt-get", "update"]),
+                 _sudo(["apt-get", "install", "-y", "unixodbc",
+                        "ibm-iaccess"])]
     elif shutil.which("dnf"):
-        steps = [["sudo", "sh", "-c", f"curl -fsSL {IBMI_RPM} >"
-                  " /etc/yum.repos.d/ibmi-acs.repo"],
-                 ["sudo", "dnf", "install", "-y", "--refresh", "unixODBC",
-                  "ibm-iaccess"]]
+        steps = [(IBMI_RPM, "/etc/yum.repos.d/ibmi-acs.repo"),
+                 _sudo(["dnf", "install", "-y", "--refresh", "unixODBC",
+                        "ibm-iaccess"])]
     else:
         log("  no package manager here that IBM publishes the driver for")
         return False
     for step in steps:
-        got = subprocess.run(step, capture_output=True, text=True)
-        if got.returncode != 0:
-            log("  it did not install: "
-                f"{(got.stderr.strip().splitlines() or [''])[-1][:120]}")
+        ok = (_placed(*step, log) if isinstance(step, tuple)
+              else _step(step, log, "it did not install"))
+        if not ok:
             return False
     return ibmi_odbc_present()
+
+
+def _sudo(argv):
+    """`argv` as root: through sudo where this user is not."""
+    import os
+    return argv if getattr(os, "geteuid", lambda: 0)() == 0 \
+        else ["sudo", *argv]
+
+
+def _step(argv, log, failed, cwd=None, env=None):
+    """One install step through the runner; its failure said in its last
+    words, program names out (`runner.said`). True where it worked."""
+    from . import runner
+    try:
+        got = runner.run(argv, env, check=False, cwd=cwd, check_flags=False)
+    except runner.Blocked as e:
+        log(f"  {failed}: {e}")
+        return False
+    if got.returncode != 0:
+        said = runner.said((got.stderr or "") + (got.stdout or ""))
+        log(f"  {failed}: {(said.splitlines() or [''])[-1][:120]}")
+        return False
+    return True
+
+
+def _placed(url, dest, log):
+    """The file at `url`, held to the lock, put at `dest` as root."""
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as work:
+        got = os.path.join(work, os.path.basename(dest))
+        if not fetch(url, got, log):
+            return False
+        return _step(_sudo(["install", "-m", "0644", got, dest]), log,
+                     "its repository could not be put in place")
 
 
 #: where IBM publishes the IBM i ODBC driver's packages
@@ -584,35 +781,29 @@ def built_program(name):
     found = which(name)
     return ([found], {}) if found else None
 
-
 def install_from_source(name, log=print):
-    """Fetch `name`'s source at the revision measured here and build it
-    under `tools_home()`. True once the built program answers."""
+    """Fetch `name`'s source at the revision measured here - held to the
+    lock before it is unpacked - and build it under `tools_home()`. True
+    once the built program answers."""
     import os
-    import tarfile
     import tempfile
-    import urllib.request
     revision, url = SOURCE_BUILDS[name]
     home = tools_home() / name
     home.mkdir(parents=True, exist_ok=True)
+    if name == "reindex-from-snapshot" and _bundle() is not None:
+        # its build fetches what it needs as it goes; the bundle carries it
+        # built, which Java runs wherever it runs
+        return _unbundle_build(name, home, log)
     with tempfile.TemporaryDirectory() as work:
         archive = os.path.join(work, "src.tar.gz")
-        try:
-            urllib.request.urlretrieve(url, archive)
-        except OSError as e:
-            log(f"  could not fetch it ({type(e).__name__})")
+        if not fetch(url, archive, log):
             return False
-        with tarfile.open(archive) as box:
-            box.extractall(work, filter="data")
+        extract(archive, work)
         top = next(os.path.join(work, d) for d in os.listdir(work)
                    if os.path.isdir(os.path.join(work, d)))
 
         def step(cmd, cwd):
-            got = subprocess.run(cmd, cwd=cwd, capture_output=True,
-                                 text=True)
-            if got.returncode != 0:
-                log(f"  the build stopped: {(got.stderr.strip().splitlines() or [''])[-1][:120]}")
-            return got.returncode == 0
+            return _step(cmd, log, "the build stopped", cwd=cwd)
         if name == "ora2pg":
             # Perl with the DBI module; nothing of it is loaded into
             # migkit - it runs as a program of its own
@@ -647,33 +838,53 @@ def install_from_source(name, log=print):
     return built_program(name) is not None
 
 
+
+
 #: the start script the snapshot reader's Gradle build lays out
 RFS_SCRIPT = "DocumentsFromSnapshotMigration"
+
+
 
 
 def _build_rfs(top, home, log):
     """The snapshot reader built by its own Gradle wrapper into a
     distribution - its start script and every jar it needs - and kept
-    whole under `home`. Java 17 is what its build asks for."""
+    whole under `home`, put in place in one step (`_swap`). Java 17 is
+    what its build asks for."""
     import os
     java = _java_home()
     if not java:
         log("  the build needs a Java 17, and none was found")
         return False
-    got = subprocess.run(["./gradlew", "--no-daemon", "-q",
-                          f":{RFS_SCRIPT}:installDist"], cwd=top,
-                         capture_output=True, text=True,
-                         env={**os.environ, "JAVA_HOME": java})
-    if got.returncode != 0:
-        log("  the build stopped: "
-            + (got.stderr.strip().splitlines() or [""])[-1][:120])
+    if not _step(["./gradlew", "--no-daemon", "-q",
+                  f":{RFS_SCRIPT}:installDist"], log, "the build stopped",
+                 cwd=top, env={"JAVA_HOME": java}):
         return False
     built = os.path.join(top, RFS_SCRIPT, "build", "install", RFS_SCRIPT)
     if not os.path.isdir(built):
         return False
-    shutil.rmtree(home, ignore_errors=True)
-    shutil.copytree(built, home, symlinks=True)
+    _swap(built, home)
     return True
+
+
+def _swap(tree, home):
+    """`tree` copied to `home` in one step: beside it first, then renamed
+    over it - a copy that fails part way leaves the working install where
+    it was, where removing it first left nothing."""
+    import os
+    home = Path(home)
+    home.parent.mkdir(parents=True, exist_ok=True)
+    new = home.with_name(home.name + ".new")
+    old = home.with_name(home.name + ".old")
+    shutil.rmtree(new, ignore_errors=True)
+    shutil.copytree(tree, new, symlinks=True)
+    shutil.rmtree(old, ignore_errors=True)
+    if home.exists() or home.is_symlink():
+        os.replace(home, old)
+    os.replace(new, home)
+    shutil.rmtree(old, ignore_errors=True)
+
+
 
 
 # name, what it lets the operator do, programs required, optional faster path.
@@ -862,42 +1073,128 @@ def by_hand(programs):
     return sorted(set(out))
 
 
+
+def _manager():
+    """The package manager migkit drives here: "brew", "apt", or None."""
+    mac = platform.system() == "Darwin"
+    return "brew" if (mac and shutil.which("brew")) else (
+        "apt" if shutil.which("apt-get") else None)
+
+
+def _packages(mgr, pkgs, log):
+    """Every package in one call of the package manager - its index read
+    first where it keeps one - and, where that call fails, each on its
+    own, so one that cannot be had does not keep the rest out. Counted,
+    not named: which package provides a capability is migkit's business,
+    and the line used to read `installing mydumper ...`."""
+    if not (mgr and pkgs):
+        return
+    log(f"installing {len(pkgs)} components with the package manager ...")
+    quiet = (lambda m: None)
+    if mgr == "apt":
+        _step(_sudo(["apt-get", "update"]), quiet, "")
+
+    def one(names):
+        return (["brew", "install", *names] if mgr == "brew"
+                else _sudo(["apt-get", "install", "-y", *names]))
+    if _step(one(pkgs), quiet, ""):
+        return
+    for n, pkg in enumerate(pkgs, 1):
+        if not _step(one([pkg]), quiet, ""):
+            log(f"  component {n} did not install; run migkit doctor again"
+                " to see which capability is still short")
+
+
+def _version_here(program):
+    """(whether `program` is on the path here, the version its build there
+    says - None where it says none, or is asked nothing), asked once per
+    build (`toolversion`)."""
+    import os
+    import re
+
+    from . import toolversion
+    path = which(program)
+    if not path:
+        return False, None
+    facts = PROGRAM.get(program)
+    args = tuple(facts.version_args) if facts else ("--version",)
+    try:
+        real = os.path.realpath(path)
+        stamp = os.stat(real).st_mtime_ns
+    except OSError:
+        return True, None
+    if not args:
+        return True, None
+    said = toolversion._said(real, stamp, args) or ""
+    m = re.search(facts.version_pattern if facts
+                  else r"(\d+\.\d+(?:\.\d+)?)", said)
+    return True, (m.group(1) if m else None)
+
+
+def _pinned_here(program):
+    """Whether the build of vendor program `program` on the path here is
+    one migkit takes: its own install of a pinned version, a build that
+    says one - the full one or the open one its terms leave - or one that
+    says no version, which is left as it is. A build that says another is
+    replaced: `doctor --install` skipped anything on the path, and a
+    build other than the pinned one was never put right."""
+    import os
+    here, have = _version_here(program)
+    if not here:
+        return False
+    versions = {VENDOR[program]}
+    if program in TERMS and TERMS[program].open_build:
+        versions.add(TERMS[program].open_build)
+    real = Path(os.path.realpath(which(program)))
+    if any(tools_home() / f"{program}-{v}" in real.parents
+           for v in versions):
+        return True
+    return have is None or have in versions
+
+
 def install_missing(log=print, ask=None):
     """Install every missing program with the platform package manager, and
     from its vendor what no package manager carries - a program that is not
     open source only once its terms are accepted (`accept_terms`, `ask`
     the question at a terminal), asked in the one question with the terms
-    of the images migkit pulls. Returns the capabilities still short
-    afterwards."""
-    mac = platform.system() == "Darwin"
-    mgr = "brew" if (mac and shutil.which("brew")) else (
-        "apt" if shutil.which("apt-get") else None)
+    of the images migkit pulls.
+
+    A program already here is replaced where it is not a build migkit
+    takes: a vendor's build other than the one pinned, a packaged one
+    older than its `lowest` where the lock has a build for this machine
+    (`install_pinned`) - said where it has none. The package manager is
+    called once for all its packages, the vendors' builds are fetched side
+    by side, and each is put in place in one step. From an offline bundle
+    (`MIGKIT_BUNDLE`) every file and image comes from it, never from the
+    network; with `MIGKIT_BUNDLE_BUILD` nothing is installed here - the
+    bundle is built there instead (`build_bundle`). Returns the
+    capabilities still short afterwards."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    from . import envkeys
+    where = os.path.expanduser(envkeys.text("MIGKIT_BUNDLE_BUILD"))
+    if where:
+        build_bundle(where, log, ask)
+        return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
+    mgr = _manager()
     if not mgr:
         log("no supported package manager (brew/apt) here; install by hand")
     wanted = []
     for _, _, needs, optional in _capabilities():
         wanted += needs + optional
+    wanted = list(dict.fromkeys(wanted))
     pkgs = []
     for cmd in wanted:
         if cmd in (SECOND_READER, COMPILED_MOVER) or cmd in SOURCE_BUILDS \
                 or _present(cmd):
             continue
         formula, apt = PROGRAMS.get(cmd, ("", ""))
-        pkg = formula if mgr == "brew" else apt
-        if mgr and pkg and pkg not in pkgs:
-            pkgs.append(pkg)
-    # counted, not named: which package provides a capability is migkit's
-    # business, and the line used to read `installing mydumper ...`
-    for n, pkg in enumerate(pkgs, 1):
-        log(f"installing component {n} of {len(pkgs)} ...")
-        cmd_line = (["brew", "install", *pkg.split()] if mgr == "brew"
-                    else ["sudo", "apt-get", "install", "-y", *pkg.split()])
-        p = subprocess.run(cmd_line, capture_output=True, text=True)
-        if p.returncode != 0:
-            log(f"  component {n} did not install; run migkit doctor again"
-                " to see which capability is still short")
-    fetch = [c for c in dict.fromkeys(wanted) if c in VENDOR and not which(c)]
-    ibm = [c for c in dict.fromkeys(wanted) if c in (IBMI_ODBC, DB2_CONNECT)
+        for pkg in ((formula if mgr == "brew" else apt) or "").split():
+            if mgr and pkg not in pkgs:
+                pkgs.append(pkg)
+    _packages(mgr, pkgs, log)
+    fetch_them = [c for c in wanted if c in VENDOR and not _pinned_here(c)]
+    ibm = [c for c in wanted if c in (IBMI_ODBC, DB2_CONNECT)
            and not _present(c)]
     # Teradata's driver, installed here; the SaaS connectors' terms, asked
     # for here and used where a hop runs one - docker pulls a container
@@ -909,26 +1206,35 @@ def install_missing(log=print, ask=None):
     # there for. An image under closed terms is asked for here too: docker
     # pulls it where it runs, and migkit runs it only once they are
     # accepted (`tooluse.allowed`)
-    answer = accept_terms(fetch + ibm + [i for i in IMAGES if i in TERMS]
+    answer = accept_terms(fetch_them + ibm + [i for i in IMAGES if i in TERMS]
                           + ([REDO_READER_CLIENT] if redo else [])
                           + ([TERADATA_DRIVER] if teradata else [])
                           + [SAAS_CONNECTORS], ask, log)
-    for n, cmd in enumerate(fetch, 1):
+    if _bundle() is not None:
+        _load_images(answer, log)
+    java = sorted({NEEDS_JAVA[c][0 if mgr == "brew" else 1]
+                   for c in fetch_them if c in NEEDS_JAVA})
+    if java and mgr and not _java_home():
+        log("installing what the vendor components run on ...")
+        _packages(mgr, java, log)
+    jobs = []
+    for n, cmd in enumerate(fetch_them, 1):
         open_build = cmd in TERMS and not answer.get(cmd)
         if open_build and not TERMS[cmd].open_build:
             continue    # declined, and the open path needs nothing fetched
-        if cmd in NEEDS_JAVA and mgr and not _java_home():
-            pkg = NEEDS_JAVA[cmd][0 if mgr == "brew" else 1]
-            log(f"installing what vendor component {n} runs on ...")
-            subprocess.run(["brew", "install", pkg] if mgr == "brew"
-                           else ["sudo", "apt-get", "install", "-y", pkg],
-                           capture_output=True, text=True)
+        jobs.append((n, cmd, open_build))
+
+    def fetch_one(job):
+        n, cmd, open_build = job
         log(f"fetching vendor component {n} ...")
         ok = (install_vendor(cmd, log, open_build=True) if open_build
               else install_vendor(cmd, log))
         if not ok:
             log(f"  vendor component {n} did not install; run migkit"
                 " doctor again to see which capability is still short")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(fetch_one, jobs))
+    _replace_old_builds(wanted, log)
     if teradata and answer.get(TERADATA_DRIVER):
         log("installing the Teradata driver ...")
         if not install_teradata(log):
@@ -939,7 +1245,7 @@ def install_missing(log=print, ask=None):
         if not install_ibm(cmd, log):
             log(f"  IBM component {n} is not in place; run migkit doctor"
                 " again to see which capability is still short")
-    for n, cmd in enumerate([c for c in dict.fromkeys(wanted)
+    for n, cmd in enumerate([c for c in wanted
                              if c in SOURCE_BUILDS and not _present(c)], 1):
         log(f"building component {n} from its source ...")
         if not install_from_source(cmd, log):
@@ -956,11 +1262,144 @@ def install_missing(log=print, ask=None):
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
 
 
-#: programs no package manager carries, fetched from their vendor at the
-#: build measured here: {program: version}
-VENDOR = {"atlas": "1.3.0", "liquibase": "5.0.4", "mysqlsh": "26.7.1",
-          "mongosync": "1.21.0", "riotx": "1.15.1", "redis-shake": "4.6.2",
-          "dsbulk": "1.11.0", "connect-mirror-maker.sh": "3.8.0"}
+def _replace_old_builds(wanted, log):
+    """Each packaged program of `wanted` on the path here that is older
+    than the oldest build migkit takes, replaced by the build the lock
+    pins for this machine - once for the programs one release carries -
+    and said where the lock has none."""
+    from . import toolversion
+    done = set()
+    for cmd in wanted:
+        facts = PROGRAM.get(cmd)
+        if facts is None or not facts.lowest:
+            continue
+        here, have = _version_here(cmd)
+        if not here or not toolversion.older(have, facts.lowest):
+            continue
+        head = _package_head(cmd)
+        if head in done:
+            continue
+        done.add(head)
+        if head and install_pinned(head, log):
+            continue
+        log(f"  the installed {facts.role} is {have}, older than the"
+            f" {facts.lowest} migkit takes, and no build of it is pinned for"
+            " this machine: upgrade it with the package manager")
+
+
+#: packaged programs whose own releases publish builds migkit puts in place
+#: where the package manager's is older than it takes: {the first of the
+#: programs one release carries: (all of them, the release, where its
+#: files are)}
+PACKAGE_BUILDS = {
+    "mydumper": (("mydumper", "myloader"), "1.0.5-1",
+                 "https://github.com/mydumper/mydumper/releases/download/"
+                 "v{version}/"),
+    "mongodump": (("mongodump", "mongorestore"), "100.16.1",
+                  "https://fastdl.mongodb.org/tools/db/"),
+}
+
+
+def _package_head(program):
+    return next((h for h, (family, _, _) in PACKAGE_BUILDS.items()
+                 if program in family), None)
+
+
+#: the Debian and Ubuntu releases the pinned packages are built for, by the
+#: version their os-release gives
+_CODENAMES = {("ubuntu", "20.04"): "focal", ("ubuntu", "22.04"): "jammy",
+              ("ubuntu", "24.04"): "noble", ("debian", "11"): "bullseye",
+              ("debian", "12"): "bookworm", ("debian", "13"): "trixie"}
+
+
+def package_file(head):
+    """The file of `head`'s pinned release for this machine (or the one a
+    bundle is built for), or None where its release has none."""
+    _, version, _ = PACKAGE_BUILDS[head]
+    system, arm, x86 = _machine()
+    release = _os_release()
+    ident, ver = release.get("ID", ""), release.get("VERSION_ID", "")
+    if head == "mydumper":
+        if system != "Linux" or not (arm or x86):
+            return None
+        code = release.get("VERSION_CODENAME") or _CODENAMES.get(
+            (ident, ver))
+        if ident in ("ubuntu", "debian") and code:
+            return (f"mydumper_{version}.{code}_"
+                    f"{'arm64' if arm else 'amd64'}.deb")
+        if ident in ("rhel", "rocky", "almalinux", "centos") and ver:
+            return (f"mydumper-{version}.el{ver.split('.')[0]}."
+                    f"{'aarch64' if arm else 'x86_64'}.rpm")
+        return None
+    arch = "arm64" if arm else "x86_64" if x86 else None
+    if arch is None:
+        return None
+    if system == "Darwin":
+        return f"mongodb-database-tools-macos-{arch}-{version}.zip"
+    if system != "Linux":
+        return None
+    name = {("ubuntu", "20.04"): "ubuntu2004", ("ubuntu", "22.04"):
+            "ubuntu2204", ("ubuntu", "24.04"): "ubuntu2404",
+            ("debian", "11"): "debian11", ("debian", "12"): "debian12",
+            ("amzn", "2023"): "amazon2023"}.get((ident, ver))
+    if name is None or (arm and name.startswith("debian")):
+        return None
+    if arm and name == "amazon2023":
+        arch = "aarch64"
+    return f"mongodb-database-tools-{name}-{arch}-{version}.tgz"
+
+
+def install_pinned(head, log=print):
+    """The pinned release of the programs `head` leads, for this machine,
+    held to the lock and put in place: a package through the package
+    manager (which brings what it links against), an archive kept whole
+    under `tools_home()` and linked in first on migkit's path. True once
+    each of them says the release's version."""
+    import os
+    import tempfile
+    family, version, base = PACKAGE_BUILDS[head]
+    name = package_file(head)
+    if not name:
+        return False
+    url = base.format(version=version) + name
+    with tempfile.TemporaryDirectory() as work:
+        got = os.path.join(work, name)
+        if not fetch(url, got, log):
+            return False
+        if name.endswith(".deb"):
+            ok = _step(_sudo(["apt-get", "install", "-y", got]), log,
+                       "the pinned build did not install")
+        elif name.endswith(".rpm"):
+            ok = _step(_sudo(["dnf", "install", "-y", got]), log,
+                       "the pinned build did not install")
+        else:
+            tree = os.path.join(work, "tree")
+            extract(got, tree)
+            top = next((root for root, _, files in os.walk(tree)
+                        if family[0] in files), None)
+            if top is None:
+                log("  the fetched archive holds no program by that name")
+                return False
+            if os.path.basename(top) == "bin":
+                top = os.path.dirname(top)
+            home = tools_home() / f"{head}-{version}"
+            _swap(top, home)
+            ok = True
+            for program in family:
+                real = next(home.rglob(program), None)
+                if real is None:
+                    ok = False
+                    continue
+                os.chmod(real, os.stat(real).st_mode | 0o755)
+                _link(real, tools_home() / "bin" / program)
+    if not ok:
+        return False
+    from . import toolversion
+    return all(not toolversion.older(toolversion.version(p),
+                                     version.split("-")[0])
+               for p in family)
+
+
 VENDOR_URL = "https://fastdl.mongodb.org/tools/mongosync/"
 #: where each other vendor publishes its builds, by version
 VENDOR_URLS = {
@@ -977,8 +1416,6 @@ VENDOR_URLS = {
     "connect-mirror-maker.sh": "https://archive.apache.org/dist/kafka/"
                                "{version}/",
 }
-#: how each asks its build for its version, where not `--version`
-VERSION_ARGS = {"atlas": ["version"]}
 #: builds that are not asked their version: the file of their own tree
 #: whose name carries it proves the build. The cluster mirror's start
 #: script takes only its properties file; its jars are named by release
@@ -998,11 +1435,44 @@ def _vendor_url(program, version):
     return VENDOR_URLS[program].format(version=version)
 
 
+#: the machine files are chosen for where it is not this one: a bundle
+#: built for another (`MIGKIT_BUNDLE_PLATFORM`, `build_bundle`)
+_TARGET = {}
+
+
 def _machine():
-    system, machine = platform.system(), platform.machine().lower()
+    system = _TARGET.get("system") or platform.system()
+    machine = (_TARGET.get("machine") or platform.machine()).lower()
     arm = machine in ("arm64", "aarch64")
     x86 = machine in ("x86_64", "amd64")
     return system, arm, x86
+
+
+def _os_release():
+    """{ID, VERSION_ID, VERSION_CODENAME} of this Linux (or the one a
+    bundle is built for); {} where there is none to read."""
+    if "release" in _TARGET:
+        return dict(_TARGET["release"])
+    release = {}
+    try:
+        for line in open("/etc/os-release"):
+            k, _, v = line.strip().partition("=")
+            release[k] = v.strip('"')
+    except OSError:
+        return {}
+    return release
+
+
+def _glibc_at_least(major, minor):
+    if _TARGET:
+        # a bundle's Linux is one the vendors build for: glibc 2.28 or later
+        return _TARGET.get("system") == "Linux"
+    libc, ver = platform.libc_ver()
+    try:
+        return libc == "glibc" and tuple(
+            int(x) for x in ver.split(".")[:2]) >= (major, minor)
+    except ValueError:
+        return False
 
 
 def vendor_file(program, open_build=False):
@@ -1032,13 +1502,8 @@ def vendor_file(program, open_build=False):
         if system == "Darwin":
             return (f"mysql-shell-{version}-macos15-"
                     f"{'arm64' if arm else 'x86-64bit'}.tar.gz")
-        libc, ver = platform.libc_ver()
-        try:
-            new_enough = libc == "glibc" and tuple(
-                int(x) for x in ver.split(".")[:2]) >= (2, 28)
-        except ValueError:
-            new_enough = False
-        if system != "Linux" or not (arm or x86) or not new_enough:
+        if system != "Linux" or not (arm or x86) \
+                or not _glibc_at_least(2, 28):
             return None
         return (f"mysql-shell-{version}-linux-glibc2.28-"
                 f"{'arm-64bit' if arm else 'x86-64bit'}.tar.gz")
@@ -1067,12 +1532,8 @@ def vendor_file(program, open_build=False):
         return f"mongosync-macos-{arch}-{version}.zip"
     if system != "Linux" or not x86:
         return None
-    release = {}
-    try:
-        for line in open("/etc/os-release"):
-            k, _, v = line.strip().partition("=")
-            release[k] = v.strip('"')
-    except OSError:
+    release = _os_release()
+    if not release:
         return None
     ident, ver = release.get("ID", ""), release.get("VERSION_ID", "")
     # the builds the vendor publishes, measured by asking for each
@@ -1086,18 +1547,19 @@ def vendor_file(program, open_build=False):
 
 
 def install_vendor(program, log=print, into=None, open_build=False):
-    """Fetch `program` from its vendor and put it beside migkit's own
-    programs. True once the installed copy says the build asked for.
+    """Fetch `program` from its vendor - held to the lock before anything
+    of it is unpacked (`fetch`) - and put it beside migkit's own programs.
+    True once the installed copy says the build asked for.
 
-    A single file is copied in; an archive whose program needs the files
-    beside it (a Java program and its libraries, a runtime of its own) is
-    unpacked whole under `~/.migkit/tools` and linked in."""
+    Every build is kept whole under `tools_home()`, by name and version -
+    a single file, or an archive's program with the files it needs beside
+    it (a Java program and its libraries, a runtime of its own) - put in
+    place in one step (`_swap`), and linked into `into`: `tools_home()/bin`,
+    first on migkit's path and this user's, so nothing is written where
+    only root may. A Java program is started through a script there that
+    gives it its Java."""
     import os
-    import sysconfig
-    import tarfile
     import tempfile
-    import urllib.request
-    import zipfile
     name = (vendor_file(program, open_build=True) if open_build
             else vendor_file(program))
     if not name:
@@ -1105,88 +1567,93 @@ def install_vendor(program, log=print, into=None, open_build=False):
             " by hand")
         return False
     version = TERMS[program].open_build if open_build else VENDOR[program]
-    into = into or sysconfig.get_path("scripts")
-    target = os.path.join(into, program)
+    into = Path(into) if into else tools_home() / "bin"
+    into.mkdir(parents=True, exist_ok=True)
+    target = into / program
+    home = tools_home() / f"{program}-{version}"
     with tempfile.TemporaryDirectory() as work:
         archive = os.path.join(work, name)
-        try:
-            urllib.request.urlretrieve(_vendor_url(program, version) + name,
-                                       archive)
-        except OSError as e:
-            log(f"  could not fetch it ({type(e).__name__})")
+        if not fetch(_vendor_url(program, version) + name, archive, log):
             return False
+        tree = os.path.join(work, "tree")
         if not name.endswith((".zip", ".tgz", ".tar.gz")):
-            shutil.copyfile(archive, target)
-            os.chmod(target, 0o755)
+            os.makedirs(tree)
+            found = os.path.join(tree, program)
+            shutil.copyfile(archive, found)
         else:
-            opener = (zipfile.ZipFile(archive) if name.endswith(".zip")
-                      else tarfile.open(archive))
-            # apart from the archive, which is not to be kept beside it
-            tree = os.path.join(work, "tree")
-            with opener as box:
-                if isinstance(box, tarfile.TarFile):
-                    box.extractall(tree, filter="data")
-                else:
-                    box.extractall(tree)
+            extract(archive, tree)
             # the shallowest: an archive whose program is at its top (the
             # Java ones) may carry another of the name further in
-            found = sorted((os.path.join(root, program)
-                            for root, _, files in os.walk(tree)
-                            if program in files and (root.endswith("bin")
-                                                     or program in NEEDS_JAVA
-                                                     or program in AT_TOP)),
-                           key=lambda p: p.count(os.sep))
-            if not found:
+            hits = sorted((os.path.join(root, program)
+                           for root, _, files in os.walk(tree)
+                           if program in files and (root.endswith("bin")
+                                                    or program in NEEDS_JAVA
+                                                    or program in AT_TOP)),
+                          key=lambda p: p.count(os.sep))
+            if not hits:
                 log("  the fetched archive holds no program by that name")
                 return False
-            if program == "mongosync":
-                shutil.copyfile(found[0], target)
-            else:
-                # its libraries stay beside it
-                home = _home() / "tools" / f"{program}-{version}"
-                shutil.rmtree(home, ignore_errors=True)
-                home.parent.mkdir(parents=True, exist_ok=True)
-                top = os.path.dirname(found[0])
-                if os.path.basename(top) == "bin":
-                    top = os.path.dirname(top)
-                shutil.copytree(top, home, symlinks=True)
-                for extra, base, folder, _ in ([] if open_build else
-                                               VENDOR_EXTRAS.get(program,
-                                                                 [])):
-                    (home / folder).mkdir(parents=True, exist_ok=True)
-                    try:
-                        urllib.request.urlretrieve(base + extra,
-                                                   home / folder / extra)
-                    except OSError as e:
-                        log(f"  could not fetch what it needs beside it"
-                            f" ({type(e).__name__})")
-                        return False
-                real = home / os.path.relpath(found[0], top)
-                os.chmod(real, os.stat(real).st_mode | 0o755)
-                if os.path.lexists(target):
-                    os.unlink(target)
-                if program in NEEDS_JAVA:
-                    # started with the Java found here, unless the operator
-                    # names one of their own
-                    java = _java_home() or ""
-                    with open(target, "w") as f:
-                        f.write("#!/bin/sh\n"
-                                f"[ -n \"$JAVA_HOME\" ] || JAVA_HOME='{java}'"
-                                "\nexport JAVA_HOME\n"
-                                f"exec '{real}' \"$@\"\n")
-                else:
-                    os.symlink(real, target)
-            os.chmod(os.path.realpath(target),
-                     os.stat(os.path.realpath(target)).st_mode | 0o755)
+            found = hits[0]
+        top = os.path.dirname(found)
+        if os.path.basename(top) == "bin" and top != tree:
+            top = os.path.dirname(top)
+        # its libraries stay beside it, and what its archive does not
+        # carry goes in with them
+        for extra, base, folder, _ in ([] if open_build else
+                                       VENDOR_EXTRAS.get(program, [])):
+            os.makedirs(os.path.join(top, folder), exist_ok=True)
+            if not fetch(base + extra, os.path.join(top, folder, extra),
+                         log):
+                log("  could not fetch what it needs beside it")
+                return False
+        rel = os.path.relpath(found, top)
+        _swap(top, home)
+    real = home / rel
+    os.chmod(real, os.stat(real).st_mode | 0o755)
+    if program in NEEDS_JAVA:
+        # started with the Java found here, unless the operator names one
+        # of their own
+        java = _java_home() or ""
+        _write_executable(target, "#!/bin/sh\n"
+                          f"[ -n \"$JAVA_HOME\" ] || JAVA_HOME='{java}'"
+                          "\nexport JAVA_HOME\n"
+                          f"exec '{real}' \"$@\"\n")
+    else:
+        _link(real, target)
     if program in VERSION_FILES:
-        home = _home() / "tools" / f"{program}-{version}"
         return (home / VERSION_FILES[program].format(version=version)
                 ).exists() and os.access(target, os.X_OK)
     if program in AT_TOP:
         return os.access(target, os.X_OK)
-    got = subprocess.run([target, *VERSION_ARGS.get(program, ["--version"])],
-                         capture_output=True, text=True)
+    from . import runner
+    got = runner.run([str(target), *VERSION_ARGS.get(program,
+                                                     ["--version"])],
+                     check=False, timeout=120, check_flags=False,
+                     what="the version")
     return version in (got.stdout + got.stderr)
+
+
+def _link(real, target):
+    """`target` made a link to `real` in one step."""
+    import os
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".new")
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    os.symlink(real, tmp)
+    os.replace(tmp, target)
+
+
+def _write_executable(target, text):
+    """`text` as the executable `target`, in one step."""
+    import os
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".new")
+    tmp.write_text(text)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, target)
 
 
 #: what a build needs beside it that its archive does not carry:
@@ -1201,14 +1668,6 @@ VENDOR_EXTRAS = {"liquibase": [
      "lib", "BSD-2-Clause")]}
 
 
-#: vendor programs that run on Java, and the package that brings a Java
-#: 17 - what the Liquibase 5 archive asks for - where none is found:
-#: (brew formula, apt package)
-NEEDS_JAVA = {"liquibase": ("openjdk", "openjdk-17-jre-headless"),
-              "dsbulk": ("openjdk", "openjdk-17-jre-headless"),
-              "connect-mirror-maker.sh": ("openjdk",
-                                          "openjdk-17-jre-headless")}
-
 
 def _java_home():
     """A Java for a Java program fetched as an archive: the operator's own
@@ -1217,11 +1676,12 @@ def _java_home():
     import os
     cands = [os.environ.get("JAVA_HOME", "")]
     if platform.system() == "Darwin":
+        from . import runner
         try:
-            cands.append(subprocess.run(
-                ["/usr/libexec/java_home", "-v", "17+"], capture_output=True,
-                text=True, timeout=20).stdout.strip())
-        except (OSError, subprocess.TimeoutExpired):
+            cands.append(runner.run(
+                ["/usr/libexec/java_home", "-v", "17+"], check=False,
+                timeout=20, check_flags=False).stdout.strip())
+        except Exception:  # noqa: BLE001 - no Java to name
             pass
         # where Homebrew's wrapper of the open build points it (measured:
         # `/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home`)
@@ -1247,30 +1707,28 @@ def build_of(program):
 def _build_of(program, path):
     import os
     import re
-    from .util import tool_env
+
+    from . import toolversion
     try:
-        stamp = os.stat(path).st_mtime_ns
+        real = os.path.realpath(path)
+        stamp = os.stat(real).st_mtime_ns
     except OSError:
         return None
-    key = (program, path, stamp)
+    key = (program, real, stamp)
     if key not in _BUILDS:
-        try:
-            got = subprocess.run([path, *VERSION_ARGS.get(program,
-                                                          ["--version"])],
-                                 capture_output=True, text=True, timeout=120,
-                                 env=tool_env())
-            said = got.stdout + got.stderr
-        except (OSError, subprocess.TimeoutExpired):
-            said = ""
+        # asked once per build, as every version is (`toolversion`)
+        said = toolversion._said(real, stamp, tuple(
+            VERSION_ARGS.get(program, ["--version"]))) or ""
         if program == "atlas":
             # measured: the Community build says `atlas community version
             # v1.3.0`, the default one `atlas version v1.2.4-...`
             _BUILDS[key] = ("open" if "community version" in said
                             else "full" if "version" in said else None)
         else:
-            m = re.search(r"(\d+)\.\d+\.\d+", said)
+            m = re.search(PROGRAM[program].version_pattern, said)
             _BUILDS[key] = (None if not m else
-                            "open" if int(m.group(1)) < 5 else "full")
+                            "open" if int(m.group(1).split(".")[0]) < 5
+                            else "full")
     return _BUILDS[key]
 
 
@@ -1288,6 +1746,12 @@ def schema_reading_note():
             " triggers are compared by migkit's own object check")
 
 
+#: the second reading's packages, each with the digests of its files
+#: (`uv pip compile --generate-hashes`), so the installer takes nothing
+#: else (`--require-hashes`)
+SECOND_READER_LOCK = Path(__file__).parent / "data" / "second-reader.txt"
+
+
 def install_second_reader(log=print):
     """Build the second reader its own environment, beside migkit's.
 
@@ -1296,30 +1760,36 @@ def install_second_reader(log=print):
     2.5, 3.0 and 30.18), at the version measured to write nothing to
     either side. On Python 3.12 where the package manager can fetch one:
     numpy 1.26.4 has no wheels past it, so a newer interpreter would
-    compile it. Measured with a warm cache: 3.9 s and 422 MB. Said in
-    migkit's words; the package is nobody's business but migkit's.
+    compile it. Measured with a warm cache: 3.9 s and 422 MB. Every
+    package held to its digest where the lock of them is here
+    (`SECOND_READER_LOCK`), and taken from the offline bundle with no
+    index at all where one is named. Said in migkit's words; the package
+    is nobody's business but migkit's.
     """
     import sys
     home = Path.home() / ".migkit" / "second-reader"
     log("installing the independent second reading in its own environment"
         " (a large download, once) ...")
+    what = (["-r", str(SECOND_READER_LOCK), "--require-hashes"]
+            if SECOND_READER_LOCK.exists() else [SECOND_READER_PACKAGE])
+    bundle = _bundle()
+    if bundle is not None:
+        what += ["--no-index", "--find-links",
+                 str(bundle.root / "second-reader")]
     uv = which("uv")
+    failed = "the second reading did not install"
+    quiet = (lambda m: None)
     if uv:
-        made = subprocess.run([uv, "venv", "-q", "--python", "3.12",
-                               str(home)], capture_output=True, text=True)
-        if made.returncode == 0:
-            made = subprocess.run([uv, "pip", "install", "-q", "--python",
-                                   str(home / "bin" / "python"),
-                                   SECOND_READER_PACKAGE],
-                                  capture_output=True, text=True)
+        made = _step([uv, "venv", "-q", "--python", "3.12", str(home)],
+                     quiet, failed) and _step(
+            [uv, "pip", "install", "-q", "--python",
+             str(home / "bin" / "python"), *what], quiet, failed)
     else:
-        made = subprocess.run([sys.executable, "-m", "venv", str(home)],
-                              capture_output=True, text=True)
-        if made.returncode == 0:
-            made = subprocess.run([str(home / "bin" / "pip"), "install",
-                                   "-q", SECOND_READER_PACKAGE],
-                                  capture_output=True, text=True)
-    if made.returncode != 0:
+        made = _step([sys.executable, "-m", "venv", str(home)], quiet,
+                     failed) and _step(
+            [str(home / "bin" / "pip"), "install", "-q", *what], quiet,
+            failed)
+    if not made:
         log("  the second reading did not install; everything else still"
             " works, and migkit doctor --install tries again")
         return False
@@ -1341,38 +1811,46 @@ REDO_READER_BUILD = {
               "2326000/instantclient-{part}-linux.{arch}-23.26.0.0.0.zip",
 }
 
+
+def redo_reader_files(arch="x64"):
+    """{the name the build script reads it by: its url}: every file the
+    redo-file reader's build is made from, for `arch` (Oracle's `x64` or
+    `arm64`)."""
+    b = REDO_READER_BUILD
+    return {"source.tgz": b["source"].format(version=b["version"]),
+            "rapidjson.tgz": b["rapidjson"],
+            "fix.diff": b["rapidjson_fix"],
+            "ic-basic.zip": b["client"].format(part="basic", arch=arch),
+            "ic-sdk.zip": b["client"].format(part="sdk", arch=arch)}
+
+
 #: the build, as the program's own container build does it, into
 #: `tools_home()`: the packages it compiles with from the system's
 #: package manager (Protocol Buffers for its network writer among them),
-#: the rest fetched from each publisher
+#: the rest fetched by migkit and held to the lock before this runs - the
+#: script reads each from its work directory and fetches nothing
 REDO_READER_SCRIPT = r"""set -eu
 home="$1"; work="$2"; version="$3"
-mkdir -p "$work"
 sudo=""; [ "$(id -u)" != 0 ] && sudo=sudo
 if command -v apt-get >/dev/null; then
   $sudo apt-get update -qq
-  $sudo apt-get install -y -qq g++ make cmake unzip curl patch libz-dev \
+  $sudo apt-get install -y -qq g++ make cmake unzip patch libz-dev \
     libprotobuf-dev protobuf-compiler libaio1t64 >/dev/null 2>&1 \
-  || $sudo apt-get install -y -qq g++ make cmake unzip curl patch libz-dev \
+  || $sudo apt-get install -y -qq g++ make cmake unzip patch libz-dev \
     libprotobuf-dev protobuf-compiler libaio1 >/dev/null
 elif command -v dnf >/dev/null; then
-  $sudo dnf install -y -q gcc-c++ make cmake unzip curl patch zlib-devel \
+  $sudo dnf install -y -q gcc-c++ make cmake unzip patch zlib-devel \
     protobuf-devel protobuf-compiler libaio
 else
   echo "no package manager this build knows (apt, dnf)" >&2; exit 2
 fi
 cd "$work"
-curl -fsSL -o rapidjson.tgz "$RAPIDJSON"
 tar xzf rapidjson.tgz && mv rapidjson-1.1.0 rapidjson
-curl -fsSL -o fix.diff "$RAPIDJSON_FIX" && (cd rapidjson && patch -p1 < ../fix.diff)
-case "$(uname -m)" in x86_64|amd64) ic=x64;; aarch64|arm64) ic=arm64;;
-  *) echo "no client for $(uname -m)" >&2; exit 2;; esac
+(cd rapidjson && patch -p1 < ../fix.diff)
 for part in basic sdk; do
-  curl -fsSL -o "ic-$part.zip" "$(printf "$CLIENT" "$part" "$ic")"
   unzip -qo "ic-$part.zip"
 done
 client="$(ls -d "$work"/instantclient_* | head -1)"
-curl -fsSL -o source.tgz "$SOURCE"
 tar xzf source.tgz
 cd "OpenLogReplicator-$version/proto"
 protoc OraProtoBuf.proto --cpp_out=.
@@ -1397,11 +1875,13 @@ chmod 755 "$home/bin/OpenLogReplicator"
 
 def install_redo_reader(log=print, home=None):
     """Build the redo-file reader where it runs - Linux on x86-64, beside
-    the redo - under `tools_home()`, and prove the build answers
-    with the version migkit speaks to. Said in migkit's words: which
-    program reads the redo is migkit's business."""
+    the redo - under `tools_home()`, and prove the build answers with the
+    version migkit speaks to. Every file it is built from is fetched first
+    and held to the lock (`redo_reader_files`). Said in migkit's words:
+    which program reads the redo is migkit's business."""
     import os
     import tempfile
+
     from .engines import oracle_redo
     if not oracle_redo.platform_runs_it():
         log("  the redo-file reader runs on Linux x86-64, beside the redo;"
@@ -1416,21 +1896,23 @@ def install_redo_reader(log=print, home=None):
     version = REDO_READER_BUILD["version"]
     log("building the redo-file reader from source (once; several"
         " minutes) ...")
-    env = dict(os.environ,
-               SOURCE=REDO_READER_BUILD["source"].format(version=version),
-               RAPIDJSON=REDO_READER_BUILD["rapidjson"],
-               RAPIDJSON_FIX=REDO_READER_BUILD["rapidjson_fix"],
-               CLIENT=REDO_READER_BUILD["client"].replace(
-                   "{part}", "%s").replace("{arch}", "%s"))
+    _, arm, _ = _machine()
     with tempfile.TemporaryDirectory() as work:
-        built = subprocess.run(["bash", "-c", REDO_READER_SCRIPT, "build",
-                                home, work, version], env=env,
-                               capture_output=True, text=True)
+        for local, url in redo_reader_files("arm64" if arm else "x64") \
+                .items():
+            if not fetch(url, os.path.join(work, local), log):
+                return False
+        from . import runner
+        built = runner.run(["bash", "-c", REDO_READER_SCRIPT, "build",
+                            str(home), work, version], check=False,
+                           check_flags=False, what="the build")
     if built.returncode != 0 or version not in built.stdout + built.stderr:
         log("  the redo-file reader did not build; LogMiner still follows"
             " the source, and migkit doctor --install tries again")
         return False
     return True
+
+
 # ---- licences ----------------------------------------------------------------
 
 #: licences whose code may be combined with migkit's own under the AGPL
@@ -1564,3 +2046,585 @@ def _licences_of(dist):
                 found.append(spdx_of(head))
                 break
     return sorted(set(found)) or [None]
+
+
+# ---- fetching, held to the lock ---------------------------------------------------
+
+#: the file under `tools_home()` keeping the digest each file a vendor
+#: publishes none for had the first time this machine fetched it
+PINS = "pins.json"
+#: seconds a fetch may go without a byte
+FETCH_TIMEOUT = 120
+_PINS_LOCK = threading.Lock()
+
+
+def _digest(path, algo="sha256"):
+    import hashlib
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return f"{algo}:{h.hexdigest()}"
+
+
+def _pins():
+    import json
+    try:
+        return json.loads((tools_home() / PINS).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _pin(url, digest):
+    from .durable import write_json
+    with _PINS_LOCK:
+        got = _pins()
+        got[url] = digest
+        write_json(tools_home() / PINS, dict(sorted(got.items())),
+                   indent=1)
+
+
+def fetch(url, dest, log=print):
+    """The file at `url` into `dest`, held to its digest before anything
+    else reads it. True once `dest` holds exactly the file pinned; False,
+    said, and nothing at `dest` otherwise.
+
+    The digest is the lock's (`pinned`); a url the lock does not know is
+    not fetched at all. Where the vendor publishes no digest (the lock's
+    is None) the one this machine kept the first time it fetched the file
+    holds (`PINS`), and the first fetch is said. From the offline bundle
+    (`MIGKIT_BUNDLE`) the file is its copy, held to the bundle's sums as
+    well, and the network is never asked."""
+    import os
+    import urllib.request
+    entry = pinned(url)
+    if not entry:
+        log("  it is not pinned in migkit's lock of what it fetches, so it"
+            " is not fetched")
+        return False
+    want, size = entry.get("digest"), entry.get("size")
+    tmp = f"{dest}.part"
+    bundle = _bundle()
+    try:
+        if bundle is not None:
+            if not bundle.copy(url, tmp):
+                log("  the offline bundle holds no copy of it")
+                return False
+        else:
+            from . import __version__
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"migkit/{__version__}"})
+            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r, \
+                    open(tmp, "wb") as out:
+                shutil.copyfileobj(r, out, 1 << 20)
+    except (OSError, ValueError) as e:
+        log(f"  could not fetch it ({type(e).__name__})")
+        _gone(tmp)
+        return False
+    if size and os.path.getsize(tmp) != int(size):
+        log("  the file fetched is not the one pinned (its size differs);"
+            " nothing of it is used")
+        _gone(tmp)
+        return False
+    if want:
+        got = _digest(tmp, want.split(":", 1)[0])
+        if got != want:
+            log("  the file fetched is not the one pinned (its digest"
+                " differs); nothing of it is used")
+            _gone(tmp)
+            return False
+    else:
+        got = _digest(tmp)
+        kept = _pins().get(url)
+        if kept and kept != got:
+            log("  the file fetched is not the one fetched here before (its"
+                " digest differs); nothing of it is used")
+            _gone(tmp)
+            return False
+        if not kept:
+            _pin(url, got)
+            log("  its vendor publishes no digest of it: the one fetched"
+                " now is kept, and every later fetch here is held to it")
+    os.replace(tmp, dest)
+    return True
+
+
+def _gone(path):
+    import os
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def extract(archive, into):
+    """An archive's files under `into`, none of them outside it: a `.zip`
+    with the modes its entries carry (the program's own executable bit
+    among them), a tar with the standard library's data filter - or, on
+    an interpreter older than 3.10.12 that has none, with every member
+    whose path or link would leave `into` refused."""
+    import os
+    import tarfile
+    import zipfile
+    into = os.path.realpath(into)
+    os.makedirs(into, exist_ok=True)
+    if str(archive).endswith(".zip"):
+        with zipfile.ZipFile(archive) as box:
+            for info in box.infolist():
+                if not _inside(into, info.filename):
+                    raise OSError(f"an entry of the archive would be"
+                                  f" written outside it: {info.filename}")
+            box.extractall(into)
+            for info in box.infolist():
+                mode = (info.external_attr >> 16) & 0o777
+                path = os.path.join(into, info.filename)
+                if mode and not info.is_dir() and os.path.isfile(path):
+                    os.chmod(path, mode)
+        return
+    with tarfile.open(archive) as box:
+        if hasattr(tarfile, "data_filter"):
+            box.extractall(into, filter="data")
+            return
+        members = box.getmembers()
+        for m in members:
+            link = (os.path.join(os.path.dirname(m.name), m.linkname)
+                    if m.issym() else m.linkname if m.islnk() else "")
+            if not _inside(into, m.name) or (link and not _inside(into,
+                                                                   link)):
+                raise OSError("an entry of the archive would be written"
+                              f" outside it: {m.name}")
+            if m.isdev():
+                raise OSError(f"the archive holds a device: {m.name}")
+        box.extractall(into, members=members)
+
+
+def _inside(root, name):
+    import os
+    if os.path.isabs(name):
+        return False
+    path = os.path.realpath(os.path.join(root, name))
+    return path == root or path.startswith(root + os.sep)
+
+
+# ---- the offline bundle -------------------------------------------------------
+
+#: the namespace a bundle's sums are signed under (`ssh-keygen -Y`)
+BUNDLE_NAMESPACE = "migkit-bundle"
+
+
+class Bundle:
+    """An offline bundle (`build_bundle`) as an install reads it: its sums
+    (`SHA256SUMS`), their signature checked against the signers the
+    operator names (`MIGKIT_BUNDLE_SIGNERS`, an `allowed_signers` file),
+    and each file held to its sum as it is copied out."""
+
+    def __init__(self, root, log=print):
+        import json
+        self.root = Path(root)
+        sums = self.root / "SHA256SUMS"
+        try:
+            text = sums.read_text()
+        except OSError:
+            raise SystemExit(f"{root} is not an offline bundle migkit made:"
+                             " it has no sums") from None
+        self.sums = {}
+        for line in text.splitlines():
+            digest, _, rel = line.partition("  ")
+            if digest and rel:
+                self.sums[rel] = digest
+        self._check_signature(log)
+        index = self.root / "files.json"
+        self.files = (json.loads(self._read(index)) if index.exists()
+                      else {})
+
+    def _check_signature(self, log):
+        import os
+        from . import envkeys
+        signers = os.path.expanduser(envkeys.text("MIGKIT_BUNDLE_SIGNERS"))
+        sig = self.root / "SHA256SUMS.sig"
+        if not signers:
+            if sig.exists():
+                log("the offline bundle's signature is not checked:"
+                    " MIGKIT_BUNDLE_SIGNERS names the file of those who may"
+                    " sign one")
+            return
+        if not sig.exists():
+            raise SystemExit("the offline bundle is not signed, and"
+                             " MIGKIT_BUNDLE_SIGNERS asks for a signed one."
+                             " Nothing has been installed from it")
+        from . import runner
+        found = runner.run(["ssh-keygen", "-Y", "find-principals", "-s",
+                            str(sig), "-f", signers], check=False,
+                           timeout=60, check_flags=False)
+        who = (found.stdout or "").strip().splitlines()
+        ok = found.returncode == 0 and who and runner.run(
+            ["ssh-keygen", "-Y", "verify", "-f", signers, "-I", who[0],
+             "-n", BUNDLE_NAMESPACE, "-s", str(sig)],
+            input=(self.root / "SHA256SUMS").read_text(), check=False,
+            timeout=60, check_flags=False).returncode == 0
+        if not ok:
+            raise SystemExit("the offline bundle's sums are not signed by"
+                             " anyone MIGKIT_BUNDLE_SIGNERS names. Nothing"
+                             " has been installed from it")
+
+    def verified(self, rel):
+        """The bundle's file `rel`, once it holds what its sum says; None
+        where it has no such file."""
+        path = self.root / rel
+        want = self.sums.get(rel)
+        if want is None or not path.is_file():
+            return None
+        if _digest(path).split(":", 1)[1] != want:
+            raise SystemExit(f"the offline bundle's {rel} is not what its"
+                             " sums say. Nothing has been installed from"
+                             " it")
+        return path
+
+    def _read(self, path):
+        rel = str(Path(path).relative_to(self.root))
+        got = self.verified(rel)
+        if got is None:
+            raise SystemExit(f"the offline bundle's {rel} is not in its"
+                             " sums")
+        return got.read_text()
+
+    def copy(self, url, dest):
+        """The bundle's copy of the file at `url` into `dest`; False where
+        it holds none."""
+        rel = self.files.get(url)
+        got = self.verified(rel) if rel else None
+        if got is None:
+            return False
+        shutil.copyfile(got, dest)
+        return True
+
+
+_BUNDLES = {}
+
+
+def _bundle(log=print):
+    """The offline bundle `MIGKIT_BUNDLE` names, read once; None where it
+    names none."""
+    import os
+    from . import envkeys
+    root = os.path.expanduser(envkeys.text("MIGKIT_BUNDLE"))
+    if not root:
+        return None
+    if root not in _BUNDLES:
+        _BUNDLES[root] = Bundle(root, log)
+    return _BUNDLES[root]
+
+
+def _load_images(answer, log):
+    """The bundle's images put into docker - each held to its sum first -
+    and kept as the image its name runs as here (`image`): by its id,
+    which is the digest of what was loaded."""
+    import json
+    bundle = _bundle()
+    listed = bundle.root / "images.json"
+    if not listed.exists():
+        return
+    from . import runner
+    for name, rec in json.loads(bundle._read(listed)).items():
+        if name in TERMS and not answer.get(name):
+            continue
+        path = bundle.verified(rec["file"])
+        if path is None:
+            continue
+        loaded = runner.run(["docker", "load", "-i", str(path)],
+                            check=False, timeout=1800, check_flags=False)
+        if loaded.returncode != 0:
+            log("  an image of the offline bundle did not load")
+            continue
+        got = runner.run(["docker", "image", "inspect", "--format",
+                          "{{.Id}}", rec["id"]], check=False, timeout=60,
+                         check_flags=False)
+        if got.returncode == 0 and got.stdout.strip() == rec["id"]:
+            _loaded(name, rec["ref"], rec["id"])
+
+
+#: the images loaded from an offline bundle, under `tools_home()`: {name:
+#: {"ref", "id"}}
+LOADED = "images.json"
+
+
+def _loaded(name, ref, image_id):
+    import json
+    path = tools_home() / LOADED
+    try:
+        got = json.loads(path.read_text())
+    except (OSError, ValueError):
+        got = {}
+    got[name] = {"ref": ref, "id": image_id}
+    from .durable import write_json
+    write_json(path, got, indent=1)
+
+
+def _platform(text):
+    """{system, machine, release} of a bundle's machine as
+    `MIGKIT_BUNDLE_PLATFORM` names it: `linux-x86_64`, `darwin-arm64`, or
+    with its Linux, `linux-x86_64-ubuntu-22.04`."""
+    parts = str(text).strip().lower().split("-")
+    if len(parts) < 2 or parts[0] not in ("linux", "darwin"):
+        raise SystemExit(f"MIGKIT_BUNDLE_PLATFORM={text} names no machine"
+                         " migkit builds bundles for: linux-x86_64,"
+                         " linux-arm64, darwin-arm64, darwin-x86_64, a Linux"
+                         " named after them (linux-x86_64-ubuntu-22.04)")
+    out = {"system": "Linux" if parts[0] == "linux" else "Darwin",
+           "machine": parts[1]}
+    if len(parts) >= 4:
+        ident, ver = parts[2], parts[3]
+        out["release"] = {"ID": ident, "VERSION_ID": ver,
+                          "VERSION_CODENAME": _CODENAMES.get((ident, ver),
+                                                             "")}
+    elif out["system"] == "Linux":
+        out["release"] = {}
+    return out
+
+
+def _wheel_tags(target):
+    """The wheel platforms pip is asked for, for a bundle built for another
+    machine: [] for this one."""
+    if not target:
+        return []
+    arch = "aarch64" if target["machine"] in ("arm64", "aarch64") \
+        else "x86_64"
+    if target["system"] == "Linux":
+        return [f"manylinux2014_{arch}", f"manylinux_2_17_{arch}",
+                f"manylinux_2_28_{arch}", f"linux_{arch}"]
+    mac = "arm64" if arch == "aarch64" else "x86_64"
+    return [f"macosx_11_0_{mac}", f"macosx_12_0_{mac}",
+            f"macosx_13_0_{mac}", f"macosx_14_0_{mac}"]
+
+
+def _pip():
+    """How pip is run here: this interpreter's, or through uv; None."""
+    import importlib.util
+    import sys
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip"]
+    if shutil.which("uvx"):
+        return ["uvx", "pip"]
+    return None
+
+
+def _requirements():
+    """What migkit needs installed beside it, as its own metadata says -
+    the extras left out."""
+    import importlib.metadata as md
+    from packaging.requirements import Requirement
+    out = []
+    for raw in md.requires("migkit") or []:
+        req = Requirement(raw)
+        if req.marker and not req.marker.evaluate({"extra": ""}):
+            continue
+        out.append(str(req))
+    return out
+
+
+def build_bundle(where, log=print, ask=None):
+    """An offline bundle in the directory `where`: every file `doctor
+    --install` would fetch for the bundle's machine (`MIGKIT_BUNDLE_PLATFORM`,
+    this one's unless named), each held to the lock as it is fetched; the
+    snapshot reader built here, where it is (Java runs it anywhere, and
+    its build fetches as it goes); migkit's wheels and its dependencies',
+    and the second reading's; the images, saved from docker - then the
+    sums of all of it (`SHA256SUMS`), signed with the SSH key
+    `MIGKIT_BUNDLE_KEY` names (`ssh-keygen -Y sign`). The terms of what is
+    not open source are asked as an install asks them, and what they do
+    not cover is left out. Returns the directory."""
+    import json
+    out = Path(where).expanduser().resolve()
+    (out / "files").mkdir(parents=True, exist_ok=True)
+    from . import envkeys
+    named = envkeys.text("MIGKIT_BUNDLE_PLATFORM")
+    target = _platform(named) if named else None
+    log(f"building an offline bundle in {out} ...")
+    wanted = []
+    for _, _, needs, optional in _capabilities():
+        wanted += needs + optional
+    wanted = list(dict.fromkeys(wanted))
+    vendor = [c for c in wanted if c in VENDOR]
+    answer = accept_terms(vendor + [i for i in IMAGES if i in TERMS]
+                          + [REDO_READER_CLIENT], ask, log)
+    urls = {}
+    before = dict(_TARGET)
+    _TARGET.clear()
+    _TARGET.update(target or {})
+    try:
+        for cmd in vendor:
+            open_build = cmd in TERMS and not answer.get(cmd)
+            if open_build and not TERMS[cmd].open_build:
+                continue
+            version = (TERMS[cmd].open_build if open_build
+                       else VENDOR[cmd])
+            name = vendor_file(cmd, open_build=open_build)
+            if name:
+                urls[_vendor_url(cmd, version) + name] = name
+            for extra, base, _, _ in ([] if open_build else
+                                      VENDOR_EXTRAS.get(cmd, [])):
+                urls[base + extra] = extra
+        for head, (_, version, base) in PACKAGE_BUILDS.items():
+            name = package_file(head)
+            if name:
+                urls[base.format(version=version) + name] = name
+        for program, (revision, url) in SOURCE_BUILDS.items():
+            if program != "reindex-from-snapshot":
+                urls[url] = f"{program}-{revision}.tar.gz"
+        system, arm, x86 = _machine()
+        if system == "Linux" and x86 and answer.get(REDO_READER_CLIENT):
+            for local, url in redo_reader_files("x64").items():
+                urls[url] = f"redo-reader-{local}"
+    finally:
+        _TARGET.clear()
+        _TARGET.update(before)
+    files = {}
+    for n, (url, name) in enumerate(sorted(urls.items()), 1):
+        log(f"fetching file {n} of {len(urls)} ...")
+        if fetch(url, out / "files" / name, log):
+            files[url] = f"files/{name}"
+    (out / "files.json").write_text(json.dumps(files, indent=1,
+                                               sort_keys=True))
+    _bundle_build(out, log)
+    _bundle_wheels(out, target, log)
+    _bundle_images(out, answer, log)
+    _sign_bundle(out, log)
+    log(f"the offline bundle is in {out}. On the machine with no network:"
+        f" pip install --no-index --find-links {out}/wheels migkit, then"
+        f" MIGKIT_BUNDLE={out} migkit doctor --install")
+    return out
+
+
+def _bundle_build(out, log):
+    """The snapshot reader as built here, where it is: its tree, for an
+    install from the bundle to put in place."""
+    import tarfile
+    home = tools_home() / "reindex-from-snapshot"
+    if not (home / "bin" / RFS_SCRIPT).exists():
+        return
+    (out / "builds").mkdir(exist_ok=True)
+    with tarfile.open(out / "builds" / "reindex-from-snapshot.tar.gz",
+                      "w:gz") as tar:
+        tar.add(home, arcname="reindex-from-snapshot")
+
+
+def _unbundle_build(name, home, log):
+    """A build the bundle carries, put in place from it."""
+    import tempfile
+    bundle = _bundle()
+    got = bundle.verified(f"builds/{name}.tar.gz")
+    if got is None:
+        log("  the offline bundle carries no build of it")
+        return False
+    with tempfile.TemporaryDirectory() as work:
+        extract(got, work)
+        _swap(Path(work) / name, home)
+    return built_program(name) is not None
+
+
+def _bundle_wheels(out, target, log):
+    """migkit's wheel, its dependencies' and the second reading's, for the
+    bundle's machine."""
+    from .util import _BASE
+    pip = _pip()
+    if pip is None:
+        log("  no pip here, nor uv to run one: the bundle carries no"
+            " wheels")
+        return
+    wheels = out / "wheels"
+    wheels.mkdir(exist_ok=True)
+    tags = [a for t in _wheel_tags(target) for a in ("--platform", t)]
+    pinned_to = (["--only-binary=:all:", "--python-version", "3.12",
+                  "--implementation", "cp", *tags] if tags else [])
+    quiet = (lambda m: None)
+    if (_BASE / "pyproject.toml").exists():
+        ok = _step([*pip, "wheel", "--no-deps", "-w", str(wheels),
+                    str(_BASE)], quiet, "migkit's own wheel was not built")
+    else:
+        from . import __version__
+        ok = _step([*pip, "download", "--no-deps", "-d", str(wheels),
+                    f"migkit=={__version__}", *pinned_to], quiet,
+                   "migkit's own wheel was not fetched")
+    deps = ((["-r", str(REQUIREMENTS_LOCK), "--require-hashes"]
+             if REQUIREMENTS_LOCK.exists() else _requirements()))
+    ok = _step([*pip, "download", "-d", str(wheels), *pinned_to, *deps],
+               log, "its dependencies' wheels were not all fetched") and ok
+    reader = out / "second-reader"
+    reader.mkdir(exist_ok=True)
+    what = (["-r", str(SECOND_READER_LOCK), "--require-hashes"]
+            if SECOND_READER_LOCK.exists() else [SECOND_READER_PACKAGE])
+    ok = _step([*pip, "download", "-d", str(reader), "--only-binary=:all:",
+                "--python-version", "3.12", "--implementation", "cp",
+                *tags, *what], log,
+               "the second reading's wheels were not all fetched") and ok
+    if not ok:
+        log("  the bundle is short of wheels: the machine it is for"
+            " installs what it lacks from an index, or not at all")
+
+
+def _bundle_images(out, answer, log):
+    """Each image migkit runs, pulled by its digest and saved into the
+    bundle, with the id it loads as - the ones whose terms were declined
+    left out."""
+    import json
+
+    from . import runner
+    if not shutil.which("docker"):
+        log("  no docker here: the bundle carries no images")
+        return
+    (out / "images").mkdir(exist_ok=True)
+    listed = {}
+    for name, ref in sorted(IMAGES.items()):
+        if name in TERMS and not answer.get(name):
+            continue
+        pulled = runner.run(["docker", "pull", ref], check=False,
+                            timeout=3600, check_flags=False)
+        got = runner.run(["docker", "image", "inspect", "--format",
+                          "{{.Id}}", ref], check=False, timeout=60,
+                         check_flags=False)
+        if pulled.returncode != 0 or got.returncode != 0:
+            log("  an image could not be pulled; the bundle is without it")
+            continue
+        image_id = got.stdout.strip()
+        rel = f"images/{name}.tar"
+        saved = runner.run(["docker", "save", "-o", str(out / rel),
+                            image_id], check=False, timeout=3600,
+                           check_flags=False)
+        if saved.returncode != 0:
+            log("  an image could not be saved; the bundle is without it")
+            continue
+        listed[name] = {"ref": ref, "id": image_id, "file": rel}
+    (out / "images.json").write_text(json.dumps(listed, indent=1,
+                                                sort_keys=True))
+
+
+def _sign_bundle(out, log):
+    """`SHA256SUMS` over every file of the bundle, and its signature where
+    `MIGKIT_BUNDLE_KEY` names the key to sign it with."""
+    import os
+    rows = []
+    for path in sorted(p for p in out.rglob("*") if p.is_file()):
+        rel = str(path.relative_to(out))
+        if rel in ("SHA256SUMS", "SHA256SUMS.sig"):
+            continue
+        rows.append(f"{_digest(path).split(':', 1)[1]}  {rel}")
+    (out / "SHA256SUMS").write_text("\n".join(rows) + "\n")
+    (out / "SHA256SUMS.sig").unlink(missing_ok=True)
+    from . import envkeys
+    key = envkeys.text("MIGKIT_BUNDLE_KEY")
+    if not key:
+        log("  the bundle is not signed: MIGKIT_BUNDLE_KEY names the SSH key"
+            " to sign its sums with")
+        return
+    from .export import _sign
+    try:
+        _sign(out / "SHA256SUMS", os.path.expanduser(key), BUNDLE_NAMESPACE)
+    except Exception as e:  # noqa: BLE001 - said; the bundle stands
+        log(f"  the bundle could not be signed ({str(e)[:160]})")
+
+
+#: the container images migkit runs, pulled where they are run rather than
+#: installed: {name as `PROGRAM_LICENCES` and `TERMS` know it: image}, each
+#: by digest. Pulled, not installed, and a closed one's terms accepted with
+#: every other's all the same (`install_missing`)
+IMAGES = {n: image(n) for n, p in PROGRAM.items() if p.image}

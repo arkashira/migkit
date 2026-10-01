@@ -32,7 +32,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 
 from . import tooluse
 from .tooluse import TOPPED, UNUSED, USED
@@ -162,20 +161,42 @@ def workdir(eng, db, table):
     return str(path)
 
 
-def _run(argv, conf_text, log):
-    from . import movers
-    from .util import PrivateFile, tool_env
+#: a line of the loader's progress table, as it prints one every report:
+#: the rows so far, then the ones it failed on
+_ROW = re.compile(r"^\s*(?P<total>[\d,]+)\s*\|\s*(?P<failed>[\d,]+)\s*\|")
+
+
+class _Progress:
+    """The loader's progress table read as it prints it: the rows so far,
+    in migkit's words."""
+
+    def __init__(self, label):
+        self.label, self.last = label, None
+
+    def __call__(self, line):
+        m = _ROW.match(line)
+        if not m:
+            return None
+        total = int(m.group("total").replace(",", ""))
+        if total == self.last:
+            return None
+        self.last = total
+        return f"{self.label}: {total:,} rows"
+
+
+def _run(argv, conf_text, log, label=""):
+    """One operation of the loader through the runner - its passwords in
+    a configuration file of this user's (`-f`), what it prints read as it
+    comes and its progress table said in migkit's words, where it was read
+    only at the end - and what it printed, for its closing counts."""
+    from . import runner
+    from .util import PrivateFile
     with PrivateFile(conf_text, ".conf") as conf:
         cmd = [argv[0], argv[1], "-f", conf] + argv[2:]
-        movers._debug(cmd)
-        with movers._spawned(subprocess.Popen(
-                cmd, env=tool_env(), text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT), cmd[0]) as p:
-            out = p.communicate()[0]
-    if p.returncode:
-        from .wording import without_programs
-        raise RuntimeError(without_programs(out[-500:], movers.DRIVEN))
-    return out
+        got = runner.run(cmd, progress=_Progress(label or argv[1]), log=log,
+                         merge=True, whole=True,
+                         what=label or "the bulk loader")
+    return got.stdout
 
 
 def copy_table(eng, db, table, workers, log):
@@ -188,7 +209,7 @@ def copy_table(eng, db, table, workers, log):
     if not done_unload:
         out = _run(args("unload", ks_src, table, work, workers,
                         _checkpoint(work, "unload")),
-                   _conf(eng.hop.source), log)
+                   _conf(eng.hop.source), log, f"{table}: read out")
         got = summary(out)
         if got is None or got[1]:
             raise RuntimeError(f"{table}: the read-out ended without its"
@@ -202,13 +223,13 @@ def copy_table(eng, db, table, workers, log):
         eng._session("dst").execute(
             f"truncate {eng._qualified('dst', db, table)}")
     out = _run(args("load", ks_dst, table, work, workers, resume),
-               _conf(eng.hop.target), log)
+               _conf(eng.hop.target), log, f"{table}: loaded")
     got = summary(out)
     if got is None or got[1]:
         raise RuntimeError(f"{table}: the load ended without its count of"
                            " rows, or with rows the target refused")
     held = counted(_run(args("count", ks_dst, table, work, workers),
-                        _conf(eng.hop.target), log))
+                        _conf(eng.hop.target), None))
     if held != read:
         raise RuntimeError(f"{table}: {read:,} rows were read out and the"
                            f" target holds {held if held is not None else 'an unknown number of'}"

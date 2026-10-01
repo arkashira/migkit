@@ -1465,6 +1465,86 @@ class Engine:
                 repaired += 1
         return stmts, undo, touched, repaired, clean, skipped, left
 
+    #: whether this engine keeps text in character sets of its own - code
+    #: pages, CCSIDs, a database character set - so text stored twice as
+    #: UTF-8 is a finding of its check and a repair of its sync
+    #: (`_mojibake`, `_mojibake_repair`); MySQL and PostgreSQL ask their
+    #: servers in SQL of their own
+    CHARSETS = False
+    #: rows read of one table at most, looking for non-ASCII values to
+    #: sample, where the server is not asked to pick them out - a sample,
+    #: as MySQL's and PostgreSQL's are: a deep check reads every table, and
+    #: a clean answer says how many values it read (`_mojibake_result`)
+    MOJIBAKE_ROWS = 20_000
+
+    def _mojibake(self, db):
+        """The mojibake check through the neutral contract, for an engine
+        with character sets and no sampling SQL of its own: the text
+        columns of every table, read in key order until `MOJIBAKE_SAMPLE`
+        non-ASCII values or `MOJIBAKE_ROWS` rows - the counting and the
+        verdict the base's, as on MySQL and PostgreSQL."""
+        from .. import canon
+        findings, scanned = [], 0
+        try:
+            for t in self.neutral_tables("src", db):
+                if self.hop.excluded(db, *str(t).split(".")):
+                    continue
+                cols = [(n, "text") for n, typ in
+                        self.neutral_columns("src", db, t)
+                        if canon.type_class(self.CANON_ENGINE, typ) == "text"]
+                if not cols:
+                    continue
+                picked, read = [], 0
+                for rows in self._every_row("src", db, t, cols):
+                    for r in rows:
+                        read += 1
+                        if any(isinstance(v, str) and not v.isascii()
+                               for v in r):
+                            picked.append(r)
+                    if len(picked) >= self.MOJIBAKE_SAMPLE \
+                            or read >= self.MOJIBAKE_ROWS:
+                        break
+                found, seen = self._mojibake_tally(
+                    t, [n for n, _ in cols], picked[:self.MOJIBAKE_SAMPLE])
+                findings += found
+                scanned += seen
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return Result("deep", f"{db} mojibake", "error",
+                          "could not sample the source's text columns:"
+                          f" {str(e).splitlines()[-1][:90]}")
+        return self._mojibake_result(
+            db, findings, scanned,
+            "repair it on the target (migkit sync --kind rows with"
+            " MIGKIT_REPAIR_TEXT=1), or convert it once on the source")
+
+    def _mojibake_repair(self, db):
+        """The row-by-row repair the mojibake check asks for, through the
+        neutral contract (`charsets.repair`: each double-encoded value on
+        the target read by key, read again just before it is written, and
+        written only where nothing changed it since, the old value kept
+        for the undo) - for an engine with character sets and no repair
+        SQL of its own. Off unless `MIGKIT_REPAIR_TEXT`, as on MySQL and
+        PostgreSQL: it moves the target away from the source."""
+        from .. import charsets
+        p = charsets.text_plan(self, db)
+        found = charsets.to_repair(self.hop, self, db, p)
+        if not found:
+            return None
+        repaired = sum(n for n in found.values())
+        enabled = self._repair_text_enabled()
+        note = self._mojibake_repair_note(repaired, set(found), 0, 0, 0, [],
+                                          enabled)
+        return RepairAction(db, "text", [
+            f"repair {n} double-encoded values of {c} on the target"
+            for c, n in sorted(found.items())] if enabled else [], [],
+            note)
+
+    def _apply_text(self, db, action, log=None):
+        """A text action of `_mojibake_repair` carried out."""
+        from .. import charsets
+        return charsets.repair(self.hop, self, db,
+                               charsets.text_plan(self, db), log)
+
     def _mojibake_repair_note(self, repaired, columns, clean, skipped, left,
                               refused, enabled):
         """What the plan says about a repair that moves the target away from
@@ -2187,7 +2267,21 @@ class Engine:
         raise NotImplementedError
 
     def repair_plan(self, db, kind):
+        """[] - but an engine with character sets of its own
+        (`CHARSETS`) repairs text stored twice as UTF-8 on the target, row
+        by row (`_mojibake_repair`)."""
+        if self.CHARSETS and kind in ("rows", "all"):
+            text = self._mojibake_repair(db)
+            return [text] if text else []
         return []
+
+    def apply(self, db, action):
+        """A text action (`_mojibake_repair`) carried out; an engine that
+        repairs anything else says how itself."""
+        if action.kind == "text":
+            return self._apply_text(db, action)
+        raise SystemExit(f"{self.CANON_ENGINE} cannot apply a"
+                         f" {action.kind!r} action")
 
     def replication_status(self, db, sql):
         """One line saying whether the native replication this engine just
@@ -2432,15 +2526,13 @@ class Engine:
         `migkit.toolversion` for the two measurements behind it.
         """
         from .. import toolversion as _tv
-        from ..util import run, which
+        from ..util import which
         got = {}
         for tool in tools:
             if not which(tool):
                 continue
-            try:
-                got[tool] = run([tool, "--version"], check=False).stdout
-            except Exception:
-                got[tool] = None
+            # asked once per build, however often an assessment asks
+            got[tool] = _tv.probe(tool)
         out = []
         for level, tool, detail in _tv.report(got, server_version,
                                               self.ENGINE_FAMILY):

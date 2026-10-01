@@ -103,7 +103,7 @@ class Db2ZosEngine(Db2Engine):
                 else int(space) * 1024, "key": None}
         return out
 
-    def check_deep(self, db):
+    def _pending(self, db):
         """Tables on the target whose definition is incomplete (`STATUS
         'I'`: a primary or unique key with no index to enforce it yet):
         z/OS refuses every write to them."""

@@ -5,12 +5,17 @@ name: wrapped programs
 # dropped a flag fails here rather than at an operator's option parsing.
 # The same check runs on the machine doing a move, against the build
 # installed there (`tests/test_the_installed_build_takes_the_options.py`).
+# And what `doctor --install` fetches, pinned by version and digest, built
+# into an offline bundle where there is a network and installed from it
+# where there is none (`offline-bundle`).
 on:
   schedule:
     - cron: "17 4 * * 1"   # weekly: a new release lands without a push
   workflow_dispatch:
   pull_request:
-    paths: ["migkit/movers.py", "tests/test_wrapped_flags_exist.py",
+    paths: ["migkit/movers.py", "migkit/runner.py", "migkit/tools.py",
+            "migkit/data/**", "deploy/Dockerfile",
+            "tests/test_wrapped_flags_exist.py",
             "tests/test_the_installed_build_takes_the_options.py",
             ".github/workflows/wrapped-programs.yml"]
 
@@ -76,3 +81,29 @@ jobs:
       - run: pip install -e ".[mongo]" pytest
       - run: mongodump --version
       - run: pytest -q tests/test_wrapped_flags_exist.py tests/test_the_installed_build_takes_the_options.py -k "mongodump or mongodb or mongorestore"
+
+  offline-bundle:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: the bundle, where there is a network, its sums signed
+        run: |
+          ssh-keygen -q -t ed25519 -N "" -f /tmp/bundle-key
+          echo "ci $(cat /tmp/bundle-key.pub)" > /tmp/allowed_signers
+          MIGKIT_BUNDLE_BUILD=/tmp/bundle MIGKIT_BUNDLE_KEY=/tmp/bundle-key \
+            MIGKIT_BUNDLE_PLATFORM=linux-x86_64-debian-12 \
+            migkit doctor --install
+          ssh-keygen -Y verify -f /tmp/allowed_signers -I ci \
+            -n migkit-bundle -s /tmp/bundle/SHA256SUMS.sig \
+            < /tmp/bundle/SHA256SUMS
+      - name: installed from it with no way out
+        run: |
+          docker run --rm --network none -v /tmp/bundle:/bundle:ro \
+            python:3.12-slim-bookworm sh -ec "
+              pip install --no-index --find-links /bundle/wheels migkit
+              MIGKIT_BUNDLE=/bundle migkit doctor --install
+              migkit doctor"

@@ -3,7 +3,8 @@ name = "migkit"
 dynamic = ["version"]
 description = "Verify, repair, and move databases across engines - without trusting the mover."
 readme = "README.md"
-requires-python = ">=3.10"
+# 3.10.12: `tarfile.extractall(filter="data")`, which the vendor installs use
+requires-python = ">=3.10.12"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "arkashira" }]
 keywords = ["database", "migration", "cdc", "replication", "verification",
@@ -149,7 +150,10 @@ diff = []
 dataframe = []
 s3 = []
 pgschema = []
+# pytest-xdist runs the pure tests side by side; pytest-timeout ends a test
+# that hangs (tools/final_suite.py)
 dev = ["pytest", "faker", "hypothesis", "pexpect", "moto[rds]",
+       "pytest-xdist", "pytest-timeout",
        # moto's server, the S3-compatible endpoint an appliance stands in as
        "flask", "flask-cors", "prometheus-client"]
 
@@ -169,12 +173,20 @@ version = { attr = "migkit.__version__" }
 include = ["migkit*"]
 
 [tool.setuptools.package-data]
-# the instance catalog the machine advice weighs (`migkit.machine`)
-migkit = ["data/*.json"]
+# the instance catalog the machine advice weighs (`migkit.machine`), and
+# the locks of what `doctor --install` fetches (`migkit.tools`)
+migkit = ["data/*.json", "data/*.txt"]
 
 [tool.pytest.ini_options]
 markers = ["docker: needs a docker daemon",
+           "vm: needs the migkit VM (Oracle, SQL Server, Db2, ASE, x86 images)",
+           "long: takes minutes by design; its timeout is an hour",
            "mssql: runs against SQL Server (the x86 workflow runs these)",
            "db2: runs against Db2 (the x86 workflow runs these)",
            "ase: runs against SAP ASE (the x86 workflow runs these)",
            "teradata: runs against a Teradata system (a Vantage Express VM on x86, MIGKIT_TERADATA_HOST)"]
+# a hung test fails after 15 minutes instead of stopping the run; the
+# signal method raises in the test, so its fixtures still tear down
+# (tests/conftest.py gives `vm` and `long` tests more)
+timeout = 900
+timeout_method = "signal"

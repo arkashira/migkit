@@ -63,6 +63,11 @@ a value the target would not keep as it is - rounded, cut, turned into a
 double or a default - is counted on the source and refused before the move
 (`unfit`), rather than found by the digest after it.
 """
+import hashlib as _hashlib
+import re as _re
+import uuid as _uuid
+from typing import NamedTuple
+
 from .pieces import Hashed as _Hashed
 
 # Neutral classes. An engine's declared type is mapped onto one of these and
@@ -360,6 +365,10 @@ TYPES = {
         "boolean": "boolean", "bool": "boolean",
         "character": "text", "character varying": "text", "varchar": "text",
         "bpchar": "text", "char": "text", "text": "text", "name": "text",
+        # the extension's text compared without case: its values are text,
+        # and `check` read them as text while a build found no class for
+        # them (`sizing.UNBOUNDED` counted it a text already)
+        "citext": "text",
         "uuid": "uuid", "inet": "inet", "cidr": "inet", "macaddr": "text",
         "xml": "xml",
         # a text search vector prints its lexemes sorted and once each, and
@@ -1344,6 +1353,7 @@ def json_text(value):
 #: in either case: 8-4-4-4-12 hexadecimal digits
 UUID_FORM = ("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
              "-[0-9a-fA-F]{12}$")
+_UUID_RE = _re.compile(UUID_FORM)
 
 
 def uuid_text(value):
@@ -1352,12 +1362,11 @@ def uuid_text(value):
     that holds one in capitals the same way; any other text as it is. A
     UUID kept as text in capitals beside a `uuid` read as a difference in
     every row."""
-    import re
-    import uuid
-    if isinstance(value, uuid.UUID):
+    if isinstance(value, _uuid.UUID):
         return str(value)
     text = value if isinstance(value, str) else str(value)
-    return text.lower() if re.fullmatch(UUID_FORM, text) else text
+    return text.lower() if len(text) == 36 and _UUID_RE.fullmatch(text) \
+        else text
 
 
 def inet_text(value):
@@ -2008,13 +2017,64 @@ KEY_TEXT = {"mysql": "varchar(768)", "mssql": "nvarchar(450)",
                         " CASESPECIFIC"}
 
 
-def ddl_type(engine, cls, numbers=(), key=False):
+class Limits(NamedTuple):
+    """What one server lets a built object be, where it differs by server
+    rather than by engine: the longest name, the widest key in bytes, the
+    bytes a character of its default character set takes, the widest
+    bounded string, the collation that compares strings byte by byte, the
+    authentication plugins it signs in with, its reserved words. None
+    where not known - `LIMITS` holds each engine's documented default, and
+    an engine that asks its server (`limits`) replaces what it read."""
+    identifier: int = None
+    key_bytes: int = None
+    char_bytes: int = None
+    max_string: int = None
+    binary_collation: str = None
+    auth_plugins: frozenset = None
+    keywords: frozenset = None
+
+
+#: each engine's defaults, from its documentation: InnoDB's DYNAMIC rows
+#: key 3,072 bytes (COMPACT and 5.6's 767), SQL Server a clustered key
+#: 900 bytes, Oracle's MAX_STRING_SIZE=STANDARD 4,000 bytes (EXTENDED
+#: 32,767), PostgreSQL's NAMEDATALEN-1 63, MySQL 64, SQL Server and Oracle
+#: 12.2+ 128
+LIMITS = {
+    "postgres": Limits(identifier=63),
+    "mysql": Limits(identifier=64, key_bytes=3072, char_bytes=4,
+                    binary_collation="utf8mb4_0900_bin"),
+    "mssql": Limits(identifier=128, key_bytes=900, char_bytes=2),
+    "oracle": Limits(identifier=128, max_string=4000),
+    "db2": Limits(identifier=128),
+    "clickhouse": Limits(),
+}
+
+
+def limits(engine, version=None, **asked):
+    """`engine`'s `Limits`: its defaults (`LIMITS`), what the server's
+    version says of them - MariaDB and MySQL before 8.0 have no
+    `utf8mb4_0900_bin`, only `utf8mb4_bin` - and whatever an engine read
+    off the server itself (`asked`, by field) over both."""
+    got = LIMITS.get(dialect(engine), Limits())
+    text = str(version or "").lower()
+    if dialect(engine) == "mysql" and text and (
+            "mariadb" in text or _re.match(r"\s*[1-7]\.", text)):
+        got = got._replace(binary_collation="utf8mb4_bin")
+    return got._replace(**{k: v for k, v in asked.items() if v is not None})
+
+
+def ddl_type(engine, cls, numbers=(), key=False, bounds=None):
     """The column type to create for a class on this engine - for a column
     of the table's key where `key`.
 
     Raises for an engine or class with no mapping rather than falling back to
     something plausible: a table created with the wrong column type is harder
     to notice than one that was never created.
+
+    `bounds`, the target server's `Limits` where an engine asked it, sizes
+    what the defaults cannot know: a key's text by the key bytes and the
+    bytes a character takes there (191 characters of utf8mb4 on a COMPACT
+    InnoDB, not 768), and Oracle's unbounded text by its MAX_STRING_SIZE.
     """
     engine = dialect(engine)
     table = DDL.get(engine)
@@ -2032,7 +2092,15 @@ def ddl_type(engine, cls, numbers=(), key=False):
     if pair is None:
         raise ValueError(f"no DDL type for class {cls!r} on {engine}")
     if key and cls == "text" and not numbers and engine in KEY_TEXT:
+        if bounds and bounds.key_bytes and bounds.char_bytes and \
+                engine in ("mysql", "mssql"):
+            chars = bounds.key_bytes // bounds.char_bytes
+            return (f"nvarchar({chars})" if engine == "mssql"
+                    else f"varchar({chars})")
         return KEY_TEXT[engine]
+    if cls == "text" and not numbers and engine == "oracle" and bounds \
+            and bounds.max_string and bounds.max_string > 4000:
+        return f"VARCHAR2({bounds.max_string} CHAR)"
     if cls == "float":
         return (FLOAT4_DDL.get(engine, pair[0]) if tuple(numbers) == (4,)
                 else pair[0])
@@ -2143,8 +2211,11 @@ def ended(out, begun, at=None, ts=None):
 
 def ddl(table, kind, sql=None, to=None, txn=None):
     """A change to a table's shape or its whole contents, at its place in
-    the source's log: `truncate`, `drop`, `rename` (to `to`), `create` or
-    `alter` - a DDL the log carries, as the reader found it (`sql` where it
+    the source's log: `truncate`, `drop`, `rename` (to `to`), `create`,
+    `alter`, or `reload` - rows changed with no row event for them (a
+    partition truncated, dropped or exchanged: `logddl`), so the table is
+    copied again wherever an emptied one would be, and never emptied in
+    place - a DDL the log carries, as the reader found it (`sql` where it
     has the statement's text). Not a row change: no writer applies one,
     and the tail takes each out of its batch before anything else sees it
     (`hetero.tail_apply`), cutting that table's changes there."""
@@ -2161,7 +2232,7 @@ def ddl(table, kind, sql=None, to=None, txn=None):
     return out
 
 
-DDL_KINDS = ("truncate", "drop", "rename", "create", "alter")
+DDL_KINDS = ("truncate", "drop", "rename", "create", "alter", "reload")
 
 
 def is_ddl(change):
@@ -2174,22 +2245,43 @@ PLAIN = frozenset({"integer", "decimal", "float", "boolean", "date",
                    "timestamp", "time"})
 
 
+#: Python's own scalars, which `write_value` hands to a driver as they are
+#: for every class but those with a form of their own (`_writer`)
+_AS_THEY_ARE = frozenset({str, bytes, int, float, bool})
+
+
+def _writer(engine, cls):
+    """What a value of one column goes through on its way into `engine`,
+    chosen once for the column: `write_value`, with the values it hands on
+    untouched - a `str`, `bytes`, a number - let through without the call
+    where the class has no form of its own there."""
+    if str(cls).startswith(bsontype_prefixes()) or cls in (
+            INTERVAL, SPARSE, VECTOR, GEOMETRY) or (
+            dialect(engine) == "mssql" and cls in ("timestamp", "time")):
+        return lambda v: write_value(engine, cls, v)
+    plain = _AS_THEY_ARE
+    return lambda v: v if type(v) in plain else write_value(engine, cls, v)
+
+
 def sql_rows(classes, rows, keep=(), engine=None):
     """`rows` with `write_value` applied where a column can need it: a
     million rows of eight columns called it eight million times, and half
     of those were numbers and times it passes through untouched. The
     columns at `keep` are handed on as they are (an array column, which
     takes a list as the array it is). `engine` is the one written to, for
-    the classes it takes a form of its own of."""
-    need = [i for i, c in enumerate(classes) if c not in PLAIN
-            and i not in keep]
+    the classes it takes a form of its own of. A writer is chosen once a
+    column (`_writer`): measured 2026-10-01, 8 columns (4 text or bytes)
+    took 2.12 us a row with `write_value` called on every value, 0.15 us
+    so."""
+    need = [(i, _writer(engine, c)) for i, c in enumerate(classes)
+            if c not in PLAIN and i not in keep]
     if not need:
         return rows
     out = []
     for r in rows:
         r = list(r)
-        for i in need:
-            r[i] = write_value(engine, classes[i], r[i])
+        for i, write in need:
+            r[i] = write(r[i])
         out.append(r)
     return out
 
@@ -2526,10 +2618,13 @@ def digest_step(total, text):
     without a database, and so an engine that has to accumulate in Python
     cannot drift from the one that accumulates in SQL.
     """
-    import hashlib
-    h = hashlib.md5(("" if text is None else str(text)).encode(),
-                    usedforsecurity=False).hexdigest()
-    return total + int(h[:DIGEST_HEX], 16)
+    got = _hashlib.md5(("" if text is None else str(text)).encode(),
+                       usedforsecurity=False).digest()
+    # the first DIGEST_HEX hex digits, read off the bytes: the same number
+    # as `int(hexdigest()[:DIGEST_HEX], 16)`, without writing the hex out
+    # (0.385 -> 0.36 us a row, measured 2026-10-01)
+    return total + (int.from_bytes(got[:_DIGEST_BYTES], "big")
+                    >> _DIGEST_SHIFT)
 
 
 def expr(engine, col, cls):
@@ -2709,12 +2804,17 @@ CHAR_TYPES = {
     "postgres": ("character varying", "varchar", "character", "char",
                  "bpchar"),
     "mysql": ("varchar", "char"),
+    # its length in characters as `DECLARED` writes it: an n-type's bytes
+    # halved
+    "mssql": ("varchar", "char", "nvarchar", "nchar"),
 }
 
 #: Types with no character limit worth counting. `("chars", None)` rather
 #: than None, because "holds anything" and "migkit never measured this" are
-#: different answers and only one of them is safe to ignore.
-UNLIMITED_CHARS = {"postgres": ("text",)}
+#: different answers and only one of them is safe to ignore. SQL Server's
+#: `(max)` is one: `varchar(max)` has no number to count against
+UNLIMITED_CHARS = {"postgres": ("text", "citext"),
+                   "mssql": ("varchar", "nvarchar", "text", "ntext")}
 
 #: MySQL's TEXT family is limited in **bytes**, not characters, so a
 #: utf8mb4 string of 20,000 characters can overflow a 65,535-byte TEXT.
@@ -2728,6 +2828,7 @@ BYTE_TYPES = {
 NUMERIC_TYPES = {
     "postgres": ("numeric", "decimal"),
     "mysql": ("decimal", "numeric"),
+    "mssql": ("decimal", "numeric"),
 }
 
 
@@ -3802,6 +3903,9 @@ def renders(engine):
 # PostgreSQL only grew a native `bit_xor` in 14, which is why AWS tells its
 # own customers to hand-create the aggregate on 12 and 13.
 DIGEST_HEX = 15
+#: `digest_step`'s DIGEST_HEX hex digits as whole bytes and a shift
+_DIGEST_BYTES = (DIGEST_HEX + 1) // 2
+_DIGEST_SHIFT = 8 * _DIGEST_BYTES - 4 * DIGEST_HEX
 DIGEST_BITS = DIGEST_HEX * 4
 
 

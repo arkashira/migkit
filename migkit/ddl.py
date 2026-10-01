@@ -37,14 +37,24 @@ the target table has rows, so it can say *will*.
 """
 import re
 
-#: `alter table <name> add [column] <name> <the rest of the definition>`.
+#: `alter table <name> <clause>, <clause> ...` - the name quoted any of
+#: the ways the engines quote one
+_ALTER = re.compile(
+    r"^\s*alter\s+table\s+(?P<table>(?:\"[^\"]*\"|`[^`]*`|\[[^\]]*\]"
+    r"|[^\s(\"`\[])+)\s+(?P<rest>.+?);?\s*$", re.I | re.S)
+#: one clause that adds a column: `add [column] <name> <definition>`.
 #: Written against the differ's own output, which quotes both identifiers
 #: and always spells out `add column`, but kept tolerant of the shorter
-#: form because the same file is read when an operator has edited it.
+#: form because the same file is read when an operator has edited it -
+#: and never a key, index or constraint an `add` makes instead
 _ADD_COLUMN = re.compile(
-    r"^\s*alter\s+table\s+(?P<table>[^\s(]+)\s+"
-    r"add\s+(?:column\s+)?(?P<column>[^\s(]+)\s+(?P<rest>.+?);?\s*$",
-    re.I | re.S)
+    r"^\s*add\s+(?:column\s+)?(?!(?:constraint|index|key|primary|unique"
+    r"|foreign|check|fulltext|spatial|partition|period)\b)"
+    r"(?P<column>(?:\"[^\"]*\"|`[^`]*`|\[[^\]]*\]|[^\s(\"`\[])+)\s+"
+    r"(?P<rest>.+)$", re.I | re.S)
+#: `add [column] (<name> <definition>, ...)`, MySQL's list of columns
+_ADD_COLUMNS = re.compile(r"^\s*add\s+(?:column\s+)?\((?P<inner>.*)\)\s*$",
+                          re.I | re.S)
 
 
 def _bare(name):
@@ -63,19 +73,35 @@ def needs_backfill(sql):
     engine, and neither engine's answer is one migkit should let pass
     without saying so.
     """
+    from .logddl import clauses
     found = []
     for raw in split(sql):
-        m = _ADD_COLUMN.match(raw)
+        m = _ALTER.match(raw)
         if not m:
             continue
-        rest = " ".join(m.group("rest").split()).lower()
-        if "not null" not in rest:
-            continue
-        if any(w in rest for w in ("default", "generated", "identity",
-                                   "auto_increment", "serial")):
-            continue
-        found.append((_bare(m.group("table")), _bare(m.group("column")),
-                      " ".join(raw.split())))
+        # every clause of it: atlas writes one ALTER with an ADD for each
+        # column, and only the first was read - measured, `add column a
+        # int not null default 0, add column note text not null` found
+        # nothing
+        added = []
+        for clause in clauses(m.group("rest")):
+            many = _ADD_COLUMNS.match(clause)
+            if many:
+                added += [f"add {c}" for c in clauses(many.group("inner"))]
+            else:
+                added.append(clause)
+        for clause in added:
+            col = _ADD_COLUMN.match(clause)
+            if not col:
+                continue
+            rest = " ".join(col.group("rest").split()).lower()
+            if "not null" not in rest:
+                continue
+            if any(w in rest for w in ("default", "generated", "identity",
+                                       "auto_increment", "serial")):
+                continue
+            found.append((_bare(m.group("table")), _bare(col.group("column")),
+                          " ".join(raw.split())))
     return found
 
 

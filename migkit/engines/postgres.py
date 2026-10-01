@@ -1066,6 +1066,60 @@ class PostgresEngine(Engine):
                 "::regclass and attnum > 0 and not attisdropped"
             ).splitlines() if line)}
 
+    def key_merges(self, side, db, columns, batches, examples=3):
+        """Asked of this server's own comparison where it may take two
+        strings for one: under a deterministic collation - libc's, and
+        ICU's by default - two strings are equal only where their bytes
+        are, so nothing merges and nothing is asked. A nondeterministic
+        ICU collation (`deterministic = false`: case- or accent-blind)
+        takes the keys into a temporary table whose columns compare as
+        the target's, and the server groups them, as MySQL's is asked."""
+        names = [co for _, co in columns if co]
+        if not names:
+            return None
+        marks = ", ".join(["%s"] * len(names))
+        with self._conn(side, self._d(side, db)) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select collname from pg_collation where not"
+                            f" collisdeterministic and collname in ({marks})",
+                            names)
+                folding = {str(r[0]) for r in cur.fetchall()}
+                if not folding:
+                    return None
+                q = self._quote_ident
+                defs = ", ".join(
+                    f"{q(n)} text" + (f" collate {q(co)}" if co in folding
+                                      else "") for n, co in columns)
+                cols = ", ".join(q(n) for n, _ in columns)
+                cur.execute(f"create temporary table migkit_key_merges"
+                            f" ({defs}) on commit drop")
+                insert = ("insert into migkit_key_merges values ("
+                          + ", ".join(["%s"] * len(columns)) + ")")
+                for rows in batches:
+                    if rows:
+                        cur.executemany(insert, [tuple(
+                            None if v is None else str(v) for v in r)
+                            for r in rows])
+                cur.execute(f"select count(*) from (select 1 from"
+                            f" migkit_key_merges group by {cols} having"
+                            " count(*) > 1) g")
+                groups = int(cur.fetchone()[0])
+                shown = []
+                if groups:
+                    cur.execute(f"select {cols} from migkit_key_merges"
+                                f" group by {cols} having count(*) > 1"
+                                f" limit {int(examples)}")
+                    for rep in cur.fetchall():
+                        # every row, not `distinct`: that compares by the
+                        # collation too, and gives back one of the group
+                        cur.execute(f"select {cols} from migkit_key_merges"
+                                    " where " + " and ".join(
+                                        f"{q(n)} = %s" for n, _ in columns),
+                                    rep)
+                        shown.append([tuple(r) for r in cur.fetchall()])
+            conn.rollback()
+        return groups, shown
+
     def decimal_extent(self, side, db, table, column, where=None):
         """The server's own `scale()` and the length of the whole part,
         in one scan rather than every value read here. Through `numeric`,
@@ -6867,8 +6921,9 @@ class PostgresEngine(Engine):
         role, obj, priv = entry.split("|", 2)
         sch, _, name = obj.partition(".")
         kind = f"{obj_type} " if obj_type else ""
-        target = f'{kind}"{sch}"."{name}"'
-        who = f'"{role}"'
+        q = PostgresEngine._quote_ident
+        target = f"{kind}{q(sch)}.{q(name)}"
+        who = q(role)
         if revoke:
             return f'REVOKE {priv} ON {target} FROM {who};'
         return f'GRANT {priv} ON {target} TO {who};'

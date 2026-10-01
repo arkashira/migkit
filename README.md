@@ -6,7 +6,7 @@
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
 [![engines](https://img.shields.io/badge/engines-50-2a78d6)](#supported-engines)
 [![pairs](https://img.shields.io/badge/cross--engine-any_pair-0ca30c)](#cross-engine-hetero)
-[![python](https://img.shields.io/badge/python-3.10+-3776ab)](pyproject.toml)
+[![python](https://img.shields.io/badge/python-3.10.12+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-0ca30c)](LICENSE)
 <!-- /gen_docs: badge -->
 
@@ -169,6 +169,9 @@ What a hop can be for - its `goal`, one word
 | `rehearse` | the whole path the real run will take - copy, follow, prove, cut over - on a copy or a sample of the source into a target of its own, every phase timed, so the hop it rehearses (rehearses:) is forecast from what it measured |
 | `upgrade` | the same engine at a newer version, a higher edition (SQL Server Web to Enterprise), or both, with the least downtime: what the new version or edition changes checked first, then the data moved into it and followed, or a copy of its pages taken to the target where the hop allows it - upgraded there where the version moves - and switched over |
 | `subset` | a copy for testing: the rows chosen and every row they refer to, masked where the hop says, into a staging or developer database, proved row by row |
+| `consolidate` | many databases or tenants into one: each source's rows under a column the hop names, filled with its own value, keys kept apart by the hop's rule, proved source by source |
+| `split` | one database into many - a service extracted, a database split by region: each part's rows by its rule, every row placed exactly once, proved |
+| `archive` | old rows to cheaper storage: the rows each rule picks added to an archive and proved there, then removed from the source only once proved and only where the hop allows it |
 <!-- /gen_docs: goals -->
 
 ## Install
@@ -417,8 +420,9 @@ row-and-schema repair with undo, and rollback, across engines, for free.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q                    # full suite (spins up throwaway docker DBs)
 pytest tests/ -q -m "not docker"    # unit + fail-case only, no docker
+python tools/final_suite.py         # the whole suite: pure tests side by side,
+                                    # docker tests in lanes, a report
 ```
 
 100+ tests: pure-logic units, CLI-surface tests (every visible command, legacy

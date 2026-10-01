@@ -244,7 +244,6 @@ GAPS = {
          "who may use an application is the application's own, not"
          " carried"))},
     "ase": {
-        "deep": (NOT_YET, "34"),
         "sequences": (NOT_YET, "34"),
         "params": (NOT_YET, "34"),
         "bulk-move": (NOT_YET, "34"),

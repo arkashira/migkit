@@ -361,6 +361,48 @@ def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
         _interlock(hop, eng, d, go)
 
 
+def _scenario_checks(hop, eng, d, out, table, checks):
+    """A database's check results with the scenarios' proofs: a change of
+    character set proved in the new one (in place of a data check of each
+    side's own bytes, for the tables it covers whole), a change of storage
+    engine, and a split's rows each placed once - where the data is
+    checked, and the whole database."""
+    if table or "data" not in checks:
+        return out
+    from . import charsets, split, tableengine
+    from .engines.base import Result
+    for name, module, run in (
+            ("charset", charsets, lambda o: charsets.check(hop, eng, d, o)),
+            ("engine", tableengine,
+             lambda o: tableengine.check(hop, eng, d, o)),
+            ("split", split, lambda o: o + ([r.__dict__ for r in
+                                             split.prove(hop, eng, d)]
+                                            if split.settings(hop)
+                                            is not None else []))):
+        try:
+            out = run(out)
+        except Exception as e:  # noqa: BLE001 - said, as the hop asked it
+            # an error where the hop asks for the change; where it only
+            # may be one, the check stands as it did before without it
+            asked = module.settings(hop) is not None
+            out = out + [Result(name, d, "error" if asked else "skip",
+                                "could not be proved: "
+                                f"{str(e).strip()[:160]}").__dict__]
+    return out
+
+
+def _after_copy(hop, eng, d):
+    """Once a database's rows are in: the character set the hop asks for
+    made by the target's own conversion, double-encoded text repaired
+    (`charsets.after_copy`), and a table the target has in an old engine
+    converted in place (`tableengine.in_place`)."""
+    from . import charsets, tableengine
+    say = lambda m: console.print(f"  {_esc(m)}")  # noqa: E731
+    for line in (charsets.after_copy(hop, eng, d, say)
+                 + tableengine.in_place(hop, eng, d, say)):
+        say(line)
+
+
 def _tables_to_copy(hop, eng, d, table=""):
     """What a copy of `d` writes, as `list_move_tables` says it, or None
     where the engine has no copier to ask or a side does not answer - the
@@ -1597,13 +1639,18 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             console.print(f"  {_esc('[' + str(d) + ']')} {_esc(line)}")
         return s
 
-    from . import rehearsal, subset
+    from . import archive, consolidate, rehearsal, subset
 
     def run_db(d):
         if subset.settings(hop) is not None:
             # a copy for testing holds the rows chosen, not the source's
             # every row: it is proved against what it was to hold
             return [r.__dict__ for r in subset.check(hop, eng, d)]
+        for goal in (consolidate, archive):
+            if goal.settings(hop) is not None:
+                # the target holds other sources' rows, or rows the source
+                # no longer has: each is proved against what it holds
+                return [r.__dict__ for r in goal.check(hop, eng, d)]
         out = []
         began = time.time()
         position = _position(eng, d)
@@ -1693,7 +1740,7 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             # check phase of the next plan, this hop's or the one it
             # rehearses (`rehearsal.record_check`)
             rehearsal.record_check(hop, eng, d, time.time() - began)
-        return out
+        return _scenario_checks(hop, eng, d, out, table, checks)
 
     results = []
     pool = ThreadPoolExecutor(max_workers=max(1, int(workers or 1)))
@@ -2210,7 +2257,7 @@ def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
     stand in for a managed migration service on a trusted VM - the same
     move, the same repair and the same check as the commands of their
     own, and the exit code the last check's."""
-    from . import subset
+    from . import archive, consolidate, subset
     from .verdict import Usage
     if kind != "all" and mode != "reconcile" and _given("kind"):
         raise Usage(f"--kind picks what a repair of the last check's"
@@ -2235,6 +2282,16 @@ def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
                          f" {hop_name} --mode full --go, and proved by"
                          f" migkit check {hop_name}; sync makes a target"
                          " equal to the whole source. Nothing was written")
+    for goal in (consolidate, archive):
+        if mode != "verify" and goal.settings(get_hop(hop_name)) is not None:
+            # the target holds other sources' rows, or rows the source no
+            # longer has: made equal to this source it would lose them
+            raise SystemExit(f"{hop_name}'s goal is {goal.GOAL}: its target"
+                             " holds rows this source does not, and sync"
+                             " makes a target equal to the source. It is"
+                             f" carried by migkit move {hop_name} --mode"
+                             f" full --go and proved by migkit check"
+                             f" {hop_name}. Nothing was written")
     if mode != "reconcile":
         got = _orchestrate(hop_name, db, mode, do_apply or go, serve,
                            interval, on_conflict)
@@ -3037,6 +3094,8 @@ def _move_full(hop, eng, db, table, chunk, go):
         settled = eng.settle_target(d)
         if settled:
             console.print(f"  {settled}")
+        if not table:
+            _after_copy(hop, eng, d)
         console.print(f"[green]{d}: move complete[/green],"
                       " run migkit check to verify")
     if not go:
@@ -3988,6 +4047,19 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return subset.move(hop, eng, [db] if db else eng.databases(),
                            mode, table, go,
                            lambda m: console.print(f"  {m}"))
+    from . import archive, consolidate
+    if consolidate.settings(hop) is not None:
+        return consolidate.move(hop, eng, [db] if db else eng.databases(),
+                                mode, table, go,
+                                lambda m: console.print(f"  {_esc(m)}"))
+    if archive.settings(hop) is not None:
+        import sys
+        # the source's leave for its archived rows is asked only at a
+        # terminal (`sourcechange.settle_named`)
+        return archive.move(hop, eng, [db] if db else eng.databases(),
+                            mode, table, go,
+                            lambda m: console.print(f"  {_esc(m)}"),
+                            ask=_ask_change if sys.stdin.isatty() else None)
     if not table and not do_drop and _carried_physically(hop, eng, db, mode,
                                                          go):
         return
@@ -4110,8 +4182,11 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
                model=resource_model.for_move(hop, eng, d))
     steps = movers.run_via(v, hop, d, hop.workers, go,
                            lambda m: chat(f"  {m}"))
+    # the way that ran, which is another where the one asked for handed
+    # its work on (`movers.Ran`): its rate and its record are that way's
+    ran = getattr(steps, "via", v)
     if go:
-        _record_run(hop, eng, d, v, rows, began, spent)
+        _record_run(hop, eng, d, ran, rows, began, spent)
     for s0 in steps:
         console.print(f"  {s0}")
     if not go:
@@ -4123,13 +4198,14 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
     _refuse_if_nothing_arrived(hop, eng, d, "the bulk copy",
                                lambda m: chat(f"  {m}"))
     _held_to_the_source(hop, eng, d, lambda m: chat(f"  {m}"))
-    _changelog(hop, {"op": f"move-{v}", "db": d})
+    _changelog(hop, {"op": f"move-{ran}", "db": d})
     _record_copy(hop, d, point)
     # the load left the statistics behind it; the engine puts them right
     # before anybody queries the target
     settled = eng.settle_target(d)
     if settled:
         console.print(f"  {settled}")
+    _after_copy(hop, eng, d)
     console.print(f"[green]{d}: bulk copy complete[/green], run migkit"
                   " check to verify")
 

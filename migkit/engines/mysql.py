@@ -5243,8 +5243,12 @@ class MySQLEngine(Engine):
     @staticmethod
     def _retarget_grant(line, src_db, dst_db):
         """The source's own GRANT, pointed at the target's database name."""
+        # the target's name quoted, and handed over as it is: a backslash
+        # or a back quote in it is the name's, never the pattern's
+        there = "`" + str(dst_db).replace("`", "``") + "`"
         out = re.sub(r"(\sON\s+)`?" + re.escape(src_db) + r"`?(\s*\.)",
-                     r"\1`" + dst_db + r"`\2", line, flags=re.I)
+                     lambda m: m.group(1) + there + m.group(2), line,
+                     flags=re.I)
         return out.rstrip(";") + ";"
 
     @staticmethod

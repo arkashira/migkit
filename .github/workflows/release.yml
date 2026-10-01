@@ -19,8 +19,32 @@ permissions:
 
 jobs:
   verify:
+    # the final run's shards (tools/final_suite.py), one job each: the pure
+    # and docker tests, then each x86 engine on a runner of its own (a
+    # runner's disk holds one of those images at a time). Timeouts from
+    # the estimate in tools/final_suite.py; set from the first measured run
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: suite
+            minutes: 200
+            args: --strict server -m "not mssql and not db2 and not ase"
+            image: ""
+          - shard: mssql
+            minutes: 90
+            args: --strict server -m mssql
+            image: mcr.microsoft.com/mssql/server:2022-latest
+          - shard: db2
+            minutes: 90
+            args: --strict server -m db2
+            image: ""
+          - shard: ase
+            minutes: 90
+            args: --strict server -m ase
+            image: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,24 +54,32 @@ jobs:
         run: python tools/check_no_secrets.py
       - name: docker buildx
         uses: docker/setup-buildx-action@v3
-      - name: pull the database images up front
-        run: |
-          for img in postgres:16 mysql:8 mongo:7; do docker pull -q "$img" & done
-          wait
       - name: install client tools
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client default-mysql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client default-mysql-client unixodbc tdsodbc
+      - name: the SQL Server client the native checks drive, from its releases
+        if: matrix.shard == 'mssql'
+        run: |
+          curl -fsSL https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2 \
+            | sudo tar -xjf - -C /usr/local/bin sqlcmd
       - name: install
         run: |
           python -m pip install -U pip
-          pip install -e ".[mysql,mongo]" faker pytest
-      - name: full suite
-        run: pytest tests/ -q --junitxml=junit-release.xml
+          pip install -e ".[dev]"
+      - name: the suite, as the final run runs it
+        env:
+          # the full SQL Server where the shard is SQL Server's
+          IMAGE: ${{ matrix.image }}
+        run: |
+          if [ -n "$IMAGE" ]; then export MIGKIT_MSSQL_IMAGE="$IMAGE"; fi
+          python tools/final_suite.py ${{ matrix.args }}
       - name: keep the results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-test-results
-          path: junit-release.xml
+          name: release-test-results-${{ matrix.shard }}
+          path: reports/final-suite/
 
   build:
     needs: verify
@@ -72,12 +104,13 @@ jobs:
           [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-      - name: the tag must match the version in pyproject
+      - name: the tag must match the version in the package
+        # pyproject's version is dynamic: migkit/__init__.py's __version__
         run: |
-          PYVER=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          PYVER=$(python -c "import ast;print(next(n.value.value for n in ast.parse(open('migkit/__init__.py').read()).body if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == '__version__'))")
           if [ "$PYVER" != "${{ steps.tag.outputs.version }}" ]; then
-            echo "tag says ${{ steps.tag.outputs.version }} but pyproject says $PYVER"
-            echo "bump the version in pyproject.toml, then retag"
+            echo "tag says ${{ steps.tag.outputs.version }} but migkit/__init__.py says $PYVER"
+            echo "bump __version__ in migkit/__init__.py, then retag"
             exit 1
           fi
           echo "version $PYVER matches the tag"

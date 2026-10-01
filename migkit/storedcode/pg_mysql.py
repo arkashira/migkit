@@ -64,6 +64,7 @@ import re
 from sqlglot import exp
 from sqlglot.dialects.mysql import MySQL
 
+from .. import canon
 from .plpgsql import MYSQL_ERRNO, Converted, Emitter
 from .translate import Refused, generate, parse
 
@@ -78,8 +79,11 @@ class _RulesMySQL(MySQL):
                       exp.IntDiv: lambda self, e: self.binary(e, "DIV")}
 
 
-#: the collation every string of a converted routine is held in
-BINARY = " CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"
+#: the collation every string of a converted routine is held in: the one
+#: that compares byte by byte, as PostgreSQL's text does - named where
+#: every build asks it (`canon.limits`)
+BINARY = (" CHARACTER SET utf8mb4 COLLATE"
+          f" {canon.LIMITS['mysql'].binary_collation}")
 
 #: MySQL's reserved words, and the words its SET reads as a statement of
 #: its own (`SET names = ...` sets the connection's character set): a

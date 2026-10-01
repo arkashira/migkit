@@ -2855,11 +2855,11 @@ is migrated." The cases, what migkit has (at fb5c988), what is missing:
 | Platform: on-prem<->cloud, cloud<->cloud, region, account | proved AWS<->Tencent; cloud snapshots across accounts; physical seeds | Tencent Cloud and Alibaba Cloud APIs beside AWS/Azure/GCP in `cloudseed`: snapshots as restore points before cutover (a real run had to script it by hand), clones and restores, credentials resolved the way the provider's own CLI does |
 | Self-managed<->managed, managed<->managed (EC2->RDS, RDS->Aurora, single->flexible server) | physical and logical rungs, cloud clones | the managed service's own blue/green or upgrade path as a rung where it exists |
 | Hardware / OS / architecture (x86->ARM, Windows->Linux SQL Server) | a logical move | said as its own case; byte-order and collation facts where they differ |
-| Character set / collation change (latin1->utf8mb4, ICU version) | collation merges refused, mojibake repair queued | a planned conversion with every value proved in the new charset, indexes rebuilt |
-| Storage engine change (MyISAM->InnoDB, Aria, MEMORY) | - | converted in the schema step, with the behaviours that change (transactions, FK, full-text) said |
-| Consolidation (many databases or tenants into one) and split (one into many, a service extracted) | `db_map`, mappings, row filters | a tenant key added on the way, collisions of keys across sources found first, a split by rule with every row placed exactly once, proved |
+| Character set / collation change (latin1->utf8mb4, ICU version) | BUILT (`charsets`, the case's rows): every text column's character set and collation read on both sides (MySQL, PostgreSQL, SQL Server, Oracle, Db2 catalogues; Unicode-only engines by their word), or asked by the hop (`charset: {to, collation, repair}`); a value the target's character set has no code for refused by key; UTF-8 stored twice found and repaired on the target (`repair: double-encoded`, the default where a conversion is asked); every unique key over text put to the target's own comparison (`key_merges`, PostgreSQL's nondeterministic collations now too) and two values it takes for one refused; MySQL's index and row limits counted in the new character set's bytes; MySQL converted on the target after the rows are in, column by column keeping each type, the whole table where a value no longer fits (`decide.attempt`); every row proved by key as converted (an order-free digest a side), the proof standing in for a data check of each side's bytes; the schema check holding the rest; PostgreSQL's sort-order libraries compared, a copy of the pages told to reindex. The mojibake check and its repair on every engine with character sets (SQL Server, Oracle, Db2, ASE, Teradata beside MySQL and PostgreSQL, through the neutral contract) | Oracle's and Db2's column collations are not put to the target (their default comparison is exact); ASE's and Teradata's character sets are not read, only their text checked for UTF-8 stored twice |
+| Storage engine change (MyISAM->InnoDB, Aria, MEMORY) | BUILT (`tableengine`): each table's engine on both sides and the target's own engines read; the hop's `table_engine: {to, accept, foreign_keys}`, and a target lacking the source's engine, made in the schema step (the definition rewritten: its ENGINE, the options only the old engine reads, a key for per-group numbering, the hop's foreign keys) or in place after the copy - a way climbed; transactions, foreign keys, full-text (each side's own settings read), locking, MEMORY's lost rows, BLACKHOLE, ARCHIVE's compression said; per-group AUTO_INCREMENT refused unless accepted; MERGE refused with the view to make, remote engines unless accepted, virtual ones refused; rows a foreign key would now refuse counted on the source and refused before the move; after it, every table's engine and every such key proved on the target, a schema check that differs by the plan alone said as the plan | ClickHouse table engines and PostgreSQL access methods are not compared |
+| Consolidation (many databases or tenants into one) and split (one into many, a service extracted) | BUILT (`consolidate`, `split`): goal `consolidate` - a tenant column filled per source (`column`, `value`/`values`), the sources of this hop and the hops it names (`with`) held together; every key two sources hold found before the move and refused, or kept apart by the rule as a climbed way: `tenant` (the column leads the key), `offset` (each source's integer keys and the references to them shifted), `remap` (offsets a stride apart worked out and kept); shifted ranges that meet, or pass their column, refused; counters raised past every source's keys and proved; every source's rows proved by key under its value, rows under no source's value named; batches written by the bulk way or the plainest (`decide.attempt`). Goal `split` - each part's rows by its own row filter and scope, every source row counted against every part's rule on the source before the move (nowhere refused unless `rest: stays`, twice unless `shared`), after it each key in exactly one part's target and the targets together the rows the rules place, references across the split counted and said | a consolidation or a split is carried once (`--mode full`): following each source's changes into the shared target is not a way yet |
 | Resharding / topology (single<->cluster, shard split/merge) | W7 open | W7 |
-| Archive / partial moves (old rows to cheaper storage) | row filters | the source rows removed only after the target is proved and only where the hop allows |
+| Archive / partial moves (old rows to cheaper storage) | BUILT (`archive`): goal `archive` - the rows each table's rule picks (`mapping.where`; a table with none refused) added to the archive, what it holds kept and never overwritten (a row held otherwise refused by key), each batch read back; removed from the source only with `archive: {remove: true}`, the source's own answer by its name (`source_changes: {archived_rows: yes}`, or asked at a terminal and recorded - never a word for every change) and the hop's approvals (`source-setting`): each row read again on both sides and removed only where the archive holds it as the source has it now, children first, never a row other rows still name; each batch's keys and digests kept in a ledger before it goes (resumable), the write recorded in the source's changelog; removed by the batch or a row at a time (`decide.attempt`); `archive: {restore: true}` puts every removed row back; the proof holds every removed row to its digest in the archive | removal is through the source engine's own delete by key: an engine without one keeps its rows and says so |
 | Zero-downtime with a way back, active-active during the move | cutover path, stream back, two-way | cutover gaps (running) |
 | Heterogeneous (commercial -> open source, relational <-> NoSQL/search/stream, OLTP -> warehouse/lake, mainframe, SaaS) | 28 engines, canon, stored-code proof | engine reach (running), P0-PARITY |
 | Test copies, DR drills, backup restores checked, replica drift | subsets, check between any two, rehearsal | - |
@@ -3190,6 +3190,26 @@ the offline bundle (P0/P1, L).** Files: `migkit/runner.py` (new),
   `uuid_text` faster (SP14, SP18 canon part); version parsing in one place
   (DU23).
 * Running work: `canon.py` (P0-PARITY large values).
+* Done 2026-10-01: every account and role name into target DDL through the
+  engine's own quoting and every value bound, on every engine `users`
+  carries, `dba`'s scripts and the PostgreSQL and MySQL grant repairs
+  (`_grant_sql`, `_retarget_grant`); `drift` on `catalog.Catalog` (kept as
+  (column, text) pairs, read back whole, one comparer and one explanation,
+  a narrowing named by `verdict.narrowing`) with SQL Server's
+  `shape_catalog`; SQL Server's check compares every table whole, its
+  permissions by class and column with their grant option, logins by SID
+  and policy, one kept connection, its own `ok`; users' one result shape,
+  roles first and a ledger with undo, `create` ending on a compare, the
+  target's auth plugins asked; `reload` for rows a partition DDL changes;
+  every clause of an ALTER read; `canon.limits`, `citext`, faster
+  `sql_rows`/`digest_step`/`uuid_text`. Left, with why: PostgreSQL and
+  MySQL `shape_catalog` (AUD-G1/G2's files); exact-width integers and
+  routines typed through `ddl_type` - either changes every cross-engine
+  build or cuts a routine's text at 1,024 characters, and the stored-code
+  rules are the conversion-breadth work's; `system_principals_sql` adopted
+  in the PostgreSQL and MySQL grant and assess filters, `freeze`, and
+  `toolversion.server_major` in `physical._series`/`jobs._my_off` (their
+  owners' files).
 
 **AUD-G1. The PostgreSQL engine: one connection, one catalogue read, one
 quoting (P0, L).** Files: `migkit/engines/postgres.py`,
@@ -3268,6 +3288,33 @@ final run (P0, M).** Files: `tests/conftest.py`, `tests/servers.py` (new),
   check reads `migkit/__init__.py`; `requires-python = ">=3.10.12"` (T12,
   W21, W24).
 
+*Done 2026-10-01.* As built, where it differs from the plan above: the
+docker tests run in **lanes** - one pytest process each, on the default
+colima profile and on the migkit VM at once, as many as each daemon's free
+memory holds - not in xdist groups, because the modules not yet moved fix
+host ports and container names: files that fix one port or name share a
+lane, files naming the `pg_pair` pair's fixed 55432/`migkit-test-pg-*` run
+on lane 0 (the only lane that keeps them; any other fails such a file
+loudly), heavy files only where a lane may hold them, balanced by
+`reports/final-suite/times.json`. A lane (`MIGKIT_TEST_LANE`) and an xdist
+worker give each process its port block (20000 + 60 x index, under the
+ephemeral ports the colima VM hands out) and name
+suffix. `vm` is marked by what a test reaches (its fixtures and the helpers
+they call name an x86 or Oracle image), not by file name, so the pure and
+PostgreSQL-only tests in `oracle`/`sql_server` files stay where they were.
+`with_docker_lock.py` hands out lanes: a command waits only for the host
+ports and names its test files fix (and lane 0 for the pinned ones); one it
+cannot read takes the whole of docker as before; the VM is stopped by the
+last user. `pg_pair` and `my_pair` are the shared `pg`/`mysql` profiles,
+module-scoped, reset at module end. `MIGKIT_TEST_STRICT` takes `1` or the
+kinds (`server`, as CI, where programs needing accepted terms are absent).
+`final_suite.py` refuses a checkout the installed editable migkit has
+modules beyond (a run would import them from the other tree), stops a lane
+silent past its test's timeout and goes on, and records the run in
+`reports/final-suite/<stamp>/`. Estimate with no measured times: ~53 min a
+lane in four lanes (default profile 1, VM 3) plus the pure phase, from the
+2026-09-27 whole run scaled; AUD-T2 replaces it with the measured run.
+
 ### Wave 2 (after wave 1 merges)
 
 **AUD-H. The pair's core: one schema comparer, one catalogue, both sides at
@@ -3333,7 +3380,16 @@ nothing `pg_pair` lacks; 43 MySQL files a stock server), hard-coded ports
 and names gone, the 144 fixed waits on `until()` and the tail's own
 caught-up sign, `docker exec` SQL through the driver; then the final run
 measured and its numbers written into `tools/final_suite.py` (T1, T4, T9,
-T10).
+T10). The pattern is at the top of `tests/servers.py` (a module fixture
+from `servers.fixture("<profile>")`, the module's `.name` for what the hop
+names, `server.sql()`, `servers.private()` for a server a test must own,
+`servers.image()` for a built image). Then: the 24 files pinned to lane 0
+read `pg_pair`'s ports instead of 55432/`migkit-test-pg-*`; `cap_pairs`,
+`typepair` (whose session fixture is also called `servers`) and the other
+helpers move onto profiles; every `-p` mapping binds 127.0.0.1 and a lint
+test in `test_the_suite_runs_in_lanes.py` holds every test file to no fixed
+host port (today it holds only the lanes' range and the shared helpers);
+the image scan reads only images a file runs, not ones its strings name.
 
 **AUD-Z. The sweep: every leftover site on the one helper, lint tests that
 keep it so (P1, M).** Files: whatever no group held -

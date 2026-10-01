@@ -1,5 +1,4 @@
 import re
-import signal
 import sys
 import time
 
@@ -7,10 +6,6 @@ from .. import fencing, pieces, tailtables
 from ..decide import Rung
 from ..util import is_transient
 from .base import Engine, RepairAction, Result
-
-
-def _stop_on_term(signum, frame):
-    raise KeyboardInterrupt
 
 
 def _digests_ranges(engine):
@@ -4020,14 +4015,14 @@ class HeteroEngine(Engine):
         window = (self.dst_engine.load_window(db, log, set(targets.values()))
                   if go else None)
         # a service manager stops a process with SIGTERM, which ends it
-        # without unwinding: taken as ctrl-c, so what the tail set aside on
-        # the target goes back and its marker comes down
+        # without unwinding: taken as ctrl-c, the one way every program
+        # migkit runs is stopped (`runner.stopping`), so what the tail set
+        # aside on the target goes back and its marker comes down
         term = None
         if go:
-            try:
-                term = signal.signal(signal.SIGTERM, _stop_on_term)
-            except ValueError:
-                pass
+            from .. import runner
+            term = runner.stopping()
+            term.__enter__()
         # the collector's passes held to what the batches leave (`_batch_gc`)
         gc_back = _batch_gc() if go else None
 
@@ -4265,7 +4260,7 @@ class HeteroEngine(Engine):
                     if sys.exc_info()[0] is not None and why:
                         notify.tail_stopped(self.hop, db, why, log)
                 if term is not None:
-                    signal.signal(signal.SIGTERM, term)
+                    term.__exit__(None, None, None)
 
     def _tail_batch(self, db, changes, lacking, tables, policy, two_way,
                     token, targets, copied, accounts, log):

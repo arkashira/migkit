@@ -85,6 +85,16 @@ def test_statements_that_are_not_this_problem(stmt):
     ("alter table `d`.`t` add column `n` text not null;", "d.t", "n"),
     ("ALTER TABLE t ADD COLUMN n TEXT NOT NULL;", "t", "n"),
     ("alter table t add n text not null;", "t", "n"),
+    # every clause of one ALTER, atlas's usual shape: the second was
+    # never read
+    ("ALTER TABLE t ADD COLUMN a int NOT NULL DEFAULT 0, ADD COLUMN note"
+     " text NOT NULL;", "t", "note"),
+    ("alter table t add constraint c check (a is not null), add column"
+     " e enum('x, not null', 'y') default 'y' not null, add column n int"
+     " not null;", "t", "n"),
+    ("alter table t add (x int not null, y int default 1 not null);", "t",
+     "x"),
+    ("alter table `my t` add column `a b` int not null;", "my t", "a b"),
 ])
 def test_the_shapes_it_has_to_read(stmt, table, column):
     """Both engines quote their identifiers, and an operator may have

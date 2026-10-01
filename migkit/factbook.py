@@ -330,6 +330,14 @@ for _name, _what, _group, _how in (
      " keys quiet while rows are written", "side", READ),
     ("write refused", "why rows may not be written into the target's"
      " tables at all, or nothing", "side", READ),
+    # --- the scenarios of a move (`tableengine`, `consolidate`) -------------
+    ("there", "whether the target has the table already", "table", READ),
+    ("rule", "how the hop keeps the keys of its sources apart", "context",
+     GIVEN),
+    ("clash", "whether two sources hold one key of a table", "table",
+     READ),
+    ("integer", "whether a table's key is one whole-number column",
+     "table", READ),
 ):
     declare(_name, _what, _group, _how)
 

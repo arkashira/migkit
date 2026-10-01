@@ -106,7 +106,7 @@ def test_a_difference_in_permissions_is_its_own_finding(pair, seeded):
                       ">CHANGE_ME_rep")
     out, _ = users.compare(seeded, say=lambda m: None)
     assert out["missing_on_target"] == [], out
-    assert out["rules_differ"] == ["ops"], out
+    assert out["grants_missing"] == ["ops"], out
     assert out["password_differs"] == [], out
 
 
@@ -135,7 +135,10 @@ def test_create_carries_the_missing_user_with_its_password(pair, seeded):
     import redis
 
     from migkit import users
-    users.create(seeded, apply=True, say=lambda m: None)
+    # report's other password is said, not overwritten - so create ends
+    # on the gap it leaves
+    with pytest.raises(SystemExit, match="still differs.*report"):
+        users.create(seeded, apply=True, say=lambda m: None)
     s, t = pair
     assert "ops" in t.acl_users()
     logged_in = redis.Redis(port=DST_PORT, username="ops",
@@ -149,7 +152,8 @@ def test_create_carries_the_missing_user_with_its_password(pair, seeded):
 
 def test_rollback_removes_only_what_create_made(pair, seeded):
     from migkit import users
-    users.create(seeded, apply=True, say=lambda m: None)
+    with pytest.raises(SystemExit, match="still differs"):
+        users.create(seeded, apply=True, say=lambda m: None)
     users.rollback(seeded, apply=True, say=lambda m: None)
     s, t = pair
     assert "ops" not in t.acl_users()

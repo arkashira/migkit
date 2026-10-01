@@ -591,7 +591,7 @@ def test_profiles_and_object_authorities_are_compared(monkeypatch, tmp_path):
     monkeypatch.setattr(Db2iEngine, "_rows", rows)
     out, _ = users.compare(hop, say=lambda m: None)
     assert out["missing_on_target"] == ["profile:OPS"]
-    assert out["grants_differ"] == ["profile:APPUSR"]
+    assert out["grants_missing"] == ["profile:APPUSR"]
     assert out["result"] == "gap"
     grants["dst"][0] = ("ORDERS", "APPUSR", "*CHANGE")
     profiles["dst"].append(profiles["src"][1])

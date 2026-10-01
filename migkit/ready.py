@@ -16,7 +16,11 @@ known now would stop it half way:
   down, an edition change - what the source uses that the target has not
   (`lacks`), what the target's edition leaves behind and its caps
   (`editions`) - each refused with its fix where it would stop the move
-  or change what the target keeps;
+  or change what the target keeps; and the scenarios of the move itself
+  (`case.scenario_rows`): a change of character set or collation
+  (`charsets`) or of storage engine (`tableengine`), a consolidation, a
+  split, an archive - each value, key and row that would not arrive as it
+  is refused by name;
 * the path: a mapping that would land two tables on one, the goal's own
   checks - an upgrade's (`upgrade.checks`), a subset's rules
   (`subset.problems`) - and the cutover as it is set up;
@@ -45,6 +49,8 @@ from dataclasses import dataclass
 BEFORE = "before the move"
 CUTOVER = "at the cutover"
 AFTER = "after the move"
+#: the goals whose target holds rows the move keeps on purpose
+OWN_ROWS = ("consolidate", "archive")
 
 
 @dataclass
@@ -151,10 +157,14 @@ def _target(hop, eng, dbs):
     if _goal(hop) == "verify":
         return []
     out = []
+    # a consolidation writes beside the other sources' rows, an archive
+    # adds to what it holds: each says itself whose rows a table holds
+    # (`case.scenario_rows`), so the tables are not asked here
+    own_rows = _goal(hop) in OWN_ROWS
     for d in dbs:
         try:
             tables = eng.list_move_tables(d) if interlock.reached(hop) \
-                else None
+                and not own_rows else None
         except Exception:  # noqa: BLE001 - asked below without the tables
             tables = None
         try:

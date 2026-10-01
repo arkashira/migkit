@@ -226,13 +226,15 @@ def test_roles_users_and_grants_are_carried_and_taken_back(servers,
     assert {"role:analyst", "user:ana", "user:nopw"} <= \
         set(out["missing_on_target"]), out
     said = []
-    users.create(hop, apply=True, passwords={"ana": "CHANGE_ME-ana"},
-                 say=said.append)
+    # nopw is skipped and said, and the gap it leaves fails the create
+    with pytest.raises(SystemExit, match="still differs.*nopw"):
+        users.create(hop, apply=True, passwords={"ana": "CHANGE_ME-ana"},
+                     say=said.append)
     assert any("skipped user nopw" in m for m in said), said
     out, _ = users.compare(hop, [].append)
     assert "user:ana" not in out["missing_on_target"]
     assert "role:analyst" not in out["missing_on_target"]
-    assert out["grants_differ"] == [], out
+    assert out["grants_missing"] == [], out
     # the password given is the one the target signs ana in with
     import clickhouse_connect
     c = clickhouse_connect.get_client(host="127.0.0.1", port=DST[1],
