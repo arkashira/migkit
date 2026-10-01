@@ -225,6 +225,41 @@ SECOND_READER = "second-reader"
 SECOND_READER_PACKAGE = "google-pso-data-validator==8.9.3"
 SECOND_READER_LICENCE = "Apache-2.0"
 
+#: Huawei Cloud's SDK lives in an environment of its own too: it pins
+#: pymongo 4.15.1 and pyasn1 0.6.3, older than migkit's, and is driven as
+#: a program (`migkit.huawei_sdk`)
+HUAWEI_SDK = "huawei-sdk"
+#: the release read for its requests' and answers' fields
+HUAWEI_SDK_PACKAGES = ("huaweicloudsdkcore==3.1.216",
+                       "huaweicloudsdkrds==3.1.216",
+                       "huaweicloudsdkdds==3.1.216",
+                       "huaweicloudsdkiam==3.1.216")
+#: {environment: its packages} `install_missing` makes where missing
+OWN_ENVS = {HUAWEI_SDK: HUAWEI_SDK_PACKAGES}
+
+
+def own_env(name):
+    """Where the environment of its own called `name` lives."""
+    return Path.home() / ".migkit" / name
+
+
+#: the variable that names each environment's Python where it is
+#: elsewhere (`envkeys`)
+OWN_ENV_PYTHON = {HUAWEI_SDK: "MIGKIT_HUAWEI_SDK_PYTHON"}
+
+
+def own_env_python(name):
+    """The environment's Python, or None where it is not installed here.
+    Named by its variable (`OWN_ENV_PYTHON`) - and then only that, so a
+    test can say it is absent."""
+    from . import envkeys
+    named = envkeys.text(OWN_ENV_PYTHON[name]) if name in OWN_ENV_PYTHON \
+        else ""
+    if named:
+        return named if Path(named).exists() else None
+    found = own_env(name) / "bin" / "python"
+    return str(found) if found.exists() else None
+
 
 def names():
     """Every name a program migkit runs goes by, in the registry and in
@@ -1253,6 +1288,14 @@ def install_missing(log=print, ask=None):
                 " to see which capability is still short")
     if not _present(SECOND_READER):
         install_second_reader(log)
+    envs = [name for name in OWN_ENVS if own_env_python(name) is None]
+    for n, name in enumerate(envs, 1):
+        install_own_env(
+            own_env(name), OWN_ENVS[name], log,
+            (f"installing component {n} of {len(envs)} in an environment of"
+             " its own ...",
+             f"  component {n} did not install; everything else still"
+             " works, and migkit doctor --install tries again"))
     if redo and answer.get(REDO_READER_CLIENT):
         install_redo_reader(log)
     if not _present(COMPILED_MOVER):
@@ -1766,32 +1809,48 @@ def install_second_reader(log=print):
     index at all where one is named. Said in migkit's words; the package
     is nobody's business but migkit's.
     """
-    import sys
-    home = Path.home() / ".migkit" / "second-reader"
-    log("installing the independent second reading in its own environment"
-        " (a large download, once) ...")
     what = (["-r", str(SECOND_READER_LOCK), "--require-hashes"]
             if SECOND_READER_LOCK.exists() else [SECOND_READER_PACKAGE])
     bundle = _bundle()
     if bundle is not None:
         what += ["--no-index", "--find-links",
                  str(bundle.root / "second-reader")]
+    return install_own_env(
+        own_env(SECOND_READER), what, log,
+        ("installing the independent second reading in its own environment"
+         " (a large download, once) ...",
+         "  the second reading did not install; everything else still"
+         " works, and migkit doctor --install tries again"))
+
+
+def install_own_env(home, packages, log, said):
+    """An environment of its own at `home` with `packages` in it - their
+    names, or a lock's arguments - beside migkit's, for a library whose
+    dependencies would break migkit's. `said` is (the line said before,
+    the line said where it did not install). On Python 3.12 where the
+    package manager can fetch one; a program the machine does not have is
+    a failed install, said as such."""
+    import sys
+    first, failed = said
+    log(first)
     uv = which("uv")
-    failed = "the second reading did not install"
     quiet = (lambda m: None)
-    if uv:
-        made = _step([uv, "venv", "-q", "--python", "3.12", str(home)],
-                     quiet, failed) and _step(
-            [uv, "pip", "install", "-q", "--python",
-             str(home / "bin" / "python"), *what], quiet, failed)
-    else:
-        made = _step([sys.executable, "-m", "venv", str(home)], quiet,
-                     failed) and _step(
-            [str(home / "bin" / "pip"), "install", "-q", *what], quiet,
-            failed)
+    why = failed.strip()
+    try:
+        if uv:
+            made = _step([uv, "venv", "-q", "--python", "3.12", str(home)],
+                         quiet, why) and _step(
+                [uv, "pip", "install", "-q", "--python",
+                 str(home / "bin" / "python"), *packages], quiet, why)
+        else:
+            made = _step([sys.executable, "-m", "venv", str(home)], quiet,
+                         why) and _step(
+                [str(home / "bin" / "pip"), "install", "-q", *packages],
+                quiet, why)
+    except OSError:
+        made = False
     if not made:
-        log("  the second reading did not install; everything else still"
-            " works, and migkit doctor --install tries again")
+        log(failed)
         return False
     return True
 
@@ -1923,7 +1982,8 @@ AGPL_COMPATIBLE = {
     "0BSD", "AGPL-3.0-only", "AGPL-3.0-or-later", "Apache-2.0",
     "BSD-2-Clause", "BSD-3-Clause", "BSL-1.0", "CC0-1.0", "GPL-2.0-or-later",
     "GPL-3.0-only", "GPL-3.0-or-later", "HPND", "ISC", "LGPL-2.1-only",
-    "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "MIT",
+    "LGPL-2.0-or-later", "LGPL-2.1-or-later", "LGPL-3.0-only",
+    "LGPL-3.0-or-later", "MIT",
     "MIT-0", "MPL-2.0", "PSF-2.0", "Python-2.0", "UPL-1.0", "Unlicense",
     "Zlib", "PostgreSQL",
 }
@@ -1952,6 +2012,11 @@ _SPDX = [
     (r"^lgpl with exceptions$", "LGPL-3.0-or-later"),
     (r"^gnu general public license v3 or later \(gplv3\+\)$",
      "GPL-3.0-or-later"),
+    (r"^gnu lesser general public license v2 or later \(lgplv2\+\)$",
+     "LGPL-2.0-or-later"),
+    (r"^universal permissive license(?: \(upl\))?(?:,? (?:v|version )?1\.0)?$",
+     "UPL-1.0"),
+    (r"^mit no attribution(?: license)?(?: \(mit-0\))?$", "MIT-0"),
 ]
 
 
@@ -2003,10 +2068,13 @@ def _licences_of(dist):
     meta = dist.metadata
     expr = meta.get("License-Expression")
     raw = (meta.get("License") or "").strip()
-    if not expr and re.fullmatch(r"[\w.+-]+(\s+OR\s+[\w.+-]+)+", raw):
-        # an SPDX expression of alternatives written in the free-text
-        # field (simplejson's `MIT OR AFL-2.1`)
-        expr = raw
+    parts = re.split(r"\s+(OR|AND)\s+", raw) if "\n" not in raw else [raw]
+    if not expr and len(parts) > 1:
+        # an expression written in the free-text field - alternatives
+        # (simplejson's `MIT OR AFL-2.1`, `BSD 3-Clause OR Apache-2.0`) or
+        # both (`Apache-2.0 AND MIT`) - each part in SPDX's words
+        expr = " ".join(p if p in ("OR", "AND") else spdx_of(p)
+                        for p in parts)
     if expr:
         # `A OR B` is either, at the user's choice; `A AND B` is both
         alts = [a.strip("() ") for a in re.split(r"\s+OR\s+", expr)]

@@ -67,6 +67,7 @@ class Ctx:
     name: str = ""         #: a publication's name
     short: list = field(default_factory=list)   #: privileges it lacks
     docdb: bool = False
+    before: str = ""       #: a setting's value before the change
 
     @property
     def cloud(self):
@@ -80,6 +81,13 @@ class Ctx:
     def aurora(self):
         return self.aws and "aurora" in (getattr(self.where, "service", "")
                                          or "")
+
+    def admin(self, engine):
+        """What the managed-service catalogue says the side's service
+        gives its admin ({} for a server run by its owner)."""
+        from . import managed
+        got = managed.service_of(self.where, engine)
+        return dict(got.admin or {}) if got is not None else {}
 
 
 @dataclass(frozen=True)
@@ -119,6 +127,34 @@ def _setting(engine, name, value, restart=False):
         r = restart(c) if callable(restart) else restart
         return spell(engine, c.where, name, value, r, c.label)
     return (lambda c: both(c)[0]), (lambda c: both(c)[1])
+
+
+def _by_service(c, engine, what, default=""):
+    """(statements, lines said about the cloud) of one of the side's
+    service's own templates (`admin.<what>` in the managed-service
+    catalogue), `default` on a server run by its owner or a service that
+    has none (`managed.statement`)."""
+    from . import managed
+    template = c.admin(engine).get(what) or default
+    return managed.statement(template, c.who)
+
+
+def _undone(statements):
+    """Each statement taken off again (`managed.undo_of`)."""
+    from . import managed
+    return [u for u in (managed.undo_of(s) for s in statements) if u]
+
+
+def _spelled(c, engine, name, value):
+    """A setting changed through the side's provider, as one line - the
+    provider's own command where the catalogue has one, its words
+    otherwise (`managed.spell`) - which the change's runner carries out
+    through the provider's API."""
+    from . import managed
+    got = managed.spell(engine, c.where, name, value, False, c.label)
+    if not got:
+        return [f"set global {name} = {value};"]
+    return [(got[1] or got[0])[-1]]
 
 
 def _ms(name):
@@ -215,10 +251,14 @@ DEFINITIONS = {d.name: d for d in (
     Definition(
         "replication_role", "postgres", "the right to read the change log"
         " (replication)",
-        make=lambda c: ([f"grant rds_replication to {c.who};"] if c.aws
-                        else [f"alter role {c.who} with replication;"]),
-        undo=lambda c: ([f"revoke rds_replication from {c.who};"] if c.aws
-                        else [f"alter role {c.who} with noreplication;"])),
+        make=lambda c: _by_service(c, "postgres", "replication",
+                                   "alter role {who} with replication;")[0],
+        undo=lambda c: _undone(_by_service(
+            c, "postgres", "replication",
+            "alter role {who} with replication;")[0]),
+        outside=lambda c: _by_service(c, "postgres", "replication",
+                                      "alter role {who} with"
+                                      " replication;")[1]),
     Definition(
         "publication", "postgres", "a publication of every table's changes",
         make=lambda c: [f"-- in database {c.db}:",
@@ -241,11 +281,27 @@ DEFINITIONS = {d.name: d for d in (
                make=_IMAGE[0], outside=_IMAGE[1]),
     Definition(
         "binlog_retention", "mysql", "a log kept a day or more",
-        make=lambda c: (["call mysql.rds_set_configuration('binlog retention"
-                         " hours', 24);"] if c.aws else _EXPIRE[0](c)),
-        outside=lambda c: [] if c.aws else _EXPIRE[1](c),
+        make=lambda c: (_by_service(c, "mysql", "binlog_retention")[0]
+                        if c.admin("mysql").get("binlog_retention")
+                        else _EXPIRE[0](c)),
+        outside=lambda c: (_by_service(c, "mysql", "binlog_retention")[1]
+                           if c.admin("mysql").get("binlog_retention")
+                           else _EXPIRE[1](c)),
         without="without it the log a stream reads from may be gone before"
                 " it is read, and the copy is made again"),
+    # the whole server read-only through the provider's parameter group,
+    # where the account the service gives may not switch it itself (no
+    # SUPER): a way of the cutover's freeze (`freeze.MySQLHold`), made
+    # through the provider's API and taken off at the thaw
+    Definition(
+        "param_read_only", "mysql",
+        "the server read-only through its parameter group (read_only 1)",
+        make=lambda c: _spelled(c, "mysql", "read_only", "1"),
+        undo=lambda c: _spelled(c, "mysql", "read_only", c.before or "0"),
+        speeds=False, after="when the cutover gives the source back",
+        without="the application's grants are revoked per database"
+                " instead, and an account that writes server-wide is"
+                " named rather than stopped"),
     Definition(
         "replication_grants", "mysql",
         "the right to read the binary log (replication)",
@@ -842,6 +898,14 @@ def undo_left(hop, run, log):
     return ok
 
 
+def entry(hop, entry_id):
+    """The change recorded under `entry_id` (`put_on`), or None."""
+    for e in _record(hop).get("made") or []:
+        if entry_id and e.get("id") == entry_id:
+            return e
+    return None
+
+
 def left_on_source(hop):
     """The changes recorded as made and not taken off: for `doctor`."""
     return [e for e in _record(hop).get("made") or []
@@ -855,6 +919,26 @@ def making(hop, change, facts, run, db, log, version=""):
     block or on any failure. `run(statement)` runs one statement on the
     source. The server refusing it is recorded (`refused_here`) and raised
     as `Refused`, what it had made taken off first."""
+    entry = put_on(hop, change, facts, run, db, log, version)
+    try:
+        yield entry
+    finally:
+        _take_off(hop, entry, run, log)
+
+
+def take_off(hop, entry, run, log):
+    """What `put_on` made taken off again, from its entry: True where
+    nothing is left (`_take_off`)."""
+    return _take_off(hop, entry, run, log)
+
+
+def put_on(hop, change, facts, run, db, log, version=""):
+    """`change` made on the source and left on - for a change that lasts
+    past one block, as a freeze of the cutover's lasts to its thaw: behind
+    the hop's approvals, recorded before it acts; the entry `take_off`
+    takes it off with, as the next run does where this one is killed
+    (`undo_left`). The server refusing it is recorded (`refused_here`) and
+    raised as `Refused`, what it had made taken off first."""
     from . import approvals
     make = change.statements(facts)
     undo = change.statements(facts, "undo")
@@ -893,10 +977,7 @@ def making(hop, change, facts, run, db, log, version=""):
         raise
     _state(hop, entry["id"], "made")
     log(f"on the source: {change.said} put on ({'; '.join(make)})")
-    try:
-        yield entry
-    finally:
-        _take_off(hop, entry, run, log)
+    return entry
 
 
 def said_by_doctor(hop):

@@ -253,8 +253,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> was restored with no change tracking version, so nothing says where its changes go on from
 
-* <...> was not ready within <...>s
-
 * the Aurora copy did not say the LSN its storage starts from
 
 * the copy holds less than the oldest binlog the source still keeps (<...>): the changes between were purged, and nothing can carry them
@@ -276,6 +274,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...> runs <...> after its upgrade to <...>
 
 * the upgrade failed: <...>
+
+* a <...> copy is not upgraded through its API by migkit; the logical copy carries an upgrade
 
 * MIGKIT_TABLE_COPY=<...> is not one of <...>
 
@@ -515,6 +515,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * cutover: no_return is later (its own run of the command, once the flip is done) or at_flip
 
+* cutover: restore_points lists the sides a restore point is taken of through their provider's API before the clock: <...>
+
 * cutover: budget and start_below are seconds
 
 * cutover: pooler is {kind: pgbouncer or pgcat, host, port, user, password, databases}
@@ -539,7 +541,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is past the point of no return (approved by <...>): the stream back is dropped and the old source takes its own writes, so nothing the target took since is on it. Nothing was done
 
+* <...> of the application's sessions could not be ended - migkit's account may not end them
+
 * the <...> is not held by migkit here: <...>
+
+* the provider made read_only 1, and the server still reads it off
+
+* read_only could not be given back through the provider; it is recorded, and the next run takes it off
 
 * a <...> side is not held by migkit
 
@@ -1353,6 +1361,110 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * charset: <...> is not a character set or collation name
 
+* <...> was not ready within <...>s
+
+* <...> is <...>
+
+* migkit asks no API of <...>; it asks <...>
+
+* <...>'s API is asked here for <...>; <...> is not one of them
+
+* <...> has no restore point ready to copy from: make one first
+
+* the AWS CLI has no profile <...>
+
+* no AWS credentials: looked in the environment (AWS_ACCESS_KEY_ID), the CLI's credentials and config files (profile <...>), its single sign-on login, a web identity token, the container's role and the instance's role
+
+* <...> has no parameter <...> in its parameter groups
+
+* <...> cannot be changed on <...>
+
+* <...> runs with the provider's default parameter group <...>, which is never changed: give it a group of its own first
+
+* no Google Cloud credentials: looked at the key file GOOGLE_APPLICATION_CREDENTIALS names, gcloud's application default login and the instance's service account
+
+* no Google Cloud project: name it (project) or set gcloud's default project
+
+* <...> failed: <...>
+
+* <...> has no primary instance
+
+* <...> was made, and the provider does not list it
+
+* <...> is no flag the provider lets <...> set
+
+* Azure's API assumes no role: it acts as the identity signed in - name another with AZURE_CLIENT_ID or the az CLI's login
+
+* no Azure credentials: looked in the environment (AZURE_CLIENT_ID with a secret or a certificate), a workload identity, the instance's managed identity, the shared token cache, the az CLI's login, the PowerShell module's login and the developer CLI's login
+
+* no Azure subscription: name it (subscription), set AZURE_SUBSCRIPTION_ID or the az CLI's default
+
+* the Azure resource group is not named (resource_group)
+
+* the SQL Database's server is not named (server)
+
+* <...> is not restorable in <...>
+
+* the CLI's profile <...> holds no Tencent Cloud credentials
+
+* no Tencent Cloud credentials: looked in the environment (TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY), the CLI's profile <...>, the SDK's own credentials file and the instance's role
+
+* no Tencent Cloud region: name it (region), set TENCENTCLOUD_REGION or the CLI profile's region
+
+* Tencent Cloud's API refused <...> for <...>: <...> (<...>)
+
+* Tencent Cloud's API lists no <...> <...> in <...>
+
+* <...> has no parameter <...>
+
+* Tencent Cloud's API did not change <...> on <...>
+
+* Tencent Cloud's API did not change <...> on <...> (code <...>)
+
+* the CLI's profile <...> holds no Alibaba Cloud credentials
+
+* no Alibaba Cloud credentials: looked in the environment (ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET), an OIDC token, the CLI's profile, the SDK's own credentials file, the instance's RAM role and a credentials address
+
+* no Alibaba Cloud region: name it (region) or set the CLI profile's region
+
+* Alibaba Cloud's API refused <...> for <...>: <...> (<...>)
+
+* Alibaba Cloud's API lists no <...> <...> in <...>
+
+* Huawei Cloud's API is driven from an environment of its own, which is not installed on this machine: migkit doctor --install
+
+* Huawei Cloud's API refused <...> for <...>: <...>
+
+* the CLI's profile <...> holds no Huawei Cloud keys
+
+* no Huawei Cloud credentials: looked in the environment (HUAWEICLOUD_SDK_AK and HUAWEICLOUD_SDK_SK), the CLI's profile, the SDK's own credentials file and the instance's agency
+
+* no Huawei Cloud region: name it (region) or set the CLI profile's region
+
+* Huawei Cloud's API lists no <...> <...> in <...>
+
+* Oracle Cloud's API assumes no role: its policies grant a user or an instance directly
+
+* the CLI's config file holds no usable profile <...>
+
+* no Oracle Cloud credentials: looked in the CLI's config file (profile <...>) and the instance's principal
+
+* the Oracle Cloud compartment is not named (compartment)
+
+* <...> is no variable Oracle Cloud's API sets on a DB system
+
+* a trusted profile is assumed with an API key, and the CLI's login is a token: set IBMCLOUD_API_KEY
+
+* no IBM Cloud credentials: looked in the environment (IBMCLOUD_API_KEY or IC_API_KEY), the CLI's login and the instance's identity
+
+* no IBM Cloud region: name it (region) or log the CLI in to one
+
+* IBM Cloud's API refused <...> <...> for <...>: <...> (<...>)
+
+* the IBM Cloud resource group is not named (resource_group)
+
+* <...> is no setting IBM Cloud's API changes on <...>
+
 * consolidate: is a mapping - column, value or values, keys, offsets, with
 
 * consolidate: keys: <...> - one of <...>
@@ -1384,6 +1496,14 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...> holds its number on the target through another store (<...>; this machine's is <...>) - every machine of a hop must name the same one. Nothing was written
 
 * <...>: the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
+
+* <...> is not a managed service migkit knows; it knows <...> and more (`migkit/data/managed.yaml`)
+
+* the <...> is named <...> (<...>), and it runs <...> - name the service it is (managed: {service: ...})
+
+* the <...>: <...>
+
+* the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
 * <...>: no database to keep the machines' records in on the target
 

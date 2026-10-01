@@ -149,7 +149,7 @@ HOP_OPTIONS = {
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
                    subs=("budget", "start_below", "freeze", "pooler",
                          "flip", "flip_undo", "keys", "jobs",
-                         "no_return")),
+                         "no_return", "restore_points")),
     "ddl": Key("what a DDL on the source does to a running tail: stop"
                " it, park only the table it touched, or apply what can be"
                " carried at its place in the log", "str"),
@@ -248,7 +248,8 @@ HOP_OPTIONS = {
                           "way", "subnet_group", "security_groups",
                           "subscription", "resource_group", "location",
                           "project", "address", "upgrade", "backup",
-                          "restore_from")),
+                          "restore_from", "profile", "role", "product",
+                          "zone", "vpc", "subnet", "spec", "storage")),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -622,6 +623,18 @@ ENDPOINT_OPTIONS = {
                                 ("kafka",)),
     "schema_registry_password": Key("the schema registry's password",
                                     "str", ("kafka",)),
+    "managed": Key("the managed service this side is and how its provider's"
+                   " API reaches it: service (its name in the managed-service"
+                   " catalogue, where neither its address nor its server"
+                   " says), id (its instance at the provider, where its"
+                   " address does not find it), region, profile (the"
+                   " provider CLI's profile its credentials come from), role"
+                   " (one assumed), and what else the provider asks for",
+                   "dict", subs=("service", "id", "region", "profile",
+                                 "role", "project", "subscription",
+                                 "resource_group", "compartment",
+                                 "project_id", "zone", "cluster", "vpc",
+                                 "subnet", "spec", "storage")),
     "tunnel": Key("reach the server through a tunnel", "str|dict"),
     "tunnel_to": Key("what carries the connection, for the report",
                      "str"),

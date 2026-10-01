@@ -233,6 +233,9 @@ VARS = {
                                    named_for_a_program=True),
     "MIGKIT_SECOND_READER_PYTHON": Var("the interpreter the second reader"
                                        " runs in", "path"),
+    "MIGKIT_HUAWEI_SDK_PYTHON": Var("the interpreter Huawei Cloud's API is"
+                                    " driven from, in its environment of"
+                                    " its own", "path"),
     # ---- the tests -------------------------------------------------------
     "MIGKIT_FAILPOINT": Var("stop a move where it keeps what it has done,"
                             " the way a crash would", "list", tests=True),
