@@ -8,16 +8,68 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import fencing
-from ..config import REPORTS
+from ..config import MIGKIT_OWN, REPORTS
 from ..decide import Need, Rung
 from ..tableway import Way
-from ..util import run, tool_env, which
+from ..util import (CommandFailed, quote_name, run, split_table,
+                    tool_env, which)
 from .base import Counted as _Counted
 from .base import Engine, Enough as _Enough, RepairAction, Result
 
+
+def _ident(name):
+    """One name as PostgreSQL's SQL reads it, its quote doubled inside
+    (`util.quote_name`). Names used to be written into statements some
+    270 ways by hand - `"{sch}"."{tbl}"`, `'{sch}'` - so a name holding
+    a quote broke the statement, and a newline in one written into a
+    script started a line of its own (audit 2026-10-01, SEC4);
+    `tests/test_postgres_names_are_quoted_one_way.py` fails on a name
+    put between quotes by hand."""
+    return quote_name("postgres", name)
+
+
+def _literal(text):
+    """One text as a string constant, in the form that reads the same
+    whatever `standard_conforming_strings` says: a backslash in it
+    written as the escape form's `\\\\`."""
+    text = str(text)
+    if "\\" in text:
+        return "E'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _file_name(name):
+    """A table's name as a file name: its letters, digits, `.`, `_` and
+    `-` kept, anything else - a `/`, a newline - a `_`, and a hash of the
+    whole where any was changed, so two names never share a file (audit
+    2026-10-01, SEC19)."""
+    import hashlib
+    plain = re.sub(r"[^A-Za-z0-9._-]", "_", str(name)).lstrip(".") or "_"
+    if plain == str(name):
+        return plain
+    return plain[:80] + "-" + hashlib.sha256(
+        str(name).encode()).hexdigest()[:8]
+
+
+def _kept_whole(path, data):
+    """`data` at `path`, whole and on the disk (`durable.write_atomic`),
+    sealed to the hop's recipients where the hop keeps the values it
+    writes encrypted (`evidence`)."""
+    from .. import durable, evidence
+    who = path._sealing() if isinstance(path, evidence.EvidencePath) \
+        else None
+    durable.write_atomic(path, evidence._seal(bytes(data), who) if who
+                         else bytes(data))
+
+
 PGDC_ROOT = REPORTS / "pgdc"
 
-INVENTORY_SQL = """
+#: migkit's own tables on a side (`config.MIGKIT_OWN`), by their exact
+#: names, for a catalogue query to leave out: `migkit\\_%` also hid an
+#: application's `migkit_audit` (audit 2026-10-01, DU26)
+OWN_SQL = "(" + ", ".join(_literal(t) for t in MIGKIT_OWN) + ")"
+
+INVENTORY_SQL = f"""
 with ns as (
   select oid, nspname from pg_namespace
   where nspname not in ('pg_catalog','information_schema')
@@ -34,7 +86,7 @@ from pg_class c
 join ns on ns.oid = c.relnamespace
 left join pg_index i on i.indexrelid = c.oid
 where c.relkind in ('r','p','v','m','S','i','I')
-  and c.relname not like 'migkit\\_%'
+  and c.relname not in {OWN_SQL}
 union all
 select case p.prokind when 'p' then 'procedure' else 'function' end
   ||'|'||ns.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'
@@ -235,8 +287,144 @@ class _Piped:
 #: printed `0.3` - equal to a target that holds 0.3 - where pinned it
 #: prints `0.30000000000000004`; and a logical decoding session under
 #: `bytea_output = escape` prints bytes in a form only the hex reader here
-#: did not know.
-SESSION = "-c extra_float_digits=3 -c bytea_output=hex"
+#: did not know. And UTC with ISO dates and the server's own interval
+#: style, so an instant reads the same on both sides whatever each is set
+#: to - the client program had those and the driver's connections did
+#: not, so business rules ran in each server's own zone (audit
+#: 2026-10-01, DU12) - and no statement ended by a timeout the server
+#: or the role sets. In this order: a pooler that refuses settings it does
+#: not track refuses the first, and says which (`wording.pooler_refused`).
+SESSION = ("-c statement_timeout=0 -c extra_float_digits=3"
+           " -c bytea_output=hex -c TimeZone=UTC -c DateStyle=ISO"
+           " -c IntervalStyle=postgres")
+
+#: seconds a connection is given to be made, and a probe's, which asks
+#: whether something answers at all
+CONNECT_SECONDS, PROBE_SECONDS = 15, 5
+
+
+def keepalives():
+    """libpq's keepalive settings. Left out, the idle time is the
+    operating system's (two hours on macOS): a long query over a
+    cross-cloud link that loses its tunnel would hang for hours instead
+    of failing; probed sooner it is an error the caller can act on."""
+    from .. import envkeys
+    return {"keepalives": 1,
+            "keepalives_idle": envkeys.number("MIGKIT_KEEPALIVE_IDLE"),
+            "keepalives_interval": 10, "keepalives_count": 5}
+
+
+def connect(ep, dbname, driver="psycopg2", options="", timeout=None,
+            retry=True, session=True, **extra):
+    """A connection to `ep`'s database `dbname`, made the one way every
+    connection migkit makes to PostgreSQL is: the side's TLS as it was
+    decided (`Endpoint.tls_forms`), a bounded wait to connect, keepalives,
+    migkit's name on the session and its settings (`SESSION`, then
+    `options`). `driver` is `psycopg2` or `psycopg`. A failure while
+    connecting that tends to clear is tried again (`util.with_retry`);
+    `retry=False` for a probe whose answer is the failure. `session=False`
+    sends none of `SESSION`, only `options`: for a pooler's console,
+    which refuses settings, and for a question about the server's own
+    zone.
+
+    Connections were opened thirteen ways: three connect timeouts,
+    keepalives on four, UTC on one, the TLS on most (audit 2026-10-01,
+    DU12)."""
+    from ..util import with_retry
+    kw = dict(host=ep.host, port=ep.port, user=ep.user,
+              password=ep.password, dbname=dbname,
+              connect_timeout=timeout or CONNECT_SECONDS,
+              application_name="migkit",
+              **keepalives(), **ep.tls_forms("postgres")["libpq"])
+    options = " ".join(x for x in (SESSION if session else "", options) if x)
+    if options:
+        kw["options"] = options
+    kw.update(extra)
+    if driver == "psycopg":
+        import psycopg
+
+        def made():
+            return psycopg.connect(**kw)
+    else:
+        import psycopg2
+
+        def made():
+            return psycopg2.connect(**kw)
+    return with_retry(made, writes=True) if retry else made()
+
+
+def _conninfo_value(v):
+    """One value of a libpq connection string, quoted where it must be."""
+    v = str(v)
+    if v and not re.search(r"[\s'\\]", v):
+        return v
+    return "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+class SqlFailed(CommandFailed):
+    """A statement the server refused, in its own words - raised where
+    the client program's failure was, so a caller that caught one catches
+    the other. `sqlstate` is the server's code for it."""
+
+    def __init__(self, err):
+        from ..redact import Redactor
+        text = str(err).strip() or type(err).__name__
+        said = Redactor()(text if text.startswith("ERROR")
+                          else f"ERROR:  {text}")
+        RuntimeError.__init__(self, said)
+        self.returncode, self.stderr, self.argv = 1, said, []
+        self.sqlstate = _sqlstate(err)
+        self.pgcode = self.sqlstate
+
+
+#: a script only the client program reads: a meta-command (`\copy`) on a
+#: line of its own
+_META = re.compile(r"(^|\n)\s*\\")
+#: a statement that may leave something in its session - a setting, a
+#: temporary table, a lock, a prepared statement, a role - which a
+#: session kept for the next statement must not carry into it
+_SESSION_WORDS = re.compile(
+    r"set_config|advisory|\btemp|\binto\b|nextval|currval|lastval|setval"
+    r"|prepare|\blisten\b|replication_origin_session|dblink|\bload\b",
+    re.I)
+#: a statement that may change the shape of a side's tables: the side's
+#: catalogue, kept for its readers (`catalog`), is read again after it
+_DDL = re.compile(r"\b(create|alter|drop|comment|import|rename)\b", re.I)
+#: a session's own temporary table, which no side's catalogue holds
+_TEMP = re.compile(r"\bcreate\s+(temp|temporary)\s+table\b|\bon\s+commit"
+                   r"\s+drop\b", re.I)
+
+
+def _changes_shape(sql):
+    return bool(_DDL.search(_TEMP.sub("", sql)))
+#: a statement that only reads, which may be asked again on a new
+#: connection when the kept one was found gone
+_READS = re.compile(r"\s*(select|show|with|table|values)\b", re.I)
+_WRITES = re.compile(
+    r"\b(insert|update|delete|merge|create|drop|alter|truncate|grant"
+    r"|revoke|comment|copy|vacuum|analyze|cluster|reindex|refresh|lock"
+    r"|call|do|begin|commit|security|notify)\b|pg_drop|pg_create"
+    r"|pg_terminate|pg_cancel|pg_replication|pg_logical|_advance|setval"
+    r"|nextval|pg_reload|pg_switch|lo_", re.I)
+
+
+def _plain_read(sql):
+    """Whether `sql` is one statement that reads and leaves nothing in its
+    session: asked again where the kept connection was found gone, and no
+    session reset after it."""
+    body = sql.strip().rstrip(";")
+    return (bool(_READS.match(body)) and ";" not in body
+            and not _WRITES.search(body) and not _SESSION_WORDS.search(body))
+
+
+#: seconds a kept connection may sit unused before it is asked whether it
+#: is still there, and how many databases a thread keeps one to per side
+KEPT_IDLE, KEPT_PER_SIDE = 30, 2
+
+
+def _tid(page):
+    """The first row address of heap page `page`, as SQL."""
+    return f"{_literal(f'({int(page)},0)')}::tid"
 
 
 def _first_line(e):
@@ -254,10 +442,40 @@ def _sqlstate(e):
 UNDEFINED_OBJECT, OBJECT_IN_USE = "42704", "55006"
 
 
-def _tls_query(ep):
-    """An endpoint's TLS as a connection URL's query: its own settings, or
-    TLS where the server offers it, as libpq does by default."""
-    return ep.tls_forms("postgres")["query"]
+#: which relations each list of tables holds (`user_tables_where`): `all`
+#: every table a dump sees, a partitioned one and each partition; `logical`
+#: the tables as the application names them - a partitioned table, not
+#: its partitions; `leaves` every table that holds rows - each partition,
+#: not their parent
+TABLE_KINDS = {
+    "all": "c.relkind in ('r', 'p')",
+    "logical": ("c.relkind in ('r', 'p') and not exists (select 1 from"
+                " pg_inherits h join pg_class p on p.oid = h.inhparent"
+                " where h.inhrelid = c.oid and p.relkind = 'p')"),
+    "leaves": "c.relkind = 'r'",
+}
+
+
+def user_tables_where(kinds="logical", own=False):
+    """The one rule for which relations of `pg_class c` (in `pg_namespace
+    n`) are the application's tables. "A user table" was written seven
+    ways: two lists took another session's temporary tables, another
+    tool's schemas and migkit's own, two did not, and a partitioned table
+    was listed with its partitions by some and without by others - so the
+    counts and the fast checksum compared one set, the copy between engines
+    another (audit 2026-10-01, DU5). In a schema of the application's: not
+    the catalogue's, a session's temporary one or TOAST's (`pg_%`), and -
+    unless `own` - not another tool's (`__%`); and not migkit's own table
+    (`config.MIGKIT_OWN`), by its exact name, where `migkit\\_%` also hid an
+    application's `migkit_audit` (DU26, `OWN_SQL`)."""
+    out = (TABLE_KINDS[kinds]
+           + " and n.nspname not in ('pg_catalog', 'information_schema')"
+           " and n.nspname not like 'pg\\_%'")
+    if not own:
+        out += (" and n.nspname not like '\\_\\_%' and c.relname not in "
+                + OWN_SQL)
+    return out
+
 
 class PostgresEngine(Engine):
     ENGINE_FAMILY = "postgres"
@@ -268,13 +486,10 @@ class PostgresEngine(Engine):
     #: a subscription with copy_data=true copies the tables, then follows
     REPLICA_COPIES = True
 
+    #: every table that holds rows, by the one rule (`user_tables_where`)
     USER_TABLES = ("select n.nspname||'.'||c.relname from pg_class c"
-                   " join pg_namespace n on n.oid = c.relnamespace"
-                   " where c.relkind = 'r'"
-                   " and n.nspname not in ('pg_catalog','information_schema')"
-                   " and n.nspname not like 'pg\\_%'"
-                   " and n.nspname not like '\\_\\_%'"
-                   " and c.relname not like 'migkit\\_%' order by 1")
+                   " join pg_namespace n on n.oid = c.relnamespace where "
+                   + user_tables_where("leaves") + " order by 1")
 
     def _d(self, side, db):
         """Physical db name for a side: source as given, target through the
@@ -284,31 +499,256 @@ class PostgresEngine(Engine):
             return self.hop.target_db(db)
         return db
 
-    def _dsn(self, side, db):
-        """dbname plus keepalive settings.
+    def _ep(self, side):
+        return self.hop.source if side == "src" else self.hop.target
 
-        libpq leaves the keepalive idle time at the OS default (two hours on
-        macOS). A long query over a cross-cloud link that loses its tunnel
-        would therefore hang for hours instead of failing. Probing sooner
-        turns it into an error the retry can handle."""
-        import os
-        idle = os.environ.get("MIGKIT_KEEPALIVE_IDLE", "60")
-        return (f"dbname={self._d(side, db)} keepalives=1"
-                f" keepalives_idle={idle} keepalives_interval=10"
-                f" keepalives_count=5")
+    def _open(self, side, name, purpose="read", **extra):
+        """`_opening`, where a pooler between migkit and the database
+        refuses the settings a connection opens with said as that, not
+        as the database refusing something (`wording.pooler_refused`)."""
+        try:
+            return self._opening(side, name, purpose, **extra)
+        except Exception as e:  # noqa: BLE001 - said, or raised as it was
+            from ..wording import pooler_refused
+            pooled = pooler_refused(str(e))
+            if pooled and purpose not in ("probe", "ask"):
+                where = "source" if side == "src" else "target"
+                raise SystemExit(f"the {where}: {pooled}. The connection was"
+                                 " refused before it ran anything.") from e
+            raise
 
-    def _psql(self, side, db, sql, statement_timeout=0):
-        ep = self.hop.source if side == "src" else self.hop.target
-        env = {**ep.libpq_env(),
-               "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-               "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO"
-                            f" -c statement_timeout={statement_timeout}"
-                            f" {SESSION}"}
-        p = run(["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", self._dsn(side, db), "-X", "-At", "-q", "-v",
-                 "ON_ERROR_STOP=1", "-c", sql],
-                env=env)
-        return p.stdout.rstrip("\n")
+    def _opening(self, side, name, purpose="read", **extra):
+        """A connection to the physical database `name` on one side, for
+        `purpose`: `read` (the driver's own types - the rows a check or a
+        copy reads), `write` (the driver that sends statements without
+        waiting and COPY binary, `_conn3`), `probe` (a short wait to
+        connect, never tried again), `ask` (the questions' own, kept by
+        `_kept_conn`: every value as the server's text), `slot` (the
+        change tail's, kept by `_slot_session`). A target database inside
+        a load window is written as a replica (`load_window`) - never on a
+        kept connection, which would stay one after the window closed."""
+        ep = self._ep(side)
+        if purpose in ("ask", "slot"):
+            if purpose == "ask":
+                extra.setdefault("prepare_threshold", None)
+            conn = connect(ep, name, "psycopg" if purpose == "ask"
+                           else "psycopg2", client_encoding="UTF8",
+                           **extra)
+            conn.autocommit = True
+            return conn
+        options = ""
+        if side == "dst" and name in self.__dict__.get("_as_replica", ()):
+            options = "-c session_replication_role=replica"
+        if purpose == "write":
+            import psycopg
+            return connect(ep, name, "psycopg", options,
+                           cursor_factory=psycopg.ClientCursor,
+                           prepare_threshold=None, **extra)
+        if purpose == "probe":
+            return connect(ep, name, options=options,
+                           timeout=extra.pop("timeout", PROBE_SECONDS),
+                           retry=False, **extra)
+        conn = connect(ep, name, options=options, **extra)
+        if purpose == "read":
+            self._read_hstore(conn, side, name)
+            self._read_json(conn)
+            self._read_float4(conn)
+        return conn
+
+    def _connect(self, side, db, purpose="read", **extra):
+        """`_open` on the database the hop calls `db` - the source's name,
+        the target's mapped here, once. Callers mapped it themselves and
+        the helper mapped it again at 33 places, so a chained or swapped
+        `db_map` read one database for the counts and another for the
+        tables (audit 2026-10-01, DU3)."""
+        return self._open(side, self._d(side, db), purpose, **extra)
+
+    # ---- one connection kept per side and thread for the questions -------
+
+    def _kept_conn(self, side, name):
+        """(connection, whether it was kept from before) this thread asks
+        database `name` on one side on. The questions a check and a move
+        ask - the catalogue, the fence, a marker - each started the client
+        program, a process and a connection of its own: 6.5 ms for the
+        process alone and several round trips to sign in, about 0.3 s a
+        question over a 50 ms link (audit 2026-10-01, SP2, W15). Kept per
+        thread, at most `KEPT_PER_SIDE` databases a side (the maintenance
+        database and the one worked on), and asked whether it is still
+        there after `KEPT_IDLE` seconds unused."""
+        import threading
+        lock = self.__dict__.setdefault("_kept_lock", threading.Lock())
+        kept = self.__dict__.setdefault("_kept", {})
+        me = (os.getpid(), threading.get_ident(), side)
+        with lock:
+            got = kept.get(me + (name,))
+        if got is not None:
+            conn, used = got
+            if not conn.closed and not conn.broken:
+                if time.monotonic() - used < KEPT_IDLE:
+                    return conn, True
+                try:
+                    conn.execute("select 1")
+                    return conn, True
+                except Exception:  # noqa: BLE001 - opened again below
+                    pass
+            self._drop_kept(me + (name,))
+        conn = self._open(side, name, "ask")
+        from psycopg.postgres import types
+        from psycopg.types.string import TextLoader
+        # every value as the server's own text, as the program printed it
+        for t in types:
+            conn.adapters.register_loader(t.oid, TextLoader)
+            if t.array_oid:
+                conn.adapters.register_loader(t.array_oid, TextLoader)
+        with lock:
+            # a thread that ended keeps nothing; this one keeps the
+            # databases it used last
+            alive = {t.ident for t in threading.enumerate()}
+            gone = [k for k in kept if k[0] == os.getpid()
+                    and k[1] not in alive]
+            mine = sorted((k for k in kept if k[:3] == me),
+                          key=lambda k: kept[k][1])
+            gone += mine[:max(0, len(mine) - KEPT_PER_SIDE + 1)]
+            for key in gone:
+                old = kept.pop(key, None)
+                if old is not None:
+                    try:
+                        old[0].close()
+                    except Exception:  # noqa: BLE001 - it is going anyway
+                        pass
+            kept[me + (name,)] = [conn, time.monotonic()]
+        return conn, False
+
+    def _drop_kept(self, key):
+        got = self.__dict__.get("_kept", {}).pop(key, None)
+        if got is not None:
+            try:
+                got[0].close()
+            except Exception:  # noqa: BLE001 - it is going anyway
+                pass
+
+    def release_kept(self, side=None, name=None):
+        """The connections this process keeps for questions closed - every
+        one, or those to one side's database `name` as it is named there,
+        on every thread."""
+        for key in [k for k in list(self.__dict__.get("_kept", {}))
+                    if k[0] == os.getpid() and side in (None, k[2])
+                    and name in (None, k[3])]:
+            self._drop_kept(key)
+
+    def _answer(self, conn, sql, statement_timeout):
+        """The rows of every statement in `sql`, as the client program
+        printed them: a row a line, its values between `|`, NULL as
+        nothing. The session is left as a new one would be: a transaction
+        the statement opened rolled back, and what it set, made or held
+        (`_SESSION_WORDS`, a timeout) dropped."""
+        from psycopg.pq import TransactionStatus
+        lines = []
+        reset = bool(statement_timeout) or not _plain_read(sql)
+        try:
+            with conn.cursor() as cur:
+                if statement_timeout:
+                    cur.execute("set statement_timeout = "
+                                + _literal(statement_timeout))
+                cur.execute(sql)
+                while True:
+                    if cur.description is not None:
+                        lines += ["|".join("" if v is None else v
+                                           for v in row)
+                                  for row in cur.fetchall()]
+                    if not cur.nextset():
+                        break
+        finally:
+            if not conn.closed:
+                try:
+                    if conn.info.transaction_status != TransactionStatus.IDLE:
+                        conn.execute("rollback")
+                    if reset:
+                        conn.execute("discard all")
+                except Exception:  # noqa: BLE001 - dropped below
+                    conn.close()
+        return "\n".join(lines).rstrip("\n")
+
+    def _psql(self, side, db, sql, statement_timeout=0, physical=None):
+        """`sql` on this side's database `db` (the source's name; the
+        target's is mapped here), answered as text: a row a line, its values
+        between `|` - on a connection kept for this thread
+        (`_kept_conn`), the client program only for a script of its own
+        meta-commands. A connection found gone is opened again, and the
+        statement asked again only where it reads and nothing else
+        (`_plain_read`); a statement that writes is never sent twice.
+        `physical` names a database of migkit's own as it is (a scratch
+        copy), not through the hop."""
+        if _META.search(sql):
+            return self._psql_program(side, db, sql, statement_timeout,
+                                      physical)
+        import psycopg
+        name = physical or self._d(side, db)
+        for again in (False, True):
+            try:
+                conn, kept = self._kept_conn(side, name)
+            except psycopg.Error as e:
+                # raised as the program's failure to connect was, for every
+                # caller that reads an unreachable side as a RuntimeError
+                from ..wording import pooler_refused
+                raise SqlFailed(pooler_refused(str(e)) or e) from e
+            try:
+                got = self._answer(conn, sql, statement_timeout)
+            except psycopg.Error as e:
+                if not (conn.closed or conn.broken) or again or not kept \
+                        or not _plain_read(sql):
+                    if conn.closed or conn.broken:
+                        self._drop_kept(self._kept_key(side, name))
+                    raise SqlFailed(e) from e
+                self._drop_kept(self._kept_key(side, name))
+                continue
+            held = self.__dict__.get("_kept", {}).get(
+                self._kept_key(side, name))
+            if held is not None:
+                held[1] = time.monotonic()
+            if _changes_shape(sql):
+                self._forget_catalog(side, db)
+            return got
+
+    def _kept_key(self, side, name):
+        import threading
+        return (os.getpid(), threading.get_ident(), side, name)
+
+    def _client(self, side, db, program, *args, physical=None, options="",
+                env=None):
+        """(argv, env) of a program on libpq for one side's database `db`
+        (mapped here; `physical` names the database as it is): the side's
+        TLS in the variables libpq reads, a bounded wait to connect,
+        keepalives, and the session every connection of migkit's has
+        (`SESSION`, then `options`). The programs were started eleven ways,
+        some without the TLS the hop asks for (audit 2026-10-01, SEC2)."""
+        ep = self._ep(side)
+        name = physical or self._d(side, db)
+        conninfo = " ".join(f"{k}={_conninfo_value(v)}" for k, v in (
+            ("dbname", name), *keepalives().items()))
+        argv = [program, "-h", str(ep.host), "-p", str(ep.port), "-U",
+                str(ep.user or ""), "-d", conninfo, *args]
+        out = {**ep.tls_forms("postgres")["env"],
+               "PGPASSWORD": ep.password or "",
+               "PGCONNECT_TIMEOUT": str(CONNECT_SECONDS),
+               "PGAPPNAME": "migkit",
+               "PGOPTIONS": " ".join(x for x in (SESSION, options) if x)}
+        out.update(env or {})
+        return argv, out
+
+    def _psql_program(self, side, db, sql, statement_timeout=0,
+                      physical=None):
+        """`sql` through the client program: what only it reads."""
+        argv, env = self._client(
+            side, db, "psql", "-X", "-At", "-q", "-v", "ON_ERROR_STOP=1",
+            "-c", sql, physical=physical,
+            options=(f"-c statement_timeout={statement_timeout}"
+                     if statement_timeout else ""))
+        try:
+            return run(argv, env=env).stdout.rstrip("\n")
+        finally:
+            if _changes_shape(sql):
+                self._forget_catalog(side, db)
 
     CANON_ENGINE = "postgres"
     OWN_PATHS_READ_COLUMN_MAPPING = False
@@ -317,28 +757,81 @@ class PostgresEngine(Engine):
         """Every table on a side as `schema.table`, the excluded ones too.
 
         The bulk paths need those by name, to tell the dump what to leave
-        out; everything else wants `neutral_tables`.
+        out; everything else wants `neutral_tables`. By the one rule
+        (`user_tables`): another session's temporary table, which
+        `pg_tables` listed and no dump carries, is not one.
         """
-        out = self._psql(side, self._d(side, db),
-                         "select schemaname||'.'||tablename from pg_tables"
-                         " where schemaname not in"
-                         " ('pg_catalog','information_schema') order by 1")
-        return [l for l in out.splitlines() if l]
+        return self.user_tables(side, db, "all", own=True)
 
     def leg_encryption(self, side, db):
-        """The server's own word on this connection (`pg_stat_ssl`), made
-        as every connection migkit makes to it is."""
-        got = self.run_rule(side, db, "select ssl, version, cipher from"
-                                      " pg_stat_ssl where pid ="
-                                      " pg_backend_pid()")
+        """The server's own word on a connection made as every connection
+        migkit makes to it is (`pg_stat_ssl`), and `verified`: whether that
+        connection checked the server's certificate, from the `sslmode` it
+        was made with - not from what the hop's options ask, which the
+        main data paths used to drop while this said verified (audit
+        2026-10-01, SEC2). `unverified` names the paths of the hop on
+        which the source's certificate is not checked (`far_paths`)."""
+        conn = self._connect(side, db, "probe", timeout=CONNECT_SECONDS)
+        try:
+            mode = (conn.info.dsn_parameters or {}).get("sslmode", "")
+            with conn.cursor() as cur:
+                cur.execute("select ssl, version, cipher from pg_stat_ssl"
+                            " where pid = pg_backend_pid()")
+                got = cur.fetchone()
+        finally:
+            conn.close()
         if not got:
             return None
-        ssl, version, cipher = got[0]
-        return {"encrypted": bool(ssl),
-                "how": f"{version} {cipher}" if ssl else ""}
+        ssl, version, cipher = got
+        verified = bool(ssl) and mode in ("verify-ca", "verify-full")
+        far = self.far_paths() if side == "src" and verified else []
+        how = f"{version} {cipher}" if ssl else ""
+        if far:
+            how += (" - checked on migkit's own connections; not on "
+                    + " or ".join(far) + ", which the target makes itself"
+                    " and can carry encrypted but not checked")
+        return {"encrypted": bool(ssl), "how": how, "verified": verified,
+                "unverified": far}
+
+    def far_paths(self):
+        """The paths on which the target server dials the source itself,
+        and so carries its TLS as far as a server can (`tls_forms`'s
+        `far`: `verify-*` as `require`, the authority's file being on
+        this machine and not the target's): the pull through a foreign
+        server and the temporary subscription (`server_to_server`), and
+        the servers' own replication a PostgreSQL target follows the
+        source by (unless `MIGKIT_CDC=follow`)."""
+        from .. import envkeys, legs
+        from . import ALIASES
+        if ALIASES.get(self.hop.engine, self.hop.engine) != "postgres":
+            return []
+        out = []
+        if legs.allowed(self.hop):
+            out.append("the target pulling the rows from the source")
+        if envkeys.text("MIGKIT_CDC").lower() != "follow":
+            out.append("the servers' own replication")
+        return out
+
+    def _leg_items(self):
+        """The base's rows, and where the source's connection is verified
+        on migkit's own connections, a row for each path the target makes
+        to the source itself (`far_paths`), on which it is not: "verified"
+        is said only of what a path checked."""
+        out = super()._leg_items()
+        verified = any(i.get("item") == "source connection verified"
+                       for i in out)
+        for path in (self.far_paths() if verified else []):
+            out.append({"level": "warn", "scope": "connection",
+                        "item": f"source connection NOT verified on {path}",
+                        "detail": "the target dials the source itself there,"
+                                  " and a server cannot read the authority's"
+                                  " file on this machine: encrypted"
+                                  " (sslmode require), the certificate not"
+                                  " checked"})
+        return out
 
     def run_rule(self, side, db, sql):
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             # a rule is the operator's SQL: the session cannot write, so a
             # rule that tries fails instead of changing the source
@@ -411,21 +904,21 @@ class PostgresEngine(Engine):
         mark = (began or {}).get("xid")
         if not keys:
             return ""
-        sch, tbl = table.split(".", 1)
+        sch, tbl = self._split(table)
         pkexpr = self._pk_text_expr(self._pk_cols_of(db, table))
-        wanted = ", ".join("'" + k.replace("'", "''") + "'"
+        wanted = ", ".join(_literal(k)
                            for k in keys[:1000])
         stamps = self._psql("dst", db, "show track_commit_timestamp") == "on"
         parts = ["count(*)"]
         if mark:
             parts.append(f"count(*) filter (where age(xmin) >"
-                         f" age('{int(mark)}'::xid))")
+                         f" age({_literal(int(mark))}::xid))")
         if stamps:
             parts.append("min(pg_xact_commit_timestamp(xmin))::text")
             parts.append("max(pg_xact_commit_timestamp(xmin))::text")
         got = self._psql("dst", db, "select " + "||'|'||".join(
             f"coalesce(({x})::text, '')" for x in parts)
-            + f' from "{sch}"."{tbl}" where {pkexpr} in ({wanted})')
+            + f' from {_ident(sch)}.{_ident(tbl)} where {pkexpr} in ({wanted})')
         vals = got.split("|")
         n = int(vals[0] or 0)
         if not n:
@@ -472,7 +965,7 @@ class PostgresEngine(Engine):
         while time.monotonic() - began < window:
             if self._psql("dst", db, "select count(*) from"
                                      " pg_stat_subscription where subname ="
-                                     f" '{name}' and pid is not null") == "0":
+                                     f" {_literal(name)} and pid is not null") == "0":
                 return True
             time.sleep(0.5)
         self._psql("dst", db, f"alter subscription {name} enable")
@@ -487,62 +980,306 @@ class PostgresEngine(Engine):
         self._psql("dst", db, f"alter subscription {name} enable")
 
     def table_facts(self, side, db):
-        """Rows as the planner's statistics estimate them - `null`, not 0,
-        for a table never analysed (PostgreSQL 14+ keeps -1 there) - and
-        whether a primary key exists."""
+        """Rows as the planner's statistics estimate them (`row_estimate`:
+        `None`, not 0, for a table whose count is not known) - and whether
+        a primary key exists, and the sizes on disk a plan adds up into
+        what the move carries and the room it needs."""
         out = {}
-        got = self._psql(side, self._d(side, db),
-                         "select n.nspname||'.'||c.relname||chr(31)"
-                         "||coalesce(case when c.reltuples < 0 then null"
-                         " else c.reltuples::bigint end::text, '')"
+        rows = self.row_estimate(side, db)
+        got = self._psql(side, db,
+                         "select n.nspname||'.'||c.relname"
                          # as a number: a boolean turned into text is
                          # `true`, not the `t` psql prints for a column
                          "||chr(31)||exists(select 1 from pg_index i"
                          " where i.indrelid = c.oid and i.indisprimary)::int"
-                         # the size on disk, which a plan adds up into
-                         # what the move carries and the room it needs
                          "||chr(31)||pg_table_size(c.oid)"
                          "||chr(31)||pg_indexes_size(c.oid)"
                          " from pg_class c join pg_namespace n"
-                         " on n.oid = c.relnamespace"
-                         " where c.relkind in ('r', 'p') and n.nspname"
-                         " not in ('pg_catalog', 'information_schema')")
+                         " on n.oid = c.relnamespace where "
+                         + user_tables_where("all", own=True))
         for line in got.splitlines():
-            name, rows, key, size, idx = (line.split("\x1f")
-                                          + ["", "", "", ""])[:5]
-            out[name] = {"rows": int(rows) if rows.isdigit() else None,
+            name, key, size, idx = (line.split("\x1f") + ["", "", ""])[:4]
+            out[name] = {"rows": rows.get(name),
                          "key": key == "1",
                          "bytes": int(size) if size.isdigit() else None,
                          "index_bytes": int(idx) if idx.isdigit() else None}
         return out
+
+    def row_estimate(self, side, db):
+        """{schema.table: rows the statistics estimate, or None where they
+        do not know}. Read three ways before, with three answers for
+        "unknown" - 0 from `n_live_tup`, 0 from `greatest(reltuples, 0)`,
+        None from `reltuples` of -1 - so after a statistics reset or a
+        fail-over a table of a billion rows read as empty and was copied
+        without checkpoints (audit 2026-10-01, DU18). Unknown is: `reltuples`
+        of -1 (never analysed, PostgreSQL 14 and later), or 0 over pages
+        that hold something (never analysed before 14, or its statistics
+        lost); the statistics collector's live count stands in where it
+        has one. A partitioned table's rows are its partitions'."""
+        leaves = ("select relid from pg_partition_tree(c.oid) where isleaf"
+                  if (self._server_version(side, db) or 0) >= 120000 else
+                  "select h.inhrelid from pg_inherits h"
+                  " where h.inhparent = c.oid")
+        got = self._psql(side, db, f"""
+            select n.nspname||'.'||c.relname||chr(31)||coalesce((
+              select case when bool_or(x.reltuples < 0
+                                  or (x.reltuples = 0 and x.relpages > 0))
+                          then null
+                          else coalesce(sum(greatest(x.reltuples, 0)), 0)
+                     end::bigint::text
+                from pg_class x
+               where (c.relkind <> 'p' and x.oid = c.oid)
+                  or (c.relkind = 'p' and x.oid in ({leaves}))), '')
+              ||chr(31)||coalesce((select s.n_live_tup::text
+                                     from pg_stat_all_tables s
+                                    where s.relid = c.oid
+                                      and (s.n_live_tup > 0
+                                           or s.last_analyze is not null
+                                           or s.last_autoanalyze
+                                              is not null)), '')
+              from pg_class c join pg_namespace n on n.oid = c.relnamespace
+             where """ + user_tables_where("all", own=True))
+        out = {}
+        for line in got.splitlines():
+            name, est, live = (line.split("\x1f") + ["", ""])[:3]
+            out[name] = (int(est) if est.isdigit() else
+                         int(live) if live.isdigit() else None)
+        return out
+
+    def user_tables(self, side, db, kinds="logical", own=False):
+        """The application's tables on a side as `schema.table`, by the one
+        rule (`user_tables_where`): `logical` the tables as the application
+        names them (a partitioned table, not its partitions), `leaves`
+        every table that holds rows (each partition, not their parent),
+        `all` both. `own` keeps migkit's own tables and other tools'
+        schemas, which a dump has to be told to leave out."""
+        out = self._psql(side, db,
+                         "select n.nspname||'.'||c.relname from pg_class c"
+                         " join pg_namespace n on n.oid = c.relnamespace"
+                         " where " + user_tables_where(kinds, own)
+                         + " order by 1")
+        return [line for line in out.splitlines() if line]
 
     def neutral_tables(self, side, db):
         # without the hop's exclude list, as every other engine's list is:
         # measured, a PostgreSQL-to-MySQL move copied an excluded table
         # into the target that owned it, and stopped only because the
         # target's copy was already there. Nor an online schema change's
-        # working tables (`drift.transient`), as on MySQL.
+        # working tables (`drift.transient`), as on MySQL. The tables as
+        # the application names them: a partitioned table and each of its
+        # partitions were both listed, so a copy to another engine carried
+        # every partition's rows twice (audit 2026-10-01, DU5)
         from .. import drift
-        got = self._all_tables(side, db)
+        got = self.user_tables(side, db)
         working = drift.transient_among(got)
         return [t for t in got if t not in working
-                and not self.hop.excluded(db, *t.split(".", 1))]
+                and not self.hop.excluded(db, *self._split(t))]
 
     def column_catalog(self, side, db):
-        """{schema.table: [(column, type), ...]} in one query - what a move
-        reads before and after itself to notice a DDL on the source."""
-        out = {}
-        rows = self._psql(side, self._d(side, db),
-                          "select table_schema||'.'||table_name||'|'||"
-                          "column_name||'|'||data_type"
-                          " from information_schema.columns"
-                          " where table_schema not in"
-                          " ('pg_catalog','information_schema')"
-                          " order by 1")
-        for line in rows.splitlines():
-            t, c, ty = line.split("|", 2)
-            out.setdefault(t, []).append((c, ty))
-        return {t: sorted(cols) for t, cols in out.items()}
+        """{schema.table: [(column, declared type), ...]} of every relation,
+        read now in the one catalogue statement (`catalog`) - what a move
+        reads before and after itself to notice a DDL on the source, what
+        a resumed check and the cutover's gate compare. The type with its
+        length and precision (`character varying(50)`, `numeric(12,2)`):
+        read from `information_schema.columns`, a column widened or
+        narrowed read as no change at all (audit 2026-10-01, SC3)."""
+        got = self._shapes(side, db, fresh=True)["catalog"]
+        return {t: sorted((c.name, c.declared) for c in cols)
+                for t, cols in got.columns.items()}
+
+    # ---- the catalogue, read once a side -----------------------------------
+
+    #: seconds a side's catalogue, read in one statement, is taken as it
+    #: stands before it is read again - a check's pass over its tables
+    #: reads it once, a loop that runs for hours sees a change within this
+    #: long. migkit's own DDL on a side (`_psql`), `forget_shapes` and a
+    #: table not found in it read it again at once
+    CATALOG_SECONDS = 60
+
+    SHAPE_CACHES = Engine.SHAPE_CACHES + ("_catalogs", "_user_types")
+
+    def _catalog_sql(self, side, db):
+        """The statement reading every relation's shape as one JSON object
+        a row. `attidentity` (10) and `attgenerated` (12) read as blank on
+        a server older than they are."""
+        v = self._server_version(side, db) or 0
+        ident = "a.attidentity" if v >= 100000 else "''::char"
+        gen = "a.attgenerated" if v >= 120000 else "''::char"
+        cols = ("(select coalesce(json_agg(a.attname order by k.o),"
+                " '[]'::json) from unnest({keys}) with ordinality k(n, o)"
+                " join pg_attribute a on a.attrelid = {rel}"
+                " and a.attnum = k.n)")
+        return f"""
+select json_build_object(
+  's', n.nspname, 't', c.relname, 'k', c.relkind,
+  'part', exists(select 1 from pg_inherits h
+                   join pg_class p on p.oid = h.inhparent
+                  where h.inhrelid = c.oid and p.relkind = 'p'),
+  'cols', coalesce((
+    select json_agg(json_build_array(
+             a.attname, format_type(a.atttypid, a.atttypmod),
+             not a.attnotnull, pg_get_expr(d.adbin, d.adrelid),
+             case when a.attcollation <> 0
+                   and a.attcollation <> ty.typcollation
+                  then co.collname end,
+             {ident}, {gen}) order by a.attnum)
+      from pg_attribute a
+      join pg_type ty on ty.oid = a.atttypid
+      left join pg_attrdef d on d.adrelid = a.attrelid
+                            and d.adnum = a.attnum
+      left join pg_collation co on co.oid = a.attcollation
+     where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped),
+    '[]'::json),
+  'key', (select {cols.format(keys="i.indkey", rel="i.indrelid")}
+            from pg_index i where i.indrelid = c.oid and i.indisprimary),
+  'ix', coalesce((
+    select json_agg(json_build_array(
+             ic.relname, i.indisunique,
+             {cols.format(keys="i.indkey", rel="i.indrelid")},
+             case when i.indexprs is null and i.indpred is null
+                   and 0 <> all(i.indkey) then ''
+                  else pg_get_indexdef(i.indexrelid) end)
+             order by ic.relname)
+      from pg_index i join pg_class ic on ic.oid = i.indexrelid
+     where i.indrelid = c.oid and not i.indisprimary), '[]'::json),
+  'fk', coalesce((
+    select json_agg(json_build_array(
+             con.conname,
+             {cols.format(keys="con.conkey", rel="con.conrelid")},
+             pn.nspname || '.' || pc.relname,
+             {cols.format(keys="con.confkey", rel="con.confrelid")},
+             con.confdeltype, con.confupdtype) order by con.conname)
+      from pg_constraint con
+      join pg_class pc on pc.oid = con.confrelid
+      join pg_namespace pn on pn.oid = pc.relnamespace
+     where con.conrelid = c.oid and con.contype = 'f'), '[]'::json),
+  'oth', coalesce((
+    select json_agg(o.said order by o.said) from (
+      select case con.contype when 'c' then 'check ' else 'exclude ' end
+             || con.conname || ' ' || pg_get_constraintdef(con.oid) said
+        from pg_constraint con
+       where con.conrelid = c.oid and con.contype in ('c', 'x')
+      union all
+      select 'trigger ' || t.tgname || ' ' || md5(pg_get_triggerdef(t.oid)
+             || coalesce(p.prosrc, ''))
+        from pg_trigger t left join pg_proc p on p.oid = t.tgfoid
+       where t.tgrelid = c.oid and not t.tgisinternal) o), '[]'::json)
+)::text
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+ where c.relkind in ('r', 'p', 'v', 'm', 'f')
+   and n.nspname not in ('pg_catalog', 'information_schema')
+   and n.nspname not like 'pg\\_%'"""
+
+    def _shapes(self, side, db, fresh=False):
+        """{"at", "catalog", "kind", "part", "identity", "generated"} of
+        one side's database, read in one statement (`_catalog_sql`) and
+        kept (`CATALOG_SECONDS`)."""
+        from .. import catalog as cat
+        import threading
+        lock = self.__dict__.setdefault("_catalogs_lock", threading.Lock())
+        known = self.__dict__.setdefault("_catalogs", {})
+        at = (side, self._d(side, db))
+        got = known.get(at)
+        if not fresh and got is not None and \
+                time.monotonic() - got["at"] < self.CATALOG_SECONDS:
+            return got
+        with lock:
+            got = known.get(at)
+            if not fresh and got is not None and \
+                    time.monotonic() - got["at"] < self.CATALOG_SECONDS:
+                return got
+            began = time.monotonic()
+            columns, keys, indexes, fks, others = {}, {}, {}, {}, {}
+            kind, part, identity, generated = {}, {}, {}, {}
+            for line in self._psql(side, db,
+                                   self._catalog_sql(side, db)).splitlines():
+                if not line:
+                    continue
+                one = json.loads(line)
+                t = f"{one['s']}.{one['t']}"
+                kind[t], part[t] = one["k"], bool(one["part"])
+                columns[t] = [self._column_of(c) for c in one["cols"]]
+                others[t] = list(one.get("oth") or [])
+                identity[t] = {c[0]: c[5] or "" for c in one["cols"]}
+                generated[t] = {c[0]: c[6] or "" for c in one["cols"]}
+                if one["key"]:
+                    keys[t] = tuple(one["key"])
+                indexes[t] = [cat.Index(i[0], tuple(i[2]), bool(i[1]),
+                                        i[3] or "") for i in one["ix"]]
+                fks[t] = [cat.ForeignKey(f[0], tuple(f[1] or ()), f[2],
+                                         tuple(f[3] or ()), f[4], f[5])
+                          for f in one["fk"]]
+            got = {"at": began,
+                   "catalog": cat.Catalog(tables=sorted(columns),
+                                          columns=columns, keys=keys,
+                                          indexes=indexes, fks=fks,
+                                          others=others),
+                   "kind": kind, "part": part, "identity": identity,
+                   "generated": generated}
+            known[at] = got
+            return got
+
+    @staticmethod
+    def _column_of(c):
+        """One column of `_catalog_sql` as `catalog.Column`: what the server
+        computes - an identity, a generated expression - in `extra`, in its
+        words, where the expression is not a default."""
+        from .. import catalog as cat
+        name, declared, nullable, default, collation, ident, gen = c[:7]
+        extra = ""
+        if ident:
+            extra = ("identity always" if ident == "a"
+                     else "identity by default")
+        if gen:
+            extra, default = f"generated always as ({default}) stored", None
+        return cat.Column(name, declared, "", bool(nullable), default,
+                          collation, extra)
+
+    def _shape_of(self, side, db, table):
+        """(the side's shapes, the catalogue's name for `table`), or (the
+        shapes, None) where it is not there - read again once first, for a
+        table made since."""
+        sch, tbl = self._split(table)
+        name = f"{sch}.{tbl}"
+        got = self._shapes(side, db)
+        if name not in got["kind"]:
+            got = self._shapes(side, db, fresh=True)
+        return got, (name if name in got["kind"] else None)
+
+    def _forget_catalog(self, side, db):
+        self.__dict__.get("_catalogs", {}).pop((side, self._d(side, db)),
+                                               None)
+
+    def catalog(self, side, db):
+        """This side's relations as `catalog.Catalog`: each one's columns
+        with their declared type, null, default and collation, its key in
+        key order, its indexes and foreign keys - read in one statement for
+        the whole database and kept (`CATALOG_SECONDS`). The readers of one
+        table's columns, key, rules and indexes take from it; each was a
+        statement a table, about 16,000 for a check of 2,000 tables (audit
+        2026-10-01, SC15, SP2)."""
+        return self._shapes(side, db)["catalog"]
+
+    def shape_catalog(self, side, db):
+        """The catalogue of the tables in scope (`neutral_tables`), read
+        now: what drift compares from one reading to the next, a table at a
+        time by its fingerprint (`catalog.Catalog.shape`), with what
+        differs in words (`explain`) - each column's type with its length,
+        precision and scale, null, default, collation, identity or
+        generated expression, and each table's key, indexes, foreign keys,
+        checks and triggers (a trigger by a hash of its definition and its
+        function's body). Drift compared a column's name and a type string
+        without its numbers (audit 2026-10-01, SC3)."""
+        from .. import catalog as cat
+        whole = self._shapes(side, db, fresh=True)["catalog"]
+        keep = set(self.neutral_tables(side, db))
+        return cat.Catalog(
+            tables=[t for t in whole.tables if t in keep],
+            columns={t: c for t, c in whole.columns.items() if t in keep},
+            keys={t: k for t, k in whole.keys.items() if t in keep},
+            indexes={t: i for t, i in whole.indexes.items() if t in keep},
+            fks={t: f for t, f in whole.fks.items() if t in keep},
+            others={t: o for t, o in whole.others.items() if t in keep})
 
     def neutral_columns(self, side, db, table):
         """[(name, declared type)] with the type's own numbers attached.
@@ -553,69 +1290,51 @@ class PostgresEngine(Engine):
         source, which loses a limit the application was relying on without
         losing a row to show for it.
         """
-        sch, tbl = self._split(table)
-        out = self._psql(side, self._d(side, db), f"""
-            select a.attname||chr(31)
-                   ||pg_catalog.format_type(a.atttypid, a.atttypmod)
-              from pg_attribute a
-              join pg_class c on c.oid = a.attrelid
-              join pg_namespace n on n.oid = c.relnamespace
-             where n.nspname = '{sch}' and c.relname = '{tbl}'
-               and a.attnum > 0 and not a.attisdropped
-             order by a.attnum""")
-        return [tuple(l.split("\x1f", 1)) for l in out.splitlines() if l]
+        got, name = self._shape_of(side, db, table)
+        if name is None:
+            return []
+        return [(c.name, c.declared)
+                for c in got["catalog"].columns.get(name, [])]
 
     def neutral_key(self, side, db, table, ask=None):
-        """The primary key's columns, in its order. `ask(sql)` as
-        `_slot_ready` takes it."""
+        """The primary key's columns, in its order - the one order every
+        reader of a key takes (audit 2026-10-01, DU19). `ask(sql)` as
+        `_slot_ready` takes it: asked on that connection, not the
+        catalogue."""
         sch, tbl = self._split(table)
-        out = (ask or (lambda sql: self._psql(side, self._d(side, db), sql)))(
-            f"""
+        if ask is None:
+            got, name = self._shape_of(side, db, table)
+            return list(got["catalog"].keys.get(name) or ()) if name else []
+        out = ask(f"""
             select a.attname
               from pg_index i
               join pg_class c on c.oid = i.indrelid
               join pg_namespace n on n.oid = c.relnamespace
               join pg_attribute a on a.attrelid = c.oid
                                  and a.attnum = any(i.indkey)
-             where i.indisprimary and n.nspname = '{sch}'
-               and c.relname = '{tbl}'
+             where i.indisprimary and n.nspname = {_literal(sch)}
+               and c.relname = {_literal(tbl)}
              order by array_position(i.indkey, a.attnum)""")
         return [l for l in out.splitlines() if l]
 
     def _conn(self, side, db):
-        import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
-        options = SESSION
-        if side == "dst" and db in self.__dict__.get("_as_replica", ()):
-            options += " -c session_replication_role=replica"
-        conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                                password=ep.password, dbname=db,
-                                connect_timeout=15, **ep.libpq_tls(),
-                                options=options)
-        self._read_hstore(conn, side, db)
-        self._read_json(conn)
-        self._read_float4(conn)
-        return conn
+        """A connection of the driver the rows are read through, to the
+        database `db` as it is named on that side (not mapped: other
+        modules hand the target's own name). Inside the engine, `_connect`
+        takes the hop's name."""
+        return self._open(side, db, "read")
 
     def _conn3(self, side, db):
         """A connection of the driver that sends statements without
         waiting for each one's answer and COPY binary - the one rows are
-        written through. Each value is put into its statement here as a
-        literal, as the other driver puts it (its type cast after it where
-        the other driver casts), so a column reads what it always read,
-        and a statement holds as many values as it has, where values sent
-        apart stop at 65,535; nothing is prepared on a server a pooler may
-        hand to another client."""
-        import psycopg
-        ep = self.hop.source if side == "src" else self.hop.target
-        options = SESSION
-        if side == "dst" and db in self.__dict__.get("_as_replica", ()):
-            options += " -c session_replication_role=replica"
-        return psycopg.connect(host=ep.host, port=ep.port, user=ep.user,
-                               password=ep.password, dbname=db,
-                               connect_timeout=15, **ep.libpq_tls(),
-                               cursor_factory=psycopg.ClientCursor,
-                               prepare_threshold=None, options=options)
+        written through - to the database `db` as it is named on that
+        side. Each value is put into its statement here as a literal, as
+        the other driver puts it (its type cast after it where the other
+        driver casts), so a column reads what it always read, and a
+        statement holds as many values as it has, where values sent apart
+        stop at 65,535; nothing is prepared on a server a pooler may hand
+        to another client."""
+        return self._open(side, db, "write")
 
     @staticmethod
     def _read_float4(conn):
@@ -678,14 +1397,13 @@ class PostgresEngine(Engine):
         if got:
             return got
         import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
 
         def ask(dbname):
             try:
-                conn = psycopg2.connect(host=ep.host, port=ep.port,
-                                        user=ep.user, password=ep.password,
-                                        dbname=dbname, connect_timeout=5,
-                                        **ep.libpq_tls())
+                # a pooler's console takes no session settings: the bare
+                # connection, with the side's TLS and a short wait
+                conn = connect(self._ep(side), dbname, retry=False,
+                               timeout=PROBE_SECONDS, session=False)
             except psycopg2.OperationalError as e:
                 return None, str(e)
             return conn, ""
@@ -859,7 +1577,7 @@ class PostgresEngine(Engine):
         for line in self._psql("dst", db,
                                self.OWNED_SEQUENCES_SQL).splitlines():
             seq, table, col, name = (line.split("\x1f") + ["", "", ""])[:4]
-            if not name or self.hop.excluded(db, *name.split(".", 1)):
+            if not name or self.hop.excluded(db, *self._split(name)):
                 continue
             top = self._psql("dst", db,
                 f"select m from (select max({col}) m from {table}) x, {seq} s"
@@ -873,7 +1591,7 @@ class PostgresEngine(Engine):
     def _raise_past(behind):
         """The statements that move each sequence to its column's largest
         value, so the next one handed out is past every row."""
-        return [f"select setval('{seq}', {top});"
+        return [f"select setval({_literal(seq)}, {top});"
                 for seq, _, _, top in behind]
 
     def _fk_orphans(self, db):
@@ -908,7 +1626,7 @@ class PostgresEngine(Engine):
               and n.nspname not like '\\_\\_%'""").splitlines() if l]
         orphans, unscanned, pending = [], [], 0
         for name, child, parent, ckeys, pkeys, valid in fks:
-            if self.hop.excluded(db, *str(child).replace('"', "").split(".")):
+            if self.hop.excluded(db, *self._split(child)):
                 continue
             pending += valid != "true"
             cc = ", ".join(f"c.{k}" for k in ckeys.split(","))
@@ -966,24 +1684,24 @@ class PostgresEngine(Engine):
         got = self._psql(side, db, "select c.relpages, c.reltuples::bigint"
                                    " from pg_class c join pg_namespace n on"
                                    " n.oid = c.relnamespace where"
-                                   f" n.nspname = '{sch}' and c.relname ="
-                                   f" '{tbl}'").strip()
+                                   f" n.nspname = {_literal(sch)} and c.relname ="
+                                   f" {_literal(tbl)}").strip()
         if not got:
             return None
         pages, rows = (int(x) for x in got.split("|"))
         if pages > 0 and rows <= 0:
             # never analysed: counted, once
             rows = int(self._psql(side, db, f'select count(*) from'
-                                            f' "{sch}"."{tbl}"').strip())
+                                            f' {_ident(sch)}.{_ident(tbl)}').strip())
         if pages <= 0 or rows <= 0:
             return [[0, None]]
         step = max(1, int(pages * rows_per / rows))
         out, start = [], 0
         while start < pages:
             end = start + step
-            out.append([start, f"ctid >= '({start},0)'::tid and ctid <"
-                               f" '({end},0)'::tid" if end < pages else
-                        f"ctid >= '({start},0)'::tid"])
+            out.append([start, f"ctid >= {_tid(start)} and ctid <"
+                               f" {_tid(end)}" if end < pages else
+                        f"ctid >= {_tid(start)}"])
             start = end
         return out
 
@@ -994,38 +1712,42 @@ class PostgresEngine(Engine):
             return {"PGOPTIONS": "-c session_replication_role=replica"}
         return {}
 
-    def _read_query(self, side, db, table, columns, after, limit, where):
+    def _read_query(self, side, db, table, columns, after, limit, where,
+                    as_text=()):
         """(sql, args, key, names) for `neutral_read` and
-        `neutral_batches`: one statement shape for both."""
+        `neutral_batches`: one statement shape for both. A column named in
+        `as_text` is read as the server's text of it."""
         from .. import canon
         sch, tbl = self._split(table)
         names = [n for n, _ in columns]
-        cols = ", ".join(canon.read_expr("postgres", f'"{n}"', c)
+        cols = ", ".join(f"{_ident(n)}::text" if n in as_text else
+                         canon.read_expr("postgres", _ident(n), c)
                          for n, c in columns)
         key = self.neutral_key(side, db, table)
         resume, args = "", []
         if key and after is not None:
             places = ", ".join(["%s"] * len(key))
-            keys = ", ".join(f'"{k}"' for k in key)
+            keys = ", ".join(_ident(k) for k in key)
             resume = f"({keys}) > ({places})"
             # a `jsonb` key is read back as the document it holds, which
             # the driver will not send: as its JSON
             args = [canon.sql_value(v) for v in after]
         # the driver formats every statement it is given parameters for
         where = self._where(where, resume, True, percent=True)
-        order = (" order by " + ", ".join(f'"{k}"' for k in key)) if key else ""
+        order = (" order by " + ", ".join(_ident(k) for k in key)) if key \
+            else ""
         cap = f" limit {int(limit)}" if key and limit else ""
-        return (f'select {cols} from "{sch}"."{tbl}"{where}{order}{cap}',
-                args, key, names)
+        return (f"select {cols} from {_ident(sch)}.{_ident(tbl)}{where}"
+                f"{order}{cap}", args, key, names)
 
     def neutral_batches(self, side, db, table, columns, size=1000,
-                        where=None):
+                        where=None, as_text=()):
         """The whole table in one pass, `size` rows at a time, for a table
         with no key to resume from - read through a cursor the server keeps,
         so no more than a batch is ever held here."""
         sql, args, _, _ = self._read_query(side, db, table, columns, None,
-                                           None, where)
-        with self._conn(side, self._d(side, db)) as conn:
+                                           None, where, as_text)
+        with self._connect(side, db) as conn:
             with conn.cursor(name="migkit_batches") as cur:
                 cur.itersize = size
                 cur.execute(sql, args)
@@ -1039,7 +1761,7 @@ class PostgresEngine(Engine):
                      where=None):
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  after, limit, where)
-        with self._conn(side, self._d(side, db)) as conn:
+        with self._connect(side, db) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, args)
                 rows = [list(r) for r in cur.fetchall()]
@@ -1057,14 +1779,9 @@ class PostgresEngine(Engine):
         NULL outside its key."""
         if table is None:
             return {None: {"null": True}}
-        return {str(n): {"null": str(null) == "true"} for n, null in (
-            line.split("\x1f") for line in self._psql(
-                side, self._d(side, db),
-                "select attname || chr(31) || (not attnotnull)::text from"
-                " pg_attribute where attrelid ="
-                f" '{self._qualified(side, db, table).replace(chr(39), '')}'"
-                "::regclass and attnum > 0 and not attisdropped"
-            ).splitlines() if line)}
+        got, name = self._shape_of(side, db, table)
+        return {c.name: {"null": c.nullable}
+                for c in (got["catalog"].columns.get(name) or [])}
 
     def key_merges(self, side, db, columns, batches, examples=3):
         """Asked of this server's own comparison where it may take two
@@ -1078,7 +1795,7 @@ class PostgresEngine(Engine):
         if not names:
             return None
         marks = ", ".join(["%s"] * len(names))
-        with self._conn(side, self._d(side, db)) as conn:
+        with self._connect(side, db) as conn:
             with conn.cursor() as cur:
                 cur.execute("select collname from pg_collation where not"
                             f" collisdeterministic and collname in ({marks})",
@@ -1142,9 +1859,9 @@ class PostgresEngine(Engine):
             return {}
         sch, tbl = self._split(table)
         sql, args = self._by_key_query(
-            f'"{sch}"."{tbl}"', columns, key, list(keys), lambda n: f'"{n}"',
+            f'{_ident(sch)}.{_ident(tbl)}', columns, key, list(keys), lambda n: f'{_ident(n)}',
             "%s", where.replace("%", "%%") if where else None, "postgres")
-        with self._conn(side, self._d(side, db)) as conn:
+        with self._connect(side, db) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, args)
                 rows = [list(r) for r in cur.fetchall()]
@@ -1158,12 +1875,12 @@ class PostgresEngine(Engine):
             return []
         sch, tbl = self._split(table)
         values, out = list(values), []
-        with self._conn(side, self._d(side, db)) as conn:
+        with self._connect(side, db) as conn:
             with conn.cursor() as cur:
                 for i in range(0, len(values), 1000):
                     sql, args = self._by_key_query(
-                        f'"{sch}"."{tbl}"', columns, list(match),
-                        values[i:i + 1000], lambda n: f'"{n}"', "%s", None,
+                        f'{_ident(sch)}.{_ident(tbl)}', columns, list(match),
+                        values[i:i + 1000], lambda n: f'{_ident(n)}', "%s", None,
                         "postgres")
                     cur.execute(sql, args)
                     out += [list(r) for r in cur.fetchall()]
@@ -1184,12 +1901,12 @@ class PostgresEngine(Engine):
         from .. import canon
         self._target_only(side, "write rows")
         sch, tbl = self._split(table)
-        quoted = f'"{sch}"."{tbl}"'
+        quoted = f'{_ident(sch)}.{_ident(tbl)}'
         names = [n for n, _ in columns]
-        cols = ", ".join(f'"{n}"' for n in names)
+        cols = ", ".join(f'{_ident(n)}' for n in names)
         key = self.neutral_key(side, db, table)
         keyed = bool(key) and all(k in names for k in key)
-        with self._conn3(side, self._d(side, db)) as conn:
+        with self._connect(side, db, "write") as conn:
             with conn.cursor() as cur:
                 into = quoted
                 if keyed:
@@ -1209,9 +1926,9 @@ class PostgresEngine(Engine):
                             "postgres"):
                         copy.write_row(r)
                 if keyed:
-                    sets = ", ".join(f'"{n}" = excluded."{n}"'
+                    sets = ", ".join(f'{_ident(n)} = excluded.{_ident(n)}'
                                      for n in names if n not in key)
-                    conflict = ", ".join(f'"{k}"' for k in key)
+                    conflict = ", ".join(f'{_ident(k)}' for k in key)
                     cur.execute(
                         f"insert into {quoted} ({cols}) select {cols} from"
                         f" migkit_batch on conflict ({conflict}) do "
@@ -1222,36 +1939,28 @@ class PostgresEngine(Engine):
         return len(rows)
 
     def _sparse_columns(self, side, db, table):
-        """The `sparsevec` columns of a table, asked once: a vector is
+        """The `sparsevec` columns of a table (`catalog`): a vector is
         read dense (`canon.read_expr`) and a `sparsevec` takes only its
         own text, `{1:0.5,4:2}/6`."""
-        known = self.__dict__.setdefault("_sparse_of", {})
-        at = (side, db, str(table))
-        if at not in known:
-            known[at] = {n for n, t in self.neutral_columns(side, db, table)
-                         if str(t).lower().startswith("sparsevec")}
-        return known[at]
+        return {n for n, t in self.neutral_columns(side, db, table)
+                if str(t).lower().startswith("sparsevec")}
 
     def _array_columns(self, side, db, table):
-        """The columns of a table that are arrays, asked once: a list on
+        """The columns of a table that are arrays (`catalog`): a list on
         its way into one is the array, where into any other column
         (`jsonb`) it is the JSON array `sql_value` writes. An array is
         read as its list, to be carried to another engine as JSON
         (`canon.array_element`), and written back here as a list."""
         from .. import canon
-        known = self.__dict__.setdefault("_arrays_of", {})
-        at = (side, db, str(table))
-        if at not in known:
-            known[at] = {n for n, t in self.neutral_columns(side, db, table)
-                         if canon.array_element("postgres", t) is not None}
-        return known[at]
+        return {n for n, t in self.neutral_columns(side, db, table)
+                if canon.array_element("postgres", t) is not None}
 
     def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a table")
         sch, tbl = self._split(table)
-        with self._conn(side, self._d(side, db)) as conn:
+        with self._connect(side, db) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'delete from "{sch}"."{tbl}"'
+                cur.execute(f'delete from {_ident(sch)}.{_ident(tbl)}'
                             + self._where(where))
                 gone = cur.rowcount
                 fencing.hold(self, side, db, cur)
@@ -1261,67 +1970,43 @@ class PostgresEngine(Engine):
     SQL_DIALECT = "postgres"
 
     def neutral_column_rules(self, side, db, table):
-        sch, tbl = self._split(table)
+        """{column: {null, default, identity}} of a table's columns the
+        server does not compute (`catalog`)."""
+        got, name = self._shape_of(side, db, table)
         out = {}
-        for line in self._psql(side, db, f"""
-                select a.attname||chr(31)||(not a.attnotnull)::text
-                       ||chr(31)||coalesce(pg_get_expr(d.adbin, d.adrelid),
-                                           '')
-                       ||chr(31)||(a.attidentity <> '')::text
-                  from pg_attribute a
-                  join pg_class c on c.oid = a.attrelid
-                  join pg_namespace n on n.oid = c.relnamespace
-                  left join pg_attrdef d on d.adrelid = a.attrelid
-                                        and d.adnum = a.attnum
-                 where n.nspname = '{sch}' and c.relname = '{tbl}'
-                   and a.attnum > 0 and not a.attisdropped
-                   and a.attgenerated = ''""").splitlines():
-            name, null, default, ident = (line.split("\x1f") + [""] * 3)[:4]
+        for c in (got["catalog"].columns.get(name) or []) if name else []:
+            if got["generated"][name].get(c.name):
+                continue
+            default = c.default or ""
             # a serial's default is its own sequence, which is what an
             # identity is on the engines that have one
             serial = default.startswith("nextval(")
-            out[name] = {"null": null == "true",
-                         "default": None if serial or not default
-                         else default,
-                         "identity": ident == "true" or serial}
+            out[c.name] = {"null": c.nullable,
+                           "default": None if serial or not default
+                           else default,
+                           "identity": bool(got["identity"][name].get(
+                               c.name)) or serial}
         return out
 
     def neutral_indexes(self, side, db, table):
-        sch, tbl = self._split(table)
-        out = []
-        for line in self._psql(side, db, f"""
-                select i.relname||chr(31)||ix.indisunique::text||chr(31)
-                       ||array_to_string(array(
-                           select a.attname
-                             from unnest(ix.indkey) with ordinality k(n, o)
-                             join pg_attribute a on a.attrelid = ix.indrelid
-                                                and a.attnum = k.n
-                            order by k.o), chr(30))||chr(31)
-                       ||(ix.indexprs is null and ix.indpred is null
-                          and 0 <> all(ix.indkey))::text
-                  from pg_index ix
-                  join pg_class i on i.oid = ix.indexrelid
-                  join pg_class t on t.oid = ix.indrelid
-                  join pg_namespace n on n.oid = t.relnamespace
-                 where n.nspname = '{sch}' and t.relname = '{tbl}'
-                   and not ix.indisprimary
-                 order by 1""").splitlines():
-            name, unique, cols, plain = (line.split("\x1f") + [""] * 3)[:4]
-            out.append((name, unique == "true",
-                        [c for c in cols.split("\x1e") if c],
-                        plain == "true"))
-        return out
+        """[(name, unique, [columns], plain)] of a table's indexes but its
+        key (`catalog`); `plain` where the columns say it all - no
+        expression, no predicate."""
+        got, name = self._shape_of(side, db, table)
+        return [(i.name, i.unique, list(i.columns), not i.definition)
+                for i in (got["catalog"].indexes.get(name) or [])]
 
     def execute_ddl(self, side, db, sql):
         self._target_only(side, "change a schema")
         self._psql(side, db, sql)
+        self._forget_catalog(side, db)
 
     def neutral_create_index_sql(self, side, db, table, name, unique,
                                  columns):
         sch, tbl = self._split(table)
-        return (f'create {"unique " if unique else ""}index "{name}"'
-                f' on "{sch}"."{tbl}" ('
-                + ", ".join(f'"{c}"' for c in columns) + ")")
+        return (f'create {"unique " if unique else ""}index {_ident(name)}'
+                f' on {_ident(sch)}.{_ident(tbl)} ('
+                + ", ".join(f'{_ident(c)}' for c in columns) + ")")
 
     def default_works(self, side, db, expr, typ=None):
         try:
@@ -1334,27 +2019,33 @@ class PostgresEngine(Engine):
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
         sch, tbl = self._split(table)
-        defs = [f'"{col[0]}" {canon.ddl_type("postgres", col[1], col[2])}'
+        # the type a key column takes, as the target validated it: a
+        # MongoDB `_id` of mixed types is `jsonb` in a key and was built
+        # `json`, which no primary key takes (audit 2026-10-01, SC6)
+        defs = [_ident(col[0]) + " "
+                + canon.ddl_type("postgres", col[1], col[2], col[0] in key)
                 + self._column_tail(col[3] if len(col) > 3 else None,
                                     "postgres")
                 for col in columns]
         if key:
-            defs.append("primary key (" + ", ".join(f'"{k}"' for k in key)
+            defs.append("primary key (" + ", ".join(_ident(k) for k in key)
                         + ")")
-        return f'create table "{sch}"."{tbl}" (' + ", ".join(defs) + ")"
+        return (f"create table {_ident(sch)}.{_ident(tbl)} ("
+                + ", ".join(defs) + ")")
 
     def neutral_create(self, side, db, table, columns, key=()):
         sch, tbl = self._split(table)
-        exists = self._psql(side, self._d(side, db),
+        exists = self._psql(side, db,
                             "select count(*) from information_schema.tables"
-                            f" where table_schema='{sch}'"
-                            f" and table_name='{tbl}'").strip()
+                            f" where table_schema={_literal(sch)}"
+                            f" and table_name={_literal(tbl)}").strip()
         if exists != "0":
             raise SystemExit(f"{table} already exists on the target -"
                              " migkit will not alter or replace a table that"
                              " is already there")
         ddl = self.neutral_create_sql(side, db, table, columns, key)
-        self._psql(side, self._d(side, db), ddl)
+        self._psql(side, db, ddl)
+        self._forget_catalog(side, db)
         return ddl
 
     def _insert_override(self, side, db, table, names):
@@ -1394,37 +2085,15 @@ class PostgresEngine(Engine):
                                 not writable at all; OVERRIDING SYSTEM VALUE
                                 was tried and answered the same error
 
-        One catalog query per table, cached, because both answers come from
-        the same row of `pg_attribute` and asking twice would be two round
-        trips for one fact.
+        Both from the side's catalogue (`catalog`), read once for every
+        table.
         """
-        # the cache lives in __dict__, so its name must not be a method's:
-        # `_write_rules` there shadowed `_write_rules` here and every call
-        # answered `'dict' object is not callable`
-        cache = self.__dict__.setdefault("_write_rules_cache", {})
-        target = self._d(side, db)
-        ident = (side, target, table)
-        if ident not in cache:
-            sch, tbl = self._split(table)
-            ref = f'"{sch}"."{tbl}"'.replace("'", "''")
-            out = self._psql(side, target,
-                             "select a.attname||chr(9)||a.attidentity::text"
-                             "||chr(9)||a.attgenerated::text"
-                             " from pg_attribute a"
-                             f" where a.attrelid = to_regclass('{ref}')"
-                             " and a.attnum > 0 and not a.attisdropped")
-            always, generated = set(), set()
-            for line in out.splitlines():
-                parts = line.split("\t")
-                if len(parts) != 3:
-                    continue
-                name, identity, gen = parts
-                if identity == "a":
-                    always.add(name)
-                if gen:
-                    generated.add(name)
-            cache[ident] = {"always": always, "generated": generated}
-        return cache[ident]
+        got, name = self._shape_of(side, db, table)
+        cols = got["catalog"].columns.get(name) or [] if name else []
+        return {"always": {c.name for c in cols
+                           if got["identity"][name].get(c.name) == "a"},
+                "generated": {c.name for c in cols
+                              if got["generated"][name].get(c.name)}}
 
     def _unwritable_columns(self, side, db, table):
         """`GENERATED ALWAYS AS (expr) STORED` - the server computes these
@@ -1451,9 +2120,8 @@ class PostgresEngine(Engine):
 
     def _ordered_tables(self, side, db):
         def read():
-            target = self._d(side, db)
             edges = [tuple(line.split("\x1f")) for line in self._psql(
-                side, target, "select a.relname || chr(31) || b.relname"
+                side, db, "select a.relname || chr(31) || b.relname"
                               " from pg_constraint c"
                               " join pg_class a on a.oid = c.conrelid"
                               " join pg_class b on b.oid = c.confrelid"
@@ -1462,7 +2130,7 @@ class PostgresEngine(Engine):
             if self._keys_off(side, db, edges):
                 edges = []
             singles = [line for line in self._psql(
-                side, target, "select c.relname from pg_index i"
+                side, db, "select c.relname from pg_index i"
                               " join pg_class c on c.oid = i.indrelid"
                               " join pg_namespace n"
                               " on n.oid = c.relnamespace"
@@ -1484,13 +2152,13 @@ class PostgresEngine(Engine):
         full = [{**k, **v} for k, v in rows]
         names = [n for n in sorted(full[0])
                  if n not in self._unwritable_columns(side, db, table)]
-        cols = ", ".join(f'"{n}"' for n in names)
-        sets = ", ".join(f'"{n}" = excluded."{n}"'
+        cols = ", ".join(f'{_ident(n)}' for n in names)
+        sets = ", ".join(f'{_ident(n)} = excluded.{_ident(n)}'
                          for n in names if n not in key)
-        conflict = ", ".join(f'"{k}"' for k in sorted(key))
+        conflict = ", ".join(f'{_ident(k)}' for k in sorted(key))
         tail = (f" on conflict ({conflict}) do update set {sets}" if sets
                 else f" on conflict ({conflict}) do nothing")
-        into = (f'insert into "{sch}"."{tbl}" ({cols})'
+        into = (f'insert into {_ident(sch)}.{_ident(tbl)} ({cols})'
                 + self._insert_override(side, db, table, names))
         arrays = self._array_columns(side, db, table)
         values = [[r[n] if n in arrays else canon.sql_value(r[n])
@@ -1592,7 +2260,7 @@ class PostgresEngine(Engine):
         piped = getattr(self._apply_held(), "piped", None)
         if piped is not None:
             piped.off()
-        cols = ", ".join(f'"{n}"' for n in names)
+        cols = ", ".join(f'{_ident(n)}' for n in names)
         with conn.cursor() as cur:
             stage, types = self._stage(conn, cur, sch, tbl)
             key = self._work_key("stage", f"{sch}.{tbl}", len(values))
@@ -1626,16 +2294,17 @@ class PostgresEngine(Engine):
             f"{sch}.{tbl}".encode(), usedforsecurity=False).hexdigest()[:12]
         made = conn.__dict__.setdefault("migkit_stages", {})
         if name not in made:
-            cur.execute(f'create temp table if not exists "{name}" (like'
-                        f' "{sch}"."{tbl}" including defaults);'
+            cur.execute(f'create temp table if not exists {_ident(name)} (like'
+                        f' {_ident(sch)}.{_ident(tbl)} including defaults);'
                         " select a.attname, t.typname from pg_attribute a"
                         " join pg_type t on t.oid = a.atttypid"
-                        f" where a.attrelid = 'pg_temp.\"{name}\"'::regclass"
+                        " where a.attrelid ="
+                        f" {_literal('pg_temp.' + _ident(name))}::regclass"
                         " and a.attnum > 0 and not a.attisdropped"
                         " and t.typtype = 'b'")
             cur.nextset()
             made[name] = {str(n): str(t) for n, t in cur.fetchall()}
-        return f'"{name}"', made[name]
+        return f'{_ident(name)}', made[name]
 
     def _added_row(self, side, db, table, key, values):
         from .. import canon
@@ -1657,13 +2326,13 @@ class PostgresEngine(Engine):
             if n in key or isinstance(row[n], canon.Kept):
                 continue
             if isinstance(row[n], canon.Added):
-                sets.append(f'"{n}" = t0."{n}" + %s')
+                sets.append(f'{_ident(n)} = t0.{_ident(n)} + %s')
                 by.append(canon.sql_value(row[n].by))
             else:
-                sets.append(f'"{n}" = excluded."{n}"')
-        conflict = ", ".join(f'"{k}"' for k in sorted(key))
-        return (f'insert into "{sch}"."{tbl}" as t0 ('
-                + ", ".join(f'"{n}"' for n in names) + ")"
+                sets.append(f'{_ident(n)} = excluded.{_ident(n)}')
+        conflict = ", ".join(f'{_ident(k)}' for k in sorted(key))
+        return (f'insert into {_ident(sch)}.{_ident(tbl)} as t0 ('
+                + ", ".join(f'{_ident(n)}' for n in names) + ")"
                 + self._insert_override(side, db, table, names)
                 + " values (" + ", ".join(["%s"] * len(names)) + ")"
                 + f" on conflict ({conflict}) do "
@@ -1678,18 +2347,18 @@ class PostgresEngine(Engine):
         table = self.local_table(table)
         sch, tbl = self._split(table)
         names = sorted(keys[0])
-        cols = ", ".join(f'"{n}"' for n in names)
+        cols = ", ".join(f'{_ident(n)}' for n in names)
         # a list of rows rather than `in (values ...)`: those values are
         # typed as text and do not compare with an integer key
         with self._writer(side, db) as conn:
-            self._in_statements(conn, f'delete from "{sch}"."{tbl}" where'
+            self._in_statements(conn, f'delete from {_ident(sch)}.{_ident(tbl)} where'
                                       f" ({cols}) in (", ")",
                                 [[canon.sql_value(k[n]) for n in names]
                                  for k in keys])
 
     def _open_writer(self, side, db):
         self._target_only(side, "apply changes")
-        return self._conn3(side, self._d(side, db))
+        return self._connect(side, db, "write")
 
     def _apply_net(self, side, db, rows):
         """The batch's runs piped (`_Piped`): each statement is sent
@@ -1761,7 +2430,7 @@ class PostgresEngine(Engine):
         with lock:
             if (side, self._d(side, db)) in made:
                 return
-            conn = self._conn(side, self._d(side, db))
+            conn = self._connect(side, db)
             try:
                 conn.autocommit = True
                 with conn.cursor() as cur:
@@ -1789,7 +2458,7 @@ class PostgresEngine(Engine):
         where the machines of a hop keep their records and the numbers
         their writers are held to (`shared`, `fencing`)."""
         self._origin_table(side, db)
-        return self._conn(side, self._d(side, db)), self.own_name(side, db)
+        return self._connect(side, db), self.own_name(side, db)
 
     #: the prefix of the replication origins two-way tails apply under: a
     #: reader leaves out what carries one, and stops where any other
@@ -1853,7 +2522,7 @@ class PostgresEngine(Engine):
     def _origin_named(self, side, db, name):
         """The replication origin `name`, made where it is not there."""
         import psycopg2
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             conn.autocommit = True
             with conn.cursor() as cur:
@@ -1871,7 +2540,7 @@ class PostgresEngine(Engine):
         the catalogue: their arguments are not the same on every
         version."""
         like = self.TWOWAY_ORIGIN.replace("_", "\\_")
-        got = self._psql(side, self._d(side, db), (
+        got = self._psql(side, db, (
             "select current_setting('server_version_num') || chr(31) ||"
             " ((select rolsuper from pg_roles where rolname = current_user)"
             "  or coalesce((select bool_and(has_function_privilege(oid,"
@@ -1882,7 +2551,8 @@ class PostgresEngine(Engine):
             "   'pg_replication_origin_progress',"
             "   'pg_replication_origin_advance')), false))::text || chr(31)"
             " || coalesce((select string_agg(roname, chr(30)) from"
-            f"  pg_replication_origin where roname not like '{like}%'), '')"
+            "  pg_replication_origin where roname not like"
+            f" {_literal(like + '%')}), '')"
             " || chr(31) || (has_schema_privilege('public', 'create') or"
             "  to_regclass('public.migkit_origin') is not null)::text"))
         version, grants, foreign, create = got.split("\x1f")
@@ -1901,10 +2571,10 @@ class PostgresEngine(Engine):
         if rung != "origin":
             raise SystemExit(f"two_way: {rung} keeps no batch here")
         name = self.twoway_origin()
-        got = self._psql(side, self._d(side, db),
+        got = self._psql(side, db,
                          "select pg_replication_origin_progress(roname,"
                          " false)::text from pg_replication_origin where"
-                         f" roname = '{name}'").strip()
+                         f" roname = {_literal(name)}").strip()
         return bool(got) and marks.number(got) == int(batch)
 
     def mark_prove(self, side, db, rung):
@@ -2046,16 +2716,17 @@ class PostgresEngine(Engine):
         elif rung == "origin":
             like = self.twoway_origin().replace("_", "\\_")
             steps.append("select pg_replication_origin_drop(roname) from"
-                         f" pg_replication_origin where roname like '{like}%'")
+                         " pg_replication_origin where roname like"
+                         f" {_literal(like + '%')}")
         for sql in steps if go else ():
-            self._psql(side, self._d(side, db), sql)
+            self._psql(side, db, sql)
         return steps
 
     def origin_seen(self, side, db):
         """What the last batch this hop committed here said it was
         (`twoway.batch_seen`), None where there is none."""
         from .. import twoway
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             with conn.cursor() as cur:
                 cur.execute("select to_regclass(%s)",
@@ -2087,11 +2758,11 @@ class PostgresEngine(Engine):
         `max_slot_wal_keep_size`, removed at the next checkpoint): it hands
         out no change again, and a new position is a new slot, made with
         its snapshot. A slot that still holds its WAL is left as it is."""
-        self._psql(side, self._d(side, db),
+        self._psql(side, db,
                    "select pg_drop_replication_slot(slot_name) from"
                    " pg_replication_slots where slot_name ="
-                   f" '{self.slot_name()}' and wal_status in ('lost',"
-                   " 'unreserved')")
+                   f" {_literal(self.slot_name())} and wal_status in"
+                   " ('lost', 'unreserved')")
 
     def _slot_ready(self, side, db, resuming_from=None, ask=None,
                     make=None):
@@ -2112,12 +2783,11 @@ class PostgresEngine(Engine):
         callable on its own.
         """
         name = self.slot_name()
-        target = self._d(side, db)
         if ask is None:
             def ask(sql):
-                return self._psql(side, target, sql)
+                return self._psql(side, db, sql)
         got = ask("select plugin from pg_replication_slots"
-                  f" where slot_name = '{name}'").strip()
+                  f" where slot_name = {_literal(name)}").strip()
         if not got and resuming_from:
             raise SystemExit(
                 f"the slot {name} is gone from the source, and the tail had"
@@ -2143,7 +2813,7 @@ class PostgresEngine(Engine):
                 make(side, db, name)
                 return name
             ask("select pg_create_logical_replication_slot"
-                f"('{name}', '{self.PLUGIN}')")
+                f"({_literal(name)}, {_literal(self.PLUGIN)})")
             return name
         if got != self.PLUGIN:
             raise SystemExit(
@@ -2159,13 +2829,13 @@ class PostgresEngine(Engine):
         it. Where nothing caps that (`max_slot_wal_keep_size` -1, the
         default) the slot keeps everything, and what fills is the source's
         disk: `held_bytes` says how much it is holding."""
-        got = self._psql(side, self._d(side, db),
+        got = self._psql(side, db,
                          "select wal_status || chr(31)"
                          " || coalesce(safe_wal_size::text, '') || chr(31)"
                          " || coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(),"
                          " restart_lsn)::bigint::text, '')"
                          " from pg_replication_slots where slot_name ="
-                         f" '{self.slot_name()}'")
+                         f" {_literal(self.slot_name())}")
         if not got:
             return None
         # not stripped: Python counts the separator as white space, and a
@@ -2191,10 +2861,10 @@ class PostgresEngine(Engine):
         of its sight.
         """
         name = self._slot_ready(side, db, make=self._slot_with_its_snapshot)
-        return self._psql(side, self._d(side, db),
+        return self._psql(side, db,
                           "select confirmed_flush_lsn::text from"
                           " pg_replication_slots"
-                          f" where slot_name = '{name}'").strip()
+                          f" where slot_name = {_literal(name)}").strip()
 
     def _slot_session(self, side, db):
         """The connection the tail reads its slot on: opened the first time
@@ -2207,18 +2877,7 @@ class PostgresEngine(Engine):
         conn = held.get(where)
         if conn is not None and not conn.closed:
             return conn
-        import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
-        conn = psycopg2.connect(
-            host=ep.host, port=ep.port, user=ep.user, password=ep.password,
-            dbname=where[1], connect_timeout=15, client_encoding="UTF8",
-            keepalives=1,
-            keepalives_idle=int(os.environ.get("MIGKIT_KEEPALIVE_IDLE",
-                                               "60")),
-            keepalives_interval=10, keepalives_count=5,
-            options="-c TimeZone=UTC -c DateStyle=ISO"
-                    f" -c statement_timeout=0 {SESSION}", **ep.libpq_tls())
-        conn.autocommit = True
+        conn = self._open(side, where[1], "slot")
         held[where] = conn
         return conn
 
@@ -2314,23 +2973,19 @@ class PostgresEngine(Engine):
         import psycopg2
         from psycopg2.extras import LogicalReplicationConnection
         plugin = plugin or self.PLUGIN
-        ep = self.hop.source if side == "src" else self.hop.target
         target = self._d(side, db)
         try:
-            rep = psycopg2.connect(
-                host=ep.host, port=ep.port, user=ep.user,
-                password=ep.password, dbname=target, connect_timeout=15,
-                connection_factory=LogicalReplicationConnection,
-                **ep.libpq_tls())
+            rep = connect(self._ep(side), target,
+                          connection_factory=LogicalReplicationConnection)
         except psycopg2.OperationalError:
             rep = None
         if rep is None:
-            self._psql(side, target, "select pg_create_logical_replication_slot"
-                                     f"('{name}', '{plugin}')")
+            self._psql(side, db, "select pg_create_logical_replication_slot"
+                                     f"({_literal(name)}, {_literal(plugin)})")
             return self._visible_by_the_commit_log(side, db, name)
         try:
             cur = rep.cursor()
-            cur.execute(f'CREATE_REPLICATION_SLOT "{name}" LOGICAL'
+            cur.execute(f'CREATE_REPLICATION_SLOT {_ident(name)} LOGICAL'
                         f" {plugin} EXPORT_SNAPSHOT")
             snapshot = cur.fetchone()[2]
             conn = self._conn(side, target)
@@ -2351,22 +3006,21 @@ class PostgresEngine(Engine):
 
         def unseen():
             _, _, running = self._snapshot_parts(self._psql(
-                side, target, "select txid_current_snapshot()::text"))
+                side, db, "select txid_current_snapshot()::text"))
             # done in the slot's snapshot, still running for a read now
             return sorted(x for x in running
                           if x < xmax and x not in done_then)
         self._wait_visible(side, db, name, unseen)
 
     def _visible_by_the_commit_log(self, side, db, name):
-        target = self._d(side, db)
 
         def unseen():
             _, _, running = self._snapshot_parts(self._psql(
-                side, target, "select txid_current_snapshot()::text"))
+                side, db, "select txid_current_snapshot()::text"))
             if not running:
                 return []
             listed = ",".join(str(x) for x in running)
-            got = self._psql(side, target,
+            got = self._psql(side, db,
                              "select x from unnest(array[" + listed
                              + "]::bigint[]) x where txid_status(x)"
                              " = 'committed'")
@@ -2379,24 +3033,23 @@ class PostgresEngine(Engine):
         can have decoded out of a read's sight (a commit a synchronous
         standby holds is in the log and not shown). Only those found now
         are waited for; a later one is after anything already read."""
-        target = self._d(side, db)
 
         def hidden(xids):
             if not xids:
                 return set()
             listed = ",".join(str(x) for x in sorted(xids))
-            got = self._psql(side, target,
+            got = self._psql(side, db,
                              "select x from unnest(array[" + listed
                              + "]::bigint[]) x where txid_status(x)"
                              " = 'committed'")
             return {int(x) for x in got.split() if x}
         _, _, running = self._snapshot_parts(self._psql(
-            side, target, "select txid_current_snapshot()::text"))
+            side, db, "select txid_current_snapshot()::text"))
         first = hidden(running)
         began = time.time()
         while first:
             _, _, running = self._snapshot_parts(self._psql(
-                side, target, "select txid_current_snapshot()::text"))
+                side, db, "select txid_current_snapshot()::text"))
             first &= running
             if not first:
                 return
@@ -2424,10 +3077,10 @@ class PostgresEngine(Engine):
                 return
             if time.time() - began > self.VISIBLE_WAIT:
                 # the slot was made for this copy, which is not happening
-                self._psql(side, self._d(side, db),
+                self._psql(side, db,
                            "select pg_drop_replication_slot(slot_name) from"
                            " pg_replication_slots"
-                           f" where slot_name = '{name}'")
+                           f" where slot_name = {_literal(name)}")
                 raise SystemExit(
                     f"{len(held)} transactions committed before the change"
                     " position are still out of sight of any read after"
@@ -2587,7 +3240,7 @@ class PostgresEngine(Engine):
                     out += [canon.ddl(t, "truncate", txn=int(xid)
                                       if str(xid or "").isdigit() else None)
                             for t in parsed["tables"]
-                            if not self.hop.excluded(db, *t.split("."))]
+                            if not self.hop.excluded(db, *self._split(t))]
                 continue
             if two_way and str(table).split(".")[-1] == "migkit_origin":
                 if marked is None:
@@ -2599,7 +3252,7 @@ class PostgresEngine(Engine):
                          if n == "origin"), None)
             if marked:
                 continue
-            if self.hop.excluded(db, *str(table).split(".")):
+            if self.hop.excluded(db, *self._split(table)):
                 continue
             if table not in keys:
                 keys[table] = self.neutral_key(side, db, table, ask=ask)
@@ -2613,7 +3266,7 @@ class PostgresEngine(Engine):
                         " will stop here again, because peeking never throws"
                         " anything away. Give the table a key or a unique"
                         " REPLICA IDENTITY, or step past it with:\n"
-                        f"    select pg_replication_slot_advance('{slot}',"
+                        f"    select pg_replication_slot_advance({_literal(slot)},"
                         " pg_current_wal_lsn());"
                         "  -- skips everything pending, including this")
             out.append(pgslot.change(parsed, keys[table],
@@ -2643,7 +3296,7 @@ class PostgresEngine(Engine):
         under, so the two marks are one and no change falls between
         them."""
         on = self._marked_on(side, db)
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             conn.rollback()
             conn.set_session(isolation_level="REPEATABLE READ",
@@ -2712,7 +3365,7 @@ class PostgresEngine(Engine):
     def log_position(self, side, db):
         if self._in_recovery(side, db):
             return None
-        return self.wal_position(side, self._d(side, db))
+        return self.wal_position(side, db)
 
     #: The position a fence waits for: every commit the server has
     #: acknowledged, which is the WAL *insert* position, not the written
@@ -2764,24 +3417,114 @@ class PostgresEngine(Engine):
         except (TypeError, ValueError):
             return None
 
-    def neutral_digest(self, side, db, table, columns, where=None):
+    #: the declared types a JSON column's values are rendered as canon's
+    #: JSON text by the server itself (`_json_text_sql`)
+    JSON_IN_SQL = ("json", "jsonb", "hstore")
+    #: a number of this many digits or more in a document may be one the
+    #: fold in this process rounds (`canon.render_value` normalises a
+    #: decimal in a context of 28 digits): a document holding one is
+    #: folded here, so the digest stays the fold's
+    JSON_DIGITS = 29
+
+    @staticmethod
+    def _json_text_sql(c):
+        """SQL for canon's JSON text of column `c` (`canon.json_text`):
+        `jsonb`'s own text - an object's keys by their length and then
+        their bytes, the last of a key given twice, `", "` and `": "`
+        between, a string escaped as JSON escapes it - with each number
+        outside a string written as its value, the zeros ending its
+        fraction dropped and a point with nothing after it too (`1.10` ->
+        `1.1`, `2.0` -> `2`); `jsonb` never writes an exponent. A string is
+        matched whole first, so a number inside one is never touched."""
+        string = r'("(?:[^"\\]|\\.)*")'
+        both = _literal(r"\1\2")
+        t = f"to_jsonb({c})::text"
+        t = (f"regexp_replace({t}, "
+             f"{_literal(string + r'|([0-9]\.[0-9]*[1-9])0+(?![0-9])')},"
+             f" {both}, 'g')")
+        return (f"regexp_replace({t}, "
+                f"{_literal(string + r'|([0-9])\.0+(?![0-9])')},"
+                f" {both}, 'g')")
+
+    def _json_in_sql(self, side, db, table, columns):
+        """The JSON columns of `columns` the server can render as canon's
+        text itself, or None where it cannot render them all: a database
+        not in UTF-8 orders an object's keys by other bytes than canon's."""
         from .. import canon
-        if any(canon.folded_here(c) for _, c in columns):
-            return canon.fold_batches(columns, self.neutral_batches(
-                side, db, table, columns, 5000, where=where))
+        wanted = [n for n, c in columns if canon.folded_here(c)]
+        if not wanted:
+            return []
+        if any(c != "json" for _, c in columns if canon.folded_here(c)):
+            return None
+        declared = dict(self.neutral_columns(side, db, table))
+        if any(str(declared.get(n, "")).lower() not in self.JSON_IN_SQL
+               for n in wanted):
+            return None
+        codes = self.__dict__.setdefault("_encodings", {})
+        at = (side, self._d(side, db))
+        if at not in codes:
+            codes[at] = self._psql(side, db, "show server_encoding").strip()
+        return wanted if codes[at].upper() in ("UTF8", "UTF-8") else None
+
+    def neutral_digest(self, side, db, table, columns, where=None):
+        """(rows, digest) of a table as canon renders its rows, summed by the
+        server. A JSON column is rendered as canon's text by the server too
+        (`_json_text_sql`) - a document was folded in this process on every
+        cross-engine proof, the proof taking three times the copy's time at
+        a million rows (backlog P0-DEPTH 7) - and a table the server cannot
+        render whole, or holding a number the fold here rounds
+        (`JSON_DIGITS`), is folded here: the same digest either way."""
+        from .. import canon, rowtext
+        jsons = self._json_in_sql(side, db, table, columns)
+        if jsons is None:
+            return self._folded_digest(side, db, table, columns, where)
         sch, tbl = self._split(table)
-        row = canon.row_expr("postgres", columns)
-        got = self._psql(side, self._d(side, db),
-                         "select count(*)::text||chr(31)||"
-                         f"{canon.digest_expr('postgres', row)}::text"
-                         f' from "{sch}"."{tbl}"'
-                         + self._where(where)).strip()
-        n, _, d = got.partition("\x1f")
+        source = f"{_ident(sch)}.{_ident(tbl)}" + self._where(where)
+        if jsons:
+            inner = ", ".join(
+                f"{self._json_text_sql(_ident(n))} as {_ident(n)}"
+                if n in jsons else _ident(n) for n, _ in columns)
+            source = f"(select {inner} from {source}) s"
+        row = rowtext.postgres_row_from(
+            [_ident(n) if n in jsons else canon.expr("postgres", n, c)
+             for n, c in columns])
+        many = _literal("[0-9.]{%d,}" % self.JSON_DIGITS)
+        guard = " or ".join(f"{_ident(n)} ~ {many}" for n in jsons) \
+            or "false"
+        try:
+            got = self._psql(side, db,
+                             "select count(*)::text||chr(31)||"
+                             f"{canon.digest_expr('postgres', row)}::text"
+                             f"||chr(31)||coalesce(bool_or({guard}), false)"
+                             f"::text from {source}").strip()
+        except SqlFailed:
+            if not jsons:
+                raise
+            # a `json` value `jsonb` cannot hold (`\u0000`)
+            return self._folded_digest(side, db, table, columns, where)
+        n, d, rounded = (got.split("\x1f") + ["", ""])[:3]
+        if rounded == "true":
+            return self._folded_digest(side, db, table, columns, where)
         return (int(n), d)
+
+    def _folded_digest(self, side, db, table, columns, where):
+        """`neutral_digest` folded in this process: a JSON document read as
+        its text, which canon parses as JSON - the driver hands a document
+        over parsed, where a JSON `null` came as SQL's and a string holding
+        `5` as the text canon then read as the number."""
+        from .. import canon
+        declared = dict(self.neutral_columns(side, db, table))
+        text = [n for n, c in columns if c == "json"
+                and str(declared.get(n, "")).lower() in ("json", "jsonb")]
+        return canon.fold_batches(columns, self.neutral_batches(
+            side, db, table, columns, 5000, where=where, as_text=text))
 
     @staticmethod
     def _quote_ident(name):
-        return '"' + str(name).replace('"', '""') + '"'
+        return _ident(name)
+
+    def _quote_literal(self, value):
+        return _literal(value)
 
     def _qualified(self, side, db, table):
         sch, tbl = self._split(table)
@@ -2789,7 +3532,9 @@ class PostgresEngine(Engine):
 
     @staticmethod
     def _split(table):
-        """(schema, table) from either form.
+        """(schema, table) from either form, one way (`util.split_table`):
+        a quoted name's dots are its own, and a name with no schema is in
+        `public`.
 
         `"t".partition(".")` answers `('t', '', '')`, so an unqualified name
         silently became schema `t` and table `""` - which PostgreSQL reports
@@ -2797,8 +3542,7 @@ class PostgresEngine(Engine):
         bare table names because a binlog has no schemas, which is where this
         first showed up.
         """
-        schema, sep, name = str(table).partition(".")
-        return (schema, name) if sep else ("public", schema)
+        return split_table("postgres", table, "public")
 
     def _brand_probes(self):
         """The version banner and the reported server_version, per side.
@@ -2852,32 +3596,28 @@ class PostgresEngine(Engine):
         the mapping (`_mapped_schema`), where a comparer of whole databases
         can only call every column the hop drops or renames a
         difference."""
-        out = {tuple(t.split(".", 1)) for t in self._all_tables(side, db)
-               if self.hop.excluded(db, *t.split(".", 1))}
+        out = {self._split(t) for t in self._all_tables(side, db)
+               if self.hop.excluded(db, *self._split(t))}
         for t in self.mapped_tables(db):
-            sch, _, tbl = t.rpartition(".")
-            sch = sch or "public"
+            sch, tbl = self._split(t)
             if side == "dst":
-                s2, _, t2 = self.hop.target_table(sch, tbl).rpartition(".")
-                sch, tbl = s2 or sch, t2
+                sch, tbl = split_table("postgres",
+                                       self.hop.target_table(sch, tbl), sch)
             out.add((sch, tbl))
         return out
 
     def _dump_schema_native(self, side, db, physical=None):
-        ep = self.hop.source if side == "src" else self.hop.target
         from .. import leftovers as _lo
         from ..movers import _pg_pattern
         left = [a for sch, tbl in sorted(self._left_out_of_schema(db, side))
                 for a in ("--exclude-table", _pg_pattern(f"{sch}.{tbl}"))]
-        p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", physical or self._d(side, db), "--schema-only",
-                 "--no-owner",
-                 "--no-privileges", "--no-security-labels", "--no-tablespaces",
-                 "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
-                 "--exclude-table", "*.migkit_changelog*", *left,
-                 *_lo.pg_dump_args()],
-                env={**ep.libpq_env(),
-                     "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
+        argv, env = self._client(
+            side, db, "pg_dump", "--schema-only", "--no-owner",
+            "--no-privileges", "--no-security-labels", "--no-tablespaces",
+            "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
+            "--exclude-table", "*.migkit_changelog*", *left,
+            *_lo.pg_dump_args(), physical=physical)
+        p = run(argv, env=env)
         noise = self._noise()
         keep = []
         for l in p.stdout.splitlines():
@@ -2921,14 +3661,11 @@ class PostgresEngine(Engine):
         res[0].whole_table = whole
         res.append(self.check_structural_diff(db))
         res.append(self.check_objects(db))
-        if which("liquibase") and self.hop.options.get("liquibase", True):
-            lb = self.check_liquibase(db)
-            if lb:
-                res.append(lb)
-        if which("atlas") and self.hop.options.get("atlas", True):
-            at = self.check_atlas(db)
-            if at:
-                res.append(at)
+        # the two optional readings are said where they did not run, and
+        # why - they used to vanish from the report on a timeout (audit
+        # 2026-10-01, SC16)
+        res.append(self.check_liquibase(db))
+        res.append(self.check_atlas(db))
         res = self._atlas_authoritative(res)
         # after the demotion, not before: the schema-aware comparison left
         # these tables out, so its reading is no authority over them
@@ -3107,6 +3844,16 @@ class PostgresEngine(Engine):
                       " review the removals, then apply on the target."
                       " structural-fix.revert.sql undoes it")
 
+    def _url_without_password(self, side, db):
+        """A side's address with its TLS (`Endpoint.url`) and no password,
+        for a program whose arguments any process listing reads: its
+        password goes in a password file."""
+        from ..config import Endpoint
+        ep = self._ep(side)
+        return Endpoint(host=ep.host, port=ep.port, user=ep.user,
+                        options=dict(ep.options or {})).url(
+            "postgresql", self._d(side, db))
+
     def _schema_urls(self, db):
         """(source, target) as the schema comparison's URLs."""
         return (self.hop.source.url("postgres", db),
@@ -3120,15 +3867,48 @@ class PostgresEngine(Engine):
             f"{sch}.{tbl}" for side in ("src", "dst")
             for sch, tbl in sorted(self._left_out_of_schema(db, side))]
 
+    def _not_run(self, db, scope, why):
+        """A reading of the schema that did not run, said as such - in
+        migkit's words, the program's name taken out of what it said."""
+        from ..movers import DRIVEN
+        from ..wording import without_programs
+        return Result("schema", f"{db} {scope}", "skip",
+                      f"not run: {without_programs(str(why), DRIVEN)}")
+
+    def _optional_off(self, name):
+        """Why an optional reading of the schema is not run here, or ""."""
+        if not self.hop.options.get(name, True):
+            return f"the hop turns it off ({name}: false)"
+        if not which(name):
+            return "the program it runs is not installed here"
+        return ""
+
+    def _atlas_authoritative(self, res):
+        """The schema-aware reading says clean only of what it inspects -
+        tables, their columns, keys and indexes - where the dump's text
+        also holds triggers, views and routines: it may demote the text's
+        difference to cosmetic only where the structural reading, which
+        inspects those, found nothing either. A routine's or a trigger's
+        body that differed read ok behind it (audit 2026-10-01, SC16)."""
+        structural = [r for r in res if r.scope.endswith("(structural)")]
+        if not structural or any(r.status != "ok" for r in structural):
+            return res
+        return super()._atlas_authoritative(res)
+
     def check_atlas(self, db):
         from ..movers import schema_diff
+        scope = self.AUTHORITY_SCOPE
+        off = self._optional_off("atlas")
+        if off:
+            return self._not_run(db, scope, off)
         su, tu = self._schema_urls(db)
         try:
             p = schema_diff(tu, su, self._schema_excludes(db))
-        except Exception:
-            return None
+        except Exception as e:  # noqa: BLE001 - said, not dropped
+            return self._not_run(db, scope, _first_line(e))
         if p.returncode != 0:
-            return None
+            return self._not_run(db, scope, "it failed: " + (
+                (p.stderr or "").strip().splitlines() or [""])[-1][:160])
         text = p.stdout.strip()
         if not text or "Schemas are synced" in text:
             return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "ok",
@@ -3163,28 +3943,44 @@ class PostgresEngine(Engine):
                 cur = None
         return out
 
+    @staticmethod
+    def _jdbc_url(ep, dbname):
+        """A side as a Java client's address, its TLS in the fields that
+        client reads (`tls_forms`'s `jdbc`)."""
+        from urllib.parse import quote, urlencode
+        host = str(ep.host or "")
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        query = urlencode(ep.tls_forms("postgres")["jdbc"])
+        return (f"jdbc:postgresql://{host}:{ep.port}/"
+                f"{quote(str(dbname), safe='')}" + (f"?{query}" if query
+                                                    else ""))
+
     def check_liquibase(self, db):
+        from ..durable import write_atomic
         s, t = self.hop.source, self.hop.target
+        scope = self.OBJECT_SCOPE
+        off = self._optional_off("liquibase")
+        if off:
+            return self._not_run(db, scope, off)
         out = self._report(db) / "schema-objects.txt"
-        out.parent.mkdir(parents=True, exist_ok=True)
         try:
             # the passwords in the environment, which it reads as well as
             # its flags (measured), not on a command line anyone can list
             p = run(["liquibase", "diff",
-                     f"--url=jdbc:postgresql://{t.host}:{t.port}/"
-                     f"{self._d('dst', db)}?{_tls_query(t)}",
+                     f"--url={self._jdbc_url(t, self._d('dst', db))}",
                      f"--username={t.user}",
-                     f"--referenceUrl=jdbc:postgresql://{s.host}:{s.port}/{db}"
-                     f"?{_tls_query(s)}",
+                     f"--referenceUrl={self._jdbc_url(s, db)}",
                      f"--referenceUsername={s.user}"],
                     env={"LIQUIBASE_COMMAND_PASSWORD": t.password,
                          "LIQUIBASE_COMMAND_REFERENCE_PASSWORD": s.password},
                     check=False, timeout=180)
-        except Exception:
-            return None
+        except Exception as e:  # noqa: BLE001 - said, not dropped
+            return self._not_run(db, scope, _first_line(e))
         if p.returncode != 0:
-            return None
-        out.write_text(p.stdout)
+            return self._not_run(db, scope, "it failed: " + (
+                (p.stderr or "").strip().splitlines() or [""])[-1][:160])
+        write_atomic(out, p.stdout)
         noise = self._noise()
         left = {f"{sch}.{tbl}" for side in ("src", "dst")
                 for sch, tbl in self._left_out_of_schema(db, side)}
@@ -3219,7 +4015,7 @@ class PostgresEngine(Engine):
         if not left:
             # another tool's schema, and everything in it
             return lambda name: str(name).split(".")[0] in NOT_DATA_SCHEMAS
-        pairs = ", ".join(f"('{sch}', '{tbl}')" for sch, tbl in sorted(left))
+        pairs = ", ".join(f"({_literal(sch)}, {_literal(tbl)})" for sch, tbl in sorted(left))
         idx = set(self._psql(side, db,
             "select n.nspname||'.'||ci.relname from pg_index i"
             " join pg_class ci on ci.oid = i.indexrelid"
@@ -3312,7 +4108,7 @@ class PostgresEngine(Engine):
 
     SEQ_Q = ("select schemaname||'.'||sequencename||'|'||coalesce(last_value,0)"
              " from pg_sequences where schemaname not like '\\_\\_%'"
-             " and sequencename not like 'migkit\\_%' order by 1")
+             f" and sequencename not in {OWN_SQL} order by 1")
 
     # map every serial/identity sequence to the column it feeds, via the
     # dependency catalog, so we can prove nextval clears that column's max.
@@ -3329,7 +4125,7 @@ class PostgresEngine(Engine):
         " join pg_attribute a on a.attrelid = d.refobjid"
         "  and a.attnum = d.refobjsubid"
         " where s.relkind = 'S' and sn.nspname not like '\\_\\_%'"
-        " and s.relname not like 'migkit\\_%'")
+        f" and s.relname not in {OWN_SQL}")
 
     def _seq_owned(self, side, db):
         """seqkey (schema.sequence) -> (schema, table, column) it feeds."""
@@ -3345,8 +4141,9 @@ class PostgresEngine(Engine):
         sequence must clear to avoid a duplicate-key collision on insert."""
         if not owned:
             return {}
-        parts = [f"select '{k}|'||coalesce(max(\"{c}\"),0)"
-                 f' from "{s}"."{t}"' for k, (s, t, c) in owned.items()]
+        parts = [f"select {_literal(k + '|')}||coalesce(max({_ident(c)}),0)"
+                 f" from {_ident(s)}.{_ident(t)}"
+                 for k, (s, t, c) in owned.items()]
         out = {}
         for i in range(0, len(parts), 200):
             chunk = " union all ".join(parts[i:i + 200])
@@ -3373,9 +4170,9 @@ class PostgresEngine(Engine):
                 inc[k] = int(v)
         parts = []
         for k in owned:
-            sch, name = k.split(".", 1)
-            parts.append(f"select '{k}'||e'\\t'||last_value||e'\\t'||is_called"
-                         f' from "{sch}"."{name}"')
+            sch, name = self._split(k)
+            parts.append(f"select {_literal(k)}||e'\\t'||last_value||e'\\t'||is_called"
+                         f' from {_ident(sch)}.{_ident(name)}')
         out = {}
         for i in range(0, len(parts), 200):
             chunk = " union all ".join(parts[i:i + 200])
@@ -3405,7 +4202,7 @@ class PostgresEngine(Engine):
         Tables the mover keeps for itself (noise_prefix) are excluded too: they
         exist on one side by nature and would count as a difference every time
         while holding no application data."""
-        sch, _, tbl = t.partition(".")
+        sch, tbl = self._split(t)
         noise = self._noise()
         if noise and tbl.startswith(noise):
             return False
@@ -3440,7 +4237,7 @@ class PostgresEngine(Engine):
                 for t in sorted(dt - set(st))]
 
         def cnt(side, t):
-            sch, tbl = t.split(".", 1)
+            sch, tbl = self._split(t)
             return int(self._psql(side, db,
                                   f"select count(*) from {self._scope(db, t)}")
                    or 0)
@@ -3566,11 +4363,11 @@ class PostgresEngine(Engine):
     # would ever save.
     CHUNK_MIN_ROWS = 5_000_000
 
+    #: the tables whose key is one whole-number column, and that column
     BIG_TABLES_SQL = (
-        "select n.nspname||'.'||c.relname, coalesce(s.n_live_tup, 0), a.attname"
+        "select n.nspname||'.'||c.relname||'|'||a.attname"
         " from pg_class c"
         " join pg_namespace n on n.oid = c.relnamespace"
-        " left join pg_stat_user_tables s on s.relid = c.oid"
         " join pg_index i on i.indrelid = c.oid and i.indisprimary"
         " join pg_attribute a on a.attrelid = c.oid"
         "   and a.attnum = i.indkey[0]"
@@ -3584,17 +4381,26 @@ class PostgresEngine(Engine):
         Restricted to one-column integer keys on purpose: range predicates on
         those are index-only and cheap to reason about. A composite or text key
         can still be checksummed, just in one pass.
+
+        The rows from `row_estimate`; a table whose count the statistics do
+        not know is taken as big, and checked restartably: the live count
+        read 0 after a statistics reset or a fail-over, and a table of a
+        billion rows was checked in one pass nothing could resume (audit
+        2026-10-01, DU18).
         """
         out = {}
         try:
-            for line in self._psql("src", db, self.BIG_TABLES_SQL).splitlines():
-                if not line:
+            rows = self.row_estimate("src", db)
+            for line in self._psql("src", db,
+                                   self.BIG_TABLES_SQL).splitlines():
+                name, _, col = line.rpartition("|")
+                if not name:
                     continue
-                name, est, col = line.split("|")
-                if int(est) >= self.CHUNK_MIN_ROWS:
-                    out[name] = (int(est), col)
+                est = rows.get(name)
+                if est is None or est >= self.CHUNK_MIN_ROWS:
+                    out[name] = (est, col)
         except Exception:
-            pass    # no estimates = no chunking, never a failure
+            pass    # no key facts = no chunking, never a failure
         return out
 
     def _scope(self, db, t):
@@ -3612,8 +4418,8 @@ class PostgresEngine(Engine):
         Rows the filter excludes that are sitting on the target anyway are
         a separate question, answered by `_outside_filter`.
         """
-        sch, tbl = t.split(".", 1)
-        qt = f'"{sch}"."{tbl}"'
+        sch, tbl = self._split(t)
+        qt = f'{_ident(sch)}.{_ident(tbl)}'
         pred = (self.hop.row_filter(db, sch, tbl)
                 if hasattr(self.hop, "row_filter") else None)
         return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
@@ -3628,13 +4434,13 @@ class PostgresEngine(Engine):
         count above zero is said. `is not true` rather than `not`, so a row
         where the predicate is NULL is counted too.
         """
-        sch, tbl = t.split(".", 1)
+        sch, tbl = self._split(t)
         pred = (self.hop.row_filter(db, sch, tbl)
                 if hasattr(self.hop, "row_filter") else None)
         if not pred:
             return None
         return int(self._psql("dst", db,
-                              f'select count(*) from "{sch}"."{tbl}"'
+                              f'select count(*) from {_ident(sch)}.{_ident(tbl)}'
                               f" where ({pred}) is not true") or 0)
 
     def _digest_where(self, side, db, table, where):
@@ -3650,28 +4456,37 @@ class PostgresEngine(Engine):
     def group_candidates(self, side, db, table):
         """[(column, neutral class, estimated distinct values)] for one
         table, from the statistics the server keeps - nothing is scanned.
-        A negative `n_distinct` is a fraction of the rows. A table never
-        analysed has none, and is not narrowed."""
+        A negative `n_distinct` is a fraction of the rows (`row_estimate`,
+        where the statistics know them). A table never analysed has none,
+        and is not narrowed."""
         from .. import canon
-        sch, tbl = table.split(".", 1)
+        sch, tbl = self._split(table)
+        rows = self.row_estimate(side, db).get(f"{sch}.{tbl}")
         out = []
         for line in self._psql(side, db, f"""
                 select s.attname||chr(31)||format_type(a.atttypid,
-                       a.atttypmod)||chr(31)||case when s.n_distinct >= 0
-                       then s.n_distinct::bigint else (-s.n_distinct
-                       * greatest(c.reltuples, 0))::bigint end
+                       a.atttypmod)||chr(31)||s.n_distinct::text
                   from pg_stats s
                   join pg_namespace n on n.nspname = s.schemaname
                   join pg_class c on c.relnamespace = n.oid
                                  and c.relname = s.tablename
                   join pg_attribute a on a.attrelid = c.oid
                                      and a.attname = s.attname
-                 where s.schemaname = '{sch}' and s.tablename = '{tbl}'
+                 where s.schemaname = {_literal(sch)} and s.tablename = {_literal(tbl)}
                    and not s.inherited""").splitlines():
             parts = line.split("\x1f")
-            if len(parts) == 3 and parts[2].lstrip("-").isdigit():
-                out.append((parts[0], canon.type_class("postgres", parts[1]),
-                            int(parts[2])))
+            if len(parts) != 3:
+                continue
+            try:
+                distinct = float(parts[2])
+            except ValueError:
+                continue
+            if distinct < 0:
+                if rows is None:
+                    continue
+                distinct = -distinct * rows
+            out.append((parts[0], canon.type_class("postgres", parts[1]),
+                        int(distinct)))
         return out
 
     def _data_fast_native(self, db, stream=None, may_skip=True):
@@ -3699,7 +4514,7 @@ class PostgresEngine(Engine):
             return s
 
         def csum(side, t):
-            sch, tbl = t.split(".", 1)
+            sch, tbl = self._split(t)
             # named from the source and run on both sides, the same way
             # `_key_hash_expr` already is: identical columns in identical
             # order, and a column the target is missing fails loudly instead
@@ -3752,9 +4567,9 @@ class PostgresEngine(Engine):
         rate = _cp.Rate()
 
         def csum_range(side, t, col, lo, hi, salt):
-            sch, tbl = t.split(".", 1)
+            sch, tbl = self._split(t)
             h = self._row_hash_expr("src", db, t)
-            pred = _cp.where(f'"{col}"', lo, hi)
+            pred = _cp.where(f'{_ident(col)}', lo, hi)
             return self._psql(side, db,
                 f"set max_parallel_workers_per_gather ="
                 f" {self._digest_workers(db, t, w)};"
@@ -3765,7 +4580,7 @@ class PostgresEngine(Engine):
         def table_rows(side, t):
             """The table's own row count, for the moment a chunk differs and
             the range's count would otherwise be reported as the table's."""
-            sch, tbl = t.split(".", 1)
+            sch, tbl = self._split(t)
             return self._psql(side, db,
                               f"select count(*) from {self._scope(db, t)}"
                               ).strip()
@@ -3805,11 +4620,11 @@ class PostgresEngine(Engine):
             sums add up to the whole-table value exactly. Completed ranges are
             persisted, and a rerun only pays for what it still owes.
             """
-            sch, tbl = t.split(".", 1)
+            sch, tbl = self._split(t)
             try:
                 bounds = self._psql("src", db,
-                    f'select coalesce(min("{col}"),0)||chr(124)||'
-                    f'coalesce(max("{col}"),0) from "{sch}"."{tbl}"').strip()
+                    f'select coalesce(min({_ident(col)}),0)||chr(124)||'
+                    f'coalesce(max({_ident(col)}),0) from {_ident(sch)}.{_ident(tbl)}').strip()
                 lo, hi = (int(x) for x in bounds.split("|"))
             except Exception as e:
                 return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
@@ -3877,14 +4692,21 @@ class PostgresEngine(Engine):
             note = _sb.caveat(k, src_note)
             return f" kind={k}" + (f" -- {note}" if note else "")
 
+        # every table's marker on each side in one statement, read before
+        # any table is: a marker is never newer than the evidence it stands
+        # for (audit 2026-10-01, SC4)
+        try:
+            marked = (self._change_markers("src", db),
+                      self._change_markers("dst", db))
+        except Exception:  # noqa: BLE001 - no marker never skips
+            marked = ({}, {})
+
         def markers(t):
             """(src, dst) change markers, or (None, None) if either is
             untrustworthy - which never skips."""
-            try:
-                return (self._change_marker("src", db, t),
-                        self._change_marker("dst", self._d("dst", db), t))
-            except Exception:
-                return (None, None)
+            sch, tbl = self._split(t)
+            name = f"{sch}.{tbl}"
+            return marked[0].get(name), marked[1].get(name)
 
         def one(t):
             src_m, dst_m = markers(t)
@@ -4020,7 +4842,7 @@ class PostgresEngine(Engine):
         " and n.nspname not in ('pg_catalog','information_schema')"
         " and n.nspname not like 'pg\\_%'"
         " and n.nspname not like '\\_\\_%'"
-        " and c.relname not like 'migkit\\_%'"
+        f" and c.relname not in {OWN_SQL}"
         " order by 1")
 
     @staticmethod
@@ -4089,7 +4911,7 @@ class PostgresEngine(Engine):
                         off += len(piece)
                     if owner in roles:
                         dc.execute(f'alter large object {oid} owner to'
-                                   f' "{owner}"')
+                                   f' {_ident(owner)}')
                 dst.commit()
         finally:
             src.close()
@@ -4143,7 +4965,7 @@ class PostgresEngine(Engine):
         try:
             src_total = int(self._psql("src", db,
                                        self.LARGE_OBJECT_COUNT).strip() or 0)
-            dst_total = int(self._psql("dst", self._d("dst", db),
+            dst_total = int(self._psql("dst", db,
                                        self.LARGE_OBJECT_COUNT).strip() or 0)
             for line in self._psql("src", db, self.OID_COLUMNS).splitlines():
                 parts = line.split("\t")
@@ -4153,7 +4975,7 @@ class PostgresEngine(Engine):
                 if kind == "integer" and not src_total:
                     continue          # no object for an integer to name
                 sch, tbl = self._split(table)
-                qt, qc = f'"{sch}"."{tbl}"', self._quote_ident(col)
+                qt, qc = f'{_ident(sch)}.{_ident(tbl)}', self._quote_ident(col)
                 ref = f"t.{qc}" if kind == "oid" else self._as_oid(f"t.{qc}")
                 names = ("exists (select 1 from pg_largeobject_metadata m"
                          f" where m.oid = {ref})")
@@ -4170,7 +4992,7 @@ class PostgresEngine(Engine):
                 broken = (f"select count(*) from {qt} t where t.{qc} is not"
                           f" null and not {names}")
                 try:
-                    missing = int(self._psql("dst", self._d("dst", db),
+                    missing = int(self._psql("dst", db,
                                              broken).strip() or 0)
                 except Exception:
                     continue          # the table is not on the target; the
@@ -4202,7 +5024,7 @@ class PostgresEngine(Engine):
         objects a statement, so a database of small documents is asked in
         a few round trips, and a large one is never held whole."""
         src = self._conn("src", db)
-        dst = self._conn("dst", self._d("dst", db))
+        dst = self._connect("dst", db)
         try:
             oids = []
             with src.cursor() as cur:
@@ -4254,7 +5076,7 @@ class PostgresEngine(Engine):
         extension table both have.
         """
         h = self._row_hash_expr("src", db, relation)
-        return self._psql(side, self._d(side, db),
+        return self._psql(side, db,
                           f"select count(*)||'|'||{self._summed(h)}"
                           f" from {relation} t")
 
@@ -4309,7 +5131,7 @@ class PostgresEngine(Engine):
 
     def _filtered_tables(self, side, db):
         try:
-            out = self._psql(side, self._d(side, db), self.RLS_FILTERED)
+            out = self._psql(side, db, self.RLS_FILTERED)
         except Exception:
             return None
         return [line for line in out.splitlines() if line]
@@ -4379,7 +5201,7 @@ class PostgresEngine(Engine):
         cols = self._pk_cols_of(db, table)
         if not cols:
             return None
-        sch, tbl = table.split(".", 1)
+        sch, tbl = self._split(table)
         scoped = self._scope(db, table)
         pkexpr = self._pk_text_expr(cols)
 
@@ -4401,12 +5223,12 @@ class PostgresEngine(Engine):
             missing, extra, changed = [], [], []
             if n > self.hop.slice and intpk:
                 mm = self._psql("src", db,
-                                f'select coalesce(min("{intpk}"),0)||\'|\'||'
-                                f'coalesce(max("{intpk}"),0) from {scoped}')
+                                f'select coalesce(min({_ident(intpk)}),0)||\'|\'||'
+                                f'coalesce(max({_ident(intpk)}),0) from {scoped}')
                 lo, hi = (int(x) for x in mm.split("|"))
                 step = max(1, (hi - lo) // max(1, n // self.hop.slice) + 1)
                 for a in range(lo, hi + 1, step):
-                    w = f'where "{intpk}" >= {a} and "{intpk}" < {a + step}'
+                    w = f'where {_ident(intpk)} >= {a} and {_ident(intpk)} < {a + step}'
                     s, dd = fetch("src", w), fetch("dst", w)
                     missing += [k for k in s if k not in dd]
                     extra += [k for k in dd if k not in s]
@@ -4548,7 +5370,7 @@ class PostgresEngine(Engine):
     def _key_where(self, db, table, keys):
         """A predicate selecting these named rows, in the key's own text."""
         pkexpr = self._pk_text_expr(self._pk_cols_of(db, table))
-        wanted = ", ".join("'" + k.replace("'", "''") + "'" for k in keys)
+        wanted = ", ".join(_literal(k) for k in keys)
         return f"{pkexpr} in ({wanted})"
 
     def _second_notes(self, db, table):
@@ -4637,51 +5459,72 @@ class PostgresEngine(Engine):
     #: the catalog spells these differently from `information_schema`
     TOAST_TYPES = ("bytea", "text", "json", "jsonb", "xml", "varchar")
 
-    def _lob_sizes(self, db):
+    def _lob_sizes(self, db, probes=None):
         """The biggest value per wide column, on each side.
 
         `octet_length` and not `pg_column_size`: the first is the size of
         the value, which is what a mover's limit is compared against, and
         the second is the size PostgreSQL stored after compressing it -
         measured, 1,000,000 against 11,452 for the same value.
+
+        Each column a read planned (`probes`, `util.Probes`): one that could
+        not be read on either side is said, where it was left out and the
+        check said ok over the rest; a table the target does not have yet
+        is its own answer (audit 2026-10-01, LG2).
         """
+        from ..util import Probes
+        probes = probes if probes is not None else Probes("columns")
         findings = []
         for table, column, typ in self._lob_columns(db):
-            sch, tbl = table.split(".", 1)
-            col = f'"{column}"'
+            name = f"{table}.{column}"
+            probes.plan(name)
+            sch, tbl = self._split(table)
+            col = _ident(column)
             if typ in ("json", "jsonb", "xml"):
                 col += "::text"
-            q = (f'select coalesce(max(octet_length({col})), 0)'
-                 f' from "{sch}"."{tbl}"')
+            q = (f"select coalesce(max(octet_length({col})), 0)"
+                 f" from {_ident(sch)}.{_ident(tbl)}")
             try:
                 src = int(self._psql("src", db, q).strip() or 0)
-            except Exception:
+            except Exception as e:  # noqa: BLE001 - said, not dropped
+                probes.failed(name, e)
                 continue
-            if not src:
-                continue
-            try:
-                dst = int(self._psql("dst", self._d("dst", db), q).strip()
-                          or 0)
-            except Exception:
-                dst = None
-            findings.append((table, column, src, dst, self.PG_FIELD_LIMIT))
+            dst = None
+            if src:
+                try:
+                    dst = int(self._psql("dst", db, q).strip() or 0)
+                except SqlFailed as e:
+                    if e.sqlstate != "42P01":
+                        probes.failed(name, e)
+                        continue
+                except Exception as e:  # noqa: BLE001 - said, not dropped
+                    probes.failed(name, e)
+                    continue
+            probes.done(name)
+            if src:
+                findings.append((table, column, src, dst,
+                                 self.PG_FIELD_LIMIT))
         return findings
 
     def _lob_check(self, db):
+        from ..util import Probes
+        probes = Probes("columns")
         try:
-            findings = self._lob_sizes(db)
+            findings = self._lob_sizes(db, probes)
         except Exception as e:
             return Result("deep", f"{db} lobs", "error",
                           "could not size the wide columns:"
                           f" {str(e).splitlines()[-1][:90]}")
-        return self._lob_result(
+        got = self._lob_result(
             db, findings, "1 GB PostgreSQL field limit",
             "set the mover's LOB size limit above the biggest value, or move"
             " those tables with a path that does not truncate -"
             " `migkit move --go` does not")
+        got.status, got.detail = probes.verdict(got.status, got.detail)
+        return got
 
     def _scalar(self, side, db, sql):
-        out = self._psql(side, self._d(side, db), sql).strip()
+        out = self._psql(side, db, sql).strip()
         return out.splitlines()[0].split("|") if out else None
 
     def _zone_fingerprints(self, side, db):
@@ -4690,8 +5533,9 @@ class PostgresEngine(Engine):
 
         Measured at 78 ms for all the zones this server carries, so there
         is nothing to optimise and nothing to sample."""
-        probes = ", ".join(f"(timestamptz '{p}+00')" for p in self.TZ_PROBES)
-        out = self._psql(side, self._d(side, db),
+        probes = ", ".join(f"(timestamptz {_literal(p + '+00')})"
+                           for p in self.TZ_PROBES)
+        out = self._psql(side, db,
                          "select n.name||chr(9)||md5(string_agg("
                          "(p.ts at time zone n.name)::text, ',' order by"
                          " p.ts)) from pg_timezone_names n"
@@ -4724,7 +5568,7 @@ class PostgresEngine(Engine):
         " and n.nspname not in ('pg_catalog','information_schema')"
         " and n.nspname not like 'pg\\_%'"
         " and n.nspname not like '\\_\\_%'"
-        " and t.relname not like 'migkit\\_%'"
+        f" and t.relname not in {OWN_SQL}"
         " and exists (select 1 from unnest(i.indkey) kk"
         "   join pg_attribute aa on aa.attrelid = i.indrelid"
         "    and aa.attnum = kk"
@@ -4750,8 +5594,7 @@ class PostgresEngine(Engine):
         try:
             for side in sides:
                 label = "source" if side == "src" else "target"
-                name = db if side == "src" else self._d("dst", db)
-                for line in self._psql(side, name,
+                for line in self._psql(side, db,
                                        self.UNIQUE_TEXT_INDEXES).splitlines():
                     parts = line.split("\t")
                     if len(parts) != 4:
@@ -4761,14 +5604,14 @@ class PostgresEngine(Engine):
                         skipped += 1
                         continue
                     checked += 1
-                    sch, tbl = table.split(".", 1)
+                    sch, tbl = self._split(table)
                     out = self._psql(
-                        side, name,
+                        side, db,
                         self.NO_INDEX_PATHS
                         + self._as_json_rows(
                             f"select {cols}, count(*) as migkit_n from"
-                            f' "{sch.replace(chr(34), chr(34) * 2)}".'
-                            f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                            f' {_ident(sch)}.'
+                            f'{_ident(tbl)}'
                             f" group by {cols} having count(*) > 1"
                             f" limit {self.DUPLICATE_CAP}"))
                     groups = [l for l in out.splitlines() if l.strip()]
@@ -4805,7 +5648,7 @@ class PostgresEngine(Engine):
         " and c.table_schema not in ('pg_catalog','information_schema')"
         " and c.table_schema not like 'pg\\_%'"
         " and c.table_schema not like '\\_\\_%'"
-        " and c.table_name not like 'migkit\\_%'"
+        f" and c.table_name not in {OWN_SQL}"
         " and c.data_type in ('text','character varying','character')"
         " order by 1")
 
@@ -4827,15 +5670,15 @@ class PostgresEngine(Engine):
                 if len(parts) == 2:
                     cols.setdefault(parts[0], []).append(parts[1])
             for table, columns in sorted(cols.items()):
-                sch, tbl = table.split(".", 1)
-                quoted = ['"' + c.replace('"', '""') + '"' for c in columns]
+                sch, tbl = self._split(table)
+                quoted = [_ident(c) for c in columns]
                 where = " or ".join(f"octet_length({q}) <> char_length({q})"
                                     for q in quoted)
                 out = self._psql(
                     "src", db, self._as_json_rows(
                         f'select {", ".join(quoted)}'
-                        f' from "{sch.replace(chr(34), chr(34) * 2)}".'
-                        f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                        f' from {_ident(sch)}.'
+                        f'{_ident(tbl)}'
                         f' where {where} limit {self.MOJIBAKE_SAMPLE}'))
                 rows = [[json.loads(line).get(c) for c in columns]
                         for line in out.splitlines() if line.strip()]
@@ -4913,19 +5756,19 @@ class PostgresEngine(Engine):
         each one - and a migration is usually the moment the two machines
         stop being the same machine."""
         drifted, missing, checked = [], [], 0
-        for side, name in (("src", db), ("dst", self._d("dst", db))):
+        for side in ("src", "dst"):
             label = "source" if side == "src" else "target"
             try:
-                rows = self._psql(side, name, self.COLLATION_DRIFT)
-                checked += int(self._psql(side, name,
+                rows = self._psql(side, db, self.COLLATION_DRIFT)
+                checked += int(self._psql(side, db,
                                           self.COLLATION_COUNT).strip() or 0)
-                if int(self._psql(side, name,
+                if int(self._psql(side, db,
                                   "select current_setting("
                                   "'server_version_num')::int").strip()
                        ) >= 150000:
                     # the database default sorts every text column that has
                     # no explicit COLLATE, so it is the one that matters most
-                    default = self._psql(side, name,
+                    default = self._psql(side, db,
                                          self.DB_COLLATION_DRIFT).strip()
                     rows += "\n" + default
                     parts = default.split("\t")
@@ -4967,7 +5810,7 @@ class PostgresEngine(Engine):
         " where n.nspname not in ('pg_catalog','information_schema')"
         " and n.nspname not like 'pg\\_%'"
         " and n.nspname not like '\\_\\_%'"
-        " and t.relname not like 'migkit\\_%'"
+        f" and t.relname not in {OWN_SQL}"
         " order by 1")
 
     def _invalid_indexes(self, db):
@@ -4976,10 +5819,10 @@ class PostgresEngine(Engine):
         reads as an index nobody uses; on the target it is the post-load
         `CREATE INDEX CONCURRENTLY` that died and said so once."""
         broken, partial, total = [], [], {"source": 0, "target": 0}
-        for side, name in (("src", db), ("dst", self._d("dst", db))):
+        for side in ("src", "dst"):
             label = "source" if side == "src" else "target"
             try:
-                out = self._psql(side, name, self.INDEX_FLAGS)
+                out = self._psql(side, db, self.INDEX_FLAGS)
             except Exception as e:
                 return Result("deep", f"{db} indexes", "error",
                               f"could not read the {label}'s indexes:"
@@ -5003,13 +5846,12 @@ class PostgresEngine(Engine):
             " raised for the rebuild")
 
     def rows_present(self, db, tables):
-        ddb = self._d("dst", db)
         got = set()
         for name in tables:
-            sch, _, tbl = name.rpartition(".")
-            q = f'select 1 from "{sch or "public"}"."{tbl}" limit 1'
+            sch, tbl = self._split(name)
+            q = f"select 1 from {_ident(sch)}.{_ident(tbl)} limit 1"
             try:
-                if self._psql("dst", ddb, q).strip():
+                if self._psql("dst", db, q).strip():
                     got.add(name)
             except RuntimeError:
                 # a table the target does not have yet cannot have rows in
@@ -5021,7 +5863,7 @@ class PostgresEngine(Engine):
         """Which tables the source has rows in and the target does not."""
         try:
             src = set(self._psql("src", db, self.USER_TABLES).splitlines())
-            dst = set(self._psql("dst", self._d("dst", db),
+            dst = set(self._psql("dst", db,
                                  self.USER_TABLES).splitlines())
         except Exception:
             return None
@@ -5036,7 +5878,7 @@ class PostgresEngine(Engine):
             try:
                 has_src = bool(self._psql("src", db, q).strip())
                 has_dst = t in dst and bool(self._psql(
-                    "dst", self._d("dst", db), q).strip())
+                    "dst", db, q).strip())
             except Exception:
                 return None
             if has_src and not has_dst:
@@ -5052,19 +5894,21 @@ class PostgresEngine(Engine):
         recommends after a restore, and what autoanalyze will not do for a
         table nobody writes to afterwards.
         """
-        ep = self.hop.target
+        from ..movers import DRIVEN
+        from ..wording import without_programs
         target = self._d("dst", db)
         if not which("vacuumdb"):
-            self._psql("dst", target, "analyze")
+            self._psql("dst", db, "analyze")
             return f"analyzed {target} on the target"
-        p = run(["vacuumdb", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", target, "--analyze-in-stages",
-                 "-j", str(max(1, int(self.hop.workers)))],
-                env={**ep.libpq_env(),
-                     "PGPASSWORD": ep.password}, check=False, timeout=7200)
+        argv, env = self._client("dst", db, "vacuumdb",
+                                 "--analyze-in-stages", "-j",
+                                 str(max(1, int(self.hop.workers))))
+        p = run(argv, env=env, check=False, timeout=7200)
         if p.returncode:
-            return (f"could not analyze {target}:"
-                    f" {(p.stderr or '').splitlines()[-1][:90] if p.stderr else 'unknown'}")
+            said = (p.stderr or "").strip().splitlines() or ["unknown"]
+            return (f"could not analyze {target}: "
+                    + without_programs(said[-1][:90],
+                                       DRIVEN + ("vacuumdb",)))
         return f"analyzed {target} on the target (in stages)"
 
     @staticmethod
@@ -5207,22 +6051,18 @@ class PostgresEngine(Engine):
 
     def _crosscheck_schema(self, db):
         """The schema half of the cross-check, behind the same switch."""
-        import os
-        if os.environ.get("MIGKIT_CROSSCHECK", "").strip().lower() \
-                not in ("1", "true", "yes", "on"):
+        from .. import envkeys
+        if not envkeys.flag("MIGKIT_CROSSCHECK"):
             return None
         from ..movers import pgcopydb_available
         from ..util import run
         if not pgcopydb_available():
             return self._crosscheck_schema_result(db, None, [], None)
         import tempfile
-        from urllib.parse import quote
-        s_, t_ = self.hop.source, self.hop.target
         # the passwords in a password file, not in the addresses: those
-        # were the program's arguments
-        src = f"postgresql://{quote(s_.user, safe='')}@{s_.host}:{s_.port}/{db}"
-        dst = (f"postgresql://{quote(t_.user, safe='')}@{t_.host}:{t_.port}"
-               f"/{self._d('dst', db)}")
+        # are the program's arguments. The side's TLS in them
+        src = self._url_without_password("src", db)
+        dst = self._url_without_password("dst", db)
         work = tempfile.mkdtemp(prefix="migkit-schemacheck-")
         try:
             from pathlib import Path
@@ -5250,22 +6090,18 @@ class PostgresEngine(Engine):
         every run. An environment variable rather than a flag, the same way
         `MIGKIT_MOVER` is.
         """
-        import os
-        if os.environ.get("MIGKIT_CROSSCHECK", "").strip().lower() \
-                not in ("1", "true", "yes", "on"):
+        from .. import envkeys
+        if not envkeys.flag("MIGKIT_CROSSCHECK"):
             return None
         from ..movers import pgcopydb_available
         from ..util import run
         if not pgcopydb_available():
             return self._crosscheck_result(db, {}, {}, False)
         import tempfile
-        from urllib.parse import quote
-        s_, t_ = self.hop.source, self.hop.target
         # the passwords in a password file, not in the addresses: those
-        # were the program's arguments
-        src = f"postgresql://{quote(s_.user, safe='')}@{s_.host}:{s_.port}/{db}"
-        dst = (f"postgresql://{quote(t_.user, safe='')}@{t_.host}:{t_.port}"
-               f"/{self._d('dst', db)}")
+        # are the program's arguments. The side's TLS in them
+        src = self._url_without_password("src", db)
+        dst = self._url_without_password("dst", db)
         work = tempfile.mkdtemp(prefix="migkit-crosscheck-")
         try:
             from pathlib import Path
@@ -5318,7 +6154,7 @@ class PostgresEngine(Engine):
         """
         rows = []
         try:
-            out = self._psql("dst", self._d("dst", db),
+            out = self._psql("dst", db,
                 "select n.nspname||'.'||c.relname"
                 " ||chr(9)||greatest(c.reltuples, 0)::bigint"
                 " ||chr(9)||(s.last_analyze is not null"
@@ -5338,7 +6174,7 @@ class PostgresEngine(Engine):
                 " and n.nspname not in ('pg_catalog','information_schema')"
                 " and n.nspname not like 'pg\\_%'"
                 " and n.nspname not like '\\_\\_%'"
-                " and c.relname not like 'migkit\\_%'"
+                f" and c.relname not in {OWN_SQL}"
                 " order by 1")
         except Exception as e:
             return Result("deep", f"{db} statistics", "error",
@@ -5350,7 +6186,7 @@ class PostgresEngine(Engine):
         # answer unknown rather than wrong.
         try:
             autovacuum_on = self._psql(
-                "dst", self._d("dst", db),
+                "dst", db,
                 "select setting from pg_settings where name = 'autovacuum'"
             ).strip() == "on"
         except Exception:
@@ -5410,7 +6246,7 @@ class PostgresEngine(Engine):
                             where datname = current_database())
                and userid <> (select oid from pg_roles
                                where rolname = current_user)
-               and query ~* '^\\s*({verbs})\\M'
+               and query ~* {_literal('^\\s*(' + verbs + ')\\M')}
                and query !~* '(pg_catalog|information_schema|pg_stat)'
              order by total_exec_time desc limit {int(n)}""")
         import re
@@ -5427,7 +6263,7 @@ class PostgresEngine(Engine):
     def workload_rows(self, side, db, sql, most):
         """The statement's answer, at most `most` rows, run read-only under
         a time limit."""
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             conn.set_session(readonly=True)
             with conn.cursor() as cur:
@@ -5445,7 +6281,7 @@ class PostgresEngine(Engine):
         the same rows is never held up."""
         import psycopg2
         self._target_only(side, "time a write")
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             with conn.cursor() as cur:
                 cur.execute("set local statement_timeout = 5000")
@@ -5477,7 +6313,7 @@ class PostgresEngine(Engine):
                         "enable_nestloop", "enable_partitionwise_join")
 
     def planner_settings(self, side, db):
-        names = ", ".join(f"'{n}'" for n in self.PLANNER_SETTINGS)
+        names = ", ".join(f"{_literal(n)}" for n in self.PLANNER_SETTINGS)
         out = {}
         for line in self._psql(side, db, "select name || chr(31) ||"
                                          " setting || coalesce(unit, '')"
@@ -5490,7 +6326,7 @@ class PostgresEngine(Engine):
 
     def _plan_json(self, side, db, sql, analyze=False):
         import json as _json
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             conn.set_session(readonly=True)
             with conn.cursor() as cur:
@@ -5564,15 +6400,11 @@ class PostgresEngine(Engine):
         and through the maintenance database where the hop's is not there
         yet (a bulk path makes it)."""
         import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
         want = self._d(side, db) if db else "postgres"
         last = None
         for at in dict.fromkeys((want, "postgres")):
             try:
-                conn = psycopg2.connect(host=ep.host, port=ep.port,
-                                        user=ep.user, password=ep.password,
-                                        dbname=at, connect_timeout=5,
-                                        **ep.libpq_tls())
+                conn = self._open(side, at, "probe")
             except psycopg2.Error as e:
                 if "does not exist" not in str(e):
                     raise
@@ -5623,7 +6455,7 @@ class PostgresEngine(Engine):
 
     def text_encodings(self, side, db):
         # one encoding for the whole database: every text value is in it
-        got = self._psql(side, self._d(side, db),
+        got = self._psql(side, db,
                          "select pg_encoding_to_char(encoding) from"
                          " pg_database where datname = current_database()")
         return {got.strip(): 1} if got.strip() else None
@@ -5631,7 +6463,7 @@ class PostgresEngine(Engine):
     def neutral_create_code(self, side, db, statement):
         if side != "dst":
             raise RuntimeError("migkit does not write to the source")
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             with conn.cursor() as cur:
                 cur.execute(statement)
@@ -5648,7 +6480,7 @@ class PostgresEngine(Engine):
         out = []
         for line in rows.splitlines():
             n, _, d = line.partition("\x1f")
-            if n and not self.hop.excluded(db, *n.split(".")):
+            if n and not self.hop.excluded(db, *self._split(n)):
                 out.append((n, d))
         return out
 
@@ -5711,7 +6543,7 @@ class PostgresEngine(Engine):
         TG_INSTEAD = 1, 2, 4, 8, 16, 32, 64
 
     def _catalog(self, side, db, sql):
-        conn = self._conn(side, self._d(side, db))
+        conn = self._connect(side, db)
         try:
             conn.set_session(readonly=True)
             with conn.cursor() as cur:
@@ -5860,7 +6692,7 @@ class PostgresEngine(Engine):
 
     @staticmethod
     def _lit(text):
-        return "'" + str(text).replace("'", "''") + "'"
+        return _literal(text)
 
     def foreign_keys(self, side, db):
         """[(child, [its columns], parent, [the parent's columns])], each
@@ -5889,15 +6721,15 @@ class PostgresEngine(Engine):
         return out
 
     def code_definition(self, side, db, kind, name):
-        schema, _, leaf = str(name).rpartition(".")
+        schema, leaf = self._split(name)
         if kind == "view":
             got = self._psql(side, db, "select pg_get_viewdef(to_regclass("
-                                       f"'{self._quote_ident(schema or 'public')}"
-                                       f".{self._quote_ident(leaf)}'))")
+                             + _literal(_ident(schema) + "."
+                                        + _ident(leaf)) + "))")
             return (f"create view {leaf} as {got}" if got else None)
         got = self._psql(side, db, "select string_agg(pg_get_functiondef("
                                    "p.oid), chr(10)) from pg_proc p where"
-                                   f" p.proname = '{leaf}'")
+                                   f" p.proname = {_literal(leaf)}")
         return got or None
 
     def neutral_function_sql(self, name, params, returns, body):
@@ -5909,7 +6741,10 @@ class PostgresEngine(Engine):
         """(the server's UTC offset in minutes, its UTC clock, [(table.column,
         latest value)]) for the `timestamp without time zone` columns an
         index leads - read by the index, so each is one probe (`zones`)."""
-        conn = self._conn(side, self._d(side, db))
+        # the one session left in the server's own zone: its offset is
+        # what is asked, which a session pinned to UTC answers as 0
+        conn = connect(self._ep(side), self._d(side, db), session=False,
+                       options=SESSION.replace(" -c TimeZone=UTC", ""))
         try:
             conn.set_session(readonly=True)
             with conn.cursor() as cur:
@@ -5932,7 +6767,7 @@ class PostgresEngine(Engine):
                 for sch, t, c in cols:
                     if self.hop.excluded(db, sch, t):
                         continue
-                    cur.execute(f'select max("{c}") from "{sch}"."{t}"')
+                    cur.execute(f'select max({_ident(c)}) from {_ident(sch)}.{_ident(t)}')
                     heads.append((f"{sch}.{t}.{c}", cur.fetchone()[0]))
             return int(offset), now, heads
         finally:
@@ -5953,7 +6788,7 @@ class PostgresEngine(Engine):
                 " and n.nspname not in ('pg_catalog','information_schema')"
                 " and n.nspname not like 'pg\\_%'"
                 " and n.nspname not like '\\_\\_%'"
-                " and c.relname not like 'migkit\\_%'"
+                f" and c.relname not in {OWN_SQL}"
                 " and not exists (select 1 from pg_index i"
                 "  where i.indrelid = c.oid"
                 "  and (i.indisprimary or i.indisunique))"
@@ -6112,7 +6947,7 @@ class PostgresEngine(Engine):
                 "'information_schema')"
                 " and table_schema not like 'pg\\_%'"
                 " and table_schema not like '\\_\\_%'"
-                " and table_name not like 'migkit\\_%' order by 1")
+                f" and table_name not in {OWN_SQL} order by 1")
         sc = {l.split("|", 1)[0]: l for l in
               self._psql("src", db, colq).splitlines() if l}
         dc = {l.split("|", 1)[0]: l for l in
@@ -6180,18 +7015,18 @@ class PostgresEngine(Engine):
                " and n.nspname not in ('pg_catalog','information_schema')"
                " and n.nspname not like 'pg\\_%'"
                " and n.nspname not like '\\_\\_%'"
-               " and c.relname not like 'migkit\\_%' order by 1")
+               f" and c.relname not in {OWN_SQL} order by 1")
         shifts = []
         for tc in [l for l in self._psql("src", db, tsq).splitlines() if l][:10]:
             tbl, col = tc.split("|", 1)
             pks = self._pk_cols_of(db, tbl)
             if len(pks) != 1:
                 continue
-            sch2, t2 = tbl.split(".", 1)
+            sch2, t2 = self._split(tbl)
             pk = pks[0]
-            q = (f'select "{pk}"::text||e\'\\t\'||extract(epoch from "{col}")'
-                 f' from "{sch2}"."{t2}" where "{col}" is not null'
-                 f' order by "{pk}" limit 200')
+            q = (f'select {_ident(pk)}::text||e\'\\t\'||extract(epoch from {_ident(col)})'
+                 f' from {_ident(sch2)}.{_ident(t2)} where {_ident(col)} is not null'
+                 f' order by {_ident(pk)} limit 200')
             try:
                 sm = dict(l.split("\t") for l in
                           self._psql("src", db, q).splitlines() if "\t" in l)
@@ -6220,13 +7055,13 @@ class PostgresEngine(Engine):
                 " and n.nspname not in ('pg_catalog','information_schema')"
                 " and n.nspname not like 'pg\\_%'"
                 " and n.nspname not like '\\_\\_%'"
-                " and c.relname not like 'migkit\\_%' order by 1")
+                f" and c.relname not in {OWN_SQL} order by 1")
         neq = []
         for tc in [l for l in self._psql("src", db, txtq).splitlines() if l][:30]:
             tbl, col = tc.split("|", 1)
-            sch2, t2 = tbl.split(".", 1)
-            q = (f'select count(*) filter (where "{col}" is null)||\'|\'||'
-                 f'count(*) filter (where "{col}" = \'\') from "{sch2}"."{t2}"')
+            sch2, t2 = self._split(tbl)
+            q = (f'select count(*) filter (where {_ident(col)} is null)||\'|\'||'
+                 f'count(*) filter (where {_ident(col)} = \'\') from {_ident(sch2)}.{_ident(t2)}')
             try:
                 sv, dv = self._psql("src", db, q), self._psql("dst", db, q)
             except RuntimeError:
@@ -6260,10 +7095,11 @@ class PostgresEngine(Engine):
             enc.append(f"server_encoding differs: src={se} dst={de}")
         for tc in [l for l in self._psql("src", db, txtq).splitlines() if l][:30]:
             tbl, col = tc.split("|", 1)
-            sch2, t2 = tbl.split(".", 1)
-            q = ('select coalesce(sum(char_length("' + col + '")'
-                 ' - char_length(replace("' + col + '", U&\'\\FFFD\','
-                 " ''))),0) from \"" + sch2 + '"."' + t2 + '"')
+            sch2, t2 = self._split(tbl)
+            c = _ident(col)
+            q = (f"select coalesce(sum(char_length({c}) - char_length("
+                 f"replace({c}, U&'\\FFFD', ''))),0) from"
+                 f" {_ident(sch2)}.{_ident(t2)}")
             try:
                 sv = int(self._psql("src", db, q) or 0)
                 dv = int(self._psql("dst", db, q) or 0)
@@ -6330,10 +7166,10 @@ class PostgresEngine(Engine):
                 gbad.append(f"{tbl}.{col}: generation expression differs")
                 continue
             if gen == "s":
-                sch2, t2 = tbl.split(".", 1)
+                sch2, t2 = self._split(tbl)
                 try:
                     n = self._psql("dst", db, f'select count(*) from'
-                                   f' "{sch2}"."{t2}" where "{col}"'
+                                   f' {_ident(sch2)}.{_ident(t2)} where {_ident(col)}'
                                    f" is distinct from ({dexpr})")
                     if n and int(n) > 0:
                         gbad.append(f"{tbl}.{col}: {n} rows where the stored"
@@ -6390,15 +7226,15 @@ class PostgresEngine(Engine):
             if not dcoll or dcoll == scoll:
                 continue
             tbl, col = k.split("|")
-            sch2, t2 = tbl.split(".", 1)
+            sch2, t2 = self._split(tbl)
             detail = (f"{tbl}.{col}: unique-key collation src({scoll})"
                       f" != dst({dcoll})")
             if dcoll != "default":
                 try:
                     n = self._psql("src", db,
                                    f'select count(*) from (select 1 from'
-                                   f' "{sch2}"."{t2}" group by "{col}"'
-                                   f' collate "{dcoll}" having count(*) > 1) x')
+                                   f' {_ident(sch2)}.{_ident(t2)} group by {_ident(col)}'
+                                   f' collate {_ident(dcoll)} having count(*) > 1) x')
                     if n and int(n) > 0:
                         detail += (f"; {n} source groups COLLAPSE to duplicates"
                                    " under the target collation (data loss)")
@@ -6443,17 +7279,17 @@ class PostgresEngine(Engine):
                  " and n.nspname not in ('pg_catalog','information_schema')"
                  " and n.nspname not like 'pg\\_%'"
                  " and n.nspname not like '\\_\\_%'"
-                 " and c.relname not like 'migkit\\_%'").splitlines() if l]
+                 f" and c.relname not in {OWN_SQL}").splitlines() if l]
         fbad = []
         for tc in fcols[:10]:
             tbl, col = tc.split("|", 1)
             pks = self._pk_cols_of(db, tbl)
             if len(pks) != 1:
                 continue
-            sch2, t2 = tbl.split(".", 1)
+            sch2, t2 = self._split(tbl)
             pk = pks[0]
-            q = (f'select "{pk}"::text||e\'\\t\'||"{col}" from "{sch2}"."{t2}"'
-                 f' where "{col}" is not null order by "{pk}" limit 500')
+            q = (f'select {_ident(pk)}::text||e\'\\t\'||{_ident(col)} from {_ident(sch2)}.{_ident(t2)}'
+                 f' where {_ident(col)} is not null order by {_ident(pk)} limit 500')
             try:
                 sm = dict(l.split("\t") for l in
                           self._psql("src", db, q).splitlines() if "\t" in l)
@@ -6499,15 +7335,14 @@ class PostgresEngine(Engine):
                " and n.nspname not in ('pg_catalog','information_schema')"
                " and n.nspname not like 'pg\\_%'"
                " and n.nspname not like '\\_\\_%'"
-               " and c.relname not like 'migkit\\_%'"
+               f" and c.relname not in {OWN_SQL}"
                " and (ty.typtype in ('e','c','d','r','m') or ty.typname in"
                " ('money','point','polygon','path','circle','box','line',"
                "'lseg','tsvector','tsquery','xml','interval','bit','varbit'))")
         exotic = [l.split("|") for l in
                   self._psql("src", db, exq).splitlines() if l][:20]
 
-        def _esc(v):
-            return "'" + v.replace("'", "''") + "'"
+        _esc = _literal
 
         drifts = []
         audited = 0
@@ -6515,10 +7350,10 @@ class PostgresEngine(Engine):
             pks = self._pk_cols_of(db, tbl)
             if not pks:
                 continue
-            sch2, t2 = tbl.split(".", 1)
+            sch2, t2 = self._split(tbl)
             pkexpr = self._pk_text_expr(pks)
-            q = (f'select {pkexpr}||\'|\'||"{col}"::text'
-                 f' from "{sch2}"."{t2}" where "{col}" is not null limit 5')
+            q = (f'select {pkexpr}||\'|\'||{_ident(col)}::text'
+                 f' from {_ident(sch2)}.{_ident(t2)} where {_ident(col)} is not null limit 5')
             try:
                 a = dict(l.split("|", 1) for l in
                          self._psql("src", db, q).splitlines() if "|" in l)
@@ -6528,16 +7363,16 @@ class PostgresEngine(Engine):
                 continue
             audited += 1
             if len(pks) == 1:
-                where = (f'"{pks[0]}"::text in ('
+                where = (f'{_ident(pks[0])}::text in ('
                          + ", ".join(_esc(k) for k in a) + ")")
             else:
-                tup = ", ".join(f'"{p}"::text' for p in pks)
+                tup = ", ".join(f'{_ident(p)}::text' for p in pks)
                 vals = ", ".join(
                     "(" + ", ".join(_esc(x) for x in self._pk_parts(k)) + ")"
                     for k in a)
                 where = f"({tup}) in ({vals})"
-            qd = (f'select {pkexpr}||\'|\'||"{col}"::text'
-                  f' from "{sch2}"."{t2}" where {where}')
+            qd = (f'select {pkexpr}||\'|\'||{_ident(col)}::text'
+                  f' from {_ident(sch2)}.{_ident(t2)} where {where}')
             try:
                 b = dict(l.split("|", 1) for l in
                          self._psql("dst", db, qd).splitlines() if "|" in l)
@@ -6568,7 +7403,7 @@ class PostgresEngine(Engine):
         for m in mvs:
             try:
                 pop = self._psql("dst", db, "select relispopulated"
-                                 f" from pg_class where oid = '{m}'::regclass")
+                                 f" from pg_class where oid = {_literal(m)}::regclass")
             except RuntimeError:
                 stale.append(f"{m}: missing on target")
                 continue
@@ -6602,21 +7437,26 @@ class PostgresEngine(Engine):
                 res.append(Result("deep", f"{db} grants", "diff",
                                   (f"{len(miss)} grants missing on target"
                                    + (": " + "; ".join(
-                                       g.replace("|", " ") for g in miss[:3])
+                                       self._grant_said(g) for g in miss[:3])
                                       if miss else "")
-                                   + (f"; {len(extra)} extra" if extra else "")),
+                                   + (f"; {len(extra)} extra: "
+                                      + "; ".join(self._grant_said(g)
+                                                  for g in extra[:3])
+                                      if extra else "")),
                                   "", "migkit sync --kind schema --apply"
                                       " re-grants them, with undo"))
             else:
                 res.append(Result("deep", f"{db} grants", "ok",
-                                  f"{seen} table grants match"
-                                  " (roles present both sides)"))
+                                  f"{seen} grants match - tables, columns,"
+                                  " schemas, the database, routines and"
+                                  " default privileges (roles present both"
+                                  " sides)"))
             if smiss:
                 res.append(Result("deep", f"{db} seq-grants", "diff",
                                   f"{len(smiss)} sequence grants missing on"
                                   " target (inserts will hit 'permission"
                                   " denied for sequence'): "
-                                  + "; ".join(g.replace("|", " ")
+                                  + "; ".join(self._grant_said(g)
                                               for g in smiss[:4]), "",
                                   "migkit sync --kind schema --apply grants"
                                   " them, with undo"))
@@ -6668,7 +7508,7 @@ class PostgresEngine(Engine):
                " and n.nspname not in ('pg_catalog','information_schema')"
                " and n.nspname not like 'pg\\_%'"
                " and n.nspname not like '\\_\\_%'"
-               " and c.relname not like 'migkit\\_%' order by 1")
+               f" and c.relname not in {OWN_SQL} order by 1")
         spk = [l.split("|") for l in
                self._psql("src", db, pkq).splitlines() if l]
         dpk = {tuple(l.split("|")[:2]) for l in
@@ -6678,8 +7518,9 @@ class PostgresEngine(Engine):
         def maxes(side, triples):
             out = {}
             for i in range(0, len(triples), 200):
-                parts = [f"select '{s}.{t}|'||coalesce(max(\"{c}\"), 0)"
-                         f' from "{s}"."{t}"'
+                parts = [f"select {_literal(f'{s}.{t}|')}"
+                         f"||coalesce(max({_ident(c)}), 0)"
+                         f" from {_ident(s)}.{_ident(t)}"
                          for s, t, c in triples[i:i + 200]]
                 for l in self._psql(side, db,
                                     " union all ".join(parts)).splitlines():
@@ -6748,8 +7589,10 @@ class PostgresEngine(Engine):
             return None
         return None if v < 0 else v
 
-    def _change_marker(self, side, db, table):
-        """A cheap proof that this table has not moved, or None.
+    def _change_markers(self, side, db):
+        """{table: a cheap proof that it has not moved}, every table of a
+        side in one statement; a table missing, or {} where the server is
+        not one whose statistics can be trusted.
 
         The pieces were chosen by measuring what each kind of change actually
         moves, on PostgreSQL 16:
@@ -6758,42 +7601,69 @@ class PostgresEngine(Engine):
             TRUNCATE          **the counters do not move at all** - only
                               relfilenode and the relation size do
             statistics reset  the counters drop to zero
+            DROP / RENAME     nothing of those: the table's live columns
+            COLUMN            (their count and a hash of each one's name,
+                              type, null and collation) are in it for that
 
         So the counters alone would skip a truncated table and call it equal.
         `relfilenode` is in the marker for exactly that case, and the whole
-        thing is compared for equality so a reset reads as "look again".
+        thing is compared for equality so a reset reads as "look again". A
+        column dropped or renamed on the target rewrites nothing, and the
+        check said "UNCHANGED since it was last proved equal" over a table
+        that had lost a column's data; and the marker was four statements a
+        table a side (audit 2026-10-01, SC4).
 
-        None is returned rather than a guess when the server is too old to
+        Nothing is returned rather than a guess when the server is too old to
         trust: before 15 the statistics collector used UDP and could drop a
         message, and a dropped UPDATE is the false negative this exists to
         avoid.
         """
         from .. import unchanged as _u
-        sch, tbl = self._split(table)
         # Before the version, because a wire-compatible fork answers the
         # version question plausibly and the pieces underneath it are dead.
         # Measured on CockroachDB: empty pg_stat_all_tables, relfilenode 0
         # everywhere, and a reported server_version of 13.0.0 - so the marker
         # would be constant and the only thing refusing it is that number.
         if not _u.usable_brand(self._brands()[0 if side == "src" else 1]):
-            return None
+            return {}
+        texts = self.__dict__.setdefault("_version_texts", {})
         try:
-            ver = self._psql(side, db, "show server_version")
-            if not _u.usable_postgres(ver):
-                return None
-            row = self._psql(side, db, f"""
-                select coalesce(s.n_tup_ins, -1)||chr(31)
+            if side not in texts:
+                texts[side] = self._psql(side, db, "show server_version")
+            if not _u.usable_postgres(texts[side]):
+                return {}
+            got = self._psql(side, db, """
+                select n.nspname||'.'||c.relname||chr(31)
+                       ||coalesce(s.n_tup_ins, -1)||chr(31)
                        ||coalesce(s.n_tup_upd, -1)||chr(31)
                        ||coalesce(s.n_tup_del, -1)||chr(31)
                        ||c.relfilenode||chr(31)
-                       ||pg_relation_size(c.oid)
+                       ||pg_relation_size(c.oid)||chr(31)
+                       ||(select count(*)||':'||coalesce(md5(string_agg(
+                                 a.attnum||':'||a.attname||':'||a.atttypid
+                                 ||':'||a.atttypmod||':'||a.attnotnull::text
+                                 ||':'||a.attcollation, ','
+                                 order by a.attnum)), '')
+                            from pg_attribute a
+                           where a.attrelid = c.oid and a.attnum > 0
+                             and not a.attisdropped)
                   from pg_class c
                   join pg_namespace n on n.oid = c.relnamespace
                   left join pg_stat_all_tables s on s.relid = c.oid
-                 where n.nspname = '{sch}' and c.relname = '{tbl}'""").strip()
+                 where """ + user_tables_where("all", own=True))
         except RuntimeError:
-            return None
-        return _u.marker(row.split("\x1f")) if row else None
+            return {}
+        out = {}
+        for line in got.splitlines():
+            name, _, rest = line.partition("\x1f")
+            if name:
+                out[name] = _u.marker(rest.split("\x1f"))
+        return out
+
+    def _change_marker(self, side, db, table):
+        """One table's marker (`_change_markers`), or None."""
+        sch, tbl = self._split(table)
+        return self._change_markers(side, db).get(f"{sch}.{tbl}")
 
     def _unvalidated_checks(self, db, kinds="c", side="dst"):
         """[(table, constraint, definition)] left NOT VALID on the target.
@@ -6805,8 +7675,8 @@ class PostgresEngine(Engine):
         NOT VALID, so the recreated constraint is the same object in the same
         state.
         """
-        want = ", ".join(f"'{k}'" for k in kinds)
-        rows = self._psql(side, self._d(side, db), f"""
+        want = ", ".join(f"{_literal(k)}" for k in kinds)
+        rows = self._psql(side, db, f"""
             select conrelid::regclass::text||chr(31)||conname||chr(31)
                    ||pg_get_constraintdef(c.oid)
               from pg_constraint c
@@ -6841,15 +7711,100 @@ class PostgresEngine(Engine):
             return None
         stmts, undo = [], []
         for tbl, name, definition in nv:
-            stmts.append(f'ALTER TABLE {tbl} VALIDATE CONSTRAINT "{name}";')
+            stmts.append(f'ALTER TABLE {tbl} VALIDATE CONSTRAINT {_ident(name)};')
             # no statement un-validates a constraint, so the way back is to
             # put the original one back exactly as it was
-            undo.append(f'ALTER TABLE {tbl} DROP CONSTRAINT "{name}";')
-            undo.append(f'ALTER TABLE {tbl} ADD CONSTRAINT "{name}"'
+            undo.append(f'ALTER TABLE {tbl} DROP CONSTRAINT {_ident(name)};')
+            undo.append(f'ALTER TABLE {tbl} ADD CONSTRAINT {_ident(name)}'
                         f' {definition};')
         return RepairAction(db, "constraints", stmts, undo,
                             f"{len(nv)} check and foreign key constraints"
                             " the load left unvalidated")
+
+    def _grants_sql(self, side, db):
+        """Every privilege granted on a side, one statement: tables and
+        views, sequences, schemas, the database, functions and procedures,
+        columns and the default privileges new objects get - each row the
+        grantee (`PUBLIC` for everyone), the kind, the object as SQL names
+        it, the column, the privilege and whether it may be granted on,
+        split by `chr(31)`. Read raw rather than through
+        `information_schema.table_privileges`: that view hides grants whose
+        grantee the connected user is not a member of, which reads as
+        missing on a target reached with a plain application user.
+
+        What each role may do there: an object nobody granted on has the
+        server's defaults (`acldefault`) - a function its EXECUTE for
+        everyone, a database its CONNECT - so a source that took that from
+        PUBLIC is told from a target that still gives it. The owner's own
+        privileges are the owner's, not a grant, and read as `(owner)`:
+        who owns what is the ownership check's (`_deep_ownership`)."""
+        v = self._server_version(side, db) or 0
+        routine = ("case p.prokind when 'p' then 'PROCEDURE' else"
+                   " 'FUNCTION' end" if v >= 110000 else "'FUNCTION'")
+        from ..users import system_principals_sql
+        ignore = [r.strip() for r in os.environ.get(
+            "GRANTS_IGNORE_ROLES", "root,rdsadmin").split(",") if r.strip()]
+        # the roles a server or its provider keeps for itself, by the one
+        # list `users` reads too (audit 2026-10-01, DU13)
+        skip = f" and not {system_principals_sql('postgres', 'g.who')}" + (
+            f" and g.who not in ({', '.join(_literal(r) for r in ignore)})"
+            if ignore else "")
+        return f"""
+with ns as (
+  select oid, nspname from pg_namespace
+   where nspname not in ('pg_catalog', 'information_schema')
+     and nspname not like 'pg\\_%' and nspname not like '\\_\\_%'),
+acl as (
+  select case c.relkind when 'S' then 'SEQUENCE' else 'TABLE' end k,
+         format('%I.%I', ns.nspname, c.relname) o, '' col,
+         ns.nspname s, c.relname n, c.relowner w,
+         coalesce(c.relacl, acldefault(case c.relkind when 'S' then 's'
+                                       else 'r' end, c.relowner)) a
+    from pg_class c join ns on ns.oid = c.relnamespace
+   where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+     and c.relname not in {OWN_SQL}
+  union all
+  select 'COLUMN', format('%I.%I', ns.nspname, c.relname),
+         quote_ident(t.attname), ns.nspname, c.relname, c.relowner,
+         t.attacl
+    from pg_attribute t join pg_class c on c.oid = t.attrelid
+    join ns on ns.oid = c.relnamespace
+   where t.attacl is not null and t.attnum > 0 and not t.attisdropped
+     and c.relname not in {OWN_SQL}
+  union all
+  select 'SCHEMA', quote_ident(ns.nspname), '', ns.nspname, '', n.nspowner,
+         coalesce(n.nspacl, acldefault('n', n.nspowner))
+    from pg_namespace n join ns on ns.oid = n.oid
+  union all
+  select 'DATABASE', '', '', '', '', datdba,
+         coalesce(datacl, acldefault('d', datdba))
+    from pg_database where datname = current_database()
+  union all
+  select {routine}, p.oid::regprocedure::text, '', ns.nspname, p.proname,
+         p.proowner, coalesce(p.proacl, acldefault('f', p.proowner))
+    from pg_proc p join ns on ns.oid = p.pronamespace
+   where not exists (select 1 from pg_depend d
+                      where d.classid = 'pg_proc'::regclass
+                        and d.objid = p.oid and d.deptype = 'e')
+  union all
+  select 'DEFAULT ' || case d.defaclobjtype when 'r' then 'TABLES'
+             when 'S' then 'SEQUENCES' when 'f' then 'FUNCTIONS'
+             when 'T' then 'TYPES' else 'SCHEMAS' end,
+         quote_ident(pg_get_userbyid(d.defaclrole))
+           || coalesce(' IN SCHEMA ' || quote_ident(n.nspname), ''),
+         '', coalesce(n.nspname, ''), '', d.defaclrole, d.defaclacl
+    from pg_default_acl d
+    left join pg_namespace n on n.oid = d.defaclnamespace)
+select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
+       ||g.privilege_type||chr(31)||g.is_grantable::text||chr(31)||acl.s
+       ||chr(31)||acl.n
+  from acl cross join lateral (
+       select case when x.grantee = 0 then 'PUBLIC'
+                   when x.grantee = acl.w then '(owner)'
+                   else pg_get_userbyid(x.grantee) end who,
+              x.privilege_type, x.is_grantable
+         from aclexplode(acl.a) x) g
+ where true{skip}"""
 
     def _grant_gaps(self, db):
         """(missing, extra, missing_sequence, n_seen, n_seq_seen), or None.
@@ -6859,74 +7814,94 @@ class PostgresEngine(Engine):
         copies of "which grants are missing" would have been two chances to
         grant the wrong thing to the wrong role.
 
-        Reads raw `relacl` rather than `information_schema.table_privileges`:
-        that view hides grants whose grantee the connected user is not a
-        member of, which reads as missing on a target reached with a plain
-        application user.
+        Every kind of privilege, one statement a side (`_grants_sql`): only
+        table and sequence grants were compared, so a schema's USAGE, a
+        database's CONNECT, a function's EXECUTE, a column's grant, the
+        default privileges the application's new tables get after the
+        cutover, a grant to PUBLIC and a grant's WITH GRANT OPTION were
+        never looked at (audit 2026-10-01, SC11). Each entry is the
+        grantee, kind, object, column, privilege and grant option joined by
+        `chr(31)`; the tables the hop leaves out, and those the movers keep
+        for themselves (`noise_prefix`), are not the application's grants.
         """
-        ign = "','".join(r.strip() for r in os.environ.get(
-            "GRANTS_IGNORE_ROLES", "root,rdsadmin").split(",") if r.strip())
-        common = (" and n.nspname not in ('pg_catalog','information_schema')"
-                  " and n.nspname not like 'pg\\_%'"
-                  " and n.nspname not like '\\_\\_%'"
-                  " and pg_get_userbyid(a.grantee) <> 'PUBLIC'"
-                  " and pg_get_userbyid(a.grantee) not like 'pg\\_%'"
-                  " and pg_get_userbyid(a.grantee) not like 'rds%'"
-                  " and pg_get_userbyid(a.grantee) not like '%tencent%'"
-                  f" and pg_get_userbyid(a.grantee) not in ('{ign}')"
-                  " and c.relname not like 'migkit\\_%'")
-        pick = ("select pg_get_userbyid(a.grantee)||'|'||n.nspname||'.'"
-                "||c.relname||'|'||a.privilege_type from pg_class c"
-                " join pg_namespace n on n.oid = c.relnamespace"
-                " cross join lateral aclexplode(c.relacl) a"
-                " where c.relkind in ({kinds})" + common)
-        gq = pick.format(kinds="'r','p','v','m','f'")
-        sgq = pick.format(kinds="'S'")
-        try:
-            ddb = self._d("dst", db)
-            ga = set(self._psql("src", db, gq).splitlines()) - {""}
-            gb = set(self._psql("dst", ddb, gq).splitlines()) - {""}
-            sga = set(self._psql("src", db, sgq).splitlines()) - {""}
-            sgb = set(self._psql("dst", ddb, sgq).splitlines()) - {""}
-            droles = set(self._psql("dst", ddb,
-                                    "select rolname from pg_roles").splitlines())
-            sroles = set(self._psql("src", db,
-                                    "select rolname from pg_roles").splitlines())
-        except RuntimeError:
-            return None
         noise = self._noise()
 
-        def _app(rows):
-            if not noise:
-                return rows
-            return {g for g in rows
-                    if not g.split("|")[1].partition(".")[2].startswith(noise)}
-        ga, gb, sga, sgb = _app(ga), _app(gb), _app(sga), _app(sgb)
-        # a grant to a role the target does not have is a missing role, which
-        # `users` reports; granting to it here would just fail
-        miss = sorted(g for g in ga - gb if g.split("|")[0] in droles)
-        extra = sorted(g for g in gb - ga if g.split("|")[0] in sroles)
-        smiss = sorted(g for g in sga - sgb if g.split("|")[0] in droles)
-        return miss, extra, smiss, len(ga), len(sga)
+        def read(side):
+            out = set()
+            for line in self._psql(side, db,
+                                   self._grants_sql(side, db)).splitlines():
+                parts = line.split("\x1f")
+                if len(parts) != 8:
+                    continue
+                who, kind, obj, col, priv, grantable, sch, name = parts
+                if kind in ("TABLE", "SEQUENCE", "COLUMN") and (
+                        (noise and name.startswith(noise))
+                        or self.hop.excluded(db, sch, name)):
+                    continue
+                out.add("\x1f".join((who, kind, obj, col, priv, grantable)))
+            return out
+        try:
+            ga, gb = read("src"), read("dst")
+            droles = set(self._psql("dst", db, "select rolname from"
+                                               " pg_roles").splitlines())
+            sroles = set(self._psql("src", db, "select rolname from"
+                                               " pg_roles").splitlines())
+        except RuntimeError:
+            return None
+        droles.add("PUBLIC")
+        sroles.add("PUBLIC")
+
+        def present(entry, roles):
+            # a grant to a role the side does not have is a missing role,
+            # which `users` reports; granting to it here would just fail -
+            # and a default privilege is given on behalf of its own role
+            who, kind, obj = entry.split("\x1f")[:3]
+            if who not in roles:
+                return False
+            return not kind.startswith("DEFAULT ") or \
+                obj.split(" IN SCHEMA ")[0].strip('"') in roles
+        seq = {g for g in ga | gb if g.split("\x1f")[1] == "SEQUENCE"}
+        miss = sorted(g for g in ga - gb - seq if present(g, droles))
+        extra = sorted(g for g in gb - ga - seq if present(g, sroles))
+        smiss = sorted(g for g in (ga - gb) & seq if present(g, droles))
+        return miss, extra, smiss, len(ga - seq), len(ga & seq)
 
     @staticmethod
-    def _grant_sql(entry, revoke=False, obj_type=""):
-        """One GRANT (or REVOKE) from a `role|schema.object|PRIVILEGE` row.
+    def _grant_said(entry):
+        """One `_grant_gaps` entry in words."""
+        who, kind, obj, col, priv, grantable = entry.split("\x1f")
+        return (f"{who} {priv}"
+                + (" (with grant option)" if grantable == "true" else "")
+                + f" on {kind.lower()} {obj or 'the database'}"
+                + (f" ({col})" if col else ""))
 
-        `obj_type` is spelled out for sequences. Measured on PostgreSQL 16
-        that the bare form is accepted for them too - `GRANT USAGE ON
-        "public"."t_id_seq"` succeeds - but the object type is known here, so
-        saying it costs nothing and removes the dependence on that fallback.
-        """
-        role, obj, priv = entry.split("|", 2)
-        sch, _, name = obj.partition(".")
-        kind = f"{obj_type} " if obj_type else ""
-        q = PostgresEngine._quote_ident
-        target = f"{kind}{q(sch)}.{q(name)}"
-        who = q(role)
+    def _grant_sql(self, entry, revoke=False, db=None):
+        """One GRANT (or its REVOKE) from a `_grant_gaps` entry, on the
+        target: a table's, a sequence's (its kind spelled out: measured on
+        PostgreSQL 16 the bare form is taken for one too, but the kind is
+        known here), a column's, a schema's, the target database's, a
+        routine's, or a default privilege's; WITH GRANT OPTION where the
+        source's grant has it."""
+        who, kind, obj, col, priv, grantable = entry.split("\x1f")
+        grantee = "PUBLIC" if who == "PUBLIC" else _ident(who)
+        opt = " WITH GRANT OPTION" if grantable == "true" else ""
+        if kind.startswith("DEFAULT "):
+            what = kind[len("DEFAULT "):]
+            if revoke:
+                return (f"ALTER DEFAULT PRIVILEGES FOR ROLE {obj} REVOKE"
+                        f" {priv} ON {what} FROM {grantee};")
+            return (f"ALTER DEFAULT PRIVILEGES FOR ROLE {obj} GRANT {priv}"
+                    f" ON {what} TO {grantee}{opt};")
+        if kind == "DATABASE":
+            target = f"DATABASE {_ident(self._d('dst', db))}"
+        elif kind == "COLUMN":
+            target = f"TABLE {obj}"
+            priv = f"{priv} ({col})"
+        else:
+            target = f"{kind} {obj}"
         if revoke:
-            return f'REVOKE {priv} ON {target} FROM {who};'
-        return f'GRANT {priv} ON {target} TO {who};'
+            return f"REVOKE {priv} ON {target} FROM {grantee};"
+        return f"GRANT {priv} ON {target} TO {grantee}{opt};"
 
     def _grant_repair(self, db):
         """Re-grant what the mover did not carry, with a REVOKE to undo it.
@@ -6942,12 +7917,9 @@ class PostgresEngine(Engine):
         miss, _extra, smiss, _, _ = gaps
         if not (miss or smiss):
             return None
-        stmts = ([self._grant_sql(g) for g in miss]
-                 + [self._grant_sql(g, obj_type="SEQUENCE") for g in smiss])
-        undo = ([self._grant_sql(g, revoke=True) for g in miss]
-                + [self._grant_sql(g, revoke=True, obj_type="SEQUENCE")
-                   for g in smiss])
-        note = (f"{len(miss)} table and {len(smiss)} sequence grants the"
+        stmts = [self._grant_sql(g, db=db) for g in miss + smiss]
+        undo = [self._grant_sql(g, revoke=True, db=db) for g in miss + smiss]
+        note = (f"{len(miss)} grants and {len(smiss)} sequence grants the"
                 " mover did not carry")
         return RepairAction(db, "grants", stmts, undo, note)
 
@@ -7025,11 +7997,10 @@ class PostgresEngine(Engine):
         leaf's count and digest in one statement."""
         from .. import canon
         sch, tbl = self._split(parent)
-        lit = (f"{self._quote_ident(sch)}.{self._quote_ident(tbl)}"
-               .replace("'", "''"))
+        lit = f"{_ident(sch)}.{_ident(tbl)}"
         got = self._psql(side, db,
             "with recursive tree(relid) as ("
-            f" select inhrelid from pg_inherits where inhparent = '{lit}'"
+            f" select inhrelid from pg_inherits where inhparent = {_literal(lit)}"
             "::regclass union all select i.inhrelid from pg_inherits i"
             " join tree t on i.inhparent = t.relid)"
             " select n.nspname||chr(31)||c.relname||chr(31)"
@@ -7050,7 +8021,7 @@ class PostgresEngine(Engine):
                 out[name] = {"rows": 0, "digest": None, "bound": bound,
                              "catchall": bound == "DEFAULT"}
                 reads.append(
-                    f"select '{name.replace(chr(39), chr(39) * 2)}'"
+                    f"select {_literal(name)}"
                     f"||chr(31)||count(*)::text||chr(31)||{digest}"
                     f" from {self._quote_ident(lsch)}"
                     f".{self._quote_ident(lname)}" + self._where(where))
@@ -7084,7 +8055,7 @@ class PostgresEngine(Engine):
             a = dict(l.split("|", 1) for l in
                      self._psql("src", db, self.OWNER_SQL).splitlines() if "|" in l)
             b = dict(l.split("|", 1) for l in
-                     self._psql("dst", self._d("dst", db),
+                     self._psql("dst", db,
                                 self.OWNER_SQL).splitlines() if "|" in l)
         except RuntimeError as e:
             return [Result("deep", f"{db} ownership", "warn",
@@ -7114,7 +8085,7 @@ class PostgresEngine(Engine):
             q = ("select schemaname||'.'||sequencename||'|'||coalesce(last_value,0)"
                  " from pg_sequences"
                  " where schemaname not like '\\_\\_%'"
-                 " and sequencename not like 'migkit\\_%'")
+                 f" and sequencename not in {OWN_SQL}")
             src = dict(l.rsplit("|", 1) for l in
                        self._psql("src", db, q).splitlines() if l)
             dst = dict(l.rsplit("|", 1) for l in
@@ -7161,14 +8132,14 @@ class PostgresEngine(Engine):
                     target += buf
                 if target == 0 or (cur is not None and int(cur) == target):
                     continue
-                stmts.append(f"select setval('{name}', {target}, true);"
+                stmts.append(f"select setval({_literal(name)}, {target}, true);"
                              f"  -- src={sv} dstmax={mx}"
                              + (f" +buffer {buf}" if buf else "")
                              + f" dst now {cur if cur is not None else 'MISSING'}")
                 if cur == "0":
-                    undo.append(f"select setval('{name}', 1, false);")
+                    undo.append(f"select setval({_literal(name)}, 1, false);")
                 elif cur is not None:
-                    undo.append(f"select setval('{name}', {cur}, true);")
+                    undo.append(f"select setval({_literal(name)}, {cur}, true);")
             same = sum(1 for n, v in src.items() if dst.get(n) == v)
             note = f"{len(stmts)} sequences set, {same} already equal"
             if refuse:
@@ -7234,11 +8205,12 @@ class PostgresEngine(Engine):
         is written into the note rather than discovered later - a repaired
         target no longer matches the source it came from.
 
-        Target triggers fire for these updates, unlike a `move`, which runs
-        with `session_replication_role = replica`. A handful of statements
-        is not a reload, and quieting them needs a privilege an application
-        role may not have; `check --deep`'s triggers line names the ones
-        that would run.
+        Written as the load writes (`apply`, `load_window`): as a replica,
+        which no trigger fires for, where the target's user may; as the
+        tables are only where they have no trigger; refused otherwise. The
+        updates used to run with the target's triggers firing - an audit
+        trigger's rows, a stamp rewritten - where every other write of
+        migkit's into the target was quiet (audit 2026-10-01).
         """
         cols = {}
         for line in self._psql("dst", db, self.TEXT_COLUMNS).splitlines():
@@ -7261,16 +8233,16 @@ class PostgresEngine(Engine):
                                     " tables point at"))
             if not want:
                 continue
-            sch, tbl = table.split(".", 1)
-            quoted = ['"' + c.replace('"', '""') + '"' for c in key + want]
+            sch, tbl = self._split(table)
+            quoted = [_ident(c) for c in key + want]
             where = " or ".join(
                 f"octet_length({q}) <> char_length({q})"
                 for q in quoted[len(key):])
             out = self._psql(
                 "dst", db, self._as_json_rows(
                     f'select {", ".join(quoted)}'
-                    f' from "{sch.replace(chr(34), chr(34) * 2)}".'
-                    f'"{tbl.replace(chr(34), chr(34) * 2)}"'
+                    f' from {_ident(sch)}.'
+                    f'{_ident(tbl)}'
                     f' where {where} limit {self.MOJIBAKE_REPAIR_CAP + 1}'))
             rows = []
             for line in out.splitlines():
@@ -7310,32 +8282,30 @@ class PostgresEngine(Engine):
         if action.kind != "schema":
             return True, ""
         from .. import movers
-        t = self.hop.target
-        tdb = self._d("dst", db)
         scratch = re.sub(r"[^a-z0-9_]", "_",
                          f"migkit_rehearsal_{self.hop.name}".lower())[:63]
-        env = {**t.libpq_env(),
-               "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
         dump = self.hop.report_dir(db) / "rehearsal.dump"
         try:
-            self._psql("dst", db, f'drop database if exists "{scratch}"')
-            self._psql("dst", db, f'create database "{scratch}"')
+            self._psql("dst", db, f'drop database if exists {_ident(scratch)}')
+            self._psql("dst", db, f'create database {_ident(scratch)}')
         except RuntimeError as e:
             return True, ("the undo was not rehearsed: a scratch database"
                           " could not be made on the target ("
                           + str(e).strip().splitlines()[-1][:100] + ")")
         try:
-            run(["pg_dump", "-h", t.host, "-p", str(t.port), "-U", t.user,
-                 "-d", tdb, "--schema-only", "-Fc", "-f", str(dump)],
-                env=env)
-            movers._restore(["pg_restore", "-h", t.host, "-p", str(t.port),
-                             "-U", t.user, "-d", scratch, "--no-owner",
-                             "--no-privileges", str(dump)], env, None,
-                            "the rehearsal copy", existing_ok=True)
+            argv, env = self._client("dst", db, "pg_dump", "--schema-only",
+                                     "-Fc", "-f", str(dump))
+            run(argv, env=env)
+            argv, env = self._client("dst", db, "pg_restore", "--no-owner",
+                                     "--no-privileges", str(dump),
+                                     physical=scratch)
+            movers._restore(argv, env, None, "the rehearsal copy",
+                            existing_ok=True)
             before = self._dump_schema_native("dst", db, physical=scratch)
             try:
-                self._psql("dst", scratch, "begin;\n"
-                           + "\n".join(action.statements) + "\ncommit;")
+                self._psql("dst", db, "begin;\n"
+                           + "\n".join(action.statements) + "\ncommit;",
+                           physical=scratch)
             except RuntimeError as e:
                 return False, ("the fix fails on a copy of the target's"
                                " schema, so it was not applied: "
@@ -7344,8 +8314,9 @@ class PostgresEngine(Engine):
                 return True, ("the fix applies on a copy of the target's"
                               " schema; it has no undo")
             try:
-                self._psql("dst", scratch, "begin;\n"
-                           + "\n".join(action.undo) + "\ncommit;")
+                self._psql("dst", db, "begin;\n"
+                           + "\n".join(action.undo) + "\ncommit;",
+                           physical=scratch)
             except RuntimeError as e:
                 return True, ("the undo FAILS on a copy of the target's"
                               " schema - keep a backup before applying: "
@@ -7367,8 +8338,12 @@ class PostgresEngine(Engine):
                           " exactly")
         finally:
             dump.unlink(missing_ok=True)
+            # a connection kept to the scratch database would keep it from
+            # being dropped
+            self.release_kept("dst", scratch)
             try:
-                self._psql("dst", db, f'drop database if exists "{scratch}"')
+                self._psql("dst", db,
+                           f"drop database if exists {_ident(scratch)}")
             except RuntimeError:
                 pass
 
@@ -7402,8 +8377,7 @@ class PostgresEngine(Engine):
             # case the note is the whole action - applying it must do
             # nothing rather than send `begin; commit;` and report success
             if action.statements:
-                self._psql("dst", db, "begin;\n"
-                           + "\n".join(action.statements) + "\ncommit;")
+                self._write_as_the_load(db, action.statements)
         elif action.kind in ("schema", "grants", "constraints"):
             # one psql call: multi-statement + $$-quoted bodies apply intact,
             # and a grant set lands all-or-nothing
@@ -7420,22 +8394,39 @@ class PostgresEngine(Engine):
             # refuse, not guess.
             raise RuntimeError(f"no way to apply a {action.kind!r} repair")
 
+    def _write_as_the_load(self, db, statements):
+        """`statements` - each an update of a table of the target - in one
+        transaction on the target, written as the load writes rows
+        (`load_window`, `WRITE_WAYS`): as a replica where the target's user
+        may, as the tables are only where they have no trigger, and
+        refused otherwise, before anything is written."""
+        tables = set()
+        for s in statements:
+            got = re.match(r"\s*update\s+(\S+)\s+set\b", s, re.I)
+            if got:
+                tables.add(".".join(self._split(got.group(1))))
+        with self.load_window(db, None, tables or None):
+            conn = self._connect("dst", db, "write")
+            try:
+                with conn.transaction(), conn.cursor() as cur:
+                    for s in statements:
+                        cur.execute(s)
+            finally:
+                conn.close()
+
     def _psql_run(self, side, db, script):
         """Run a multi-statement psql script from stdin so client-side
         \\copy works (needed for the temp-pk join repair). On the target
         inside the load window it writes as the window's connections do
         (`replica_env`)."""
-        ep = self.hop.source if side == "src" else self.hop.target
         quiet = self.replica_env(db).get("PGOPTIONS", "") \
             if side == "dst" else ""
-        env = tool_env({**ep.libpq_env(),
-                        "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": f"-c statement_timeout=0 {SESSION}"
-                                     + (f" {quiet}" if quiet else "")})
-        p = subprocess.run(
-            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-             "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
-            input=script, capture_output=True, text=True, env=env)
+        argv, env = self._client(side, db, "psql", "-X", "-q", "-v",
+                                 "ON_ERROR_STOP=1", options=quiet)
+        p = subprocess.run(argv, input=script, capture_output=True,
+                           text=True, env=tool_env(env))
+        if _changes_shape(script):
+            self._forget_catalog(side, db)
         if p.returncode:
             from ..wording import pooler_refused
             pooled = pooler_refused(p.stderr)
@@ -7459,13 +8450,13 @@ class PostgresEngine(Engine):
         refused, triggers or not, where the load stopped - a repair whose
         rows the target's triggers rewrote as they landed."""
         d = self._report(db)
-        sch, tbl = t.split(".", 1)
-        qt = f'"{sch}"."{tbl}"'
+        sch, tbl = self._split(t)
+        qt = f'{_ident(sch)}.{_ident(tbl)}'
         pks = self._pk_cols_of(db, t)
         if not pks:
             return
         cols_decl = ", ".join(f"c{i + 1} text" for i in range(len(pks)))
-        cond = " and ".join(f't."{pks[i]}"::text = p.c{i + 1}'
+        cond = " and ".join(f't.{_ident(pks[i])}::text = p.c{i + 1}'
                             for i in range(len(pks)))
         only = self.__dict__.get("_repair_only")
         canon_of = self._key_canon(db, t, pks) if only is not None else None
@@ -7491,41 +8482,90 @@ class PostgresEngine(Engine):
             chg = self._newer_split(db, t, sch, tbl, pks, col, chg, d)
         copy_pks = read("missing") + chg
         del_pks = read("extra") + chg
-        work = Path(tempfile.mkdtemp())
         undo = d / "undo"
         undo.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
+        rows_file = undo / f"{ts}-{_file_name(t)}.rows"
         # every statement written down before any lands (`repairlog`), and
         # the table's repair one transaction: a stop leaves all of it or
         # none, where the deletes used to land without the copy after them
         record = self._repair_record(db, t, pks, copy_pks, chg,
                                      read("extra"), undo)
+        # the rows travel through the drivers' COPY, never a script: names
+        # were written into a script of the client program's, where a
+        # newline in one began a line of its own, and the undo rows were
+        # written by that program to a file of its own, plain, whatever the
+        # hop's `at_rest` said (audit 2026-10-01, SEC4, SEC9)
+        rows = tempfile.SpooledTemporaryFile(max_size=64 * 2 ** 20)
+        held = tempfile.SpooledTemporaryFile(max_size=64 * 2 ** 20)
         try:
-            (work / "copy.pks").write_text(copy_pks)
-            (work / "del.pks").write_text(del_pks)
-            if copy_pks.strip():
-                self._psql_run("src", db,
-                    f"create temp table _pk ({cols_decl});\n"
-                    f"\\copy _pk from '{work}/copy.pks'\n"
-                    f"\\copy (select t.* from {qt} t join _pk p on {cond})"
-                    f" to '{work}/rows.out'\n")
-            body = (f"create temp table _pk ({cols_decl});\n"
-                    f"\\copy _pk from '{work}/del.pks'\n"
-                    f"\\copy (select t.* from {qt} t join _pk p on {cond})"
-                    f" to '{undo}/{ts}-{tbl}.rows'\n"
-                    f"delete from {qt} t using _pk p where {cond};\n")
-            if (work / "rows.out").exists():
-                body += f"\\copy {qt} from '{work}/rows.out'\n"
-            body = "begin;\n" + body + "commit;\n"
+            keys = [[self._pk_unescape(v) for v in line.split("\t")]
+                    for line in copy_pks.splitlines() if line]
+            if keys:
+                self._source_rows(db, qt, pks, keys, rows)
             with self.load_window(db, None, {t}):
-                self._psql_run("dst", db, body)
+                conn = self._connect("dst", db, "write")
+                try:
+                    with conn.transaction(), conn.cursor() as cur:
+                        cur.execute(f"create temp table _pk ({cols_decl})"
+                                    " on commit drop")
+                        with cur.copy("copy _pk from stdin") as cp:
+                            cp.write(del_pks)
+                        with cur.copy(f"copy (select t.* from {qt} t join"
+                                      f" _pk p on {cond}) to stdout") as cp:
+                            for chunk in cp:
+                                held.write(chunk)
+                        # what the rows it replaces were, sealed where the
+                        # hop keeps values encrypted and on the disk before
+                        # anything is deleted
+                        held.seek(0)
+                        _kept_whole(rows_file, held.read())
+                        cur.execute(f"delete from {qt} t using _pk p"
+                                    f" where {cond}")
+                        if keys:
+                            rows.seek(0)
+                            with cur.copy(f"copy {qt} from stdin") as cp:
+                                while True:
+                                    chunk = rows.read(1 << 16)
+                                    if not chunk:
+                                        break
+                                    cp.write(chunk)
+                finally:
+                    conn.close()
             record.applied(record.n)
             with (undo / "manifest.txt").open("a") as m:
-                m.write(f"{ts} {t}: re-copy {undo}/{ts}-{tbl}.rows to undo\n")
+                m.write(f"{ts} {t}: re-copy {rows_file} to undo\n")
         finally:
             record.close()
-            import shutil as _sh
-            _sh.rmtree(work, ignore_errors=True)
+            rows.close()
+            held.close()
+
+    #: keys asked of the source in one statement of a repair
+    REPAIR_KEYS = 5000
+
+    def _source_rows(self, db, qt, pks, keys, out):
+        """The source's rows of `keys` (their key columns' text, in key
+        order) as COPY text into `out`, read in one read-only snapshot and
+        asked by the keys themselves - no temporary table, which a
+        read-only source (a replica) refuses."""
+        import psycopg
+        conn = self._connect("src", db, "write")
+        try:
+            conn.read_only = True
+            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+            with conn.transaction(), conn.cursor() as cur:
+                tup = ", ".join(f"t.{_ident(k)}::text" for k in pks)
+                for i in range(0, len(keys), self.REPAIR_KEYS):
+                    values = ", ".join(
+                        "(" + ", ".join(_literal(v) for v in k) + ")"
+                        for k in keys[i:i + self.REPAIR_KEYS])
+                    with cur.copy(f"copy (select t.* from {qt} t where"
+                                  f" ({tup}) in (values {values}))"
+                                  " to stdout") as cp:
+                        for chunk in cp:
+                            out.write(chunk)
+        finally:
+            conn.close()
 
     def _repair_record(self, db, t, pks, copy_lines, changed_lines,
                        extra_lines, undo):
@@ -7593,7 +8633,7 @@ class PostgresEngine(Engine):
         one transaction, then read back and held to what passed
         (`_copy_checked`, the pipe). Returns the rows copied."""
         sch, tbl = self._split(sides.dst_t)
-        qt = f'"{sch}"."{tbl}"'
+        qt = f'{_ident(sch)}.{_ident(tbl)}'
         (k,) = sides.dkey
         q = self._quote_ident(k)
         pred = f"{q} >= {int(lo)} and {q} < {int(hi)}"
@@ -7610,21 +8650,21 @@ class PostgresEngine(Engine):
         for side in ("src", "dst"):
             if not self._psql(side, db,
                               "select 1 from information_schema.columns"
-                              f" where table_schema = '{sch}'"
-                              f" and table_name = '{tbl}'"
-                              f" and column_name = '{col}'").strip():
+                              f" where table_schema = {_literal(sch)}"
+                              f" and table_name = {_literal(tbl)}"
+                              f" and column_name = {_literal(col)}").strip():
                 raise SystemExit(
                     f"{t}: newer_wins names {col}, and it is not on both"
                     " sides, so which row is newer cannot be told. Nothing"
                     " was repaired on this table.")
         keys = [line for line in lines.splitlines() if line]
-        cond = " and ".join(f't."{pks[i]}"::text = p.c{i + 1}'
+        cond = " and ".join(f't.{_ident(pks[i])}::text = p.c{i + 1}'
                             for i in range(len(pks)))
 
         def at(side, wanted):
             # the keys as a VALUES list: a read-only session may not create
             # even a temporary table
-            conn = self._conn(side, self._d(side, db))
+            conn = self._connect(side, db)
             names = ", ".join(f"c{i + 1}" for i in range(len(pks)))
             got = ", ".join(f"p.c{i + 1}" for i in range(len(pks)))
             out = {}
@@ -7637,7 +8677,7 @@ class PostgresEngine(Engine):
                             "(" + ", ".join(["%s"] * len(pks)) + ")"
                             for _ in rows)
                         cur.execute(
-                            f'select {got}, t."{col}" from "{sch}"."{tbl}" t'
+                            f'select {got}, t.{_ident(col)} from {_ident(sch)}.{_ident(tbl)} t'
                             f" join (values {vals}) as p({names}) on {cond}",
                             [v for r in rows for v in r])
                         out.update({"\t".join(r[:-1]): r[-1]
@@ -7706,19 +8746,19 @@ class PostgresEngine(Engine):
                           "coalesce(last_value,1)||'|'||(last_value is not null)"
                           " from pg_sequences"
                           " where schemaname not like '\\_\\_%'")
-        (state_dir / "dst-sequences.txt").write_text((seqs + "\n") if seqs else "")
+        # what a rollback puts back: whole or not at all, and on the disk
+        # before the repair it undoes begins (`durable`)
+        from ..durable import write_atomic
+        write_atomic(state_dir / "dst-sequences.txt",
+                     (seqs + "\n") if seqs else "")
         # a sequence-only repair rolls back from the sequence snapshot alone;
         # skip the schema dump, which is slow (and can stall) on big partitioned
         # databases and buys nothing here.
         if kind == "sequences":
             return
-        ep = self.hop.target
-        p = run(["pg_dump", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-                 "-d", self._d("dst", db), "--schema-only", "--no-owner",
-                 "--no-privileges"],
-                env={**ep.libpq_env(),
-                     "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15"})
-        (state_dir / "dst-schema.sql").write_text(p.stdout)
+        argv, env = self._client("dst", db, "pg_dump", "--schema-only",
+                                 "--no-owner", "--no-privileges")
+        write_atomic(state_dir / "dst-schema.sql", run(argv, env=env).stdout)
 
     #: how `assess` reads the login roles of both sides
     ROLE_READS = (
@@ -7732,17 +8772,15 @@ class PostgresEngine(Engine):
         service) the roles are read by name alone, switched to by itself -
         and the passwords not compared then is said, not left out
         quietly."""
+        # the roles a server or its provider keeps for itself, by the one
+        # list `users` and the grant check read too (audit 2026-10-01, DU13)
+        from ..users import system_principals_sql
+        system = system_principals_sql("postgres", "rolname")
         roles_q = ("select rolname||'|'||coalesce(rolpassword,'')"
-                   " from pg_authid"
-                   " where rolcanlogin"
-                   " and rolname not like 'pg\\_%'"
-                   " and rolname not like 'rds%'"
-                   " and rolname not like '%tencent%' order by 1")
-        names_q = ("select rolname from pg_roles r"
-                   " where rolcanlogin"
-                   " and r.rolname not like 'pg\\_%'"
-                   " and r.rolname not like 'rds%'"
-                   " and r.rolname not like '%tencent%' order by 1")
+                   f" from pg_authid where rolcanlogin and not {system}"
+                   " order by 1")
+        names_q = ("select rolname from pg_roles where rolcanlogin"
+                   f" and not {system} order by 1")
 
         def roles(choice):
             if choice.path == "names":
@@ -7839,14 +8877,14 @@ class PostgresEngine(Engine):
             for r in rows:
                 name, active, status, retained = r.split("|")
                 if status == "lost":
-                    add("fail", "instance", f"replication slot '{name}'",
+                    add("fail", "instance", f"replication slot {_literal(name)}",
                         f"WAL LOST - replication broken, retained {retained}")
                 elif active in ("f", "false"):
-                    add("warn", "instance", f"replication slot '{name}'",
+                    add("warn", "instance", f"replication slot {_literal(name)}",
                         "INACTIVE (no consumer) - pins WAL, retained"
                         f" {retained}; drop it if abandoned")
                 elif status in ("unreserved", "extended"):
-                    add("warn", "instance", f"replication slot '{name}'",
+                    add("warn", "instance", f"replication slot {_literal(name)}",
                         f"wal_status {status}, retained {retained} -"
                         " approaching the retention limit")
             if rows:
@@ -7917,7 +8955,7 @@ class PostgresEngine(Engine):
                 add("pass" if invalid == "0" else "warn", db,
                     "invalid indexes on source", invalid)
                 enc_q = ("select pg_encoding_to_char(encoding)||' '||datcollate"
-                         f" from pg_database where datname = '{db}'")
+                         f" from pg_database where datname = {_literal(db)}")
                 se = self._psql("src", "postgres", enc_q)
                 try:
                     de = self._psql("dst", "postgres", enc_q)
@@ -8236,15 +9274,8 @@ class PostgresEngine(Engine):
         return inv
 
     def _pk_cols_of(self, db, table, side="src"):
-        sch, tbl = table.split(".", 1)
-        cols = self._psql(side, db,
-            "select a.attname from pg_index i"
-            " join pg_attribute a on a.attrelid = i.indrelid"
-            " and a.attnum = any(i.indkey)"
-            f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
-            " and i.indisprimary"
-            " order by array_position(i.indkey, a.attnum)").splitlines()
-        return [c for c in cols if c]
+        """The key's columns in key order (`neutral_key`)."""
+        return self.neutral_key(side, db, table)
 
     #: The key files are read back with psql's `\copy`, which parses COPY
     #: text: tabs separate columns and a backslash starts an escape. Writing
@@ -8270,7 +9301,7 @@ class PostgresEngine(Engine):
     def _pk_text_expr(cls, cols):
         """SQL for one row's key: each column escaped, then tab-joined."""
         return ("concat_ws(e'\\t', " + ", ".join(
-            cls.PK_ESCAPE.format(f'"{c}"::text') for c in cols) + ")")
+            cls.PK_ESCAPE.format(f'{_ident(c)}::text') for c in cols) + ")")
 
     @staticmethod
     def _pk_unescape(text):
@@ -8306,10 +9337,9 @@ class PostgresEngine(Engine):
         cols = self._pk_cols_of(db, table)
         if not cols:
             return None
-        sch, tbl = table.split(".", 1)
+        sch, tbl = self._split(table)
 
-        def esc(v):
-            return "'" + v.replace("'", "''") + "'"
+        esc = _literal
 
         def fetch(side):
             out = {}
@@ -8319,9 +9349,9 @@ class PostgresEngine(Engine):
                 if len(cols) == 1:
                     inlist = ", ".join(esc(self._pk_unescape(k))
                                        for k in chunk)
-                    where = f'"{cols[0]}"::text in ({inlist})'
+                    where = f'{_ident(cols[0])}::text in ({inlist})'
                 else:
-                    tup = ", ".join(f'"{c}"::text' for c in cols)
+                    tup = ", ".join(f'{_ident(c)}::text' for c in cols)
                     vals = ", ".join(
                         "(" + ", ".join(esc(p) for p in self._pk_parts(k))
                         + ")" for k in chunk)
@@ -8329,7 +9359,7 @@ class PostgresEngine(Engine):
                 pk = self._pk_text_expr(cols)
                 h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
                 q = (f"select {pk}||'|'||{h}"
-                     f' from "{sch}"."{tbl}" t where {where}')
+                     f' from {_ident(sch)}.{_ident(tbl)} t where {where}')
                 for line in self._psql(side, db, q).splitlines():
                     k, _, h = line.rpartition("|")
                     out[k] = h
@@ -8350,13 +9380,17 @@ class PostgresEngine(Engine):
             return []
 
     def _write_pk_files(self, db, table, missing, extra, changed):
+        """The keys that differ, a file a kind, which the repair reads
+        back: each whole and on the disk (`durable`), sealed where the
+        hop keeps values encrypted - a file a crash cut repaired some of
+        the keys and said nothing of the rest."""
         d = self._report(db)
         d.mkdir(parents=True, exist_ok=True)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
             f = d / f"data-{table}.{kind}"
             if rows:
-                f.write_text("\n".join(rows) + "\n")
+                _kept_whole(f, ("\n".join(rows) + "\n").encode())
             elif f.exists():
                 f.unlink()
 
@@ -8364,26 +9398,14 @@ class PostgresEngine(Engine):
     # the source, so "target applied past LSN X" is observable there ---
 
     def _psql_script(self, side, db, sql):
-        ep = self.hop.source if side == "src" else self.hop.target
-        env = tool_env({**ep.libpq_env(),
-                        "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": "-c TimeZone=UTC -c DateStyle=ISO"
-                                     f" -c statement_timeout=0 {SESSION}"})
+        """(the client program started on a script read from its input,
+        the script): the lanes of a digest that share one exported
+        snapshot run as programs of their own, side by side."""
+        argv, env = self._client(side, db, "psql", "-X", "-At", "-q", "-v",
+                                 "ON_ERROR_STOP=1")
         return subprocess.Popen(
-            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-             "-d", self._d(side, db), "-X", "-At", "-q", "-v",
-             "ON_ERROR_STOP=1"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, env=env), sql
-
-    PK_COLS_SQL = (
-        "select a.attname from pg_index i"
-        " join pg_class c on c.oid = i.indrelid"
-        " join pg_namespace n on n.oid = c.relnamespace"
-        " join pg_attribute a on a.attrelid = c.oid"
-        "   and a.attnum = any(i.indkey)"
-        " where i.indisprimary and n.nspname = %s and c.relname = %s"
-        " order by a.attnum")
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=tool_env(env)), sql
 
     def _summed(self, h, salt=None):
         """The one fold of a row hash over rows: `h`, an `md5(...)`
@@ -8395,7 +9417,7 @@ class PostgresEngine(Engine):
         if not h.startswith("md5("):
             raise ValueError(f"not a row hash: {h[:40]}")
         salt = salt or self.digest_salt()
-        return (f"coalesce(sum(('x'||substr(md5('{salt}'||{h[4:]},1,16))"
+        return (f"coalesce(sum(('x'||substr(md5({_literal(salt)}||{h[4:]},1,16))"
                 "::bit(64)::bigint::numeric), 0)")
 
     def _key_hash_expr(self, side, db, table):
@@ -8414,13 +9436,13 @@ class PostgresEngine(Engine):
         drilldown - that is still how you learn *which* rows - it removes the
         need for one in order to learn *what happened*.
         """
-        sch, tbl = table.split(".", 1)
+        # in key order, as every reader of a key takes it (`neutral_key`):
+        # by column position, two sides whose columns were added in
+        # another order hashed one key two ways (audit 2026-10-01, DU19)
         try:
-            out = self._psql(side, db, self.PK_COLS_SQL.replace("%s", "{}")
-                             .format(f"'{sch}'", f"'{tbl}'"))
-        except Exception:
+            cols = self.neutral_key(side, db, table)
+        except Exception:  # noqa: BLE001 - no key hash, the row hash stands
             return None
-        cols = [c for c in out.splitlines() if c]
         if not cols:
             return None
         # Joined with chr(2) and standing in for NULL with chr(1), this had
@@ -8471,22 +9493,22 @@ class PostgresEngine(Engine):
 
         def val(c, kind):
             if kind == "geometry":
-                return f'ST_AsEWKT(t."{c}")'
+                return f'ST_AsEWKT(t.{_ident(c)})'
             if kind == "geography":
-                return f'ST_AsEWKT(t."{c}"::geometry)'
+                return f'ST_AsEWKT(t.{_ident(c)}::geometry)'
             if kind == "wide":
                 # a value wider than `canon.WIDE` as its length and md5,
                 # hashed where it lies: the row's text around its hex had a
                 # 160 MB value killed on a 4 GB source (backlog R22). Any
                 # other is the text the row renders it as, as before
-                q = f't."{c}"'
+                q = f't.{_ident(c)}'
                 return (f"(case when octet_length({q}) > {canon.WIDE} then"
-                        f" '{canon.WIDE_MARK}' || octet_length({q}) || ':'"
+                        f" {_literal(canon.WIDE_MARK)} || octet_length({q}) || ':'"
                         f" || md5({q}) else {q}::text end)")
-            return f't."{c}"'
+            return f't.{_ident(c)}'
 
         if jsonb:
-            args = ", ".join(f"'{c}', {val(c, kind)}" for c, kind in cols)
+            args = ", ".join(f"{_literal(c)}, {val(c, kind)}" for c, kind in cols)
             return f"md5(jsonb_build_object({args})::text)"
         return "md5(ROW(" + ", ".join(val(c, kind)
                                       for c, kind in cols) + ")::text)"
@@ -8545,7 +9567,7 @@ class PostgresEngine(Engine):
             "join pg_class c on c.oid = a.attrelid "
             "join pg_namespace n on n.oid = c.relnamespace "
             "left join pg_type t on t.oid = a.atttypid "
-            f"where n.nspname = '{sch}' and c.relname = '{tbl}' "
+            f"where n.nspname = {_literal(sch)} and c.relname = {_literal(tbl)} "
             "and a.attnum > 0 and not a.attisdropped "
             "order by a.attname").splitlines()
         parsed = [(r.split("|")[0], r.split("|")[1]) for r in rows if r]
@@ -8570,7 +9592,7 @@ class PostgresEngine(Engine):
         lines = ["begin transaction isolation level repeatable read"
                  " read only;"]
         if snapshot:
-            lines.append(f"set transaction snapshot '{snapshot}';")
+            lines.append(f"set transaction snapshot {_literal(snapshot)};")
         lines.append(f"set local max_parallel_workers_per_gather = {workers};")
         return lines
 
@@ -8633,7 +9655,7 @@ class PostgresEngine(Engine):
         is how both are had at once.
         """
         try:
-            conn = self._conn(side, self._d(side, db))
+            conn = self._connect(side, db)
         except Exception:
             # a server that cannot be reached, which is the caller's cue to
             # fall back. Deliberately narrow: this used to wrap the call
@@ -8679,7 +9701,8 @@ class PostgresEngine(Engine):
             for t in bucket:
                 h = self._row_hash_expr("src", db, t)
                 lines.append(
-                    f"select '{t}|'||count(*)||'|'||{self._summed(h)}"
+                    f"select {_literal(t + '|')}||count(*)||'|'"
+                    f"||{self._summed(h)}"
                     f" from {self._scope(db, t)};")
             lines.append("commit;")
             out.append("\n".join(lines))
@@ -8724,7 +9747,8 @@ class PostgresEngine(Engine):
                 # two servers store them in
                 h = self._row_hash_expr("src", db, t)
                 lines.append(
-                    f"select '{t}|'||count(*)||'|'||{self._summed(h)}"
+                    f"select {_literal(t + '|')}||count(*)||'|'"
+                    f"||{self._summed(h)}"
                     f" from {self._scope(db, t)};")
             lines.append("commit;")
             return "\n".join(lines)
@@ -8906,10 +9930,10 @@ class PostgresEngine(Engine):
           union all
           select o.remote_lsn
             from pg_replication_origin_status o
-           where o.external_id = '{origin}'"""
+           where o.external_id = {origin}"""
 
     def _origin_rows(self, db):
-        return self._ORIGIN_ROWS.format(origin=self.follow_origin(db))
+        return self._ORIGIN_ROWS.format(origin=_literal(self.follow_origin(db)))
 
     def applied_lsn(self, db):
         """The source LSN the *target* has actually applied, or None.
@@ -8938,7 +9962,7 @@ class PostgresEngine(Engine):
         q = ("select coalesce(min(o.remote_lsn)::text, '') from ("
              + self._origin_rows(db) + ") o")
         try:
-            got = self._psql("dst", self._d("dst", db), q)
+            got = self._psql("dst", db, q)
         except RuntimeError:
             return None
         got = got.strip()
@@ -8977,18 +10001,13 @@ class PostgresEngine(Engine):
         the retried connection 60s - is no reason to wait longer than the
         stream would have."""
         import psycopg2
-        ep = self.hop.target
         try:
-            conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                                    password=ep.password,
-                                    dbname=self._d("dst", db),
-                                    connect_timeout=3,
-                                    options="-c statement_timeout=3000",
-                                    **ep.libpq_tls())
+            conn = self._connect("dst", db, "probe", timeout=3)
         except psycopg2.Error:
             return []
         try:
             with conn.cursor() as cur:
+                cur.execute("set statement_timeout = 3000")
                 cur.execute("select subslotname from pg_subscription where"
                             " subdbid = (select oid from pg_database where"
                             " datname = current_database())"
@@ -9035,32 +10054,35 @@ class PostgresEngine(Engine):
         """
         if lsn is None:
             return None
-        names = ", ".join("'" + n.replace("'", "''") + "'"
+        names = ", ".join(_literal(n)
                           for n in self.own_slots(db))
-        mine = (f" from pg_replication_slots where database = '{db}'"
+        mine = (f" from pg_replication_slots where database = {_literal(db)}"
                 f" and slot_type = 'logical' and slot_name in ({names})")
         if self._psql("src", db, "select count(*)" + mine) == "0":
             return None
         q = ("select coalesce(min(confirmed_flush_lsn), '0/0'::pg_lsn)"
-             f" >= '{lsn}'::pg_lsn" + mine)
+             f" >= {_literal(lsn)}::pg_lsn" + mine)
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
             if self._psql("src", db, q) == "t":
                 return True
-            # a cutover's clock runs while this waits: asked often, since
-            # each round costs one catalogue read
-            time.sleep(0.25)
+            # a cutover's clock runs while this waits: asked every 50 ms,
+            # each round one statement on the kept connection - it was a
+            # program and a connection a round, every 0.25 s (audit
+            # 2026-10-01, SP10)
+            time.sleep(0.05)
         return False
 
     def _column_fingerprint(self, db, table):
         """One scan, one aggregate per column: which columns actually
         differ. Localizes drift (e.g. only updated_at differs = timezone
         rendering, not data loss) before any row-level work."""
-        sch, tbl = table.split(".", 1)
+        sch, tbl = self._split(table)
         try:
             cols = [l for l in self._psql("src", db,
                     "select attname from pg_attribute"
-                    f""" where attrelid = '"{sch}"."{tbl}"'::regclass"""
+                    " where attrelid ="
+                    f" {_literal(_ident(sch) + '.' + _ident(tbl))}::regclass"
                     " and attnum > 0 and not attisdropped"
                     " and attgenerated = '' order by attnum").splitlines() if l]
         except Exception as e:
@@ -9103,12 +10125,12 @@ class PostgresEngine(Engine):
         slot = self._delta_slot(db)
         have = self._psql("src", db,
                           "select 1 from pg_replication_slots"
-                          f" where slot_name = '{slot}'")
+                          f" where slot_name = {_literal(slot)}")
         if have:
             return False
         self._psql("src", db,
                    "select pg_create_logical_replication_slot("
-                   f"'{slot}', 'test_decoding')")
+                   f"{_literal(slot)}, 'test_decoding')")
         return True
 
     def delta_teardown(self, db):
@@ -9116,7 +10138,7 @@ class PostgresEngine(Engine):
         self._psql("src", db,
                    "select pg_drop_replication_slot(slot_name)"
                    " from pg_replication_slots"
-                   f" where slot_name = '{slot}'")
+                   f" where slot_name = {_literal(slot)}")
 
     @staticmethod
     def _parse_decoding(lines, pk_of):
@@ -9162,7 +10184,7 @@ class PostgresEngine(Engine):
                            " from this point on")]
         out = self._psql("src", db,
                          "select lsn||' '||data from"
-                         f" pg_logical_slot_peek_changes('{slot}',"
+                         f" pg_logical_slot_peek_changes({_literal(slot)},"
                          f" null, {limit})")
         lines = [l.split(" ", 1) for l in out.splitlines() if " " in l]
         pk_cache = {}
@@ -9220,7 +10242,7 @@ class PostgresEngine(Engine):
         if clean and last_lsn:
             self._psql("src", db,
                        "select pg_replication_slot_advance("
-                       f"'{slot}', '{last_lsn}'::pg_lsn)")
+                       f"{_literal(slot)}, {_literal(last_lsn)}::pg_lsn)")
             note = "slot advanced"
         else:
             note = "slot NOT advanced, window replays next cycle"
@@ -9252,17 +10274,13 @@ class PostgresEngine(Engine):
         return [(s, t) for s, t in got if f"{s}.{t}" not in working]
 
     def _int_pk(self, db, sch, tbl):
-        rows = self._psql("src", db,
-            "select a.attname||'|'||a.atttypid::regtype from pg_index i"
-            " join pg_attribute a on a.attrelid = i.indrelid"
-            " and a.attnum = any(i.indkey)"
-            f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
-            " and i.indisprimary").splitlines()
-        if len(rows) == 1:
-            col, typ = rows[0].split("|")
-            if typ in ("smallint", "integer", "bigint"):
-                return col
-        return None
+        """The key's one column where it is a whole number, or None."""
+        key = self.neutral_key("src", db, f"{sch}.{tbl}")
+        if len(key) != 1:
+            return None
+        declared = dict(self.neutral_columns("src", db, f"{sch}.{tbl}"))
+        return key[0] if declared.get(key[0]) in (
+            "smallint", "integer", "bigint") else None
 
     def _copy_cols(self, db, sch, tbl):
         """The source's live columns, in its own order, or None.
@@ -9276,8 +10294,8 @@ class PostgresEngine(Engine):
                              "select a.attname from pg_attribute a"
                              " join pg_class c on c.oid = a.attrelid"
                              " join pg_namespace n on n.oid = c.relnamespace"
-                             f" where n.nspname = '{sch}'"
-                             f" and c.relname = '{tbl}'"
+                             f" where n.nspname = {_literal(sch)}"
+                             f" and c.relname = {_literal(tbl)}"
                              " and a.attnum > 0 and not a.attisdropped"
                              " and a.attgenerated = ''"
                              " order by a.attnum")
@@ -9289,7 +10307,7 @@ class PostgresEngine(Engine):
     @staticmethod
     def _copy_select(qt, cols, pred=""):
         """SELECT naming the columns, so both ends of the pipe agree."""
-        what = ", ".join(f'"{c}"' for c in cols) if cols else "*"
+        what = ", ".join(f'{_ident(c)}' for c in cols) if cols else "*"
         sql = f"select {what} from {qt}"
         return f"{sql} where {pred}" if pred else sql
 
@@ -9320,16 +10338,11 @@ class PostgresEngine(Engine):
         if relay is not None:
             proc, stream = relay
             return proc, stream, True
-        s = self.hop.source
-        env = tool_env({**s.libpq_env(),
-                        "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": SESSION})
-        args = ["psql", "-h", s.host, "-p", str(s.port), "-U", s.user,
-                "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1"]
-        for c in commands:
-            args += ["-c", c]
+        args, env = self._client("src", db, "psql", "-X", "-q", "-v",
+                                 "ON_ERROR_STOP=1",
+                                 *[a for c in commands for a in ("-c", c)])
         proc = subprocess.Popen(args, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, env=env)
+                                stderr=subprocess.PIPE, env=tool_env(env))
         return proc, proc.stdout, False
 
     def _range_digest_sql(self, db, table, where=""):
@@ -9340,7 +10353,7 @@ class PostgresEngine(Engine):
         sch, tbl = self._split(table)
         h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
         return (f"select count(*)::text || '|' || {self._summed(h)}::text"
-                f' from "{sch}"."{tbl}" t'
+                f' from {_ident(sch)}.{_ident(tbl)} t'
                 + (f" where {where}" if where else ""))
 
     def _copy_pipe(self, db, select_sql, qt, pre_sql="", columns=None):
@@ -9358,37 +10371,28 @@ class PostgresEngine(Engine):
         So the column list is not an optimisation. It is the difference
         between moving the data and moving it into the wrong columns.
         """
-        s, t = self.hop.source, self.hop.target
-        env_s = tool_env({**s.libpq_env(),
-                          "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15",
-                          "PGOPTIONS": SESSION})
-        quiet = {**t.libpq_env(),
-                 "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
-        options = self._load_options(db, qt)
-        if options:
-            quiet["PGOPTIONS"] = options
-        env_t = tool_env(quiet)
         collist = ""
         if columns:
-            collist = " (" + ", ".join(f'"{c}"' for c in columns) + ")"
+            collist = " (" + ", ".join(_ident(c) for c in columns) + ")"
         relay = self._relay(select_sql, db)
         if relay is not None:
             out, source = relay
         else:
-            out = subprocess.Popen(
-                ["psql", "-h", s.host, "-p", str(s.port), "-U", s.user,
-                 "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1",
-                 "-c", f"\\copy ({select_sql}) to stdout"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env_s)
+            argv, env = self._client("src", db, "psql", "-X", "-q", "-v",
+                                     "ON_ERROR_STOP=1", "-c",
+                                     f"\\copy ({select_sql}) to stdout")
+            out = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,
+                                   env=tool_env(env))
             source = out.stdout
         cmds = ["-c", pre_sql] if pre_sql else []
-        inp = subprocess.Popen(
-            ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
-             "-d", self._d("dst", db),
-             "-X", "-q", "-v", "ON_ERROR_STOP=1", "-1", *cmds,
-             "-c", f"\\copy {qt}{collist} from stdin"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=env_t)
+        argv, env = self._client("dst", db, "psql", "-X", "-q", "-v",
+                                 "ON_ERROR_STOP=1", "-1", *cmds, "-c",
+                                 f"\\copy {qt}{collist} from stdin",
+                                 options=self._load_options(db, qt))
+        inp = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=tool_env(env))
         # passed on through here, and tallied on the way: what the target
         # is read back against once it has committed (`_copy_checked`)
         from ..stall import Guard
@@ -9455,9 +10459,13 @@ class PostgresEngine(Engine):
         if t is None or not t.has("psql", "zstd"):
             return None
         host, port = t.far
-        env = " ".join(f"{k}={shlex.quote(v)}" for k, v in
-                       {**s.libpq_env(), "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": SESSION}.items())
+        # the side's TLS as a program on another machine can carry it: an
+        # authority's file is on this one (`tls_forms`'s `far`)
+        far = {"PG" + k.upper(): v
+               for k, v in s.tls_forms("postgres")["far"].items()}
+        env = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in
+                       {**far, "PGCONNECT_TIMEOUT": str(CONNECT_SECONDS),
+                        "PGAPPNAME": "migkit", "PGOPTIONS": SESSION}.items())
         read = " ".join(shlex.quote(a) for a in [
             "psql", "-h", host, "-p", str(port), "-U", s.user, "-d", db,
             "-X", "-q", "-v", "ON_ERROR_STOP=1",
@@ -9588,15 +10596,11 @@ class PostgresEngine(Engine):
         """The rows `select_sql` answers on `side`, tallied as COPY writes
         them - the read-back half of `_copy_checked`."""
         from ..tally import Tally
-        ep = self.hop.source if side == "src" else self.hop.target
-        env = tool_env({**ep.libpq_env(),
-                        "PGPASSWORD": ep.password, "PGCONNECT_TIMEOUT": "15",
-                        "PGOPTIONS": SESSION})
-        got = subprocess.Popen(
-            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-             "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",
-             "-c", f"\\copy ({select_sql}) to stdout"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        argv, env = self._client(side, db, "psql", "-X", "-q", "-v",
+                                 "ON_ERROR_STOP=1", "-c",
+                                 f"\\copy ({select_sql}) to stdout")
+        got = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=tool_env(env))
         tally = Tally()
         while True:
             chunk = got.stdout.read(1 << 16)
@@ -9800,14 +10804,13 @@ class PostgresEngine(Engine):
         " from pg_attribute a join pg_class c on c.oid = a.attrelid"
         " join pg_namespace n on n.oid = c.relnamespace"
         " join pg_type t on t.oid = a.atttypid"
-        " where n.nspname = '{sch}' and c.relname = '{tbl}'"
+        " where n.nspname = {sch} and c.relname = {tbl}"
         " and a.attnum > 0 and not a.attisdropped")
 
     def _binary_columns(self, side, db, sch, tbl):
         """{column: (its type, whether it has a binary form)} on one side."""
         out = {}
-        sql = self.BINARY_SQL.format(sch=sch.replace("'", "''"),
-                                     tbl=tbl.replace("'", "''"))
+        sql = self.BINARY_SQL.format(sch=_literal(sch), tbl=_literal(tbl))
         for line in self._psql(side, db, sql).splitlines():
             name, typ, ok = line.split("\x1f")
             out[name] = (typ, ok == "1")
@@ -9885,7 +10888,7 @@ class PostgresEngine(Engine):
 
         def facts_for(table, fact):
             sch, tbl = self._split(table)
-            qt = f'"{sch}"."{tbl}"'
+            qt = f'{_ident(sch)}.{_ident(tbl)}'
             return Facts(
                 {"batch": via in self.TABLE_BATCH, "via": via,
                  **(known or {}), "bytes": (fact or {}).get("bytes"),
@@ -9970,10 +10973,10 @@ class PostgresEngine(Engine):
         """Whether the target lets `qt` be emptied by TRUNCATE: no foreign
         key of any table points at it, which TRUNCATE refuses whatever
         role the session loads as."""
-        name = qt.replace("'", "''")
         return self._psql("dst", db, "select count(*) from pg_constraint"
                                      " where contype = 'f' and confrelid ="
-                                     f" '{name}'::regclass").strip() == "0"
+                                     f" {_literal(qt)}::regclass"
+                          ).strip() == "0"
 
     def _copy_ways(self, db, key, qt, cols, log):
         """The table's ways (`pg_pass.Ways`): each range climbs `COPY_WAYS`
@@ -9994,8 +10997,7 @@ class PostgresEngine(Engine):
                                 ranges.active.workers)
         facts = Facts(
             binary=lambda: self._binary_unfit(db, sch, tbl, cols),
-            dst_version=lambda: self._server_version("dst",
-                                                     self._d("dst", db)))
+            dst_version=lambda: self._server_version("dst", db))
         ways = self.COPY_WAYS
         if tableway.planned_through(self.hop, db, key):
             ways = tuple(r for r in ways if r.name == "pipe") or ways
@@ -10096,11 +11098,8 @@ class PostgresEngine(Engine):
         """One reading of the side's load counters (`LOAD_SQL`); the share
         of memory its cache is, as a managed service sets it by default -
         shared buffers a quarter of the class's memory."""
-        version = self.__dict__.setdefault("_load_version", {})
-        if side not in version:
-            version[side] = self._server_version(side, self._d(side, db)) \
-                or 0
-        reads, writes = self.LOAD_IO[version[side] >= 160000]
+        reads, writes = self.LOAD_IO[
+            (self._server_version(side, db) or 0) >= 160000]
         got = self._psql(side, db, self.LOAD_SQL.format(
             reads=reads, writes=writes)).strip().split("|")
         xacts, r, w, running, conns, most, cache, hit = (got + [""] * 8)[:8]
@@ -10118,13 +11117,13 @@ class PostgresEngine(Engine):
         `max_worker_processes` is set from them - RDS and Aurora use
         GREATEST(2 x vCPU, 8) - so above 8 it gives them; otherwise they go
         unread."""
-        got = self._psql(side, self._d(side, db), self.CAPACITY_SQL).strip()
+        got = self._psql(side, db, self.CAPACITY_SQL).strip()
         free, running, workers, standby = got.split("|")
         out = {"free_connections": max(0, int(free)),
                "running": int(running), "replica": standby == "1"}
         cpus = None
         try:
-            n = self._psql(side, self._d(side, db),
+            n = self._psql(side, db,
                            "select count(*) from regexp_matches("
                            "pg_read_file('/proc/cpuinfo'), '^processor',"
                            " 'gn')").strip()
@@ -10163,14 +11162,15 @@ class PostgresEngine(Engine):
     READS_HERE = False
 
     def _probe_conn(self, side, db, seconds=None):
-        import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
-        options = SESSION + (f" -c statement_timeout={int(seconds * 1000)}"
-                             if seconds else "")
-        return psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                                password=ep.password,
-                                dbname=self._d(side, db), connect_timeout=15,
-                                options=options, **ep.libpq_tls())
+        """A connection whose statements the server stops after `seconds`
+        - a measurement's own, not the table copier's."""
+        conn = self._connect(side, db, "probe", timeout=CONNECT_SECONDS)
+        if seconds:
+            with conn.cursor() as cur:
+                cur.execute("set statement_timeout ="
+                            f" {int(seconds * 1000)}")
+            conn.commit()
+        return conn
 
     def probe_read(self, side, db, table, part=0, parts=1,
                    budget=16 * 2 ** 20, seconds=1.5, keep=0):
@@ -10196,8 +11196,8 @@ class PostgresEngine(Engine):
             want = max(1, min(int(budget / per_page), pages // max(parts, 1)))
             if version >= 140000:
                 lo = pages * part // max(parts, 1)
-                where = (f"ctid >= '({lo},0)'::tid and ctid <"
-                         f" '({lo + want},0)'::tid")
+                where = (f"ctid >= {_tid(lo)} and ctid <"
+                         f" {_tid(lo + want)}")
                 select = self._copy_select(qt, cols, where)
             elif part:
                 return None
@@ -10221,7 +11221,7 @@ class PostgresEngine(Engine):
         rows = self.run_rule("src", db,
                              "select a.attname, format_type(a.atttypid,"
                              " a.atttypmod) from pg_attribute a"
-                             f" where a.attrelid = '{qt}'::regclass"
+                             f" where a.attrelid = {_literal(qt)}::regclass"
                              " and a.attnum > 0 and not a.attisdropped"
                              " and a.attgenerated = '' order by a.attnum")
         key = self._pk_cols_of(db, ".".join(self._split(table)))
@@ -10327,7 +11327,7 @@ class PostgresEngine(Engine):
         """Sessions and the server's own writers waiting on storage
         (`wait_event_type` IO), and those working - the sessions active and
         the writers waiting - other than this one."""
-        writers = ", ".join(f"'{w}'" for w in self.WRITERS)
+        writers = ", ".join(f"{_literal(w)}" for w in self.WRITERS)
         got = self.run_rule(side, db,
                             "select count(*) filter (where wait_event_type ="
                             " 'IO'), count(*) filter (where (backend_type ="
@@ -10360,10 +11360,13 @@ class PostgresEngine(Engine):
     def row_sizes(self, side, db, tables=None):
         """Each row's size as COPY carries it - text as its bytes, a byte
         value twice over in hex, anything else as stored - measured without
-        reading a value stored out of line."""
+        reading a value stored out of line. A sampled table's rows are the
+        statistics' estimate (`row_estimate`), or where those do not know,
+        the sample's count scaled by its share - not 0 (audit 2026-10-01,
+        DU18)."""
+        estimates = self.row_estimate(side, db)
         cat = self.run_rule(side, db, """
             select n.nspname || '.' || c.relname, c.relpages::bigint * 8192,
-                   greatest(c.reltuples, 0)::bigint,
                    string_agg(case
                        when a.atttypid = 'bytea'::regtype
                          then '2 * coalesce(octet_length(' ||
@@ -10382,11 +11385,11 @@ class PostgresEngine(Engine):
              where c.relkind in ('r', 'p') and n.nspname not in
                    ('pg_catalog', 'information_schema')
                and n.nspname not like 'pg\\_%'
-             group by 1, 2, 3""")
+             group by 1, 2""")
         want = None if tables is None else {
             ".".join(self._split(t)) for t in tables}
         out = {}
-        for name, heap, rows, expr in cat:
+        for name, heap, expr in cat:
             if want is not None and name not in want:
                 continue
             exact = int(heap) <= self.SIZE_EXACT_UP_TO
@@ -10406,9 +11409,12 @@ class PostgresEngine(Engine):
             most, p99, mean, n = got[0]
             if not n:
                 continue
+            est = estimates.get(name)
             out[name] = {"largest": int(most), "p99": int(p99),
                          "mean": float(mean),
-                         "rows": int(n) if exact else int(rows),
+                         "rows": int(n) if exact else (
+                             est if est is not None
+                             else int(n * 100.0 / pct)),
                          "exact": exact}
         return out
 
@@ -10432,7 +11438,7 @@ class PostgresEngine(Engine):
     def _move_table(self, db, sch, tbl, chunk, ck, log, later):
         sch = sch or "public"
         key = self.move_key(db, sch, tbl)
-        qt = f'"{sch}"."{tbl}"'
+        qt = f'{_ident(sch)}.{_ident(tbl)}'
         st = ck.setdefault(key, {})
         # The hop's row filter, applied on both ends: only the rows it
         # selects are read, and only the rows it selects are replaced. A
@@ -10479,9 +11485,9 @@ class PostgresEngine(Engine):
             st["done"] = True
             return True
         mm = self._psql("src", db,
-                        f'select coalesce(min("{pk}"), 0)||\'|\'||'
-                        f'coalesce(max("{pk}"), 0)||\'|\'||'
-                        f'(min("{pk}") is not null)::int from {qt}'
+                        f'select coalesce(min({_ident(pk)}), 0)||\'|\'||'
+                        f'coalesce(max({_ident(pk)}), 0)||\'|\'||'
+                        f'(min({_ident(pk)}) is not null)::int from {qt}'
                         + (f" where {rf}" if rf else ""))
         lo, hi, has = mm.split("|")
         lo, hi = int(lo), int(hi)
@@ -10511,7 +11517,7 @@ class PostgresEngine(Engine):
             # key lies outside the source's whole range was never in any
             # chunk and stayed - a target carrying an earlier attempt kept
             # its strays.
-            outside = (f'not ("{pk}" between {lo} and {hi})' if has == "1"
+            outside = (f'not ({_ident(pk)} between {lo} and {hi})' if has == "1"
                        else "true")
             if rf:
                 outside = f"({outside}) and ({rf})"
@@ -10526,7 +11532,7 @@ class PostgresEngine(Engine):
             after, upto = rng
             if ways is not None:
                 ways.ctx.raise_failed()
-            pred = f'"{pk}" > {after} and "{pk}" <= {upto}'
+            pred = f'{_ident(pk)} > {after} and {_ident(pk)} <= {upto}'
             if rf:
                 pred = f"({pred}) and ({rf})"
             what = f"{key} {pk} {after + 1:,} to {upto:,}"
@@ -10583,12 +11589,16 @@ class PostgresEngine(Engine):
         there before it is enabled, so nothing before is applied again;
         `via` is (host, port) of the source as the target reaches it."""
         # the subscription signs in as the hop's own source user, so there
-        # is no replication user for `secret` to be the password of
+        # is no replication user for `secret` to be the password of. Its
+        # connection string is the one every path the target dials by is
+        # built with (`legs.conninfo`): the source's TLS as far as a server
+        # carries it, each value quoted as libpq reads it - written by hand
+        # here it had neither (audit 2026-10-01, SEC13)
+        from .. import legs
         s = self.hop.source
         name = self._repl_name()
         host, port = via or (s.host, s.port)
-        conn = (f"host={host} port={port} dbname={db}"
-                f" user={s.user} password={s.password}")
+        conn = legs.conninfo(self.hop, db, host, port)
         streaming = self._subscription_streaming(db)
         # a stream the other way exists or will: this one must not send
         # back what that one applied, or a change goes round for ever
@@ -10615,19 +11625,19 @@ class PostgresEngine(Engine):
                        f" not be asked now ({why})")
         return {**note,
             "src": [publish],
-            "dst": [f"create subscription {name} connection '{conn}'"
+            "dst": [f"create subscription {name} connection {_literal(conn)}"
                     f" publication {name} with (copy_data ="
                     f" {'true' if copy_data else 'false'}"
                     + (f", streaming = {streaming}" if streaming else "")
                     + (", origin = none" if origin else "")
-                    + (f", create_slot = false, slot_name = '{slot}'"
+                    + (f", create_slot = false, slot_name = {_literal(slot)}"
                        if slot else "")
                     + (", enabled = false" if at else "")
                     + ");"] + ([
                         "select pg_replication_origin_advance('pg_' || oid,"
                         # the name was folded to lower case, unquoted
-                        f" '{at}') from pg_subscription where subname ="
-                        f" '{name.lower()}' and subdbid = (select oid from"
+                        f" {_literal(at)}) from pg_subscription where subname ="
+                        f" {_literal(name.lower())} and subdbid = (select oid from"
                         " pg_database where datname = current_database());",
                         f"alter subscription {name} enable;"] if at else [])
                     + self._refresh_sql(db, name, tables),
@@ -10652,21 +11662,21 @@ class PostgresEngine(Engine):
         return {
             "arm_src": [publish,
                         "select pg_create_logical_replication_slot("
-                        f"'{slot}', 'pgoutput') where not exists (select 1"
+                        f"{_literal(slot)}, 'pgoutput') where not exists (select 1"
                         " from pg_replication_slots where slot_name ="
-                        f" '{slot}');"],
-            "arm_dst": [f"create subscription {name} connection '{conn}'"
+                        f" {_literal(slot)});"],
+            "arm_dst": [f"create subscription {name} connection {_literal(conn)}"
                         f" publication {name} with (copy_data = false"
                         + (f", streaming = {streaming}" if streaming else "")
                         + (", origin = none" if origin else "")
-                        + f", create_slot = false, slot_name = '{slot}',"
+                        + f", create_slot = false, slot_name = {_literal(slot)},"
                         " enabled = false);"],
             "fire_src": ["select pg_replication_slot_advance("
-                         f"'{slot}', pg_current_wal_lsn());"],
+                         f"{_literal(slot)}, pg_current_wal_lsn());"],
             "fire_dst": [f"alter subscription {name} enable;"],
             "unarm_src": ["select pg_drop_replication_slot(slot_name) from"
                           " pg_replication_slots where slot_name ="
-                          f" '{slot}' and not active;"],
+                          f" {_literal(slot)} and not active;"],
         }
 
     def armed_status(self, db, sql):
@@ -10678,15 +11688,15 @@ class PostgresEngine(Engine):
         name = self._repl_name().lower()
         want = self._psql("src", db, "select count(*) from"
                                      " pg_publication_tables where pubname"
-                                     f" = '{name}'").strip()
+                                     f" = {_literal(name)}").strip()
         have = self._psql("dst", db, "select count(*) from"
                                      " pg_subscription_rel r join"
                                      " pg_subscription s on s.oid ="
-                                     f" r.srsubid where s.subname = '{name}'"
+                                     f" r.srsubid where s.subname = {_literal(name)}"
                           ).strip()
         slot = self._psql("src", db, "select count(*) from"
                                      " pg_replication_slots where slot_name"
-                                     f" = '{name}'").strip()
+                                     f" = {_literal(name)}").strip()
         if slot != "1":
             return "its slot is not held on the side it reads"
         if have != want:
@@ -10700,7 +11710,7 @@ class PostgresEngine(Engine):
         return [t for (t,) in self._plan_rows(
             "src", db, "select schemaname||'.'||tablename from pg_tables"
             " where schemaname not in ('pg_catalog','information_schema')"
-            " order by 1") if not self.hop.excluded(db, *t.split(".", 1))]
+            " order by 1") if not self.hop.excluded(db, *self._split(t))]
 
     def _publication_sql(self, name, tables):
         """The publication of exactly the hop's tables: `FOR TABLE` every
@@ -10736,7 +11746,7 @@ class PostgresEngine(Engine):
         again = (f" else alter publication {name} set table"
                  f" {', '.join(listed)};" if listed else "")
         return ("do $$ begin if not exists (select 1 from pg_publication"
-                f" where pubname = '{name}') then {made};{again} end if;"
+                f" where pubname = {_literal(name)}) then {made};{again} end if;"
                 " end $$;")
 
     def _refresh_sql(self, db, name, tables):
@@ -10753,10 +11763,10 @@ class PostgresEngine(Engine):
                 " pg_subscription_rel r join pg_subscription s on s.oid ="
                 " r.srsubid join pg_class c on c.oid = r.srrelid join"
                 " pg_namespace n on n.oid = c.relnamespace where s.subname"
-                f" = '{name}'")}
+                f" = {_literal(name)}")}
             there = self._plan_rows("dst", db, "select 1 from"
                                                " pg_subscription where"
-                                               f" subname = '{name}'")
+                                               f" subname = {_literal(name)}")
         except RuntimeError:
             return []
         if not there or not set(tables) - has:
@@ -10799,16 +11809,16 @@ class PostgresEngine(Engine):
         name = self._repl_name()
         try:
             there = self._plan_rows("src", db, "select 1 from pg_publication"
-                                               f" where pubname = '{name}'")
+                                               f" where pubname = {_literal(name)}")
             if not there:
                 return ""
             has = {t for (t,) in self._plan_rows(
                 "src", db, "select schemaname||'.'||tablename from"
-                f" pg_publication_tables where pubname = '{name}'")}
+                f" pg_publication_tables where pubname = {_literal(name)}")}
             tables = [t for (t,) in self._plan_rows(
                 "src", db, "select schemaname||'.'||tablename from pg_tables"
                 " where schemaname not in ('pg_catalog','information_schema')"
-                " order by 1") if not self.hop.excluded(db, *t.split(".", 1))]
+                " order by 1") if not self.hop.excluded(db, *self._split(t))]
         except RuntimeError:
             return ""
         new = [t for t in tables if t not in has]
@@ -10828,7 +11838,7 @@ class PostgresEngine(Engine):
         only what the other side's own sessions wrote - PostgreSQL 16 on
         both sides."""
         src = self._server_version("src", db)
-        dst = self._server_version("dst", self._d("dst", db))
+        dst = self._server_version("dst", db)
         if not src or not dst:
             return "a side's version could not be read"
         if src < 160000 or dst < 160000:
@@ -10850,7 +11860,7 @@ class PostgresEngine(Engine):
         source has to be 14 as well, to send it. None - the server's own
         default - where either side cannot be asked."""
         src = self._server_version("src", db)
-        dst = self._server_version("dst", self._d("dst", db))
+        dst = self._server_version("dst", db)
         if not src or not dst or src < 140000 or dst < 140000:
             return None
         return "parallel" if dst >= 160000 else "on"
@@ -10863,12 +11873,8 @@ class PostgresEngine(Engine):
         for 303 s (measured; 20 s before the tables were listed, 33 s
         this way). A RuntimeError where it cannot be asked."""
         import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
         try:
-            conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                                    password=ep.password,
-                                    dbname=self._d(side, db),
-                                    connect_timeout=5, **ep.libpq_tls())
+            conn = self._connect(side, db, "probe")
         except psycopg2.Error as e:
             raise RuntimeError(str(e).strip()) from None
         try:
@@ -10882,22 +11888,26 @@ class PostgresEngine(Engine):
 
     def _server_version(self, side, db):
         """`server_version_num` of one side, or None where it cannot be
-        asked. One attempt with a short wait: this decides an option, and
-        a plan should not stall a minute on a server that is down."""
-        import psycopg2
-        ep = self.hop.source if side == "src" else self.hop.target
+        asked - read once a side (a server's version is the same in every
+        database), on the database the hop calls `db`. One attempt with a
+        short wait: this decides an option, and a plan should not stall a
+        minute on a server that is down. Callers mapped the target's name
+        themselves, or did not and asked the source's name of the target
+        (audit 2026-10-01, DU3); a marker read it a table (SC4)."""
+        known = self.__dict__.setdefault("_versions", {})
+        if side in known:
+            return known[side]
         try:
-            conn = psycopg2.connect(host=ep.host, port=ep.port, user=ep.user,
-                                    password=ep.password, dbname=db,
-                                    connect_timeout=5, **ep.libpq_tls())
-        except Exception:
+            conn = self._connect(side, db, "probe")
+        except Exception:  # noqa: BLE001 - not known, and said so
             return None
         try:
             with conn.cursor() as cur:
                 cur.execute("select current_setting('server_version_num')"
                             "::int")
-                return cur.fetchone()[0]
-        except psycopg2.Error:
+                known[side] = cur.fetchone()[0]
+                return known[side]
+        except Exception:  # noqa: BLE001
             return None
         finally:
             conn.close()
@@ -10928,27 +11938,46 @@ class PostgresEngine(Engine):
     #: publication; the statement is made when it runs
     LISTED_WHEN_RUN = "-- create publication"
 
+    def _dial(self, side, db, stmt, secs):
+        """A statement that dials the source from the target, and carries
+        its credentials: on a session of its own that asks the target not
+        to log its statements where it may (a superuser's), so the
+        password is not in the target's log under `log_statement = ddl`,
+        and bounded by `secs` (audit 2026-10-01, SEC13)."""
+        import psycopg2
+
+        from .. import legs
+        conn = connect(self._ep(side), self._d(side, db))
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                legs.unlogged(cur)
+                cur.execute(f"set statement_timeout = {int(secs) * 1000}")
+                cur.execute(stmt)
+                return ""
+        except psycopg2.Error as e:
+            raise SqlFailed(e) from e
+        finally:
+            conn.close()
+
     def apply_replication_stmt(self, side, db, stmt):
-        import os
+        from .. import envkeys
         if stmt.startswith(self.LISTED_WHEN_RUN):
             stmt = self._publication_sql(self._repl_name(),
                                          self.neutral_tables("src", db))
         head = stmt.strip().lower()
         if not any(head.startswith(p) for p in self.DIALS_ACROSS):
             return self._psql(side, db, stmt)
-        raw = os.environ.get("MIGKIT_SUBSCRIBE_TIMEOUT", "").strip()
-        if raw:
+        got = envkeys.number("MIGKIT_SUBSCRIBE_TIMEOUT")
+        secs = self.SUBSCRIBE_TIMEOUT if got is None else got
+        if secs <= 0:
             # a typo here would otherwise be ignored and the operator would
             # wait the default while believing they had changed it
-            if not raw.isdigit() or int(raw) <= 0:
-                raise SystemExit(
-                    f"MIGKIT_SUBSCRIBE_TIMEOUT={raw} is not a whole number of"
-                    " seconds greater than zero")
-            secs = int(raw)
-        else:
-            secs = self.SUBSCRIBE_TIMEOUT
+            raise SystemExit(
+                f"MIGKIT_SUBSCRIBE_TIMEOUT={secs} is not a whole number of"
+                " seconds greater than zero")
         try:
-            return self._psql(side, db, stmt, statement_timeout=f"{secs}s")
+            return self._dial(side, db, stmt, secs)
         except RuntimeError as e:
             if "already exists" in str(e):
                 # the stream a first run started: making it again stopped
@@ -11005,7 +12034,7 @@ class PostgresEngine(Engine):
             f" The publication {name} on the source was, by the statement"
             " before it, and PostgreSQL has no CREATE PUBLICATION IF NOT"
             " EXISTS - so clear it before retrying, or the next run stops"
-            f" on `publication \"{name}\" already exists`:"
+            f" on `publication {_ident(name)} already exists`:"
             " migkit move <hop> --mode cdc --drop --go."
             " migkit also has a CDC path that needs no route from the"
             " target at all - it runs from here and connects out to both"
@@ -11050,16 +12079,13 @@ class PostgresEngine(Engine):
         import io as _io
 
         import pandas as pd
-        sch, tbl = table.split(".", 1) if "." in table else ("public", table)
-        ep = self.hop.source if side == "src" else self.hop.target
-        env = tool_env({**ep.libpq_env(), "PGPASSWORD": ep.password})
-        p = subprocess.run(
-            ["psql", "-h", ep.host, "-p", str(ep.port), "-U", ep.user,
-             "-d", self._d(side, db), "-X", "-q", "-v", "ON_ERROR_STOP=1",
-             "-c", f"\\copy (select * from \"{sch}\".\"{tbl}\""
-                   + (f" where {where}" if where else "")
-                   + f" limit {limit}) to stdout (format csv, header)"],
-            capture_output=True, env=env)
+        sch, tbl = self._split(table)
+        argv, env = self._client(
+            side, db, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c",
+            f"\\copy (select * from {_ident(sch)}.{_ident(tbl)}"
+            + (f" where {where}" if where else "")
+            + f" limit {int(limit)}) to stdout (format csv, header)")
+        p = subprocess.run(argv, capture_output=True, env=tool_env(env))
         if p.returncode:
             raise RuntimeError(p.stderr.decode("utf-8", "replace")[-200:])
         return pd.read_csv(_io.StringIO(p.stdout.decode("utf-8"), newline=""))

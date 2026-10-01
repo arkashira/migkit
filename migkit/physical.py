@@ -647,6 +647,17 @@ def _pg_changes():
     )
 
 
+def _far_tls(hop):
+    """The source's TLS for a program on the target's host, as the
+    variables libpq reads: as far as another machine can carry it
+    (`legs._far_tls` - `verify-*` as `require`, the authority's file
+    being on this machine). The page copy dialled the source with
+    whatever that host's environment held (audit 2026-10-01, SEC2)."""
+    from .legs import _far_tls as far
+    return "".join(f" export PG{k.upper()}={shlex.quote(str(v))};"
+                   for k, v in far(hop).items())
+
+
 def _pg_prove(facts):
     """The copy's own path tried before anything is stopped: the program
     on the target's host is the source's major version, and a replication
@@ -654,8 +665,8 @@ def _pg_prove(facts):
     is the source's)."""
     opts, hop = facts["options"], facts.hop
     host, port = _source_address(hop, opts)
-    script = ("IFS= read -r PGPASSWORD; export PGPASSWORD;"
-              " pg_basebackup --version &&"
+    script = ("IFS= read -r PGPASSWORD; export PGPASSWORD;" + _far_tls(hop)
+              + " pg_basebackup --version &&"
               " psql " + shlex.quote(
                   f"host={host} port={port} user={hop.source.user}"
                   " dbname=replication replication=true connect_timeout=15")
@@ -1380,8 +1391,8 @@ def _pg_script(hop, opts, compressed):
     q = shlex.quote
     comp = " --compress=server-zstd:level=1" if compressed else ""
     return (
-        "IFS= read -r PGPASSWORD; export PGPASSWORD;"
-        f" D={q(str(opts['data']))};"
+        "IFS= read -r PGPASSWORD; export PGPASSWORD;" + _far_tls(hop)
+        + f" D={q(str(opts['data']))};"
         # only a data directory, or nothing at all, is emptied
         ' if [ -n "$(ls -A "$D" 2>/dev/null)" ] && [ ! -f "$D/PG_VERSION" ];'
         ' then echo "$D holds files and no PG_VERSION: not a data'

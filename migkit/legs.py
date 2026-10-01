@@ -70,11 +70,11 @@ hop does not allow it yet; and nowhere in particular when the rows go
 server to server. Every round trip is a statement's (`round_trips`):
 opening a connection is answered by whatever is in front of the server.
 """
-import json
-import os
 import re
 import threading
 import time
+
+from .util import split_table
 
 #: the ways a whole database's rows go from server to server without
 #: crossing migkit's machine; `physical-clone` is the MySQL physical
@@ -119,22 +119,54 @@ def source_for_target(hop):
     return str(ep.host), int(ep.port)
 
 
-def _sslmode(hop):
+def _far_tls(hop):
     """The TLS the target asks of the source when it dials it: the
-    source's own `sslmode`, as far as it can be carried - `verify-ca` and
-    `verify-full` need the authority's certificate in a file on the
-    target's own machine, which migkit cannot put there, so they are
-    carried as `require` (encrypted, the certificate not checked) and the
-    plan says so."""
-    mode = str((hop.source.options or {}).get("sslmode") or "")
-    return "require" if mode in ("verify-ca", "verify-full") else mode
+    source's own, as it was decided (its options, or what asking the
+    server found), as far as it can be carried (`tls_forms`'s `far`) -
+    `verify-ca` and `verify-full` need the authority's certificate in a
+    file on the target's own machine, which migkit cannot put there, so
+    they are carried as `require` (encrypted, the certificate not
+    checked) and the plan says so."""
+    return dict(hop.source.tls_forms("postgres")["far"])
+
+
+def conninfo(hop, db, host=None, port=None):
+    """The source as the target dials it - a subscription's connection
+    string - built one way for every path that has the target dial: each
+    value quoted as libpq reads it (a quote in a password ended the value
+    written as SQL quotes it), the source's TLS as far as a server can
+    carry it (`_far_tls`), keepalives and a bounded dial (audit
+    2026-10-01, SEC13). `host`/`port` where the caller knows how the
+    target reaches the source."""
+    from .engines.postgres import _conninfo_value, keepalives
+    if host is None:
+        host, port = source_for_target(hop) or (hop.source.host,
+                                                hop.source.port)
+    parts = {"host": host, "port": port, "dbname": db,
+             "user": hop.source.user, "password": hop.source.password or "",
+             "connect_timeout": DIAL_SECONDS, **keepalives(),
+             **_far_tls(hop)}
+    return " ".join(f"{k}={_conninfo_value(v)}" for k, v in parts.items())
+
+
+def unlogged(cur):
+    """Ask the server not to log this session's statements, where the
+    user may (a superuser's): the next statement holds the source's
+    credentials, and under `log_statement = ddl` the server's log keeps
+    them. A session that may not is left as it is, and the plan says so
+    (`logs_ddl`). On a connection in autocommit, where a refused setting
+    leaves nothing open."""
+    try:
+        cur.execute("set log_statement = 'none'")
+    except Exception:  # noqa: BLE001 - not a superuser's session
+        pass
 
 
 def _connect(ep, dbname, autocommit=True):
-    import psycopg2
-    conn = psycopg2.connect(host=ep.host, port=int(ep.port), user=ep.user,
-                            password=ep.password, dbname=dbname,
-                            connect_timeout=15, **ep.libpq_tls())
+    """A connection made as every PostgreSQL connection of migkit's is
+    (`engines.postgres.connect`)."""
+    from .engines.postgres import connect
+    conn = connect(ep, dbname)
     conn.autocommit = autocommit
     return conn
 
@@ -384,7 +416,9 @@ def _publication_ctx(f):
 
 
 def _published(carried):
-    return [".".join(_q(p) for p in t.split(".", 1)) for t in carried]
+    from .util import qualify
+    return [qualify("postgres", *split_table("postgres", t, "public"))
+            for t in carried]
 
 
 #: the temporary subscription's one change on the source: a publication of
@@ -422,11 +456,15 @@ def _names(hop):
 
 
 def _q(name):
-    return '"' + str(name).replace('"', '""') + '"'
+    """A name as PostgreSQL reads it, the one way (`postgres._ident`)."""
+    from .engines.postgres import _ident
+    return _ident(name)
 
 
 def _lit(text):
-    return "'" + str(text).replace("'", "''") + "'"
+    """A text as a string constant, the one way (`postgres._literal`)."""
+    from .engines.postgres import _literal
+    return _literal(text)
 
 
 class Footprint:
@@ -469,23 +507,17 @@ class Footprint:
             # the keepalives every connection of migkit's has: a link that
             # goes quiet mid-range ends the fetch in about two minutes
             # instead of holding it for the operating system's two hours
+            from .engines.postgres import keepalives
             opts = {"host": host, "port": str(port), "dbname": self.db,
                     "connect_timeout": str(DIAL_SECONDS),
-                    "application_name": "migkit", "keepalives": "1",
-                    "keepalives_idle": os.environ.get(
-                        "MIGKIT_KEEPALIVE_IDLE", "60"),
-                    "keepalives_interval": "10", "keepalives_count": "5"}
-            mode = _sslmode(self.hop)
-            if mode:
-                opts["sslmode"] = mode
+                    "application_name": "migkit",
+                    **{k: str(v) for k, v in keepalives().items()},
+                    **_far_tls(self.hop)}
             cur.execute(f"create server {_q(self.server)} foreign data"
                         " wrapper postgres_fdw options ("
                         + ", ".join(f"{k} {_lit(v)}" for k, v in
                                     opts.items()) + ")")
-            try:
-                cur.execute("set log_statement = 'none'")
-            except Exception:  # noqa: BLE001 - not a superuser's session
-                pass
+            unlogged(cur)
             cur.execute(f"create user mapping for current_user server"
                         f" {_q(self.server)} options (user %s, password %s)",
                         (self.hop.source.user, self.hop.source.password or ""))
@@ -608,10 +640,7 @@ def prove_subscribe(hop, db=None):
     db = db or _first_db(hop)
     name = _names(hop).replace("pull", "probe")
     host, port = source_for_target(hop)
-    conninfo = " ".join(f"{k}={_lit(v)}" for k, v in (
-        ("host", host), ("port", port), ("dbname", db),
-        ("user", hop.source.user), ("password", hop.source.password or ""),
-        ("connect_timeout", DIAL_SECONDS)))
+    dials = conninfo(hop, db, host, port)
     try:
         conn = _connect(hop.target, hop.target_db(db))
     except Exception as e:  # noqa: BLE001
@@ -624,14 +653,11 @@ def prove_subscribe(hop, db=None):
                 cur.execute(f"alter subscription {_q(name)} set (slot_name"
                             " = none)")
                 cur.execute(f"drop subscription {_q(name)}")
-            cur.execute(f"set statement_timeout = '{DIAL_SECONDS * 4}s'")
-            try:
-                cur.execute("set log_statement = 'none'")
-            except Exception:  # noqa: BLE001 - not a superuser's session
-                pass
+            cur.execute(f"set statement_timeout = {DIAL_SECONDS * 4000}")
+            unlogged(cur)
             try:
                 cur.execute(f"create subscription {_q(name)} connection"
-                            f" {_lit(conninfo)} publication {_q(name)} with"
+                            f" {_lit(dials)} publication {_q(name)} with"
                             " (connect = true, enabled = false, create_slot"
                             " = false, slot_name = none, copy_data = false)")
             except Exception as e:  # noqa: BLE001 - the proof's answer
@@ -648,18 +674,22 @@ def _seen_path(hop):
 
 
 def _keep_seen(hop, ms):
-    _seen_path(hop).write_text(json.dumps({
-        "target_to_source_ms": ms,
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S")}))
+    from .durable import write_json
+    from .util import stamp
+    write_json(_seen_path(hop), {"target_to_source_ms": ms, "at": stamp()})
 
 
 def servers_seen(hop):
-    """The round trip the target measured to the source, ms, or None."""
+    """The round trip the target measured to the source, ms, or None - a
+    reading that can be taken again, so a file a crash cut reads as none
+    (`durable.read_state`)."""
+    from .durable import read_state
     try:
-        return json.loads(_seen_path(hop).read_text()).get(
-            "target_to_source_ms")
-    except (OSError, ValueError):
+        got = read_state(_seen_path(hop), "cache")
+    except OSError:
         return None
+    return got.get("target_to_source_ms") if isinstance(got, dict) \
+        else None
 
 
 def _fetch_rows(row_bytes, rtt_s):
@@ -733,7 +763,7 @@ def pull_move(hop, db, workers, go, log):
     rtt = (servers_seen(hop) or 1.0) / 1000
     by_schema = {}
     for name in carried:
-        sch, _, tbl = name.partition(".")
+        sch, tbl = eng._split(name)
         by_schema.setdefault(sch, []).append(tbl)
     with Footprint(hop, db, log) as fp:
         work = []
@@ -756,8 +786,10 @@ def pull_move(hop, db, workers, go, log):
 
 def _tls_note(hop):
     """The plan's line where the target's connection to the source is
-    checked less than migkit's own."""
-    mode = str((hop.source.options or {}).get("sslmode") or "")
+    checked less than migkit's own: the source's certificate verified by
+    migkit - asked for, or found to verify (`tls.auto`) - and carried as
+    `require` by the target (`_far_tls`)."""
+    mode = hop.source.tls_forms("postgres")["mode"]
     if mode not in ("verify-ca", "verify-full"):
         return []
     return [f"# migkit checks the source's certificate ({mode}); the"
@@ -792,11 +824,10 @@ def _table_work(hop, eng, db, sch, tbl, local, known):
     if not cols:
         raise RuntimeError(f"{sch}.{tbl}: its columns could not be read on"
                            " the source")
-    target = hop.target_table(sch, tbl)
-    tsch, _, ttbl = target.rpartition(".")
-    qt = f"{_q(tsch or sch)}.{_q(ttbl)}"
+    tsch, ttbl = split_table("postgres", hop.target_table(sch, tbl), sch)
+    qt = f"{_q(tsch)}.{_q(ttbl)}"
     names = ", ".join(_q(c) for c in cols)
-    override = eng._insert_override("dst", db, f"{tsch or sch}.{ttbl}", cols)
+    override = eng._insert_override("dst", db, f"{tsch}.{ttbl}", cols)
     head = (f"insert into {qt} ({names}){override} select {names} from"
             f" {_q(local)}.{_q(tbl)}")
     key = eng._int_pk(db, sch, tbl)
@@ -926,12 +957,7 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
         log(steps[-1])
     src = _connect(hop.source, db)
     dst = _connect(hop.target, hop.target_db(db))
-    conninfo = " ".join(
-        f"{k}={_lit(v)}" for k, v in (
-            ("host", host), ("port", port), ("dbname", db),
-            ("user", hop.source.user), ("password", hop.source.password or ""),
-            ("connect_timeout", DIAL_SECONDS),
-            *([("sslmode", _sslmode(hop))] if _sslmode(hop) else [])))
+    dials = conninfo(hop, db, host, port)
     # from 16 the first copy of each table goes in the binary form too;
     # before it only the changes after it would
     binary = _one(dst, "select current_setting('server_version_num')::int"
@@ -954,7 +980,7 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
                                            "published": _published(carried)},
                         on_source, db, log or (lambda m: None)):
                     try:
-                        _subscribe(dst, name, conninfo, binary)
+                        _subscribe(dst, name, dials, binary)
                         _wait_copied(dst, name, len(carried), log, poll,
                                      stall.seconds())
                     finally:
@@ -971,19 +997,16 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
     return steps
 
 
-def _subscribe(dst, name, conninfo, binary):
+def _subscribe(dst, name, dials, binary):
     """The subscription made, bounded in time: the target dials the source
     inside the statement, and only a statement timeout ends a dial that
     hangs (`PostgresEngine.DIALS_ACROSS`)."""
     with dst.cursor() as cur:
-        cur.execute(f"set statement_timeout = '{DIAL_SECONDS * 4}s'")
-        try:
-            cur.execute("set log_statement = 'none'")
-        except Exception:  # noqa: BLE001 - not a superuser's session
-            pass
+        cur.execute(f"set statement_timeout = {DIAL_SECONDS * 4000}")
+        unlogged(cur)
         try:
             cur.execute(f"create subscription {_q(name)} connection"
-                        f" {_lit(conninfo)} publication {_q(name)} with"
+                        f" {_lit(dials)} publication {_q(name)} with"
                         f" (copy_data = true"
                         + (", binary = true" if binary else "") + ")")
         except Exception as e:  # noqa: BLE001 - said in its words

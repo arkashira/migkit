@@ -3238,6 +3238,33 @@ quoting (P0, L).** Files: `migkit/engines/postgres.py`,
 * Running work: `pg_pass.py` (the table-way ladder), the repair paths
   (repair ladder).
 
+  **Built 2026-10-01 (tests written, the full run to come):** one
+  `postgres.connect` (the side's `tls_forms`, connect timeout, keepalives
+  from `envkeys`, migkit's name, `SESSION` pinned: UTC, ISO, every digit,
+  no statement timeout) behind `_open`/`_connect` (the hop's name mapped
+  once) and `pg_pass.connect`, `legs._connect`; the questions on a kept
+  connection per side and thread (`_kept_conn`: the server's text, every
+  result of a script, the session reset after anything that may leave
+  state, a read asked again on a lost connection, a write never), the
+  client program only for meta-commands, and every program through one
+  `_client` with the side's TLS; the catalogue in one statement a side
+  (`catalog`, `shape_catalog` with column extras, checks and triggers,
+  kept 60 s and read again after migkit's own DDL), every reader of a
+  table's shape from it; `user_tables` the one rule, `row_estimate` with
+  None, the key in key order everywhere, markers with the table's live
+  columns in one statement a side; grants of every kind as effective
+  privileges with the grant option; the optional schema readings said
+  "not run: why"; the subscription's connection string from
+  `legs.conninfo` on a session that is not logged; the row repair through
+  the drivers' COPY, its undo sealed and durable; the text repair under the
+  load's window; JSON digested on the server as canon writes it; `doctor`
+  says verified only of a path that checked (`leg_encryption`'s
+  `verified`, the far paths' rows); the page copy's programs on the
+  target's host take the source's TLS as far as they can (`physical`).
+  Left to others: `cli._leg_said` reading `verified` (AUD-A), the leaves'
+  JSON still folded here (`leaves.py`), the drilldown's file names from
+  table names (base and the readers).
+
 **AUD-G2. The MySQL engine: the same (P0, L).** Files:
 `migkit/engines/mysql.py`, `migkit/engines/my_pass.py`.
 * One `_connect` (read timeout, keepalive, UTC pinned for rules too, TLS
