@@ -35,7 +35,18 @@ _LOCK = threading.Lock()
 DECISIONS = "decisions.jsonl"
 
 
+#: the shape of a run's id: its start and six hex digits
+_SHAPE = r"^\d{8}T\d{6}-[0-9a-f]{6}$"
+
+
 def _new():
+    """A new run's id - the one the web view drew for a run it started
+    (`MIGKIT_RUN_ID`), so the view finds the run's evidence by it."""
+    import os
+    import re
+    given = os.environ.get("MIGKIT_RUN_ID", "").strip()
+    if given and re.match(_SHAPE, given):
+        return given
     return time.strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(3)
 
 

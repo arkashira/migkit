@@ -90,8 +90,10 @@ HOP_OPTIONS = {
     "accept_changes": Key("table.column patterns whose values may arrive"
                           " as the target keeps them", "list",
                           ("hetero",)),
-    "access": Key("who may use the dashboard's pages", "dict",
-                  subs=("operator", "viewer")),
+    "access": Key("who sees and does what on this hop in the web view and"
+                  " the API - viewer, operator, approver, admin - added to"
+                  " the file's own `access`", "dict",
+                  subs=("viewer", "operator", "approver", "admin")),
     "app_roles": Key("the application's roles protect_target holds",
                      "list"),
     "approvals": Key("the steps that wait for an approval", "dict",
@@ -1348,10 +1350,15 @@ def check(data):
     if not isinstance(data, dict):
         return [Problem("error", "the file", "is not a mapping of keys")]
     for k in data:
-        if k != "hops":
+        if k not in ("hops", "access"):
             out.append(Problem("warn", str(k), "read by nothing - only"
-                               " `hops` is (a YAML anchor kept here is"
-                               " fine)"))
+                               " `hops` and `access` are (a YAML anchor"
+                               " kept here is fine)"))
+    # who may do what in the web view, for every hop or a group of them
+    # (`web.roles`)
+    from .web import roles
+    for where, text in roles.problems(data.get("access")):
+        out.append(Problem("error", where, text))
     hops = data.get("hops") or {}
     if not isinstance(hops, dict):
         return [Problem("error", "hops", "is not a mapping of hops")]
@@ -1394,6 +1401,9 @@ def check_hop(name, raw):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
         out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
+        from .web import roles
+        for w, text in roles.hop_problems(opts.get("access")):
+            out.append(Problem("error", f"{where}.options.{w}", text))
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
         if got is None:

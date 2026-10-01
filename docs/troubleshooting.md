@@ -501,7 +501,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * approvals.steps: <...> - not a step migkit holds; the steps are <...>
 
-* <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there
+* <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there, and no one approves it in the web view either (the hop's `access` names no approver)
 
 * cutover: is `true` or the path's settings (<...>), not <...>
 
@@ -660,6 +660,34 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * MIGKIT_AI=<...> needs MIGKIT_AI_MODEL: migkit does not choose a model for this provider
 
 * the model provider <...> is not one of <...>
+
+## The web view and the API
+
+* <...> describes no identity provider (no IDPSSODescriptor)
+
+* <...>: the identity provider offers no sign-in by redirect
+
+* <...>: no signing certificate - an answer could not be proved
+
+* MIGKIT_WEB_URL=<...> is not an address people open: https://host[:port], no path
+
+* MIGKIT_WEB_TLS_CERT and MIGKIT_WEB_TLS_KEY go together: the certificate and its private key
+
+* signing in through an identity provider needs the view at an https:// address (MIGKIT_WEB_URL) - a code or an assertion would cross the network in the clear otherwise
+
+* MIGKIT_WEB_SAML_METADATA=<...> is not a file: the identity provider's metadata, as it publishes it
+
+* MIGKIT_WEB_SCIM_TOKEN is shorter than 24 characters - anyone who guesses it provisions people; draw a long random one
+
+* MIGKIT_METRICS_TOKEN is shorter than 24 characters; draw a long random one
+
+* <...> is not a file this machine can read
+
+* the view would listen on <...> without TLS: give it a certificate (MIGKIT_WEB_TLS_CERT, MIGKIT_WEB_TLS_KEY), or serve it behind a reverse proxy that does TLS - MIGKIT_WEB_URL=https://... and MIGKIT_WEB_PROXIES naming the proxy's address, the only one then answered; or, in a container published on the host's loopback only, MIGKIT_WEB_PLAIN=on
+
+* MIGKIT_WEB_OIDC_ISSUER needs MIGKIT_WEB_OIDC_CLIENT_ID and MIGKIT_WEB_OIDC_CLIENT_SECRET - the client the provider registered for this view
+
+* the identity provider <...> is not an https:// address
 
 ## PostgreSQL
 

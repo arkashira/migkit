@@ -1,0 +1,1989 @@
+{
+ "components": {
+  "securitySchemes": {
+   "csrf": {
+    "description": "the page's token, on every call that changes something",
+    "in": "header",
+    "name": "X-CSRF-Token",
+    "type": "apiKey"
+   },
+   "session": {
+    "description": "a signed-in page's session",
+    "in": "cookie",
+    "name": "migkit_session",
+    "type": "apiKey"
+   },
+   "token": {
+    "description": "an API token made on the account page (mkt_...)",
+    "scheme": "bearer",
+    "type": "http"
+   }
+  }
+ },
+ "info": {
+  "description": "The REST API, version 1: one table of routes (`ROUTES`) that the server dispatches on and the OpenAPI document is written from - a route cannot be served without being described, or described without being served (backlog W2).",
+  "license": {
+   "identifier": "AGPL-3.0-or-later",
+   "name": "AGPL-3.0-or-later"
+  },
+  "title": "migkit",
+  "version": "v1 (0.2.0)"
+ },
+ "openapi": "3.1.0",
+ "paths": {
+  "/api/v1/admin/people": {
+   "get": {
+    "operationId": "people",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the people and groups the identity provider provisioned, and the local account",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "global admin"
+   }
+  },
+  "/api/v1/admin/record": {
+   "get": {
+    "operationId": "record",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the view's own record: sign-ins, provisioning, tokens, refusals",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "global admin"
+   }
+  },
+  "/api/v1/admin/sessions": {
+   "get": {
+    "operationId": "sessions",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "every session open",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "global admin"
+   }
+  },
+  "/api/v1/hops": {
+   "get": {
+    "operationId": "hops",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the hops the caller may see, each with its verdict, runs going on and what waits",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "signed-in"
+   }
+  },
+  "/api/v1/hops/{hop}": {
+   "get": {
+    "operationId": "hop",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the hop as its file says it, every secret hidden, and what its goal does to each side",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/approvals": {
+   "get": {
+    "operationId": "approvals",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the steps waiting for approval: what each will do, what approving lets happen, who has approved",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/approvals/{request}": {
+   "post": {
+    "operationId": "approve",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "request",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "db": {
+          "type": "string"
+         }
+        },
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "approve a step as the person signed in - never one they asked for",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "approver"
+   }
+  },
+  "/api/v1/hops/{hop}/decisions": {
+   "get": {
+    "operationId": "decisions",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the decision record, on request: each work, the way taken and why, every way passed over and why",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/evidence": {
+   "get": {
+    "operationId": "evidence",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the hop's evidence bundles and its record's chain",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/evidence/{name}": {
+   "get": {
+    "operationId": "evidence_file",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "one file of the hop's whole-history bundle, as written",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/evidence/{run}/{name}": {
+   "get": {
+    "operationId": "evidence_run_file",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "run",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "one file of a run's bundle, as written",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/notifications": {
+   "get": {
+    "operationId": "notifications",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "who is told what: the receivers by kind, the events, the lag",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/notifications/test": {
+   "post": {
+    "operationId": "notify_test",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "send the hop's receivers a test message",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "admin"
+   }
+  },
+  "/api/v1/hops/{hop}/offers": {
+   "get": {
+    "operationId": "offers",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the changes on the source a faster way needs, offered and not answered: what each buys and what not taking it means",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/offers/{change}": {
+   "post": {
+    "operationId": "answer",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "change",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "answer": {
+          "enum": [
+           "yes",
+           "no",
+           "dba"
+          ],
+          "type": "string"
+         }
+        },
+        "required": [
+         "answer"
+        ],
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "answer an offered change on the source: yes, no or dba",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/outcome": {
+   "get": {
+    "operationId": "outcome",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "what the hop does to each side and guarantees; each planned database's phases with their p50 and p90, and the outage held to the hop's limits",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/plan": {
+   "post": {
+    "operationId": "plan",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "db": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string"
+         },
+         "table": {
+          "type": "string"
+         }
+        },
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "action": {
+           "type": "string"
+          },
+          "argv": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "by": {
+           "type": "string"
+          },
+          "exit": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "hop": {
+           "type": "string"
+          },
+          "id": {
+           "type": "string"
+          },
+          "run": {
+           "type": "string"
+          },
+          "state": {
+           "enum": [
+            "queued",
+            "running",
+            "ended",
+            "lost"
+           ],
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     },
+     "409": {
+      "description": "a run that writes is going on"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "a dry run of the move: what it would do and how long it would take - a run of its own, nothing written to either side",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/progress": {
+   "get": {
+    "operationId": "progress",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "where the hop stands: the verdict, each move's progress and tail, and the metrics /metrics serves for it",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/runs": {
+   "get": {
+    "operationId": "runs",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "properties": {
+           "action": {
+            "type": "string"
+           },
+           "argv": {
+            "items": {
+             "type": "string"
+            },
+            "type": "array"
+           },
+           "by": {
+            "type": "string"
+           },
+           "exit": {
+            "type": [
+             "integer",
+             "null"
+            ]
+           },
+           "hop": {
+            "type": "string"
+           },
+           "id": {
+            "type": "string"
+           },
+           "run": {
+            "type": "string"
+           },
+           "state": {
+            "enum": [
+             "queued",
+             "running",
+             "ended",
+             "lost"
+            ],
+            "type": "string"
+           }
+          },
+          "type": "object"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the runs started from the view and the API, newest first",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   },
+   "post": {
+    "operationId": "start",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "action": {
+          "enum": [
+           "plan",
+           "assess",
+           "check",
+           "move",
+           "sync",
+           "cutover",
+           "rollback",
+           "report"
+          ],
+          "type": "string"
+         },
+         "apply": {
+          "type": "boolean"
+         },
+         "db": {
+          "type": "string"
+         },
+         "deep": {
+          "type": "boolean"
+         },
+         "go": {
+          "type": "boolean"
+         },
+         "kind": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string"
+         },
+         "on_conflict": {
+          "type": "string"
+         },
+         "only": {
+          "type": "string"
+         },
+         "state": {
+          "type": "string"
+         },
+         "table": {
+          "type": "string"
+         },
+         "tag": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "action"
+        ],
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "202": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "action": {
+           "type": "string"
+          },
+          "argv": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "by": {
+           "type": "string"
+          },
+          "exit": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "hop": {
+           "type": "string"
+          },
+          "id": {
+           "type": "string"
+          },
+          "run": {
+           "type": "string"
+          },
+          "state": {
+           "enum": [
+            "queued",
+            "running",
+            "ended",
+            "lost"
+           ],
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     },
+     "409": {
+      "description": "a run that writes is going on"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "start a run: the plan, assess, a check, the move, a sync, the cutover, a rollback or the evidence export - the command line's own command, with the hop's guards and approvals",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/runs/{run}": {
+   "get": {
+    "operationId": "run",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "run",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "action": {
+           "type": "string"
+          },
+          "argv": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "by": {
+           "type": "string"
+          },
+          "exit": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "hop": {
+           "type": "string"
+          },
+          "id": {
+           "type": "string"
+          },
+          "run": {
+           "type": "string"
+          },
+          "state": {
+           "enum": [
+            "queued",
+            "running",
+            "ended",
+            "lost"
+           ],
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "one run: its state, exit, verdict and evidence",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/runs/{run}/output": {
+   "get": {
+    "operationId": "output",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "run",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "query",
+      "name": "offset",
+      "schema": {
+       "minimum": 0,
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "a run's output from `offset`, secrets hidden",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/hops/{hop}/runs/{run}/stop": {
+   "post": {
+    "operationId": "stop",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "run",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "action": {
+           "type": "string"
+          },
+          "argv": {
+           "items": {
+            "type": "string"
+           },
+           "type": "array"
+          },
+          "by": {
+           "type": "string"
+          },
+          "exit": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "hop": {
+           "type": "string"
+          },
+          "id": {
+           "type": "string"
+          },
+          "run": {
+           "type": "string"
+          },
+          "state": {
+           "enum": [
+            "queued",
+            "running",
+            "ended",
+            "lost"
+           ],
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "stop a run as ctrl-c at its terminal would",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/tails/{db}/hold": {
+   "post": {
+    "operationId": "hold",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "db",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "hold a change tail between batches, its position saved",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/tails/{db}/resume": {
+   "post": {
+    "operationId": "resume",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "db",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "let a held change tail go on",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/tails/{db}/stop": {
+   "post": {
+    "operationId": "tail_stop",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "in": "path",
+      "name": "db",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "end a change tail at its next batch, its position saved",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "operator"
+   }
+  },
+  "/api/v1/hops/{hop}/validation": {
+   "get": {
+    "operationId": "validation",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "hop",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "what is wrong with the hop in its file, and what doctor would say of its keys",
+    "tags": [
+     "hops"
+    ],
+    "x-migkit-role": "viewer"
+   }
+  },
+  "/api/v1/me": {
+   "get": {
+    "operationId": "me",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "who is signed in, and their role on each hop",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "signed-in"
+   }
+  },
+  "/api/v1/openapi.json": {
+   "get": {
+    "operationId": "openapi",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [],
+    "summary": "this document",
+    "tags": [
+     "api"
+    ],
+    "x-migkit-role": "anyone"
+   }
+  },
+  "/api/v1/tokens": {
+   "get": {
+    "operationId": "tokens",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "the caller's API tokens",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "signed-in"
+   },
+   "post": {
+    "operationId": "token_new",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "days": {
+          "type": "number"
+         },
+         "name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "name"
+        ],
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "a new API token for the caller, shown once",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "signed-in"
+   }
+  },
+  "/api/v1/tokens/{token}": {
+   "delete": {
+    "operationId": "token_revoke",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "token",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      },
+      "description": "the answer"
+     },
+     "401": {
+      "description": "not signed in"
+     },
+     "403": {
+      "description": "a role too low, or not from this view's page"
+     },
+     "404": {
+      "description": "not there, or not the caller's to see"
+     }
+    },
+    "security": [
+     {
+      "token": []
+     },
+     {
+      "csrf": [],
+      "session": []
+     }
+    ],
+    "summary": "end one of the caller's API tokens",
+    "tags": [
+     "people"
+    ],
+    "x-migkit-role": "signed-in"
+   }
+  }
+ },
+ "servers": [
+  {
+   "url": "/"
+  }
+ ]
+}

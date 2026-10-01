@@ -4607,6 +4607,26 @@ the gaps nothing above covers yet, now items of their own.
   target, and hundreds of migrations run and watched as one fleet; a
   REST API, a Terraform provider and a Kubernetes operator over it; SSO
   (OIDC/SAML) and SCIM on the view, not only a proxy's header.
+  PARTLY BUILT (the owner's scope of 2026-10-01, "W2 and a GUI";
+  `migkit.web`, served by `migkit report --serve`, `docs/web.md`): sign-in
+  by OpenID Connect (code flow with PKCE, ID token checked against the
+  provider's keys) or SAML (only a signed answer to a request the view
+  made, read out of the element the signature covers), SCIM 2.0
+  provisioning that signs a deactivated person out at once, one local
+  operator without a provider; roles viewer/operator/approver/admin per
+  hop, hop group or file in the hops file's `access`; a versioned REST
+  API whose OpenAPI document is written from the table it dispatches on
+  (`docs/site/openapi.json`); runs started from the view are the command
+  line's own commands in a process of their own, carrying who started
+  them; approvals given in the view counted by `approvals.require`
+  (signed by the view's key, re-checked for the role at count time,
+  never the requester's); source-change offers answered there and
+  recorded by name; pages showing each side's outcome, the plan's phases
+  with p50/p90 and the cutover outage, progress, evidence, the decision
+  record only when asked. Not built: discovery, sizing from performance
+  history, cost, a fleet view, the Terraform provider and the Kubernetes
+  operator; an encrypted SAML assertion, a signed authentication request,
+  single logout.
 * **W3. Code conversion at enterprise breadth.** Beyond R11: PL/SQL
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code

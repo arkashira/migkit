@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ run.action }} on {{ hop.name }} - migkit{% endblock %}
+{% block main %}
+{% set api = "/api/v1/hops/" ~ (hop.name|urlencode) %}
+<p><a href="/hops/{{ hop.name|urlencode }}#runs">&larr; {{ hop.name }}</a></p>
+<section class="card">
+  <h1>{{ run.action }} <span class="pill {{ run.state }}" data-state>{{ run.state }}</span></h1>
+  <p>Started by <b>{{ run.by }}</b> ({{ run.through }}), asked {{ run.asked|when }}{% if run.started %}, started {{ run.started|when }}{% endif %}{% if run.ended %}, ended {{ run.ended|when }}{% endif %}.</p>
+  <p class="route">migkit {{ run.argv|join(" ") }}</p>
+  <p data-exit>{% if run.state == "ended" %}Exit {{ run.exit }}{% if run.ended_as %}: {% for e in run.ended_as %}<span title="{{ e.means }}">{{ e.as }}</span>{% if not loop.last %} or {% endif %}{% endfor %}{% endif %}.{% elif run.state == "lost" %}Its process is gone without saying how it ended.{% endif %}
+  {% if verdict %}The verdict it wrote: <span class="pill {{ verdict }}">{{ verdict }}</span>.{% endif %}
+  {% if evidence %}<a href="/hops/{{ hop.name|urlencode }}/evidence/{{ evidence|urlencode }}">Its evidence</a>.{% endif %}
+  {% if run.cancel %}Stopped by {{ run.cancel.by }}.{% endif %}</p>
+  {% if may.operator and run.state in ("queued", "running") %}
+  <button data-post="{{ api }}/runs/{{ run.id|urlencode }}/stop" data-confirm="Stop this run as ctrl-c would?">Stop it</button>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Its output</h2>
+  <pre class="output" data-output="{{ api }}/runs/{{ run.id|urlencode }}/output" data-offset="{{ offset }}" data-running="{{ 1 if run.state in ('queued', 'running') else 0 }}">{{ text }}</pre>
+</section>
+{% endblock %}
