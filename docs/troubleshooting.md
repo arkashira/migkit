@@ -193,6 +193,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop maps columns (mapping.columns), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
 
+* <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which reads the hop's scope and mapping for every change.
+
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which stops on a schema change instead of carrying half of it. | `migkit move --mode full` copies what the hop covers, and `migkit sync` brings the target level again before cutover.
 
 * cdc tail needs --db
@@ -341,7 +343,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * could not set the <...> on the CDC leg: <...>
 
-* <...>: the columns the hop keeps could not be matched against the source's, so the stream cannot be told which to leave out. Nothing has been started
+* <...>: the columns the hop keeps could not be matched against the source's, so the stream cannot be told which to take. Nothing has been started
+
+* <...>: a name holding a comma cannot be put on <...>'s lists, which a comma divides. Nothing has been started
+
+* the hop moves <...> databases (<...>), and <...> writes into the one database its sink is given: every database's tables would land in the first's. Nothing has been started - follow one database a hop, or with migkit's own change tail
 
 * the source's tables in <...> could not be listed, so what the hop maps cannot be matched against them. Nothing has been started
 
@@ -447,9 +453,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the saved position in <...> cannot be read, and a follow started from anywhere else either skips changes or cannot say it did not. Remove the file and move again with --mode full+cdc
 
-* ddl: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
+* <...>: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
+
+* ddl.skip: <...> is not one of <...> - an ALTER or a rename left out would have every change after it written where the target has no column or table for it
 
 * spool_limit: the bytes a parked table's changes may take on this machine, a whole number
+
+* <...>: <...> was replaced on the source - its name names another table now (renamed, or two renames swapped one in under it) - at <...> or after, and nothing after that position was applied. The hop's `ddl` is stop: set `ddl: apply` or `ddl: park` to have it copied again, and run the tail again; it resumes from there
 
 * <...>: <...> was <...> on the source at <...> or after, and nothing after that position was applied. The hop's `ddl` is stop: set `ddl: apply` to carry what can be carried at its place, or `ddl: park` to set only that table aside, and run the tail again; it resumes from there
 
@@ -1300,6 +1310,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the saved position in <...> cannot be read, and a tail started from anywhere else either skips changes or cannot say it did not. Remove the file and move again with --mode full+cdc
 
 * <...>: mapping.columns leaves out part of its key, so a change cannot be placed on the target by it. Keep the key's columns.
+
+* <...>: another table of the source has its name, and the target has no table of its whole name, so its changes would land in a table of the other's. Nothing of the batch was applied: make the target's table of that whole name, or rename one of them with mapping.tables, and run the tail again
 
 * <...>: the source's schema changed under the tail - <...> ... | <...>. The target does not have <...> yet, so nothing after <...> was applied. Bring the target's schema level with the source's, then run the tail again; it resumes from there.
 

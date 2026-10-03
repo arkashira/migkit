@@ -142,7 +142,9 @@ def test_the_hops_exclude_list_reaches_the_connector(tmp_path, monkeypatch):
     hop.report_dir = lambda db=None: tmp_path
     out = movers.stream_codegen(hop, ["appdb"], "postgres")
     cfg = json.loads((out / "source-connector.json").read_text())["config"]
-    assert cfg["table.exclude.list"] == r"public\.audit_log", cfg
+    # the hop's pattern as the connector reads it: `audit_log` in any
+    # schema, as the hop leaves it out
+    assert cfg["table.exclude.list"] == r"[^.]+\.audit_log", cfg
 
 
 def test_the_exclude_list_is_a_regex_with_its_dots_escaped():
@@ -189,10 +191,12 @@ def test_a_hop_with_no_exclude_list_adds_no_key(tmp_path):
     assert "table.exclude.list" not in cfg, cfg
 
 
-def test_a_source_that_cannot_be_listed_leaves_the_stream_unfiltered(
+def test_a_source_that_cannot_be_listed_is_filtered_by_the_hop_s_patterns(
         tmp_path, monkeypatch):
     """Guessing at table names would be worse: a wrong regex silently
-    stops streaming something nobody excluded."""
+    stops streaming something nobody excluded. The hop's own patterns are
+    no guess (`debezium_tables`): they reach the connector as the hop
+    reads them, and nothing is added by name."""
     from migkit import movers
 
     class Boom:
@@ -214,4 +218,4 @@ def test_a_source_that_cannot_be_listed_leaves_the_stream_unfiltered(
     hop.report_dir = lambda db=None: tmp_path
     out = movers.stream_codegen(hop, ["appdb"], "postgres")
     cfg = json.loads((out / "source-connector.json").read_text())["config"]
-    assert "table.exclude.list" not in cfg, cfg
+    assert cfg.get("table.exclude.list") == r"[^.]+\.audit_log", cfg

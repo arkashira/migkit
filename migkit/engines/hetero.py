@@ -3489,20 +3489,39 @@ class HeteroEngine(Engine):
                 " --mode full+cdc")
 
     def _tail_targets(self, db):
-        """{source table's leaf: the target table its changes go to}.
+        """{source table: the target table its changes go to}, by the
+        source table's whole name, and by its last part where no other
+        table of the source has that.
 
         The same pairing the move makes, through the hop's mapping. The tail
         used to write each change to the source's own table name, so a
         table the hop renames was copied under its new name and then kept
-        up to date under its old one.
+        up to date under its old one. It was keyed by the last part alone:
+        `sales.orders` and `crm.orders` both went to one target table. Two
+        tables of one name go each to the target's table of its own whole
+        name; where the target has none, to no table (None), and a change
+        of one stops the tail before anything of its batch is applied
+        (`_tail_target`).
         """
+        from collections import Counter
+        src = self.src_engine.neutral_tables("src", db)
         there = ([] if self.dst_engine.target_missing(db)
                  else self.dst_engine.neutral_tables("dst", db))
-        pairs, src_only, _, _ = self.match_tables(
-            self.src_engine.neutral_tables("src", db), there, self._renamer(db))
-        out = {self._leaf(s_): d for s_, d in pairs}
+        pairs, src_only, _, _ = self.match_tables(src, there,
+                                                  self._renamer(db))
+        out = {str(s_): d for s_, d in pairs}
         for s_ in src_only:
-            out[self._leaf(s_)] = self._leaf(self._rename(s_, db))
+            out[str(s_)] = self._leaf(self._rename(s_, db))
+        named = Counter(self._leaf(s_) for s_ in src)
+        exact = {str(d) for d in there}
+        for s_ in src:
+            leaf = self._leaf(s_)
+            if str(s_) not in out:
+                # one of two of its name the pairing would not choose
+                # between (`match_tables`)
+                want = str(self._rename(s_, db))
+                out[str(s_)] = want if want in exact else None
+            out[leaf] = None if named[leaf] > 1 else out[str(s_)]
         return out
 
     def _in_scope(self, db, changes):
@@ -3515,7 +3534,10 @@ class HeteroEngine(Engine):
         now rather than at the change converges: a row that moved into the
         filter and out again in one batch is gone from the target, as it
         is from the filter. A row the source no longer has is gone too, and
-        its own delete follows."""
+        its own delete follows. Each delete made here says so
+        (`canon.FILTERED`): the source deleted nothing, and a two-way
+        tail holds it to no conflict (`twoway.resolve`)."""
+        from .. import canon
         by_table = {}
         for c in changes:
             if c.get("op") in ("insert", "update"):
@@ -3536,7 +3558,6 @@ class HeteroEngine(Engine):
             try:
                 classes = dict(self.src_engine.neutral_columns("src", db,
                                                                table))
-                from .. import canon
                 cols = [(k, canon.type_class(self.src_engine.CANON_ENGINE,
                                              classes.get(k)))
                         for k in key]
@@ -3554,13 +3575,43 @@ class HeteroEngine(Engine):
                 continue
             now = {k: (c.get("values") or {}).get(k, v)
                    for k, v in c["key"].items()}
-            out.append({"op": "delete", "table": c["table"], "key": now})
+            out.append({"op": "delete", "table": c["table"], "key": now,
+                        canon.FILTERED: True})
             if now != c["key"]:
                 # an update that moved the key as well: the row's old
                 # address goes too, as the apply would have removed it
                 out.append({"op": "delete", "table": c["table"],
-                            "key": dict(c["key"])})
+                            "key": dict(c["key"]), canon.FILTERED: True})
         return out
+
+    def _carried(self, db, changes):
+        """The changes of an operation the hop's `mapping.ops` carries for
+        its table (`Hop.carries`) - decided on the source's own operation,
+        before the row filter turns an insert or an update into a delete.
+        Every change where the hop says nothing of it."""
+        if not (self.hop.mapping or {}).get("ops"):
+            return changes
+        known = {}
+        out = []
+        for c in changes:
+            t = c["table"]
+            if t not in known:
+                known[t] = self.hop.carries(db, *str(t).split("."))
+            if c.get("op") in known[t]:
+                out.append(c)
+        return out
+
+    def _filtered_kept(self, db, changes):
+        """The changes without the deletes the row filter made
+        (`canon.FILTERED`) for a table whose deletes the hop does not
+        carry: a row that left the filter is kept on the target as it
+        was, as a row the source deleted is."""
+        if not (self.hop.mapping or {}).get("ops"):
+            return changes
+        from .. import canon
+        return [c for c in changes if not (
+            c.get(canon.FILTERED) and "delete" not in self.hop.carries(
+                db, *str(c["table"]).split(".")))]
 
     def _typed_change(self, db, change, target):
         """A change with each value of a class that has a form of its own
@@ -3620,15 +3671,25 @@ class HeteroEngine(Engine):
         (`_in_scope`), under the target's table and column names, each
         value in the form the target keeps (`_typed_change`,
         `_mapped_change`) - the one way the tail and a reader beside it
-        (`carry`) put a change on the target. `accounts` hears of the
-        deletes a key moved out of the filter adds, and of each table's
-        target name (`_Accounts`)."""
+        (`carry`) put a change on the target. Only the operations the
+        hop's `mapping.ops` carries (`_carried`); where it keeps deletes,
+        a row that leaves the filter is kept too (`_filtered_kept`).
+        `accounts` hears of the deletes a key moved out of the filter
+        adds, of what the hop does not carry, and of each table's target
+        name (`_Accounts`)."""
         if not changes:
             return [], 0
-        kept = changes
-        changes = self._in_scope(db, changes)
+        carried = self._carried(db, changes)
+        if accounts is not None:
+            accounts.dropped(tailtables.NOT_CARRIED, changes, carried)
+        kept = carried
+        changes = self._in_scope(db, carried)
         if accounts is not None:
             accounts.grown(kept, changes)
+        left = self._filtered_kept(db, changes)
+        if accounts is not None:
+            accounts.dropped(tailtables.NOT_CARRIED, changes, left)
+        changes = left
         mapped = []
         for c in changes:
             to = self._tail_target(targets, c["table"], db)
@@ -3669,10 +3730,22 @@ class HeteroEngine(Engine):
         return None
 
     def _tail_target(self, targets, table, db=None):
-        # a table made on the source after the tail began goes by its
-        # mapped name, as the move would have sent it
-        return (targets.get(self._leaf(table))
-                or self._leaf(self._rename(table, db)))
+        # by its whole name, then by its last part; a table made on the
+        # source after the tail began goes by its mapped name, as the move
+        # would have sent it
+        for k in (str(table), self._leaf(table)):
+            if k not in targets:
+                continue
+            if targets[k] is None:
+                raise SystemExit(
+                    f"{table}: another table of the source has its name, and"
+                    " the target has no table of its whole name, so its"
+                    " changes would land in a table of the other's. Nothing"
+                    " of the batch was applied: make the target's table of"
+                    " that whole name, or rename one of them with"
+                    " mapping.tables, and run the tail again")
+            return targets[k]
+        return self._leaf(self._rename(table, db))
 
     def _shape_gate(self, db, token_path, position, skip=(), stop=True):
         """The source's column shape the tail may apply under, or None
@@ -3691,13 +3764,16 @@ class HeteroEngine(Engine):
         Where the hop's `ddl` does not stop the tail (`stop` False), the
         tables the target lags on are handed back instead (`_shape_now`),
         and the tables of `skip` - being copied, parked or out of the tail
-        (`tailtables`) - are not held to the target at all.
+        (`tailtables`) - are not held to the target at all. `stop` may be a
+        callable of a source table, where the hop's `ddl` says it per
+        table: only the tables it is true of stop the tail.
         """
         return self._shape_now(db, token_path, position, skip, stop)[0]
 
     def _shape_now(self, db, token_path, position, skip=(), stop=True):
         """(the source's shape or None, {source table: (target table,
-        [its columns the target does not have])})."""
+        [its columns the target does not have])}) - the tables `stop`
+        stops on raising instead."""
         import json as _json
 
         from .. import drift
@@ -3719,8 +3795,10 @@ class HeteroEngine(Engine):
             behind = {t: got for t, got in
                       self._lacking(db, saved, now).items()
                       if self._leaf(t) not in skip}
-            if behind and stop:
-                named = [f"{d}.{n}" for d, cols in behind.values()
+            stopping = {t: got for t, got in behind.items()
+                        if (stop(t) if callable(stop) else stop)}
+            if stopping:
+                named = [f"{d}.{n}" for d, cols in stopping.values()
                          for n in cols]
                 raise SystemExit(
                     f"{db}: the source's schema changed under the tail - "
@@ -3742,8 +3820,12 @@ class HeteroEngine(Engine):
                 self._lacking(db, before, after).values() for n in cols]
 
     def _lacking(self, db, before, after):
-        """{source table: (target table, [columns the source has now that
-        the target does not])}, of the tables whose shape changed."""
+        """{source table: (target table, [columns the hop carries there now
+        that the target does not have, by their target names])}, of the
+        tables whose shape changed. Through the hop's `mapping.columns`
+        (`_mapped_types`): a column it keeps out or drops is not the
+        target's to have, and named as missing it stopped the tail, or
+        parked its table for good."""
         out = {}
         if self.dst_engine.CREATES_ON_WRITE:
             # a column arrives with the first row that has it
@@ -3758,7 +3840,8 @@ class HeteroEngine(Engine):
                         self.dst_engine.neutral_columns("dst", db, dst_t)}
             except Exception:
                 have = set()
-            missing = [n for n, _ in cols if str(n).lower() not in have]
+            carried, _ = self._mapped_types(db, t, dict(cols))
+            missing = [n for n in carried if str(n).lower() not in have]
             if missing:
                 out[t] = (dst_t, missing)
         return out
@@ -3938,7 +4021,15 @@ class HeteroEngine(Engine):
         # ends at the slot's end at the latest)
         slot_ends = schedule.slot_end()
         until = tailctl.until(self.hop, scheduled=slot_ends is not None)
-        policy = tailtables.policy(self.hop)
+        # the hop's `ddl`, read before anything connects, and per table
+        # where it says it so: whether a table the target lags on stops
+        # the tail (`_shape_now`)
+        tailtables.policy(self.hop)
+        tailtables.skipped(self.hop)
+
+        def stops(table):
+            return tailtables.policy(
+                self.hop, [db, *str(table).split(".")]) == "stop"
         log(f"tailing {self.src_name} -> {self.dst_name}"
             + (", until caught up" if until == "caught_up"
                else ", ctrl-c to stop")
@@ -4018,14 +4109,29 @@ class HeteroEngine(Engine):
         # the source's shape the tail last applied under, saved beside its
         # position, so a DDL made while it was stopped is seen too
         known, lacking = self._shape_now(db, token_path, saved_token,
-                                         not_live(), policy == "stop")
+                                         not_live(), stops)
         running = tailctl.Running(where) if go else None
         # the target's triggers held off for as long as changes are applied,
         # as the servers' own replication applies them: what the source's
         # triggers wrote is in the log with the rest, and the target's
         # firing again rewrote the rows and wrote them twice
-        window = (self.dst_engine.load_window(db, log, set(targets.values()))
+        quieted = {t for t in targets.values() if t}
+        window = (self.dst_engine.load_window(db, log, set(quieted))
                   if go else None)
+        # and for a table that joins the tail after it began, from when it
+        # joins (`TableSet.quiet`): the window above was decided over the
+        # tables there were then
+        import contextlib
+        joined = contextlib.ExitStack()
+        if tables is not None and window is not None:
+            def quiet(name):
+                to = self._tail_target(targets, name, db)
+                if to in quieted:
+                    return
+                joined.enter_context(self.dst_engine.load_window(
+                    db, log, {to}))
+                quieted.add(to)
+            tables.quiet = quiet
         # a service manager stops a process with SIGTERM, which ends it
         # without unwinding: taken as ctrl-c, the one way every program
         # migkit runs is stopped (`runner.stopping`), so what the tail set
@@ -4055,6 +4161,10 @@ class HeteroEngine(Engine):
                 window.__enter__()
             if tables is not None:
                 tables.resumed(saved_token)
+            # the tables carried as the source's reader was last opened
+            follows_listed = getattr(self.src_engine,
+                                     "FOLLOWS_LISTED_TABLES", False)
+            taking = tables.taken() if tables is not None else frozenset()
             while True:
                 # between batches, never inside one: everything read so far
                 # is applied and its position saved before it holds still
@@ -4082,14 +4192,28 @@ class HeteroEngine(Engine):
                             room_said = True
                 try:
                     if tables is not None:
-                        if tables.boundary(saved_token, known):
-                            # read ahead under the scope before it: read
-                            # again from the saved position
+                        again = tables.boundary(saved_token, known)
+                        if tables.take_remapped():
+                            # the hop's mapping changed under it: each
+                            # table's target, columns and filter read again
+                            targets = self._tail_targets(db)
+                            self.forget_shapes()
+                            self.__dict__.pop("_typed_of", None)
+                        now = tables.taken()
+                        if again or (follows_listed and now - taking):
+                            # read ahead under the scope before it, or a
+                            # feed opened over the tables there were then
+                            # (`FOLLOWS_LISTED_TABLES`): read again from
+                            # the saved position, the source's reader let
+                            # go and opened again over the tables now
                             if ahead is not None:
                                 ahead.close()
                                 ahead = self._change_reader(db, token_path,
                                                             log)
+                            else:
+                                self.src_engine.release_changes()
                             read_at, carried = saved_token, []
+                        taking = now
                         tables.check_level(lambda name: self._level(db,
                                                                     name))
                     asked = _time.time()
@@ -4128,11 +4252,10 @@ class HeteroEngine(Engine):
                         # before the batch is applied: rows on both sides of a
                         # DDL may be in it, and its position is not saved yet
                         known, more = self._shape_now(
-                            db, token_path, saved_token, not_live(),
-                            policy == "stop")
+                            db, token_path, saved_token, not_live(), stops)
                         lacking = {**lacking, **more}
                     plan, before, work, released = self._tail_batch(
-                        db, changes, lacking, tables, policy, two_way,
+                        db, changes, lacking, tables, two_way,
                         saved_token, targets, copied, accounts, log)
                     lacking = {}
                     left += sum(accounts.now.get(tailtables.COPIED,
@@ -4263,8 +4386,11 @@ class HeteroEngine(Engine):
             else:
                 self.src_engine.release_changes()
             try:
-                if window:
-                    window.__exit__(*sys.exc_info())
+                try:
+                    joined.__exit__(*sys.exc_info())
+                finally:
+                    if window:
+                        window.__exit__(*sys.exc_info())
             finally:
                 if running:
                     running.__exit__(*sys.exc_info())
@@ -4274,8 +4400,8 @@ class HeteroEngine(Engine):
                 if term is not None:
                     term.__exit__(None, None, None)
 
-    def _tail_batch(self, db, changes, lacking, tables, policy, two_way,
-                    token, targets, copied, accounts, log):
+    def _tail_batch(self, db, changes, lacking, tables, two_way, token,
+                    targets, copied, accounts, log):
         """One batch as the target is to take it: ([(changes to apply, the
         DDL carried after them or None)], the statements run on the target
         for it, the tables' states the batch leaves, changes set aside
@@ -4286,10 +4412,10 @@ class HeteroEngine(Engine):
         hop's `ddl` carries is done between the runs it falls between; a
         column the target lacks is added here, before anything of the
         batch, where it is one the target takes at any place
-        (`_additive`) and the hop says apply - its table parked where it
-        is not, or where the target refuses it. `token` is where the batch
-        was read from. Count-only (`tables` None) routes nothing: every
-        change goes on, and a DDL is said."""
+        (`_additive`) and the table's `ddl` says apply - its table parked
+        where it is not, or where the target refuses it. `token` is where
+        the batch was read from. Count-only (`tables` None) routes nothing:
+        every change goes on, and a DDL is said."""
         from .. import canon, drift, twoway
         work = tables.begin() if tables is not None else None
         released, back = [], {}
@@ -4301,16 +4427,18 @@ class HeteroEngine(Engine):
                     " and left out")
         before = []
         for src_t, (dst_t, missing) in sorted(lacking.items()):
-            leaf = self._leaf(src_t)
             if work is None:
                 log(f"{src_t}: the target does not have"
                     f" {', '.join(missing)} (count-only: nothing done)")
                 continue
+            leaf = tables.key(src_t)
             if (work.get(leaf) or {}).get("state", "live") != "live":
                 continue
+            # the table's own `ddl`, where the hop says it per table
+            pol = tailtables.policy(self.hop, [db, *str(src_t).split(".")])
             sqls, why = (self._additive(db, src_t, dst_t, missing)
-                         if policy == "apply" else
-                         (None, "the hop's ddl is park"))
+                         if pol == "apply" else
+                         (None, f"the hop's ddl is {pol} for it"))
             for sql in sqls or ():
                 # before any of the batch: a column added takes NULL or
                 # its constant in every row, so the rows before its place
@@ -4344,6 +4472,11 @@ class HeteroEngine(Engine):
             if act is not None:
                 acts.append(act)
                 runs.append([])
+        if work is not None:
+            # the DDLs the hop leaves out, never applied: counted, and said
+            for (table, why), n in sorted(tables.left_ddl().items()):
+                accounts.ddl_left(table, why, n)
+                log(f"{table}: {why}" + (f" ({n})" if n > 1 else ""))
         plan = []
         for i, run in enumerate(runs):
             if work is not None:
@@ -4382,9 +4515,16 @@ class HeteroEngine(Engine):
     def _carry_ddl(self, db, act, targets, log):
         """A DDL the hop's `ddl` carries, done on the target at its place
         among the runs of a batch: a table emptied on the source emptied
-        there - within the hop's row filter, as a copy empties it."""
+        there - within the hop's row filter, as a copy empties it. Never
+        where the hop does not carry the table's deletes: what the source
+        takes away the target keeps (`tailtables.TableSet.ddl` leaves such
+        a truncate out before it comes here)."""
         kind, src_t = act
         if kind != "truncate":
+            return
+        if "delete" not in self.hop.carries(db, *str(src_t).split(".")):
+            log(f"{src_t}: emptied on the source; the hop does not carry its"
+                " deletes, so the target keeps its rows")
             return
         dst_t = self._tail_target(targets, src_t, db)
         _, dst_where = self._row_scope(db, src_t)
@@ -4653,11 +4793,19 @@ class _Accounts:
     released = applied + left out, table by table. The check that would
     have caught TiDB DM decoding an added table's rows empty and dropping
     them (tiflow #12859), and PostgreSQL before 17.5 filtering a table
-    added to a publication."""
+    added to a publication.
+
+    Beside the identity, two things the tail says of a table and does not
+    count against it: the changes a large value the log left out as
+    unchanged was kept as the target holds it in (`canon.UNCHANGED`), and
+    the DDLs the hop leaves out (`ddl_left`)."""
 
     #: why a change read is not applied, in the words the file keeps
     WHY = (tailtables.COPIED, "not the application's",
-           "the target's own change kept") + tailtables.WHY
+           "the target's own change kept", tailtables.NOT_CARRIED) \
+        + tailtables.WHY
+    #: changes with a large value kept as the target holds it
+    UNCHANGED = "a large value kept as the target holds it"
 
     def __init__(self, where):
         import json
@@ -4670,12 +4818,25 @@ class _Accounts:
         self.rows = {}
         self.now, self.split, self.back = {}, Counter(), {}
         self.came_back = Counter()
+        self.said = {}
 
     def read(self, changes):
         from collections import Counter
+
+        from .. import canon
         self.now = {"read": Counter(c["table"] for c in changes)}
         self.split, self.back, self.rows = Counter(), {}, {}
         self.came_back = Counter()
+        self.said = {}
+        kept = Counter(c["table"] for c in changes
+                       if c.get(canon.UNCHANGED))
+        for t, n in kept.items():
+            self.said.setdefault(t, Counter())[self.UNCHANGED] += n
+
+    def ddl_left(self, table, why, n=1):
+        """`n` DDLs of `table` the hop leaves out, for `why`."""
+        from collections import Counter
+        self.said.setdefault(table, Counter())[f"ddl {why}"] += n
 
     def released(self, counts):
         """`counts` {source table: changes} set aside in an earlier batch
@@ -4732,6 +4893,8 @@ class _Accounts:
             self.rows[t] = {"read": read[t], "applied": applied[t],
                             **({"taken back": back[t]} if back[t] else {}),
                             **{w: n for w, n in gone.items() if n}}
+        for t, said in self.said.items():
+            self.rows.setdefault(t, {}).update(said)
 
     def save(self):
         """The batch checked last added to what has run, and kept."""
