@@ -78,12 +78,21 @@ NOT_CARRIED = ("the hop does not carry users, roles or grants (accounts:"
 
 
 def carried(hop):
-    """Whether the hop's move carries users, roles and grants: not where it
-    says `accounts: false`, as a DTS job told not to move them does
-    (`imports`). The checks of them are then skipped and said as not
-    compared (`NOT_CARRIED`) - never as the same - and no repair grants
-    what the move was not asked to carry."""
-    return (getattr(hop, "options", None) or {}).get("accounts") is not False
+    """Whether the hop's move carries users, roles and grants: not where
+    the operator says it does not - `accounts: false`, or `objects:
+    {roles: false}`, two ways of saying one thing - because the target's
+    accounts are made apart from this move. The checks of them are then
+    skipped and said as not compared (`NOT_CARRIED`) - never as the same -
+    and no repair grants what the move was not asked to carry. A service's
+    job that moves none is not taken as saying so (`imports`): the
+    application needs them on the target all the same."""
+    if (getattr(hop, "options", None) or {}).get("accounts") is False:
+        return False
+    from .config import objects_of
+    try:
+        return objects_of(hop).get("roles", True) is not False
+    except SystemExit:
+        return True
 
 
 def _h(x):

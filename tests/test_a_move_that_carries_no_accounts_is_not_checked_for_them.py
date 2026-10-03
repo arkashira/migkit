@@ -1,16 +1,19 @@
 """A move that does not carry accounts is not checked for them (backlog
-P0-SCOPE.6a).
+P0-SCOPE.6a) - where the operator says so.
+
+`accounts: false` (or `objects: {roles: false}`) says the target's
+accounts are made apart from this move: every check of users, roles and
+grants (the deep check's, `users`, the assessment's) skips with a detail
+that says the hop does not carry them. A skip is "not compared", never
+"the same": `users verify` ends as incomplete, and no repair grants what
+the move does not carry.
 
 A DTS job told not to move accounts (Tencent's `IsMigrateAccount` false,
-Alibaba's `privilegeMigration` false) was read into a hop with a note
-saying so, and nothing else: the deep check's grants and `migkit users
-verify` went on reporting the target's users and grants as differences
-the job was never asked to carry. The hop says it now - `accounts: false`,
-written by both importers - and every check of users, roles and grants
-(the deep check's, `users`, the assessment's) skips with a detail that
-says the hop does not carry them. A skip is "not compared", never "the
-same": `users verify` ends as incomplete, and no repair grants what the
-move does not carry.
+Alibaba's `privilegeMigration` false) is not taken as saying so: the
+application needs its accounts on the target all the same, and their
+absence there - grants by the hundred, measured on a job that moved
+none - is the finding the check is for. The importers say it beside the
+hop and leave the check to show it.
 
 The docker tests run one engine at a time (`-k postgres`, `-k mysql`).
 """
@@ -34,49 +37,31 @@ def _no_accounts(engine="mysql", **kw):
                target=Endpoint(), options={"accounts": False}, **kw)
 
 
-def test_a_tencent_job_that_moves_no_accounts_says_so_in_the_hop():
+def test_a_tencent_job_that_moves_no_accounts_is_said_and_still_checked():
     got = imports.read(SAMPLES / "tencent-dts-migration.json")
-    assert got.raw["options"] == {"accounts": False}
-    assert "accounts: false" in " | ".join(got.notes)
-    raw = dict(got.raw, target="mysql://app@10.0.0.22")
-    assert not [p for p in hopkeys.check({"hops": {got.name: raw}})
-                if p.level == "error"]
-    hop = build_hop(got.name, raw)
-    assert not users.carried(hop)
-
-
-def test_a_tencent_job_that_moves_them_leaves_the_hop_as_it_was():
-    job = json.loads((SAMPLES / "tencent-dts-migration.json").read_text())
-    body = job.get("Response", job)
-    body["MigrateOption"]["IsMigrateAccount"] = True
-    got = imports.from_tencent_dts(job)
     assert "accounts" not in (got.raw.get("options") or {})
-    assert users.carried(build_hop(got.name, dict(
-        got.raw, target="mysql://app@10.0.0.22")))
+    said = " | ".join(got.notes)
+    assert "does not move accounts" in said and "users create" in said
+    hop = build_hop(got.name, dict(got.raw, target="mysql://app@10.0.0.22"))
+    assert users.carried(hop)
 
 
-def test_an_alibaba_job_that_moves_no_accounts_says_so_in_the_hop():
+def test_an_alibaba_job_that_moves_no_accounts_is_said_and_still_checked():
     job = json.loads((SAMPLES / "alibaba-dts-job.json").read_text())
-    # where its reserved settings say nothing, nothing is assumed
-    assert "options" not in imports.from_alibaba_dts(dict(job)).raw
     job["Reserve"] = json.dumps({"privilegeMigration": "false",
                                  "targetTableMode": "2"})
     got = imports.from_alibaba_dts(job)
-    assert got.raw["options"] == {"accounts": False}
+    assert "accounts" not in (got.raw.get("options") or {})
     assert "privilegeMigration false" in " | ".join(got.notes)
-    job["Reserve"] = {"privilegeMigration": True}
-    assert "options" not in imports.from_alibaba_dts(job).raw
 
 
-def test_across_engines_the_option_joins_the_pairs_own():
-    job = json.loads((SAMPLES / "alibaba-dts-job.json").read_text())
-    job["DestinationEndpoint"] = {"EngineName": "POSTGRESQL",
-                                  "Ip": "10.0.0.43", "UserName": "app"}
-    job["Reserve"] = '{"privilegeMigration": false}'
-    got = imports.from_alibaba_dts(job)
-    assert got.raw["options"] == {"source_engine": "mysql",
-                                  "target_engine": "postgres",
-                                  "accounts": False}
+def test_the_operator_says_it_either_way():
+    assert not users.carried(_no_accounts())
+    assert not users.carried(Hop(name="na", engine="mysql",
+                                 source=Endpoint(), target=Endpoint(),
+                                 objects={"roles": False}))
+    assert users.carried(Hop(name="na", engine="mysql", source=Endpoint(),
+                             target=Endpoint()))
 
 
 def test_users_verify_is_not_compared_and_never_a_pass(monkeypatch):

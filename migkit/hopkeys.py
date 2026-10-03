@@ -108,9 +108,10 @@ HOP_OPTIONS = {
                   " the file's own `access`", "dict",
                   subs=("viewer", "operator", "approver", "admin")),
     "accounts": Key("false: the move does not carry users, roles or grants"
-                    " (a DTS job told not to move them) - their checks are"
-                    " skipped and said as not compared, and no repair"
-                    " grants them", "bool"),
+                    " - the target's are made apart from it - so their"
+                    " checks are skipped and said as not compared, and no"
+                    " repair grants them (as objects: {roles: false})",
+                    "bool"),
     "app_roles": Key("the application's roles protect_target holds",
                      "list"),
     "approvals": Key("the steps that wait for an approval", "dict",
