@@ -496,6 +496,7 @@ class Db2iEngine(Db2Engine):
             return [Result("deep", f"{db} target tables", "error",
                            "could not read the target's constraints:"
                            f" {str(e).splitlines()[0][:90]}")]
+        held = self._held_in_scope(db, held)
         if held:
             return [Result("deep", f"{db} target tables", "diff",
                            f"{len(held)} constraints in check pending: "

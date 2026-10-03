@@ -385,8 +385,10 @@ class MSSQLEngine(DbapiRows, Engine):
              " join sys.schemas s on s.schema_id=t.schema_id"
              " join sys.partitions p on p.object_id=t.object_id and p.index_id in (0,1)"
              " group by s.name, t.name order by 1")
-        src = {r[0]: r[1] for r in self._cmd("src", db, q)}
-        dst = {r[0]: r[1] for r in self._cmd("dst", db, q)}
+        src = {r[0]: r[1] for r in
+               self._scoped_rows(db, self._cmd("src", db, q))}
+        dst = {r[0]: r[1] for r in
+               self._scoped_rows(db, self._cmd("dst", db, q))}
         bad = [f"{t} src={src.get(t)} dst={dst.get(t)}"
                for t in sorted(set(src) | set(dst)) if src.get(t) != dst.get(t)]
         if bad:
@@ -752,12 +754,12 @@ class MSSQLEngine(DbapiRows, Engine):
         res = []
         # no pk/unique = CDC drops its updates/deletes and it can't be verified
         # or repaired by key (same trap as the other engines)
-        nopk = [r[0] for r in self._cmd("src", db,
+        nopk = [r[0] for r in self._scoped_rows(db, self._cmd("src", db,
                 "select s.name+'.'+t.name from sys.tables t"
                 " join sys.schemas s on s.schema_id=t.schema_id"
                 " where not exists (select 1 from sys.indexes i"
                 " where i.object_id=t.object_id"
-                " and (i.is_primary_key=1 or i.is_unique=1))")]
+                " and (i.is_primary_key=1 or i.is_unique=1))"))]
         if nopk:
             res.append(Result("deep", f"{db} keys", "diff",
                               f"{len(nopk)} tables have no pk/unique (CDC drops"
@@ -772,12 +774,13 @@ class MSSQLEngine(DbapiRows, Engine):
         # movers load with constraints/triggers disabled and often forget
         # to re-enable or re-validate: is_disabled and is_not_trusted are
         # the sql server analog of postgres NOT VALID
-        rows = self._cmd("dst", db,
+        # each after the table it is on, which decides its scope
+        rows = self._scoped_rows(db, self._cmd("dst", db,
                        "select s.name+'.'+t.name+'.'+fk.name,"
-                       " fk.is_disabled, fk.is_not_trusted"
+                       " fk.is_disabled, fk.is_not_trusted, s.name+'.'+t.name"
                        " from sys.foreign_keys fk"
                        " join sys.tables t on t.object_id=fk.parent_object_id"
-                       " join sys.schemas s on s.schema_id=t.schema_id")
+                       " join sys.schemas s on s.schema_id=t.schema_id"), 3)
         disabled = [r[0] for r in rows if r[1] == "1"]
         untrusted = [r[0] for r in rows if r[1] == "0" and r[2] == "1"]
         bad = ([f"disabled: {', '.join(disabled[:4])}"] if disabled else []) \
@@ -788,11 +791,12 @@ class MSSQLEngine(DbapiRows, Engine):
                           else f"{len(rows)} fks enabled and trusted", "",
                           "alter table ... with check check constraint ..."
                           if bad else ""))
-        trg = [r[0] for r in self._cmd("dst", db,
-               "select s.name+'.'+t.name+'.'+tr.name from sys.triggers tr"
+        trg = [r[0] for r in self._scoped_rows(db, self._cmd("dst", db,
+               "select s.name+'.'+t.name+'.'+tr.name, s.name+'.'+t.name"
+               " from sys.triggers tr"
                " join sys.tables t on t.object_id=tr.parent_id"
                " join sys.schemas s on s.schema_id=t.schema_id"
-               " where tr.is_disabled=1")]
+               " where tr.is_disabled=1"), 1)]
         res.append(Result("deep", f"{db} triggers",
                           "diff" if trg else "ok",
                           "disabled on target: " + ", ".join(trg[:5]) if trg
@@ -802,10 +806,13 @@ class MSSQLEngine(DbapiRows, Engine):
                 "data_type+'|'+is_nullable+'|'+isnull(column_default,'')+'|'+"
                 "isnull(cast(character_maximum_length as varchar),'')+'|'+"
                 "isnull(cast(numeric_precision as varchar),'')+'|'+"
-                "isnull(collation_name,'')"
+                "isnull(collation_name,''),"
+                " table_schema+'.'+table_name"
                 " from information_schema.columns order by 1")
-        sc = {r[0].split("|", 1)[0]: r[0] for r in self._cmd("src", db, colq)}
-        dc = {r[0].split("|", 1)[0]: r[0] for r in self._cmd("dst", db, colq)}
+        sc = {r[0].split("|", 1)[0]: r[0] for r in
+              self._scoped_rows(db, self._cmd("src", db, colq), 1)}
+        dc = {r[0].split("|", 1)[0]: r[0] for r in
+              self._scoped_rows(db, self._cmd("dst", db, colq), 1)}
         drift = [k for k in sorted(sc) if k in dc and sc[k] != dc[k]]
         if drift:
             out = self.hop.report_dir(db) / "deep-columns.diff"
@@ -838,7 +845,7 @@ class MSSQLEngine(DbapiRows, Engine):
                           " i2.index_id=ic2.index_id and i2.is_primary_key=1"
                           " where ic2.object_id=t.object_id)")
         ahead, behind, n = [], [], 0
-        for t, c in pk_rows:
+        for t, c in self._scoped_rows(db, pk_rows):
             n += 1
             try:
                 q = (f"select isnull(max({self._q(c)}),0) from"
@@ -1081,7 +1088,10 @@ class MSSQLEngine(DbapiRows, Engine):
         tables = sorted({f.name[len("data-"):].rsplit(".", 1)[0]
                          for k in ("missing", "changed", "extra")
                          for f in d.glob(f"data-*.{k}")})
-        out = []
+        # a drilldown of a table the hop has since left out is said, never
+        # acted on
+        tables, said = self._drills_in_scope(db, tables)
+        out = [said] if said else []
         for t in tables:
             n = {k: sum(1 for x in (d / f"data-{t}.{k}").read_text()
                         .splitlines() if x)
@@ -1335,7 +1345,7 @@ class MSSQLEngine(DbapiRows, Engine):
             side, db, "select s.name + '.' + t.name from sys.tables t join"
                       " sys.schemas s on s.schema_id = t.schema_id where"
                       " t.is_ms_shipped = 0 order by 1")
-            if not self.hop.excluded(db, *t.split(".", 1))]
+            if self.in_scope(db, t)]
 
     def column_facts(self, side, db, table):
         """Whether each column takes NULL, and the collation its text is

@@ -2108,6 +2108,7 @@ def _said_outcome(outcome):
 
 
 def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
+    from .engines.base import LEFT_OUT
     _lend_console(eng)
     for i, a in enumerate(actions):
         console.print(f"\n[bold]{_esc(a.kind)} on {_esc(a.scope)}[/bold]"
@@ -2119,6 +2120,9 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
             say_raw(f"  {s}")
         if len(a.statements) > 20:
             console.print(f"  ... {len(a.statements) - 20} more")
+        if a.kind == LEFT_OUT:
+            # said with the plan, nothing to carry out
+            continue
         ladder = _ladder(hop, eng, db, a)
         if ladder is not None and ladder.ready:
             console.print(f"  {ladder.foreseen()}")

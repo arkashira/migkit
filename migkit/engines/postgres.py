@@ -1072,8 +1072,7 @@ class PostgresEngine(Engine):
         from .. import drift
         got = self.user_tables(side, db)
         working = drift.transient_among(got)
-        return [t for t in got if t not in working
-                and not self.hop.excluded(db, *self._split(t))]
+        return [t for t in got if t not in working and self.in_scope(db, t)]
 
     def column_catalog(self, side, db):
         """{schema.table: [(column, declared type), ...]} of every relation,
@@ -3683,7 +3682,7 @@ select json_build_object(
         can only call every column the hop drops or renames a
         difference."""
         out = {self._split(t) for t in self._all_tables(side, db)
-               if self.hop.excluded(db, *self._split(t))}
+               if not self.in_scope(db, t)}
         for t in self.mapped_tables(db):
             sch, tbl = self._split(t)
             if side == "dst":
@@ -3696,7 +3695,10 @@ select json_build_object(
     def _dump_schema_native(self, side, db, physical=None):
         from .. import leftovers as _lo
         from ..movers import _pg_pattern
-        left = [a for sch, tbl in sorted(self._left_out_of_schema(db, side))
+        # the views, materialized views and sequences the hop leaves out
+        # with the tables: the dump's table switch takes every relation
+        left = [a for sch, tbl in sorted(self._left_out_of_schema(db, side)
+                                         | self._objects_not_taken(side, db))
                 for a in ("--exclude-table", _pg_pattern(f"{sch}.{tbl}"))]
         argv, env = self._client(
             side, db, "pg_dump", "--schema-only", "--no-owner",
@@ -3810,7 +3812,8 @@ select json_build_object(
                           if getattr(v, "schema", k) in NOT_DATA_SCHEMAS
                           or k in NOT_DATA_SCHEMAS]:
                     del schemas[k]
-            left = self._left_out_of_schema(db, side)
+            left = (self._left_out_of_schema(db, side)
+                    | self._objects_not_taken(side, db))
             if not left:
                 continue
             for kind in self._DIFF_KINDS:
@@ -3952,7 +3955,8 @@ select json_build_object(
         from ..leftovers import NOT_DATA_SCHEMAS
         return ["__*", "*.migkit_changelog", *sorted(NOT_DATA_SCHEMAS)] + [
             f"{sch}.{tbl}" for side in ("src", "dst")
-            for sch, tbl in sorted(self._left_out_of_schema(db, side))]
+            for sch, tbl in sorted(self._left_out_of_schema(db, side)
+                                   | self._objects_not_taken(side, db))]
 
     def _not_run(self, db, scope, why):
         """A reading of the schema that did not run, said as such - in
@@ -4070,7 +4074,8 @@ select json_build_object(
         write_atomic(out, p.stdout)
         noise = self._noise()
         left = {f"{sch}.{tbl}" for side in ("src", "dst")
-                for sch, tbl in self._left_out_of_schema(db, side)}
+                for sch, tbl in self._left_out_of_schema(db, side)
+                | self._objects_not_taken(side, db)}
         bad = []
         for head, items in self._liquibase_sections(p.stdout):
             # the database's own name is the hop's db_map, not a difference
@@ -4115,12 +4120,57 @@ select json_build_object(
                              or name.rsplit(".", 1)[0] in whole
                              or str(name).split(".")[0] in NOT_DATA_SCHEMAS)
 
+    #: the inventory's kinds that are not on one table, each the hop takes
+    #: or leaves by its own name (`_object_left_out`)
+    OWN_NAMED = ("view", "matview", "sequence", "function", "procedure")
+
+    def _object_left_out(self, side, db):
+        """A predicate on an object of a side - its kind and `schema.name`
+        as the inventory names it - true where the hop leaves it out: a
+        table, view or materialized view by its own name (`in_scope`), a
+        routine by its name without its arguments, a sequence by the table
+        whose column it feeds (`_seq_owned`) and else by its own name. The
+        inventory, the owners, the grants and the schema fix read this one
+        answer: the views, sequences and functions of tables the hop left
+        out were compared, and the schema fix made them on the target."""
+        from ..config import scoped
+        owned = self._seq_owned(side, db) if scoped(self.hop) else {}
+
+        def out(kind, name):
+            name = str(name)
+            if kind.lower() in ("function", "procedure", "routine"):
+                name = name.split("(", 1)[0]
+            elif name in owned:
+                name = ".".join(owned[name][:2])
+            return not self.in_scope(db, name)
+        return out
+
+    def _objects_not_taken(self, side, db):
+        """{(schema, name)} of the views, materialized views, sequences
+        and routines on a side that the hop leaves out (`_object_left_out`):
+        what the schema comparers and the schema fix leave out beside the
+        tables, so the fix never makes one on the target. Nothing for a hop
+        that takes everything, which is read as it always was."""
+        from ..config import scoped
+        if not scoped(self.hop):
+            return set()
+        out = self._object_left_out(side, db)
+        got = set()
+        for line in self._psql(side, db, INVENTORY_SQL).splitlines():
+            kind, _, name = line.partition("|")
+            if kind in self.OWN_NAMED and out(kind, name):
+                if kind in ("function", "procedure"):
+                    name = name.split("(", 1)[0]
+                got.add(self._split(name))
+        return got
+
     def check_objects(self, db):
         from .. import drift
         sides = {}
         for side in ("src", "dst"):
             m = {}
             left = self._objects_left_out_of_schema(db, side)
+            out = self._object_left_out(side, db)
             lines = [l.partition("|")[::2] for l in
                      self._psql(side, db, INVENTORY_SQL).splitlines()]
             # an online schema change's working tables, with what hangs off
@@ -4131,6 +4181,8 @@ select json_build_object(
             for t, name in lines:
                 if left(name) or (t == "trigger"
                                   and drift.transient_trigger(name)):
+                    continue
+                if t in self.OWN_NAMED and out(t, name):
                     continue
                 if name in working or name.rsplit(".", 1)[0] in working \
                         or (t != "table" and drift.transient(name, tables)):
@@ -4344,7 +4396,26 @@ select json_build_object(
         from .. import drift
         if drift.maybe_transient(t) and t in self._working_tables(db):
             return False
-        return not self.hop.excluded(db, sch, tbl)
+        return self.in_scope(db, t)
+
+    def in_scope(self, db, table):
+        """`Engine.in_scope`, a table without its schema read in `public`
+        as `_split` reads it: `regclass` names a table on the search path
+        without one, and `orders` asked as itself missed an `include` of
+        `appdb.public.orders`."""
+        return not self.hop.excluded(db, *self._split(table))
+
+    def _scoped(self, db, lines, sep="|"):
+        """The lines of a listing - catalogue rows whose first field, up to
+        `sep`, is the table they are about - that are of a table the hop
+        takes (`in_scope`). Every deep check, inventory and repair reads
+        its tables through it, so none reads one the hop leaves out: a
+        keyless or drifted table the move never took made the deep check
+        say different (backlog P0-SCOPE.6b)."""
+        if isinstance(lines, str):
+            lines = lines.splitlines()
+        return [l for l in lines
+                if l and self.in_scope(db, l.split(sep, 1)[0])]
 
     def _working_tables(self, db):
         """The tables an online schema change is working in, on either
@@ -5249,9 +5320,12 @@ select json_build_object(
         """
         findings, checked = [], 0
         try:
+            # an extension's table by its own name, as the hop's scope
+            # reads every table
             rows = [l.split("\t") for l in
                     self._psql("src", db, self.EXTENSION_DATA).splitlines()
-                    if l]
+                    if l.count("\t") == 1
+                    and self.in_scope(db, l.split("\t")[1])]
             for ext, table in rows:
                 checked += 1
                 try:
@@ -5277,7 +5351,7 @@ select json_build_object(
             out = self._psql(side, db, self.RLS_FILTERED)
         except Exception:
             return None
-        return [line for line in out.splitlines() if line]
+        return self._scoped(db, out)
 
     @staticmethod
     def _failed_tables(out):
@@ -5303,8 +5377,12 @@ select json_build_object(
         are told apart by whether any table exists on both sides.
         """
         n, rows_src, rows_dst, bad = self._parse_fast(out)
-        st = set(self._psql("src", db, self.USER_TABLES).splitlines())
-        dt = set(self._psql("dst", db, self.USER_TABLES).splitlines())
+        # the tables the hop takes, as the pass these counts come from
+        # reads them: one it leaves out, on one side only, is the target's
+        st = {t for t in self._psql("src", db, self.USER_TABLES).splitlines()
+              if t and self._keep_tbl(db, t)}
+        dt = {t for t in self._psql("dst", db, self.USER_TABLES).splitlines()
+              if t and self._keep_tbl(db, t)}
         bad += [f"{t} missing on target" for t in sorted(st - dt)]
         bad += [f"{t} extra on target" for t in sorted(dt - st)]
         if bad:
@@ -5593,7 +5671,7 @@ select json_build_object(
             f" and t.typname = any(array{list(self.TOAST_TYPES)}::name[])"
             " order by 1")
         out = []
-        for line in rows.splitlines():
+        for line in self._scoped(db, rows, "\t"):
             parts = line.split("\t")
             if len(parts) == 3:
                 out.append((parts[0], parts[1], parts[2]))
@@ -5737,8 +5815,8 @@ select json_build_object(
         try:
             for side in sides:
                 label = "source" if side == "src" else "target"
-                for line in self._psql(side, db,
-                                       self.UNIQUE_TEXT_INDEXES).splitlines():
+                for line in self._scoped(db, self._psql(
+                        side, db, self.UNIQUE_TEXT_INDEXES), "\t"):
                     parts = line.split("\t")
                     if len(parts) != 4:
                         continue
@@ -5795,6 +5873,20 @@ select json_build_object(
         " and c.data_type in ('text','character varying','character')"
         " order by 1")
 
+    def _text_columns(self, side, db):
+        """{schema.table: [text column]} on a side, of the tables the hop
+        takes (`TEXT_COLUMNS`, `_scoped`): what the mojibake check samples
+        on the source and its repair rewrites on the target, read one way -
+        the repair read every table of the target, and with
+        MIGKIT_REPAIR_TEXT updated tables the hop leaves out."""
+        cols = {}
+        for line in self._scoped(db, self._psql(side, db, self.TEXT_COLUMNS),
+                                 "\t"):
+            parts = line.split("\t")
+            if len(parts) == 2:
+                cols.setdefault(parts[0], []).append(parts[1])
+        return cols
+
     def _mojibake(self, db):
         """Sample the non-ASCII rows of every text column on the source.
 
@@ -5806,12 +5898,7 @@ select json_build_object(
         """
         findings, scanned = [], 0
         try:
-            cols = {}
-            for line in self._psql("src", db,
-                                   self.TEXT_COLUMNS).splitlines():
-                parts = line.split("\t")
-                if len(parts) == 2:
-                    cols.setdefault(parts[0], []).append(parts[1])
+            cols = self._text_columns("src", db)
             for table, columns in sorted(cols.items()):
                 sch, tbl = self._split(table)
                 quoted = [_ident(c) for c in columns]
@@ -5894,6 +5981,41 @@ select json_build_object(
         "||coalesce(pg_database_collation_actual_version(oid), '')"
         " from pg_database where datname = current_database()")
 
+    #: Each versioned collation with a table that uses it - by a column,
+    #: or by an index on the table - so a hop that takes some tables asks
+    #: only about the collations those use (`_collations_taken`).
+    COLLATION_USERS = (
+        "select c.collname||chr(9)||n.nspname||'.'||t.relname"
+        " from pg_collation c"
+        " join pg_attribute a on a.attcollation = c.oid and a.attnum > 0"
+        "  and not a.attisdropped"
+        " join pg_class t on t.oid = a.attrelid and t.relkind not in"
+        "  ('i', 'I')"
+        " join pg_namespace n on n.oid = t.relnamespace"
+        " where c.collversion is not null and c.collversion <> ''"
+        " and n.nspname not in ('pg_catalog','information_schema')"
+        " union"
+        " select c.collname||chr(9)||n.nspname||'.'||t.relname"
+        " from pg_index i"
+        " join pg_class t on t.oid = i.indrelid"
+        " join pg_namespace n on n.oid = t.relnamespace"
+        " join pg_collation c on c.oid = any (i.indcollation)"
+        " where c.collversion is not null and c.collversion <> ''"
+        " and n.nspname not in ('pg_catalog','information_schema')")
+
+    def _collations_taken(self, side, db):
+        """The versioned collations a table the hop takes uses, on a side,
+        or None for a hop that takes everything - which asks of every
+        collation in use, as it always did. A collation only a table the
+        hop leaves out sorts by is not the move's to report."""
+        from ..config import scoped
+        if not scoped(self.hop):
+            return None
+        return {line.split("\t", 1)[0] for line in self._psql(
+                    side, db, self.COLLATION_USERS).splitlines()
+                if "\t" in line
+                and self.in_scope(db, line.split("\t", 1)[1])}
+
     def _collation_versions(self, db):
         """Both sides, because this is a property of the machine underneath
         each one - and a migration is usually the moment the two machines
@@ -5903,8 +6025,14 @@ select json_build_object(
             label = "source" if side == "src" else "target"
             try:
                 rows = self._psql(side, db, self.COLLATION_DRIFT)
-                checked += int(self._psql(side, db,
-                                          self.COLLATION_COUNT).strip() or 0)
+                taken = self._collations_taken(side, db)
+                if taken is None:
+                    checked += int(self._psql(
+                        side, db, self.COLLATION_COUNT).strip() or 0)
+                else:
+                    rows = "\n".join(l for l in rows.splitlines()
+                                     if l.split("\t", 1)[0] in taken)
+                    checked += len(taken)
                 if int(self._psql(side, db,
                                   "select current_setting("
                                   "'server_version_num')::int").strip()
@@ -5970,7 +6098,7 @@ select json_build_object(
                 return Result("deep", f"{db} indexes", "error",
                               f"could not read the {label}'s indexes:"
                               f" {str(e).splitlines()[-1][:90]}")
-            for line in out.splitlines():
+            for line in self._scoped(db, out, "\t"):
                 parts = line.split("\t")
                 if len(parts) != 5:
                     continue
@@ -6197,6 +6325,14 @@ select json_build_object(
         from .. import envkeys
         if not envkeys.flag("MIGKIT_CROSSCHECK"):
             return None
+        from ..config import scoped
+        if scoped(self.hop):
+            # it reads the two databases whole and cannot be told what the
+            # hop leaves out, whose differences are not the move's
+            return Result("deep", f"{db} schema cross-check", "skip",
+                          "the second reading compares whole databases and"
+                          " this hop takes only some of this one, so the"
+                          " schema check above stands on one reading")
         from ..movers import pgcopydb_available
         from ..util import run
         if not pgcopydb_available():
@@ -6335,7 +6471,7 @@ select json_build_object(
         except Exception:
             autovacuum_on = False
         reachable = set()
-        for line in out.splitlines():
+        for line in self._scoped(db, out, "\t"):
             parts = line.split("\t")
             if len(parts) != 5:
                 continue
@@ -6924,7 +7060,7 @@ select json_build_object(
         # a table with no pk/unique is the quiet trap: DMS and GoldenGate drop
         # its UPDATE/DELETE during CDC and duplicate it on full+CDC, and it
         # can't be verified or repaired by key. Surface it before it bites.
-        nopk = [l for l in self._psql("src", db,
+        nopk = self._scoped(db, self._psql("src", db,
                 "select n.nspname||'.'||c.relname from pg_class c"
                 " join pg_namespace n on n.oid = c.relnamespace"
                 " where c.relkind = 'r'"
@@ -6935,7 +7071,7 @@ select json_build_object(
                 " and not exists (select 1 from pg_index i"
                 "  where i.indrelid = c.oid"
                 "  and (i.indisprimary or i.indisunique))"
-                " order by 1").splitlines() if l]
+                " order by 1"))
         if nopk:
             res.append(Result("deep", f"{db} keys", "diff",
                               f"{len(nopk)} tables have no pk/unique"
@@ -7000,17 +7136,25 @@ select json_build_object(
         # schema; code that relies on deferred checks (bulk reorder inside one
         # transaction) then fails with a constraint violation that never
         # happened on the source. Diff the deferral flags per constraint.
-        dfq = ("select conrelid::regclass::text||'.'||conname||'|'"
+        # each line after the table it is on, which decides its scope
+        dfq = ("select tn.nspname||'.'||t.relname||chr(31)"
+               "||conrelid::regclass::text||'.'||conname||'|'"
                "||condeferrable||'|'||condeferred from pg_constraint c"
                " join pg_namespace n on n.oid = c.connamespace"
+               " join pg_class t on t.oid = c.conrelid"
+               " join pg_namespace tn on tn.oid = t.relnamespace"
                " where c.contype in ('p','u','f','c') and c.conrelid <> 0"
                " and n.nspname not in ('pg_catalog','information_schema')"
                " and n.nspname not like 'pg\\_%'"
                " and n.nspname not like '\\_\\_%'")
-        sdf = {l.split("|", 1)[0]: l.split("|", 1)[1] for l in
-               self._psql("src", db, dfq).splitlines() if "|" in l}
-        ddf = {l.split("|", 1)[0]: l.split("|", 1)[1] for l in
-               self._psql("dst", db, dfq).splitlines() if "|" in l}
+
+        def deferral(side):
+            lines = [l.split("\x1f", 1)[1] for l in
+                     self._scoped(db, self._psql(side, db, dfq), "\x1f")
+                     if "\x1f" in l]
+            return {l.split("|", 1)[0]: l.split("|", 1)[1] for l in lines
+                    if "|" in l}
+        sdf, ddf = deferral("src"), deferral("dst")
         defer = [f"{k}: src deferrable/deferred={sdf[k]} dst={ddf[k]}"
                  for k in sorted(sdf) if k in ddf and sdf[k] != ddf[k]]
         if defer:
@@ -7028,7 +7172,7 @@ select json_build_object(
         # as) sees only policy-permitted rows, so counts and checksums can be
         # a filtered subset with no error. And RLS enabled with zero policies
         # is default-deny - the table looks empty to everyone but the owner.
-        rls = [l.split("|") for l in self._psql("src", db,
+        rls = [l.split("|") for l in self._scoped(db, self._psql("src", db,
                "select n.nspname||'.'||c.relname||'|'||"
                "(select count(*) from pg_policies p"
                " where p.schemaname = n.nspname and p.tablename = c.relname)"
@@ -7036,7 +7180,7 @@ select json_build_object(
                " where c.relkind = 'r' and c.relrowsecurity"
                " and n.nspname not in ('pg_catalog','information_schema')"
                " and n.nspname not like 'pg\\_%'"
-               " and n.nspname not like '\\_\\_%'").splitlines() if l]
+               " and n.nspname not like '\\_\\_%'"))]
         if rls:
             # the same rule the counts and data passes use, asked once:
             # an owner reads its own tables in full unless they are FORCEd,
@@ -7065,12 +7209,15 @@ select json_build_object(
             res.append(Result("deep", f"{db} rls", "ok",
                               "no row-level security in use"))
 
+        # a trigger by the table it sits on
         trg = [l.split("\t") for l in
-               self._psql("dst", db, self.TARGET_TRIGGERS).splitlines() if l]
+               self._psql("dst", db, self.TARGET_TRIGGERS).splitlines()
+               if l.count("\t") == 2 and self.in_scope(db, l.split("\t")[1])]
         dis = [name for name, table, state in trg if state == "D"]
         # only the tables a load would write: one that exists on the target
         # alone is never written, and naming it would be noise
-        writable = set(self._psql("src", db, self.USER_TABLES).splitlines())
+        writable = set(self._scoped(db, self._psql("src", db,
+                                                   self.USER_TABLES)))
         quieted = sorted(name for name, table, state in trg
                          if state != "D" and table in writable)
         res.append(self._trigger_result(
@@ -7079,7 +7226,9 @@ select json_build_object(
             " need - an audit row, a maintained counter - in which case"
             " that work has to happen another way"))
 
-        colq = ("select table_schema||'.'||table_name||'.'||column_name"
+        # each line after the table it is on, which decides its scope
+        colq = ("select table_schema||'.'||table_name||chr(31)"
+                "||table_schema||'.'||table_name||'.'||column_name"
                 "||'|'||coalesce(data_type,'')||'|'||is_nullable"
                 "||'|'||coalesce(column_default,'')"
                 "||'|'||coalesce(character_maximum_length::text,'')"
@@ -7091,10 +7240,13 @@ select json_build_object(
                 " and table_schema not like 'pg\\_%'"
                 " and table_schema not like '\\_\\_%'"
                 f" and table_name not in {OWN_SQL} order by 1")
-        sc = {l.split("|", 1)[0]: l for l in
-              self._psql("src", db, colq).splitlines() if l}
-        dc = {l.split("|", 1)[0]: l for l in
-              self._psql("dst", db, colq).splitlines() if l}
+
+        def columns(side):
+            lines = [l.split("\x1f", 1)[1] for l in
+                     self._scoped(db, self._psql(side, db, colq), "\x1f")
+                     if "\x1f" in l]
+            return {l.split("|", 1)[0]: l for l in lines}
+        sc, dc = columns("src"), columns("dst")
         ignores = self._ignore_patterns()
         drift = [f"src {sc[k]}\ndst {dc[k]}" for k in sorted(sc)
                  if k in dc and sc[k] != dc[k]
@@ -7160,7 +7312,7 @@ select json_build_object(
                " and n.nspname not like '\\_\\_%'"
                f" and c.relname not in {OWN_SQL} order by 1")
         shifts = []
-        for tc in [l for l in self._psql("src", db, tsq).splitlines() if l][:10]:
+        for tc in self._scoped(db, self._psql("src", db, tsq))[:10]:
             tbl, col = tc.split("|", 1)
             pks = self._pk_cols_of(db, tbl)
             if len(pks) != 1:
@@ -7200,7 +7352,7 @@ select json_build_object(
                 " and n.nspname not like '\\_\\_%'"
                 f" and c.relname not in {OWN_SQL} order by 1")
         neq = []
-        for tc in [l for l in self._psql("src", db, txtq).splitlines() if l][:30]:
+        for tc in self._scoped(db, self._psql("src", db, txtq))[:30]:
             tbl, col = tc.split("|", 1)
             sch2, t2 = self._split(tbl)
             q = (f'select count(*) filter (where {_ident(col)} is null)||\'|\'||'
@@ -7236,7 +7388,7 @@ select json_build_object(
                        f" validation); source is {se}")
         elif se != de:
             enc.append(f"server_encoding differs: src={se} dst={de}")
-        for tc in [l for l in self._psql("src", db, txtq).splitlines() if l][:30]:
+        for tc in self._scoped(db, self._psql("src", db, txtq))[:30]:
             tbl, col = tc.split("|", 1)
             sch2, t2 = self._split(tbl)
             c = _ident(col)
@@ -7288,7 +7440,7 @@ select json_build_object(
 
         def _genmap(side):
             out = {}
-            for l in self._psql(side, db, genq).splitlines():
+            for l in self._scoped(db, self._psql(side, db, genq)):
                 p = l.split("|", 3)
                 if len(p) == 4:
                     out[p[0] + "|" + p[1]] = (p[2], p[3])
@@ -7357,7 +7509,7 @@ select json_build_object(
 
         def _uqmap(side):
             out = {}
-            for l in self._psql(side, db, uq).splitlines():
+            for l in self._scoped(db, self._psql(side, db, uq)):
                 p = l.split("|")
                 if len(p) == 3:
                     out[p[0] + "|" + p[1]] = p[2]
@@ -7412,7 +7564,7 @@ select json_build_object(
         # caught without false-flagging a bit-identical copy. This is a
         # diagnostic layer; the row checksum stays exact.
         tol = float(self.hop.options.get("float_tolerance", 1e-9))
-        fcols = [l for l in self._psql("src", db,
+        fcols = self._scoped(db, self._psql("src", db,
                  "select n.nspname||'.'||c.relname||'|'||a.attname"
                  " from pg_attribute a join pg_class c on c.oid = a.attrelid"
                  " join pg_namespace n on n.oid = c.relnamespace"
@@ -7422,7 +7574,7 @@ select json_build_object(
                  " and n.nspname not in ('pg_catalog','information_schema')"
                  " and n.nspname not like 'pg\\_%'"
                  " and n.nspname not like '\\_\\_%'"
-                 f" and c.relname not in {OWN_SQL}").splitlines() if l]
+                 f" and c.relname not in {OWN_SQL}"))
         fbad = []
         for tc in fcols[:10]:
             tbl, col = tc.split("|", 1)
@@ -7483,7 +7635,7 @@ select json_build_object(
                " ('money','point','polygon','path','circle','box','line',"
                "'lseg','tsvector','tsquery','xml','interval','bit','varbit'))")
         exotic = [l.split("|") for l in
-                  self._psql("src", db, exq).splitlines() if l][:20]
+                  self._scoped(db, self._psql("src", db, exq))][:20]
 
         _esc = _literal
 
@@ -7537,11 +7689,13 @@ select json_build_object(
                           " consider options.checksum: jsonb" if drifts
                           else ""))
 
-        mvs = [l for l in self._psql("src", db,
+        # a materialized view the hop names in its include or exclude, by
+        # its own name
+        mvs = self._scoped(db, self._psql("src", db,
                "select n.nspname||'.'||c.relname from pg_class c"
                " join pg_namespace n on n.oid = c.relnamespace"
                " where c.relkind = 'm'"
-               " and n.nspname not like '\\_\\_%'").splitlines() if l]
+               " and n.nspname not like '\\_\\_%'"))
         stale = []
         for m in mvs:
             try:
@@ -7659,6 +7813,7 @@ select json_build_object(
                f" and c.relname not in {OWN_SQL} order by 1")
         spk = [l.split("|") for l in
                self._psql("src", db, pkq).splitlines() if l]
+        spk = [p for p in spk if self.in_scope(db, f"{p[0]}.{p[1]}")]
         dpk = {tuple(l.split("|")[:2]) for l in
                self._psql("dst", db, pkq).splitlines() if l}
         both = [(s, t, c) for s, t, c in spk if (s, t) in dpk]
@@ -7825,14 +7980,21 @@ select json_build_object(
         """
         want = ", ".join(f"{_literal(k)}" for k in kinds)
         rows = self._psql(side, db, f"""
-            select conrelid::regclass::text||chr(31)||conname||chr(31)
+            select tn.nspname||'.'||t.relname||chr(31)
+                   ||conrelid::regclass::text||chr(31)||conname||chr(31)
                    ||pg_get_constraintdef(c.oid)
               from pg_constraint c
               join pg_namespace n on n.oid = c.connamespace
+              join pg_class t on t.oid = c.conrelid
+              join pg_namespace tn on tn.oid = t.relnamespace
              where c.contype in ({want}) and not c.convalidated
                and n.nspname not like '\\_\\_%'
-             order by 1""").splitlines()
-        return [tuple(r.split("\x1f", 2)) for r in rows if r.count("\x1f") == 2]
+             order by conrelid::regclass::text, conname""").splitlines()
+        # only the tables the hop takes: the repair validates what this
+        # returns, and a table the hop leaves out is the target's own
+        return [tuple(r.split("\x1f", 3)[1:])
+                for r in self._scoped(db, rows, "\x1f")
+                if r.count("\x1f") == 3]
 
     def _constraint_repair(self, db):
         """Finish the validation the load skipped.
@@ -7976,6 +8138,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
 
         def read(side):
             out = set()
+            left = self._object_left_out(side, db)
             for line in self._psql(side, db,
                                    self._grants_sql(side, db)).splitlines():
                 parts = line.split("\x1f")
@@ -7983,8 +8146,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     continue
                 who, kind, obj, col, priv, grantable, sch, name = parts
                 if kind in ("TABLE", "SEQUENCE", "COLUMN") and (
-                        (noise and name.startswith(noise))
-                        or self.hop.excluded(db, sch, name)):
+                        noise and name.startswith(noise)):
+                    continue
+                # a table's, a sequence's, a column's and a routine's grant
+                # by the object it is on; the schema's, the database's and
+                # the default privileges are of what the hop takes too
+                if kind in ("TABLE", "SEQUENCE", "COLUMN", "FUNCTION",
+                            "PROCEDURE") and left(kind, f"{sch}.{name}"):
                     continue
                 out.add("\x1f".join((who, kind, obj, col, priv, grantable)))
             return out
@@ -8203,12 +8371,22 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         it, and checking it twice is how two copies drift apart.
         """
         from .. import ownership as _own
+
+        def owners(side):
+            # a schema's owner stays: it is the schema of what is taken
+            out = self._object_left_out(side, db)
+            got = {}
+            for l in self._psql(side, db, self.OWNER_SQL).splitlines():
+                if "|" not in l:
+                    continue
+                what, owner = l.split("|", 1)
+                kind, _, name = what.partition(" ")
+                if kind != "schema" and out(kind, name):
+                    continue
+                got[what] = owner
+            return got
         try:
-            a = dict(l.split("|", 1) for l in
-                     self._psql("src", db, self.OWNER_SQL).splitlines() if "|" in l)
-            b = dict(l.split("|", 1) for l in
-                     self._psql("dst", db,
-                                self.OWNER_SQL).splitlines() if "|" in l)
+            a, b = owners("src"), owners("dst")
         except RuntimeError as e:
             return [Result("deep", f"{db} ownership", "warn",
                            f"cannot read owners: {str(e).splitlines()[-1][:90]}"
@@ -8326,7 +8504,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     tables.add(f.name[len("data-"):-len(".extra")])
                 for f in rpt.glob("data-*.changed"):
                     tables.add(f.name[len("data-"):-len(".changed")])
-            for t in sorted(tables):
+            # a drilldown of a table the hop has since left out is said,
+            # never acted on
+            taken, said = self._drills_in_scope(db, sorted(tables))
+            if said:
+                actions.append(said)
+            for t in taken:
                 if not self._keep_tbl(db, t):
                     continue
                 counts = []
@@ -8381,11 +8564,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         trigger's rows, a stamp rewritten - where every other write of
         migkit's into the target was quiet (audit 2026-10-01).
         """
-        cols = {}
-        for line in self._psql("dst", db, self.TEXT_COLUMNS).splitlines():
-            parts = line.split("\t")
-            if len(parts) == 2:
-                cols.setdefault(parts[0], []).append(parts[1])
+        cols = self._text_columns("dst", db)
         stmts, undo, touched, refused = [], [], set(), []
         repaired = clean = skipped = left = 0
         for table, columns in sorted(cols.items()):

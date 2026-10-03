@@ -88,7 +88,7 @@ class MongoEngine(Engine):
         c = self._client(side)[self._d(side, db)]
         return sorted(n for n in c.list_collection_names()
                       if not n.startswith("system.")
-                      and not self.hop.excluded(db, n))
+                      and self.in_scope(db, n))
 
     def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a collection")
@@ -992,7 +992,10 @@ class MongoEngine(Engine):
     def _shape(self, side, db):
         d = self._client(side)[self._d(side, db)]
         shape = {}
-        for name in sorted(d.list_collection_names()):
+        # the collections and views the hop takes, with their indexes: one
+        # it leaves out, on one side only, was "extra on target" every check
+        for name in sorted(n for n in d.list_collection_names()
+                           if self.in_scope(db, n)):
             idx = {}
             for i in d[name].list_indexes():
                 spec = {k: (str(v) if k == "key" else v)
@@ -1761,8 +1764,9 @@ class MongoEngine(Engine):
 
     def check_deep(self, db):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-        names = sorted(set(s.list_collection_names())
-                       & set(t.list_collection_names()))
+        names = sorted(n for n in set(s.list_collection_names())
+                       & set(t.list_collection_names())
+                       if self.in_scope(db, n))
 
         def newest(coll):
             d = coll.find_one(sort=[("_id", -1)], projection={"_id": 1})
@@ -2114,10 +2118,11 @@ class MongoEngine(Engine):
         names = sorted({f.name.split(".")[0][len("data-"):]
                         for k in ("missing", "extra", "changed")
                         for f in d.glob(f"data-*.{k}")})
-        actions = []
+        # a drilldown of a collection the hop has since left out is said,
+        # never acted on
+        names, said = self._drills_in_scope(db, names)
+        actions = [said] if said else []
         for name in names:
-            if self.hop.excluded(db, name):
-                continue
             counts = []
             for k in ("missing", "extra", "changed"):
                 f = d / f"data-{name}.{k}"
