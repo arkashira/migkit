@@ -5053,7 +5053,34 @@ the gaps nothing above covers yet, now items of their own.
   XMLType, object types and nested tables; SQL Server hierarchyid,
   sql_variant, FILESTREAM; Db2 DECFLOAT and GRAPHIC - mapped, carried,
   rendered for the digest, or refused before the move (the type-fidelity
-  research, 2026-09-28).
+  research, 2026-09-28). *Built 2026-10-04 (`migkit/commercial.py`, with
+  `canon`): each type is carried exactly, carried as something said and
+  refused unless the hop's `accept_changes` names the column, said and
+  left out as no data, or refused by name. SQL Server: a `sql_variant`
+  with its base type (class `variant`: read as the server's text of the
+  value and its type, written back through `convert` into that type, kept
+  elsewhere as JSON of both), a `hierarchyid` as its path, a
+  `datetimeoffset` with its offset where both sides keep one (class
+  `timestamp with offset`; dropped elsewhere only where accepted), money
+  at four places and inside its range, a `uniqueidentifier` beside
+  sixteen bytes in RFC order (asked first), shapes written through their
+  constructors and a polygon drawn clockwise refused by a geography, XML
+  refused into a column typed by a schema collection, a FILESTREAM column
+  carried as its bytes and said, a CLR type refused by name elsewhere and
+  carried as its bytes between two SQL Servers, `rowversion` said and left
+  out. Oracle: FLOAT a decimal (as a double it kept 17 of 38 digits),
+  NUMBER held to 38 digits and 1E-130..1E126, BINARY_FLOAT/DOUBLE NaN and
+  the infinities, TIMESTAMP WITH TIME ZONE with its zone (a region refused
+  into an offset), XMLType, SDO_GEOMETRY (8307 read as EPSG 4326), JSON
+  and BOOLEAN, object types and collections as JSON where accepted, BFILE
+  as its file's bytes where accepted, ROWID and UROWID said, ANYDATA
+  refused by name. Db2: DECFLOAT(16/34) at every digit with its NaN and
+  infinities and held to its digits and range as a target, XML, GRAPHIC
+  and VARGRAPHIC counted in UTF-16 units and CHAR/VARCHAR in bytes as
+  targets, distinct types as their source type, ROWID said. Teradata:
+  NUMBER held to 38 digits, a UDT refused by name. SAP ASE: `timestamp`
+  said, money held to its range. Not done: SAP HANA (no engine to read
+  it - W5).*
 * **W7. Resharding.** One database split across N targets by key, N
   merged into one with DDL coordinated (TiDB DM's shard merge), and a
   load that follows the target's own distribution (Citus, Vitess,

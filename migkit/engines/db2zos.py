@@ -40,6 +40,8 @@ DECLARED = ("case when coltype = 'DECIMAL' then 'DECIMAL(' ||"
             " rtrim(char(scale)) || ')'"
             " when coltype = 'FLOAT' and length = 4 then 'REAL'"
             " when coltype = 'FLOAT' then 'DOUBLE'"
+            " when coltype = 'DECFLOAT' then 'DECFLOAT(' || case when"
+            " length = 8 then '16' else '34' end || ')'"
             " else rtrim(coltype) end")
 
 #: why a z/OS source is not followed, in the words `assess` and the

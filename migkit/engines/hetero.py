@@ -1390,13 +1390,29 @@ class HeteroEngine(Engine):
             if missing:
                 notes.append("not carried, the target has no such column: "
                              + ", ".join(missing))
-        from .. import canon
+        from .. import canon, commercial
+        gone = [n for n in both
+                if commercial.not_data(self.src_engine.CANON_ENGINE,
+                                       src_types[n])
+                or commercial.not_data(self.dst_engine.CANON_ENGINE,
+                                       dst_types[n])]
+        if gone:
+            # a row version or a row's address, which the target writes of
+            # its own (`commercial.NOT_DATA`)
+            notes.append("not carried, not data - a row version or a row's"
+                         " address, which the target makes its own: "
+                         + ", ".join(gone))
+            both = [n for n in both if n not in gone]
         src_cols, dst_cols = [], []
         for name in both:
             s = canon.type_class(self.src_engine.CANON_ENGINE,
                                  src_types[name])
             d = canon.type_class(self.dst_engine.CANON_ENGINE,
                                  dst_types[name])
+            # an instant written with its offset where both keep one
+            s, d = canon.offset_class(
+                self.src_engine.CANON_ENGINE, src_types[name], s,
+                self.dst_engine.CANON_ENGINE, dst_types[name], d)
             typed = canon.bson_pair(self.src_engine.CANON_ENGINE,
                                     src_types[name],
                                     self.dst_engine.CANON_ENGINE,
@@ -2249,6 +2265,10 @@ class HeteroEngine(Engine):
         rules = self._carried_rules(db, src_table, back)
         columns, unknown = [], []
         same = self.src_engine.CANON_ENGINE == self.dst_engine.CANON_ENGINE
+        from .. import commercial
+        mine = (self.src_engine.column_facts("src", db, src_table)
+                if self.src_engine.CANON_ENGINE in commercial.ENGINES
+                and not same else {})
         from ..storedcode import sizing
         if (self.hop.options or {}).get("types_from_data") and not same:
             # the columns whose declaration leaves the domain open, read
@@ -2261,10 +2281,23 @@ class HeteroEngine(Engine):
                 # the same engine on both sides takes the source's own type
                 # as it is written. Through the classes, a `timestamptz`
                 # was built as `timestamp(6)` - the offset gone - and an
-                # `int` as `bigint`
-                columns.append((name, canon.OWN, (typ,),
+                # `int` as `bigint`. One that holds nothing of its own
+                # there (a BFILE) as what it is carried as
+                columns.append((name, canon.OWN, (commercial.own_type(
+                    self.src_engine.CANON_ENGINE, typ),),
                                 rules.get(name) or {}))
                 continue
+            said = commercial.not_data(self.src_engine.CANON_ENGINE, typ)
+            if said:
+                # not built: the target makes its own row versions and
+                # addresses, and the rows carry none (`_move_columns`)
+                self.rules_not_carried.append(f"{name}, {said}")
+                continue
+            lost = commercial.built_without(
+                self.src_engine.CANON_ENGINE, typ,
+                mine.get(back[name]), self.dst_engine.CANON_ENGINE)
+            if lost:
+                self.rules_not_carried.append(f"{name}: {lost}")
             if cls is None:
                 unknown.append(f"{name} ({typ})")
                 continue

@@ -18,7 +18,7 @@ from decimal import Decimal
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from migkit import canon, nanotime, render, rowtext
+from migkit import canon, commercial, nanotime, render, rowtext
 
 
 class _Sub(datetime.datetime):
@@ -93,6 +93,18 @@ VALUES = {
     | st.sampled_from(["0101000020E610000000000000002059400000000000802B40"])
     | st.text(max_size=6),
     "bson": _json | st.integers() | st.text(max_size=6),
+    # a sql_variant as SQL Server's read gives it, as the JSON another
+    # engine keeps it in, and what is neither
+    "variant": st.integers().map(
+        lambda n: commercial.Variant("int", n, str(n)))
+    | st.builds(lambda t, v: {"type": t, "value": v},
+                st.sampled_from(["int", "nvarchar(4)", "decimal(10,2)",
+                                 "float", "datetime2(7)",
+                                 "datetimeoffset(7)", "uniqueidentifier",
+                                 "varbinary(8)", "bit", "date"]),
+                st.text(max_size=8))
+    | st.text(max_size=6),
+    canon.OFFSET: _naive | _aware | st.text(max_size=3),
 }
 # the digits past the microsecond a value read at nine carries, and a
 # MySQL TIME, which the driver hands over as a duration

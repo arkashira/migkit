@@ -14,16 +14,27 @@ from .. import pieces
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 
-#: the declared type, with the numbers a counterpart needs
-DECLARED = ("case when typename in ('DECIMAL', 'NUMERIC') then typename"
-            " || '(' || length || ',' || scale || ')'"
-            " when typename in ('CHARACTER', 'VARCHAR', 'GRAPHIC',"
-            " 'VARGRAPHIC') and codepage = 0 then 'VARBINARY(' || length"
+#: a column's type: its own, or for a distinct type the built-in type it
+#: is made from (`syscat.datatypes`), whose values it holds - a distinct
+#: type was a name no other engine knew, and left the column unmapped
+_TYPE = ("coalesce((select d.sourcename from syscat.datatypes d where"
+         " d.typeschema = c.typeschema and d.typename = c.typename and"
+         " d.metatype = 'T'), c.typename)")
+
+#: the declared type of a column of `syscat.columns c`, with the numbers a
+#: counterpart needs: a DECFLOAT's digits, 16 or 34, by the 8 or 16 bytes
+#: its catalogue gives as its length
+DECLARED = ("case when {t} in ('DECIMAL', 'NUMERIC') then {t}"
+            " || '(' || c.length || ',' || c.scale || ')'"
+            " when {t} in ('CHARACTER', 'VARCHAR', 'GRAPHIC',"
+            " 'VARGRAPHIC') and c.codepage = 0 then 'VARBINARY(' || c.length"
             " || ')'"
-            " when typename in ('CHARACTER', 'VARCHAR', 'GRAPHIC',"
-            " 'VARGRAPHIC') then typename || '(' || length || ')'"
-            " when typename = 'TIMESTAMP' then 'TIMESTAMP(' || scale || ')'"
-            " else typename end")
+            " when {t} in ('CHARACTER', 'VARCHAR', 'GRAPHIC',"
+            " 'VARGRAPHIC') then {t} || '(' || c.length || ')'"
+            " when {t} = 'TIMESTAMP' then 'TIMESTAMP(' || c.scale || ')'"
+            " when {t} = 'DECFLOAT' then 'DECFLOAT(' || case when c.length"
+            " = 8 then '16' else '34' end || ')'"
+            " else {t} end").format(t=_TYPE)
 
 
 #: the engine each Db2 platform is, and how it is said
@@ -93,6 +104,14 @@ def large_values(sample=None):
         piece="substr({c}, {at}, {n})", sample=sample)
 
 
+def _decfloat(text):
+    """A DECFLOAT from the server's own text of it (`char`), which writes
+    every digit it holds and its NaN and infinities by name: the driver's
+    reading of one went through a double."""
+    from decimal import Decimal
+    return Decimal(str(text).strip())
+
+
 def _twelve(text):
     """A Db2 timestamp's text of twelve digits after the second as the
     value, nine kept; one with a digit past the ninth, which no other
@@ -137,10 +156,16 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
                 f"FF{12 if digits > 9 else 9}')")
 
     def _read_as(self, quoted, declared):
+        """A TIMESTAMP of more than nine digits (`_twelve`), a DECFLOAT as
+        its own text (`_decfloat`), an XML as its document's text."""
         from .. import canon
         name, nums = canon._split_declared(declared)
         if name == "timestamp" and nums and nums[0] > 9:
             return (self._nanos_text(quoted, declared), _twelve)
+        if name == "decfloat":
+            return (f"rtrim(char({quoted}))", _decfloat)
+        if name == "xml":
+            return (f"xmlserialize({quoted} as clob(2G))", str)
         return None
 
     #: the platform this engine's hops are on, as `platform_of` names it
@@ -197,9 +222,9 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
 
     def neutral_columns(self, side, db, table):
         return [(self._said(n.strip()), t.strip()) for n, t in self._rows(
-            side, db, f"select colname, {DECLARED} from syscat.columns"
-                      f" where tabschema = {MARK} and tabname = {MARK}"
-                      " order by colno",
+            side, db, f"select c.colname, {DECLARED} from syscat.columns c"
+                      f" where c.tabschema = {MARK} and c.tabname = {MARK}"
+                      " order by c.colno",
             (self._owner(side, db), self._q(table)[1:-1]))]
 
     def neutral_key(self, side, db, table):

@@ -68,6 +68,7 @@ import re as _re
 import uuid as _uuid
 from typing import NamedTuple
 
+from .commercial import Variant as _Variant
 from .pieces import Hashed as _Hashed
 
 # Neutral classes. An engine's declared type is mapped onto one of these and
@@ -76,7 +77,7 @@ from .pieces import Hashed as _Hashed
 CLASSES = ("integer", "decimal", "float", "boolean", "text", "bytes",
            "date", "timestamp", "time", "json", "own text", "number",
            "xml", "uuid", "inet", "json on one engine", "interval",
-           "vector", "geometry", "bson")
+           "vector", "geometry", "bson", "variant", "timestamp with offset")
 
 #: A duration as months, days and nanoseconds kept apart (`intervals`):
 #: PostgreSQL's and DuckDB's `interval`, Cassandra's `duration`, Oracle's
@@ -97,6 +98,15 @@ GEOMETRY = "geometry"
 #: (`bsontype`). Beside another engine's column a MongoDB field is
 #: `bson/<tag>` and the column `bson:<tag>` (`bson_pair`).
 BSON = "bson"
+#: A SQL Server `sql_variant`: its value with the base type it was stored
+#: as (`commercial.Variant`), kept elsewhere as the JSON of both
+VARIANT = "variant"
+#: An instant with the zone it was written in, between two columns that
+#: both keep one (`offset_class`): SQL Server's `datetimeoffset`, Oracle's
+#: TIMESTAMP WITH TIME ZONE. Rendered as the instant in UTC and the zone
+#: (`commercial.offset_render`), so `07:00 +07:00` and `00:00 +00:00` are
+#: one instant and two values
+OFFSET = "timestamp with offset"
 
 #: JSON compared between two columns of one engine and one type: that
 #: engine's own normal form of it, rendered on the server as it always was.
@@ -445,9 +455,13 @@ TYPES = {
     # through `to_decimal()` the same fixed-point text comes out as
     # PostgreSQL's `::text` and MySQL's `cast(... as char)` produce.
     # SQL Server, read through its driver and rendered in this process.
-    # Its `timestamp` is a row version, not a time, and `datetimeoffset`
-    # carries an offset the renderer would drop: both stay unmapped, as
-    # do `sql_variant`, `hierarchyid` and the spatial types.
+    # Its `timestamp` is a row version, not data (`commercial.NOT_DATA`);
+    # a `datetimeoffset` is an instant, compared with its offset where the
+    # other side keeps one too (`OFFSET`); a `sql_variant` is its value
+    # with its base type (`VARIANT`); a `hierarchyid` its canonical path,
+    # read as `ToString()` writes it; a CLR type of a user's own assembly
+    # stays unmapped, refused by name on its way anywhere else
+    # (`commercial.refused`).
     "mssql": {
         "tinyint": "integer", "smallint": "integer", "int": "integer",
         "bigint": "integer",
@@ -461,12 +475,12 @@ TYPES = {
         "binary": "bytes", "varbinary": "bytes", "image": "bytes",
         "date": "date",
         "datetime": "timestamp", "datetime2": "timestamp",
-        "smalldatetime": "timestamp",
+        "smalldatetime": "timestamp", "datetimeoffset": "timestamp",
         "time": "time",
-        # read as their SRID and binary (`read_as`); a shape written here
-        # goes in through its own constructor, which the row copy does
-        # not call, so into SQL Server the move refuses them
+        # read as their SRID and binary (`read_as`), and written through
+        # the type's own constructor (`commercial.mssql_shape_mark`)
         "geography": "geometry", "geometry": "geometry",
+        "sql_variant": VARIANT, "hierarchyid": "text",
     },
     # Parquet, by the Arrow type names a table's `_table.json` gives:
     # `decimal_text` is a decimal kept as its text, where the source
@@ -511,9 +525,14 @@ TYPES = {
     # instant it names, read in UTC by the server (`sys_extract_utc`), as
     # PostgreSQL's is read in a session pinned to UTC. `NUMBER` with no
     # scale holds integers and decimals alike, and renders the same text
-    # either way.
+    # either way; FLOAT is a NUMBER of binary precision, a decimal - as a
+    # double it kept fifteen of its thirty-eight digits. An XMLType is its
+    # document, an SDO_GEOMETRY its SRID and binary (`geo`), a BFILE the
+    # bytes of its file (refused unless accepted: `commercial`); an object
+    # type or collection (`"OWNER"."TYPE"`) the JSON of what it holds
+    # (`type_class`). ROWID and UROWID are not data, ANYDATA unmapped.
     "oracle": {
-        "number": "decimal", "integer": "decimal", "float": "float",
+        "number": "decimal", "integer": "decimal", "float": "decimal",
         "binary_float": "float", "binary_double": "float",
         "varchar2": "text", "nvarchar2": "text", "char": "text",
         "nchar": "text", "clob": "text", "nclob": "text", "long": "text",
@@ -527,6 +546,9 @@ TYPES = {
         "interval year to month": "interval",
         "interval day to second": "interval",
         "vector": "vector",
+        "xmltype": "xml", "sdo_geometry": "geometry", "bfile": "bytes",
+        # 21c's and 23ai's own
+        "json": "json", "boolean": "boolean",
     },
     # Db2 (LUW), by `syscat.columns` type names. A character column with
     # no code page holds bytes (`FOR BIT DATA`), and is declared VARBINARY
@@ -541,11 +563,12 @@ TYPES = {
         "dbclob": "text",
         "blob": "bytes", "binary": "bytes", "varbinary": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
+        "xml": "xml",
     },
     # Db2 for i, by `QSYS2.SYSCOLUMNS` type names as `engines.db2i` reads
     # them: NUMERIC is zoned, DECIMAL packed, both exact; VARG is
     # VARGRAPHIC and VARBIN VARBINARY; a CHAR of CCSID 65535 is read as
-    # VARBINARY. ROWID, XML and DATALINK stay unmapped
+    # VARBINARY. ROWID is not data; DATALINK stays unmapped
     "db2i": {
         "smallint": "integer", "integer": "integer", "bigint": "integer",
         "decimal": "decimal", "numeric": "decimal", "decfloat": "decimal",
@@ -556,6 +579,7 @@ TYPES = {
         "binary": "bytes", "varbin": "bytes", "varbinary": "bytes",
         "blob": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
+        "xml": "xml",
     },
     # Db2 for z/OS, by `SYSIBM.SYSCOLUMNS` COLTYPE as `engines.db2zos`
     # reads them; a column FOR BIT DATA is read as VARBINARY
@@ -568,6 +592,7 @@ TYPES = {
         "binary": "bytes", "varbin": "bytes", "varbinary": "bytes",
         "blob": "bytes",
         "date": "date", "timestamp": "timestamp", "time": "time",
+        "xml": "xml",
     },
     # A file described by a COBOL copybook, by the types `migkit.copybook`
     # gives its fields: how a number is stored, then what it is. A number
@@ -905,6 +930,10 @@ def type_class(engine, declared):
         k, v = _generic(inner, "map")
         return ("json" if type_class(engine, k) in ("text", "uuid", "inet")
                 and type_class(engine, v) in ARRAY_ELEMENTS else None)
+    if engine == "oracle" and base.startswith('"'):
+        # an object type or a collection of a schema's own: the JSON of
+        # its attributes or its elements (`commercial.oracle_value`)
+        return "json"
     if engine == "oracle" and base.startswith("interval"):
         import re
         # `INTERVAL DAY(2) TO SECOND(6)`: the numbers inside, not the name
@@ -1118,6 +1147,41 @@ def decimal_class(src, src_declared, dst, dst_declared):
     return NUMBER
 
 
+def offset_class(src, src_declared, scls, dst, dst_declared, dcls):
+    """(`OFFSET`, `OFFSET`) for a pair of timestamp columns that both keep
+    each value's own offset (`commercial.keeps_offset`) - compared, and
+    written, with it: as instants alone, `07:00 +07:00` written as `00:00
+    +00:00` compared equal. The classes as they are for any other pair."""
+    from . import commercial
+    if scls == dcls == "timestamp" \
+            and commercial.keeps_offset(dialect(src), src_declared) \
+            and commercial.keeps_offset(dialect(dst), dst_declared):
+        return OFFSET, OFFSET
+    return scls, dcls
+
+
+def pair_classes(src, src_declared, scls, dst, dst_declared, dcls):
+    """(source class, target class) a pair of columns of the commercial
+    engines' own types is compared as: an instant with its offset where
+    both keep one (`offset_class`); a `sql_variant` beside the JSON or the
+    text another engine keeps it in, as a `sql_variant` on both; sixteen
+    bytes beside a UUID, as the UUID they spell in RFC 4122 order (which
+    order a writer meant is the hop's to accept: `uuid-order`). Any other
+    pair as it is."""
+    from . import commercial
+    scls, dcls = offset_class(src, src_declared, scls, dst, dst_declared,
+                              dcls)
+    pair = {scls, dcls}
+    if VARIANT in pair and pair <= {VARIANT, "json", "text"}:
+        return VARIANT, VARIANT
+    if pair == {"uuid", "bytes"}:
+        eng, typ = ((src, src_declared) if scls == "bytes"
+                    else (dst, dst_declared))
+        if commercial.sixteen_bytes(dialect(eng), typ):
+            return "uuid", "uuid"
+    return scls, dcls
+
+
 def bson_pair(src, src_declared, dst, dst_declared):
     """(source class, target class) for a column with MongoDB on exactly
     one side, or None for any other pair: MongoDB's field `bson/<tag>`
@@ -1288,7 +1352,7 @@ def _float_text(d):
 #: `1e20` (measured on 8.4), `jsonb` keeps both as written, and a `json`
 #: value holding `\u0000` stopped the whole digest at `::jsonb`.
 FOLDED_HERE = frozenset({"json", "xml", "inet", INTERVAL, VECTOR, GEOMETRY,
-                         BSON})
+                         BSON, VARIANT, OFFSET})
 
 
 def folded_here(cls):
@@ -1364,6 +1428,10 @@ def uuid_text(value):
     every row."""
     if isinstance(value, _uuid.UUID):
         return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)) and len(value) == 16:
+        # sixteen bytes beside a UUID: the UUID they spell, in RFC 4122
+        # order (`pair_classes`)
+        return str(_uuid.UUID(bytes=bytes(value)))
     text = value if isinstance(value, str) else str(value)
     return text.lower() if len(text) == 36 and _UUID_RE.fullmatch(text) \
         else text
@@ -1552,6 +1620,12 @@ def render_value(cls, value):
     if cls == GEOMETRY:
         from . import geo
         return _or_uncomparable(geo.text, value)
+    if cls == VARIANT:
+        from . import commercial
+        return _or_uncomparable(commercial.variant_text, value)
+    if cls == OFFSET:
+        from . import commercial
+        return _or_uncomparable(commercial.offset_render, value)
     if cls == BSON or cls.startswith(bsontype_prefixes()):
         from . import bsontype
         if cls.startswith(bsontype.OTHER):
@@ -1574,8 +1648,8 @@ def _or_uncomparable(render, value):
     import struct
     try:
         return render(value)
-    except (ValueError, TypeError, IndexError, KeyError,
-            struct.error) as e:
+    except (ValueError, TypeError, IndexError, KeyError, AttributeError,
+            ArithmeticError, struct.error) as e:
         return uncomparable(f"{type(value).__name__}: {str(e)[:60]}")
 
 
@@ -1613,6 +1687,7 @@ DDL = {
         # `jsonb` sorts them; a key (and a value of one type no other
         # engine has) goes in `jsonb`, which can be one
         "bson": ("jsonb", "json"),
+        VARIANT: ("jsonb", "jsonb"),
     },
     "mysql": {
         OWN: ("text", "{0}"),
@@ -1636,6 +1711,7 @@ DDL = {
         "vector": ("vector", "vector({0})"),
         "geometry": ("geometry", "geometry"),
         "bson": ("json", "json"),
+        VARIANT: ("json", "json"),
     },
     "mssql": {
         OWN: ("nvarchar(max)", "{0}"),
@@ -1654,6 +1730,8 @@ DDL = {
         "json": ("nvarchar(max)", "nvarchar(max)"),
         "xml": ("xml", "xml"),
         "bson": ("nvarchar(max)", "nvarchar(max)"),
+        "geometry": ("geometry", "geometry"),
+        VARIANT: ("sql_variant", "sql_variant"),
     },
     "clickhouse": {
         # the source's own type, as `neutral_columns` reads it without its
@@ -1672,6 +1750,7 @@ DDL = {
         "timestamp": ("DateTime64(6)", "DateTime64({0})"),
         "vector": ("Array(Float32)", "Array(Float32)"),
         "bson": ("String", "String"),
+        VARIANT: ("String", "String"),
     },
     "oracle": {
         # Oracle to Oracle makes a column as the source declares it, as
@@ -1689,6 +1768,11 @@ DDL = {
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "vector": ("VECTOR", "VECTOR({0}, FLOAT32)"),
         "bson": ("CLOB", "CLOB"),
+        "xml": ("XMLTYPE", "XMLTYPE"),
+        "geometry": ("SDO_GEOMETRY", "SDO_GEOMETRY"),
+        # the type of 21c and later
+        "json": ("JSON", "JSON"),
+        VARIANT: ("CLOB", "CLOB"),
     },
     "db2": {
         OWN: ("CLOB", "CLOB"),
@@ -1707,6 +1791,8 @@ DDL = {
         "timestamp": ("TIMESTAMP(6)", "TIMESTAMP({0})"),
         "time": ("TIME", "TIME"),
         "bson": ("CLOB", "CLOB"),
+        "xml": ("XML", "XML"),
+        VARIANT: ("CLOB", "CLOB"),
     },
     # Db2 for i and for z/OS: DB2's own types, a boolean as the SMALLINT
     # both hold on every release (BOOLEAN came to IBM i with 7.5), which
@@ -1748,6 +1834,8 @@ DDL = {
         "time": ("TIME(6)", "TIME({0})"),
         "json": ("JSON CHARACTER SET UNICODE", "JSON CHARACTER SET UNICODE"),
         "xml": ("XML", "XML"),
+        VARIANT: ("JSON CHARACTER SET UNICODE",
+                  "JSON CHARACTER SET UNICODE"),
     },
     "duckdb": {
         # a type of the same engine is made as the source declares it:
@@ -1769,6 +1857,7 @@ DDL = {
         "interval": ("INTERVAL", "INTERVAL"),
         "vector": ("FLOAT[]", "FLOAT[{0}]"),
         "bson": ("JSON", "JSON"),
+        VARIANT: ("JSON", "JSON"),
     },
     "ase": {
         OWN: ("text", "text"),
@@ -1799,6 +1888,7 @@ DDL = {
         "time": ("time", "time"),
         "json": ("super", "super"),
         "bson": ("super", "super"),
+        VARIANT: ("super", "super"),
     },
     "snowflake": {
         OWN: ("VARCHAR", "{0}"),
@@ -1815,6 +1905,7 @@ DDL = {
         "time": ("TIME(9)", "TIME({0})"),
         "json": ("VARIANT", "VARIANT"),
         "bson": ("VARIANT", "VARIANT"),
+        VARIANT: ("VARIANT", "VARIANT"),
     },
     "bigquery": {
         OWN: ("STRING", "{0}"),
@@ -1831,6 +1922,7 @@ DDL = {
         "time": ("TIME", "TIME"),
         "json": ("JSON", "JSON"),
         "bson": ("JSON", "JSON"),
+        VARIANT: ("JSON", "JSON"),
     },
     # the lakes take the source's own type between two tables of one
     # format. Iceberg's `timestamp` is a wall clock, as the other
@@ -1880,6 +1972,7 @@ DDL = {
         "interval": ("duration", "duration"),
         "vector": ("vector<float>", "vector<float, {0}>"),
         "bson": ("text", "text"),
+        VARIANT: ("text", "text"),
     },
     "sqlite": {
         OWN: ("text", "{0}"),
@@ -1896,8 +1989,17 @@ DDL = {
         "time": ("text", "text"),
         "json": ("text", "text"),
         "bson": ("text", "text"),
+        VARIANT: ("text", "text"),
     },
 }
+
+#: a timestamp that keeps each value's own offset (`commercial`), built
+#: where the target has a type that keeps it too - and, on PostgreSQL, as
+#: the instant it is; anywhere else as any timestamp, the offset refused
+#: unless accepted (`unfit`, `offset`)
+OFFSET_DDL = {"mssql": "datetimeoffset(7)",
+              "oracle": "TIMESTAMP(9) WITH TIME ZONE",
+              "postgres": "timestamptz(6)"}
 
 
 def params(declared):
@@ -1980,6 +2082,16 @@ def ddl_numbers(engine, declared, cls):
     if cls == "float":
         base = str(declared or "").strip().lower().split("(")[0].strip()
         return (4,) if base in FLOAT4.get(engine, ()) else ()
+    from . import commercial
+    if cls == "decimal" and commercial.floating(engine, declared):
+        # a decimal of no fixed scale - DECFLOAT(34), Oracle's FLOAT(126):
+        # its numbers are no precision and scale, and a target of a fixed
+        # one is sized from the data (`hetero._measured_decimal`)
+        return ()
+    if cls == "decimal" and commercial.money_range(engine, declared):
+        return _fixed_decimal(engine, declared)
+    if cls == "timestamp" and commercial.keeps_offset(engine, declared):
+        return ("offset",)
     if engine == "mongodb":
         seen = {t.strip().lower() for t in str(declared or "").split("|")} \
             - {"null", "missing", ""}
@@ -2116,8 +2228,15 @@ def ddl_type(engine, cls, numbers=(), key=False, bounds=None):
         return pair[1] if tuple(numbers) == ("document",) and not key \
             else pair[0]
     if cls == GEOMETRY:
-        return ("geography" if engine == "postgres"
+        return ("geography" if engine in ("postgres", "mssql")
                 and tuple(numbers) == ("geography",) else pair[0])
+    if cls == "timestamp" and tuple(numbers[:1]) == ("offset",):
+        return OFFSET_DDL.get(engine, pair[0])
+    if cls == VARIANT and key and engine != "mssql" \
+            and engine in JSON_UNKEYED:
+        raise ValueError(
+            f"{engine} cannot key {JSON_UNKEYED[engine]}, which is what"
+            " keeps a sql_variant's base type and value")
     if cls == VECTOR and not numbers and engine in ("duckdb", "cassandra"):
         raise ValueError(f"{engine} builds a vector of a fixed number of"
                          " elements, and the source's does not say how many")
@@ -2320,6 +2439,11 @@ def write_value(engine, cls, value):
     if value is None or value is ABSENT:
         return value
     engine = dialect(engine)
+    if type(value) is _Variant:
+        # a `sql_variant`: its base value into SQL Server, its JSON into
+        # any other engine (`commercial.variant_write`)
+        from . import commercial
+        return commercial.variant_write(engine, value)
     if isinstance(cls, str) and cls.startswith(bsontype_prefixes()):
         from . import bsontype
         if cls.startswith(bsontype.MONGO):
@@ -2338,6 +2462,12 @@ def write_value(engine, cls, value):
             return bsontype.ejson(value)
         cls = {"string": "text", "uuid": "uuid",
                "binData": "bytes"}.get(cls[len(bsontype.OTHER):], cls)
+    if cls == OFFSET:
+        # an instant and its offset, into a type that keeps both: SQL
+        # Server's text of it, Oracle's own bind (`engines.oracle.Bind`)
+        from . import commercial
+        return (commercial.mssql_offset_text(value) if engine == "mssql"
+                else value)
     if engine == "mssql" and cls in ("timestamp", "time"):
         return mssql_time_text(value)
     if engine != "mongodb":
@@ -2385,6 +2515,9 @@ def write_value(engine, cls, value):
         return vectors.of(value)
     if cls == GEOMETRY:
         from . import geo
+        if engine != "oracle":
+            # at the EPSG number another engine knows the system by
+            value = geo.as_epsg(value)
         if engine == "mysql":
             return geo.to_mysql(value)
         if engine == "mongodb":
@@ -2404,6 +2537,13 @@ def write_value(engine, cls, value):
         if engine == "cassandra" and isinstance(value, dict):
             # and a map, the mapping
             return dict(value)
+    if cls == "bytes" and isinstance(value, _uuid.UUID):
+        # a UUID into sixteen bytes, in RFC 4122 order (`uuid-order`)
+        return value.bytes
+    if cls == "uuid" and isinstance(value, (bytes, bytearray, memoryview)) \
+            and len(value) == 16 and not _bson_value(value):
+        # sixteen bytes into a UUID: the UUID they spell in that order
+        return str(_uuid.UUID(bytes=bytes(value)))
     if cls in ("text", "uuid") and not isinstance(value, str) \
             and _bson_value(value):
         # a MongoDB value into a text column the hop lets it change into
@@ -2422,7 +2562,7 @@ def has_own_form(cls):
     form of its own there (`write_value`) - an interval, a vector, a
     shape, a MongoDB-typed value - rather than the driver's reading of
     it as it came."""
-    return cls in (INTERVAL, VECTOR, GEOMETRY) or \
+    return cls in (INTERVAL, VECTOR, GEOMETRY, VARIANT, OFFSET) or \
         str(cls).startswith(bsontype_prefixes())
 
 
@@ -2472,6 +2612,11 @@ def sql_value(value):
     """
     if isinstance(value, (dict, list)):
         return json_write(value)
+    if type(value) is _Variant:
+        # a `sql_variant` into any driver but SQL Server's, which writes it
+        # through its base type (`commercial.variant_mark`)
+        from . import commercial
+        return json_write(commercial.variant_json(value))
     if isinstance(value, (memoryview, bytearray)):
         # psycopg2 hands a `bytea` column back as a memoryview, and pymysql
         # has no escape rule for one - measured, it stored the *text* of the
@@ -3016,6 +3161,32 @@ UNFIT_WORDS = {
     "no-writer": "a {arg}, which the row copy has no way to write into"
                  " {dst}",
     "null-element": "a NULL inside a collection, which {dst} refuses",
+    "refused-type": "a value of the {arg} type, which migkit has no exact"
+                    " form of on {dst} - accepted, it is carried as its"
+                    " driver reads it, and not compared",
+    "as-json": "{arg}, which {dst} has no type for and keeps as the JSON"
+               " of all it holds",
+    "bfile": "a BFILE - a file on the source server's own disk that the row"
+             " points at, not data the database holds; accepted, the"
+             " file's bytes are carried",
+    "offset": "a time written at an offset of its own (+07:00), which {dst}"
+              " keeps as the instant alone - the offset is not kept",
+    "zone-region": "a time written in a named zone (Europe/Paris), which"
+                   " {dst} keeps at that instant's offset - the zone is not"
+                   " kept",
+    "ring-orientation": "a polygon whose outer ring runs clockwise, or a"
+                        " hole counter-clockwise: {arg}",
+    "xml-typed": "an XML value the {dst} column checks against its schema"
+                 " collection {arg} and keeps by type, so its text can come"
+                 " back otherwise (a decimal's zeros, a time's zone)",
+    "xml-fragment": "XML that is not one document - several elements, or"
+                    " text beside them - which {dst}'s XML type refuses",
+    "uuid-order": "a UUID {arg} sixteen bytes, taken in RFC 4122 order -"
+                  " SQL Server's own binary form puts its first three"
+                  " groups backwards, so which order is meant is the hop's"
+                  " to accept",
+    "money-range": "a number outside {arg[0]} to {arg[1]}, the range of the"
+                   " {dst} money column",
 }
 
 
@@ -3156,11 +3327,6 @@ VECTOR_WIDTH = {"postgres": {"vector": 32, "halfvec": 16, "sparsevec": 32},
 #: engines whose vector refuses NaN and the infinities
 NO_NONFINITE_VECTOR = {"postgres"}
 
-#: engines a shape goes into only through their own constructor, which
-#: the row copy does not call: SQL Server takes no binary but its own
-#: serialisation into a `geography` or a `geometry`
-NO_SHAPE_WRITER = {"mssql"}
-
 
 def vector_width(engine, declared):
     """16, 32 or 64: the float each element of a vector column is kept in,
@@ -3229,8 +3395,6 @@ def _unfit_shapes(src, src_declared, scls, dst, dst_declared, dcls,
     if scls == GEOMETRY and src == "mongodb":
         # a document is a shape only where it is GeoJSON
         out.append(("geometry-form", None))
-    if scls == GEOMETRY and dcls == GEOMETRY and dst in NO_SHAPE_WRITER:
-        out.append(("no-writer", "shape"))
     kind = collection_kind(dst, dst_declared)
     if kind and src != dst and (scls in ("json", BSON) or src == "mongodb"):
         # a collection empty on the source and NULL on the target read
@@ -3277,6 +3441,12 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
     out += _unfit_bson(src, src_declared, scls, dst, dst_declared)
     out += _unfit_shapes(src, src_declared, scls, dst, dst_declared, dcls,
                          src_facts)
+    from . import commercial
+    if commercial.not_data(src, src_declared):
+        # neither carried nor compared (`commercial.NOT_DATA`)
+        return out
+    out += _unfit_commercial(src, src_declared, scls, dst, dst_declared,
+                             dcls)
     if not scls:
         return out
     other = src != dst
@@ -3304,10 +3474,16 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
                         _temporal_digits(dst, dst_declared))
         if theirs is not None and (mine is None or mine > theirs):
             out.append(("fraction", theirs))
-    if scls == "decimal" and src in NONFINITE_DECIMAL \
-            and dst not in NONFINITE_DECIMAL:
+    if scls == "decimal" and nonfinite_decimal(src, src_declared) \
+            and not nonfinite_decimal(dst, dst_declared):
         out.append(("numeric-nonfinite", None))
-    if scls == "float" and dst in NO_NONFINITE_FLOAT:
+    if scls == "float" and dst in NO_NONFINITE_FLOAT \
+            and not commercial.holds_nonfinite(dst, dst_declared):
+        out.append(("float-nonfinite", None))
+    elif scls == "float" and (dcls == "integer" or dcls == "decimal"
+                              and not nonfinite_decimal(dst, dst_declared)):
+        # a double's NaN into a number of a kind that holds none - an
+        # Oracle NUMBER beside its BINARY_DOUBLE, any engine's integer
         out.append(("float-nonfinite", None))
     if scls in ("integer", "decimal", "float") and dcls in ("integer",
                                                             "decimal"):
@@ -3342,7 +3518,19 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
     # hold every 64-bit integer, and 1e126 is past every one of them
     bounded = scls == "integer" and INT_RANGES.get(src, {}).get(
         _split_declared(src_declared)[0], (None, 10 ** 38))[1] < 10 ** 38
-    if scls in ("integer", "decimal") and dst in SIGNIFICANT \
+    held = commercial.floating(dst, dst_declared) if dcls == "decimal" \
+        else None
+    if held and scls in ("integer", "decimal", "float"):
+        # a decimal of no fixed scale holds so many digits and no more,
+        # in a range of its own: Oracle's NUMBER from 1E-130, a DECFLOAT(16)
+        # sixteen digits - a 64-bit integer has nineteen
+        widest = INT_RANGES.get(src, {}).get(
+            _split_declared(src_declared)[0]) if scls == "integer" else None
+        if not widest or max(-widest[0], widest[1]) >= 10 ** held[0]:
+            out.append(("sigdigits", held[0]))
+        if not widest:
+            out.append(("magnitude", held[1]))
+    elif scls in ("integer", "decimal") and dst in SIGNIFICANT \
             and dcls in ("decimal", None) and not bounded \
             and not _fixed_decimal(dst, dst_declared):
         out.append(("sigdigits", SIGNIFICANT[dst]))
@@ -3359,6 +3547,14 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
         name, nums = _split_declared(dst_declared)
         if dst == "mssql" and name in ("nvarchar", "nchar") and nums:
             out.append(("utf16", nums[0]))
+        if dst in ("db2", "db2i", "db2zos") and nums:
+            # Db2 counts a GRAPHIC in UTF-16 units and a CHAR or VARCHAR
+            # in the bytes of the database's code page, UTF-8 in a
+            # Unicode database
+            if name in ("graphic", "vargraphic", "varg"):
+                out.append(("utf16", nums[0]))
+            elif name in ("char", "character", "varchar"):
+                out.append(("bytes", nums[0]))
         if dst == "postgres" and src != "postgres":
             out.append(("nul", None))
         charset = str(facts.get("charset") or "").lower()
@@ -3380,6 +3576,63 @@ def unfit(src, src_declared, dst, dst_declared, facts=None,
         out.append(("null" if dst == "clickhouse" else "not-null", None))
     # each kind asked once, whichever rule found it
     return list(dict.fromkeys(out))
+
+
+def nonfinite_decimal(engine, declared):
+    """Whether a decimal column of this type holds NaN and the
+    infinities: PostgreSQL's `numeric`, MongoDB's Decimal128, Db2's
+    DECFLOAT."""
+    from . import commercial
+    return engine in NONFINITE_DECIMAL or \
+        commercial.holds_nonfinite(engine, declared)
+
+
+def _unfit_commercial(src, src_declared, scls, dst, dst_declared, dcls):
+    """The kinds of the commercial engines' own types on their way
+    (`commercial`): a type refused by name, a value kept as JSON, a BFILE,
+    an offset or a zone the target drops, a polygon the target reads by
+    its rings' order, XML a typed or a one-document target holds
+    otherwise, sixteen bytes read as a UUID or a UUID written as them,
+    money past its range."""
+    from . import commercial
+    out = []
+    got = commercial.refused(src, src_declared, dst)
+    if got:
+        out.append(("refused-type", got))
+    got = commercial.as_json(src, src_declared, dst)
+    if got:
+        out.append(("as-json", got))
+    if src == dst == "oracle" and commercial.oracle_object(src_declared):
+        out.append(("no-writer", "value of an Oracle object type"))
+    if src == "oracle" and commercial.base(src_declared) == "bfile":
+        out.append(("bfile", None))
+    if scls == "timestamp" and commercial.keeps_offset(src, src_declared):
+        if not commercial.keeps_offset(dst, dst_declared):
+            out.append(("offset", None))
+        elif src == "oracle" and dst != "oracle":
+            out.append(("zone-region", None))
+    rule = commercial.ring_rule(dst, dst_declared)
+    if scls == GEOMETRY and rule:
+        out.append(("ring-orientation", rule))
+    if dcls == "xml":
+        coll = commercial.xml_collection(dst, dst_declared)
+        if coll and coll != commercial.xml_collection(src, src_declared):
+            out.append(("xml-typed", coll))
+        if dst in commercial.DOCUMENT_ONLY and scls in ("xml", "text") \
+                and src not in commercial.DOCUMENT_ONLY:
+            out.append(("xml-fragment", None))
+    if {scls, dcls} == {"uuid", "bytes"}:
+        if scls == "bytes" and commercial.sixteen_bytes(src, src_declared):
+            out.append(("uuid-order", "read from"))
+        elif dcls == "bytes" and commercial.sixteen_bytes(dst,
+                                                          dst_declared):
+            out.append(("uuid-order", "written as"))
+    rng = commercial.money_range(dst, dst_declared)
+    if rng and scls in ("integer", "decimal", "float"):
+        mine = commercial.money_range(src, src_declared)
+        if not mine or mine[0] < rng[0] or mine[1] > rng[1]:
+            out.append(("money-range", rng))
+    return out
 
 
 def unfit_words(kind, arg, dst):
@@ -3590,8 +3843,13 @@ def unfit_value(kind, value, arg):
     if kind.startswith(("bson-", "vector-", "geometry-")) \
             or kind in ("empty-collection", "null-element", "set-order"):
         return _unfit_typed(kind, value, arg)
-    if kind == "no-writer":
+    if kind in ("no-writer", "refused-type", "as-json", "bfile", "xml-typed",
+                "uuid-order"):
+        # a value of the column at all is one of them
         return True
+    if kind in ("offset", "zone-region", "ring-orientation", "xml-fragment",
+                "money-range"):
+        return _unfit_commercial_value(kind, value, arg)
     if kind == "interval-part":
         from . import intervals
         try:
@@ -3690,7 +3948,9 @@ def unfit_value(kind, value, arg):
             return False
         return iface.network.prefixlen < iface.max_prefixlen
     if kind == "json-form":
-        if isinstance(value, (str, bytes, bytearray, memoryview)):
+        if isinstance(value, (str, bytes, bytearray, memoryview)) \
+                or type(value) is _Variant:
+            # a `sql_variant` goes as the JSON of its type and text
             return False
         try:
             json_write(value)
@@ -3698,6 +3958,38 @@ def unfit_value(kind, value, arg):
             return True
         return False
     return False
+
+
+def _unfit_commercial_value(kind, value, arg):
+    """`unfit_value` for the kinds of the commercial engines' own types
+    (`_unfit_commercial`)."""
+    import struct
+    from decimal import Decimal, InvalidOperation
+
+    from . import commercial, geo
+    if kind == "offset":
+        return commercial.zone_of(value) not in (None, "+00:00")
+    if kind == "zone-region":
+        return commercial.is_region(commercial.zone_of(value))
+    if kind == "ring-orientation":
+        try:
+            return geo.misoriented(value)
+        except (ValueError, TypeError, KeyError, IndexError,
+                AttributeError, struct.error):
+            # no shape at all, which the target refuses
+            return True
+    if kind == "xml-fragment":
+        return commercial.fragment(value)
+    if isinstance(value, bool):
+        return False
+    if hasattr(value, "to_decimal"):
+        value = value.to_decimal()
+    try:
+        value = Decimal(repr(value)) if isinstance(value, float) \
+            else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return value.is_finite() and (value < arg[0] or value > arg[1])
 
 
 def _interval_like(value):
@@ -3842,6 +4134,8 @@ AS = {
     VECTOR: "vectors, float for float",
     GEOMETRY: "shapes (SRID and binary, longitude first)",
     BSON: "values with their BSON type",
+    VARIANT: "values with their SQL Server base type",
+    OFFSET: "timestamps with the offset each was written at",
 }
 
 #: Classes whose rendering is the whole of what a column of one type on
@@ -3850,7 +4144,7 @@ AS = {
 #: a decimal's trailing zeros - even where the type is the same.
 WHOLE = frozenset({"integer", "decimal", "boolean", "text", "bytes", "date",
                    "timestamp", "time", OWN, "uuid", INTERVAL, VECTOR,
-                   GEOMETRY, BSON})
+                   GEOMETRY, BSON, VARIANT, OFFSET})
 
 
 def as_words(cls):
@@ -3995,7 +4289,7 @@ def _speak_as():
               MOST_DIGITS, DECIMAL_MOST, SIGNIFICANT, ADDRESS_ONLY,
               VECTOR_WIDTH, UNFIT_SQL)
     sets = (KEEPS_SCALE, NO_NONFINITE_FLOAT, NONFINITE_DECIMAL,
-            NO_NONFINITE_VECTOR, NO_SHAPE_WRITER)
+            NO_NONFINITE_VECTOR)
     for engine, speaks in WIRE.items():
         for table in tables:
             if speaks in table and engine not in table:

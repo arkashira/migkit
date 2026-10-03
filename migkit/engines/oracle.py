@@ -51,7 +51,24 @@ DECLARED = ("case when data_type like '%WITH LOCAL TIME ZONE' then"
             " when data_type in ('VARCHAR2', 'NVARCHAR2', 'CHAR', 'NCHAR')"
             " then data_type || '(' || char_length || ')'"
             " when data_type = 'RAW' then 'RAW(' || data_length || ')'"
+            " when data_type = 'FLOAT' and data_precision is not null then"
+            " 'FLOAT(' || data_precision || ')'"
             " else data_type end")
+
+#: the schemas Oracle's own types live in: a type owned by any other is a
+#: schema's own object type or collection
+SYSTEM_OWNERS = ("SYS", "MDSYS", "PUBLIC", "XDB", "ORDSYS", "CTXSYS",
+                 "SYSTEM")
+
+#: a table column's declared type: `DECLARED`, and an object type or a
+#: collection of a schema's own by its owner and name, quoted -
+#: `"APP"."ADDRESS_T"` - which is how it is written in a table built for it
+#: and what `canon.type_class` knows one by
+COLUMN_DECLARED = (
+    "case when data_type_owner is not null and data_type_owner not in ("
+    + ", ".join(f"'{o}'" for o in SYSTEM_OWNERS) + ") then '\"' ||"
+    " data_type_owner || '\".\"' || data_type || '\"' else "
+    + DECLARED + " end")
 
 #: what migkit makes on a target for its own use, and leaves out of every
 #: listing: the session-private tables a direct path load is staged in
@@ -240,13 +257,29 @@ class Bind:
 
     def zone(self, value):
         """The zone a value of this column is written in: its own where it
-        came with one (`Zoned`), UTC otherwise; None for any other
-        column."""
+        came with one (`Zoned`), the offset of a time that keeps one (SQL
+        Server's `datetimeoffset`: `commercial.zone_of`), UTC otherwise;
+        None for any other column."""
+        from .. import commercial
         if not self.zoned:
             return None
-        return getattr(_as_time(value), "zone", None) or "UTC"
+        value = _as_time(value)
+        own = getattr(value, "zone", None)
+        if own:
+            return own
+        got = commercial.zone_of(value)
+        return "UTC" if got in (None, "+00:00") else got
 
     def mark(self, zone=None):
+        if self.kind == "XMLTYPE":
+            # a document from its text, and a NULL as one
+            return (f"case when {MARK} is null then null else"
+                    f" xmltype({MARK}) end")
+        if self.kind == "SDO_GEOMETRY":
+            # a shape from its well-known binary and SRID, through the
+            # type's own constructor
+            return (f"case when {MARK} is null then null else"
+                    f" sdo_geometry({MARK}, {MARK}) end")
         if not self.timed:
             return MARK
         at = f"to_timestamp({MARK}, '{TIME_TEXT}')"
@@ -266,6 +299,16 @@ class Bind:
             return [_utc_wall(_as_time(value))]
         if self.kind.startswith("INTERVAL"):
             return [_interval(self.kind, value)]
+        if self.kind == "XMLTYPE":
+            got = canon.sql_value(value)
+            return [got, got]
+        if self.kind == "SDO_GEOMETRY":
+            if value is None:
+                return [None, None, None]
+            from .. import geo
+            s = geo.of(value)
+            # Oracle says "no SRID" with a NULL, never a 0
+            return [1, geo.wkb(s), s.srid or None]
         return [canon.sql_value(value)]
 
     def sizes(self):
@@ -274,9 +317,15 @@ class Bind:
             return [oracledb.DB_TYPE_INTERVAL_YM
                     if self.kind.startswith("INTERVAL YEAR")
                     else oracledb.DB_TYPE_INTERVAL_DS]
+        if self.kind == "XMLTYPE":
+            return [oracledb.DB_TYPE_CLOB, oracledb.DB_TYPE_CLOB]
+        if self.kind == "SDO_GEOMETRY":
+            return [None, oracledb.DB_TYPE_BLOB, None]
         return [{"BLOB": oracledb.DB_TYPE_BLOB,
                  "CLOB": oracledb.DB_TYPE_CLOB,
-                 "NCLOB": oracledb.DB_TYPE_NCLOB}.get(self.kind)]
+                 "NCLOB": oracledb.DB_TYPE_NCLOB,
+                 # a document of any length, which a VARCHAR2 bind is not
+                 "JSON": oracledb.DB_TYPE_CLOB}.get(self.kind)]
 
     def staged(self, fact):
         """[(column, type)] in the stage: a time as its text, and a zone
@@ -456,7 +505,8 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
 
     def neutral_columns(self, side, db, table):
         return [(self._said(n), t) for n, t in self._rows(
-            side, db, f"select column_name, {DECLARED} from all_tab_columns"
+            side, db, f"select column_name, {COLUMN_DECLARED} from"
+                      " all_tab_columns"
                       f" where owner = {MARK} and table_name = {MARK}"
                       " order by column_id",
             (self._owner(side, db), self._q(table)[1:-1]))]
@@ -465,7 +515,8 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         """(statement, binds) of the schema's columns `column_catalog`
         reads and `shape_mark` digests: one row a column - its table, its
         name, its declared type and its place."""
-        return (f"select table_name ct, column_name cn, {DECLARED} cd,"
+        return (f"select table_name ct, column_name cn, {COLUMN_DECLARED}"
+                " cd,"
                 " column_id cp from all_tab_columns where owner ="
                 f" {MARK} and table_name not like '{OWN_PREFIX}%' escape"
                 " '\\' and table_name in (select table_name from"
@@ -509,11 +560,14 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         what the reads, the writes and the server's digest are built from."""
         return [{"name": self._said(n), "kind": _kind(t), "length": ln,
                  "chars": cl, "precision": p, "scale": s,
-                 "virtual": v == "YES"}
-                for n, t, ln, cl, p, s, v in self._rows(
+                 "virtual": v == "YES",
+                 # a schema's own object type or collection
+                 "object": o is not None and o not in SYSTEM_OWNERS}
+                for n, t, ln, cl, p, s, v, o in self._rows(
                     side, db, "select column_name, data_type, data_length,"
                               " char_length, data_precision, data_scale,"
-                              " virtual_column from all_tab_cols where"
+                              " virtual_column, data_type_owner from"
+                              " all_tab_cols where"
                               f" owner = {MARK} and table_name = {MARK} and"
                               " hidden_column = 'NO' order by column_id",
                     (self._owner(side, db), self._q(table)[1:-1]))]
@@ -596,10 +650,14 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         `columns`' order - a time of more than six digits with all of them
         (`_nanos_text`, as every engine reading through this base does), a
         time with a zone as the instant it names carrying its zone
-        (`Zoned`), a large value read in pieces."""
-        from .. import nanotime
+        (`Zoned`), a large value read in pieces. An XMLType as its
+        document's text, an SDO_GEOMETRY as its SRID and well-known binary
+        (`geo`), a BFILE as its file's bytes, an object or a collection as
+        the JSON of what it holds (`commercial.oracle_value`): the driver
+        hands back none of them as what they hold."""
+        from .. import commercial, geo, nanotime
         facts = {f["name"]: f for f in self._facts(side, db, table)}
-        exprs, parts, lobs = [], [], False
+        exprs, parts, lobs, files = [], [], False, set()
         for n, cls in columns:
             f = facts.get(n, {})
             kind = f.get("kind")
@@ -614,11 +672,26 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                     exprs.append(f"to_char({q}, 'TZR')")
                 parts.append(("zoned" if kind == "TIMESTAMP WITH TIME ZONE"
                               else "utc", bool(wide), n))
-            elif kind in LOBS:
+            elif kind in LOBS or kind == "BFILE":
+                # a BFILE's bytes as a BLOB of them
+                v = f"to_blob({q})" if kind == "BFILE" else q
+                if kind == "BFILE":
+                    files.add(n)
                 exprs += [f"case when dbms_lob.getlength({q}) <= {PIECE}"
-                          f" then {q} end", f"dbms_lob.getlength({q})"]
+                          f" then {v} end", f"dbms_lob.getlength({q})"]
                 parts.append(("lob", False, n))
                 lobs = True
+            elif kind == "XMLTYPE":
+                exprs.append(f"case when {q} is null then null else"
+                             f" xmlserialize(content {q} as clob) end")
+                parts.append(("plain", False, n))
+            elif kind == "SDO_GEOMETRY":
+                exprs += [f"treat({q} as mdsys.sdo_geometry).sdo_srid",
+                          f"sdo_util.to_wkbgeometry({q})"]
+                parts.append(("shape", False, n))
+            elif f.get("object"):
+                exprs.append(q)
+                parts.append(("object", False, n))
             elif kind == "TIMESTAMP" and self._nanos_text(q, digits):
                 exprs.append(self._nanos_text(q, digits))
                 parts.append(("wide", True, n))
@@ -655,18 +728,30 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                         if value is None and size:
                             big.append((len(out), i, n, r[-1]))
                         row.append(value)
+                    elif how == "shape":
+                        srid, raw = r[j], r[j + 1]
+                        j += 2
+                        row.append(None if raw is None else geo.from_wkb(
+                            bytes(raw), None if srid is None else int(srid)))
+                    elif how == "object":
+                        row.append(None if r[j] is None
+                                   else commercial.oracle_value(r[j]))
+                        j += 1
                     else:
                         row.append(time_of(r[j], text))
                         j += 1
                 out.append(row)
             for at, i, n, rid in big:
-                out[at][i] = self._read_in_pieces(side, db, table, n, rid)
+                out[at][i] = self._read_in_pieces(
+                    side, db, table, n, rid,
+                    "to_blob({})" if n in files else "{}")
             return out
         return ", ".join(exprs), finish
 
-    def _read_in_pieces(self, side, db, table, column, rowid):
+    def _read_in_pieces(self, side, db, table, column, rowid, read="{}"):
         """One large value, read through its locator a multiple of its
-        chunk at a time rather than in one fetch."""
+        chunk at a time rather than in one fetch; `read` the expression
+        it is read by, `{}` the column (a BFILE's: `to_blob({})`)."""
         import oracledb
         conn = self._connect(side, db)
         try:
@@ -679,7 +764,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                     return cursor.var(metadata.type_code,
                                       arraysize=cursor.arraysize)
             cur.outputtypehandler = locator
-            cur.execute(f"select {self._q(column)} from"
+            cur.execute(f"select {read.format(self._q(column))} from"
                         f" {self._qualified(side, db, table)} where rowid ="
                         " chartorowid(:1)", [rowid])
             got = cur.fetchone()

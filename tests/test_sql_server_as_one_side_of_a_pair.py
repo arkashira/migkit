@@ -162,8 +162,14 @@ def test_its_values_digest_as_postgresql_digests_them(pg_pair, monkeypatch):
 
 
 @pytest.mark.parametrize("declared,cls", [
-    ("datetimeoffset(7)", None), ("timestamp", None),
+    ("datetimeoffset(7)", "timestamp"), ("timestamp", None),
+    ("sql_variant", "variant"), ("hierarchyid", "text"),
+    ("Point", None),
     ("nvarchar(max)", "text"), ("bit", "boolean"), ("money", "decimal")])
 def test_what_has_no_honest_rendering_stays_unmapped(declared, cls):
+    """A row version (`timestamp`) is not data, and a CLR type of a user's
+    own assembly (`Point`) has no rendering: both unmapped. An instant
+    with its offset, a `sql_variant` and a hierarchy node each have one
+    (`commercial`)."""
     from migkit import canon
     assert canon.type_class("mssql", declared) == cls

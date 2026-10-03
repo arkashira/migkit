@@ -73,6 +73,8 @@ DECLARED = ("case when data_type in ('DECIMAL', 'NUMERIC') then data_type"
             " rtrim(char(coalesce(datetime_precision, 6))) || ')'"
             " when data_type = 'FLOAT' and length = 4 then 'REAL'"
             " when data_type = 'FLOAT' then 'DOUBLE'"
+            " when data_type = 'DECFLOAT' then 'DECFLOAT(' ||"
+            " rtrim(char(coalesce(numeric_precision, 34))) || ')'"
             " else data_type end")
 
 #: the journal entries a follow reads: a row put (PT; PX at a given

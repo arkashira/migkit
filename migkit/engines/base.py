@@ -3769,13 +3769,22 @@ class Engine:
         reports, because the row text is positional and two servers agreeing
         on a set of columns says nothing about the order they list them in.
         """
-        from .. import canon
+        from .. import canon, commercial
         out = {"pairs": [], "unreadable": [],
                "only_src": sorted(set(src_types) - set(dst_types)),
                "only_dst": sorted(set(dst_types) - set(src_types))}
         same = (src_engine.CANON_ENGINE == dst_engine.CANON_ENGINE
                 and canon.renders(src_engine.CANON_ENGINE))
         for name in sorted(set(src_types) & set(dst_types)):
+            said = (commercial.not_data(src_engine.CANON_ENGINE,
+                                        src_types[name])
+                    or commercial.not_data(dst_engine.CANON_ENGINE,
+                                           dst_types[name]))
+            if said:
+                # a row version or a row's address: what the target writes
+                # of its own, never what the source held (`commercial`)
+                out["unreadable"].append((name, said))
+                continue
             scls, swhy = canon.comparable(src_engine.CANON_ENGINE,
                                           src_types[name])
             dcls, dwhy = canon.comparable(dst_engine.CANON_ENGINE,
@@ -3840,6 +3849,11 @@ class Engine:
                 base = str(typ).split("(")[0].strip().lower()
                 if base in eng.TEXT_HOLDS_BYTES:
                     scls = dcls = "bytes"
+            # the commercial engines' own: an offset both keep, a
+            # sql_variant kept as JSON, sixteen bytes beside a UUID
+            scls, dcls = canon.pair_classes(
+                src_engine.CANON_ENGINE, src_types[name], scls,
+                dst_engine.CANON_ENGINE, dst_types[name], dcls)
             out["pairs"].append((name, scls, dcls))
         out["src_types"], out["dst_types"] = src_types, dst_types
         # how each compared column is compared, exactly or by value, and
