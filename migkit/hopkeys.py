@@ -57,6 +57,11 @@ class Key:
 
 STREAMS = ("kafka", "kinesis", "pubsub")
 
+#: what assess does with a table the hop takes that needs one it leaves
+#: out (`Engine._closure_items`): names it with both ways out, or says the
+#: hop accepted it
+CLOSURE = ("warn", "accept")
+
 #: the keys of a hop itself
 HOP_KEYS = {
     "goal": Key("what the hop is for - copy, cutover, verify, two-way,"
@@ -144,6 +149,11 @@ HOP_OPTIONS = {
     "checksum": Key("text or jsonb row rendering", "str", ("postgres",)),
     "checksum_workers": Key("tables checksummed at once", "int",
                             ("postgres",), knob="size"),
+    "closure": Key("what assess says of a table the hop takes that needs"
+                   " one it leaves out - a foreign key's parent, a view's,"
+                   " a routine's or a trigger's table, a sequence's owner,"
+                   " a partition: warn (each named, with the tables to"
+                   " take) or accept (said as accepted)", "str"),
     "cloud": Key("the cloud the servers run in - aws, gcp or azure -"
                  " where their addresses and the servers do not say; the"
                  " machine and the target's class are named in it", "str"),
@@ -1594,6 +1604,22 @@ def _patterns_or_none(value):
         return []
 
 
+def _takes_back(probe, entry, back):
+    """Whether exclude entry `back` leaves out every table under include
+    entry `entry` - a database or a schema it names - read as `excluded`
+    reads a table there whatever its name: `exclude: [shop.*]` beside
+    `include: [shop]`. A name no table has stands in for each part below
+    the entry, down to a table's whole name on the hop's engine."""
+    import dataclasses
+    parts = [x for x in str(entry).split(".") if x]
+    depth = probe.whole_name() or len(parts) + 1
+    if not parts or len(parts) >= depth:
+        return False
+    leaver = dataclasses.replace(probe, include=[], exclude=[back])
+    return leaver.excluded(*parts, *(f"\x00{n}" for n in
+                                     range(depth - len(parts))))
+
+
 def _include_problems(where, raw, probe):
     """`include` said wrong, or said against the rest of the hop: an
     entry that is not a name, one `exclude` takes back whole, a mapping
@@ -1627,6 +1653,13 @@ def _include_problems(where, raw, probe):
                 "error", f"{where}.include[{i}]",
                 f"{p} is excluded as a whole as well, so it takes nothing"
                 " - drop one of the two"))
+            continue
+        back = [x for x in excluded if _takes_back(probe, p, x)]
+        if back:
+            out.append(Problem(
+                "warn", f"{where}.include[{i}]",
+                f"exclude {back[0]} leaves out every table under {p}, so"
+                f" include {p} takes none of them - drop one of the two"))
     probe.include = [p for p in got if isinstance(p, str) and p.strip()]
     if not probe.include:
         return out
@@ -1659,13 +1692,19 @@ def _contradictions(where, raw, opts, goal, engine):
                 options={k: v for k, v in opts.items()
                          if k == "source_engine"})
     mapping = raw.get("mapping") or {}
-    for part in ("where", "tables", "columns"):
+    for part in ("where", "tables", "columns", "ops"):
         rules = mapping.get(part) or {}
         if not isinstance(rules, dict):
-            out.append(Problem("error", f"{where}.mapping.{part}",
-                               "is not a mapping"))
+            if part != "ops":
+                # `ops` said wrong is said by its own check
+                out.append(Problem("error", f"{where}.mapping.{part}",
+                                   "is not a mapping"))
             continue
         for table in rules:
+            if part == "ops" and any(c in str(table) for c in "*?["):
+                # a pattern takes what it takes; only a table named
+                # outright is one the hop may leave out whole
+                continue
             if probe.excluded(*str(table).split(".")):
                 out.append(Problem(
                     "error", f"{where}.mapping.{part}.{table}",
@@ -1695,6 +1734,10 @@ def _contradictions(where, raw, opts, goal, engine):
     if isinstance(share, str) and share.lower() != "ranges":
         out.append(Problem("error", f"{where}.options.share_tables",
                            f"{share!r} - true, or ranges"))
+    closure = opts.get("closure")
+    if closure is not None and str(closure).lower() not in CLOSURE:
+        out.append(Problem("error", f"{where}.options.closure",
+                           f"{closure!r} - one of {', '.join(CLOSURE)}"))
     from .interlock import CHOICES
     rows = opts.get("target_rows")
     if rows is not None and str(rows).lower() not in CHOICES:

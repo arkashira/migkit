@@ -22,6 +22,7 @@ was counted from; an empty answer set read `same`.
 """
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 
@@ -158,12 +159,14 @@ class _Gated:
 def _notes(hop, records):
     """The ids of the warns the hop says do not stop the check: a slower
     target holds the same data, and stops it only under `performance:
-    gate` (`workload.gate`)."""
+    gate` (`workload.gate`); and a difference wholly of the rows the hop
+    keeps by the changes it does not carry (`hold`)."""
     from . import workload
     slow = workload.gate(_Gated, records)
     gated = workload.gate(hop, records) if hasattr(hop, "options") else []
     kept = {id(r) for r in gated}
-    return {id(r) for r in slow if id(r) not in kept}
+    return {id(r) for r in slow if id(r) not in kept} | {
+        id(r) for r in records if r.get("kept_by_hop")}
 
 
 def _narrowed(coverage):
@@ -188,8 +191,11 @@ def decide(records, hop=None, coverage=None):
     source may have moved under since, only skips, a narrowed run. A skip
     among compared answers is said, not hidden: `same` names what was not
     compared. A status the table has no word for counts as an error -
-    never as a pass."""
+    never as a pass. Each answer is first held to the changes the hop
+    carries (`hold`): rows it keeps are a note, never a `same` row."""
     records = list(records)
+    if hop is not None:
+        hold(hop, records)
     notes = _notes(hop, records)
     sev = []
     bad, diff, stale, warn, reused, skip, ok = [], [], [], [], [], [], []
@@ -252,8 +258,13 @@ def decide(records, hop=None, coverage=None):
     if coverage:
         return Decision("incomplete", "the run was narrowed to "
                         + _narrowed(coverage), tuple(sev))
-    return Decision("same", (f"{len(ok)} compared the same; not compared:"
-                             f" {_named(skip)}" if skip else ""), tuple(sev))
+    kept = [r for r in ok if r.get("kept_by_hop")]
+    why = "; ".join(
+        ([f"{len(ok)} compared the same; not compared: {_named(skip)}"]
+         if skip else [])
+        + ([f"{len(kept)} hold only what the hop keeps by the changes it"
+            f" does not carry: {_named(kept)}"] if kept else []))
+    return Decision("same", why, tuple(sev))
 
 
 def difference_kind(count_a, key_a, count_b, key_b):
@@ -309,6 +320,285 @@ def difference_kind_from_counts(missing, extra, changed):
 
 def _rows(n):
     return f"{n} row{'' if n == 1 else 's'}"
+
+
+# ---- what a hop that does not carry every change lets the target hold ----
+#
+# A hop's `mapping.ops` may leave a change out for a table (`Hop.carries`):
+# an archive kept on the target carries no deletes, as a DTS job told to
+# skip them or GoldenGate's IGNOREDELETES does. Such a target holds rows
+# the source deleted, and a check that called that "different" was never
+# going to pass. Judged here and nowhere else (`held`, `hold`): a
+# difference is a note only where the rows apart were counted one by one
+# and every one of them is a kind the hop leaves; a shape read from counts
+# and key sums is never proof of that, and a row apart of a kind the hop
+# does carry is a difference however many others it keeps.
+
+#: each change a hop may leave out, the kind of row it leaves the target
+#: holding apart from the source (as the drilldown names them), and the
+#: words for both, said after a number of rows
+LEFT_OUT = (("delete", "extra", "the source deleted",
+             "deletes are not carried"),
+            ("insert", "missing", "the source inserted",
+             "inserts are not carried"),
+            ("update", "changed", "as they were before the source updated"
+             " them", "updates are not carried"))
+#: the kinds of row a drilldown names, and how a row of each is said
+KINDS = {"missing": ("missing on the target", "inserts are carried"),
+         "extra": ("only on the target", "deletes are carried"),
+         "changed": ("with different values", "updates are carried")}
+
+
+def carried(hop, db, table):
+    """The changes the hop carries for `db`'s `table`, named as a check
+    names it (`public.orders`, `orders`): `Hop.carries` - and, for a table
+    a pair names by its own name alone (`HeteroEngine._leaf`), a rule that
+    names its schema as well, the pair telling its tables apart by that
+    name already."""
+    from .config import OPS
+    every = frozenset(OPS)
+    rules = (getattr(hop, "mapping", None) or {}).get("ops") or {}
+    if not rules or not hasattr(hop, "carries"):
+        return every
+    from .util import _parts
+    parts = [p for p in _parts(hop._names_engine(), str(table)) if p] \
+        or [str(table)]
+    got = hop.carries(db, *parts)
+    if got != every or len(parts) > 1 or hop.whole_name() != 3:
+        return got
+    for key in rules:
+        head = str(key).split(".")
+        if len(head) >= 2:
+            there = hop.carries(db, head[-2], *parts)
+            if there != every:
+                return there
+    return got
+
+
+def kept_kinds(hop, db, table):
+    """The kinds of row (`missing`, `extra`, `changed`) the target may
+    hold apart from the source for this table, by the changes the hop
+    does not carry - empty where it carries every one. What a repair
+    leaves as it is, and what the check may call kept."""
+    got = carried(hop, db, table)
+    return frozenset(kind for op, kind, _, _ in LEFT_OUT if op not in got)
+
+
+@dataclass(frozen=True)
+class Held:
+    """One table's rows apart, held to what its hop carries. `state`:
+    `kept` - counted one by one, every row a kind the hop leaves; `unproved`
+    - possibly only those, not counted one by one; `differs` - some rows
+    are of a kind the hop carries."""
+    state: str
+    said: str
+
+
+def held(hop, db, table, missing=0, extra=0, changed=0, exact=True):
+    """How a table's rows apart stand against its hop's carried changes
+    (`Held`), or None where the hop carries every change for it or nothing
+    is apart. `exact`: the numbers are the rows counted one by one;
+    otherwise each is the least there are."""
+    allowed = kept_kinds(hop, db, table)
+    counts = {"missing": int(missing or 0), "extra": int(extra or 0),
+              "changed": int(changed or 0)}
+    if not allowed or not any(counts.values()):
+        return None
+    least = "" if exact else "at least "
+    kept = [f"{least}{_rows(counts[kind])} {words} - {why}"
+            for _, kind, words, why in LEFT_OUT
+            if kind in allowed and counts[kind]]
+    bad = [f"{least}{_rows(counts[kind])} {KINDS[kind][0]}"
+           f" {'is' if counts[kind] == 1 else 'are'} a difference -"
+           f" {KINDS[kind][1]}"
+           for kind in KINDS if counts[kind] and kind not in allowed]
+    if bad:
+        return Held("differs", "; ".join(
+            ([f"kept by the hop: {'; '.join(kept)}"] if kept and exact
+             else []) + bad))
+    if exact:
+        return Held("kept", "kept by the hop: " + "; ".join(kept))
+    whys = ", ".join(why for _, kind, _, why in LEFT_OUT if kind in allowed)
+    return Held("unproved", f"{whys} for this table, and the rows apart"
+                " are not proved to be only the ones it keeps: they were"
+                " read from counts and key sums, not counted row by row -"
+                " a data check names them")
+
+
+#: words in a finding that say its rows were not all counted
+_PARTIAL = ("may be more", "not localised", "not localized",
+            "not fully localized", "still moving", "never settled",
+            "no row named", "read was short")
+#: words that say a finding holds a difference beside the rows it counted
+_BESIDE = ("outside the hop's row filter", "row filter excludes",
+           " errors: ", "stopped: ")
+_TRIPLE = re.compile(r"\bmissing=(\d+) extra=(\d+) changed=(\d+)")
+_NAMED_TRIPLE = re.compile(r"([^\s,;:()]+) missing=(\d+) extra=(\d+)"
+                           r" changed=(\d+)")
+_KIND_WORDS = re.compile(r"rows-(missing|extra) by=(\d+)|rows-replaced"
+                         r"|values-changed")
+_SRC_DST = re.compile(r"\bsrc=([\d,]+)\s+dst=([\d,]+)")
+_COUNTED = re.compile(r"^\s*(\S+) src=(\d+) dst=(\d+)\s*$")
+
+
+def _inferred(detail):
+    """(counts, net) a finding's words imply where it did not count its
+    rows one by one - each count the least there is - or None."""
+    at = str(detail).find("kind=")
+    if at >= 0:
+        counts, net = {"missing": 0, "extra": 0, "changed": 0}, 0
+        for m in _KIND_WORDS.finditer(str(detail)[at:]):
+            if m.group(1):
+                n = int(m.group(2))
+                counts[m.group(1)] = max(counts[m.group(1)], n)
+                net += n if m.group(1) == "extra" else -n
+            elif m.group(0) == "rows-replaced":
+                counts["missing"] = max(counts["missing"], 1)
+                counts["extra"] = max(counts["extra"], 1)
+            else:
+                counts["changed"] = max(counts["changed"], 1)
+        if any(counts.values()):
+            return counts, net
+    m = _SRC_DST.search(str(detail))
+    if m:
+        a, b = (int(x.replace(",", "")) for x in m.groups())
+        if a != b:
+            return ({"missing": max(a - b, 0), "extra": max(b - a, 0),
+                     "changed": 0}, b - a)
+    return None
+
+
+def _shapes(r):
+    """([(db, table, counts, exact, net)], whole) of one finding: each
+    table it is about with the rows apart its words give - counted one by
+    one (`exact`), or the least there are with the net they add up to -
+    and whether those are the whole of what it found. [] for a finding
+    that names no rows."""
+    check, scope = r.get("check"), str(r.get("scope", ""))
+    detail = str(r.get("detail", ""))
+    db = db_of(scope)
+    whole = not any(w in detail for w in _BESIDE)
+    sure = not any(w in detail for w in _PARTIAL)
+    if check not in ("data", "delta", "counts") or not db:
+        return [], False
+    if scope == db and check == "data" and \
+            detail.startswith("tables differ: "):
+        # a database's one data answer, its tables named and each one's
+        # rows counted where it has a key (`_own_check_data`)
+        named = [n.strip() for n in detail[len("tables differ: "):]
+                 .split(" (", 1)[0].split(",") if n.strip()]
+        found = {m.group(1): {"missing": int(m.group(2)),
+                              "extra": int(m.group(3)),
+                              "changed": int(m.group(4))}
+                 for m in _NAMED_TRIPLE.finditer(detail)}
+        out = [(db, t, found[t], sure, None) for t in named if t in found]
+        return out, whole and len(out) == len(named)
+    if scope == db and check == "counts":
+        # a database's one count answer: each clause a table's two counts
+        out = []
+        for clause in detail.split("; "):
+            m = _COUNTED.match(clause)
+            if not m:
+                whole = False
+                continue
+            a, b = int(m.group(2)), int(m.group(3))
+            out.append((db, m.group(1), {"missing": max(a - b, 0),
+                                         "extra": max(b - a, 0),
+                                         "changed": 0}, False, b - a))
+        return out, whole
+    if scope.startswith(db + ".") or scope.startswith(db + " "):
+        table = scope[len(db) + 1:].strip()
+        m = _TRIPLE.search(detail)
+        if m:
+            counts = {"missing": int(m.group(1)), "extra": int(m.group(2)),
+                      "changed": int(m.group(3))}
+            return [(db, table, counts, sure,
+                     counts["extra"] - counts["missing"])], whole
+        got = _inferred(detail)
+        if got:
+            return [(db, table, got[0], False, got[1])], whole
+    return [], False
+
+
+def _keep(r, said):
+    """A finding wholly the rows its hop keeps, said as that: a note, not
+    a difference and not a `same` (`decide`)."""
+    r["status"] = "warn"
+    r["kept_by_hop"] = said
+    r["detail"] = f"{said}; {r.get('detail', '')}".rstrip("; ")
+    r["fix_hint"] = ""
+
+
+#: what a second reading of a table's rows says where it names the same
+#: rows migkit's own reading named (`second_reader.compared`)
+_SECOND_AGREES = re.compile(r"the same \d+ rows differ|rows differ, as many"
+                            r" as migkit's own reading named")
+
+
+def hold(hop, records):
+    """Each finding held to the changes its hop carries (`mapping.ops`),
+    in place, once: a difference wholly of rows the hop keeps becomes a
+    note saying so (`kept_by_hop`); one that may be only those and was
+    not counted row by row becomes a `warn` saying it is not proved; one
+    with rows of a kind the hop carries stays a difference, said. A count
+    is held to the same table's rows where they were counted one by one
+    and add up to it. The records; nothing changes for a hop that carries
+    every change."""
+    records = list(records)
+    if not ((getattr(hop, "mapping", None) or {}).get("ops")):
+        return records
+    proved = {}
+    for r in records:
+        if r.get("status") != "diff":
+            continue
+        for db, table, counts, exact, _ in _shapes(r)[0]:
+            if exact:
+                proved[(db, table)] = counts
+    kept = {}
+    for r in records:
+        if r.get("held_by_hop") or r.get("status") != "diff":
+            continue
+        items, whole = _shapes(r)
+        if not items:
+            continue
+        r["held_by_hop"] = True
+        per_table = str(r.get("scope", "")) != db_of(r.get("scope", ""))
+        judged = []
+        for db, table, counts, exact, net in items:
+            proof = proved.get((db, table))
+            if not exact and proof is not None and net is not None and \
+                    proof["extra"] - proof["missing"] == net:
+                counts, exact = proof, True
+            judged.append((db, table, held(hop, db, table, exact=exact,
+                                           **counts)))
+        said = "; ".join(
+            (h.said if per_table else f"{table}: {h.said}")
+            for _, table, h in judged if h is not None)
+        if whole and judged and all(h is not None and h.state == "kept"
+                                    for _, _, h in judged):
+            _keep(r, said)
+            for db, table, h in judged:
+                kept[(db, table)] = h.said
+        elif whole and judged and all(
+                h is not None and h.state in ("kept", "unproved")
+                for _, _, h in judged):
+            r["status"] = "warn"
+            r["detail"] = f"{said}; {r.get('detail', '')}"
+        elif said:
+            r["detail"] = f"{r.get('detail', '')}; {said}"
+    for r in records:
+        scope = str(r.get("scope", ""))
+        if r.get("status") != "diff" or not scope.endswith(" rows") or \
+                not _SECOND_AGREES.search(str(r.get("detail", ""))):
+            continue
+        db, named = db_of(scope), scope[:-len(" rows")]
+        named = named[len(db) + 1:] if named.startswith(db + ".") else named
+        for (kdb, table), said in kept.items():
+            if kdb == db and (named == table or
+                              named.endswith("." + table)):
+                _keep(r, f"{said}; read a second way, the same rows")
+                break
+    return records
 
 
 def partition_differences(table, src, dst):
@@ -600,10 +890,31 @@ def hop_scope(hop):
     out["column_rules"] = sorted((mapping.get("columns") or {}))
     out["renamed"] = [f"{k} -> {v}" for k, v in
                       sorted((mapping.get("tables") or {}).items())]
-    out["changes_carried"] = [
-        f"{k}: {', '.join(v) if isinstance(v, (list, tuple)) else v}"
-        for k, v in sorted((mapping.get("ops") or {}).items())]
+    out["changes_carried"] = [contract_said(k, v) for k, v in
+                              sorted((mapping.get("ops") or {}).items())]
     return {k: v for k, v in out.items() if v}
+
+
+#: what a target holds for each change a hop does not carry
+_LEAVES = {"delete": "the target keeps the rows the source deletes",
+           "insert": "the rows the source inserts stay off the target",
+           "update": "the target's rows keep the values the source's"
+                     " updates change"}
+
+
+def contract_said(table, value):
+    """One `mapping.ops` rule as what it lets the target hold: the
+    changes carried, and for each left out, what the target keeps - a
+    `same` within such a hop is a `same` within that."""
+    from .config import OPS, parse_ops
+    try:
+        got = parse_ops(value)
+    except SystemExit:
+        return f"{table}: {value}"
+    left = [op for op in OPS if op not in got]
+    return (f"{table}: {', '.join(op for op in OPS if op in got)}"
+            + "".join(f"; {op}s are not carried - {_LEAVES[op]}"
+                      for op in left))
 
 
 def summarize(hop, records, engine=None, load=None, coverage=None):
@@ -633,6 +944,9 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     `incomplete` for the same reason, and names them under `stale`. The
     status is `decide`'s, and `why` says why it is not `same`.
     """
+    # held to the hop's carried changes before anything is counted, so
+    # the totals and the verdict read one answer (`hold`)
+    records = hold(hop, records)
     totals = {s: 0 for s in STATUSES}
     stale = sorted({str(r.get("scope", "")) for r in records
                     if r.get("stale")})
@@ -678,7 +992,9 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
              "status": r.get("status", ""),
              "detail": r.get("detail", ""),
              "report": r.get("report", ""),
-             "fix_hint": r.get("fix_hint", "")}
+             "fix_hint": r.get("fix_hint", ""),
+             **({"kept_by_hop": r["kept_by_hop"]}
+                if r.get("kept_by_hop") else {})}
             for r in records
             if r.get("status") not in ("ok", "skip") or r.get("stale")
         ],
