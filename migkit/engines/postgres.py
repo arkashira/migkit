@@ -539,19 +539,24 @@ class PostgresEngine(Engine):
         `_kept_conn`: every value as the server's text), `slot` (the
         change tail's, kept by `_slot_session`). A target database inside
         a load window is written as a replica (`load_window`) - never on a
-        kept connection, which would stay one after the window closed."""
+        kept connection, which would stay one after the window closed.
+        Every one carries the session settings a node's own part of a
+        table is reached under, where a reshard writes it directly
+        (`Spread.session`, `reshard._node_pair`)."""
         ep = self._ep(side)
+        more = self.__dict__.get("_part_session", "")
         if purpose in ("ask", "slot"):
             if purpose == "ask":
                 extra.setdefault("prepare_threshold", None)
             conn = connect(ep, name, "psycopg" if purpose == "ask"
-                           else "psycopg2", client_encoding="UTF8",
+                           else "psycopg2", more, client_encoding="UTF8",
                            **extra)
             conn.autocommit = True
             return conn
-        options = ""
+        options = more
         if side == "dst" and name in self.__dict__.get("_as_replica", ()):
-            options = "-c session_replication_role=replica"
+            options = " ".join(x for x in (
+                options, "-c session_replication_role=replica") if x)
         if purpose == "write":
             import psycopg
             return connect(ep, name, "psycopg", options,
@@ -1430,7 +1435,12 @@ select json_build_object(
                        if column else "Citus's one node for it"),
                       parts, owners, reference,
                       lambda k: nodes[shards[k][0]] if 0 <= k < len(shards)
-                      else None)
+                      else None,
+                      # a shard's own table is written and read on its node
+                      # only in a session that asks for it: Citus keeps
+                      # shards from every client's listings and writes
+                      "-c citus.enable_manual_changes_to_shards=on"
+                      " -c citus.show_shards_for_app_name_prefixes=*")
 
     def _conn(self, side, db):
         """A connection of the driver the rows are read through, to the

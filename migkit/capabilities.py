@@ -1052,6 +1052,7 @@ LINKED = {
     "move.bulk": ("capability", "bulk-move"),
     "move.large-values": ("shape", "large values"),
     "move.partitioned": ("shape", "partitioned"),
+    "move.spread": ("shape", "spread target"),
     "cutover.freeze": ("shape", "writes held"),
     "cutover.read-only-target": ("shape", "read-only target"),
     "cutover.counters": ("capability", "sequences"),
@@ -2126,6 +2127,10 @@ UNPROVED = {
     "move.table-copy": "db2i db2zos snowflake bigquery dsql",
     "move.bulk": "hetero",
     "move.large-values": "db2i db2zos snowflake bigquery",
+    # a sharded MongoDB, a Cassandra ring and a Vitess gate are clusters of
+    # servers the tests do not start yet; their readings are proved on
+    # stand-ins (`test_a_cluster_target_is_loaded_as_it_spreads_its_rows`)
+    "move.spread": "mysql mongodb cassandra",
     "move.sized": ("oracle db2i db2zos teradata redshift snowflake tidb "
                    "cockroachdb dsql"),
     "move.load-window": "tidb",

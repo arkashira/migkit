@@ -162,13 +162,16 @@ class Spread:
     cannot say], asked of the cluster's own function, a batch at once;
     `reference` - every node holds the whole table; `address` part index
     -> (host, port) where migkit writes the part's own table on its node
-    directly, or None where only the cluster's router is written."""
+    directly, or None where only the cluster's router is written;
+    `session`, the session settings a connection to a node reads and
+    writes a part's own table under."""
     columns: list
     said: str
     parts: list
     owners: object
     reference: bool = False
     address: object = None
+    session: str = ""
 
 
 #: the kind of a repair action that carries nothing out and only says

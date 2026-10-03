@@ -1639,9 +1639,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the follow of a group runs one database a process - --db one of <...>
 
-* <...>.<...>: <...> on <...> - the group's follow stops at a change of a table's shape or of its whole contents, its position kept before it: make the change on every target, then move again (--mode full+cdc)
-
 * <...>.<...>: no way places its rows - <...>
+
+* <...>: <...> on every source - a change the group's follow does not make on its targets: it stops before it, every position kept. Make it on every target, then move again (--mode full+cdc)
+
+* <...>: every source changed it, and <...> cannot take the change at its place in the log (<...>) - the follow stops before it, every position kept: make it on every target, then move again (--mode cdc)
 
 * <...>: the group's follow already runs - one follow a group
 
@@ -1652,6 +1654,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: a group is cut over one database at a time - --db one of <...>
 
 * <...>: a group has no stream back - its targets hold other rows than each of its sources
+
+* <...>: its group is cut over as one, and <...> say cutover: otherwise than <...> - say it alike on every hop of the group. Nothing was written
 
 * <...> is not a time zone - an offset (+07:00) or a zone name (Asia/Bangkok)
 

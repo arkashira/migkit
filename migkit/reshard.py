@@ -59,8 +59,13 @@ from every target it left before it is written on the one it reaches -
 every target's removals first, then every target's writes - so no row is
 on two targets at once; each target's writes of a source's batch are one
 transaction under the batch's number (`marks`), so a target that
-committed a batch before a stop is not written it again. A key that moves
+committed a batch before a stop is not written again. A key that moves
 between sources is asked of every source as it is now (`_held_elsewhere`).
+A change of a table's shape or whole contents holds its source there
+until every source holding the table has made it - its log says so, or,
+for a column added, its catalogue - and is then made once on every target
+(`_change_targets`): the shard merge's coordination, so no target takes a
+shape before every source's rows of the shape before it are in.
 
 **Proved** (`prove`, `judge`): every target read by key and digest - each
 key on the one target its key places it on, as its source has it, no key
@@ -76,6 +81,8 @@ import dataclasses
 import hashlib
 import time
 from dataclasses import dataclass, field
+
+from .freeze import GROUP
 
 GOAL = "reshard"
 OPTION = "reshard"
@@ -266,7 +273,19 @@ class Group:
         return got
 
     def reader(self, i):
-        return self.pair(i, 0).src_engine
+        """Source `i`'s reader, its change log's included - named for the
+        source alone, so its slot is the group's, and for a split over
+        every part's tables (a part's own scope leaves out tables another
+        part takes; `_takes` holds each table to the parts)."""
+        got = self._pairs.get((i, "reader"))
+        if got is None:
+            from .engines import get_engine
+            h = self.pair_hop(i, 0)
+            h = dataclasses.replace(h, name=f"{self.lead.name}-s{i + 1}")
+            if self.kind == "split":
+                h = dataclasses.replace(h, exclude=[], include=[])
+            got = self._pairs[(i, "reader")] = _pair(get_engine(h))
+        return got.src_engine
 
     def writer(self, i, j):
         return self.pair(i, j).dst_engine
@@ -1025,6 +1044,8 @@ def _node_pair(g, i, k, spread):
             target=dataclasses.replace(base.target, host=host,
                                        port=int(port)))
         got = g._pairs[key] = _pair(get_engine(h))
+        if spread.session:
+            got.dst_engine._part_session = spread.session
         _arm(g, got)
     return got
 
@@ -1231,9 +1252,10 @@ def _finish(g, log):
     """Once every unit is in: the indexes of the tables the copy made, each
     target's counters past its rows, and the proof - a target that is not
     what the function places there stops it."""
-    for key, pair in sorted((k, p) for k, p in g._pairs.items()
-                            if len(k) == 2):
-        pair.finish_created(g.sources[key[0]].db, log)
+    for (i, j), pair in sorted(((k, p) for k, p in g._pairs.items()
+                                if len(k) == 2 and isinstance(k[1], int)),
+                               key=lambda kp: kp[0]):
+        pair.finish_created(g.sources[i].db, log)
     for j in range(len(g.targets)):
         said = g.writer(0, j).settle_target(g.sources[0].db,
                                             from_source=False)
@@ -1272,11 +1294,12 @@ def copy(g, go, log):
             " emptied, every row written to the target its key places it"
             " on, and every target proved")
         return
-    if (g.lead.options or {}).get("protect_target"):
+    hop = g.lead
+    if (hop.options or {}).get("protect_target"):
         # every target kept from the application's writes before a row is
         # copied, each its own way, as one (`freeze.GroupHold`)
         from . import freeze
-        freeze.protect(g.lead, Cluster(g), g.db, log)
+        freeze.protect(hop, Cluster(g), g.db, log)
     ledger = _ledger(g)
     where = _ledger_path(g)
     if not ledger.get("prepared"):
@@ -1688,17 +1711,10 @@ def _apply(g, i, changes, fn_of, token, run, log):
     db = g.sources[i].db
     rows_ = []
     for c in changes:
+        # a change of a table's shape is settled before this, at its place
+        # in the log (`_split_at_ddl`, `_coordinate`)
         fn = fn_of(c["table"])
-        if canon.is_ddl(c):
-            if fn is None:
-                continue
-            raise SystemExit(
-                f"{db}.{c['table']}: {c.get('kind')} on {g.sources[i].name}"
-                " - the group's follow stops at a change of a table's shape"
-                " or of its whole contents, its position kept before it:"
-                " make the change on every target, then move again (--mode"
-                " full+cdc)")
-        if fn is None or drift.transient(c["table"]):
+        if canon.is_ddl(c) or fn is None or drift.transient(c["table"]):
             continue
         if fn.way == "whole" and fn.home != i:
             # a table its targets take whole is carried from the first
@@ -1728,7 +1744,8 @@ def _apply(g, i, changes, fn_of, token, run, log):
     for j in range(n):
         if not plan.into[j]:
             continue
-        if _same(run["ahead"].get((i, j)), token):
+        if (i, j) in run["ahead"] and token is not None \
+                and _same(run["ahead"][(i, j)], token):
             log(f"{g.targets[j].name} had committed this batch of"
                 f" {g.sources[i].name} before the stop: not written again")
             continue
@@ -1760,6 +1777,100 @@ def _functions(g):
     return fns
 
 
+def _split_at_ddl(changes, table_of, i, fns):
+    """(the changes before the first change of a table's shape or whole
+    contents the group carries, that change, the changes after it) of
+    source `i`'s batch; (changes, None, []) where there is none. A log
+    that keeps no DDL (PostgreSQL's) shows one by a change carrying a
+    column the table did not have when its rows were placed: an `alter`
+    there, the change itself after it. A table its targets take whole
+    from another source is that source's to change."""
+    from . import canon
+    for x, c in enumerate(changes):
+        t = table_of(c["table"])
+        if t is None or (fns[t].way == "whole" and fns[t].home != i):
+            continue
+        if canon.is_ddl(c):
+            return changes[:x], c, changes[x + 1:]
+        cols = fns[t].columns
+        if cols and set(c.get("values") or {}) - set(cols):
+            return changes[:x], {"op": "ddl", "table": c["table"],
+                                 "kind": "alter"}, changes[x:]
+    return changes, None, []
+
+
+def _made_alike(g, t, held, need, fn):
+    """The sources of `need` that have not made the change the sources
+    `held` are held at: a table emptied, by their own logs; columns
+    added, by their own catalogues now - a source whose catalogue holds
+    every column the first held one gained has made it, whether or not
+    its log has come to it yet."""
+    kinds = {h["kind"] for h in held.values()}
+    if not kinds <= {"alter", "create"}:
+        return [k for k in need if k not in held]
+    for pair in g._pairs.values():
+        pair.src_engine.forget_shapes()
+
+    def columns(k):
+        return {n for n, _ in g.reader(k).neutral_columns(
+            "src", g.sources[k].db, t)}
+    gained = columns(min(held)) - set(fn.columns)
+    return [k for k in need if k not in held
+            and not gained <= columns(k)]
+
+
+def _change_targets(g, t, kinds, within, log):
+    """A change every source holding `t` has made, made once on every
+    target: a table emptied, emptied there within the hop's row filter;
+    columns added, added as each target builds a column the copy would
+    have built (`HeteroEngine._additive`). Any other, or one a target
+    cannot take at its place in the log without a row coming out
+    otherwise, stops the follow before it, its positions kept."""
+    db = g.sources[0].db
+    for pair in g._pairs.values():
+        # what the engines keep of the tables' columns, read again
+        pair.src_engine.forget_shapes()
+        pair.dst_engine.forget_shapes()
+        pair.__dict__.pop("_typed_of", None)
+    for j in within:
+        pair = g.pair(0, j)
+        if kinds == {"truncate"}:
+            dst_t = _target_table(pair, db, t)
+            _, dst_where = pair._row_scope(db, t)
+            n = pair.dst_engine.neutral_empty(
+                "dst", db, dst_t, **({"where": dst_where} if dst_where
+                                     else {}))
+            log(f"{t}: emptied on every source; {dst_t} emptied on"
+                f" {g.targets[j].name} at the same place ({n or 0:,} rows)")
+            continue
+        if not kinds <= {"alter", "create"}:
+            break
+        lacking = pair._lacking(db, {}, {t: g.reader(0).neutral_columns(
+            "src", db, t)})
+        for _, (dst_t, missing) in lacking.items():
+            if not missing:
+                continue
+            sqls, why = pair._additive(db, t, dst_t, missing)
+            if sqls is None:
+                raise SystemExit(
+                    f"{t}: every source changed it, and {g.targets[j].name}"
+                    f" cannot take the change at its place in the log"
+                    f" ({why}) - the follow stops before it, every position"
+                    " kept: make it on every target, then move again"
+                    " (--mode cdc)")
+            for sql in sqls:
+                pair._run_ddl(db, sql)
+                log(f"{t}: changed on every source; on"
+                    f" {g.targets[j].name}: {sql}")
+    else:
+        return
+    raise SystemExit(
+        f"{t}: {', '.join(sorted(k for k in kinds if k))} on every source"
+        " - a change the group's follow does not make on its targets: it"
+        " stops before it, every position kept. Make it on every target,"
+        " then move again (--mode full+cdc)")
+
+
 def follow(g, go, log):
     """Every source's changes onto the targets, by the same function, on
     the one follow loop (`tailctl.run_loop`) until it is stopped - ctrl-c,
@@ -1778,17 +1889,25 @@ def follow(g, go, log):
         raise SystemExit(f"{g.db}: the group's follow already runs - one"
                          " follow a group")
     fns = _functions(g)
+    homes = {t: fn.home for t, fn in fns.items()}
     leaves = {}
     for t in fns:
         leaves.setdefault(str(t).split(".")[-1], []).append(t)
 
-    def fn_of(table):
-        got = fns.get(table)
+    def table_of(table):
+        """The table of the group a change names, by its whole name or by
+        its last part where only one table has it; None for another."""
+        if table in fns:
+            return table
         leaf = str(table).split(".")[-1]
-        if got is None and len(leaves.get(leaf, [])) == 1:
-            got = fns[leaves[leaf][0]]
-        return got
+        return leaves[leaf][0] if len(leaves.get(leaf, [])) == 1 else None
+
+    def fn_of(table):
+        t = table_of(table)
+        return fns[t] if t is not None else None
     n_src, n_dst = len(g.sources), len(g.targets)
+    holding = [set(g.reader(i).neutral_tables("src", s.db))
+               for i, s in enumerate(g.sources)]
     paths = [_token_path(g, i) for i in range(n_src)]
     envs = []
     for i, s in enumerate(g.sources):
@@ -1839,13 +1958,79 @@ def follow(g, go, log):
     st = {"saved": [e.get("token") for e in envs],
           "read_at": [e.get("token") for e in envs],
           "carried": [[] for _ in range(n_src)], "limit": [BATCH] * n_src,
-          "fence": [None] * n_src, "moved": 0}
+          "fence": [None] * n_src, "moved": 0, "held": [None] * n_src,
+          "said": set()}
     cut_ok = [bool(getattr(g.reader(i), "READ_ENDS_INSIDE_TRANSACTIONS",
                            False)) for i in range(n_src)]
+
+    def run_part(i, changes, at):
+        """Source `i`'s changes up to `at`: applied and its position kept -
+        or, where one changes a table's shape or whole contents, those
+        before it applied and the source held there (`coordinate`), its
+        position kept where it was: the changes before it are applied
+        again after a stop, which the targets take by key."""
+        before, ddl, after = _split_at_ddl(changes, table_of, i, fns)
+        if ddl is None:
+            applied, m, marked = _apply(g, i, changes, fn_of, at, run, log)
+            for key in [k for k in ahead if k[0] == i]:
+                ahead.pop(key)
+            if applied or not _same(at, st["saved"][i]):
+                batch[i] += 1 if marked else 0
+                envs[i] = tailctl.moved(paths[i], envs[i], at,
+                                        batch=batch[i])
+                st["saved"][i] = at
+            return applied, m
+        applied, m, _ = _apply(g, i, before, fn_of, None,
+                               dict(run, numbered={}), log)
+        t = table_of(ddl["table"])
+        st["held"][i] = {"table": t, "kind": ddl.get("kind"),
+                         "after": after, "at": at}
+        log(f"{t}: {ddl.get('kind')} on {g.sources[i].name} - its changes"
+            " held there until every source holding it has made it too;"
+            " then it is made once on every target")
+        return applied, m
+
+    def coordinate():
+        """The sources held at a change of one table's shape or contents,
+        let go once every source holding the table has reached one - each
+        made once on every target first (`_change_targets`): the shard
+        merge's own way, a change no source has yet made never landing
+        before another source's rows of the shape before it."""
+        went = 0
+        waiting = {}
+        for i, h in enumerate(st["held"]):
+            if h is not None:
+                waiting.setdefault(h["table"], []).append(i)
+        for t, held in waiting.items():
+            need = ([homes[t]] if fns[t].way == "whole" else
+                    [k for k in range(n_src) if t in holding[k]])
+            behind = [g.sources[k].name for k in _made_alike(
+                g, t, {k: st["held"][k] for k in held}, need, fns[t])]
+            if behind:
+                said = (t, tuple(behind))
+                if said not in st["said"]:
+                    st["said"].add(said)
+                    log(f"{t}: waiting for {', '.join(behind)} to make the"
+                        " same change")
+                continue
+            _change_targets(g, t, {st["held"][k]["kind"] for k in held},
+                            fns[t].within, log)
+            fresh, _ = function(g, t, homes[t])
+            if fresh is not None:
+                fns[t] = fresh
+            for k in held:
+                h, st["held"][k] = st["held"][k], None
+                applied, m = run_part(k, h["after"], h["at"])
+                went += applied
+                st["moved"] += m
+        return went
 
     def look(token):
         went, settled = 0, True
         for i, s in enumerate(g.sources):
+            if st["held"][i] is not None:
+                settled = False
+                continue
             reader = g.reader(i)
             got, read_to = reader.neutral_changes(
                 "src", s.db, st["read_at"][i], limit=st["limit"][i])
@@ -1858,22 +2043,16 @@ def follow(g, go, log):
             if cut is not None:
                 changes, st["carried"][i] = changes[:cut], changes[cut:]
                 at = changes[-1]["txn_at"]
-            applied, m, marked = _apply(g, i, changes, fn_of, at, run, log)
-            for key in [k for k in ahead if k[0] == i]:
-                ahead.pop(key)
-            if applied or not _same(at, st["saved"][i]):
-                batch[i] += 1 if marked else 0
-                envs[i] = tailctl.moved(paths[i], envs[i], at,
-                                        batch=batch[i])
-                st["saved"][i] = at
+            applied, m = run_part(i, changes, at)
             went += applied
             st["moved"] += m
             settled = settled and fewer and not st["carried"][i]
+        went += coordinate()
         if went:
             log(f"{went:,} changes"
                 + (f", {st['moved']:,} rows moved across targets so far"
                    if st["moved"] else ""))
-        return list(st["saved"]), went, settled
+        return list(st["saved"]), went, settled and not any(st["held"])
 
     def reached(token):
         out = True
@@ -1892,6 +2071,8 @@ def follow(g, go, log):
     def lost(e, token):
         st["read_at"] = list(st["saved"])
         st["carried"] = [[] for _ in range(n_src)]
+        # a source held at a change is read again up to it
+        st["held"] = [None] * n_src
         return list(st["saved"])
     secrets_ = tuple(x for s in g.sources for x in (s.hop.source.password,))
     secrets_ += tuple(t.hop.target.password for t in g.targets)
@@ -2171,7 +2352,7 @@ class _Sides:
     """One side of a group as the cutover's freeze and its target's hold
     see it (`freeze.GroupHold`): each source - or each target - with the
     hop it is held under, its engine and its database."""
-    CANON_ENGINE = "group"
+    CANON_ENGINE = GROUP
 
     def __init__(self, g, side):
         self.group, self.side = g, side
@@ -2181,8 +2362,8 @@ class _Sides:
         g, out = self.group, []
         if self.side == "src":
             for i, s in enumerate(g.sources):
-                pair = g.pair(i, 0)
-                out.append((s.name, pair.hop, pair, s.db))
+                reader = g.reader(i)
+                out.append((s.name, reader.hop, reader, s.db))
         elif g.kind == GOAL:
             for j, t in enumerate(g.targets):
                 pair = g.pair(0, j)
@@ -2240,7 +2421,7 @@ class _Fence:
     """The follow's drain, as the cutover asks it: every source's position
     now, and the follow waited for until its kept position of each has
     passed it."""
-    CANON_ENGINE = "group"
+    CANON_ENGINE = GROUP
 
     def __init__(self, g):
         self.group = g
@@ -2304,10 +2485,20 @@ def leg(g, say):
         if tailctl.alive(where, g.lead):
             raise SystemExit(f"{d}: the group's follow did not end")
         say(f"  {d}: the group's follow ended")
+    def manual(go):
+        """The teardown of a group without `cutover:`: its follow ended,
+        once migkit has proved around it what it proves by hand."""
+        if not go:
+            say(f"  {g.db}: with --go the group's follow is ended here, its"
+                " every position kept")
+            return None
+        end(g.db)
+        return None
     if not tailctl.alive(where, g.lead):
         return cutover.Leg("none", why="no follow of the group runs: start"
-                                       " it with --mode cdc")
-    return cutover.Leg("tail", fence=_Fence(g), down=down, up=up, end=end)
+                                       " it with --mode cdc", manual=manual)
+    return cutover.Leg("tail", fence=_Fence(g), down=down, up=up, end=end,
+                       manual=manual)
 
 
 def cut_over(hop, dbs, go, say, approve):
@@ -2325,5 +2516,12 @@ def cut_over(hop, dbs, go, say, approve):
                          " targets hold other rows than each of its"
                          " sources")
     g = group(hop, dbs[0])
+    apart = sorted(h.name for h in g.hops
+                   if cutover.settings(h) != cutover.settings(g.lead))
+    if apart:
+        raise SystemExit(f"{hop.name}: its group is cut over as one, and"
+                         f" {', '.join(apart)} say cutover: otherwise than"
+                         f" {g.lead.name} - say it alike on every hop of the"
+                         " group. Nothing was written")
     return cutover.run(g.lead, Cluster(g), [g.db], go, leg(g, say), say,
                        approve)

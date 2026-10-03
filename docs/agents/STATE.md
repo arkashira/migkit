@@ -47,13 +47,13 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 265, yes 455. A cell below is the ways proved of the items that apply.
+87 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 918, not yet 1489, test owed 268, yes 457. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | ase | 0/10 | 0/34 | 0/6 | 0/7 | 1/6 | 3/7 | 1/7 | 0/1 | 0/1 | 0/1 | 5/80 |
 | bigquery | 0/10 | 0/31 | 0/6 | 1/7 | 1/6 | 1/6 | 1/6 | 1/1 | 1/1 | 0/1 | 6/75 |
-| cassandra | 0/9 | 3/24 | 1/5 | 0/7 | 1/4 | 2/5 | 4/5 | 1/1 | 1/1 | 0/1 | 13/62 |
+| cassandra | 0/9 | 3/24 | 1/5 | 0/7 | 1/4 | 2/6 | 4/5 | 1/1 | 1/1 | 0/1 | 13/63 |
 | clickhouse | 1/9 | 3/30 | 1/6 | 0/7 | 1/5 | 5/7 | 4/6 | 1/1 | 1/1 | 0/1 | 17/73 |
 | cockroachdb | 1/10 | 2/35 | 3/6 | 0/7 | 1/6 | 1/7 | 3/7 | 0/1 | 1/1 | 0/1 | 12/81 |
 | copybook | 0/7 | 0/15 | - | 0/4 | 1/2 | 2/4 | 0/1 | 0/1 | - | 0/1 | 3/35 |
@@ -67,17 +67,17 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | duckdb | 0/9 | 1/23 | - | 0/7 | 1/6 | 4/6 | 2/2 | 0/1 | 0/1 | 0/1 | 8/56 |
 | dynamodb | 0/8 | 2/18 | 1/5 | 0/7 | 1/2 | 2/5 | 3/4 | 1/1 | 1/1 | 0/1 | 11/52 |
 | generic | 1/10 | 2/39 | 0/6 | 1/7 | 0/6 | 0/7 | 0/6 | 0/1 | 0/1 | 0/1 | 4/84 |
-| hetero | 4/10 | 5/39 | 1/2 | 1/5 | - | 5/7 | 2/5 | - | - | - | 18/68 |
+| hetero | 4/10 | 5/39 | 1/2 | 1/5 | - | 6/8 | 2/5 | - | - | - | 19/69 |
 | iceberg | 0/9 | 0/23 | 0/6 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/58 |
 | kafka | 0/9 | 6/18 | 1/5 | 2/7 | 0/1 | 5/6 | 3/5 | 1/1 | 1/1 | 0/1 | 19/54 |
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
-| mongodb | 1/9 | 11/23 | 1/6 | 4/7 | 0/3 | 4/5 | 3/5 | 1/1 | 1/1 | 0/1 | 26/61 |
+| mongodb | 1/9 | 11/23 | 1/6 | 4/7 | 0/3 | 4/6 | 3/5 | 1/1 | 1/1 | 0/1 | 26/62 |
 | mssql | 4/10 | 12/35 | 1/6 | 0/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 29/81 |
-| mysql | 8/10 | 22/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 63/78 |
+| mysql | 8/10 | 22/31 | 5/6 | 5/7 | 6/6 | 7/8 | 7/8 | 1/1 | 1/1 | 1/1 | 63/79 |
 | opensearch | 0/9 | 3/26 | 1/6 | 2/7 | 1/4 | 3/6 | 4/6 | 1/1 | 1/1 | 0/1 | 16/67 |
 | oracle | 3/10 | 8/36 | 1/6 | 1/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 25/82 |
 | parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 0/1 | 0/1 | 0/1 | 5/38 |
-| postgres | 9/10 | 29/37 | 4/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 72/84 |
+| postgres | 9/10 | 29/37 | 4/6 | 7/7 | 5/6 | 8/8 | 8/8 | 1/1 | 1/1 | 1/1 | 73/85 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | redis | 1/8 | 7/14 | 1/6 | 4/7 | 0/1 | 4/5 | 3/6 | 1/1 | 1/1 | 0/1 | 22/50 |
 | redshift | 0/10 | 0/32 | 0/6 | 1/7 | 1/5 | 1/5 | 1/7 | 1/1 | 1/1 | 0/1 | 6/75 |
@@ -164,6 +164,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | move.bulk | the rest (15) | hetero | ase bigquery cockroachdb cosmosdb couchbase db2 db2i db2zos delta generic iceberg redshift snowflake tidb | dsql kinesis pubsub saas sapodp teradata |
 | move.large-values | the rest (17) | bigquery db2i db2zos snowflake | cockroachdb cosmosdb couchbase dsql generic teradata tidb | cassandra copybook dynamodb kinesis pubsub redshift saas sapodp |
 | move.partitioned | clickhouse kafka mysql postgres | - | the rest (19) | cassandra copybook cosmosdb couchbase duckdb dynamodb kinesis mongodb opensearch pubsub saas sapodp sqlite |
+| move.spread | hetero postgres | cassandra mongodb mysql | - | the rest (31) |
 | move.sized | the rest (13) | cockroachdb db2i db2zos dsql oracle redshift snowflake teradata tidb | cassandra copybook cosmosdb couchbase delta dynamodb generic iceberg opensearch parquet saas sapodp | kinesis pubsub |
 | move.load-window | hetero mysql oracle postgres | tidb | the rest (18) | bigquery copybook delta iceberg kafka kinesis parquet pubsub redis redshift saas sapodp snowflake |
 | move.create-missing | hetero mysql postgres tidb | - | the rest (26) | kinesis mongodb pubsub redis saas sapodp |
@@ -181,7 +182,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (445 items, `docs/backlog-index.md`)
 
-DONE 283 - PARTLY 47 - IN PROGRESS 9 - OPEN 77 - BLOCKED 20 - NOT PURSUED 9
+DONE 284 - PARTLY 47 - IN PROGRESS 8 - OPEN 77 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -190,7 +191,7 @@ DONE 283 - PARTLY 47 - IN PROGRESS 9 - OPEN 77 - BLOCKED 20 - NOT PURSUED 9
 | cutover | 14 | 1 | 1 | 4 | 0 | 0 |
 | ease of use | 19 | 2 | 1 | 3 | 1 | 1 |
 | engines | 26 | 6 | 3 | 14 | 6 | 1 |
-| move | 30 | 10 | 2 | 10 | 0 | 2 |
+| move | 31 | 10 | 1 | 10 | 0 | 2 |
 | operations/scale | 26 | 9 | 0 | 11 | 5 | 3 |
 | security | 10 | 2 | 0 | 4 | 2 | 1 |
 | tools used whole | 32 | 6 | 0 | 2 | 0 | 0 |
@@ -198,5 +199,5 @@ DONE 283 - PARTLY 47 - IN PROGRESS 9 - OPEN 77 - BLOCKED 20 - NOT PURSUED 9
 | types | 12 | 1 | 1 | 0 | 0 | 0 |
 | verify | 42 | 4 | 0 | 10 | 1 | 1 |
 
-Not done (153): P0-DE.1, P0-DE.2, P0-DE.3, P0-DE.4, BAR-1, BAR-2, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, R9.docdb, A2/D10, C1.managed, F1.dual, P3.dryrun, R6.cloud, 26.versions, 26.trino, 26.striim, MSSQL-x86, AUD.slot.more, AUD.release, P0-DEPTH.constants, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-DEPTH.tombstones, P0-AUDIT, AUD-B, AUD-C, AUD-D, AUD-E.pin, AUD-F, AUD-G2, AUD-H, AUD-T2, AUD-Z, P0-PARITY.lv, P0-PARITY.part, P0-PARITY.small, P0-PARITY.lv.new, P0-SMART.route, P0-CLOUDS.native, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.brands, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, DEC.deps, DEC.ptcs, S1.e, S3.link, S4, F2.freeze, F3, F7.beat, F7.edges, F7.sec, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R2, LT.R3, LT.R6, LT.R7, LT.R8, LT.R9, LT.R10, LT.C1, LT.C2, LT.C3, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.a, W4.b, W6, W7, W8, W9, 28.rates, R5.actions, R5.anchor, 32.rds, 45.run, R4.msk, R4.formats, R3.topo, 38.real, R17b.hmac, R17b.prog, DOCS, 43.fix, R8.more, R8.mv, R10.pieces, R12.minio, R13-DB2, R13-ASE, R13-HETERO, R13-GENERIC, R13.kafka, R13.redis, R13.sqlite, R13.parquet, R15.2nd, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.7, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R23.7, R23.8, R25.2, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all
+Not done (152): P0-DE.1, P0-DE.2, P0-DE.3, P0-DE.4, BAR-1, BAR-2, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, R9.docdb, A2/D10, C1.managed, F1.dual, P3.dryrun, R6.cloud, 26.versions, 26.trino, 26.striim, MSSQL-x86, AUD.slot.more, AUD.release, P0-DEPTH.constants, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-DEPTH.tombstones, P0-AUDIT, AUD-B, AUD-C, AUD-D, AUD-E.pin, AUD-F, AUD-G2, AUD-H, AUD-T2, AUD-Z, P0-PARITY.lv, P0-PARITY.part, P0-PARITY.small, P0-PARITY.lv.new, P0-SMART.route, P0-CLOUDS.native, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.brands, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, DEC.deps, DEC.ptcs, S1.e, S3.link, S4, F2.freeze, F3, F7.beat, F7.edges, F7.sec, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R2, LT.R3, LT.R6, LT.R7, LT.R8, LT.R9, LT.R10, LT.C1, LT.C2, LT.C3, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.a, W4.b, W6, W8, W9, 28.rates, R5.actions, R5.anchor, 32.rds, 45.run, R4.msk, R4.formats, R3.topo, 38.real, R17b.hmac, R17b.prog, DOCS, 43.fix, R8.more, R8.mv, R10.pieces, R12.minio, R13-DB2, R13-ASE, R13-HETERO, R13-GENERIC, R13.kafka, R13.redis, R13.sqlite, R13.parquet, R15.2nd, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.7, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R23.7, R23.8, R25.2, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all
 

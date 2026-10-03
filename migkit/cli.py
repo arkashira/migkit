@@ -5786,10 +5786,18 @@ def rollback(hop_name, db, state_ts, do_apply):
     eng = get_engine(hop)
     from . import cutover, freeze, repairlog
     _guard_write(hop, eng, "a rollback", [db], do_apply, step="rollback")
+    # a reshard's, a split's or a consolidation's hop goes back as the
+    # group it was cut over as: its first hop's record, every source's
+    # freeze given back side by side (`reshard.Cluster`)
+    from . import reshard
+    lead, held = hop, eng
+    if reshard.kind_of(hop) is not None:
+        group_ = reshard.group(hop, db)
+        lead, held = group_.lead, reshard.Cluster(group_)
     # read before the target's own counters are put back: the new
     # primary's as they stand clear every key it handed out, even one
     # whose row it deleted since
-    back = cutover.back_plan(hop, eng, db, console.print)
+    back = cutover.back_plan(lead, held, db, console.print)
     # the row repairs since the state gone back to, or the last run's where
     # none was saved, each by its statement-level record (`repairlog`)
     from .state import get_store
@@ -5811,7 +5819,8 @@ def rollback(hop_name, db, state_ts, do_apply):
                         path, eng.repair_io(db, repairlog.read(path)[0]),
                         log=lambda m: console.print(f"  {_esc(m)}"))
         if back is not None:
-            cutover.back_apply(hop, eng, db, back, do_apply, console.print)
+            cutover.back_apply(lead, held, db, back, do_apply,
+                               console.print)
         if freeze.state(hop, db):
             # what migkit took from the application's roles comes back
             # last: given back first, they wrote while the rest was put

@@ -67,15 +67,9 @@ def test_the_group_is_every_hop_named_in_one_order_whichever_runs():
              db_map={"shop": "shop_b"})
     c = _hop("c", {}, host="10.0.0.2", target="10.0.0.10")
     have = {"a": a, "b": b, "c": c}
-    for runs in (a, b, c):
-        if runs is c:
-            # c names nobody: it is a group of its own
-            assert [h.name for h in reshard.group(c, "shop", have).hops] \
-                == ["c"]
-            continue
-        g = reshard.group(runs, "shop", have)
-        assert [h.name for h in g.hops] == (["a", "b", "c"] if runs is a
-                                            else ["b", "c"])
+    # the hops each names, and the hops those name; c names nobody
+    assert [[h.name for h in reshard.group(runs, "shop", have).hops]
+            for runs in (a, b, c)] == [["a", "b", "c"], ["b", "c"], ["c"]]
     g = reshard.group(a, "shop", have)
     # two sources (two servers), three targets (two databases on one
     # server, and another server), each named by its first hop by name
@@ -279,19 +273,14 @@ def test_one_source_followed_every_row_on_one_target_after_every_batch(
     now = {}
     for batch in _batches(data.draw, log):
         plan = reshard.plan_batch(batch, {"t": fn}, n)
-        assert not plan.asked or all(t == "t" for t, _ in plan.asked)
         order = data.draw(st.permutations(list(range(n))))
-        _apply(plan, targets, order)
+        for _ in range(1 + data.draw(st.integers(0, 1))):
+            _apply(plan, targets, order)
         for c in batch:
-            if c["op"] == "delete":
-                now.pop(c["key"]["id"], None)
-            else:
-                now.pop(c["key"]["id"], None)
+            now.pop(c["key"]["id"], None)
+            if c["op"] != "delete":
                 now[c["values"]["id"]] = dict(c["values"])
         assert targets == _placed(fn, now, n)
-        if data.draw(st.booleans()):
-            _apply(plan, targets)
-            assert targets == _placed(fn, now, n)
     assert now == final
     assert targets == _placed(fn, final, n)
 
@@ -336,18 +325,20 @@ def test_keys_that_move_between_sources_end_once_on_their_target(data, n):
 
 
 @hsettings(max_examples=200, deadline=None)
-@given(st.data(), st.integers(2, 4), st.booleans())
-def test_a_split_parts_rules_asked_of_the_source_place_every_row(data, n,
-                                                                 stays):
+@given(st.data(), st.integers(2, 4))
+def test_a_split_parts_rules_asked_of_the_source_place_every_row(data, n):
     """A split's parts place a row by their rules, which only the source can
     answer (`_rule_places`): asked of the rows as they stand when the
-    follow has drained, each row is on every part whose rule takes it and
-    no other, and a row no rule takes is on none - or stops the follow
-    where the rest does not stay."""
-    takes = {j: set(data.draw(st.lists(st.integers(0, 40), max_size=20)))
-             for j in range(n)}
+    follow has drained, each row is on the part whose rule takes it and
+    no other, and a row no rule takes - the rest staying on the source -
+    on none."""
+    # each value of the column a part's rule reads taken by one part, or by
+    # none: rules that overlap are refused before the move (`split`)
+    owner = {k: data.draw(st.sampled_from(list(range(n)) + [None]))
+             for k in range(41)}
+    takes = {j: {k for k, o in owner.items() if o == j} for j in range(n)}
     fn = _fn("rule", n=n, rules={j: f"k in {sorted(t)}"
-                                 for j, t in takes.items()}, stays=stays)
+                                 for j, t in takes.items()}, stays=True)
     (log,), (final,) = data.draw(_history(1))
     targets = [dict() for _ in range(n)]
     for batch in _batches(data.draw, log):
@@ -358,12 +349,8 @@ def test_a_split_parts_rules_asked_of_the_source_place_every_row(data, n,
             placed[reshard._ident(t, key)] = (
                 reshard.GONE if row is None else
                 {j for j, ks in takes.items() if row["k"] in ks})
-        try:
-            plan = reshard.plan_batch(batch, {"t": fn}, n, placed=placed)
-        except reshard.Unplaced as e:
-            assert not stays and "in no part's rule" in str(e)
-            return
-        _apply(plan, targets)
+        _apply(reshard.plan_batch(batch, {"t": fn}, n, placed=placed),
+               targets)
     for j, ks in takes.items():
         want = {k: r for k, r in final.items() if r["k"] in ks}
         # a row the source no longer holds is left to its own delete,
@@ -395,6 +382,114 @@ def test_a_change_no_target_takes_stops_the_follow_before_it():
     with pytest.raises(reshard.Unplaced) as e:
         reshard.plan_batch(batch, {"t": fn}, 3)
     assert "places its row on no target" in str(e.value)
+    # a split part's rule that takes it nowhere, the rest not staying
+    rule = _fn("rule", n=2, rules={0: "k < 5", 1: "k > 60"})
+    ident = reshard._ident("t", {"id": 1})
+    with pytest.raises(reshard.Unplaced) as e:
+        reshard.plan_batch(batch, {"t": rule}, 2, placed={ident: set()})
+    assert "in no part's rule" in str(e.value)
+    rule.stays = True
+    plan = reshard.plan_batch(batch, {"t": rule}, 2, placed={ident: set()})
+    # the rest staying on the source: written on no part
+    assert plan.into == {0: [], 1: []} and plan.out == {0: [], 1: []}
+
+
+# --- a change of a table's shape, made once every source has made it ---------------
+
+def test_a_batch_is_cut_at_the_first_change_of_a_group_tables_shape():
+    fns = {"public.orders": _fn(), "public.countries": _fn("whole")}
+    fns["public.countries"].home = 1
+
+    def table_of(t):
+        return t if t in fns else None
+    row = {"op": "insert", "table": "public.orders", "key": {"id": 1},
+           "values": {"id": 1, "k": 1, "v": ""}}
+    other = {"op": "ddl", "table": "public.audit", "kind": "alter"}
+    copy = {"op": "ddl", "table": "public.countries", "kind": "truncate"}
+    mine = {"op": "ddl", "table": "public.orders", "kind": "alter"}
+    before, ddl, after = reshard._split_at_ddl(
+        [row, other, copy, row, mine, row], table_of, 0, fns)
+    # a table outside the group, and source 0's copy of a table its
+    # targets take whole from source 1, pass; the group's own does not
+    assert before == [row, other, copy, row] and ddl is mine
+    assert after == [row]
+    assert reshard._split_at_ddl([row], table_of, 0, fns) == ([row], None,
+                                                              [])
+    _, ddl, _ = reshard._split_at_ddl([copy], table_of, 1, fns)
+    assert ddl is copy
+    # a log that keeps no DDL shows one by a column the table did not have
+    wider = {**row, "values": {**row["values"], "note": "x"}}
+    before, ddl, after = reshard._split_at_ddl([row, wider, row], table_of,
+                                               0, fns)
+    assert before == [row] and after == [wider, row]
+    assert ddl == {"op": "ddl", "table": "public.orders", "kind": "alter"}
+
+
+class _Shaped:
+    def __init__(self, missing=(), takes=True):
+        self.missing, self.takes, self.ran, self.emptied = missing, takes, \
+            [], []
+
+        class _E:
+            def forget_shapes(self):
+                pass
+
+            def neutral_empty(e, side, db, table, where=None):
+                self.emptied.append((table, where))
+                return 3
+        self.src_engine = self.dst_engine = _E()
+
+    def _row_scope(self, db, t):
+        return None, "region = 'eu'"
+
+    def _lacking(self, db, before, after):
+        return {t: ("orders", list(self.missing)) for t in after}
+
+    def _additive(self, db, t, dst_t, missing):
+        if not self.takes:
+            return None, "a NOT NULL column with no default"
+        return [f"alter table {dst_t} add column {m} text" for m in
+                missing], ""
+
+    def _run_ddl(self, db, sql):
+        self.ran.append(sql)
+
+
+def test_a_change_every_source_made_is_made_once_on_every_target(
+        monkeypatch):
+    lead = _hop("a")
+    pairs = [_Shaped(["note"]), _Shaped(["note"]), _Shaped(["note"])]
+    g = reshard.Group("reshard", lead, [lead],
+                      [reshard.Side("a", lead, "shop")],
+                      [reshard.Side(n, lead, "shop") for n in "abc"], {})
+    for j, p in enumerate(pairs):
+        g._pairs[(0, j)] = p
+
+    class _Reader:
+        def neutral_columns(self, side, db, t):
+            return [("id", "integer"), ("note", "text")]
+    monkeypatch.setattr(reshard.Group, "reader", lambda self, i: _Reader())
+    monkeypatch.setattr(reshard, "_target_table", lambda pair, db, t: "orders")
+    said = []
+    # only the targets that hold the table are changed
+    reshard._change_targets(g, "public.orders", {"alter"}, [0, 2],
+                            said.append)
+    assert [p.ran for p in pairs] == [
+        ["alter table orders add column note text"], [],
+        ["alter table orders add column note text"]]
+    reshard._change_targets(g, "public.orders", {"truncate"}, [0, 1, 2],
+                            said.append)
+    # emptied within the hop's row filter, as a copy empties a table
+    assert [p.emptied for p in pairs] == [[("orders", "region = 'eu'")]] * 3
+    pairs[1].takes = False
+    with pytest.raises(SystemExit) as e:
+        reshard._change_targets(g, "public.orders", {"alter"}, [0, 1, 2],
+                                said.append)
+    assert "cannot take the change at its place in the log" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        reshard._change_targets(g, "public.orders", {"rename"}, [0],
+                                said.append)
+    assert "rename on every source" in str(e.value)
 
 
 # --- the proof can say different --------------------------------------------------
@@ -494,6 +589,8 @@ def _conf(tmp_path, monkeypatch, cutover=False):
                  f"    db_map: {{shop: {db}}}\n"
                  "    options:\n"
                  "      follow_until: caught_up\n"
+                 # the shards hold an earlier test's rows: replaced
+                 "      target_rows: replace\n"
                  "      reshard: {with: [a, b, c], by: hash, key: {orders:"
                  " customer_id}, shared: [countries]}\n"
                  + ("      cutover: {budget: 120, freeze: operator}\n"
@@ -572,6 +669,21 @@ def test_one_database_onto_three_by_a_hash_followed_and_proved(
     for db in SHARDS:
         assert _sql(DST[0], "select name from countries where code = 'us'",
                     db) == "USA"
+    # a column added on the source: made on every shard once the source
+    # has it, then the rows that carry it written
+    _sql(SRC[0], "alter table orders add column note text;"
+                 " update orders set note = 'n' || id where id <= 30",
+         "shop")
+    got, out = _run("move", "a", "--mode", "cdc", "--db", "shop", "--go")
+    assert got.exit_code == 0, out
+    assert out.count("changed on every source; on") == 3, out
+    notes = {}
+    for db in SHARDS:
+        for line in _sql(DST[0], "select id, note from orders where note is"
+                                 " not null", db).splitlines():
+            oid, note = line.split("|")
+            notes[int(oid)] = note
+    assert notes == {o: f"n{o}" for o in range(1, 31) if not 10 <= o <= 20}
     got, out = _run("check", "a", "--db", "shop")
     assert got.exit_code == 0, out
     # the proof says different where a row sits on a shard the function
@@ -623,8 +735,6 @@ def test_the_whole_group_is_cut_over_at_once(pair, tmp_path, monkeypatch):
                     "--go")
     assert got.exit_code == 0, out
     import migkit.config as cfg
-    hops = cfg.load_hops()
-    g = reshard.group(hops["a"], "shop", hops)
     path = tmp_path / "hops.yaml"
     path.write_text(path.read_text().replace("follow_until: caught_up",
                                              "follow_until: stopped"))
