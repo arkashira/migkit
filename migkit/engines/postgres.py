@@ -1554,12 +1554,15 @@ select json_build_object(
           a row the target holds
         * then, from any engine, each sequence that owns a column is raised
           to that column's largest value - only raised, never lowered
-        Then the statistics (`_analyze_in_stages`).
+        Then the statistics (`_analyze_in_stages`). After a copy from a
+        PostgreSQL source, the rows it wrote whose parent the hop does not
+        take are counted and said (`_orphans_left`).
         """
         said = []
         if from_source:
             from .. import movers
             movers._pg_carry_sequences(self.hop, db)
+            said += self._orphans_left(db)
         behind = self.sequences_behind(db)
         if behind:
             self._psql("dst", db, "\n".join(self._raise_past(behind)))
@@ -1594,19 +1597,10 @@ select json_build_object(
         return [f"select setval({_literal(seq)}, {top});"
                 for seq, _, _, top in behind]
 
-    def _fk_orphans(self, db):
-        """Rows on the target whose foreign key points at nothing.
-
-        A validated foreign key was taken to mean there could be none. But
-        every load migkit makes writes as a replica, or with the triggers
-        off, and a foreign key is a trigger: it did not look. Measured, a
-        child row whose parent the hop's row filter left out landed behind
-        a validated key, and the check read "all fk constraints validated,
-        no orphans possible". So every foreign key is scanned, each within
-        `fk_scan_seconds` (default 300); one that runs out is said, not
-        passed."""
-        budget = int(self.hop.options.get("fk_scan_seconds", 300)) * 1000
-        fks = [l.split("|") for l in self._psql("dst", db, """
+    def _foreign_keys(self, db):
+        """Every foreign key on the target: [name, the table it is on, the
+        table it points at, their columns, whether it is validated]."""
+        return [l.split("|") for l in self._psql("dst", db, """
             select c.conname
               ||'|'||c.conrelid::regclass||'|'||c.confrelid::regclass
               ||'|'||(select string_agg(quote_ident(a.attname), ','
@@ -1624,44 +1618,136 @@ select json_build_object(
             join pg_namespace n on n.oid = c.connamespace
             where c.contype = 'f'
               and n.nspname not like '\\_\\_%'""").splitlines() if l]
-        orphans, unscanned, pending = [], [], 0
+
+    def _pointing_at_nothing(self, db, child, parent, ckeys, pkeys):
+        """How many rows of `child` on the target point at no row of
+        `parent`, counted within `fk_scan_seconds` (default 300);
+        RuntimeError where it ran out or failed."""
+        budget = int(self.hop.options.get("fk_scan_seconds", 300)) * 1000
+        cc = ", ".join(f"c.{k}" for k in ckeys.split(","))
+        pc = ", ".join(f"p.{k}" for k in pkeys.split(","))
+        return int(self._psql("dst", db,
+                              f"select count(*) from {child} c"
+                              f" where ({cc}) is not null and not exists"
+                              f" (select 1 from {parent} p"
+                              f" where ({pc}) = ({cc}))",
+                              statement_timeout=budget) or 0)
+
+    def _fk_orphans(self, db):
+        """Rows on the target whose foreign key points at nothing.
+
+        A validated foreign key was taken to mean there could be none. But
+        every load migkit makes writes as a replica, or with the triggers
+        off, and a foreign key is a trigger: it did not look. Measured, a
+        child row whose parent the hop's row filter left out landed behind
+        a validated key, and the check read "all fk constraints validated,
+        no orphans possible". So every foreign key is scanned, each within
+        `fk_scan_seconds` (default 300); one that runs out is said, not
+        passed.
+
+        A child pointing into a table the hop does not take is a warn that
+        names that table: what the target holds of it is not the move's to
+        answer for, and it was a difference on every run. A parent the hop
+        takes - its row filter cutting the rows a child points at included
+        - is still a difference."""
+        fks = self._foreign_keys(db)
+        orphans, outside, unscanned, pending = [], [], [], 0
         for name, child, parent, ckeys, pkeys, valid in fks:
             if self.hop.excluded(db, *self._split(child)):
                 continue
             pending += valid != "true"
-            cc = ", ".join(f"c.{k}" for k in ckeys.split(","))
-            pc = ", ".join(f"p.{k}" for k in pkeys.split(","))
             try:
-                n = self._psql("dst", db,
-                               f"select count(*) from {child} c"
-                               f" where ({cc}) is not null and not exists"
-                               f" (select 1 from {parent} p"
-                               f" where ({pc}) = ({cc}))",
-                               statement_timeout=budget)
+                n = self._pointing_at_nothing(db, child, parent, ckeys,
+                                              pkeys)
             except RuntimeError as e:
                 unscanned.append(f"{child}.{name}"
                                  f" ({str(e).splitlines()[-1][:60]})")
                 continue
-            if n != "0":
-                orphans.append(f"{child}.{name}: {n} orphan rows"
-                               + (" behind a validated key" if valid == "true"
-                                  else ""))
+            if not n:
+                continue
+            if self.hop.excluded(db, *self._split(parent)):
+                outside.append(f"{child}.{name}: {n} rows point at {parent},"
+                               " which this hop does not move")
+                continue
+            orphans.append(f"{child}.{name}: {n} orphan rows"
+                           + (" behind a validated key" if valid == "true"
+                              else ""))
+        aside = (f"; {len(outside)} into tables the hop does not move: "
+                 + "; ".join(outside[:3]) if outside else "")
         if orphans:
             return Result("deep", f"{db} fk", "diff",
                           "; ".join(orphans[:5])
                           + (f"; {len(unscanned)} not scanned in time"
-                             if unscanned else ""), "",
+                             if unscanned else "") + aside, "",
                           "put the parents in place or delete the orphans,"
                           " then validate the constraints on the target")
         if unscanned:
             return Result("deep", f"{db} fk", "warn",
                           f"{len(unscanned)} foreign keys not scanned within"
                           " fk_scan_seconds, so unknown rather than clean: "
-                          + "; ".join(unscanned[:3]))
+                          + "; ".join(unscanned[:3]) + aside)
+        if outside:
+            return Result("deep", f"{db} fk", "warn",
+                          "; ".join(outside[:5]), "",
+                          "the parent is not moved by this hop: take it"
+                          " too, or the rows keep pointing at nothing")
         return Result("deep", f"{db} fk", "ok",
                       f"{len(fks)} foreign keys scanned, 0 orphan rows"
                       + (f"; {pending} are NOT VALID - validate them before"
                          " cutover" if pending else ""))
+
+    def _orphans_left(self, db):
+        """The rows a load just wrote whose parent the hop does not take,
+        counted key by key, said and recorded in the hop's change log (and
+        so in its evidence) - never a failure.
+
+        A load writes with the keys off (as a replica, or with the triggers
+        off), so a child arrives whether its parent does or not: a parent
+        table the hop leaves out, or the rows of one its row filter leaves
+        behind. MySQL's move says the rows of a table it leaves out that
+        point at a parent it replaced (`movers._my_orphans_left`);
+        PostgreSQL's said nothing at all, and the check was the first to
+        hear of it. Nothing is read for a hop that takes everything whole.
+        Returns the lines said."""
+        from .. import audit
+        from ..config import scoped
+        if not (scoped(self.hop) or (self.hop.mapping or {}).get("where")):
+            return []
+        try:
+            fks = self._foreign_keys(db)
+        except RuntimeError as e:
+            return ["the rows pointing at parents the move did not carry"
+                    f" could not be counted: {str(e).splitlines()[-1][:90]}"]
+        found, said = [], []
+        for name, child, parent, ckeys, pkeys, _ in fks:
+            if self.hop.excluded(db, *self._split(child)):
+                continue
+            where = self._split(parent)
+            if self.hop.excluded(db, *where):
+                why = "the hop does not take that table"
+            elif self.hop.row_filter(db, *where):
+                why = "the hop's row filter leaves those rows behind"
+            else:
+                continue
+            try:
+                n = self._pointing_at_nothing(db, child, parent, ckeys,
+                                              pkeys)
+            except RuntimeError as e:
+                said.append(f"{child}: the rows pointing at {parent} could"
+                            f" not be counted: {str(e).splitlines()[-1][:60]}")
+                continue
+            if n:
+                # no field named for a key: the evidence leaves out what
+                # reads as a secret's name (`redact.SECRET_KEY`)
+                found.append({"table": child, "constraint": name,
+                              "parent": parent, "rows": n, "why": why})
+                rows = "row points" if n == 1 else "rows point"
+                said.append(f"{child}: {n:,} {rows} at {parent} rows that"
+                            f" are not there - {why}; the check names them")
+        if found:
+            audit.append(self.hop.report_dir() / "changelog.jsonl",
+                         {"op": "orphans-left", "db": db, "found": found})
+        return said
 
     def create_missing(self, db, log=None):
         """The bulk paths' own: the tables from the source's definition,
@@ -4137,6 +4223,54 @@ select json_build_object(
                 owned[p[0]] = (p[1], p[2], p[3])
         return owned
 
+    # the tables whose column defaults draw from a sequence: one no table
+    # owns (shared by several, or a `default nextval(...)` written by hand)
+    # goes with the tables that use it
+    SEQ_USED_Q = (
+        "select distinct sn.nspname||'.'||s.relname||'|'||tn.nspname||'|'"
+        "||t.relname"
+        " from pg_depend d"
+        " join pg_attrdef ad on ad.oid = d.objid"
+        " join pg_class t on t.oid = ad.adrelid"
+        " join pg_namespace tn on tn.oid = t.relnamespace"
+        " join pg_class s on s.oid = d.refobjid and s.relkind = 'S'"
+        " join pg_namespace sn on sn.oid = s.relnamespace"
+        " where d.classid = 'pg_attrdef'::regclass"
+        " and d.refclassid = 'pg_class'::regclass")
+
+    def _seq_left_out(self, side, db, names, owned=None):
+        """The sequences among `names` (`schema.sequence`, as `side` has
+        them) the hop does not take, so no counter check or repair reads or
+        sets them: one a table owns (a serial's, an identity's -
+        `_seq_owned`) goes with that table; one no table owns goes with the
+        tables whose defaults draw from it, left out only where every one of
+        them is; one nothing owns or draws from is judged by its own name.
+
+        Found by the audit of scope (backlog P0-SCOPE.6a): with `exclude:
+        [pick_dispatch_queue]`, a table the target writes itself, its
+        sequence was planned from the source's last value - below the keys
+        the target had handed out, so the cutover's counter gate refused,
+        and set, the target's next insert would have taken a key it holds.
+        """
+        owned = self._seq_owned(side, db) if owned is None else owned
+        used = {}
+        if any(n not in owned for n in names):
+            for l in self._psql(side, db, self.SEQ_USED_Q).splitlines():
+                p = l.split("|")
+                if len(p) == 3:
+                    used.setdefault(p[0], []).append((p[1], p[2]))
+        out = set()
+        for n in names:
+            if n in owned:
+                gone = self.hop.excluded(db, *owned[n][:2])
+            elif used.get(n):
+                gone = all(self.hop.excluded(db, s, t) for s, t in used[n])
+            else:
+                gone = self.hop.excluded(db, *self._split(n))
+            if gone:
+                out.add(n)
+        return out
+
     def _seq_col_max(self, side, db, owned):
         """seqkey -> max(owned column) on `side`, so we know the floor the
         sequence must clear to avoid a duplicate-key collision on insert."""
@@ -4284,10 +4418,18 @@ select json_build_object(
                 return {n: v for n, v in d.items()
                         if not n.rsplit(".", 1)[-1].startswith(noise)}
             src, dst = app(src), app(dst)
+        # the counters of the tables the hop takes, and only theirs: a table
+        # it leaves out keeps the counter its own writer gives it, and
+        # compared, it differed on every run, `watch --verify` included
+        gone = self._seq_left_out("src", db, list(src))
+        src = {n: v for n, v in src.items() if n not in gone}
+        dst = {n: v for n, v in dst.items() if n not in gone}
         owned = self._seq_owned("dst", db)
         if noise:
             owned = {k: v for k, v in owned.items()
                      if not k.rsplit(".", 1)[-1].startswith(noise)}
+        gone = self._seq_left_out("dst", db, list(owned), owned)
+        owned = {k: v for k, v in owned.items() if k not in gone}
         dmax = self._seq_col_max("dst", db, owned)
         dnext = self._seq_next("dst", db, owned)
         collide = []
@@ -7428,8 +7570,13 @@ select json_build_object(
         # The same computation feeds the repair, so it lives in one place:
         # two copies of "which grants are missing" would eventually disagree,
         # and the disagreement would be a repair that grants the wrong thing.
-        gaps = self._grant_gaps(db)
-        if gaps is None:
+        from ..users import NOT_CARRIED, carried
+        taken = carried(self.hop)
+        gaps = self._grant_gaps(db) if taken else None
+        if not taken:
+            res += [Result("deep", f"{db} {what}", "skip", NOT_CARRIED)
+                    for what in ("grants", "seq-grants")]
+        elif gaps is None:
             res.append(Result("deep", f"{db} grants", "warn",
                               "cannot read grants - unknown, not clean"))
         else:
@@ -7911,8 +8058,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         here. Removing a privilege somebody may have added on purpose is a
         different decision from restoring one the migration dropped, and doing
         both under one word would hide the second inside the first.
+
+        Nothing on a hop whose move does not carry grants (`users.carried`):
+        the check does not compare them, and the repair does not make them.
         """
-        gaps = self._grant_gaps(db)
+        from ..users import carried
+        gaps = self._grant_gaps(db) if carried(self.hop) else None
         if not gaps:
             return None
         miss, _extra, smiss, _, _ = gaps
@@ -8097,7 +8248,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             # sequence is only suspicious when the source does not do it too.
             smax = self._seq_col_max("src", db, owned)
             noise = self._noise()
-            stmts, undo, refuse = [], [], []
+            # a sequence of a table the hop leaves out is that table's
+            # writer's: neither read against the source nor set
+            gone = self._seq_left_out("src", db, list(src))
+            src = {n: v for n, v in src.items() if n not in gone}
+            stmts, undo, refuse, ahead = [], [], [], []
             for name, v in sorted(src.items()):
                 # the mover's own bookkeeping sequences exist on one side only
                 # by design; setting them on the target would fail or create
@@ -8133,6 +8288,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     target += buf
                 if target == 0 or (cur is not None and int(cur) == target):
                     continue
+                if cur is not None and int(cur) > target:
+                    # never lowered: a counter past the value it would be
+                    # set to has handed out keys up to where it stands, and
+                    # set back, the next insert takes one of them again
+                    ahead.append(f"{name}: target {cur} > {target}")
+                    continue
                 stmts.append(f"select setval({_literal(name)}, {target}, true);"
                              f"  -- src={sv} dstmax={mx}"
                              + (f" +buffer {buf}" if buf else "")
@@ -8143,10 +8304,17 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     undo.append(f"select setval({_literal(name)}, {cur}, true);")
             same = sum(1 for n, v in src.items() if dst.get(n) == v)
             note = f"{len(stmts)} sequences set, {same} already equal"
+            if gone:
+                note += (f"; {len(gone)} the hop does not take left as they"
+                         " are")
+            if ahead:
+                note += (f"; left alone {len(ahead)} (the target's counter is"
+                         " past it already, never lowered): "
+                         + "; ".join(ahead[:4]))
             if refuse:
                 note += (f"; REFUSED {len(refuse)} (target ahead of source): "
                          + "; ".join(refuse[:4]))
-            if stmts or refuse:
+            if stmts or refuse or ahead:
                 actions.append(RepairAction(db, "sequences", stmts, undo, note))
         if kind in ("rows", "all"):
             rpt = self._report(db)
@@ -8369,8 +8537,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         if action.by == "pair":
             return self.columns_pair().apply(db, action)
         if action.kind == "sequences":
-            self._psql("dst", db,
-                       "\n".join(s.split("  --")[0] for s in action.statements))
+            # a plan of counters left alone and nothing to set sends nothing
+            if action.statements:
+                self._psql("dst", db, "\n".join(s.split("  --")[0]
+                                                for s in action.statements))
         elif action.kind == "resnapshot":
             self._apply_resnapshot(action)
         elif action.kind == "text":
@@ -8796,6 +8966,38 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                  log=switched.append)[1]
         return src, dst, switched
 
+    def _assess_roles(self):
+        """The application's login roles on the target, as `assess` says
+        them: each there, and with the source's password."""
+        items = []
+
+        def add(level, scope, item, detail=""):
+            items.append({"level": level, "scope": scope,
+                          "item": item, "detail": str(detail)})
+        src_pairs, dst_pairs, switched = self._login_roles()
+        if switched:
+            add("warn", "instance",
+                "role passwords match source (login will work on target)",
+                "not compared: " + "; ".join(switched))
+        sa, da = set(src_pairs), set(dst_pairs)
+        miss = sorted(sa - da)
+        add("pass" if not miss else "warn", "instance",
+            "login roles present on target",
+            f"{len(sa)} src / {len(da)} dst"
+            + (f", missing: {', '.join(miss[:5])}" if miss else ""))
+        # role on both sides but hash differs = DTS carried the user, not the
+        # password -> apps can't authenticate on target
+        drift = sorted(n for n in (sa & da)
+                       if src_pairs[n] and dst_pairs[n]
+                       and src_pairs[n] != dst_pairs[n])
+        if any(src_pairs.values()):
+            add("pass" if not drift else "fail", "instance",
+                "role passwords match source (login will work on target)",
+                "all match" if not drift
+                else f"password differs for: {', '.join(drift[:5])}"
+                     " -> reset on target or apps cannot log in")
+        return items
+
     def assess(self):
         items = []
 
@@ -8913,28 +9115,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 f" {who or 'an unnamed session'} - vacuum can remove nothing"
                 " newer than it while it is open")
 
-        src_pairs, dst_pairs, switched = self._login_roles()
-        if switched:
-            add("warn", "instance",
-                "role passwords match source (login will work on target)",
-                "not compared: " + "; ".join(switched))
-        sa, da = set(src_pairs), set(dst_pairs)
-        miss = sorted(sa - da)
-        add("pass" if not miss else "warn", "instance",
-            "login roles present on target",
-            f"{len(sa)} src / {len(da)} dst"
-            + (f", missing: {', '.join(miss[:5])}" if miss else ""))
-        # role on both sides but hash differs = DTS carried the user, not the
-        # password -> apps can't authenticate on target
-        drift = sorted(n for n in (sa & da)
-                       if src_pairs[n] and dst_pairs[n]
-                       and src_pairs[n] != dst_pairs[n])
-        if any(src_pairs.values()):
-            add("pass" if not drift else "fail", "instance",
-                "role passwords match source (login will work on target)",
-                "all match" if not drift
-                else f"password differs for: {', '.join(drift[:5])}"
-                     " -> reset on target or apps cannot log in")
+        from ..users import NOT_CARRIED, carried
+        if not carried(self.hop):
+            add("info", "instance", "login roles present on target",
+                NOT_CARRIED)
+        else:
+            items.extend(self._assess_roles())
 
         try:
             avail = set(self._psql("dst", "postgres",

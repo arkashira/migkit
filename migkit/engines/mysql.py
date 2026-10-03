@@ -2454,15 +2454,14 @@ class MySQLEngine(Engine):
         pre-8.0 restart, tablespace import, or a stray id=0 row can leave it
         behind); parity = does the counter match the source."""
         ddb = self._d("dst", db)
-        q = ("select table_name, auto_increment from information_schema.tables"
-             " where table_schema=%s and auto_increment is not null")
-        src = dict(self._q("src", q, (db,), fresh=True))
-        dst = dict(self._q("dst", q, (ddb,), fresh=True))
-        acol = dict(self._q("dst",
-                            "select table_name, column_name"
-                            " from information_schema.columns"
-                            " where table_schema=%s and extra like %s",
-                            (ddb, "%auto_increment%"), fresh=True))
+        src, dst = self._counters(db)
+        # the counters of the tables the hop takes: one it leaves out keeps
+        # the counter its own writer gives it, and differed on every run
+        acol = {t: c for t, c in self._q(
+            "dst", "select table_name, column_name"
+                   " from information_schema.columns"
+                   " where table_schema=%s and extra like %s",
+            (ddb, "%auto_increment%"), fresh=True) if self.in_scope(db, t)}
         collide = []
         for t, nextv in sorted(dst.items()):
             col = acol.get(t)
@@ -4587,7 +4586,11 @@ class MySQLEngine(Engine):
 
     def _fk_orphans(self, db):
         """Rows on the target whose foreign key points at nothing: loads run
-        with foreign_key_checks=0, so the key never looked."""
+        with foreign_key_checks=0, so the key never looked. A child pointing
+        into a table the hop does not take is a warn that names it - the
+        target's rows of that table are not the move's to answer for; a
+        parent the hop takes, its row filter cutting the rows included, is
+        a difference."""
         ddb = self._d("dst", db)
         rows = self._q("dst",
                        "select constraint_name, table_name, column_name,"
@@ -4601,7 +4604,7 @@ class MySQLEngine(Engine):
             fk = fks.setdefault((con, t, rt), ([], []))
             fk[0].append(c)
             fk[1].append(rc)
-        orphans = []
+        orphans, outside = [], []
         for (con, t, rt), (cols, rcols) in sorted(fks.items()):
             if self.hop.excluded(db, str(t)):
                 continue
@@ -4612,13 +4615,27 @@ class MySQLEngine(Engine):
                                f" where {nn} and not exists"
                                f" (select 1 from `{ddb}`.`{rt}` p"
                                f" where {join})")[0][0]
-            if n:
+            if not n:
+                continue
+            if self.hop.excluded(db, str(rt)):
+                outside.append(f"{t}.{con}: {n} rows point at {rt}, which"
+                               " this hop does not move")
+            else:
                 orphans.append(f"{t}.{con}: {n} orphan rows")
-        return Result("deep", f"{db} fk", "diff" if orphans else "ok",
-                      "; ".join(orphans[:5]) if orphans
-                      else f"{len(fks)} fks scanned, 0 orphan rows", "",
-                      "reload the child rows or delete orphans"
-                      if orphans else "")
+        if orphans:
+            return Result("deep", f"{db} fk", "diff",
+                          "; ".join(orphans[:5])
+                          + (f"; {len(outside)} into tables the hop does not"
+                             " move: " + "; ".join(outside[:3])
+                             if outside else ""), "",
+                          "reload the child rows or delete orphans")
+        if outside:
+            return Result("deep", f"{db} fk", "warn",
+                          "; ".join(outside[:5]), "",
+                          "the parent is not moved by this hop: take it"
+                          " too, or the rows keep pointing at nothing")
+        return Result("deep", f"{db} fk", "ok",
+                      f"{len(fks)} fks scanned, 0 orphan rows")
 
     def create_missing(self, db, log=None):
         """The bulk path's own: each missing table from the source's `show
@@ -4965,6 +4982,9 @@ class MySQLEngine(Engine):
     # permissions do not. The symptom is an app that connects fine and then
     # cannot read its own tables, which nothing else here would catch.
     def _check_grants(self, db):
+        from ..users import NOT_CARRIED, carried
+        if not carried(self.hop):
+            return [Result("deep", f"{db} grants", "skip", NOT_CARRIED)]
         ddb = self._d("dst", db)
         src, serr = self._grants_for_db("src", db)
         dst, derr = self._grants_for_db("dst", ddb)
@@ -5238,7 +5258,11 @@ class MySQLEngine(Engine):
         Users that exist on one side only are left alone: that is the users
         check's finding, and `migkit users create` replays their whole grant
         set. Granting to an account that does not exist would just fail.
+        Nothing on a hop whose move does not carry grants (`users.carried`).
         """
+        from ..users import carried
+        if not carried(self.hop):
+            return None
         ddb = self._d("dst", db)
         src, serr = self._grants_for_db("src", db)
         dst, derr = self._grants_for_db("dst", ddb)
@@ -5298,14 +5322,24 @@ class MySQLEngine(Engine):
         rev = rev.replace(" TO ", " FROM ", 1)
         return [rev + ";"] + extra
 
+    def _counters(self, db):
+        """({table: AUTO_INCREMENT} of the source, of the target), of the
+        tables the hop takes only (`Engine.in_scope`): a table it leaves out
+        - one the target writes itself - keeps its own counter, which no
+        check reads against the source's and no repair raises, the margin
+        of the cutover's `keys: apart` included."""
+        q = ("select table_name, auto_increment from information_schema.tables"
+             " where table_schema=%s and auto_increment is not null")
+        return tuple({t: v for t, v in self._q(side, q, (name,), fresh=True)
+                      if self.in_scope(db, t)}
+                     for side, name in (("src", db),
+                                        ("dst", self._d("dst", db))))
+
     def repair_plan(self, db, kind):
         actions = []
         if kind in ("sequences", "all"):
-            q = ("select table_name, auto_increment from information_schema.tables"
-                 " where table_schema=%s and auto_increment is not null")
             ddb = self._d("dst", db)
-            src = dict(self._q("src", q, (db,), fresh=True))
-            dst = dict(self._q("dst", q, (ddb,), fresh=True))
+            src, dst = self._counters(db)
             stmts, undo, refuse = [], [], []
             # head-room above the source's counter where it is asked for
             # (the cutover's `keys: apart`), read as PostgreSQL's is
@@ -5862,6 +5896,38 @@ class MySQLEngine(Engine):
             dconn.close()
         return n
 
+    def _assess_accounts(self):
+        """The application's accounts on the target, as `assess` says them:
+        each there, and with the source's password."""
+        items = []
+
+        def add(level, scope, item, detail=""):
+            items.append({"level": level, "scope": scope,
+                          "item": item, "detail": str(detail)})
+        try:
+            uq = ("select concat(user,'@',host),"
+                  " authentication_string from mysql.user"
+                  " where user not in ('mysql.sys','mysql.session',"
+                  "'mysql.infoschema','root') and user not like 'rds%'")
+            su = dict(self._q("src", uq))
+            du = dict(self._q("dst", uq))
+            miss = sorted(set(su) - set(du))
+            add("pass" if not miss else "warn", "instance",
+                "user accounts present on target",
+                f"{len(su)} src / {len(du)} dst"
+                + (f", missing: {', '.join(miss[:5])}" if miss else ""))
+            drift = sorted(u for u in (set(su) & set(du))
+                           if su[u] and du[u] and su[u] != du[u])
+            add("pass" if not drift else "fail", "instance",
+                "account passwords match source",
+                "all match" if not drift
+                else f"password differs for: {', '.join(drift[:5])}"
+                     " -> apps cannot log in on target")
+        except Exception:
+            add("warn", "instance", "cannot read mysql.user",
+                "grant select on mysql.user to compare accounts")
+        return items
+
     def assess(self):
         items = []
 
@@ -5972,28 +6038,12 @@ class MySQLEngine(Engine):
             items.extend(self._large_values(db))
         items.extend(self._target_replicas())
 
-        try:
-            uq = ("select concat(user,'@',host),"
-                  " authentication_string from mysql.user"
-                  " where user not in ('mysql.sys','mysql.session',"
-                  "'mysql.infoschema','root') and user not like 'rds%'")
-            su = dict(self._q("src", uq))
-            du = dict(self._q("dst", uq))
-            miss = sorted(set(su) - set(du))
-            add("pass" if not miss else "warn", "instance",
-                "user accounts present on target",
-                f"{len(su)} src / {len(du)} dst"
-                + (f", missing: {', '.join(miss[:5])}" if miss else ""))
-            drift = sorted(u for u in (set(su) & set(du))
-                           if su[u] and du[u] and su[u] != du[u])
-            add("pass" if not drift else "fail", "instance",
-                "account passwords match source",
-                "all match" if not drift
-                else f"password differs for: {', '.join(drift[:5])}"
-                     " -> apps cannot log in on target")
-        except Exception:
-            add("warn", "instance", "cannot read mysql.user",
-                "grant select on mysql.user to compare accounts")
+        from ..users import NOT_CARRIED, carried
+        if not carried(self.hop):
+            add("info", "instance", "user accounts present on target",
+                NOT_CARRIED)
+        else:
+            items.extend(self._assess_accounts())
         inv = self._handwork()
         items += inv.rows() + inv.summary()
         items += self._mover_leftovers()
