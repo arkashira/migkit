@@ -607,6 +607,26 @@ def main(quiet):
     replicate, tail, setup-target, ui, state, monitor, ...) still work."""
     global QUIET
     QUIET = quiet
+    _env_at_start()
+
+
+def _env_at_start():
+    """The environment read once before any command: a `MIGKIT_*` nothing
+    reads is said with the nearest name that is read - a typo was read by
+    nothing and said nothing - and one set to what its kind cannot be
+    stops here as a usage error, named, rather than wherever it is first
+    read, part way through a run (audit 2026-10-01, K13)."""
+    from . import envkeys
+    for line in envkeys.said_unknown():
+        click.echo(f"migkit: {line}", err=True)
+    try:
+        for name, var in envkeys.VARS.items():
+            if var.kind == "flag":
+                envkeys.flag(name)
+            elif var.kind in ("number", "whole"):
+                envkeys.number(name)
+    except envkeys.Bad as e:
+        raise click.UsageError(str(e))
 
 
 def _engine_lines():
@@ -778,6 +798,10 @@ def doctor(install):
         console.print(f"diagnostics: {bundle} ({len(got)} files; passwords,"
                       " tokens, addresses' credentials and every finding's"
                       " values left out)")
+    from . import config as _config
+    # the two places a run depends on, wherever it was started from
+    console.print(f"configuration: {_esc(str(_config.CONF))}\nreports and"
+                  f" run state: {_esc(str(_config.REPORTS))}")
     _hops_table(required=False)
     if install:
         import sys
@@ -952,7 +976,7 @@ def _doctor_config():
     if not path.exists():
         return {}, {}
     try:
-        data = yaml.safe_load(path.read_text()) or {}
+        data = _config.read_yaml(path.read_text())
     except yaml.YAMLError as e:
         console.print(f"[red]{path} is not YAML migkit can read[/red]: {e}")
         return {}, {}
@@ -960,7 +984,7 @@ def _doctor_config():
         hops = load_hops()
     except SystemExit:
         return {}, {}
-    for p in hopkeys.check(data):
+    for p in hopkeys.check(data, path):
         console.print(f"[yellow]{p}[/yellow]")
     return hops, (data.get("hops") or {}) if isinstance(data, dict) else {}
 

@@ -31,31 +31,25 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * ssl-mode=<...> checks the server's certificate against an authority: say which with ssl-ca=<its certificate file> (a managed service publishes its bundle)
 
+* <...>: not a regular expression (<...>)
+
 * nothing is kept in this machine's keychain as <...>/<...> - `migkit init` keeps it there, or write another reference
 
 * pip install boto3 for AWS sign-in and secrets
 
-* secret env var '<...>' is not set
-
-* secret file '<...>' not found
-
-* AWS secret '<...>' holds no text
-
-* could not read AWS secret '<...>': <...>
-
-* AWS secret '<...>' has no field '<...>'
+* <...>: <...> | <...>
 
 * pip install google-cloud-secret-manager for gcp-sm: secrets
 
 * pip install azure-identity azure-keyvault-secrets for azure-kv: secrets
 
-* could not read vault secret '<...>' (need vault CLI + VAULT_ADDR/VAULT_TOKEN)
-
-* auth: <...> - password (the default) or aws_iam
+* <...> has <...> problem<...>, and nothing was run: <...>
 
 * no hop configuration yet (<...> does not exist). create one: migkit init or point at an existing file: MIGKIT_CONF=/path/to/hops.yaml
 
-* <...> has <...> problem<...>, and nothing was run: <...>
+* <...> is not YAML migkit can read, and nothing was run: <...>
+
+* auth: <...> - password (the default) or aws_iam
 
 * <...>: the source address names <...> and databases says <...> - say it once
 
@@ -63,7 +57,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> goes to <...> by the target address and to <...> by db_map
 
-* unknown hop <...>, have: <...>
+* unknown hop <...> - did you mean <...>? | <...>, have: <...>
 
 * <...> already has a hop <...> going somewhere else (MIGKIT_HOP=<another name> adds this one beside it)
 
@@ -81,6 +75,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop could not be added to <...> as it is written (<...>); nothing was changed - use --force to write a new file
 
+* <...>: <...> - <...>
+
+* topology: <...> - one_way or two_way
+
+* reverse: <...> - at_cutover
+
 * origin_table: <...> - keep, or drop
 
 * <...>: goal <...> - <...> - so <...> is not run. Change the hop's goal to copy or cutover to move data.
@@ -96,6 +96,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the file holds <...> replication tasks; give it one (a hop is one task)
 
 * the endpoint <...> is a <...> one, which migkit has no engine for
+
+* a row filter on a <...> source: migkit has no engine to write it in
 
 * filter operator <...>: not one migkit reads
 
@@ -1330,6 +1332,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...> holds its number on the target through another store (<...>; this machine's is <...>) - every machine of a hop must name the same one. Nothing was written
 
 * <...>: the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
+
+* rules: a mapping of each rule's name to its question
+
+* rules.<...>: asks <...> nothing - a rule is one question both sides answer, or a question for each (source: ..., target: ...)
 
 * <...>: no database to keep the machines' records in on the target
 
