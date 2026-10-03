@@ -747,28 +747,31 @@ class Endpoint:
 def _side_field(name):
     """A field of a side read from the configuration whose value may be a
     reference: kept as written, resolved the first time it is read
-    (`secret`), once."""
+    (`secret`), once. The references are replaced, never changed in
+    place, so a copy of the side reads its own."""
     def get(self):
         d = self.__dict__
-        refs = d.get("_refs") or {}
-        if name in refs:
+        if name in (d.get("_refs") or {}):
             with _RESOLVING:
+                refs = d.get("_refs") or {}
                 if name in refs:
                     d["_v_" + name] = secret(
                         refs[name], f"{d.get('_where') or 'the side'}"
                                     f".{name}", d.get("_memo"))
-                    del refs[name]
+                    d["_refs"] = {k: v for k, v in refs.items()
+                                  if k != name}
         return d.get("_v_" + name, "")
 
     def put(self, value):
         d = self.__dict__
-        refs = d.setdefault("_refs", {})
+        refs = {k: v for k, v in (d.get("_refs") or {}).items()
+                if k != name}
         if _is_reference(value):
             refs[name] = value
             d.pop("_v_" + name, None)
         else:
-            refs.pop(name, None)
             d["_v_" + name] = value
+        d["_refs"] = refs
     return property(get, put)
 
 
