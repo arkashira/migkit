@@ -1385,6 +1385,44 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
 
+* reshard: is a mapping - with, by, key, shared, ranges, values, lookup, default
+
+* reshard: by: <...> - one of <...>
+
+* reshard: key is {table: column or [columns]}
+
+* reshard: <...>
+
+* <...>: the reshard does not hold together - <...>
+
+* <...>: <...> holds other columns of it than <...> - the targets of a reshard hold one schema. Nothing more was written
+
+* <...>: the shard key <...> is not carried, so a row cannot be placed by it. Nothing more was written
+
+* <...>: a row no target takes arrived since the rows were counted (<...>, by its shard key <...>) - name a target for its value, or reshard: {default: <hop>}. The tables written so far are kept, and the next run goes on
+
+* <...>: target_rows: keep leaves <...> as they are, and a reshard places and proves every row of every table - target_rows: replace, or empty them. Nothing was written
+
+* <...>: the reshard is not what its function places - <...>
+
+* <...>.<...>: nothing was written - no way places its rows: <...>
+
+* <...>: a reshard is carried whole - every row is placed and proved across every target. Leave out --table
+
+* <...>: the follow of a reshard runs one database a process - --db one of <...>
+
+* <...>.<...>: <...> on <...> - the reshard's follow stops at a change of a table's shape or of its whole contents, its position kept before it: make the change on every target, then move again (--mode full+cdc)
+
+* <...>: the reshard's follow already runs here - one follow a group
+
+* <...>.<...>: no way places its rows - <...>
+
+* <...>: the reshard's follow did not pause
+
+* <...>: the reshard's follow did not end
+
+* <...>: a reshard has no stream back - its targets are other shards than its sources
+
 * <...>: no database to keep the machines' records in on the target
 
 * <...>: its machines have nowhere to agree on who writes - <...>. Keep the hop's run state in a bucket (state: {backend: s3}), or name a directory every machine sees (state: {shared: <path>})
