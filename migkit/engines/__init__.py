@@ -1,8 +1,27 @@
+#: every canonical engine name, in the order a report lists them
+NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
+         "parquet", "clickhouse", "dynamodb", "oracle", "db2", "db2i",
+         "db2zos", "ase", "teradata",
+         "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
+         "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
+         "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
+         "sapodp", "saas", "hetero", "generic")
+
+#: every other name an engine goes by - a brand on its wire (`mariadb`,
+#: `aurora-postgres`), a vendor's or a protocol's spelling (`postgresql`,
+#: `sqlserver`, `valkey`) - and the engine it is: the one table `engine:`
+#: in a hop and an address's scheme are both read through (`canonical`).
+#: Measured before it: 14 names were taken only as a scheme and 16 only as
+#: `engine:`, so `engine: postgresql` was refused while `postgresql://`
+#: was read (audit 2026-10-01, DU6)
 ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "aurora-postgres": "postgres", "alloydb": "postgres",
+           "postgresql": "postgres", "pgsql": "postgres",
            "documentdb": "mongodb", "cosmosdb-mongo": "mongodb",
-           "azure-sql": "mssql", "tdsql": "mysql",
+           "azure-sql": "mssql", "sqlserver": "mssql", "tdsql": "mysql",
+           "valkey": "redis",
            "elasticsearch": "opensearch", "scylladb": "cassandra",
+           "scylla": "cassandra",
            "sybase": "ase", "sap-ase": "ase", "vsam": "copybook",
            "cobol": "copybook", "ibmi": "db2i", "as400": "db2i",
            "iseries": "db2i", "db2-for-i": "db2i", "db2-zos": "db2zos",
@@ -20,52 +39,61 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
 #: transaction may hold - is the engine's own
 WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres"}
 
-#: an address's scheme and the engine it names - `source:
-#: postgres://app@db1/shop` in a hop (`migkit.addresses`). The one place a
-#: scheme is mapped: an engine added to `NAMES` without a scheme here is
-#: one an address cannot name, which `tests/test_a_hop_from_two_addresses`
-#: fails on. `generic` takes the address whole, as its own `url`.
-SCHEMES = {
-    "postgres": "postgres", "postgresql": "postgres", "pgsql": "postgres",
-    "mysql": "mysql", "mariadb": "mysql",
-    "mongodb": "mongodb", "mongodb+srv": "mongodb",
-    "redis": "redis", "rediss": "redis", "valkey": "redis",
-    "mssql": "mssql", "sqlserver": "mssql",
-    "oracle": "oracle",
-    "clickhouse": "clickhouse",
-    "kafka": "kafka",
-    "sqlite": "sqlite",
-    "duckdb": "duckdb",
-    "db2": "db2",
-    "db2i": "db2i", "ibmi": "db2i", "as400": "db2i",
-    "db2zos": "db2zos",
-    "copybook": "copybook", "vsam": "copybook",
-    "ase": "ase", "sybase": "ase",
-    "opensearch": "opensearch", "elasticsearch": "opensearch",
-    "cassandra": "cassandra", "scylla": "cassandra",
-    "dynamodb": "dynamodb",
-    "redshift": "redshift",
-    "snowflake": "snowflake",
-    "bigquery": "bigquery",
-    "kinesis": "kinesis",
-    "pubsub": "pubsub",
-    "parquet": "parquet", "parquet+s3": "parquet",
-    "iceberg": "iceberg", "iceberg+http": "iceberg",
-    "iceberg+https": "iceberg",
-    "delta": "delta", "delta+s3": "delta",
-    "teradata": "teradata",
+#: what an address's scheme says beyond the engine's name: the way it is
+#: reached (`mongodb+srv`, `rediss`, a place on S3, an SAP sandbox over
+#: plain HTTP) or, for a program source, its kind (`engines.saas`) - and
+#: the engines spoken to through the address whole (`generic`)
+SCHEME_ONLY = {
+    "mongodb+srv": "mongodb", "rediss": "redis",
+    "parquet+s3": "parquet", "iceberg+http": "iceberg",
+    "iceberg+https": "iceberg", "delta+s3": "delta",
     # an SAP system's OData services, https or - a sandbox's - http
-    "sapodp": "sapodp", "sapodp+http": "sapodp",
-    # a program source: the scheme is its kind (`engines.saas`)
+    "sapodp+http": "sapodp",
+    "couchbases": "couchbase",
     "dlt": "saas", "singer": "saas", "airbyte": "saas",
     "salesforce": "saas",
     "trino": "generic", "presto": "generic", "vertica": "generic",
-    "tidb": "tidb",
-    "cockroachdb": "cockroachdb", "cockroach": "cockroachdb",
-    "dsql": "dsql",
-    "couchbase": "couchbase", "couchbases": "couchbase",
-    "cosmosdb": "cosmosdb", "cosmos": "cosmosdb",
 }
+
+#: engines an address names by a word of its own rather than the engine's
+#: name: a program source's scheme is its kind, `generic` takes the
+#: address whole as its `url`, `hetero` is a pair
+_NO_SCHEME = ("saas", "generic", "hetero")
+
+#: an address's scheme and the engine it names - `source:
+#: postgres://app@db1/shop` in a hop (`migkit.addresses`): every engine's
+#: own name, every other name it goes by (`ALIASES`) and `SCHEME_ONLY` -
+#: so a word `engine:` takes is a scheme too. The engine's own name comes
+#: first, the one `addresses.render` writes back; an engine added to
+#: `NAMES` is one an address can name, which
+#: `tests/test_a_hop_from_two_addresses` holds
+SCHEMES = {**{n: n for n in NAMES if n not in _NO_SCHEME},
+           **{a: e for a, e in ALIASES.items() if e not in _NO_SCHEME},
+           **SCHEME_ONLY}
+
+#: the port a side listens on where it names none - the one table every
+#: side is built from (`config.build_hop`), an address's and the long
+#: form's alike, and the port each engine's own connection falls back to.
+#: Measured before it: six engines here and the rest inline in their
+#: engines, so a cross-engine hop's long-form sides got port 0 while the
+#: same sides as addresses got 3306 and 5432 (audit 2026-10-01, DU6, K15)
+PORTS = {
+    "postgres": 5432, "mysql": 3306, "mssql": 1433,
+    "mongodb": 27017, "redis": 6379, "kafka": 9092,
+    "tidb": 4000, "cockroachdb": 26257, "dsql": 5432, "cosmosdb": 443,
+    "oracle": 1521, "clickhouse": 8123, "cassandra": 9042,
+    "opensearch": 9200, "redshift": 5439, "db2": 50000, "db2zos": 446,
+    "db2i": 8076, "ase": 5000, "teradata": 1025,
+}
+
+
+def canonical(name):
+    """The engine `name` is - its own name, or the one it is another name
+    of (`ALIASES`) - or None for a name no engine goes by."""
+    got = str(name or "").strip().lower()
+    if got in NAMES:
+        return got
+    return ALIASES.get(got)
 
 
 def _class_for(name):
@@ -181,15 +209,6 @@ def _class_for(name):
     return None
 
 
-#: every canonical engine name, in the order a report lists them
-NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
-         "parquet", "clickhouse", "dynamodb", "oracle", "db2", "db2i",
-         "db2zos", "ase", "teradata",
-         "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
-         "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
-         "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
-         "sapodp", "saas", "hetero", "generic")
-
 #: what each engine is called where a person reads it - the manual, the
 #: site (`tools/gen_docs.py`) and the troubleshooting guide's headings; a
 #: name added to `NAMES` without one here fails
@@ -239,8 +258,7 @@ def engine_named(name, hop):
     entry points: a second copy would be one rename away from a hop that
     resolves differently depending on which of the two was asked.
     """
-    canonical = ALIASES.get(name, name)
-    cls = _class_for(canonical)
+    cls = _class_for(canonical(name) or name)
     if cls is None:
         raise SystemExit(f"unsupported engine {name}")
     return cls(hop)

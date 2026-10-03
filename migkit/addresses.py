@@ -175,7 +175,7 @@ def parse(text, side="source"):
             raise SystemExit(f"the {side} address {text!r} names no file")
         return engine, {"path": unquote(rest), **_options(
             engine, params, side)}, []
-    authority, _, path = rest.partition("/")
+    authority, path = _authority(rest)
     userinfo, at, hostlist = authority.rpartition("@")
     user, colon, password = userinfo.partition(":")
     user, password = unquote(user), unquote(password)
@@ -247,6 +247,28 @@ def parse(text, side="source"):
         # own unless it says so
         endpoint["tls"] = False
     return engine, endpoint, [d for d in dbs if d]
+
+
+#: `user:<a reference>@` at the start of an address's authority: the
+#: reference may hold `/` (`file:/run/secrets/pw`, `vault:secret/db#pw`,
+#: an ARN), so it is read before the path is split off
+_REFERENCE_USERINFO = re.compile(
+    r"^([^/@:]*:(?:" + "|".join(map(re.escape, REFERENCES)) + r")[^@]*)@")
+
+
+def _authority(rest):
+    """(authority, path) of what follows `scheme://`. Split at the first
+    `/` before - measured: `postgres://app:file:/run/secrets/pw@db1/shop`
+    read as host `app:file` and database `run`, no error, and a vault or
+    cloud reference holding `/` failed as "the port is not a number"
+    (audit 2026-10-01, K17)."""
+    m = _REFERENCE_USERINFO.match(rest)
+    if m:
+        after = rest[m.end():]
+        host, _, path = after.partition("/")
+        return m.group(1) + "@" + host, path
+    authority, _, path = rest.partition("/")
+    return authority, path
 
 
 def _srv(hostlist, params):

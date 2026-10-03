@@ -22,9 +22,12 @@ prefix added to every name), rather than carried half-way. A password in
 the file is never copied: the guide asks for it and keeps it in the
 keychain.
 
-A list of tables to include, which migkit has no key for (a hop says what
-it leaves out), is returned as `include` and made into the hop's
-`exclude` against the source's own tables when the guide connects.
+A list of tables to include is the hop's `include` (shell patterns, or
+`re:` and a regular expression where a shell pattern cannot say it), and
+an exclude pattern a shell pattern cannot say goes into its `exclude`
+the same way (`_scope`), so the hop holds to them whether or not the
+guide reaches the source; `include` and `exclude_re` are returned as
+well, for the guide to name what they leave out of the source it reads.
 """
 import json
 import re
@@ -91,9 +94,8 @@ def _side(engine, ep, dbs=()):
     """A side as an address where one can say it, the long form
     otherwise."""
     from . import addresses
-    from .config import DEFAULT_PORTS
-    got = addresses.render(engine, ep, list(dbs),
-                           DEFAULT_PORTS.get(engine, 0))
+    from .engines import PORTS
+    got = addresses.render(engine, ep, list(dbs), PORTS.get(engine, 0))
     return got if got else dict(ep)
 
 
@@ -244,7 +246,7 @@ def from_dms(data, stem="hop"):
                                  ("where", where)) if v}
     if mapping:
         out.raw["mapping"] = mapping
-    return out
+    return _scope(out)
 
 
 def _dms_engine(ep, notes):
@@ -295,30 +297,35 @@ def _dms_endpoint(ep, engine, notes):
     return out
 
 
-def _lit(value):
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _q(column, engine):
-    """A column as a filter names it: bare where it can be, which both
-    sides of a cross-engine hop read alike (the filter is asked of both);
-    quoted in the source's way where it cannot."""
-    if re.fullmatch(r"[a-z_][a-z0-9_]*", str(column)):
-        return str(column)
-    if engine == "mysql":
-        return "`" + str(column).replace("`", "``") + "`"
-    return '"' + str(column).replace('"', '""') + '"'
+def _quoting(engine):
+    """(identifier, literal) quoting of the source's engine, its own
+    (`_quote_ident`, `_quote_literal`): a row filter is written in the
+    source's SQL and translated for the target where it speaks another
+    (`hetero`). Measured with quoting of this module's own: a filter on
+    PostgreSQL's column `user` became `user = 'bob'` - the session's user,
+    so zero rows on both sides and "same" over nothing - `order` a syntax
+    error, and `'C:\\new'` read by MySQL with a newline in it (audit
+    2026-10-01, DU4)."""
+    from .engines import _class_for, canonical
+    cls = _class_for(canonical(engine) or str(engine))
+    if cls is None:
+        raise SystemExit(f"a row filter on a {engine} source: migkit has"
+                         " no engine to write it in")
+    one = object.__new__(cls)
+    return one._quote_ident, one._quote_literal
 
 
 def _dms_filter(filters, engine):
     """DMS's filters as one predicate: the conditions of a column any of
-    them, the columns all."""
+    them, the columns all - each name and value quoted as the source's
+    engine quotes them."""
     ops = {"eq": "=", "noteq": "<>", "lte": "<=", "ste": "<=", "gte": ">="}
+    _q, _lit = _quoting(engine)
     parts = []
     for f in filters:
         if f.get("filter-type", "source") != "source":
             continue
-        col = _q(f["column-name"], engine)
+        col = _q(f["column-name"])
         conds = []
         for c in f.get("filter-conditions") or []:
             op = c.get("filter-operator")
@@ -430,8 +437,7 @@ def from_connector(data, stem="hop"):
             notes.append("the connection string's password was left out")
         base, _, query = url.partition("?")
         head = re.match(r"^(mongodb(?:\+srv)?://[^/]*)", base)
-        dbs = sorted({g for g in (as_glob(p) for p in _regexes(
-            cfg.get("database.include.list"))) if g and "*" not in g})
+        dbs = _databases(cfg, out)
         if head:
             out.raw["source"] = (head.group(1)
                                  + ("/" + ",".join(dbs) if dbs else "")
@@ -456,8 +462,7 @@ def from_connector(data, stem="hop"):
         if kind == "mssql" and cfg.get("database.names"):
             dbs = _regexes(cfg["database.names"])
         if kind == "mysql":
-            dbs = sorted({g for g in (as_glob(p) for p in _regexes(
-                cfg.get("database.include.list"))) if g and "*" not in g})
+            dbs = _databases(cfg, out)
         if kind == "oracle":
             ep["service"] = dbs.pop() if dbs else None
             ep = {k: v for k, v in ep.items() if v}
@@ -493,6 +498,54 @@ def from_connector(data, stem="hop"):
         out.raw["goal"] = goal
     notes.append("the connector writes to a stream; the guide asks where"
                  " the data should go")
+    return _scope(out)
+
+
+def _databases(cfg, out):
+    """The connector's `database.include.list`: its names, where each is
+    one; else every database, the patterns carried as the hop's include -
+    unless a table or collection list says which, each of its patterns
+    naming the database too. A pattern was left out without a word, and
+    the hop moved every database (audit 2026-10-01, K16)."""
+    pats = _regexes(cfg.get("database.include.list"))
+    globs = [as_glob(p) for p in pats]
+    if all(g and "*" not in g for g in globs):
+        return sorted(set(globs))
+    if cfg.get("table.include.list") or cfg.get("collection.include.list"):
+        out.notes.append("database.include.list holds patterns: every"
+                         " database is read, and the table list - which"
+                         " names each table's database - says which tables")
+        return []
+    for p in pats:
+        out.include.append(("regex", p + r"\..*"))
+    out.notes.append("database.include.list holds patterns: every database"
+                     " is read, and the hop's include keeps the tables of"
+                     " those they match")
+    return []
+
+
+def _scope(out):
+    """The task's own scope carried into the hop: the tables it took as
+    the hop's `include`, and what it left out that a shell pattern cannot
+    say as `re:` patterns of its `exclude` - so the hop holds to them
+    whether or not the guide reaches the source. They were applied only
+    against the source's tables as the guide read them, so a hop written
+    where the source could not be reached moved every table and said
+    nothing of it (audit 2026-10-01, K16)."""
+    taken = []
+    for kind, pat in out.include:
+        if kind == "glob":
+            taken.append(pat)
+        elif kind == "regex":
+            taken.append(as_glob(pat) or "re:" + pat)
+        else:
+            # matched anywhere in the table's name, as that file's are
+            taken.append(f"re:.*(?:{pat}).*")
+    if taken:
+        out.raw["include"] = list(dict.fromkeys(taken))
+    left = ["re:" + r for r in out.exclude_re]
+    if left:
+        out.raw["exclude"] = list(out.raw.get("exclude") or []) + left
     return out
 
 
@@ -592,7 +645,7 @@ def from_load_file(text, stem="hop"):
                        (r"set\b", "SET: migkit sets its own sessions")):
         if re.search(rf"(?is)\b{word}", body):
             notes.append(said)
-    return out
+    return _scope(out)
 
 
 def left_out(imported, ids):
