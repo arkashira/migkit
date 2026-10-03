@@ -71,6 +71,16 @@ def test_a_secret_is_read_the_first_time_it_is_used(conf, monkeypatch):
     assert "CHANGE_ME" not in repr(hop.source)
 
 
+def test_a_copy_of_a_side_reads_its_own_secret(conf):
+    """A copy made before either was read shares nothing it can lose:
+    the side that reads first leaves the other's reference in place."""
+    import copy
+    hop = config.get_hop("shop")
+    twin = copy.copy(hop.source)
+    assert hop.source.password == "CHANGE_ME-src"
+    assert twin.password == "CHANGE_ME-src"
+
+
 def test_a_name_that_is_not_a_hop_is_said_with_the_nearest(conf):
     with pytest.raises(SystemExit) as e:
         config.get_hop("shpo")

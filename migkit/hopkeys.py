@@ -2768,7 +2768,9 @@ def decisions(hop):
     def side(ep):
         return {"host": ep.host, "port": ep.port, "user": ep.user,
                 "password": ep.password, "options": dict(ep.options or {}),
-                "class": type(ep).__name__.replace("Keychain", "")}
+                # a password from the keychain or a reference is a password
+                "class": type(ep).__name__.replace("Keychain", "")
+                .replace("Side", "")}
     return {"engine": hop.engine, "brand": dict(hop.brand or {}),
             "source": side(hop.source), "target": side(hop.target),
             "databases": [str(d) for d in hop.databases or []],
