@@ -1462,7 +1462,11 @@ def _gen_migration(hop_name, db, out):
     ts = time.strftime("%Y%m%d%H%M%S")
     made = 0
     for d in ([db] if db else eng.databases()):
-        fwd, undo = eng.migration_pair(d)
+        try:
+            fwd, undo = eng.migration_pair(d)
+        except RuntimeError as e:
+            # a comparison that did not run is never "already in sync"
+            raise SystemExit(f"{d}: {e}") from None
         if fwd is None:
             raise SystemExit(
                 "generating migration DDL needs a component that is not"

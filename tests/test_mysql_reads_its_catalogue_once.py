@@ -100,10 +100,71 @@ def test_what_a_column_is_besides_its_type_is_one_spelling():
         "on update current_timestamp"
     assert extra("on update current_timestamp()", "") == \
         "on update current_timestamp"
-    assert extra("STORED GENERATED", "(`b` * 2)") == \
-        "stored generated as ((`b` * 2))"
+    # MySQL keeps the expression in parentheses, MariaDB does not
+    for expr in ("(`b` * 2)", "`b` * 2", "((`b` * 2))"):
+        assert extra("STORED GENERATED", expr) == \
+            "stored generated as (`b` * 2)", expr
     assert extra("auto_increment", "") == "auto_increment"
     assert extra("", "") == ""
+
+
+@pytest.mark.parametrize("expr,bare", [
+    ("(`n` >= 0)", "`n` >= 0"),
+    ("`n` >= 0", "`n` >= 0"),
+    ("((`n` >= 0))", "`n` >= 0"),
+    ("  ( `n`  >= 0 ) ", "`n` >= 0"),
+    # two parts in parentheses each: the whole is not one
+    ("(`a` > 0) and (`b` > 0)", "(`a` > 0) and (`b` > 0)"),
+    ("((`a` > 0) and (`b` > 0))", "(`a` > 0) and (`b` > 0)"),
+    # a parenthesis inside a text or a name is not one
+    ("(`v` <> ')')", "`v` <> ')'"),
+    ("(`v` <> '(' and `w` <> 'it''s)')", "`v` <> '(' and `w` <> 'it''s)'"),
+    ("(`a)b` > 0)", "`a)b` > 0"),
+    ("(`v` <> '\\')')", "`v` <> '\\')'"),
+    ("(unbalanced", "(unbalanced"),
+    ("", ""),
+    (None, ""),
+])
+def test_an_expression_is_read_without_the_parentheses_around_it(expr,
+                                                                  bare):
+    from migkit.engines.mysql import _unwrapped
+    assert _unwrapped(expr) == bare
+
+
+@pytest.mark.parametrize("text,said", [
+    # measured: MySQL keeps the `;` of a trigger made in a script of
+    # several statements, MariaDB does not
+    ("set new.id = new.id;", "set new.id = new.id"),
+    ("set new.id = new.id", "set new.id = new.id"),
+    ("begin\n  set new.p = 1;\nend ;\n", "begin set new.p = 1; end"),
+    ("set new.v = 'a;'", "set new.v = 'a;'"),
+    (None, ""),
+])
+def test_a_stored_body_is_one_spelling_on_both_servers(text, said):
+    from migkit.engines.mysql import _stored_text
+    assert _stored_text(text) == said
+
+
+def test_a_trigger_made_in_a_script_reads_as_one_made_alone(monkeypatch):
+    """Both readers of a body - the table's shape and the objects'
+    definitions - take it in the one spelling."""
+    import types
+    eng = MySQLEngine.__new__(MySQLEngine)
+    eng.hop = types.SimpleNamespace(target_db=lambda db: db)
+    monkeypatch.setattr(MySQLEngine, "_side_brand", lambda self, side:
+                        types.SimpleNamespace(name="mysql"))
+    bodies = {"src": "set new.id = new.id;", "dst": "set new.id = new.id"}
+
+    def q(self, side, sql, args=None, fresh=False):
+        if "information_schema.triggers" not in sql:
+            return []
+        if "concat(" in sql:
+            return [("t_bi", f"c BEFORE INSERT 1 {bodies[side]}")]
+        return [("c", "t_bi", "BEFORE", "INSERT", 1, bodies[side])]
+    monkeypatch.setattr(MySQLEngine, "_q", q)
+    assert eng.catalog("src", "app").others == \
+        eng.catalog("dst", "app").others
+    assert eng._definitions("src", "app") == eng._definitions("dst", "app")
 
 
 def test_two_servers_spelling_one_schema_two_ways_compare_alike():
@@ -125,6 +186,29 @@ def test_two_servers_spelling_one_schema_two_ways_compare_alike():
                                                  " zerofill")]})
     assert eng._comparable_shape(widened).columns["t"][0] != \
         b.columns["t"][0]
+
+
+def test_a_foreign_keys_rule_and_a_checks_clause_compare_alike_on_both():
+    """Measured on MySQL 8.4 and MariaDB 11, one schema: a rule left
+    unsaid is `no action` on one and `restrict` on the other - which
+    InnoDB holds the same - and a check's clause is in parentheses on
+    one only (`_unwrapped` at the read); a rule that differs still
+    differs."""
+    from migkit.catalog import Catalog, ForeignKey
+    eng = MySQLEngine.__new__(MySQLEngine)
+
+    def cat(on_update, check="check (n >= 0)"):
+        return eng._comparable_shape(Catalog(
+            fks={"c": [ForeignKey("c_p", ("p",), "t", ("id",), "cascade",
+                                  on_update)]},
+            others={"t": [check]}))
+    assert cat("no action").fingerprint("c") == \
+        cat("restrict").fingerprint("c")
+    assert cat("no action").fingerprint("c") != \
+        cat("cascade").fingerprint("c")
+    assert cat("restrict").fks["c"][0].on_delete == "cascade"
+    assert cat("restrict", "check (`n` >= 0)").fingerprint("t") == \
+        cat("restrict").fingerprint("t")
 
 
 def test_the_deep_column_check_compares_the_catalogue_in_one_spelling(
@@ -195,6 +279,59 @@ def test_the_texts_difference_stands_where_an_object_differs():
     # the readings that compare objects are never made cosmetic
     assert [r.status for r in said("diff", "diff")[1:3]] == ["diff",
                                                              "diff"]
+
+
+def test_the_schema_comparison_runs_once_each_way_and_never_fails_as_same(
+        tmp_path, monkeypatch):
+    """The check's schema-aware reading and the repair right after it
+    share one run each way - four runs it was; migkit's own change to the
+    target reads it again; a comparison that fails is a `skip` saying why,
+    no repair, and an error for `schema --migration` - it was "already in
+    sync" there."""
+    from types import SimpleNamespace
+
+    from migkit import movers
+    from migkit.config import Endpoint, Hop
+    from migkit.engines import mysql
+    ep = Endpoint(host="10.0.0.5", port=3306, user="u", password="CHANGE_ME")
+    hop = Hop(name="c", engine="mysql", source=ep, target=ep,
+              databases=["app"], db_map={"app": "app_copy"})
+    hop.report_dir = lambda d=None: tmp_path
+    eng = MySQLEngine(hop)
+    monkeypatch.setattr(MySQLEngine, "_schema_excludes", lambda self, db: [])
+    monkeypatch.setattr(MySQLEngine, "_q", lambda self, *a, **k: [])
+    monkeypatch.setattr(mysql, "which", lambda name: "/usr/bin/" + name)
+    su, tu = eng._schema_urls("app")
+    runs, failing = [], []
+
+    def diff(frm, to, excludes=(), timeout=180):
+        runs.append((frm, to))
+        if failing:
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr=f"Error: {tu} refused, password CHANGE_ME")
+        return SimpleNamespace(returncode=0, stderr="", stdout=(
+            "ALTER TABLE `t` ADD COLUMN `w` int;" if frm == tu
+            else "ALTER TABLE `t` DROP COLUMN `w`;"))
+    monkeypatch.setattr(movers, "schema_diff", diff)
+    got = eng._atlas("app")
+    assert got.status == "diff", got.detail
+    action = eng._schema_repair_action("app")
+    assert action.statements == ["ALTER TABLE `t` ADD COLUMN `w` int;"]
+    assert action.undo == ["ALTER TABLE `t` DROP COLUMN `w`;"]
+    assert runs == [(tu, su), (su, tu)]
+    # migkit changes the target: what the comparison said is read again
+    eng.execute_ddl("dst", "app", "alter table t add column w int")
+    assert eng.migration_pair("app")[0].startswith("ALTER TABLE")
+    assert len(runs) == 4
+    failing.append(1)
+    eng.forget_shapes()
+    got = eng._atlas("app")
+    assert got.status == "skip", got.detail
+    assert "did not run" in got.detail and "CHANGE_ME" not in got.detail
+    assert eng._schema_repair_action("app") is None
+    with pytest.raises(RuntimeError, match="did not run"):
+        eng.migration_pair("app")
 
 
 # ---- on a server -----------------------------------------------------------
@@ -300,3 +437,39 @@ def test_a_change_migkit_makes_is_read_again_at_once(eng, db):
     eng.execute_ddl("dst", db, "alter table parent add column w int")
     assert eng.neutral_columns("dst", db, "parent") == [("id", "int"),
                                                         ("w", "int")]
+
+
+maria = servers.fixture("mariadb")
+
+
+@needs_docker
+def test_one_schema_on_mysql_and_on_mariadb_compares_alike(pair, maria,
+                                                          tmp_path):
+    """Measured, MySQL 8.4 and MariaDB 11, one schema: a default quoted
+    or not, an integer's display width, the parentheses around a check or
+    a generated expression, `no action` and `restrict` - read as the same,
+    table by table and column by column; a column the target makes
+    narrower is still read as one."""
+    from migkit.config import Hop
+    db, mdb = pair.name, maria.name
+    for server, name in ((pair.src, db), (maria.dst, mdb)):
+        server.sql(f"drop database if exists `{name}`; create database"
+                   f" `{name}` character set utf8mb4 collate utf8mb4_bin")
+        server.sql(SHAPES, name)
+    hop = Hop(name="brands", engine="mysql", source=pair.src.endpoint(),
+              target=maria.dst.endpoint(), databases=[db],
+              db_map={db: mdb})
+    hop.report_dir = lambda d=None: tmp_path
+    eng = MySQLEngine(hop)
+    try:
+        got = eng._check_tables(db)
+        assert got.status == "ok", got.detail
+        cols, narrow = eng._deep_column_definitions(db)
+        assert cols.status == "ok", cols.detail
+        assert narrow.status == "ok", narrow.detail
+        maria.dst.sql("alter table shaped modify v varchar(20)", mdb)
+        got = eng._check_tables(db)
+        assert got.status == "diff" and "column v" in got.detail, got.detail
+        assert eng._deep_column_definitions(db)[1].status == "diff"
+    finally:
+        eng.release_kept()

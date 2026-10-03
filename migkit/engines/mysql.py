@@ -47,6 +47,48 @@ def _leaf(name):
     return text.rpartition(".")[2]
 
 
+def _unwrapped(expr):
+    """An expression without the parentheses around the whole of it,
+    however many: MySQL keeps a check's clause and a generated column's
+    expression in them, MariaDB does not (measured, MySQL 8.4 and MariaDB
+    11: `(`n` >= 0)` and `` `n` >= 0 ``), and one schema read on the two
+    differed on every check and generated column. A parenthesis inside a
+    quoted text or name is not counted; `(a) or (b)` is left whole."""
+    text = " ".join(str(expr or "").split())
+    while text.startswith("(") and text.endswith(")"):
+        depth, quote, i = 0, "", 0
+        while i < len(text):
+            ch = text[i]
+            if quote:
+                if ch == "\\" and quote == "'":
+                    i += 1
+                elif ch == quote:
+                    quote = ""
+            elif ch in "'`\"":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i < len(text) - 1:
+                    return text
+            i += 1
+        if depth != 0 or quote:
+            return text
+        text = text[1:-1].strip()
+    return text
+
+
+def _stored_text(text):
+    """A stored body - a trigger's, a routine's, a view's - in one
+    spelling: its blanks as one space, and no `;` at its end, which MySQL
+    keeps where the body came in a script of several statements and
+    MariaDB does not (measured, MySQL 8.4 and MariaDB 11: `set new.id =
+    new.id;` and `set new.id = new.id`) - one trigger read on the two as
+    two."""
+    return re.sub(r"[\s;]+$", "", " ".join(str(text or "").split()))
+
+
 #: migkit's own tables on a side (`config.MIGKIT_OWN`), by their exact
 #: names, for a catalogue query to leave out: `like 'migkit%'` left out an
 #: application's `migkitchen` and `migkit_audit` too, and `moved_nothing`
@@ -446,7 +488,7 @@ class MySQLEngine(Engine):
     #: (`neutral_changes`), and goes on from there
     READ_ENDS_INSIDE_TRANSACTIONS = True
     SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_unique_counts",
-                    "_types_loaded", "_catalogs")
+                    "_types_loaded", "_catalogs", "_schema_pairs")
 
     def neutral_tables(self, side, db):
         return self._tables(side, db)
@@ -597,8 +639,11 @@ class MySQLEngine(Engine):
         return self._brands()[0 if side == "src" else 1]
 
     def _forget_catalog(self, side, db):
+        """What migkit keeps of a side's schema, read again next time: its
+        catalogue, and the schema comparison's pair (`_schema_pair`)."""
         self.__dict__.get("_catalogs", {}).pop((side, self._d(side, db)),
                                                None)
+        self.__dict__.get("_schema_pairs", {}).pop(db, None)
 
     #: the six statements a side's catalogue is read in (`_shapes`) and
     #: its digest is asked over (`shape_mark`), as (what, its order, how
@@ -734,7 +779,7 @@ class MySQLEngine(Engine):
             for (t, c, typ, null, data_type, default, extra, coll, expr,
                  _) in self._shape_rows(side, name, "columns"):
                 t, c, typ = str(t), str(c), str(typ)
-                expr = " ".join(str(expr or "").split())
+                expr = _unwrapped(expr)
                 if expr:
                     generated.setdefault(t, set()).add(c)
                 columns.setdefault(t, []).append(Column(
@@ -787,16 +832,16 @@ class MySQLEngine(Engine):
             # its name, which the server makes up where none was given
             for t, clause, enforced in self._shape_rows(side, name,
                                                         "checks"):
-                clause = " ".join(str(clause).split())
+                clause = _unwrapped(clause)
                 others.setdefault(str(t), []).append(
-                    f"check {clause}" + (" not enforced"
-                                         if str(enforced).upper() == "NO"
-                                         else ""))
+                    f"check ({clause})" + (" not enforced"
+                                           if str(enforced).upper() == "NO"
+                                           else ""))
             # each trigger by what fires it and a hash of its body - who
             # defined it is the ownership check's (`_deep_ownership`)
             for (t, trigger, timing, event, order,
                  body) in self._shape_rows(side, name, "triggers"):
-                body = " ".join(str(body or "").split())
+                body = _stored_text(body)
                 digest = hashlib.md5(body.encode(),
                                      usedforsecurity=False).hexdigest()[:16]
                 others.setdefault(str(t), []).append(
@@ -821,12 +866,15 @@ class MySQLEngine(Engine):
     def _column_extra(extra, expr):
         """What a column is besides its type, in one spelling for every
         server: `auto_increment`, `on update current_timestamp`, `virtual
-        generated as (...)`, `invisible`. MySQL 8 marks an expression
-        default `DEFAULT_GENERATED`, which says how the default is kept
-        (`default_shown` reads it), not what the column is."""
+        generated as (...)`, `invisible` - the expression without the
+        parentheses MySQL keeps it in and MariaDB does not (`_unwrapped`).
+        MySQL 8 marks an expression default `DEFAULT_GENERATED`, which
+        says how the default is kept (`default_shown` reads it), not what
+        the column is."""
         words = " ".join(str(extra or "").lower().replace(
             "default_generated", "").split())
         words = re.sub(r"current_timestamp\(\)", "current_timestamp", words)
+        expr = _unwrapped(expr)
         if expr:
             words = re.sub(r"\b(virtual|stored) generated\b",
                            lambda m: f"{m.group(0)} as ({expr})", words)
@@ -2728,6 +2776,7 @@ class MySQLEngine(Engine):
                     for key in [k for k in self.__dict__.get(
                             "_catalogs", {}) if k[0] == side]:
                         self.__dict__["_catalogs"].pop(key, None)
+                    self.__dict__.pop("_schema_pairs", None)
                     self.__dict__.get("_privs_of", {}).pop(side, None)
             return with_retry(once, label=f"mysql statement {side}",
                               writes=True)
@@ -2863,20 +2912,30 @@ class MySQLEngine(Engine):
 
     def _comparable_shape(self, cat):
         """`cat` as a schema check across a hop's two sides compares it:
-        each column's type, collation, generated expression and each
-        check's clause in one spelling for both servers (`_WIDTH`, back
-        quotes left out) - a server's way of writing it is not a
+        each column's type, collation, generated expression, each check's
+        clause and each foreign key's rules in one spelling for both
+        servers (`_WIDTH`, back quotes left out, `no action` for
+        `restrict`, which InnoDB holds the same and MariaDB says for a
+        rule left unsaid where MySQL says `no action` - measured, MySQL
+        8.4 and MariaDB 11) - a server's way of writing it is not a
         difference between the two schemas."""
         import dataclasses
 
         def coll(c):
             return re.sub(r"^utf8_", "utf8mb3_", c) if c else c
+
+        def rule(r):
+            return "no action" if str(r or "").lower() in (
+                "no action", "restrict") else r
         cols = {t: [c._replace(declared=self._WIDTH.sub(r"\1", c.declared),
                                collation=coll(c.collation),
                                extra=c.extra.replace("`", ""))
                     for c in got] for t, got in cat.columns.items()}
         return dataclasses.replace(
             cat, columns=cols,
+            fks={t: [dataclasses.replace(f, on_delete=rule(f.on_delete),
+                                         on_update=rule(f.on_update))
+                     for f in got] for t, got in cat.fks.items()},
             others={t: [o.replace("`", "") if o.startswith("check ") else o
                         for o in got] for t, got in cat.others.items()})
 
@@ -3005,8 +3064,8 @@ class MySQLEngine(Engine):
                     # NULL or empty: not read, never the same
                     out[(typ, str(n))] = None
                     continue
-                text = " ".join(str(text).replace(_qi(name) + ".",
-                                                  "`<db>`.").split())
+                text = _stored_text(str(text).replace(_qi(name) + ".",
+                                                      "`<db>`."))
                 if typ in ("function", "procedure"):
                     text = params.get(str(n), "") + text
                 out[(typ, str(n))] = hashlib.md5(
@@ -3152,31 +3211,68 @@ class MySQLEngine(Engine):
                     if not self.takes(db, typ, str(n), str(by))}
         return got
 
-    def _atlas(self, db):
-        """The schema-aware comparison and the DDL that would align the
-        target, or a `skip` saying why it did not run: it vanished from
-        the check where it failed (audit 2026-10-01, SC16)."""
+    def _schema_pair(self, db):
+        """(the DDL that brings the target's schema to the source's, the
+        DDL that takes it back) from the schema-aware comparison, run once
+        each way - "" for a way where there is nothing to do, or the way
+        back where it could not be read. What the check shows
+        (`_atlas`) and the repair and `schema --migration` apply
+        (`migration_pair`): it ran twice for each, four times for one
+        check and its repair (audit 2026-10-01, SC16). Kept
+        `CATALOG_SECONDS`, and read again at once where migkit writes to a
+        side (`_forget_catalog`, `_answer`). The comparison failing raises,
+        in words that name neither the program nor a password - never
+        read as two schemas the same."""
         from ..movers import DRIVEN, schema_diff
         from ..redact import Redactor
         from ..wording import without_programs
+        kept = self.__dict__.setdefault("_schema_pairs", {})
+        got = kept.get(db)
+        if got is not None and \
+                time.monotonic() - got[0] < self.CATALOG_SECONDS:
+            return got[1]
+        began = time.monotonic()
         su, tu = self._schema_urls(db)
         excludes = self._schema_excludes(db)
 
-        def not_run(why):
-            said = (str(why).strip().splitlines() or ["?"])[-1]
-            said = without_programs(Redactor(self.hop)(said),
-                                    DRIVEN + ("atlas",), "the comparison")
-            return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "skip",
-                          "the schema-aware comparison did not run: "
-                          + said[:160])
+        def text(p):
+            got = p.stdout.strip()
+            return "" if "Schemas are synced" in got else got
         try:
             p = schema_diff(tu, su, excludes)
-        except Exception as e:  # noqa: BLE001 - said in the row
-            return not_run(e)
-        if p.returncode != 0:
-            return not_run(p.stderr or f"exit {p.returncode}")
-        text = p.stdout.strip()
-        if not text or "Schemas are synced" in text:
+            why = "" if p.returncode == 0 else (p.stderr
+                                                or f"exit {p.returncode}")
+        except Exception as e:  # noqa: BLE001 - said in the words raised
+            why = str(e)
+        if why:
+            said = (why.strip().splitlines() or ["?"])[-1]
+            said = without_programs(Redactor(self.hop)(said),
+                                    DRIVEN + ("atlas",), "the comparison")
+            raise RuntimeError("the schema-aware comparison did not run: "
+                               + said[:160])
+        fwd, undo = text(p), ""
+        if fwd:
+            # the way back taken now: once the fix is applied the two
+            # schemas no longer describe where the target came from
+            try:
+                rp = schema_diff(su, tu, excludes)
+                undo = text(rp) if rp.returncode == 0 else ""
+            except Exception:  # noqa: BLE001 - no undo, said by `_atlas`
+                undo = ""
+        kept[db] = (began, (fwd, undo))
+        return fwd, undo
+
+    def _atlas(self, db):
+        """The schema-aware comparison (`_schema_pair`) and the DDL that
+        would align the target, or a `skip` saying why it did not run: it
+        vanished from the check where it failed (audit 2026-10-01,
+        SC16)."""
+        try:
+            text, rtext = self._schema_pair(db)
+        except RuntimeError as e:  # said in the row
+            return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "skip",
+                          str(e))
+        if not text:
             # both files, not just the fix: an undo left behind after the
             # schemas converged is a rollback for changes nobody made
             for stale in ("schema-fix.sql", "schema-fix.revert.sql"):
@@ -3188,16 +3284,10 @@ class MySQLEngine(Engine):
         out.write_text(text + "\n")
         detail = (f"{len(text.splitlines())} lines of DDL would bring the"
                   " target's schema up to the source's")
-        # The same diff run the other way is the undo of exactly these
-        # statements, and it has to be taken now: once the fix is applied the
-        # two schemas no longer describe where the target came from.
+        # the same diff run the other way is the undo of exactly these
+        # statements (`_schema_pair`)
         from .. import revert as _revert
         rev = self.hop.report_dir(db) / "schema-fix.revert.sql"
-        try:
-            rp = schema_diff(su, tu, excludes)
-            rtext = rp.stdout.strip() if rp.returncode == 0 else ""
-        except Exception:
-            rtext = ""
         body = _revert.script(text, rtext, "schema-fix.sql")
         if body:
             rev.write_text(body)
@@ -6977,10 +7067,14 @@ class MySQLEngine(Engine):
     def _schema_repair_action(self, db):
         """atlas-generated DDL to align the target's objects (columns,
         indexes, PK/FK, views, routines, triggers) to the source, reverse
-        DDL as undo. Structure only; data untouched."""
+        DDL as undo. Structure only; data untouched. None where the
+        comparison could not run: the check says why (`_atlas`)."""
         if not which("atlas"):
             return None
-        fwd, undo = self.migration_pair(db)
+        try:
+            fwd, undo = self.migration_pair(db)
+        except RuntimeError:
+            return None
         if not fwd:
             return None
         return RepairAction(db, "schema", fwd.splitlines(),
@@ -9888,21 +9982,16 @@ class MySQLEngine(Engine):
         ]
 
     def migration_pair(self, db):
-        from ..movers import schema_diff
+        """(forward DDL, its undo) for `schema --migration` and the schema
+        repair (`_schema_pair`); (None, None) where the comparison is not
+        installed. A comparison that failed raises: it was read as two
+        schemas in sync, and `schema --migration` said "nothing to
+        generate". A mapped table's schema is the mapping's, left out
+        (`_schema_excludes`): aligning it with the source would put back
+        the columns the hop drops."""
         if not which("atlas"):
             return None, None
-        su, tu = self._schema_urls(db)
-        # a mapped table's schema is the mapping's, and aligning it with the
-        # source would put back the columns the hop drops
-        excludes = self._schema_excludes(db)
-
-        def diff(a, b):
-            p = schema_diff(a, b, excludes)
-            text = p.stdout.strip()
-            if p.returncode or "Schemas are synced" in text:
-                return ""
-            return text
-        return diff(tu, su), diff(su, tu)
+        return self._schema_pair(db)
 
     def fetch_sample_df(self, side, db, table, limit, where=None):
         import pandas as pd

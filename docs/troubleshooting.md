@@ -173,6 +173,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * generating migration DDL needs a component that is not installed on this machine: migkit doctor --install puts it in place
 
+* <...>: <...>
+
 * --drill needs --db and --table (schema.table)
 
 * --drill supports postgres and mysql hops
@@ -190,8 +192,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...> is writing to this target, and a row repair beside it would race it - the row that survives is whichever lands last. Nothing was applied. Stop it, repair, and start it again, or let it catch up and check again.
 
 * <...>: <...> did not pause within <...>s (hop option repair_window), so nothing was applied. It has been told to carry on.
-
-* <...>: <...>
 
 * --kind picks what a repair of the last check's differences puts right; --mode <...> runs a whole flow and repairs whatever it finds
 
