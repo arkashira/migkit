@@ -628,6 +628,106 @@ class _Documents(NeutralCopier, Engine):
             "create them on the target before the cutover" if lacking
             else "wait for them to be built" if building else "")]
 
+    # ---- a table by the service's own export and import ---------------------
+
+    #: how long an export or an import is waited for
+    EXPORT_WAIT = 6 * 3600
+
+    def _bucket(self):
+        """The bucket prefix the hop gives the service's export, or None."""
+        got = str((self.hop.options or {}).get("export_bucket") or "")
+        return got.rstrip("/") if got.startswith("gs://") else None
+
+    def _export_unfit(self, db, table):
+        """Why the service's own export and import cannot carry the table,
+        or None."""
+        from . import same_engine
+        if not same_engine(self):
+            return "the target is another engine"
+        if self._bucket() is None:
+            return ("the hop names no bucket the export is written to"
+                    " (export_bucket: gs://bucket/prefix)")
+        if any(self._ep(s).options.get("emulator") for s in ("src", "dst")):
+            return "the emulator exports nothing"
+        if self._described("src", db, table) is not None:
+            return ("migkit made the table from another engine's rows, and"
+                    " describes it here")
+        return None
+
+    def _where_to(self, db, table):
+        safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in
+                       f"{self.hop.name}-{db}-{table}")
+        return f"{self._bucket()}/{safe}-{time.strftime('%Y%m%d%H%M%S')}"
+
+    def _held_to(self, side, db, table):
+        """The database, the collection group or kind, and - in Datastore
+        mode - the namespace an export or an import is held to: both modes
+        are exported by the one admin API."""
+        out = {"name": self._db_name(side, db), "collection_ids": [table]}
+        space = self._ep(side).options.get("namespace")
+        if space:
+            out["namespace_ids"] = [space]
+        return out
+
+    def _exported(self, db, table):
+        """The collection group or kind exported by the service as it
+        stands, under a prefix of its own; the prefix."""
+        got = self._admin("src").export_documents(request={
+            **self._held_to("src", db, table),
+            "output_uri_prefix": self._where_to(db, table)}).result(
+            self.EXPORT_WAIT)
+        return got.output_uri_prefix
+
+    def _imported(self, db, table, uri):
+        self._admin("dst").import_documents(request={
+            **self._held_to("dst", db, table),
+            "input_uri_prefix": uri}).result(self.EXPORT_WAIT)
+
+    def _table_ways(self):
+        """How a table goes (`tableway.each`): the service's own export of
+        it, imported into the emptied target, where the hop names a bucket
+        for it; by the table copier always."""
+        from ..decide import Need, Rung
+        return (
+            Rung("export", "the service's own export, imported into the"
+                           " target",
+                 needs=(Need("a table the export carries",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"]),),
+                 because="every document as the service keeps it, read and"
+                         " written by the service"),
+            Rung("copier", "the table copier, by key ranges",
+                 because="every document read and written by migkit"),
+        )
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each collection carried by the service's own export and import
+        through the bucket the hop names, the target's emptied first, where
+        it can; by the table copier otherwise. The check that follows
+        compares them."""
+        steps = [f"{t}: exported and imported by the service, or copied by"
+                 " key ranges" for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts
+        held = []
+
+        def run(way, t):
+            if way != "export":
+                return self.copy_by_copier(db, t, log, held)
+            uri = self._exported(db, t)
+            if t in self.neutral_tables("dst", db):
+                self.neutral_empty("dst", db, t)
+            self._imported(db, t, uri)
+            if log:
+                log(f"{t}: exported and imported by the service ({uri})")
+            return None
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(unfit=lambda t=t: self._export_unfit(
+                          db, t)), run, log)
+        return steps
+
     def snapshot_state(self, db, state_dir, kind="all"):
         """The moment the target stood at before a repair, with whether
         point-in-time recovery keeps it seven days - a copy can be made of
@@ -1213,11 +1313,10 @@ def _register():
          ("BulkWriter", "delete"): "delete",
          ("FirestoreAdminClient", "get_database"): "get_database",
          ("FirestoreAdminClient", "list_indexes"): "list_indexes",
-         ("FirestoreAdminClient", "list_fields"): "list_fields"}),
+         ("FirestoreAdminClient", "list_fields"): "list_fields",
+         ("FirestoreAdminClient", "export_documents"): "export_documents",
+         ("FirestoreAdminClient", "import_documents"): "import_documents"}),
         options={
-        ("FirestoreAdminClient", "export_documents"): (
-            unused, "an export is files in a bucket, read by the service's"
-                    " own import only"),
         ("Client", "recursive_delete"): (
             unused, "it deletes the documents under each document too, where"
                     " a table is one collection group"),

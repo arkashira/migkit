@@ -407,7 +407,9 @@ def supported(engine, via):
             "mydumper": engine == "mysql",
             "mysqlsh": engine == "mysql",
             "pgloader": engine == "hetero",
-            "mongodump": engine == "mongodb",
+            # a dump read and a restore written by the wire's own
+            # commands: GeminiDB's MongoDB API answers them as MongoDB does
+            "mongodump": engine in ("mongodb", "geminidb-mongo"),
             "mongosync": engine == "mongodb",
             "riotx": engine == "redis",
             "redisshake": engine == "redis",

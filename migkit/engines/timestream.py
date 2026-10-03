@@ -438,6 +438,165 @@ class TimestreamEngine(NeutralCopier, Engine):
                                   "give the target's tables the source's"
                                   " retention and partition key")
 
+    # ---- the service's own batch load ------------------------------------------
+    #
+    # A table's records written as one CSV file into the S3 prefix the hop
+    # names and loaded by the service's batch load, at one version, its
+    # report kept beside it - a multi-measure table, whose every record's
+    # measures are columns. A single-measure table, or one whose file
+    # cannot be written, goes by the copier.
+
+    #: how long a batch load is waited for
+    LOAD_WAIT = 6 * 3600
+
+    def _load_unfit(self, db, table):
+        """Why the service's batch load cannot carry the table, or None."""
+        from . import same_engine
+        if not same_engine(self):
+            return "the target is another engine"
+        if self._ep("dst").options.get("endpoint_url"):
+            return "the target is a stand-in, which loads no files"
+        if not str((self.hop.options or {}).get("export_bucket")
+                   or "").startswith("s3://"):
+            return ("the hop names no S3 prefix the load reads from"
+                    " (export_bucket: s3://bucket/prefix)")
+        _, _, _, measures = self._parts("src", db, table, self.neutral_columns(
+            "src", db, table))
+        if measures and all(n.startswith("measure_value::")
+                            for n, _ in measures):
+            return ("a single-measure table, whose records the batch load"
+                    " takes as mixed measures only")
+        return None
+
+    def _batch_loaded(self, db, table, log):
+        """The table's records loaded by the service's batch load from one
+        file written for it; the records in it."""
+        import csv
+        import io
+
+        import boto3
+
+        from .. import decide
+        from .spanner import ns_of
+        cols = self.neutral_columns("src", db, table)
+        dims, name_col, at, measures = self._parts("src", db, table, cols)
+        heads = dims + ([name_col] if name_col else []) + [at] + [
+            n for n, _ in measures]
+        text, count = io.StringIO(), 0
+        out = csv.writer(text, lineterminator="\n")
+        out.writerow(heads)
+        for batch in self.neutral_batches("src", db, table, cols, 5000):
+            for row in batch:
+                values = dict(zip([n for n, _ in cols], row))
+                cells = [values.get(d) for d in dims]
+                if name_col:
+                    cells.append(values.get(name_col))
+                cells.append(ns_of(values[at]))
+                for n, t in measures:
+                    v = values.get(n)
+                    cells.append(None if v is None else ns_of(v) // 10 ** 6
+                                 if t == "timestamp" else
+                                 ("true" if v else "false") if t == "boolean"
+                                 else repr(v) if isinstance(v, float) else v)
+                out.writerow(["" if c is None else c for c in cells])
+                count += 1
+        bucket, _, prefix = str(self.hop.options["export_bucket"])[5:] \
+            .partition("/")
+        base = (f"{prefix.rstrip('/') + '/' if prefix else ''}migkit-"
+                f"{self.hop.name}-{table}-{time.strftime('%Y%m%d%H%M%S')}")
+        region = self._ep("dst").options.get("region") or self._ep(
+            "dst").host or None
+        try:
+            boto3.client("s3", region_name=region).put_object(
+                Bucket=bucket, Key=f"{base}/records.csv",
+                Body=text.getvalue().encode())
+        except Exception as e:  # noqa: BLE001 - nothing loaded: said
+            raise decide.Blocked(f"{table}: the load's file could not be"
+                                 f" written: {str(e).splitlines()[0]}")
+        model = {"TimeColumn": at, "TimeUnit": "NANOSECONDS",
+                 "DimensionMappings": [{"SourceColumn": d,
+                                        "DestinationColumn": d}
+                                       for d in dims],
+                 "MultiMeasureMappings": {
+                     **({} if name_col else {"TargetMultiMeasureName":
+                                             table}),
+                     "MultiMeasureAttributeMappings": [
+                         {"SourceColumn": n,
+                          "TargetMultiMeasureAttributeName": n,
+                          "MeasureValueType": MEASURE_TYPES.get(
+                              t, t.upper())} for n, t in measures]}}
+        if name_col:
+            model["MeasureNameColumn"] = name_col
+        client = self._client("dst", "write")
+        task = client.create_batch_load_task(
+            DataModelConfiguration={"DataModel": model},
+            DataSourceConfiguration={
+                "DataSourceS3Configuration": {"BucketName": bucket,
+                                              "ObjectKeyPrefix": base},
+                "DataFormat": "CSV"},
+            ReportConfiguration={"ReportS3Configuration": {
+                "BucketName": bucket, "ObjectKeyPrefix": f"{base}/report"}},
+            TargetDatabaseName=self._d("dst", db), TargetTableName=table,
+            RecordVersion=time.time_ns() // 1000)["TaskId"]
+        deadline = time.time() + self.LOAD_WAIT
+        while True:
+            got = client.describe_batch_load_task(TaskId=task)[
+                "BatchLoadTaskDescription"]
+            status = str(got.get("TaskStatus") or "")
+            if status == "SUCCEEDED":
+                break
+            if status not in ("CREATED", "IN_PROGRESS") or \
+                    time.time() > deadline:
+                raise SystemExit(f"{table}: the batch load {task} ended"
+                                 f" {status}: {got.get('ErrorMessage', '')}"
+                                 f" (its report: s3://{bucket}/{base}/report)")
+            time.sleep(5)
+        if log:
+            log(f"{table}: {count:,} records loaded by the service's batch"
+                " load")
+        return count
+
+    def _table_ways(self):
+        """How a table goes (`tableway.each`): the service's batch load of
+        a file of its records where the hop names a prefix for it; by the
+        table copier always."""
+        from ..decide import Need, Rung
+        return (
+            Rung("batch", "the service's batch load, from a file of the"
+                          " records",
+                 needs=(Need("a table the batch load carries",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"]),),
+                 because="the records written by the service at once,"
+                         " costing no write calls"),
+            Rung("copier", "the table copier",
+                 because="every record written a hundred a call"),
+        )
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table loaded by the service's own batch load from a file of
+        its records, the target's table made again empty first, where it
+        can be; by the table copier otherwise. The check that follows
+        compares them."""
+        steps = [f"{t}: loaded by the service's batch load, or copied"
+                 for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts
+        self._as_pair().create_missing(db, log)
+        held = []
+
+        def run(way, t):
+            if way == "batch":
+                self.neutral_empty("dst", db, t)
+                return self._batch_loaded(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(unfit=lambda t=t: self._load_unfit(
+                          db, t)), run, log)
+        return steps
+
     def snapshot_state(self, db, state_dir, kind="all"):
         """What the target held before a repair: each table's retention and
         partition key, and its records counted - the records a repair
@@ -490,11 +649,10 @@ def _register():
          ("write", "Version"): "Version",
          ("write", "MULTI"): "MULTI",
          ("write", "EnableMagneticStoreWrites"): "EnableMagneticStoreWrites",
-         ("write", "CreateTable"): "create_table"}), options={
-        ("write", "CreateBatchLoadTask"): (
-            unused, "a batch load reads CSV files from S3, which a copy from"
-                    " another server has none of, and reports its errors to"
-                    " a bucket rather than per record"),
+         ("write", "CreateTable"): "create_table",
+         ("write", "CreateBatchLoadTask"): "create_batch_load_task",
+         ("write", "DescribeBatchLoadTask"): "describe_batch_load_task"}),
+        options={
         ("query", "CreateScheduledQuery"): (
             unused, "a scheduled query writes into the same database it"
                     " reads, which a copy to another does not"),

@@ -342,14 +342,11 @@ GAPS = {
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
         "snapshot": (NOT_YET, "ER5"),
     },
-    # the cloud-native services (P0-CLOUDS part 2): their own bulk paths
-    # (CN1), accounts (CN2) and the follows not built (CN4)
-    "spanner": {
-        "bulk-move": (NOT_YET, "CN1"),
-    },
+    # the cloud-native services (P0-CLOUDS part 2): the loaders of the
+    # distributed MySQL-wire services (CN1) and the follows not built (CN4)
+    "spanner": {},
     "bigtable": {
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
-        "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_APPLICABLE, _IAM.format("a table")),
         "statistics": (NOT_APPLICABLE, "a Bigtable table is read by its row"
                                        " keys and keeps no optimiser"
@@ -357,7 +354,6 @@ GAPS = {
     },
     "firestore": {
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("document")),
-        "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_APPLICABLE, "who may read a database is IAM's and its"
                                   " security rules', not the collection's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
@@ -366,16 +362,13 @@ GAPS = {
         "sequences": (NOT_APPLICABLE, "an entity's numeric id is allocated by"
                                       " the service and carried as it is:"
                                       " there is no sequence to carry"),
-        "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_APPLICABLE, "Datastore mode has no change feed and no"
                                  " listener: nothing a client can follow")
            for cap in ("stream", "fence", "confirm", "delta")},
         "users": (NOT_APPLICABLE, _IAM.format("a kind")),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
-    "gaussdb": {
-        "bulk-move": (NOT_YET, "CN1"),
-    },
+    "gaussdb": {},
     **{name: {
         "bulk-move": (NOT_YET, "CN1"),
     } for name in ("oceanbase", "polardbx", "dcdb")},
@@ -392,7 +385,6 @@ GAPS = {
     },
     "neptune": {
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("vertex or edge")),
-        "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_APPLICABLE, _IAM.format("the graph")),
     },
     "timestream": {
@@ -403,7 +395,6 @@ GAPS = {
         "sequences": (NOT_APPLICABLE, "a record is kept by its dimensions"
                                       " and its time: there is no sequence"
                                       " to carry"),
-        "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_APPLICABLE, "Timestream keeps no change log, and a"
                                  " record written late or at a higher"
                                  " version lands in the past, where no"
@@ -414,7 +405,10 @@ GAPS = {
     },
     "lindorm": {
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
-        "bulk-move": (NOT_YET, "CN1"),
+        "bulk-move": (NOT_APPLICABLE, "Lindorm's own bulk paths - its tunnel"
+                                      " service, its bulk load - are run from"
+                                      " its console, not by a client: its"
+                                      " tables go by the table copier"),
         **{cap: (NOT_YET, "CN4")
            for cap in ("stream", "fence", "confirm", "delta")},
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
@@ -429,7 +423,11 @@ GAPS = {
     },
     "geminidb-redis": {
         "sequences": (NOT_APPLICABLE, "keys have no sequences"),
-        "bulk-move": (NOT_YET, "CN1"),
+        "bulk-move": (NOT_APPLICABLE, "the Redis copy programs read a"
+                                      " replica's stream, which GeminiDB"
+                                      " serves none of, or are licensed into"
+                                      " Redis's own products alone: its keys"
+                                      " go by migkit's own copier"),
         **{cap: (NOT_APPLICABLE, "a GeminiDB instance neither is nor serves"
                                  " a replica, and keeps no change stream a"
                                  " client can read")
@@ -439,7 +437,6 @@ GAPS = {
     "geminidb-mongo": {
         "sequences": (NOT_APPLICABLE,
                       "collections have no sequences or auto-increment"),
-        "bulk-move": (NOT_YET, "CN1"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "kinesis": {cap: (NOT_APPLICABLE, STREAM_ONLY.format("Kinesis",

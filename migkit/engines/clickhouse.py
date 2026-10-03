@@ -1295,13 +1295,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         def run(choice, t):
             if choice.path == self.PULL:
                 return self._pull_table(db, t, reach, log)
-            if not ck:
-                from ..cli import _Checkpoint
-                ck.append(_Checkpoint(self.hop.report_dir(db)
-                                      / "move-rows.json"))
-                ck[0].clear()
-                ck[0].discard()
-            return self.move_table(db, "", t, self.COPIER_CHUNK, ck[0], log)
+            return self.copy_by_copier(db, t, log, ck)
         for t in pulled + [t for t, _ in copied]:
             self._attempt(t, self._ways(),
                           lambda choice, t=t: run(choice, t), facts[t],

@@ -272,6 +272,104 @@ class GaussEngine(ProvedDigest, PgWireEngine):
             conn.close()
         return f"statistics gathered on {len(tables)} tables (ANALYZE)"
 
+    # ---- a table by the servers' own COPY ------------------------------------
+
+    def _copy_unfit(self, db, table):
+        """Why the servers' own COPY cannot carry the table, or None."""
+        from . import same_engine
+        if not same_engine(self):
+            return "the target is another engine"
+        if table not in self.neutral_tables("dst", db):
+            return "the target has no such table yet"
+        theirs = [n for n, _ in self.neutral_columns("dst", db, table)]
+        ours = [n for n, _ in self.neutral_columns("src", db, table)]
+        if sorted(theirs) != sorted(ours):
+            return "the two tables' columns are not the same"
+        return None
+
+    def _streamed(self, db, table, log):
+        """The table's rows carried by the servers' own COPY in its binary
+        form: the source's COPY TO read straight into the target's COPY
+        FROM, the target's rows emptied first - no value parsed or written
+        by migkit. The rows the target took."""
+        import os
+        import threading
+        cols = ", ".join(self._q(n) for n, _ in self.neutral_columns(
+            "src", db, table))
+        self.neutral_empty("dst", db, table)
+        src, dst = self._connect("src", db), self._connect("dst", db)
+        r, w = os.pipe()
+        failed = []
+
+        def read_out():
+            try:
+                with os.fdopen(w, "wb") as out:
+                    src.cursor().copy_expert(
+                        f"copy {self._qualified('src', db, table)} ({cols})"
+                        " to stdout with (format binary)", out)
+            except BaseException as e:  # noqa: BLE001 - raised below
+                failed.append(e)
+        reader = threading.Thread(target=read_out, daemon=True)
+        reader.start()
+        try:
+            with os.fdopen(r, "rb") as given:
+                cur = dst.cursor()
+                cur.copy_expert(f"copy {self._qualified('dst', db, table)}"
+                                f" ({cols}) from stdin with (format binary)",
+                                given)
+            reader.join()
+            if failed:
+                raise failed[0]
+            dst.commit()
+        finally:
+            src.close()
+            dst.close()
+        if log:
+            log(f"{table}: {cur.rowcount:,} rows carried by the servers'"
+                " own COPY")
+        return cur.rowcount
+
+    def _table_ways(self):
+        """How a table goes (`tableway.each`): the servers' own COPY, the
+        source's read into the target's, where the two tables are one
+        shape; by the table copier always."""
+        from ..decide import Need, Rung
+        return (
+            Rung("copy", "the servers' own COPY, the source's read into the"
+                         " target's",
+                 needs=(Need("two tables of one shape",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"]),),
+                 because="every value in the servers' own binary form, no"
+                         " value parsed by migkit"),
+            Rung("copier", "the table copier, by key ranges",
+                 because="every row read and written as the neutral"
+                         " contract reads it"),
+        )
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table carried by the servers' own COPY where the target's
+        table is the source's shape - made first by the source's own
+        definition where it lacks it - else by the table copier. The
+        check that follows compares them."""
+        steps = [f"{t}: carried by the servers' own COPY, or copied by key"
+                 " ranges" for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts
+        self._as_pair().create_missing(db, log)
+        held = []
+
+        def run(way, t):
+            if way == "copy":
+                return self._streamed(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(unfit=lambda t=t: self._copy_unfit(
+                          db, t)), run, log)
+        return steps
+
     # ---- the target's state before a repair ----------------------------------
 
     def _sequence_values(self, side, db):

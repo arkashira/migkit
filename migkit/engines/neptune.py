@@ -725,6 +725,181 @@ class NeptuneEngine(NeutralCopier, Engine):
                               "a Gremlin or SPARQL server keeps no statistics"
                               " or stream of Neptune's to check")]
 
+    # ---- the bulk loader ---------------------------------------------------
+    #
+    # A table's elements written as the loader's own file - the property
+    # graph's CSV, the RDF store's N-Quads - into the S3 prefix the hop
+    # names, and loaded by the target cluster itself, reading it as the
+    # role the target names. A value of a kind the loader's CSV has no
+    # type for (a decimal, a UUID, bytes), a key holding values of two
+    # kinds, or an edge's key of many values stops the file before
+    # anything is loaded: the copier takes the table.
+
+    #: the loader's type for each kind a value is kept as
+    LOADER_TYPES = {"boolean": "Bool", "integer": "Long", "double": "Double",
+                    "string": "String", "date": "Date"}
+    #: how long a load is waited for
+    LOAD_WAIT = 6 * 3600
+
+    def _load_unfit(self, db, table):
+        """Why the target's bulk loader cannot carry the table, or None."""
+        if not self._neptune("dst"):
+            return "the target is no Neptune cluster: none other loads files"
+        if not str((self.hop.options or {}).get("export_bucket")
+                   or "").startswith("s3://"):
+            return ("the hop names no S3 prefix the loader reads from"
+                    " (export_bucket: s3://bucket/prefix)")
+        if not self._ep("dst").options.get("iam_role"):
+            return ("the target names no role the cluster reads S3 as"
+                    " (iam_role)")
+        return None
+
+    @staticmethod
+    def _cell(text):
+        """One field of the loader's CSV, quoted where it must be."""
+        text = str(text)
+        if any(c in text for c in ',"\n\r'):
+            text = '"' + text.replace('"', '""') + '"'
+        return text
+
+    @staticmethod
+    def _one_of_many(text):
+        """One value of a set, as a field of many holds it: its `;` and
+        its backslash escaped."""
+        return str(text).replace("\\", "\\\\").replace(";", "\\;")
+
+    def _loader_text(self, db, table):
+        """(the loader's format, the file's text, the rows in it) of a
+        table's elements as the source holds them."""
+        from .. import decide
+        rows = list(self._rows("src", db, table))
+        if table == "quads":
+            return "nquads", "".join(
+                f"{s} {p} {o}{' ' + g if g else ''} .\n"
+                for s, p, o, g in rows), len(rows)
+        kinds = {}
+        for r in rows:
+            for k, vals in r[-1].items():
+                for kind, _ in vals:
+                    if kind not in self.LOADER_TYPES:
+                        raise decide.Blocked(
+                            f"{table}: {k} holds a {kind}, which the loader's"
+                            " file has no type for")
+                    if kinds.setdefault(k, kind) != kind:
+                        raise decide.Blocked(
+                            f"{table}: {k} holds values of two kinds, which"
+                            " one column of the loader's file cannot")
+                if table == "edges" and len(vals) > 1:
+                    raise decide.Blocked(f"{table}: an edge's {k} holds many"
+                                         " values, which an edge cannot")
+        keys = sorted(kinds)
+        lead = ["~id", "~label"] if table == "vertices" else [
+            "~id", "~label", "~from", "~to"]
+        many = table == "vertices"
+        head = lead + [f"{k}:{self.LOADER_TYPES[kinds[k]]}"
+                       + ("[]" if many else "") for k in keys]
+        lines = [",".join(self._cell(h) for h in head)]
+        for r in rows:
+            props = r[-1]
+            cells = [self._cell(v) for v in r[:-1]]
+            for k in keys:
+                vals = [text + ("Z" if kind == "date" else "")
+                        for kind, text in props.get(k) or ()]
+                vals = ["true" if v == "1" else "false" if v == "0" else v
+                        for v in vals] if kinds[k] == "boolean" else vals
+                cells.append(self._cell(";".join(
+                    self._one_of_many(v) for v in vals)) if many
+                    else self._cell(vals[0]) if vals else "")
+            lines.append(",".join(cells))
+        return "csv", "\n".join(lines) + "\n", len(rows)
+
+    def _loaded(self, db, table, log):
+        """The table's elements loaded by the target cluster from the file
+        written for them; the rows the file held."""
+        import boto3
+
+        from .. import decide
+        fmt, text, count = self._loader_text(db, table)
+        bucket, _, prefix = str(self.hop.options["export_bucket"])[5:] \
+            .partition("/")
+        key = (f"{prefix.rstrip('/') + '/' if prefix else ''}migkit-"
+               f"{self.hop.name}-{table}-{time.strftime('%Y%m%d%H%M%S')}."
+               f"{'nq' if fmt == 'nquads' else 'csv'}")
+        try:
+            boto3.client("s3", region_name=self._region("dst")).put_object(
+                Bucket=bucket, Key=key, Body=text.encode())
+        except Exception as e:  # noqa: BLE001 - nothing loaded: said
+            raise decide.Blocked(f"{table}: the loader's file could not be"
+                                 f" written: {str(e).splitlines()[0]}")
+        client = self._data("dst")
+        load = client.start_loader_job(
+            source=f"s3://{bucket}/{key}", format=fmt,
+            s3BucketRegion=self._region("dst"),
+            iamRoleArn=str(self._ep("dst").options["iam_role"]),
+            mode="NEW", failOnError=True, parallelism="HIGH",
+            updateSingleCardinalityProperties=True,
+            **({"userProvidedEdgeIds": True, "edgeOnlyLoad": True}
+               if table == "edges" else {}))["payload"]["loadId"]
+        deadline = time.time() + self.LOAD_WAIT
+        while True:
+            got = client.get_loader_job_status(loadId=load)["payload"][
+                "overallStatus"]
+            status = str(got.get("status") or "")
+            if status == "LOAD_COMPLETED":
+                break
+            if status not in ("LOAD_NOT_STARTED", "LOAD_IN_PROGRESS",
+                              "LOAD_IN_QUEUE") or time.time() > deadline:
+                raise SystemExit(f"{table}: the target's load {load} ended"
+                                 f" {status}: {got.get('totalRecords')}"
+                                 f" records, {got.get('parsingErrors')}"
+                                 " that could not be read")
+            time.sleep(5)
+        if log:
+            log(f"{table}: {count:,} loaded by the target's bulk loader")
+        return count
+
+    def _table_ways(self):
+        """How a table goes (`tableway.each`): the target's bulk loader
+        where the target is Neptune and the hop gives it a prefix and a
+        role; by the table copier always."""
+        from ..decide import Need, Rung
+        return (
+            Rung("loader", "the target's bulk loader, from a file written"
+                           " for it",
+                 needs=(Need("a target that loads files",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"]),),
+                 because="the elements written by the cluster itself, many"
+                         " at once"),
+            Rung("copier", "the table copier",
+                 because="every element read and written by migkit"),
+        )
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table loaded by the target's own bulk loader from a file of
+        its elements, the target's emptied first, where it can be; by the
+        table copier otherwise. Vertices go before the edges between
+        them. The check that follows compares them."""
+        steps = [f"{t}: loaded by the target's bulk loader, or copied"
+                 for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts
+        order = sorted(tables, key=lambda t: ("vertices", "edges",
+                                              "quads").index(t))
+        held = []
+
+        def run(way, t):
+            if way == "loader":
+                self.neutral_empty("dst", db, t)
+                return self._loaded(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+        tableway.each(self, db, order, self._table_ways(),
+                      lambda t: Facts(unfit=lambda t=t: self._load_unfit(
+                          db, t)), run, log)
+        return steps
+
     def snapshot_state(self, db, state_dir, kind="all"):
         """What the target held before a repair: how many vertices and
         edges, or quads, it held - the elements a repair writes are kept by
@@ -1002,11 +1177,10 @@ def _register():
          ("statistics", "get_propertygraph_statistics"):
              "get_propertygraph_statistics",
          ("statistics", "get_sparql_statistics"):
-             "get_sparql_statistics"}), options={
-        ("loader", "start_loader_job"): (
-            unused, "the bulk loader reads files from S3 the cluster's role"
-                    " can reach, which a copy from another server has none"
-                    " of"),
+             "get_sparql_statistics",
+         ("loader", "start_loader_job"): "start_loader_job",
+         ("loader", "get_loader_job_status"): "get_loader_job_status"}),
+        options={
         ("query", "execute_gremlin_query"): (
             unused, "the Gremlin driver reads and writes by traversal over"
                     " one connection, where this sends text a request"),

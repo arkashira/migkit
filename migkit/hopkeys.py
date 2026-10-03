@@ -209,9 +209,11 @@ HOP_OPTIONS = {
                         "str"),
     "exclude_schema": Key("schemas left out of the schema dump", "str",
                           ("postgres",)),
-    "export_bucket": Key("s3://bucket/prefix the source's own export of a"
-                         " table is written under, for a copy that reads"
-                         " the table off it", "str", ("dynamodb",)),
+    "export_bucket": Key("s3://bucket/prefix (gs:// for Firestore) the"
+                         " source's own export of a table, or the file the"
+                         " target's own loader reads, is written under",
+                         "str", ("dynamodb", "firestore", "datastore",
+                                 "neptune", "timestream")),
     "fence_timeout": Key("seconds a fenced re-check waits", "int"),
     "fk_scan_seconds": Key("the budget of the orphaned-row scan", "int",
                            ("postgres",)),
@@ -632,8 +634,9 @@ ENDPOINT_OPTIONS = {
                           ("bigquery",)),
     "stage": Key("an S3 prefix the cluster reads staged files from", "str",
                  ("redshift",)),
-    "iam_role": Key("the role the cluster reads the stage as", "str",
-                    ("redshift",)),
+    "iam_role": Key("the role the cluster reads the stage, or the files"
+                    " its bulk loader loads, as", "str",
+                    ("redshift", "neptune")),
     "stage_region": Key("the stage bucket's region", "str", ("redshift",)),
     "stage_endpoint_url": Key("the stage's S3-compatible endpoint", "str",
                               ("redshift",)),

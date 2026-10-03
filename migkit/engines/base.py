@@ -6548,3 +6548,23 @@ class NeutralCopier:
 
     def moved_nothing(self, db):
         return self._as_pair().moved_nothing(db)
+
+    #: the rows a range of the copier reads at once where a native ladder
+    #: hands it a table
+    COPIER_CHUNK = 50_000
+
+    def copy_by_copier(self, db, table, log, held):
+        """One table by the one copier every pair shares, resumable by its
+        key: the last rung of an engine's own ladder (`tableway.each`),
+        which no missing program or service refusal stops. `held` keeps
+        the move's one checkpoint across the ladder's tables, begun
+        afresh."""
+        if not held:
+            from ..cli import _Checkpoint
+            held.append(_Checkpoint(self.hop.report_dir(db)
+                                    / "move-rows.json"))
+            held[0].clear()
+            held[0].discard()
+        from ..util import split_table
+        sch, tbl = split_table(self.CANON_ENGINE or self.hop.engine, table)
+        return self.move_table(db, sch, tbl, self.COPIER_CHUNK, held[0], log)

@@ -514,6 +514,111 @@ class BigtableEngine(NeutralCopier, Engine):
                     " longer than the copy takes"))
         return out
 
+    # ---- a table by the service's own backup and restore ---------------------
+
+    #: how long the backup a table is restored from is kept, and how long
+    #: its making, copying and restoring are each waited for
+    COPY_BACKUP_HOURS = 24
+    BACKUP_WAIT = 6 * 3600
+
+    def _restore_unfit(self, db, table):
+        """Why the target's table cannot be the source's restored from a
+        backup of it, or None."""
+        from . import same_engine
+        if not same_engine(self):
+            return "the target is another engine"
+        if any(self._ep(s).options.get("emulator") for s in ("src", "dst")):
+            return "the emulator keeps no backups"
+        if self._described("src", db, table) is not None:
+            return ("migkit made the table from another engine's rows, and"
+                    " describes it here")
+        if self._table("dst", db, table).exists():
+            return ("the target's table is there already, and a backup is"
+                    " restored only into a new one")
+        return None
+
+    def _first_cluster(self, side, db):
+        clusters, _ = self._instance(side, db).list_clusters()
+        return sorted(c.cluster_id for c in clusters)[0]
+
+    def _restored(self, db, table, log):
+        """One table backed up as it stands, the backup copied to the
+        target's project where it is another, and restored there as the
+        target's table - every cell version and family as they are. A
+        failure before the restore begins is `Blocked`: nothing was made,
+        and the next way is taken. The rows the table holds."""
+        from google.protobuf import timestamp_pb2
+
+        from .. import decide
+        from . import gcp
+        now = datetime.datetime.now(datetime.timezone.utc)
+        expire = now + datetime.timedelta(hours=self.COPY_BACKUP_HOURS)
+        name = re.sub(r"[^a-zA-Z0-9_.-]+", "-",
+                      f"migkit-copy-{table}-{now:%Y%m%d%H%M%S}")[-50:]
+        try:
+            cluster = self._first_cluster("src", db)
+            backup = self._table("src", db, table).backup(
+                name, cluster_id=cluster, expire_time=expire)
+            backup.create(cluster).result(self.BACKUP_WAIT)
+            source = backup.name
+            there = gcp.project(self._ep("dst"))
+            if there != gcp.project(self._ep("src")):
+                stamp = timestamp_pb2.Timestamp()
+                stamp.FromDatetime(expire)
+                parent = (f"projects/{there}/instances/{self._d('dst', db)}"
+                          f"/clusters/{self._first_cluster('dst', db)}")
+                self._client("dst").table_admin_client.copy_backup(
+                    parent=parent, backup_id=name, source_backup=source,
+                    expire_time=stamp).result(self.BACKUP_WAIT)
+                source = f"{parent}/backups/{name}"
+        except Exception as e:  # noqa: BLE001 - said, and the next way taken
+            raise decide.Blocked(f"{table} could not be backed up for the"
+                                 f" copy: {str(e).strip().splitlines()[0]}")
+        self._table("dst", db, table).restore(
+            table, backup_name=source).result(self.BACKUP_WAIT)
+        if log:
+            log(f"{table}: restored from a backup of the source taken at"
+                f" {now:%Y-%m-%d %H:%M:%S} UTC")
+        return None
+
+    def _table_ways(self):
+        """How a table goes (`tableway.each`): restored from the service's
+        own backup of it where the target has no such table yet, by the
+        table copier always."""
+        from ..decide import Need, Rung
+        return (
+            Rung("restore", "the source's backup of the table restored as"
+                            " the target's",
+                 needs=(Need("a table a backup restores",
+                             lambda f: f["unfit"] is None,
+                             lambda f: f["unfit"]),),
+                 because="every cell version and family as the service"
+                         " holds them, no row read by migkit"),
+            Rung("copier", "the table copier, by key ranges",
+                 because="every cell version read and written by migkit"),
+        )
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table restored from a backup of it the service takes, where
+        the target has no such table yet; else by the table copier. The
+        check that follows compares them."""
+        steps = [f"{t}: restored from a backup of the source, or copied by"
+                 " key ranges" for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts
+        held = []
+
+        def run(way, t):
+            if way == "restore":
+                return self._restored(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+        tableway.each(self, db, tables, self._table_ways(),
+                      lambda t: Facts(unfit=lambda t=t: self._restore_unfit(
+                          db, t)), run, log)
+        return steps
+
     #: how long a backup taken before a repair is kept
     BACKUP_DAYS = 7
 
@@ -915,7 +1020,12 @@ def _register():
          ("change stream", "generate_initial_change_stream_partitions"):
              "generate_initial_change_stream_partitions",
          ("change stream", "continuation_tokens"): "continuation_tokens",
-         ("change stream", "heartbeat_duration"): "heartbeat_duration"}),
+         ("change stream", "heartbeat_duration"): "heartbeat_duration",
+         ("Table", "backup"): "backup",
+         ("Table", "restore"): "restore",
+         ("Table", "get_cluster_states"): "get_cluster_states",
+         ("Instance", "list_clusters"): "list_clusters",
+         ("TableAdminClient", "copy_backup"): "copy_backup"}),
         options={
         ("Table", "mutations_batcher"): (
             unused, "its failures come back after a flush, apart from the"

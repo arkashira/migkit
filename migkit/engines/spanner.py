@@ -1033,6 +1033,119 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         (state_dir / "dst-spanner.json").write_text(
             json.dumps(out, indent=2, sort_keys=True))
 
+    # ---- the whole database by the service's own backup ----------------------
+
+    #: how long the backups a copy is restored from are kept: past the
+    #: restore, they hold nothing the target needs
+    COPY_BACKUP_HOURS = 24
+
+    def _restore_unfit(self, db, tables):
+        """Why the target cannot be the source's database restored whole
+        from a backup, or None."""
+        from . import same_engine
+        if not same_engine(self):
+            return "the target is another engine"
+        if any(self._ep(s).options.get("emulator") for s in ("src", "dst")):
+            return "the emulator keeps no backups"
+        if self._database("dst", db).exists():
+            return ("the target database is there already, and a backup is"
+                    " restored only into a new one")
+        every = set(self._tables_named("src", db))
+        if set(tables) != every:
+            return ("the hop takes part of the database, and a backup is"
+                    " restored whole")
+        return None
+
+    def _restored(self, db, log):
+        """The source's database backed up as it stands now - at one
+        version time, every table at the same moment - the backup copied
+        to the target's instance where it is another, and restored there
+        as the target database; the change streams the source defined left
+        out, as the copy of its definition leaves them. The version time.
+        What fails before the restore begins is `Blocked`: nothing was
+        made on the target, and the table copier is taken."""
+        from .. import decide
+        now = datetime.datetime.now(datetime.timezone.utc)
+        expire = now + datetime.timedelta(hours=self.COPY_BACKUP_HOURS)
+        name = re.sub(r"[^a-z0-9-]+", "-", f"migkit-copy-{self.hop.name}"
+                      f"-{now:%Y%m%d%H%M%S}".lower()).strip("-")[-60:]
+        name = name if name[:1].isalpha() else "m" + name[1:]
+        src, dst = self._instance("src"), self._instance("dst")
+        try:
+            backup = src.backup(name, database=self._database("src", db),
+                                expire_time=expire, version_time=now)
+            backup.create().result(self.BACKUP_WAIT)
+            if src.name != dst.name:
+                copied = dst.copy_backup(name, source_backup=backup.name,
+                                         expire_time=expire)
+                copied.create().result(self.BACKUP_WAIT)
+                backup = copied
+        except Exception as e:  # noqa: BLE001 - said, and the copier taken
+            raise decide.Blocked("the source could not be backed up for the"
+                                 f" copy: {str(e).strip().splitlines()[0]}")
+        if log:
+            log(f"{db}: backed up at {now:%Y-%m-%d %H:%M:%S} UTC, restored"
+                " as the target database")
+        target = self._database("dst", db)
+        target.restore(backup).result(self.BACKUP_WAIT)
+        self.__dict__.pop("_dialects", None)
+        streams = [r[0] for r in self._execute(
+            "dst", db, "select change_stream_name from"
+                       " information_schema.change_streams")]
+        if streams:
+            target.update_ddl([f"drop change stream"
+                               f" {self._qd('dst', db, s)}"
+                               for s in streams]).result(600)
+        self.forget_shapes()
+        return now
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """The source's database restored whole as the target from a backup
+        of it at one moment, where the target is not there yet and the hop
+        takes every table - no row read by migkit; else each table by the
+        table copier. Either way the check that follows compares them."""
+        from .. import decide
+        unfit = self._restore_unfit(db, tables)
+        steps = ([f"{db}: restored whole from a backup of the source taken"
+                  " now"] if unfit is None else
+                 [f"{t}: copied by key ranges ({unfit})" for t in tables])
+        if not go:
+            return steps
+        held = []
+
+        def by_tables():
+            from .. import tableway
+            tableway.each(self, db, tables, self._table_ways(),
+                          lambda t: decide.Facts(),
+                          lambda way, t: self.copy_by_copier(db, t, log,
+                                                             held), log)
+            return None
+
+        def run(choice):
+            if choice.rung.name == "restore":
+                return self._restored(db, log)
+            return by_tables()
+        self._attempt(f"{db}: the database's copy", (
+            decide.Rung("restore", "the source's backup restored as the"
+                                   " target",
+                        needs=(decide.Need("a database a backup restores",
+                                           lambda f: f["unfit"] is None,
+                                           lambda f: f["unfit"]),),
+                        because="every table as of one moment, no row read"
+                                " by migkit"),
+            decide.Rung("tables", "the tables by the table copier")),
+            run, decide.Facts(unfit=unfit), log=log,
+            switch=decide.only_blocked)
+        return steps
+
+    def _table_ways(self):
+        """How a table goes where the database is not restored whole
+        (`tableway.each`): the table copier, by its key ranges."""
+        from ..decide import Rung
+        return (Rung("copier", "the table copier, by key ranges",
+                     because="every row read and written as the neutral"
+                             " contract reads it"),)
+
     def restore_sequences(self, db, state_dir):
         """The statements that put each sequence's counter back where the
         snapshot found it."""
@@ -1626,7 +1739,10 @@ def _register():
          ("Database", "create"): "create",
          ("KeySet", "keys"): "KeySet",
          ("change stream", "heartbeat_milliseconds"): "HEARTBEAT_MS",
-         ("change stream", "child_partitions"): "child_partitions"}),
+         ("change stream", "child_partitions"): "child_partitions",
+         ("Instance", "backup"): "backup",
+         ("Instance", "copy_backup"): "copy_backup",
+         ("Database", "restore"): "restore"}),
         options={
         ("Batch", "insert"): (
             unused, "insert refuses a row that is there, and a batch written"
