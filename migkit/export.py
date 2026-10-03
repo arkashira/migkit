@@ -312,7 +312,9 @@ def _route(hop):
     return {"source": side(hop.source, src_e),
             "target": side(hop.target, dst_e),
             "databases": [str(d) for d in hop.databases or []],
-            "left_alone": [str(x) for x in hop.exclude or []]}
+            "left_alone": [str(x) for x in hop.exclude or []],
+            "taken_only": [str(x) for x in getattr(hop, "include", None)
+                           or []]}
 
 
 def _assessment(root):

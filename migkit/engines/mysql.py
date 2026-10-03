@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .. import fencing
+from ..config import scoped
 from ..decide import Need, Rung
 from ..tableway import DIRECT, Way
 from ..util import keepalive as _keepalive, run, which, with_retry
@@ -7693,7 +7694,7 @@ class MySQLEngine(Engine):
             if tdb != d:
                 rewrite.append((d, tdb))
             do.append(f"{tdb}.%")
-            if not getattr(self.hop, "exclude", None):
+            if not scoped(self.hop):
                 continue
             # the tables it excludes as they are named now; a table created
             # later under an excluded pattern is not in the list

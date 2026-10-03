@@ -2792,6 +2792,51 @@ class Engine:
     #: every time and teach people to ignore the section.
     PREFLIGHT = ()
 
+    def _scope_items(self):
+        """What the hop's `include` takes, read before the move: an entry
+        that takes no table, a database it takes nothing of. Either is a
+        table the operator believes is moved and checked that nothing
+        looks at, and the check, comparing only what is taken, would
+        call the rest the same. Nothing is said for a hop without one."""
+        hop = self.hop
+        if not getattr(hop, "include", None):
+            return []
+        items, taken, why = [], [], None
+        try:
+            for db in self.databases():
+                got = [(db, t) for t in self.neutral_tables("src", db)]
+                taken += got
+                if not got:
+                    items.append({
+                        "level": "warn", "scope": "before the move",
+                        "item": "scope", "detail":
+                            f"include takes no table of database {db} -"
+                            " it is opened and nothing in it is moved or"
+                            " checked  [fix] name its tables in include,"
+                            " or leave it out of databases"})
+        except Exception as e:
+            why = str(e).splitlines()[-1][:90] if str(e) else \
+                type(e).__name__
+        if why is not None:
+            return [{"level": "warn", "scope": "before the move",
+                     "item": "scope", "detail":
+                         "could not list the source's tables, so what"
+                         f" include takes is unknown: {why}"}]
+        for entry in hop.unused_include(taken):
+            items.append({
+                "level": "warn", "scope": "before the move",
+                "item": "scope", "detail":
+                    f"include names {entry!r}, which takes no table on the"
+                    " source - nothing under that name is moved or"
+                    " checked  [fix] correct the name or drop it"})
+        if not items:
+            items.append({
+                "level": "pass", "scope": "before the move",
+                "item": "scope", "detail":
+                    f"include takes {len(taken)} tables, every entry"
+                    " taking one"})
+        return items
+
     def _mapping_items(self):
         """What the hop's mapping would do, read before the move.
 
@@ -2822,7 +2867,9 @@ class Engine:
         ids, why = [], None
         try:
             for db in self.databases():
-                ids += list(self.neutral_tables("src", db))
+                # named from the database down, so a rule that names its
+                # database is matched, and one naming another is not
+                ids += [f"{db}.{t}" for t in self.neutral_tables("src", db)]
         except Exception as e:
             why = str(e).splitlines()[-1][:90]
         if why is not None:
@@ -2859,7 +2906,7 @@ class Engine:
         that could not run, and it says so rather than passing.
         """
         level_of = {"diff": "fail", "warn": "warn", "error": "warn"}
-        items = self._mapping_items()
+        items = self._mapping_items() + self._scope_items()
         try:
             dbs = self.databases()
         except Exception:
@@ -3860,7 +3907,8 @@ class Engine:
         if src is not None:
             pairs, _, _, _ = self.match_tables(
                 src.neutral_tables("src", db),
-                self.dst_engine.neutral_tables("dst", db), self._rename)
+                self.dst_engine.neutral_tables("dst", db),
+                self._renamer(db))
             match = [(s, d) for s, d in pairs if self._leaf(s) == table]
             if len(match) != 1:
                 return None

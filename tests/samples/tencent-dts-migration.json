@@ -1,0 +1,82 @@
+{
+ "Response": {
+  "JobId": "dts-example1",
+  "JobName": "orders-mysql-to-cloud",
+  "Status": "readyComplete",
+  "SrcInfo": {
+   "DatabaseType": "mysql",
+   "AccessType": "vpncloud",
+   "Supplier": "aws",
+   "Info": [
+    {
+     "Host": "10.0.0.21",
+     "Port": 3306,
+     "User": "dts_reader",
+     "Password": "",
+     "UniqVpnGwId": "vpngw-example",
+     "EncryptConn": "UnEncrypted"
+    }
+   ]
+  },
+  "DstInfo": {
+   "DatabaseType": "mysql",
+   "AccessType": "cdb",
+   "Info": [
+    {
+     "InstanceId": "cdb-example1",
+     "User": "root",
+     "Password": ""
+    }
+   ]
+  },
+  "MigrateOption": {
+   "MigrateType": "fullAndIncrement",
+   "IsMigrateAccount": false,
+   "IsDstReadOnly": false,
+   "DatabaseTable": {
+    "ObjectMode": "partial",
+    "Databases": [
+     {
+      "DbName": "billing",
+      "DBMode": "all"
+     },
+     {
+      "DbName": "logistics",
+      "NewDbName": "logistics_new",
+      "DBMode": "partial",
+      "TableMode": "partial",
+      "Tables": [
+       {
+        "TableName": "orders"
+       },
+       {
+        "TableName": "parcels",
+        "NewTableName": "parcel",
+        "TableEditMode": "rename",
+        "FilterCondition": "id > 10"
+       }
+      ]
+     }
+    ]
+   },
+   "Consistency": {
+    "Mode": "full",
+    "ObjectMode": "custom",
+    "Options": {
+     "Method": "sampleDataCheck",
+     "SampleRate": 10
+    },
+    "Objects": {
+     "ObjectMode": "partial",
+     "Databases": [
+      {
+       "DbName": "billing",
+       "DBMode": "all"
+      }
+     ]
+    }
+   }
+  },
+  "RequestId": "00000000-0000-0000-0000-000000000000"
+ }
+}

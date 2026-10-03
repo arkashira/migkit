@@ -140,6 +140,26 @@ def _objects_section(hop, dbs):
             f'</thead><tbody>{"".join(rows)}</tbody></table></div>')
 
 
+def _scope_section(hop):
+    """What the hop takes, under the verdict it qualifies: a `same` is
+    about these and nothing else (`verdict.hop_scope`). Nothing for a hop
+    that takes everything whole."""
+    from . import verdict
+    scope = verdict.hop_scope(hop)
+    if not scope:
+        return ""
+    words = {"include": "takes only", "exclude": "leaves out",
+             "row_filters": "rows filtered in",
+             "column_rules": "columns chosen in"}
+    rows = "".join(
+        f'<tr><td class="db">{words[k]}</td>'
+        f'<td>{html.escape(", ".join(v[:40]))}'
+        f'{" ..." if len(v) > 40 else ""}</td></tr>'
+        for k, v in scope.items())
+    return (f'<div class="card"><h2>scope (what the verdict covers)</h2>'
+            f'<table><tbody>{rows}</tbody></table></div>')
+
+
 #: a cell's worst answer, and what it is shown as
 _WORST = ("error", "diff", "warn", "skip", "ok")
 
@@ -228,6 +248,7 @@ def render(hop, results, generated=None, decided=None):
         if hop.target.configured() else "(not configured)"
 
     objects_html = _objects_section(hop, dbs)
+    scope_html = _scope_section(hop)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -238,6 +259,7 @@ def render(hop, results, generated=None, decided=None):
 <div class="sub">migkit check / {hop.engine} / {html.escape(hop.service or "no service")} / {generated}</div>
 <div class="route">{html.escape(src)} &rarr; {html.escape(dst)}</div></div>
 {banner}
+{scope_html}
 <div class="tiles">{"".join(tiles)}</div>
 <div class="card"><h2>status</h2>
 <table><thead><tr><th>db</th>

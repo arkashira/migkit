@@ -259,6 +259,9 @@ class Facts(dict):
         if hop.exclude:
             return (f"the hop excludes {', '.join(map(str, hop.exclude))},"
                     " and a copy of the pages carries every table")
+        if getattr(hop, "include", None):
+            return (f"the hop takes only {', '.join(map(str, hop.include))},"
+                    " and a copy of the pages carries every table")
         mapping = hop.mapping or {}
         if mapping.get("where"):
             return ("the hop filters rows, and a copy of the pages carries"

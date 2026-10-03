@@ -149,14 +149,26 @@ class HeteroEngine(Engine):
         """
         return str(identifier).split(".")[-1]
 
-    def _rename(self, identifier):
+    def _rename(self, identifier, db=None):
         """This source table's name on the target, from the hop's mapping.
 
         One place, so the pairing and the message explaining it cannot
-        disagree about which rename applied.
+        disagree about which rename applied. Asked with the database the
+        table is in, so a rule written `appdb.public.orders` - the only
+        way to say which of two databases' `orders` is renamed - is read
+        here as it is everywhere else; without it such a rule was passed
+        over, and the table compared against the name it no longer has.
+        Unmapped, the name comes back as it was given.
         """
         parts = [p for p in str(identifier).split(".") if p]
-        return self.hop.target_table(*parts)
+        if db in (None, ""):
+            return self.hop.target_table(*parts)
+        return self.hop.target_table_in(db, *parts)
+
+    def _renamer(self, db):
+        """`_rename` for the tables of one database, as `match_tables`
+        takes it."""
+        return lambda identifier: self._rename(identifier, db)
 
     @staticmethod
     def match_tables(src_ids, dst_ids, rename=None):
@@ -262,7 +274,7 @@ class HeteroEngine(Engine):
         src_ids = self.src_engine.neutral_tables("src", db)
         dst_ids = self.dst_engine.neutral_tables("dst", db)
         pairs, src_only, dst_only, _ = self.match_tables(src_ids, dst_ids,
-                                                         self._rename)
+                                                         self._renamer(db))
         if only is not None:
             # the tables a same-engine hop leaves to this comparison; the
             # others are its own comparers' to report
@@ -412,7 +424,7 @@ class HeteroEngine(Engine):
         src_ids = self.src_engine.neutral_tables("src", db)
         dst_ids = self.dst_engine.neutral_tables("dst", db)
         pairs, src_only, dst_only, ambiguous = self.match_tables(
-            src_ids, dst_ids, self._rename)
+            src_ids, dst_ids, self._renamer(db))
         if table:
             # one table asked about: the others, on either side, are not
             # this answer's to report
@@ -424,7 +436,7 @@ class HeteroEngine(Engine):
                          if self._leaf(t) == self._leaf(table)]
         rows = []
         for t in src_only:
-            want = self._rename(t)
+            want = self._rename(t, db)
             why = f"{t} is on the source and not on the target"
             if want and str(want) != str(t):
                 # the mapping is why it looks missing, and without saying so
@@ -810,14 +822,14 @@ class HeteroEngine(Engine):
         this pair would build it - with the columns and key to read them
         by, and the hop's row filter."""
         from .. import canon
-        leaf = self._leaf(self._rename(src_t))
+        leaf = self._leaf(self._rename(src_t, db))
         declared = {n: self.src_engine.canonical_type("src", db, t)
                     for n, t in self.src_engine.neutral_columns("src", db,
                                                                 src_t)}
         mapped, back = self._mapped_types(db, src_t, declared)
         there = ([] if self.dst_engine.target_missing(db)
                  else self.dst_engine.neutral_tables("dst", db))
-        pairs, _, _, _ = self.match_tables([src_t], there, self._rename)
+        pairs, _, _, _ = self.match_tables([src_t], there, self._renamer(db))
         dst_t = pairs[0][1] if pairs else None
         facts = self.dst_engine.column_facts("dst", db, dst_t)
         mine = self.src_engine.column_facts("src", db, src_t)
@@ -954,7 +966,7 @@ class HeteroEngine(Engine):
             return []
         there = ([] if self.dst_engine.target_missing(db)
                  else self.dst_engine.neutral_tables("dst", db))
-        pairs, _, _, _ = self.match_tables([src_t], there, self._rename)
+        pairs, _, _, _ = self.match_tables([src_t], there, self._renamer(db))
         facts = self.dst_engine.column_facts(
             "dst", db, pairs[0][1] if pairs else None)
         where = self._row_scope(db, src_t)[0]
@@ -1117,7 +1129,7 @@ class HeteroEngine(Engine):
                      else self.dst_engine.neutral_tables("dst", db))
             pairs, _, _, _ = self.match_tables(
                 self.src_engine.neutral_tables("src", db), there,
-                self._rename)
+                self._renamer(db))
             for src_t, dst_t in pairs:
                 mapped, _ = self._mapped_types(db, src_t, dict(
                     self.src_engine.neutral_columns("src", db, src_t)))
@@ -1260,7 +1272,7 @@ class HeteroEngine(Engine):
             return
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db), self._rename)
+            self.dst_engine.neutral_tables("dst", db), self._renamer(db))
         match = [(s, d) for s, d in pairs if self._leaf(s) == name]
         if not match:
             raise SystemExit(f"{name} is no longer on both sides, so the"
@@ -1520,11 +1532,11 @@ class HeteroEngine(Engine):
             self.refuse_unfit(db, [src_t])
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db), self._rename)
+            self.dst_engine.neutral_tables("dst", db), self._renamer(db))
         match = [d for s_, d in pairs if self._leaf(s_) == leaf]
         # the name it goes by on the target, through the hop's mapping: a
         # renamed table that is not there yet is made under its new name
-        want = self._leaf(self._rename(src_t))
+        want = self._leaf(self._rename(src_t, db))
         if match:
             dst_t = match[0]
         elif self.dst_engine.CREATES_ON_WRITE:
@@ -1915,7 +1927,7 @@ class HeteroEngine(Engine):
         from .. import claims
         if not claims.shared_ranges(self.hop):
             return False
-        dst_t = self._leaf(self._rename(src_t))
+        dst_t = self._leaf(self._rename(src_t, db))
         try:
             src_cols = self._move_columns(src_t, dst_t, db)[0]
             src_where, _ = self._row_scope(db, src_t)
@@ -2329,11 +2341,11 @@ class HeteroEngine(Engine):
         there = ([] if self.dst_engine.target_missing(db)
                  else self.dst_engine.neutral_tables("dst", db))
         _, src_only, _, _ = self.match_tables(
-            self.src_engine.neutral_tables("src", db), there, self._rename)
+            self.src_engine.neutral_tables("src", db), there, self._renamer(db))
         for src_t in src_only:
             if not self.hop.excluded(db, *str(src_t).split(".")):
                 self._create_target(db, src_t,
-                                    self._leaf(self._rename(src_t)), log)
+                                    self._leaf(self._rename(src_t, db)), log)
 
     def finish_created(self, db, log=None):
         """The source's indexes on the tables this pair built, once their
@@ -2675,7 +2687,7 @@ class HeteroEngine(Engine):
     def load_window(self, db, log=None, tables=None):
         """The target's own, over the names the tables have there."""
         if tables is not None:
-            tables = {self._leaf(self._rename(t)) for t in tables}
+            tables = {self._leaf(self._rename(t, db)) for t in tables}
         return self.dst_engine.load_window(db, log, tables)
 
     def planned_checks(self):
@@ -2700,7 +2712,7 @@ class HeteroEngine(Engine):
         them - through the hop's renames."""
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db), self._rename)
+            self.dst_engine.neutral_tables("dst", db), self._renamer(db))
         return pairs
 
     def _second_views(self, db):
@@ -2825,7 +2837,7 @@ class HeteroEngine(Engine):
         """Walk the table again, both sides, and say what still differs."""
         pairs, _, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db), self._rename)
+            self.dst_engine.neutral_tables("dst", db), self._renamer(db))
         match = [(s_, d_) for s_, d_ in pairs if self._leaf(s_) == table]
         if not match:
             return None
@@ -2870,7 +2882,7 @@ class HeteroEngine(Engine):
                 tuple(sorted(key.items()))] = key
         pairs, _, _, _ = self.match_tables(
             src.neutral_tables("src", db),
-            self.dst_engine.neutral_tables("dst", db), self._rename)
+            self.dst_engine.neutral_tables("dst", db), self._renamer(db))
         by_leaf = {self._leaf(s_): (s_, d_) for s_, d_ in pairs}
         res, clean = [], True
         for table, keyed in sorted(touched.items()):
@@ -3201,7 +3213,7 @@ class HeteroEngine(Engine):
             with_rows = [t for t in self.my._tables("src", db)
                          if self.my._q("src", f"select 1 from `{db}`.`{t}`"
                                               " limit 1")]
-            landed = {t: "public." + self._leaf(self._rename(t))
+            landed = {t: "public." + self._leaf(self._rename(t, db))
                       for t in with_rows}
             present = self.pg.rows_present(db, list(landed.values()))
         except Exception:
@@ -3221,7 +3233,7 @@ class HeteroEngine(Engine):
                      else self.dst_engine.neutral_tables("dst", db))
             pairs, src_only, _, _ = self.match_tables(
                 self.src_engine.neutral_tables("src", db), there,
-                self._rename)
+                self._renamer(db))
             landed = dict(pairs)
             empty = []
             for src_t in list(landed) + list(src_only):
@@ -3260,7 +3272,7 @@ class HeteroEngine(Engine):
                 return set()
             pairs, _, _, _ = self.match_tables(
                 self.src_engine.neutral_tables("src", db),
-                self.dst_engine.neutral_tables("dst", db), self._rename)
+                self.dst_engine.neutral_tables("dst", db), self._renamer(db))
             landed = dict(pairs)
             held = set()
             for sch, tbl in tables:
@@ -3286,7 +3298,7 @@ class HeteroEngine(Engine):
                      else self.dst_engine.neutral_tables("dst", db))
             pairs, src_only, _, ambiguous = self.match_tables(
                 self.src_engine.neutral_tables("src", db), there,
-                self._rename)
+                self._renamer(db))
             if ambiguous:
                 # one name in two schemas has one place to land on the
                 # target; guessing which is how a copy overwrites the other
@@ -3487,10 +3499,10 @@ class HeteroEngine(Engine):
         there = ([] if self.dst_engine.target_missing(db)
                  else self.dst_engine.neutral_tables("dst", db))
         pairs, src_only, _, _ = self.match_tables(
-            self.src_engine.neutral_tables("src", db), there, self._rename)
+            self.src_engine.neutral_tables("src", db), there, self._renamer(db))
         out = {self._leaf(s_): d for s_, d in pairs}
         for s_ in src_only:
-            out[self._leaf(s_)] = self._leaf(self._rename(s_))
+            out[self._leaf(s_)] = self._leaf(self._rename(s_, db))
         return out
 
     def _in_scope(self, db, changes):
@@ -3619,7 +3631,7 @@ class HeteroEngine(Engine):
             accounts.grown(kept, changes)
         mapped = []
         for c in changes:
-            to = self._tail_target(targets, c["table"])
+            to = self._tail_target(targets, c["table"], db)
             if accounts is not None:
                 accounts.named(c["table"], to)
             mapped.append(dict(self._mapped_change(
@@ -3656,11 +3668,11 @@ class HeteroEngine(Engine):
                 return i + 1
         return None
 
-    def _tail_target(self, targets, table):
+    def _tail_target(self, targets, table, db=None):
         # a table made on the source after the tail began goes by its
         # mapped name, as the move would have sent it
         return (targets.get(self._leaf(table))
-                or self._leaf(self._rename(table)))
+                or self._leaf(self._rename(table, db)))
 
     def _shape_gate(self, db, token_path, position, skip=(), stop=True):
         """The source's column shape the tail may apply under, or None
@@ -3740,7 +3752,7 @@ class HeteroEngine(Engine):
         for t, cols in sorted(after.items()):
             if dict(cols) == dict(before.get(t, [])):
                 continue
-            dst_t = self._tail_target(targets, t)
+            dst_t = self._tail_target(targets, t, db)
             try:
                 have = {str(n).lower() for n, _ in
                         self.dst_engine.neutral_columns("dst", db, dst_t)}
@@ -4374,7 +4386,7 @@ class HeteroEngine(Engine):
         kind, src_t = act
         if kind != "truncate":
             return
-        dst_t = self._tail_target(targets, src_t)
+        dst_t = self._tail_target(targets, src_t, db)
         _, dst_where = self._row_scope(db, src_t)
         gone = self.dst_engine.neutral_empty(
             "dst", db, dst_t, **({"where": dst_where} if dst_where else {}))
@@ -4414,7 +4426,7 @@ class HeteroEngine(Engine):
                 # this used to report
                 b = sum(int(self.pg._psql(
                             "dst", db, f'select count(*) from'
-                                       f' "{self._leaf(self._rename(t))}"'))
+                                       f' "{self._leaf(self._rename(t, db))}"'))
                         for t in tables)
             except (RuntimeError, ValueError) as e:
                 return {"db": db, "ts": time.time(), "src_rows": a,

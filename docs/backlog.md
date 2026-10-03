@@ -2818,6 +2818,63 @@ store). What was still nowhere:
     same outcomes the console shows, the approvals and the source-change
     offer answered there.
 
+## P0-SCOPE. The check takes exactly what the move took (owner, 2026-10-03)
+
+"A DTS job can be told to leave the log tables behind, so when we verify
+or compare we must be able to choose where to verify - deep and very
+detailed." A hop said only what it left out (`exclude`); what another
+tool's job *took* was turned into an `exclude` against the source's
+tables once, when `init` connected, so a table made later was in scope
+though the job never took it.
+
+1. **`include`** (done 2026-10-03): the databases, schemas and tables a
+   hop takes - the same names and shell patterns as `exclude`, matched
+   the same right-anchored way, `exclude` winning where both name one.
+   Read inside `Hop.excluded`, the one scope answer every reader asks
+   (the copy, the check, the repair, the tail, the drop list of every
+   bulk mover), so none can verify a table the move left out or leave
+   out one it moved. A database is skipped only where every entry names
+   another one first; where a name may hold a dot of its own (a
+   collection, a topic) every database is opened. Every whole copy (the
+   pages, a backup restore, a replica, the keyspace copy) is refused
+   for a hop that takes only some (`config.scoped`). Validated: an entry
+   that is not a name, one `exclude` takes back whole, a mapping rule
+   naming a table `include` does not take. Before the move: an entry that
+   takes no table, a database it takes nothing of. In the evidence:
+   `verdict.json` and the report say the scope a `same` covers
+   (`verdict.hop_scope`); a `same` within the hop's own scope is a
+   `same` (a run narrowed on the command line stays `incomplete`).
+   Columns and rows go deeper through `mapping.columns` and
+   `mapping.where`, which the compare paths already read.
+2. **A DTS job read as a hop** (done 2026-10-03, `imports`): a Tencent
+   Cloud migration job's detail, a sync job, or a data check's
+   objects; an Alibaba Cloud job's detail or request. Goal `verify`; the
+   job's databases and new names, schemas, tables and new names, row
+   filters, columns and new column names, views; and said beside it,
+   every setting of the job that makes a correct move look different -
+   deletes or updates it does not carry, conflicts it ignores, tables it
+   wrote into that were there, changes-only starts, a target left
+   writable, accounts not moved, its own check off, sampled, counting
+   only or covering less than it moves, an unencrypted leg. AWS DMS
+   tasks' plain includes are now the hop's `include` too.
+3. **Renames read with their database** (done 2026-10-03, found on the
+   way): a rule `appdb.public.orders: orders_v2` - the only way to say
+   which of two databases' `orders` is renamed - was passed over by the
+   pair engine, the PostgreSQL schema check and the parallel copier,
+   which asked without the database; the table was compared against the
+   name it no longer has. `Hop.target_table_in(db, ...)`, one place.
+4. **Still open:**
+   a. the Alibaba job's top level for a source with schemas (PostgreSQL,
+      SQL Server) is read as its schemas inside the endpoint's database,
+      from the service's documentation and its errors, not from a real
+      job's detail - confirm against one;
+   b. the change-capture connector and LOAD-file imports still turn a
+      regex or search include into a one-time `exclude`;
+   c. a Huawei DRS / GCP DMS / Azure DMS job read the same way;
+   d. `include` read by a live tail's filter (Debezium `table.include.list`
+      instead of a resolved exclude list) so a table made later under a
+      taken pattern joins the stream without a restart.
+
 ## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
 
 "Not just AWS to Tencent - any <-> any from the start: AWS, Tencent,

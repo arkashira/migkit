@@ -586,6 +586,21 @@ def fingerprint(records):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def hop_scope(hop):
+    """What the hop itself takes, where it takes less than everything: the
+    `include` and `exclude` it was checked within, and the tables whose
+    rows or columns it narrows. Unlike `coverage`, not a narrowed run -
+    the hop's own definition, a `same` within it is a `same` - and said
+    beside the verdict so whoever reads `same` reads what it covers.
+    Empty for a hop that takes everything whole."""
+    mapping = getattr(hop, "mapping", None) or {}
+    out = {k: [str(x) for x in getattr(hop, k, None) or []]
+           for k in ("include", "exclude")}
+    out["row_filters"] = sorted((mapping.get("where") or {}))
+    out["column_rules"] = sorted((mapping.get("columns") or {}))
+    return {k: v for k, v in out.items() if v}
+
+
 def summarize(hop, records, engine=None, load=None, coverage=None):
     """Build the normalized envelope for one check run.
 
@@ -624,8 +639,10 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     # digests the check took and could not keep: the answers stand, and
     # the evidence lists as many tables fewer - said here, not swallowed
     unwritten = digests.unwritten(session.current())
+    scope = hop_scope(hop)
     return {
         **({"coverage": coverage} if coverage else {}),
+        **({"scope": scope} if scope else {}),
         **({"stale": stale} if stale else {}),
         "format_version": FORMAT_VERSION,
         "tool": "migkit",

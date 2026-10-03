@@ -1,6 +1,7 @@
 import time
 
 from .. import pieces
+from ..config import scoped
 from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result
 
@@ -266,12 +267,12 @@ class RedisEngine(Engine):
         excludes, matched as `db.key` and as `key`. This engine used to
         ignore `exclude`, so a target-owned key pattern was compared, and
         repaired away, like any other."""
-        if not self.hop.exclude:
+        if not scoped(self.hop):
             return keys
         return [k for k in keys if not self.hop.excluded(str(db), k)]
 
     def _count(self, side, db):
-        if not self.hop.exclude:
+        if not scoped(self.hop):
             return self._dbsize(side, db)
         # the server's own count includes the excluded keys, so the kept
         # ones are counted by walking them
@@ -322,7 +323,7 @@ class RedisEngine(Engine):
         """`_kept` over keys as the server holds them, which need not be
         text: matched through a decoding that cannot fail, returned as
         they were."""
-        if not self.hop.exclude:
+        if not scoped(self.hop):
             return keys
         text = {k.decode("utf-8", "surrogateescape"): k for k in keys}
         return [text[k] for k in self._kept(db, list(text))]
@@ -369,7 +370,7 @@ class RedisEngine(Engine):
         moved = from_keys = int(st.get("moved", 0))
         # the server's count includes what the hop leaves out; walking the
         # keyspace once more for a total would double the reading
-        total = None if self.hop.exclude else self._dbsize("src", db)
+        total = None if scoped(self.hop) else self._dbsize("src", db)
         began = time.monotonic()
         batch = max(1, min(int(chunk), self.COPY_BATCH))
         how = self._carry_plan(db)
@@ -1369,10 +1370,10 @@ class RedisEngine(Engine):
         use were both gone once the link came up. And it carries every
         database and every key the source has, with no filter to leave any
         out."""
-        if self.hop.exclude:
-            return ("the hop excludes keys, and a Redis replica carries"
+        if scoped(self.hop):
+            return ("the hop leaves keys out, and a Redis replica carries"
                     " every key of the source: its first sync empties the"
-                    " target, the excluded keys with it")
+                    " target, the keys left out with it")
         for side in ("src", "dst"):
             if self._client(side).info("cluster").get("cluster_enabled"):
                 return (f"the {'source' if side == 'src' else 'target'} is"

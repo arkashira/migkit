@@ -207,11 +207,11 @@ class Spool:
 
 
 class _HopFile:
-    """The hop's `exclude` as its file says it now, read again only when
-    the file has changed - so a table taken out of it, or put in it, joins
-    or leaves the running tail at the next batch. A hop the file does not
-    name (made in code) is left as it is; what the environment or a
-    command added to its `exclude` stays."""
+    """The hop's `exclude` and `include` as its file says them now, read
+    again only when the file has changed - so a table taken out of the
+    scope, or put in it, joins or leaves the running tail at the next
+    batch. A hop the file does not name (made in code) is left as it is;
+    what the environment or a command added to either list stays."""
 
     def __init__(self, hop):
         from .config import CONF
@@ -236,11 +236,12 @@ class _HopFile:
             return None
         if not isinstance(got, dict):
             return None
-        return [str(p) for p in (got.get("exclude") or [])]
+        return {k: [str(p) for p in (got.get(k) or [])]
+                for k in ("exclude", "include")}
 
     def refresh(self):
-        """Whether the hop's scope changed, its `exclude` set to what the
-        file says now."""
+        """Whether the hop's scope changed, its `exclude` and `include`
+        set to what the file says now."""
         stamp = self._stamp()
         if stamp == self.stamp or self.said is None:
             return False
@@ -248,8 +249,12 @@ class _HopFile:
         now = self._read()
         if now is None or now == self.said:
             return False
-        others = [p for p in (self.hop.exclude or []) if p not in self.said]
-        self.hop.exclude = list(now) + [p for p in others if p not in now]
+        for k in ("exclude", "include"):
+            was = self.said.get(k) or []
+            others = [p for p in (getattr(self.hop, k, None) or [])
+                      if p not in was]
+            setattr(self.hop, k, list(now[k]) + [p for p in others
+                                                 if p not in now[k]])
         self.said = now
         return True
 
@@ -737,7 +742,7 @@ class TableSet:
         self._copy(leaf, stop, name)
 
     def _target(self, pair, name):
-        return pair._tail_target(pair._tail_targets(self.db), name)
+        return pair._tail_target(pair._tail_targets(self.db), name, self.db)
 
     def _digest(self, eng, side, table, cols):
         if not cols:

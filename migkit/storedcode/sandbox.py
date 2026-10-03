@@ -288,6 +288,7 @@ class Sandbox:
         self.twin = HeteroEngine(Hop(
             name=f"{self.hop.name}-proof", engine="hetero", source=src_ep,
             target=dst_ep, databases=[self.db], exclude=self.hop.exclude,
+            include=list(getattr(self.hop, "include", None) or []),
             options=opts, db_map=dict(self.hop.db_map or {}),
             mapping=dict(self.hop.mapping or {})))
         self._fresh_databases()
@@ -766,6 +767,7 @@ class Sandbox:
             name=f"{self.hop.name}-proof-sample", engine="hetero",
             source=self.hop.source, target=self.src.hop.target,
             databases=[db], exclude=self.hop.exclude,
+            include=list(getattr(self.hop, "include", None) or []),
             options={"source_engine": pair.src_name,
                      "target_engine": pair.src_name},
             mapping={"where": where}))

@@ -824,7 +824,8 @@ def _table_work(hop, eng, db, sch, tbl, local, known):
     if not cols:
         raise RuntimeError(f"{sch}.{tbl}: its columns could not be read on"
                            " the source")
-    tsch, ttbl = split_table("postgres", hop.target_table(sch, tbl), sch)
+    tsch, ttbl = split_table("postgres", hop.target_table_in(db, sch, tbl),
+                             sch)
     qt = f"{_q(tsch)}.{_q(ttbl)}"
     names = ", ".join(_q(c) for c in cols)
     override = eng._insert_override("dst", db, f"{tsch}.{ttbl}", cols)
