@@ -8,42 +8,42 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 | engine | capabilities | shapes | not yet |
 |---|---|---|---|
-| ase | 6/16 | 8/11 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned, read-only target, writes held |
-| bigquery | 5/16 | 8/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned, read-only target, writes held |
-| cassandra | 16/16 | 10/11 | read-only target |
-| clickhouse | 16/16 | 9/11 | read-only target, writes held |
-| cockroachdb | 11/16 | 7/11 | sequences, params, bulk-move, users, snapshot, large values, partitioned, read-only target, writes held |
-| copybook | 16/16 | 10/11 | read-only target |
-| cosmosdb | 14/16 | 8/11 | bulk-move, snapshot, large values, read-only target, writes held |
-| couchbase | 11/16 | 8/11 | params, bulk-move, users, statistics, snapshot, large values, read-only target, writes held |
-| db2 | 6/16 | 8/11 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned, read-only target, writes held |
-| db2i | 12/16 | 8/11 | sequences, params, bulk-move, snapshot, partitioned, read-only target, writes held |
-| db2zos | 10/16 | 8/11 | sequences, params, bulk-move, users, statistics, snapshot, partitioned, read-only target, writes held |
-| delta | 9/16 | 8/11 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned, read-only target, writes held |
-| dsql | 12/16 | 7/11 | sequences, users, statistics, snapshot, large values, partitioned, read-only target, writes held |
-| duckdb | 16/16 | 10/11 | read-only target |
-| dynamodb | 16/16 | 10/11 | read-only target |
-| generic | 4/16 | 0/11 | sequences, params, bulk-move, table-copy, stream, fence, confirm, delta, users, guard, statistics, snapshot, keyless, no unique index, wide key, too large, large values, partitioned, read-only source, missing grant, read-only target, slow link, writes held |
-| hetero | 15/16 | 7/11 | users, partitioned, missing grant, read-only target, writes held |
-| iceberg | 9/16 | 8/11 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned, read-only target, writes held |
-| kafka | 16/16 | 10/11 | read-only target |
+| ase | 6/16 | 10/11 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| bigquery | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| cassandra | 16/16 | 11/11 | - |
+| clickhouse | 16/16 | 11/11 | - |
+| cockroachdb | 11/16 | 9/11 | sequences, params, bulk-move, users, snapshot, large values, partitioned |
+| copybook | 16/16 | 11/11 | - |
+| cosmosdb | 14/16 | 10/11 | bulk-move, snapshot, large values |
+| couchbase | 11/16 | 10/11 | params, bulk-move, users, statistics, snapshot, large values |
+| db2 | 6/16 | 10/11 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| db2i | 12/16 | 10/11 | sequences, params, bulk-move, snapshot, partitioned |
+| db2zos | 10/16 | 10/11 | sequences, params, bulk-move, users, statistics, snapshot, partitioned |
+| delta | 9/16 | 10/11 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| dsql | 12/16 | 9/11 | sequences, users, statistics, snapshot, large values, partitioned |
+| duckdb | 16/16 | 11/11 | - |
+| dynamodb | 16/16 | 11/11 | - |
+| generic | 4/16 | 2/11 | sequences, params, bulk-move, table-copy, stream, fence, confirm, delta, users, guard, statistics, snapshot, keyless, no unique index, wide key, too large, large values, partitioned, read-only source, missing grant, slow link |
+| hetero | 15/16 | 9/11 | users, partitioned, missing grant |
+| iceberg | 9/16 | 10/11 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| kafka | 16/16 | 11/11 | - |
 | kinesis | 16/16 | 11/11 | - |
-| mongodb | 16/16 | 9/11 | missing grant, read-only target |
-| mssql | 16/16 | 9/11 | partitioned, read-only target |
+| mongodb | 16/16 | 10/11 | missing grant |
+| mssql | 16/16 | 10/11 | partitioned |
 | mysql | 16/16 | 11/11 | - |
-| opensearch | 16/16 | 10/11 | read-only target |
-| oracle | 16/16 | 8/11 | partitioned, read-only target, writes held |
-| parquet | 16/16 | 9/11 | partitioned, read-only target |
+| opensearch | 16/16 | 11/11 | - |
+| oracle | 16/16 | 10/11 | partitioned |
+| parquet | 16/16 | 10/11 | partitioned |
 | postgres | 16/16 | 11/11 | - |
 | pubsub | 16/16 | 11/11 | - |
-| redis | 16/16 | 9/11 | partitioned, read-only target |
-| redshift | 5/16 | 8/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned, read-only target, writes held |
-| saas | 16/16 | 10/11 | writes held |
-| sapodp | 16/16 | 10/11 | writes held |
-| snowflake | 5/16 | 8/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned, read-only target, writes held |
-| sqlite | 16/16 | 10/11 | read-only target |
-| teradata | 16/16 | 7/11 | large values, partitioned, read-only target, writes held |
-| tidb | 13/16 | 7/11 | bulk-move, users, snapshot, large values, partitioned, read-only target, writes held |
+| redis | 16/16 | 10/11 | partitioned |
+| redshift | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| saas | 16/16 | 11/11 | - |
+| sapodp | 16/16 | 11/11 | - |
+| snowflake | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| sqlite | 16/16 | 11/11 | - |
+| teradata | 16/16 | 9/11 | large values, partitioned |
+| tidb | 13/16 | 9/11 | bulk-move, users, snapshot, large values, partitioned |
 
 ## Backlog (445 items, `docs/backlog-index.md`)
 
