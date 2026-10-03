@@ -483,14 +483,10 @@ def _keep_positions(eng, db, fence, before, saved):
     offset after the last message the mirror handed on, and how many it
     wrote on the target - so the copier or the tail after it goes on from
     there and counts nothing twice."""
-    import os
-
     from kafka import TopicPartition
+    from . import checkpoint
     path = eng.hop.report_dir(db) / "move.json"
-    try:
-        state = json.loads(path.read_text())
-    except (OSError, ValueError):
-        state = {}
+    state = checkpoint.read_move(path) or {}
     dst = eng._consumer("dst")
     try:
         for (t, p), (begin, end, _) in fence.items():
@@ -503,9 +499,7 @@ def _keep_positions(eng, db, fence, before, saved):
             st["done"] = True
     finally:
         dst.close()
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=1))
-    os.replace(tmp, path)
+    checkpoint.write_move(path, state)
 
 
 # ---- the ladder's facts ----------------------------------------------------

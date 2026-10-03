@@ -301,11 +301,19 @@ def test_a_name_rule_that_cannot_be_turned_round_is_refused():
             there.reversed()
 
 
+#: the hop's rules asked with a table's parts: a listed name is split
+#: for them one way (`Hop.parts_of`)
+ASKED_BY_PARTS = ("excluded", "carries", "row_filter", "row_filter_zone",
+                  "column_rules", "target_table_in", "takes_object",
+                  "tolerance")
+
+
 def test_a_listed_table_is_asked_of_the_scope_one_way():
     """A table's listed name is split once, the way names are
-    (`Hop.takes_table`, `Engine.in_scope`): split by hand beside them,
-    `public."v1.orders"` broke at the wrong dot and a bare PostgreSQL name
-    was asked outside its schema."""
+    (`Hop.parts_of`, `Hop.takes_table`, `Engine.in_scope`): split by hand
+    beside them, `public."v1.orders"` broke at the wrong dot and a bare
+    PostgreSQL name was asked outside its schema - by the scope, the row
+    filter, the changes carried and every other rule."""
     import ast
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "migkit"
@@ -314,19 +322,25 @@ def test_a_listed_table_is_asked_of_the_scope_one_way():
         for node in ast.walk(ast.parse(f.read_text())):
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "excluded"):
+                    and node.func.attr in ASKED_BY_PARTS):
                 continue
             for arg in node.args:
                 inner = arg.value if isinstance(arg, ast.Starred) else None
                 if inner is None:
                     continue
                 for sub in ast.walk(inner):
-                    if isinstance(sub, ast.Attribute) and sub.attr in (
-                            "split", "_split"):
+                    by_dot = (isinstance(sub, ast.Call)
+                              and isinstance(sub.func, ast.Attribute)
+                              and sub.func.attr == "split"
+                              and (not sub.args or (
+                                  isinstance(sub.args[0], ast.Constant)
+                                  and sub.args[0].value == ".")))
+                    if by_dot or (isinstance(sub, ast.Attribute)
+                                  and sub.attr == "_split"):
                         bad.append(f"{f.relative_to(root)}:{node.lineno}")
-    # a pattern checked against itself, a listing already in parts, and
-    # the generic engine's own names, each said where it is
-    allowed = {"hopkeys.py", "engines/postgres.py", "engines/generic.py"}
+    # a pattern checked against itself, and the generic engine's own
+    # names, each said where it is
+    allowed = {"hopkeys.py", "engines/generic.py"}
     assert [b for b in bad if b.split(":")[0] not in allowed] == []
 
 

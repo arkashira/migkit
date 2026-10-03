@@ -391,7 +391,7 @@ def _needs(eng, db, name, masked=False, begun=False):
     need = []
     if masked:
         need.append("masked on the way")
-    if eng.hop.row_filter(db, *str(name).split(".")):
+    if eng.hop.row_filter(db, *eng.hop.parts_of(name)):
         need.append("row filter")
     if begun:
         need.append("resume by chunk")

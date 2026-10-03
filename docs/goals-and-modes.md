@@ -37,10 +37,10 @@ operator does the steps by hand, with migkit proving around them (below).
 <!-- gen_docs: modes -->
 | Command | What it does |
 |---|---|
-| `move --mode full` | one copy of every table the hop carries: the source read, the target written |
+| `move --mode full` | one copy of every table the hop carries: the source read, the target written - kept from the application's writes before the first row and again after the last where the hop asks (protect_target): its rights taken, its access policy changed on an answer of yes, or its writes named, the way the target allows |
 | `move --mode cdc` | the stream of changes started, or resumed from where it stood: the source's log read, the target written change by change |
 | `move --mode full+cdc` | the copy, then the stream from a position taken before the copy began, so nothing changed during it is lost |
-| `move --mode cdc --drop` | the cutover: the stream torn down, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return |
+| `move --mode cdc --drop` | the cutover: the stream torn down, the target given back to the application where protect_target kept it, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return |
 | `sync --mode reconcile` | the last check's differences shown; --apply writes the target to match the source |
 | `sync --mode verify` | read only: every table compared as of one moment |
 | `sync --mode seed` | the schema aligned, the copy, the differences repaired and a consistent check, one after another |
@@ -68,9 +68,10 @@ starts with what each side will see.
 **On** (`cutover: true`, or its settings): migkit does all of that itself, and adds:
 
 - a timed path: the write outage clocked from the pooler's pause or the freeze to the flip, against the hop's budget - past it, all of it is undone
-- the freeze: migkit stops the source's writes itself, the way chosen from what the source allows - the whole server made read-only where it may, or the application's accounts kept from writing and their sessions ended - and reads it back; PostgreSQL, MySQL, MongoDB, Redis, SQL Server, Cassandra, Kafka and OpenSearch sources alike
+- the freeze: migkit stops the source's writes itself, the way chosen from what the source allows - the whole server made read-only where it may, or the application's accounts kept from writing and their sessions ended - and reads it back; PostgreSQL, MySQL, TiDB, CockroachDB, MongoDB, Redis, SQL Server, Oracle, Db2, SAP ASE, Teradata, ClickHouse, Cassandra, Couchbase, Kafka, OpenSearch, Redshift and Snowflake sources alike
 - the drain: the source's position taken after the freeze, and the hop's own stream waited for until it passes it - or, where the stream keeps no position migkit can read, a mark written on the source after the freeze and waited for on the target; a streaming pipeline and a leg run from here drained by their own offsets and positions
 - the fenced check: the rows changed since the last verified pass compared inside the outage, and the schema compared with the preflight's
+- the target's hold read back first (protect_target): the application's accounts write nothing there, or, where nothing holds a writer, the writes that are not migkit's named - one named is drift, and stops the cutover - and given back at the flip, put on again if the cutover is undone
 - the counters: the target's sequences and auto-increments raised past every key the source handed out
 - the stream back: from the new primary to the old source (reverse: at_cutover), made and proven before the freeze where its engine lets it wait idle, so the flip only starts it, and proven to reach the old source
 - the undo: every step recorded before it acts and put back, the last first, on any failure, on the budget passing, or on the next run after one killed half way

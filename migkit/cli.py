@@ -1,6 +1,5 @@
 import contextlib
 import json
-import os
 import socket
 import threading
 import time
@@ -75,11 +74,22 @@ def _changelog(hop, entry, eng=None):
 class _Checkpoint(dict):
     """How far a copy got. Kept in the hop's run state as well where it has
     one (the s3 backend), so a run another machine takes over resumes from
-    the last chunk saved rather than from the start (backlog 30)."""
+    the last chunk saved rather than from the start (backlog 30).
+
+    Between whole saves, a range begun or landed is a line added to the
+    checkpoint's journal (`journal`, `checkpoint.read_move`): a copy of
+    one table in 20,000 ranges saved the whole file twice a range, O(R^2)
+    bookkeeping and about 14 minutes of saves one after the other (audit
+    ST17); a line is written in the time a whole save of a small file
+    takes, whatever the plan's size. Where the hop keeps its run state
+    where another machine reads it, every save is whole, as before: the
+    store holds the file, not its journal."""
 
     def __init__(self, path, remote=None):
         super().__init__()
         import threading
+
+        from . import checkpoint
         self.path = path
         self.remote = remote
         self._lock = threading.RLock()
@@ -89,13 +99,47 @@ class _Checkpoint(dict):
         # the entries this process's copiers write into: theirs, whatever
         # another machine saved since
         self._mine = set()
+        # the journal the file on the disk names: None until it is written
+        self._jid = None
+        self._keys = {}
         if not path.exists() and remote is not None:
             text = remote.get(path)
             if text:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text)
-        if path.exists():
-            self.update(json.loads(path.read_text()))
+                from . import durable
+                durable.write_atomic(path, text)
+        got = checkpoint.read_move(path)
+        if got is not None:
+            self.update(got)
+            from . import durable
+            self._jid = (durable.read_state(path, "position") or {}).get(
+                checkpoint.JOURNAL)
+
+    def journals(self):
+        """Whether a range begun or landed is a journal line, not a whole
+        save."""
+        return self.remote is None and self._jid is not None
+
+    def journal(self, st, event):
+        """`event` of the entry `st` added to the journal - called under
+        the lock the entry was changed under, so no whole save written at
+        the same time can leave it out."""
+        import json as _json
+
+        from . import checkpoint, durable, failpoint
+        with self._lock:
+            key = self._keys.get(id(st))
+            if key is None or self.get(key) is not st:
+                key = next((k for k, v in self.items() if v is st), None)
+                if key is None:
+                    # an entry not in the checkpoint: nothing to add to
+                    return self.save()
+                self._keys[id(st)] = key
+            durable.append_line(checkpoint.journal_of(self.path),
+                                _json.dumps({"j": self._jid, "k": key,
+                                             **event},
+                                            separators=(",", ":"),
+                                            default=str))
+            failpoint.hit("checkpoint.journaled")
 
     def setdefault(self, key, default=None):
         self._mine.add(key)
@@ -125,31 +169,40 @@ class _Checkpoint(dict):
         path - measured (CPython 3.12, in-process) on the checkpoint of 200
         tables of 50 ranges each, 1.7 MB: 26.5 ms a save indented, 4.2 ms
         compact, and such a copy saves twice a range."""
-        from . import failpoint
+        import secrets
+
+        from . import checkpoint, durable, failpoint
         with self._lock:
             if upto is not None and self._saved >= upto:
                 return
             if self.remote is not None:
                 self._merge_into_remote()
             gen = self._gen
-            text = self._encoded()
-            tmp = self.path.with_name(
-                f"{self.path.name}.{os.getpid()}.{threading.get_ident()}"
-                ".tmp")
-            tmp.write_text(text)
+            # a journal of its own for the file written now: a line of the
+            # one before, left over by a stop between the two, is not
+            # added to it (`checkpoint.read_move`)
+            jid = secrets.token_hex(6)
+            text = self._encoded(jid)
             failpoint.hit("checkpoint.written")
-            tmp.replace(self.path)
+            durable.write_atomic(self.path, text)
+            self._jid = jid
+            checkpoint.journal_of(self.path).unlink(missing_ok=True)
             self._saved = gen
 
-    def _encoded(self):
-        """The checkpoint as JSON. A copier that adds a field to its own
-        table's entry outside the lock while it is encoded makes the
-        encoder stop (`dictionary changed size`); encoded again, a bounded
-        number of times - the loop that did this ended in an unbound name
-        on its last turn and took the move down with it."""
+    def _encoded(self, jid=None):
+        """The checkpoint as JSON, naming the journal `jid` begun with it.
+        A copier that adds a field to its own table's entry outside the
+        lock while it is encoded makes the encoder stop (`dictionary
+        changed size`); encoded again, a bounded number of times - the
+        loop that did this ended in an unbound name on its last turn and
+        took the move down with it."""
+        from . import checkpoint
         for _ in range(100):
             try:
-                return json.dumps(self, separators=(",", ":"), default=str)
+                body = dict(self)
+                if jid is not None:
+                    body[checkpoint.JOURNAL] = jid
+                return json.dumps(body, separators=(",", ":"), default=str)
             except RuntimeError:
                 time.sleep(0.001)
         raise SystemExit(f"the move's checkpoint {self.path} kept changing"
@@ -157,7 +210,10 @@ class _Checkpoint(dict):
                          " is lost, and the next run goes on from it")
 
     def discard(self):
+        from . import checkpoint
         self.path.unlink(missing_ok=True)
+        checkpoint.journal_of(self.path).unlink(missing_ok=True)
+        self._jid = None
         if self.remote is not None:
             self.remote.delete(self.path)
 
@@ -240,7 +296,7 @@ def _shared(hop, d):
     """This database's run files, fetched from the hop's run state where
     this machine lacks them - or None without one."""
     from . import ha
-    from .state import Mirror, run_state
+    from .state import TailMirror, run_state
     pushed = ha.mirror(hop, d)
     if pushed is not None:
         # a hop with a standby: its files go with the holding's own pushes,
@@ -249,7 +305,8 @@ def _shared(hop, d):
     remote = run_state(hop)
     if remote is None:
         return None
-    return Mirror(remote, [hop.report_dir(d) / n for n in RUN_FILES]).fetch()
+    return TailMirror(remote, [hop.report_dir(d) / n
+                               for n in RUN_FILES]).fetch()
 
 
 @contextlib.contextmanager
@@ -999,13 +1056,11 @@ def _doctor_hop(name, hop, raw_hop):
         except Exception:  # noqa: BLE001 - a probe never fails doctor
             pass
     for d in (hop.databases or []):
-        held = freeze.state(hop, d)
-        if held and held.get("roles"):
-            out.append(f"{_esc(name)} dst: {_esc(d)} is kept from the"
-                       " application's writes -"
-                       f" {_esc(', '.join(sorted(held['roles'])))};"
-                       " tearing the stream down at cutover, or"
-                       " rollback --apply, gives them back")
+        line = freeze.kept_line(hop, d)
+        if line:
+            out.append(f"{_esc(name)} dst: {_esc(line)}; tearing the stream"
+                       " down at cutover, or rollback --apply, gives it"
+                       " back")
     return out, failed
 
 
@@ -3694,9 +3749,8 @@ def _follow(hop, eng, db, do_drop, go):
 
 
 def _tail_token(hop, db):
-    if not db:
-        raise SystemExit("cdc tail needs --db")
-    return hop.report_dir(db) / "tail-token.json"
+    from . import tailctl
+    return tailctl.token_path(hop, db)
 
 
 def _mark_move(hop, eng, d):
@@ -3734,27 +3788,29 @@ def _record_copy(hop, d, before):
     copy was a snapshot at a position of its own - that position; and the
     scope it copied (`Hop.scope_record`), so a stream started after the
     scope took more in copies that first (`_entered`)."""
+    from . import durable
     rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "before": before,
            "scope_fingerprint": hop.scope_fingerprint(),
            "scope": hop.scope_record()}
     dumped = hop.report_dir(d) / "dump-position.json"
-    if dumped.exists():
-        try:
-            rec["exact"] = json.loads(dumped.read_text())
-        except ValueError:
-            pass
-        dumped.unlink()
-    _copy_record_path(hop, d).write_text(json.dumps(rec, default=str))
+    got = durable.read_state(dumped, "position")
+    if got is not None:
+        rec["exact"] = got
+    # the position a later tail starts from, on the disk before the one
+    # it came from goes (`durable`)
+    durable.write_json(_copy_record_path(hop, d), rec)
+    dumped.unlink(missing_ok=True)
     shared = _shared(hop, d)
     if shared:
         shared.push(force=True)
 
 
 def _copy_record(hop, d):
-    try:
-        return json.loads(_copy_record_path(hop, d).read_text())
-    except (OSError, ValueError):
-        return None
+    """The copy's record, None where there is none; one that cannot be read
+    whole stops, naming it - read as none, a tail started from now and
+    skipped what changed during the copy (`durable`)."""
+    from . import durable
+    return durable.read_state(_copy_record_path(hop, d), "position")
 
 
 def _entered(hop, eng, d, rec):
@@ -4122,22 +4178,38 @@ def _refused_by_a_server(e):
         "pyodbc", "redis", "kafka")
 
 
-def _protect_target(hop, eng, db, release=False):
-    """The hop's `protect_target`: the application's roles cannot write to
-    the target while migkit moves data into it, and can again once the
-    stream is torn down at cutover (or on `rollback --apply`)."""
+def _protect_target(hop, eng, db, release=False, go=True, again=False):
+    """The hop's `protect_target`: the application cannot write to the
+    target while migkit moves data into it - the way its engine allows,
+    climbed per database (`freeze.protect`) - and can again once the
+    stream is torn down at cutover (or on `rollback --apply`). Without
+    `go`, what it would do is said and nothing is changed; `again`, after
+    a copy, takes in what the copy made, where it was taken before."""
     from . import freeze
     if not (hop.options or {}).get("protect_target"):
         return
-    if not freeze.supported(hop):
-        raise SystemExit(
-            f"protect_target is set, and keeping the application from"
-            f" writing to the target is not available for {hop.engine} hops"
-            " yet - nothing has been copied. Remove the option to move"
-            " without it.")
-    for d in ([db] if db else eng.databases()):
-        (freeze.thaw if release else freeze.freeze)(
-            hop, eng, d, lambda m: console.print(f"  {m}"))
+    dbs = [db] if db else eng.databases()
+
+    def say(m):
+        console.print(f"  {_esc(m)}")
+    if not go:
+        for line in freeze.protect_plan(hop, eng, dbs):
+            say(line)
+        return
+    for d in dbs:
+        if release:
+            freeze.thaw(hop, eng, d, say)
+        elif again and freeze.state(hop, d) is None:
+            continue
+        else:
+            freeze.protect(hop, eng, d, say,
+                           ask=_ask_access if sys.stdin.isatty() else None)
+
+
+def _ask_access(question):
+    """The offer of a change to the target's access policy, answered at
+    the terminal."""
+    return click.prompt(f"  {question}", type=click.Choice(["yes", "no"]))
 
 
 def _carried_physically(hop, eng, db, mode, go):
@@ -4343,6 +4415,9 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         # where the hop asks for one, so no write of the application's
         # lands before it
         _protect_target(hop, eng, db, release=do_drop and mode == "cdc")
+    elif not go and not do_drop:
+        # what --go does to the target first, and what it would offer
+        _protect_target(hop, eng, db, go=False)
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     if mode == "full":
@@ -4373,8 +4448,15 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
             # bulk way where `--go` would take the copier (`decide.attempt`)
             for d in dbs:
                 _bulk_or_copier(hop, eng, d, v, table, chunk, engine, go)
+            if go:
+                # what the copy made - its tables, a grant a default gave
+                # on them - taken in
+                _protect_target(hop, eng, db, again=True)
             return
-        return _move_full(hop, eng, db, table, chunk, go)
+        got = _move_full(hop, eng, db, table, chunk, go)
+        if go:
+            _protect_target(hop, eng, db, again=True)
+        return got
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
     from . import twoway
@@ -4413,6 +4495,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
             _tail_before_copy(hop, tailer, db)
         _move_full(hop, eng, db, table, chunk, go)
         if go:
+            _protect_target(hop, eng, db, again=True)
             return _tail(hop, tailer, db, go)
         # not "then run --mode cdc": a tail started after the copy has
         # skipped what changed during it
@@ -4735,7 +4818,7 @@ def _stream_leg(hop, eng, db, dbs, engine):
         tailctl.resume(where)
         end = time.monotonic() + 60
         while tailctl.alive(where) and time.monotonic() < end:
-            time.sleep(0.5)
+            time.sleep(tailctl.POLL)
         if tailctl.alive(where):
             raise SystemExit(f"{d}: the change tail did not end")
         say(f"{d}: the change tail ended")

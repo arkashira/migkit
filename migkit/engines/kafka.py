@@ -430,6 +430,11 @@ class KafkaEngine(Engine):
                 if "base" not in pst:
                     pst.update(base=there, copied=0,
                                next=src.beginning_offsets([src_tp])[src_tp])
+                    # kept before anything is sent: a stop before the
+                    # first batch's position was saved took what that
+                    # batch put on the target for messages held before
+                    # the copy, and sent them again
+                    save()
                     if there:
                         log(f"{topic}[{p}]: the target held {there:,}"
                             " messages before the copy; offsets will differ,"
@@ -522,26 +527,18 @@ class KafkaEngine(Engine):
     def _tail_state(self, db, token_path):
         """The positions the tail goes on from: its own, or - the first
         time - where the copy of the topics ended, so a tail after a copy
-        sends nothing twice."""
-        import json
-        if token_path.exists():
-            try:
-                return json.loads(token_path.read_text())["token"]
-            except (ValueError, KeyError, TypeError):
-                raise SystemExit(
-                    f"the saved positions in {token_path} cannot be read,"
-                    " and a tail started from anywhere else sends messages"
-                    " twice or skips them. Remove the file to copy every"
-                    " topic from its start again")
-        copied = self.hop.report_dir(db) / "move.json"
-        try:
-            state = json.loads(copied.read_text())
-        except (OSError, ValueError):
-            return {}
-        for st in state.values():
+        sends nothing twice. Either that cannot be read whole stops, naming
+        it: a tail started from anywhere else sends messages twice or
+        skips them (`tailctl.position`, `checkpoint.read_move`)."""
+        from .. import checkpoint, tailctl
+        env = tailctl.position(token_path)
+        if env is not None:
+            return env.get("token") or {}
+        state = checkpoint.read_move(self.hop.report_dir(db) / "move.json")
+        for st in (state or {}).values():
             if isinstance(st, dict):
                 st.pop("done", None)
-        return state
+        return state or {}
 
     #: a topic is a log that keeps its order: the tail goes on from the
     #: positions the copy saved, and nothing changes behind them
@@ -553,18 +550,17 @@ class KafkaEngine(Engine):
 
     def tail_apply(self, db, go, token_path, log):
         """Each round, every topic copied on from where the last round
-        ended, until stopped. The positions are saved after each batch
-        reached the target, as the copy saves them."""
+        ended, round the loop every tail goes round (`tailctl.run_loop`):
+        stopped when asked, ended once caught up where the hop or a
+        schedule says so, a lost connection tried again from the saved
+        positions. The positions are saved after each batch reached the
+        target, as the copy saves them - and a message sent whose batch's
+        position was not saved yet is known on the target by the header
+        it carries (`HEADER`), so it is not sent twice."""
         import json
 
-        from .. import tailctl
+        from .. import failpoint, tailctl
         state = self._tail_state(db, token_path)
-
-        def save():
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = token_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"token": state}))
-            tmp.replace(token_path)
         log("following the source's topics, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to copy)"))
         if not go:
@@ -573,26 +569,45 @@ class KafkaEngine(Engine):
                 + "".join(f"; {t} {n:,}" for t, n in sorted(behind.items())
                           if n))
             return
-        seen = 0
-        with tailctl.Running(token_path.parent):
-            while True:
-                tailctl.hold_if_asked(token_path.parent, log)
-                if tailctl.stop_asked(token_path.parent):
-                    log(f"stopped as asked after {seen} messages; the"
-                        " positions are saved")
-                    break
-                went = 0
-                for _, topic in self.list_move_tables(db):
-                    st = state.setdefault(self.move_key(db, "", topic), {})
-                    went += self._copy_topic(topic, st, 5000, save,
-                                             lambda m: None)
-                save()
-                if went:
-                    seen += went
-                    log(f"{seen} messages")
-                tailctl.beat(token_path.parent, time.time(), seen)
-                if not went:
-                    time.sleep(1)
+        env = [tailctl.position(token_path)]
+        last = [json.dumps(state, sort_keys=True, default=str)
+                if env[0] is not None else None]
+        seen = [0]
+
+        def save():
+            text = json.dumps(state, sort_keys=True, default=str)
+            if text == last[0]:
+                # nothing moved: the file is not written again each round
+                return
+            failpoint.hit("tail.applied")
+            env[0] = tailctl.moved(
+                token_path, env[0] or tailctl.new_stream(self, None),
+                json.loads(text))
+            last[0] = text
+            failpoint.hit("tail.saved")
+
+        def look(at):
+            went = 0
+            for _, topic in self.list_move_tables(db):
+                st = state.setdefault(self.move_key(db, "", topic), {})
+                went += self._copy_topic(topic, st, 5000, save,
+                                         lambda m: None)
+            save()
+            if went:
+                seen[0] += went
+                log(f"{seen[0]} messages")
+            return state, went, not went
+
+        def lost(e, at):
+            # the positions as saved: what a round sent after them is known
+            # by its header, and not sent again
+            state.clear()
+            state.update(self._tail_state(db, token_path))
+            return state
+        tailctl.run_loop(token_path.parent, db, look, log, "messages",
+                         hop=self.hop, go=go, token=state, lost=lost,
+                         secrets=(self.hop.source.password,
+                                  self.hop.target.password))
 
     def _behind(self, db, state):
         """{topic: messages on the source past the saved positions}."""
@@ -621,7 +636,7 @@ class KafkaEngine(Engine):
         from kafka import TopicPartition
 
         from .. import tailctl
-        if not tailctl.alive(self.hop.report_dir(db)):
+        if not tailctl.alive(self.hop.report_dir(db), self.hop):
             return None
         src = self._consumer("src")
         try:
@@ -639,15 +654,17 @@ class KafkaEngine(Engine):
         """Wait until the tail's saved position has reached `at` in every
         partition. True when it has, False on timeout, None where there is
         nothing to wait on."""
-        import json
+        from .. import tailctl
         if not at:
             return None
-        path = self.hop.report_dir(db) / "tail-token.json"
+        path = tailctl.token_path(self.hop, db)
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             try:
-                state = json.loads(path.read_text())["token"]
-            except (OSError, ValueError, KeyError, TypeError):
+                state = tailctl.saved(path)
+            except SystemExit:
+                return None
+            if not isinstance(state, dict):
                 return None
             if all(int((state.get(self.move_key(db, "", topic)) or {})
                        .get("parts", {}).get(p, {}).get("next", -1)) >= want
@@ -656,7 +673,8 @@ class KafkaEngine(Engine):
                 # where the confirm pass compares up to
                 self._fenced_at = at
                 return True
-            time.sleep(1)
+            # looked at every 50 ms, not once a second (audit SP19)
+            time.sleep(tailctl.POLL)
         return False
 
     #: topics a cluster keeps for itself: the broker's own (`__`), a schema

@@ -270,9 +270,8 @@ def _load(hop, db):
 
 
 def _save(hop, rec, path):
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    tmp.replace(path)
+    from . import durable
+    durable.write_json(path, rec, indent=1)
     shared = _mirror(hop, path)
     if shared:
         shared.push(force=True)
@@ -398,10 +397,12 @@ def whose_rows(hop, eng, d, tables, dst):
 
 def refusals(hop, eng, d, tables=None):
     """[why a write step into `d` would stop] - the target the source
-    itself, production the hop does not name, and (for a copy of
-    `tables`) rows it did not write that the hop does not say what to do
-    with - asked the way `before_write` and `before_copy` ask, and
-    nothing kept or said: what `ready` says before anything runs."""
+    itself, production the hop does not name, (for a copy of `tables`)
+    rows it did not write that the hop does not say what to do with, and
+    a target the hop's own `protect_target` asks to keep from the
+    application that nothing here keeps - asked the way `before_write`,
+    `before_copy` and `freeze.protect` ask, and nothing kept or said: what
+    `ready` says before anything runs."""
     src, dst = identities(hop, eng, d)
     out = []
     same = itself(src, dst)
@@ -422,6 +423,10 @@ def refusals(hop, eng, d, tables=None):
                        + (" ..." if len(names) > 8 else "")
                        + " - and the hop does not say what to do with them"
                        " (target_rows: replace or keep)")
+    from . import freeze
+    why = freeze.not_protected(hop, eng, d)
+    if why:
+        out.append(f"protect_target is set, and {why}")
     return out
 
 

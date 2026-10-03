@@ -177,8 +177,8 @@ def test_a_file_anyone_may_change_is_refused(tmp_path):
     text = ("hops:\n  h:\n    source: postgres://app@10.0.0.1/shop\n"
             "    target: postgres://app@10.0.0.2/shop\n")
     conf = _write(tmp_path, text, 0o666)
-    with pytest.raises(SystemExit, match="every user of this machine may"
-                                         " change it"):
+    with pytest.raises(SystemExit, match="may be changed by every user of"
+                                         " this machine"):
         config.load_hops(conf)
     os.chmod(conf, 0o644)
     assert "h" in config.load_hops(conf)

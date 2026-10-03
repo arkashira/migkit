@@ -20,7 +20,6 @@ passed over with the reason, whatever it measured; a copy the copier
 stopped part way goes on by the copier, which is the one that resumes.
 """
 import dataclasses
-import json
 import os
 
 #: the engines climbed here, each with its ways out of `movers._ladder`
@@ -57,10 +56,10 @@ def _unfinished(hop):
         paths = list(root.glob("*/move.json"))
     except OSError:
         return False
+    from . import checkpoint
     for path in paths:
-        try:
-            got = json.loads(path.read_text())
-        except (OSError, ValueError):
+        got = checkpoint.read_move(path, "cache")
+        if got is None:
             continue
         if any(isinstance(v, dict) and v and not v.get("done")
                for v in got.values()):

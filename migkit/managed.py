@@ -457,10 +457,13 @@ def stand_in(service):
             actions.append("bypassWriteBlockingMode")
         return {"others": [], "version": _version(a.get("version") or "0.0"),
                 "actions": actions if sup or a.get("user_roles") else [],
-                "commands": sorted(set(MONGO_COMMANDS) - missing)}
+                "commands": sorted(set(MONGO_COMMANDS) - missing),
+                # a service checks who signs in, always
+                "auth": True}
     if f == "redis":
         return {"others": [], "version": _version(a.get("version") or "0.0"),
-                "acl": bool(a.get("acl")), "stream back": False}
+                "acl": bool(a.get("acl")), "stream back": False,
+                "one server": not a.get("cluster", False)}
     if f == "mssql":
         return {"others": [], "alter": bool(a.get("alter")),
                 "alone in its group": not a.get("availability_group"),

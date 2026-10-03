@@ -83,7 +83,7 @@ class Part:
         return self.hop.takes_table(db, table)
 
     def rule(self, db, table):
-        return self.hop.row_filter(db, *str(table).split("."))
+        return self.hop.row_filter(db, *self.hop.parts_of(table))
 
 
 def parts(hop, siblings=None):
