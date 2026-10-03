@@ -8,12 +8,115 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .. import fencing
+from ..config import MIGKIT_OWN
 from ..decide import Need, Rung
 from ..tableway import DIRECT, Way
-from ..util import keepalive as _keepalive, run, which, with_retry
+from ..util import keepalive as _keepalive, quote_name, run, split_table, \
+    which, with_retry
 from .base import Engine, RepairAction, Result
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
+
+
+def _qi(name):
+    """A MySQL name - a database, a table, a column, an index - in back
+    quotes, a back quote inside it doubled (`util.quote_name`): the one
+    way a name reaches a statement here. 175 went in raw between back
+    quotes, and `a`b` ended the name where its back quote stood (audit
+    2026-10-01, SEC4)."""
+    return quote_name("mysql", name)
+
+
+def _ql(value):
+    """A value as a MySQL string literal. MySQL reads a backslash inside a
+    string as an escape unless the session sets NO_BACKSLASH_ESCAPES, which
+    the default sql_mode does not: doubling the quote alone - correct
+    everywhere else - would turn a value holding `\\n` into a newline on
+    the way in."""
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _leaf(name):
+    """The table of a name that may carry its database in front -
+    `shop.orders`, `` `shop`.`v1.orders` `` - one way for every reader of
+    one here: a quoted name as `util.split_table` takes it apart, a plain
+    one after its last dot."""
+    text = str(name)
+    if text.startswith("`"):
+        return split_table("mysql", text)[1]
+    return text.rpartition(".")[2]
+
+
+#: migkit's own tables on a side (`config.MIGKIT_OWN`), by their exact
+#: names, for a catalogue query to leave out: `like 'migkit%'` left out an
+#: application's `migkitchen` and `migkit_audit` too, and `moved_nothing`
+#: had no rule at all (audit 2026-10-01, DU26)
+OWN_SQL = "(" + ", ".join(_ql(t) for t in MIGKIT_OWN) + ")"
+
+#: the session time zone every connection here reads and writes in: a
+#: TIMESTAMP is handed out and taken in the session's zone, so two servers
+#: in two zones read one instant as two values, and a business rule run in
+#: each server's own zone compared two different clocks (audit 2026-10-01,
+#: DU12, LG4). An offset needs no time zone tables on the server
+SESSION_ZONE = "+00:00"
+
+#: types whose default is written as a bare number
+NUMERIC_TYPES = {"tinyint", "smallint", "mediumint", "int", "integer",
+                 "bigint", "decimal", "numeric", "float", "double", "real"}
+
+#: a default that is the clock, however the server spells it:
+#: `CURRENT_TIMESTAMP` (MySQL 8, and 5.7 without `DEFAULT_GENERATED`),
+#: `current_timestamp()` and `current_timestamp(6)` (MariaDB), `now()`
+_CLOCK = re.compile(r"(?i)^(current_timestamp|now|localtimestamp|localtime)"
+                    r"(\((\d?)\))?$")
+
+#: what MariaDB's catalogue writes into a quoted default, and what it
+#: stands for (`append_unescaped`): `''` a quote, `\\` a backslash, `\0`,
+#: `\n` and `\r`
+_MARIADB_ESCAPES = {"''": "'", "\\\\": "\\", "\\0": "\0", "\\n": "\n",
+                    "\\r": "\r", "\\'": "'"}
+
+
+def default_shown(mariadb, data_type, default, extra):
+    """A column's default as SQL writes it - a literal quoted (`'new'`,
+    its quote doubled), a number bare, an expression as written, the
+    clock as `current_timestamp` (with its digits) - or None where there
+    is none, read from `information_schema.columns` as each server
+    writes it there.
+
+    MySQL 8 keeps a literal without its quotes and marks an expression
+    `DEFAULT_GENERATED`; 5.7 marks nothing, so its `CURRENT_TIMESTAMP`
+    read as the text `'CURRENT_TIMESTAMP'`. MariaDB from 10.2.7 quotes a
+    literal itself (`'new'`, `'it''s'`), writes an expression bare
+    (`curdate()`), says `NULL` for a nullable column's implicit default,
+    and has no `DEFAULT_GENERATED` - read as MySQL's, a MariaDB source's
+    table was built with `default 'NULL'`, `default '''new'''` and
+    `curdate()` as text, each of which the target took (audit
+    2026-10-01, SC14)."""
+    if default is None:
+        return None
+    text = str(default)
+    typ = str(data_type or "").lower()
+    clock = _CLOCK.match(text.strip())
+    if clock and typ in ("timestamp", "datetime"):
+        return "current_timestamp" + (f"({clock.group(3)})"
+                                      if clock.group(3) else "")
+    if mariadb:
+        if text == "NULL":
+            return None
+        if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+            value = re.sub(r"''|\\[\\0nr']", lambda m: _MARIADB_ESCAPES[
+                m.group(0)], text[1:-1])
+            return "'" + value.replace("'", "''") + "'"
+        return text
+    if "default_generated" in str(extra or "").lower():
+        # an expression, which the catalogue keeps as written
+        return text
+    if typ in NUMERIC_TYPES or (typ == "bit" and text.lower().startswith(
+            "b'")):
+        return text
+    # a literal, which the catalogue keeps without its quotes
+    return "'" + text.replace("'", "''") + "'"
 
 #: the two tables the benchmark's rates were measured on (`MY_BENCH`):
 #: narrow rows of plain columns, and wide rows with a binary column (the
@@ -146,43 +249,156 @@ class MySQLEngine(Engine):
     #: as `'12345'` and said nothing.
     WRITE_SQL_MODE = "NO_AUTO_VALUE_ON_ZERO,STRICT_ALL_TABLES"
 
-    def _conn(self, side, retry=True):
-        ep = self.hop.source if side == "src" else self.hop.target
+    def _ep(self, side):
+        return self.hop.source if side == "src" else self.hop.target
+
+    def _connect(self, side, purpose="read", retry=True):
+        """A connection to one side, opened one way for every purpose: the
+        hop's TLS (`Endpoint.tls_forms`, as the driver takes it), 15
+        seconds to connect and sign in, `MIGKIT_READ_TIMEOUT` a read after
+        that, TCP keepalive (`MIGKIT_KEEPALIVE_IDLE`), utf8mb4, and the
+        session in UTC (`SESSION_ZONE`). A target's connection also writes
+        under `WRITE_SQL_MODE` and offers the server only the rows migkit
+        sends it for a bulk load (`_loading`). `purpose`: `read` (a fresh
+        connection the caller closes), `kept` (one `_q` keeps a thread,
+        committing each statement as it runs), `zone` (the session left in
+        the server's own zone: what asks the server what its clock says).
+
+        Opened six ways before - only some with keepalive, one with TLS
+        from the options alone - and `run_rule` read each server in its
+        own zone (audit 2026-10-01, DU12)."""
+        ep = self._ep(side)
         try:
             import pymysql
         except ImportError:
             raise SystemExit("pip install 'migkit[mysql]' for mysql support")
-        # read_timeout + TCP keepalive: without them a network blip on a
-        # cross-cloud link leaves the socket open forever and a long scan
-        # (count on a hundred-GB table) hangs the whole run with no error.
-        import os
-        rt = int(os.environ.get("MIGKIT_READ_TIMEOUT", "3600"))
+        from .. import envkeys
+        rt = envkeys.number("MIGKIT_READ_TIMEOUT")
+        idle = envkeys.number("MIGKIT_KEEPALIVE_IDLE")
+        tls = ep.tls_forms("mysql")["driver"]
+        sets = []
+        if purpose != "zone":
+            sets.append(f"time_zone = {_ql(SESSION_ZONE)}")
+        if side == "dst":
+            sets.append(f"sql_mode = {_ql(self.WRITE_SQL_MODE)}")
 
         def _open():
             # the greeting is read under the read timeout, so a server that
             # does not speak MySQL - measured, a PostgreSQL port - held the
             # connect for the whole hour of it; the handshake gets the
             # connect's 15 seconds and the queries after it the hour
-            # the target's connection offers the server a bulk load, and
-            # answers it only with the rows migkit is sending (`_loading`)
             opener = (_loading() or pymysql.connect) if side == "dst" \
-                else pymysql.connect
+                and purpose != "kept" else pymysql.connect
             c = opener(host=ep.host, port=ep.port, user=ep.user,
                        password=ep.password, charset="utf8mb4",
-                       connect_timeout=15, **ep.mysql_tls(),
+                       connect_timeout=15, **tls,
                        read_timeout=15, write_timeout=rt,
                        local_infile=opener is not pymysql.connect,
-                       init_command=(
-                           "set session sql_mode ="
-                           f" '{self.WRITE_SQL_MODE}'"
-                           if side == "dst" else None))
+                       autocommit=purpose == "kept",
+                       init_command=("set session " + ", ".join(sets)
+                                     if sets else None))
             c._read_timeout = rt
-            _keepalive(getattr(c, "_sock", None))
+            _keepalive(getattr(c, "_sock", None), idle=idle)
             return c
         # a probe that only decides an option asks once: retrying a server
         # that is not there only delays saying "no"
         return (with_retry(_open, label=f"mysql connect {side}") if retry
                 else _open())
+
+    def _conn(self, side, retry=True):
+        """A fresh connection to one side (`_connect`), the caller's to
+        close."""
+        return self._connect(side, "read", retry=bool(retry))
+
+    #: seconds a kept connection waits unused before it is asked whether
+    #: it is still there
+    KEPT_IDLE = 30
+
+    #: statements a kept connection answers: they read, and leave the
+    #: session as they found it
+    _READS = re.compile(r"(?is)^\s*(select|show)\b")
+
+    @staticmethod
+    def _kept_key(side, fresh):
+        import os
+        return (os.getpid(), threading.get_ident(), side, bool(fresh))
+
+    def _kept(self, side, fresh=False):
+        """The connection this thread asks one side on: each `_q` opened a
+        connection, signed in over TLS and closed it - about 16,000 for a
+        check of 2,000 tables, each a few round trips (audit 2026-10-01,
+        SP2, SC15). One a side and thread (and one more whose catalogue
+        statistics are read fresh), in autocommit, so a read never sees an
+        older snapshot than the statement before it; asked whether it is
+        still there after `KEPT_IDLE` seconds unused; a thread that ended
+        keeps nothing."""
+        import os
+        lock = self.__dict__.setdefault("_kept_lock", threading.Lock())
+        kept = self.__dict__.setdefault("_kept_conns", {})
+        me = self._kept_key(side, fresh)
+        with lock:
+            got = kept.get(me)
+        if got is not None:
+            conn, used = got
+            if conn.open:
+                if time.monotonic() - used < self.KEPT_IDLE:
+                    got[1] = time.monotonic()
+                    return conn
+                try:
+                    conn.ping(reconnect=False)
+                    got[1] = time.monotonic()
+                    return conn
+                except Exception:  # noqa: BLE001 - opened again below
+                    pass
+            self._drop_kept(me)
+        conn = self._connect(side, "kept")
+        if fresh:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("set session information_schema_stats_expiry"
+                                " = 0")
+            except Exception:  # noqa: BLE001 - before 8.0: always fresh
+                pass
+        with lock:
+            alive = {t.ident for t in threading.enumerate()}
+            for key in [k for k in kept if k[0] == os.getpid()
+                        and k[1] not in alive]:
+                self._drop_kept(key)
+            kept[me] = [conn, time.monotonic()]
+        return conn
+
+    def _asked(self, side, sql, args, fresh, named):
+        """One statement on this thread's kept connection, its rows (as
+        dicts where `named`); the connection let go where the statement
+        left it in a state unknown - lost, or stopped halfway."""
+        import pymysql
+        conn = self._kept(side, fresh)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                if named:
+                    cols = [d[0] for d in (cur.description or ())]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+                return cur.fetchall()
+        except BaseException as e:
+            if not conn.open or not isinstance(e, pymysql.err.MySQLError):
+                self._drop_kept(self._kept_key(side, fresh))
+            raise
+
+    def _drop_kept(self, key):
+        got = self.__dict__.get("_kept_conns", {}).pop(key, None)
+        if got is not None:
+            try:
+                got[0].close()
+            except Exception:  # noqa: BLE001 - it is going anyway
+                pass
+
+    def release_kept(self):
+        """Every connection this process keeps for `_q`, closed."""
+        import os
+        for key in [k for k in list(self.__dict__.get("_kept_conns", {}))
+                    if k[0] == os.getpid()]:
+            self._drop_kept(key)
 
     CANON_ENGINE = "mysql"
     OWN_PATHS_READ_COLUMN_MAPPING = False
@@ -193,8 +409,8 @@ class MySQLEngine(Engine):
     #: a read stops inside a transaction larger than what is left of it
     #: (`neutral_changes`), and goes on from there
     READ_ENDS_INSIDE_TRANSACTIONS = True
-    SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_generated_cache",
-                    "_unique_counts", "_types_loaded")
+    SHAPE_CACHES = ("_column_rules_of", "_ordered_of", "_unique_counts",
+                    "_types_loaded", "_catalogs")
 
     def neutral_tables(self, side, db):
         return self._tables(side, db)
@@ -213,10 +429,14 @@ class MySQLEngine(Engine):
                 "how": f"{got.get('Ssl_version', '')} {cipher}".strip()}
 
     def run_rule(self, side, db, sql):
+        """A business rule's answer on one side, read-only, in the one
+        session zone (`SESSION_ZONE`): run in each server's own zone, a
+        rule over a TIMESTAMP compared two clocks (audit 2026-10-01,
+        DU12)."""
         conn = self._conn(side)
         try:
             with conn.cursor() as cur:
-                cur.execute(f"use {self._my_ident(self._d(side, db))}")
+                cur.execute(f"use {_qi(self._d(side, db))}")
                 # read-only: a rule that tries to write fails, and the
                 # source is not written to whatever the rule says
                 cur.execute("start transaction read only")
@@ -228,7 +448,7 @@ class MySQLEngine(Engine):
 
     @staticmethod
     def _my_ident(name):
-        return "`" + str(name).replace("`", "``") + "`"
+        return _qi(name)
 
     #: the account migkit's own replica signs in with (`replicate_sql`) -
     #: what tells it apart from a replica somebody else set up
@@ -321,28 +541,280 @@ class MySQLEngine(Engine):
         return out
 
     def column_catalog(self, side, db):
-        """{table: [(column, type), ...]} in one query - what a move reads
-        before and after itself to notice a DDL on the source."""
-        out = {}
-        for t, c, ty in self._q(side, "select table_name, column_name,"
-                                      " column_type from"
-                                      " information_schema.columns"
-                                      " where table_schema = %s",
-                                (self._d(side, db),)):
-            out.setdefault(str(t), []).append((str(c), str(ty)))
-        return {t: sorted(cols) for t, cols in out.items()}
+        """{table: [(column, declared type), ...]} of every table and view,
+        read now (`catalog`) - what a move reads before and after itself
+        to notice a DDL on the source."""
+        got = self._shapes(side, db, fresh=True)["catalog"]
+        return {t: sorted((c.name, c.declared) for c in cols)
+                for t, cols in got.columns.items()}
+
+    # ---- the catalogue, read once a side -----------------------------------
+
+    #: seconds a side's catalogue, read in one pass, is taken as it stands
+    #: before it is read again - a check's pass over its tables reads it
+    #: once, a loop that runs for hours sees a change within this long.
+    #: migkit's own DDL on a side, `forget_shapes` and a table not found in
+    #: it read it again at once
+    CATALOG_SECONDS = 60
+
+    def _side_brand(self, side):
+        return self._brands()[0 if side == "src" else 1]
+
+    def _forget_catalog(self, side, db):
+        self.__dict__.get("_catalogs", {}).pop((side, self._d(side, db)),
+                                               None)
+
+    def _catalog_rows(self, side, name, sql):
+        """`sql` on the side's catalogue as dicts with lower-case keys: a
+        `select *` reads whatever columns this server's version has."""
+        return [{str(k).lower(): v for k, v in r.items()}
+                for r in self._q(side, sql, (name,), named=True)]
+
+    def _shapes(self, side, db, fresh=False):
+        """{"at", "catalog", "kind", "indexes", "generated"} of one side's
+        database: every table's and view's columns with their declared
+        type, null, default (`default_shown`), collation and what else the
+        server declares (`extra`: auto_increment, on update, generated as,
+        invisible), each table's key, indexes, foreign keys, checks and
+        triggers - read in six statements on one kept connection whatever
+        the number of tables, and kept (`CATALOG_SECONDS`). It was a
+        statement a table for each of its columns, rules, indexes and key,
+        each on a connection of its own (audit 2026-10-01, SC15, SP2)."""
+        from .. import canon
+        from ..catalog import Catalog, Column, ForeignKey, Index
+        lock = self.__dict__.setdefault("_catalogs_lock", threading.Lock())
+        known = self.__dict__.setdefault("_catalogs", {})
+        name = self._d(side, db)
+        at = (side, name)
+        got = known.get(at)
+        if not fresh and got is not None and \
+                time.monotonic() - got["at"] < self.CATALOG_SECONDS:
+            return got
+        with lock:
+            got = known.get(at)
+            if not fresh and got is not None and \
+                    time.monotonic() - got["at"] < self.CATALOG_SECONDS:
+                return got
+            began = time.monotonic()
+            mariadb = self._side_brand(side).name == "mariadb"
+            kind = {str(r["table_name"]): str(r["table_type"])
+                    for r in self._catalog_rows(
+                        side, name, "select table_name, table_type from"
+                        " information_schema.tables where table_schema"
+                        " = %s")}
+            columns, generated = {}, {}
+            for r in self._catalog_rows(
+                    side, name, "select * from information_schema.columns"
+                    " where table_schema = %s order by table_name,"
+                    " ordinal_position"):
+                t, c = str(r["table_name"]), str(r["column_name"])
+                typ = str(r["column_type"])
+                expr = " ".join(str(r.get("generation_expression")
+                                    or "").split())
+                if expr:
+                    generated.setdefault(t, set()).add(c)
+                columns.setdefault(t, []).append(Column(
+                    c, typ, canon.type_class("mysql", typ) or "",
+                    str(r["is_nullable"]).upper() == "YES",
+                    default_shown(mariadb, r["data_type"],
+                                  r["column_default"], r["extra"]),
+                    r.get("collation_name") and str(r["collation_name"]),
+                    self._column_extra(r["extra"], expr)))
+            keys, indexes, plain = {}, {}, {}
+            for r in self._catalog_rows(
+                    side, name, "select * from information_schema.statistics"
+                    " where table_schema = %s order by table_name,"
+                    " index_name, seq_in_index"):
+                t, ix = str(r["table_name"]), str(r["index_name"])
+                col = r.get("column_name")
+                expr = r.get("expression")
+                part = r.get("sub_part")
+                one = plain.setdefault((t, ix), [
+                    int(r["non_unique"]) == 0, [], True, [], r])
+                if col is None or expr is not None or part is not None:
+                    one[2] = False
+                if col is not None:
+                    one[1].append(str(col))
+                said = (f"({' '.join(str(expr).split())})" if expr is not None
+                        else str(col) + (f"({part})" if part is not None
+                                         else ""))
+                one[3].append(said + (" desc" if str(r.get("collation")
+                                                     or "") == "D" else ""))
+            for (t, ix), (unique, cols, _, said, r) in plain.items():
+                if ix == "PRIMARY":
+                    # only the columns the table shows: MariaDB adds a
+                    # system-versioned table's hidden `row_end` to its key
+                    shown = {c.name for c in columns.get(t, [])}
+                    keys[t] = tuple(c for c in cols if c in shown)
+                    continue
+                how = [str(r.get("index_type") or "").lower()]
+                how = [h for h in how if h and h != "btree"]
+                if str(r.get("is_visible") or "YES").upper() == "NO" or \
+                        str(r.get("ignored") or "NO").upper() == "YES":
+                    how.append("invisible")
+                indexes.setdefault(t, []).append(Index(
+                    ix, tuple(said), bool(unique), " ".join(how)))
+            fks = {}
+            for r in self._catalog_rows(
+                    side, name, "select k.table_name, k.constraint_name,"
+                    " k.column_name, k.referenced_table_schema,"
+                    " k.referenced_table_name, k.referenced_column_name,"
+                    " r.update_rule, r.delete_rule from"
+                    " information_schema.key_column_usage k join"
+                    " information_schema.referential_constraints r on"
+                    " r.constraint_schema = k.constraint_schema and"
+                    " r.constraint_name = k.constraint_name and r.table_name"
+                    " = k.table_name where k.table_schema = %s and"
+                    " k.referenced_table_name is not null order by"
+                    " k.table_name, k.constraint_name, k.ordinal_position"):
+                t = str(r["table_name"])
+                ref = str(r["referenced_table_name"])
+                if str(r["referenced_table_schema"]) != name:
+                    ref = f"{r['referenced_table_schema']}.{ref}"
+                mine = fks.setdefault(t, {}).setdefault(
+                    str(r["constraint_name"]),
+                    [[], ref, [], str(r["delete_rule"]).lower(),
+                     str(r["update_rule"]).lower()])
+                mine[0].append(str(r["column_name"]))
+                mine[2].append(str(r["referenced_column_name"]))
+            others = {}
+            for t, said in self._checks_of(side, name) + \
+                    self._triggers_of(side, name):
+                others.setdefault(t, []).append(said)
+            tables = sorted(set(kind) | set(columns))
+            got = {"at": began, "kind": kind, "generated": generated,
+                   "indexes": {k: (v[0], v[1], v[2])
+                               for k, v in plain.items()},
+                   "catalog": Catalog(
+                       tables=tables, columns=columns, keys=keys,
+                       indexes=indexes,
+                       fks={t: [ForeignKey(n, tuple(f[0]), f[1],
+                                           tuple(f[2]), f[3], f[4])
+                                for n, f in got_fks.items()]
+                            for t, got_fks in fks.items()},
+                       others=others)}
+            known[at] = got
+            return got
+
+    @staticmethod
+    def _column_extra(extra, expr):
+        """What a column is besides its type, in one spelling for every
+        server: `auto_increment`, `on update current_timestamp`, `virtual
+        generated as (...)`, `invisible`. MySQL 8 marks an expression
+        default `DEFAULT_GENERATED`, which says how the default is kept
+        (`default_shown` reads it), not what the column is."""
+        words = " ".join(str(extra or "").lower().replace(
+            "default_generated", "").split())
+        words = re.sub(r"current_timestamp\(\)", "current_timestamp", words)
+        if expr:
+            words = re.sub(r"\b(virtual|stored) generated\b",
+                           lambda m: f"{m.group(0)} as ({expr})", words)
+            if " as (" not in words:
+                words = (words + f" generated as ({expr})").strip()
+        return words
+
+    def _checks_of(self, side, name):
+        """[(table, "check (...)")] of a database: each check by its clause
+        and whether it is enforced - not by its name, which the server
+        makes up where none was given. [] where the server keeps none
+        (MySQL before 8.0.16 reads a CHECK and drops it)."""
+        import pymysql
+        try:
+            owner = {str(r["constraint_name"]): (
+                str(r["table_name"]),
+                str(r.get("enforced") or "YES").upper())
+                for r in self._catalog_rows(
+                    side, name, "select * from"
+                    " information_schema.table_constraints where"
+                    " table_schema = %s and constraint_type = 'CHECK'")}
+            got = self._catalog_rows(
+                side, name, "select * from information_schema"
+                ".check_constraints where constraint_schema = %s")
+        except pymysql.err.MySQLError as e:
+            if e.args and e.args[0] in (1109, 1146):
+                return []
+            raise
+        out = []
+        for r in got:
+            table = r.get("table_name") or owner.get(
+                str(r["constraint_name"]), ("", ""))[0]
+            if not table:
+                continue
+            enforced = owner.get(str(r["constraint_name"]), ("", "YES"))[1]
+            clause = " ".join(str(r["check_clause"]).split())
+            out.append((str(table), f"check {clause}"
+                        + (" not enforced" if enforced == "NO" else "")))
+        return out
+
+    def _triggers_of(self, side, name):
+        """[(table, "trigger name before insert order 1 <md5>")]: each
+        trigger by what fires it and a hash of its body - who defined it
+        is the ownership check's (`_deep_ownership`)."""
+        import hashlib
+        out = []
+        for r in self._catalog_rows(
+                side, name, "select trigger_name, event_object_table,"
+                " action_timing, event_manipulation, action_order,"
+                " action_statement from information_schema.triggers where"
+                " trigger_schema = %s"):
+            body = " ".join(str(r["action_statement"] or "").split())
+            digest = hashlib.md5(body.encode(),
+                                 usedforsecurity=False).hexdigest()[:16]
+            out.append((str(r["event_object_table"]),
+                        f"trigger {r['trigger_name']}"
+                        f" {str(r['action_timing']).lower()}"
+                        f" {str(r['event_manipulation']).lower()}"
+                        f" order {r['action_order']} {digest}"))
+        return out
+
+    def catalog(self, side, db):
+        """This side's tables and views as `catalog.Catalog`, read in one
+        pass for the whole database and kept (`CATALOG_SECONDS`): what the
+        readers of one table's columns, key, rules and indexes take from."""
+        return self._shapes(side, db)["catalog"]
+
+    def shape_catalog(self, side, db):
+        """The catalogue of the tables in scope (`neutral_tables`), read
+        now: what drift compares from one reading to the next, a table at a
+        time by its fingerprint (`catalog.Catalog.shape`), with what
+        differs in words (`explain`) - each column's type with its length
+        and precision, null, default, collation, auto-increment, on-update
+        clock or generated expression, and each table's key, indexes,
+        foreign keys, checks and triggers. Drift compared a column's name
+        and type string (audit 2026-10-01, SC3)."""
+        from ..catalog import Catalog
+        whole = self._shapes(side, db, fresh=True)["catalog"]
+        keep = set(self.neutral_tables(side, db))
+        return Catalog(
+            tables=[t for t in whole.tables if t in keep],
+            columns={t: c for t, c in whole.columns.items() if t in keep},
+            keys={t: k for t, k in whole.keys.items() if t in keep},
+            indexes={t: i for t, i in whole.indexes.items() if t in keep},
+            fks={t: f for t, f in whole.fks.items() if t in keep},
+            others={t: o for t, o in whole.others.items() if t in keep})
+
+    def _shape_of(self, side, db, table):
+        """(the side's shapes, `table` as the catalogue names it) - read
+        again once where it is not there, for a table made since; the name
+        None where it is not there then either."""
+        t = _leaf(table)
+        got = self._shapes(side, db)
+        if t not in got["catalog"].columns:
+            got = self._shapes(side, db, fresh=True)
+        return got, (t if t in got["catalog"].columns else None)
 
     def neutral_columns(self, side, db, table):
-        rows = self._q(side, "select column_name, column_type"
-                             " from information_schema.columns"
-                             " where table_schema=%s and table_name=%s"
-                             " order by ordinal_position",
-                       (self._d(side, db), table))
-        return [(r[0], r[1]) for r in rows]
+        got, t = self._shape_of(side, db, table)
+        if t is None:
+            return []
+        return [(c.name, c.declared) for c in got["catalog"].columns[t]]
 
     def neutral_key(self, side, db, table):
-        return [r[0] for r in self._q(side, self.PK_SQL,
-                                      (self._d(side, db), table))]
+        """The primary key's columns in key order, from the catalogue: a
+        batch read or written asked it again every time (audit 2026-10-01,
+        SP2)."""
+        got, t = self._shape_of(side, db, table)
+        return list(got["catalog"].keys.get(t) or ()) if t else []
 
     def json_rewritten(self, side, db, numbers):
         """Asked of this server: the numbers go in as one JSON array and
@@ -451,19 +923,19 @@ class MySQLEngine(Engine):
         `neutral_batches`: one statement shape for both."""
         from .. import canon
         names = [n for n, _ in columns]
-        cols = ", ".join(canon.read_expr("mysql", f"`{n}`", c)
+        cols = ", ".join(canon.read_expr("mysql", _qi(n), c)
                          for n, c in columns)
         key = self.neutral_key(side, db, table)
         resume, args = "", []
         if key and after is not None:
             places = ", ".join(["%s"] * len(key))
-            keys = ", ".join(f"`{k}`" for k in key)
+            keys = ", ".join(_qi(k) for k in key)
             resume = f"({keys}) > ({places})"
             args = list(after)
         where = self._where(where, resume, bool(args), percent=True)
-        order = (" order by " + ", ".join(f"`{k}`" for k in key)) if key else ""
+        order = (" order by " + ", ".join(_qi(k) for k in key)) if key else ""
         cap = f" limit {int(limit)}" if key and limit else ""
-        return (f"select {cols} from `{self._d(side, db)}`.`{table}`"
+        return (f"select {cols} from {self._qualified(side, db, table)}"
                 f"{where}{order}{cap}", args or None, key, names)
 
     def neutral_batches(self, side, db, table, columns, size=1000,
@@ -503,9 +975,8 @@ class MySQLEngine(Engine):
         if not key or not keys:
             return {}
         sql, args = self._by_key_query(
-            f"`{self._d(side, db)}`.`{table}`", columns, key, list(keys),
-            lambda n: f"`{n}`", "%s",
-            where.replace("%", "%%") if where else None, "mysql")
+            self._qualified(side, db, table), columns, key, list(keys),
+            _qi, "%s", where.replace("%", "%%") if where else None, "mysql")
         rows = [list(r) for r in self._q(side, sql, args)]
         return self._by_key_map(columns, key, rows)
 
@@ -518,8 +989,8 @@ class MySQLEngine(Engine):
         values, out = list(values), []
         for i in range(0, len(values), 1000):
             sql, args = self._by_key_query(
-                f"`{self._d(side, db)}`.`{table}`", columns, list(match),
-                values[i:i + 1000], lambda n: f"`{n}`", "%s", None, "mysql")
+                self._qualified(side, db, table), columns, list(match),
+                values[i:i + 1000], _qi, "%s", None, "mysql")
             out += [list(r) for r in self._q(side, sql, args)]
         return out
 
@@ -528,20 +999,22 @@ class MySQLEngine(Engine):
             return 0
         from .. import canon
         names = [n for n, _ in columns]
-        cols = ", ".join(f"`{n}`" for n in names)
+        cols = ", ".join(_qi(n) for n in names)
         key = set(self.neutral_key(side, db, table))
-        sets = ", ".join(f"`{n}` = values(`{n}`)"
+        sets = ", ".join(f"{_qi(n)} = values({_qi(n)})"
                          for n in names if n not in key)
         # `on duplicate key update` rather than `replace into`: REPLACE
         # deletes the old row first, which fires delete triggers and drops
         # any column the incoming row does not carry
         tail = f" on duplicate key update {sets}" if sets else ""
         place = "(" + ", ".join(["%s"] * len(names)) + ")"
-        insert = (f"insert into `{self._d(side, db)}`.`{table}` ({cols})"
+        insert = (f"insert into {self._qualified(side, db, table)} ({cols})"
                   f" values {place}{tail}")
-        classes = [c for _, c in columns]
-        rows = [tuple(canon.write_value("mysql", c, v)
-                      for c, v in zip(classes, r)) for r in rows]
+        # a writer chosen once a column (`canon.sql_rows`): every value went
+        # through `write_value`, numbers included - measured 4.45 us a row
+        # of 8 columns against 0.51 letting a `str` or `bytes` through
+        # (audit 2026-10-01, SP14)
+        rows = canon.sql_rows([c for _, c in columns], rows, engine="mysql")
         conn = self._conn(side)
         try:
             with conn.cursor() as cur:
@@ -572,8 +1045,8 @@ class MySQLEngine(Engine):
         try:
             with conn.cursor() as cur:
                 gone = cur.execute(
-                    f"delete from {self._quote_ident(self._d(side, db))}"
-                    f".{self._quote_ident(table)}" + self._where(where))
+                    f"delete from {self._qualified(side, db, table)}"
+                    + self._where(where))
                 fencing.hold(self, side, db, cur)
             conn.commit()
         finally:
@@ -582,34 +1055,18 @@ class MySQLEngine(Engine):
 
     SQL_DIALECT = "mysql"
 
-    #: types whose default is written as a bare number
-    NUMERIC_TYPES = {"tinyint", "smallint", "mediumint", "int", "integer",
-                     "bigint", "decimal", "numeric", "float", "double",
-                     "real"}
+    #: types whose default is written as a bare number (`default_shown`)
+    NUMERIC_TYPES = NUMERIC_TYPES
 
     def neutral_column_rules(self, side, db, table):
-        rows = self._q(side, "select column_name, is_nullable,"
-                             " column_default, extra, data_type"
-                             " from information_schema.columns"
-                             " where table_schema=%s and table_name=%s",
-                       (self._d(side, db), table))
-        out = {}
-        for name, null, default, extra, typ in rows:
-            extra = str(extra or "").lower()
-            if default is None:
-                shown = None
-            elif "default_generated" in extra:
-                # an expression, which the catalogue keeps as written
-                shown = str(default)
-            elif str(typ).lower() in self.NUMERIC_TYPES:
-                shown = str(default)
-            else:
-                # a literal, which the catalogue keeps without its quotes
-                shown = "'" + str(default).replace("'", "''") + "'"
-            out[str(name)] = {"null": str(null).upper() == "YES",
-                              "default": shown,
-                              "identity": "auto_increment" in extra}
-        return out
+        """{column: {"null", "default", "identity"}} from the catalogue,
+        the default as SQL writes it whichever server wrote it there
+        (`default_shown`)."""
+        got, t = self._shape_of(side, db, table)
+        return {c.name: {"null": c.nullable, "default": c.default,
+                         "identity": "auto_increment" in c.extra}
+                for c in (got["catalog"].columns.get(t) or [] if t
+                          else [])}
 
     def default_works(self, side, db, expr, typ=None):
         try:
@@ -619,43 +1076,38 @@ class MySQLEngine(Engine):
             return False
 
     def neutral_indexes(self, side, db, table):
-        rows = self._q(side, "select index_name, non_unique, column_name,"
-                             " sub_part, expression"
-                             " from information_schema.statistics"
-                             " where table_schema=%s and table_name=%s"
-                             " and index_name <> 'PRIMARY'"
-                             " order by index_name, seq_in_index",
-                       (self._d(side, db), table))
-        got = {}
-        for name, non_unique, col, part, expr in rows:
-            one = got.setdefault(str(name), [not non_unique, [], True])
-            if expr is not None or col is None or part is not None:
-                one[2] = False
-            if col is not None:
-                one[1].append(str(col))
-        return [(n, u, c, ok) for n, (u, c, ok) in sorted(got.items())]
+        """[(name, unique, [columns], plain)] of the table's indexes but its
+        key, from the catalogue: `plain` False for one over an expression
+        or a part of a column, which another engine cannot be given as it
+        is."""
+        got, t = self._shape_of(side, db, table)
+        return sorted((ix, unique, list(cols), ok)
+                      for (tt, ix), (unique, cols, ok)
+                      in got["indexes"].items()
+                      if tt == t and ix != "PRIMARY")
 
     def execute_ddl(self, side, db, sql):
         self._target_only(side, "change a schema")
         self._q(side, sql)
+        self._forget_catalog(side, db)
 
     def neutral_create_index_sql(self, side, db, table, name, unique,
                                  columns):
-        return (f"create {'unique ' if unique else ''}index `{name}`"
-                f" on `{self._d(side, db)}`.`{table}` ("
-                + ", ".join(f"`{c}`" for c in columns) + ")")
+        return (f"create {'unique ' if unique else ''}index {_qi(name)}"
+                f" on {self._qualified(side, db, table)} ("
+                + ", ".join(_qi(c) for c in columns) + ")")
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
-        defs = [f"`{col[0]}`"
+        defs = [f"{_qi(col[0])}"
                 f" {canon.ddl_type('mysql', col[1], col[2], col[0] in key)}"
                 + self._column_tail(col[3] if len(col) > 3 else None,
                                     "mysql")
                 for col in columns]
         if key:
-            defs.append("primary key (" + ", ".join(f"`{k}`" for k in key)
+            defs.append("primary key (" + ", ".join(_qi(k) for k in key)
                         + ")")
-        return (f"create table `{self._d(side, db)}`.`{table}` ("
+        return (f"create table {self._qualified(side, db, table)} ("
                 + ", ".join(defs) + ")")
 
     def neutral_create(self, side, db, table, columns, key=()):
@@ -675,11 +1127,13 @@ class MySQLEngine(Engine):
             conn.commit()
         finally:
             conn.close()
+            self._forget_catalog(side, db)
         return ddl
 
     def local_table(self, table):
-        """The last component: this engine has no schemas to qualify with."""
-        return str(table).split(".")[-1]
+        """The table of a name that may carry its database (`_leaf`): this
+        engine has no schemas to qualify with."""
+        return _leaf(table)
 
     def _unwritable_columns(self, side, db, table):
         """MySQL refuses a value for a generated column too, with its own
@@ -690,19 +1144,10 @@ class MySQLEngine(Engine):
 
         Both kinds are excluded. A VIRTUAL column is not stored at all, so
         writing to it is refused just as flatly as to a STORED one, and
-        `generation_expression` is non-empty for both. Cached per table.
+        `generation_expression` is non-empty for both. From the catalogue.
         """
-        cache = self.__dict__.setdefault("_generated_cache", {})
-        target = self._d(side, db)
-        ident = (side, target, table)
-        if ident not in cache:
-            rows = self._q(side,
-                           "select column_name from information_schema.columns"
-                           " where table_schema = %s and table_name = %s"
-                           " and generation_expression <> ''",
-                           (target, table))
-            cache[ident] = {r[0] for r in rows}
-        return cache[ident]
+        got, t = self._shape_of(side, db, table)
+        return set(got["generated"].get(t) or ()) if t else set()
 
     #: Rows in one applied statement (`Engine._apply_each`).
     APPLY_ROWS = 1000
@@ -1469,7 +1914,6 @@ class MySQLEngine(Engine):
                                                   WriteRowsEvent)
 
         from .. import canon
-        ep = self.hop.source if side == "src" else self.hop.target
         for name, why in (
                 ("binlog_row_metadata",
                  "without it the binlog carries no column names and no"
@@ -1530,9 +1974,7 @@ class MySQLEngine(Engine):
             if held:
                 held["stream"].close()
             stream = BinLogStreamReader(
-                connection_settings={"host": ep.host, "port": ep.port,
-                                     "user": ep.user,
-                                     "passwd": ep.password},
+                connection_settings=self._binlog_settings(side),
                 server_id=int(self.hop.options.get("server_id", 4379)),
                 blocking=False, resume_stream=True,
                 log_file=token.get("log_file"),
@@ -1800,14 +2242,21 @@ class MySQLEngine(Engine):
             return None
         return {"seconds": max(int(closed + expire - time.time()), 0)}
 
+    def _binlog_settings(self, side):
+        """How a binlog reader signs in to one side, the hop's TLS with it
+        (`Endpoint.tls_forms`): the change stream was read in clear text
+        from a side every other connection to was encrypted (audit
+        2026-10-01, SEC2)."""
+        ep = self._ep(side)
+        return {"host": ep.host, "port": ep.port, "user": ep.user,
+                "passwd": ep.password, **ep.tls_forms("mysql")["driver"]}
+
     def _binlog_started(self, side, name):
         """The time on the format event a binlog file opens with."""
         from pymysqlreplication import BinLogStreamReader
         from pymysqlreplication.event import FormatDescriptionEvent
-        ep = self.hop.source if side == "src" else self.hop.target
         stream = BinLogStreamReader(
-            connection_settings={"host": ep.host, "port": ep.port,
-                                 "user": ep.user, "passwd": ep.password},
+            connection_settings=self._binlog_settings(side),
             server_id=int(self.hop.options.get("server_id", 4379)),
             blocking=False, resume_stream=True, log_file=name, log_pos=4,
             only_events=[FormatDescriptionEvent])
@@ -1961,17 +2410,68 @@ class MySQLEngine(Engine):
             if first:
                 time.sleep(0.05)
 
+    def _json_as_is(self, names):
+        """SQL true for a row whose JSON values (`names`) MySQL writes as
+        canon's text of them already (`canon.json_text`): MySQL keeps an
+        object's keys by their length and then their bytes, the last of a
+        key given twice, and writes `", "` and `": "` between - canon's
+        order and spelling. What it writes otherwise is left to the fold
+        here: a number with a fraction or an exponent (a JSON number not a
+        whole one is a double in MySQL: `1.10` comes back `1.1`, `1e2`
+        `100.0`), any escape (a backslash), and the one control character
+        the server is not known to escape as canon does (0x1F). A string
+        that only looks like such a number is folded too: slower, never
+        different."""
+        out = []
+        for n in names:
+            t = f"cast({_qi(n)} as char)"
+            out.append(f"({_qi(n)} is null or not ({t} regexp '[0-9][.eE]'"
+                       f" or locate(char(92 using utf8mb4), {t}) > 0"
+                       f" or locate(char(31 using utf8mb4), {t}) > 0))")
+        return " and ".join(out)
+
+    def _json_on_server(self, side):
+        """Whether this side's JSON is MySQL's own: MariaDB keeps a JSON
+        column as the text it was given, TiDB orders an object's keys
+        another way."""
+        return self.CANON_ENGINE == "mysql" and \
+            self._side_brand(side).name != "mariadb"
+
     def neutral_digest(self, side, db, table, columns, where=None):
+        """(rows, digest) of a table as canon renders its rows, summed by
+        the server (`canon.row_expr`, `canon.digest_expr`).
+
+        A JSON column was folded in this process for every row of every
+        cross-engine proof - at a million rows the copy took 8 s and its
+        proof 24-26 s (backlog P0-DEPTH 7). The rows whose documents MySQL
+        writes as canon does (`_json_as_is`) are digested by the server
+        now, and only the rest read and folded here (`canon.fold_batches`):
+        the digest is a sum over rows, so the two parts add up to what the
+        fold of every row gives. A class the server renders no way of
+        canon's folds the table here, as before."""
         from .. import canon
-        if any(canon.folded_here(c) for _, c in columns):
+        jsons = [n for n, c in columns if c == "json"]
+        folded = [c for _, c in columns if canon.folded_here(c)]
+        if folded and (len(folded) != len(jsons)
+                       or not self._json_on_server(side)):
             return canon.fold_batches(columns, self.neutral_batches(
                 side, db, table, columns, 5000, where=where))
         row = canon.row_expr("mysql", columns)
+        exact = self._json_as_is(jsons)
         r = self._q(side, f"select count(*),"
                           f" {canon.digest_expr('mysql', row)}"
-                          f" from `{self._d(side, db)}`.`{table}`"
-                          + self._where(where))
-        return (int(r[0][0]), str(r[0][1]))
+                          f" from {self._qualified(side, db, table)}"
+                          + self._where(" and ".join(
+                              p for p in (f"({where})" if where else "",
+                                          exact) if p)))
+        n, total = int(r[0][0]), int(r[0][1])
+        if jsons:
+            k, rest = canon.fold_batches(columns, self.neutral_batches(
+                side, db, table, columns, 5000,
+                where=(f"({where}) and " if where else "")
+                + f"not ({exact})"))
+            n, total = n + int(k), total + int(rest)
+        return (n, str(total))
 
     def purge_backlog(self, side):
         """InnoDB's history list length - the undo not yet purged, which is
@@ -2003,23 +2503,35 @@ class MySQLEngine(Engine):
             return {"version": r[0][0], "version_comment": r[0][1]}
         return (one("src"), one("dst"))
 
-    def _q(self, side, sql, args=None, fresh=False):
-        # retry the connect+query as a unit so a TLS/socket blip clears
-        def once():
-            conn = self._conn(side)
-            try:
-                with conn.cursor() as cur:
-                    if fresh:
-                        try:
-                            cur.execute("set session"
-                                        " information_schema_stats_expiry = 0")
-                        except Exception:
-                            pass
-                    cur.execute(sql, args)
-                    return cur.fetchall()
-            finally:
-                conn.close()
-        return with_retry(once, label=f"mysql query {side}")
+    def _q(self, side, sql, args=None, fresh=False, named=False):
+        """The rows `sql` answers on one side (as dicts where `named`).
+
+        A statement that reads (`_READS`) is asked on this thread's kept
+        connection (`_kept`), and asked again where the connection failed
+        on the way (`util.with_retry`). Any other - DDL, a SET, a KILL, a
+        replica's start - runs on a connection of its own, as every
+        statement did, and is tried again only where it failed while
+        connecting: a statement sent again after `Lost connection` may
+        have been applied already (audit 2026-10-01, W11). `fresh` reads
+        the catalogue's statistics as they are now, not as cached up to a
+        day (`information_schema_stats_expiry`)."""
+        if self._READS.match(sql) is None:
+            def once():
+                conn = self._conn(side, retry=False)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, args)
+                        if named:
+                            cols = [d[0] for d in (cur.description or ())]
+                            return [dict(zip(cols, r))
+                                    for r in cur.fetchall()]
+                        return cur.fetchall()
+                finally:
+                    conn.close()
+            return with_retry(once, label=f"mysql statement {side}",
+                              writes=True)
+        return with_retry(lambda: self._asked(side, sql, args, fresh, named),
+                          label=f"mysql query {side}")
 
     def _q_named(self, side, sql):
         """`_q`, keeping the column names.
@@ -2028,34 +2540,7 @@ class MySQLEngine(Engine):
         order is not a contract and whose names differ between MySQL and
         MariaDB. Reading it by index would be guessing twice.
         """
-        def once():
-            conn = self._conn(side)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(sql)
-                    cols = [d[0] for d in (cur.description or ())]
-                    return [dict(zip(cols, r)) for r in cur.fetchall()]
-            finally:
-                conn.close()
-        return with_retry(once, label=f"mysql named query {side}")
-
-    def _rows_utc(self, side, sql):
-        """Read with the session time_zone pinned to +00:00 so UNIX_TIMESTAMP
-        on a DATETIME is comparable across sides regardless of server tz -
-        the mysql equivalent of the postgres UTC pin used for tz-shift audit."""
-        def once():
-            conn = self._conn(side)
-            try:
-                with conn.cursor() as cur:
-                    try:
-                        cur.execute("set time_zone = '+00:00'")
-                    except Exception:
-                        pass
-                    cur.execute(sql)
-                    return cur.fetchall()
-            finally:
-                conn.close()
-        return with_retry(once, label=f"mysql utc {side}")
+        return self._q(side, sql, named=True)
 
     def _d(self, side, db):
         """Resolve the physical db name for a side. Source keeps the given
@@ -2087,22 +2572,33 @@ class MySQLEngine(Engine):
                       and not r[0].startswith("__")
                       and not self.hop.excluded(r[0]))
 
+    def _client_argv(self, program, side):
+        """`program` - the client or its dump - signed in to one side with
+        the hop's TLS among its flags (`_client_tls`): the schema's dump
+        ran without them, so an account that must show a certificate could
+        not sign in and the server's was never checked (audit 2026-10-01,
+        SC17). The password goes in the environment (`_client_env`): on
+        the command line every process listing on the machine reads it."""
+        ep = self._ep(side)
+        return [program, "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
+                *self._client_tls(side)]
+
+    def _client_env(self, side):
+        return {"MYSQL_PWD": self._ep(side).password or ""}
+
     def _dump_schema(self, side, db, physical=None):
-        ep = self.hop.source if side == "src" else self.hop.target
         if not which("mysqldump"):
             raise SystemExit("the MySQL client is not installed on this"
                              " machine: migkit doctor --install")
         pdb = physical or self._d(side, db)
         left = [f"--ignore-table={pdb}.{t}"
                 for t in sorted(self._left_out_of_schema(db, side))]
-        # the password in the environment: on the command line every
-        # process listing on the machine could read it
-        p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
+        p = run([*self._client_argv("mysqldump", side),
                  "--no-data", "--routines", "--triggers",
                  "--events", "--skip-comments", "--skip-dump-date",
                  "--column-statistics=0",
                  f"--ignore-table={pdb}.migkit_changelog", *left, pdb],
-                check=False, env={"MYSQL_PWD": ep.password})
+                check=False, env=self._client_env(side))
         if p.returncode != 0:
             raise RuntimeError(p.stderr.strip())
         text = self._canon_ddl(p.stdout)
@@ -2121,8 +2617,8 @@ class MySQLEngine(Engine):
         out = {t for t in self._all_tables(side, db)
                if self.hop.excluded(db, t)}
         for t in self.mapped_tables(db):
-            leaf = t.rpartition(".")[2]
-            out.add(self.hop.target_table(db, leaf).rpartition(".")[2]
+            leaf = _leaf(t)
+            out.add(_leaf(self.hop.target_table(db, leaf))
                     if side == "dst" else leaf)
         return out
 
@@ -2154,33 +2650,138 @@ class MySQLEngine(Engine):
             r.whole_table = any(l[1:].lstrip().upper().startswith(
                 "CREATE TABLE") for l in changed)
             res.append(r)
+        res.append(self._check_tables(db))
         res.append(self.check_objects(db))
         if which("atlas") and self.hop.options.get("atlas", True):
-            at = self._atlas(db)
-            if at:
-                res.append(at)
+            res.append(self._atlas(db))
         # after the demotion, not before: the schema-aware comparison left
         # these tables out, so its reading is no authority over them
         return self._atlas_authoritative(res) + self._mapped_schema(db)
 
+    #: one spelling for what two servers - two versions, or MySQL and
+    #: MariaDB - write two ways about one schema: an integer's display
+    #: width (5.7 and MariaDB `int(11)`, 8.0 `int`), which says nothing of
+    #: what it holds but where it is zero-filled, and `utf8` for `utf8mb3`
+    _WIDTH = re.compile(r"^(tinyint|smallint|mediumint|int|integer|bigint|"
+                        r"year)\(\d+\)(?!.*zerofill)")
+
+    def _comparable_shape(self, cat):
+        """`cat` as a schema check across a hop's two sides compares it:
+        each column's type, collation, generated expression and each
+        check's clause in one spelling for both servers (`_WIDTH`, back
+        quotes left out) - a server's way of writing it is not a
+        difference between the two schemas."""
+        from ..catalog import Catalog
+        import dataclasses
+
+        def coll(c):
+            return re.sub(r"^utf8_", "utf8mb3_", c) if c else c
+        cols = {t: [c._replace(declared=self._WIDTH.sub(r"\1", c.declared),
+                               collation=coll(c.collation),
+                               extra=c.extra.replace("`", ""))
+                    for c in got] for t, got in cat.columns.items()}
+        return dataclasses.replace(
+            cat, columns=cols,
+            others={t: [o.replace("`", "") if o.startswith("check ") else o
+                        for o in got] for t, got in cat.others.items()})
+
+    def _check_tables(self, db):
+        """Every table compared whole on both sides by the one comparer
+        (`catalog.Catalog.explain`), read in one pass a side
+        (`shape_catalog`): its columns by their declared types with length,
+        precision and scale - a narrower target column named with why
+        (`verdict.narrowing`) - null, default, collation, auto-increment,
+        on-update clock and generated expression; its key, its indexes,
+        foreign keys, checks and triggers. The schema's text was compared,
+        and that comparison was demoted wherever the schema-aware one read
+        the two as synced - which inspects no trigger - so this one is
+        never demoted (audit 2026-10-01, SC16)."""
+        src = self._comparable_shape(self.shape_catalog("src", db))
+        dst = self._comparable_shape(self.shape_catalog("dst", db))
+        left = {side: self._left_out_of_schema(db, side)
+                for side in ("src", "dst")}
+        a = {t for t in src.tables if t not in left["src"]}
+        b = {t for t in dst.tables if t not in left["dst"]}
+        bad = [f"missing table {t}" for t in sorted(a - b)]
+        bad += [f"extra table {t}" for t in sorted(b - a)]
+        for t in sorted(a & b):
+            if src.fingerprint(t) == dst.fingerprint(t):
+                continue
+            said = src.explain(dst, t, self.CANON_ENGINE,
+                               added="only on the target",
+                               dropped="missing on the target")
+            bad.append(f"{t}: {', '.join(said)}")
+        out = self.hop.report_dir(db) / "schema-tables.diff"
+        if not bad:
+            out.unlink(missing_ok=True)
+            return Result("schema", f"{db} tables", "ok",
+                          f"{len(a)} tables the same on both sides, every"
+                          " column, key, index, foreign key, check and"
+                          " trigger")
+        from .. import durable
+        durable.write_atomic(out, "\n".join(bad) + "\n")
+        r = Result("schema", f"{db} tables", "diff",
+                   f"{len(bad)} tables differ: " + "; ".join(bad[:3]),
+                   str(out), "apply missing DDL from schema-src.sql on"
+                             " target")
+        r.whole_table = bool(a ^ b)
+        return r
+
+    #: what each kind of object is read as: its name, and the text its
+    #: definition is compared by (`check_objects`)
+    OBJECT_SQL = {
+        "table": "select table_name, null from information_schema.tables"
+                 " where table_schema = %s and table_type in"
+                 " ('BASE TABLE', 'SYSTEM VERSIONED')",
+        "view": "select table_name, view_definition from"
+                " information_schema.views where table_schema = %s",
+        "function": "select r.routine_name, concat(r.dtd_identifier, ' ',"
+                    " r.is_deterministic, ' ', r.sql_data_access, ' ',"
+                    " r.routine_definition) from information_schema.routines"
+                    " r where r.routine_schema = %s and r.routine_type ="
+                    " 'FUNCTION'",
+        "procedure": "select r.routine_name, concat(r.is_deterministic, ' ',"
+                     " r.sql_data_access, ' ', r.routine_definition) from"
+                     " information_schema.routines r where r.routine_schema"
+                     " = %s and r.routine_type = 'PROCEDURE'",
+        "trigger": "select trigger_name, concat(event_object_table, ' ',"
+                   " action_timing, ' ', event_manipulation, ' ',"
+                   " action_order, ' ', action_statement) from"
+                   " information_schema.triggers where trigger_schema = %s",
+        "event": "select event_name, concat(event_type, ' ',"
+                 " coalesce(interval_value, ''), ' ',"
+                 " coalesce(interval_field, ''), ' ', on_completion, ' ',"
+                 " event_definition) from information_schema.events where"
+                 " event_schema = %s",
+        "index": "select concat(table_name, '.', index_name), null from"
+                 " information_schema.statistics where table_schema = %s"
+                 " group by table_name, index_name",
+    }
+
+    def _routine_params(self, side, name):
+        """{routine: its parameters as one text}, every routine of the
+        database in one statement."""
+        out = {}
+        for spec, mode, pname, dtd in self._q(
+                side, "select specific_name, parameter_mode, parameter_name,"
+                      " dtd_identifier from information_schema.parameters"
+                      " where specific_schema = %s and ordinal_position > 0"
+                      " order by specific_name, ordinal_position", (name,)):
+            out[str(spec)] = (out.get(str(spec), "")
+                              + f"({mode} {pname} {dtd})")
+        return out
+
     def check_objects(self, db):
-        queries = {
-            "table": "select table_name from information_schema.tables"
-                     " where table_schema=%s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')",
-            "view": "select table_name from information_schema.tables"
-                    " where table_schema=%s and table_type='VIEW'",
-            "function": "select routine_name from information_schema.routines"
-                        " where routine_schema=%s and routine_type='FUNCTION'",
-            "procedure": "select routine_name from information_schema.routines"
-                         " where routine_schema=%s and routine_type='PROCEDURE'",
-            "trigger": "select trigger_name from information_schema.triggers"
-                       " where trigger_schema=%s",
-            "event": "select event_name from information_schema.events"
-                     " where event_schema=%s",
-            "index": "select concat(table_name, '.', index_name)"
-                     " from information_schema.statistics"
-                     " where table_schema=%s group by table_name, index_name",
-        }
+        """Views, routines, triggers and events by their names and their
+        definitions; tables and indexes by their names (`_check_tables`
+        compares them whole). A routine's, a trigger's or a view's body
+        that changed read ok: this compared names only, and the comparison
+        that demotes the textual one inspects none of them (audit
+        2026-10-01, SC16). Who defined an object and its SQL SECURITY are
+        the ownership check's (`_deep_ownership`); an event's on-off
+        switch is the cutover's. A definition the account may not read
+        on a side is said, never read as the same."""
+        import hashlib
         inv = {}
         # a mapped table's indexes are over the columns the mapping names
         left = {side: self._left_out_of_schema(db, side)
@@ -2200,17 +2801,46 @@ class MySQLEngine(Engine):
             table = name.split(".", 1)[0]
             return not (typ == "index" and (table in left[side]
                                             or table in working[side]))
-        for typ, sql in queries.items():
-            a = {r[0] for r in self._q("src", sql, (db,))
-                 if kept("src", typ, r[0])}
-            b = {r[0] for r in self._q("dst", sql, (self._d("dst", db),))
-                 if kept("dst", typ, r[0])}
+
+        def read(side, typ, sql, params):
+            name = self._d(side, db)
+            out = {}
+            for n, text in self._q(side, sql, (name,)):
+                if not kept(side, typ, n):
+                    continue
+                if typ not in ("table", "index") and not str(
+                        text or "").strip():
+                    # a definition this account may not read comes back
+                    # NULL or empty: not read, never the same
+                    out[str(n)] = None
+                    continue
+                text = " ".join(str(text or "").replace(
+                    _qi(name) + ".", "`<db>`.").split())
+                text = params.get(str(n), "") + text
+                out[str(n)] = hashlib.md5(
+                    text.encode(), usedforsecurity=False).hexdigest()
+            return out
+        unread = []
+        params = {side: self._routine_params(side, self._d(side, db))
+                  for side in ("src", "dst")}
+        for typ, sql in self.OBJECT_SQL.items():
+            a = read("src", typ, sql, params["src"] if typ in (
+                "function", "procedure") else {})
+            b = read("dst", typ, sql, params["dst"] if typ in (
+                "function", "procedure") else {})
+            both = sorted(set(a) & set(b))
+            unread += [f"{typ} {n}" for n in both
+                       if a[n] is None or b[n] is None]
             inv[typ] = {"src": len(a), "dst": len(b),
-                        "missing": sorted(a - b)[:50],
-                        "extra": sorted(b - a)[:50]}
+                        "missing": sorted(set(a) - set(b))[:50],
+                        "extra": sorted(set(b) - set(a))[:50],
+                        "differs": [n for n in both if a[n] is not None
+                                    and b[n] is not None
+                                    and a[n] != b[n]][:50]}
         out = self.hop.report_dir(db) / "objects.json"
         out.write_text(json.dumps(inv, indent=1))
-        bad = {t: v for t, v in inv.items() if v["missing"] or v["extra"]}
+        bad = {t: v for t, v in inv.items()
+               if v["missing"] or v["extra"] or v["differs"]}
         if bad:
             parts = []
             for t, v in bad.items():
@@ -2219,34 +2849,55 @@ class MySQLEngine(Engine):
                     m += " missing: " + ", ".join(v["missing"][:3])
                 if v["extra"]:
                     m += " extra: " + ", ".join(v["extra"][:3])
+                if v["differs"]:
+                    m += " defined differently: " + ", ".join(
+                        v["differs"][:3])
                 parts.append(m)
             return Result("schema", f"{db} objects", "diff", "; ".join(parts),
                           str(out),
                           "create missing objects on target from schema-src.sql")
         total = sum(v["src"] for v in inv.values())
+        if unread:
+            return Result("schema", f"{db} objects", "warn",
+                          f"{total} objects in {len(inv)} types all present"
+                          " on target; the definitions of"
+                          f" {len(unread)} could not be read by this account"
+                          f" on one side, so they were not compared: "
+                          + ", ".join(unread[:5]), str(out),
+                          "grant SHOW_ROUTINE (or SELECT on mysql.*) to the"
+                          " checking account")
         return Result("schema", f"{db} objects", "ok",
-                      f"{total} objects in {len(inv)} types,"
-                      " all present on target")
+                      f"{total} objects in {len(inv)} types, all present"
+                      " on target and defined alike")
 
     def snapshot_state(self, db, state_dir, kind="all"):
+        from .. import durable
         q = ("select table_name, auto_increment from information_schema.tables"
              " where table_schema=%s and auto_increment is not null")
         rows = self._q("dst", q, (self._d("dst", db),), fresh=True)
-        (state_dir / "dst-autoinc.txt").write_text(
-            "".join(f"{t}|{v}\n" for t, v in sorted(rows)))
+        durable.write_atomic(state_dir / "dst-autoinc.txt",
+                             "".join(f"{t}|{v}\n" for t, v in sorted(rows)))
         # sequence-only repair rolls back from the auto_increment snapshot alone
         if kind == "sequences":
             return
-        (state_dir / "dst-schema.sql").write_text(self._dump_schema("dst", db))
+        durable.write_atomic(state_dir / "dst-schema.sql",
+                             self._dump_schema("dst", db))
+
+    def _schema_url(self, side, db):
+        """One side as the schema comparison's address: `Endpoint.url`
+        (user and password escaped whole), the TLS in the query its
+        driver reads (`tls_forms`' `schema_query`). It went without TLS,
+        so under `require_secure_transport` the comparison failed and
+        vanished from the check without a word (audit 2026-10-01,
+        SC17)."""
+        ep = self._ep(side)
+        query = ep.tls_forms("mysql")["schema_query"]
+        return ep.url("mysql", self._d(side, db), tls=False) + (
+            f"?{query}" if query else "")
 
     def _schema_urls(self, db):
         """(source, target) as the schema comparison's URLs."""
-        from urllib.parse import quote
-        s, t = self.hop.source, self.hop.target
-        return (f"mysql://{s.user}:{quote(s.password, safe='')}"
-                f"@{s.host}:{s.port}/{db}",
-                f"mysql://{t.user}:{quote(t.password, safe='')}"
-                f"@{t.host}:{t.port}/{self._d('dst', db)}")
+        return self._schema_url("src", db), self._schema_url("dst", db)
 
     def _schema_excludes(self, db):
         """What the schema comparison leaves out: migkit's own table, and
@@ -2256,15 +2907,28 @@ class MySQLEngine(Engine):
             for name in sorted(self._left_out_of_schema(db, side))]
 
     def _atlas(self, db):
-        from ..movers import schema_diff
+        """The schema-aware comparison and the DDL that would align the
+        target, or a `skip` saying why it did not run: it vanished from
+        the check where it failed (audit 2026-10-01, SC16)."""
+        from ..movers import DRIVEN, schema_diff
+        from ..redact import Redactor
+        from ..wording import without_programs
         su, tu = self._schema_urls(db)
         excludes = self._schema_excludes(db)
+
+        def not_run(why):
+            said = (str(why).strip().splitlines() or ["?"])[-1]
+            said = without_programs(Redactor(self.hop)(said),
+                                    DRIVEN + ("atlas",), "the comparison")
+            return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "skip",
+                          "the schema-aware comparison did not run: "
+                          + said[:160])
         try:
             p = schema_diff(tu, su, excludes)
-        except Exception:
-            return None
+        except Exception as e:  # noqa: BLE001 - said in the row
+            return not_run(e)
         if p.returncode != 0:
-            return None
+            return not_run(p.stderr or f"exit {p.returncode}")
         text = p.stdout.strip()
         if not text or "Schemas are synced" in text:
             # both files, not just the fix: an undo left behind after the
@@ -2311,8 +2975,9 @@ class MySQLEngine(Engine):
         what counts as a table.
         """
         rows = self._q(side, "select table_name from information_schema.tables"
-                             " where table_schema=%s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
-                             " and table_name not like 'migkit%%'"
+                             " where table_schema=%s and table_type in"
+                             " ('BASE TABLE', 'SYSTEM VERSIONED')"
+                             f" and table_name not in {OWN_SQL}"
                              " order by 1", (self._d(side, db),))
         return [r[0] for r in rows]
 
@@ -2959,13 +3624,7 @@ class MySQLEngine(Engine):
         # checksum's where it read only the groups
         src, dst = (range(n) for n in read_whole.get("rows", counts))
         d = self.hop.report_dir(db)
-        for name, rows in (("missing", missing), ("extra", extra),
-                           ("changed", changed)):
-            p = d / f"data-{t}.{name}"
-            if rows:
-                p.write_text("\n".join(rows) + "\n")
-            elif p.exists():
-                p.unlink()
+        self._write_pk_files(db, t, missing, extra, changed)
         if not (missing or extra or changed):
             # The sums differed and no row does: a write between the
             # reads, if the sums now agree - asked, not assumed. Where they
@@ -3070,12 +3729,16 @@ class MySQLEngine(Engine):
         return missing, extra, changed
 
     def _write_pk_files(self, db, t, missing, extra, changed):
+        """The keys a check found differing, one file a kind, written whole
+        or not at all (`durable`): the repair reads them back, and a file a
+        crash cut repairs part of a table and says it repaired it."""
+        from .. import durable
         d = self.hop.report_dir(db)
         for kind, rows in (("missing", missing), ("extra", extra),
                            ("changed", changed)):
             f = d / f"data-{t}.{kind}"
             if rows:
-                f.write_text("\n".join(rows) + "\n")
+                durable.write_atomic(f, "\n".join(rows) + "\n")
             elif f.exists():
                 f.unlink()
 
@@ -3092,8 +3755,13 @@ class MySQLEngine(Engine):
         except ImportError:
             return [Result("delta", db, "error",
                            "pip install mysql-replication for delta verify")]
+        from .. import durable
+        # where the last clean verify left the binlog: a position, written
+        # whole or not at all, and a torn one stops rather than verify from
+        # a guess (`durable`)
         state = self.hop.report_dir(db) / "delta-pos.json"
-        if not state.exists():
+        ck = durable.read_state(state, "position")
+        if ck is None:
             try:
                 pos = self._binlog_position("src")
             except Exception:
@@ -3101,18 +3769,15 @@ class MySQLEngine(Engine):
             if not pos:
                 return [Result("delta", db, "error",
                                "cannot read binlog position on source")]
-            state.write_text(json.dumps({"log_file": pos[0],
-                                         "log_pos": pos[1]}))
+            durable.write_json(state, {"log_file": pos[0],
+                                       "log_pos": pos[1]})
             return [Result("delta", db, "ok",
                            f"baseline {pos[0]}:{pos[1]} recorded,"
                            " changes are tracked from this point on")]
         from .. import rowtext
         from ..binlog_payload import register
-        ck = json.loads(state.read_text())
-        s = self.hop.source
         stream = BinLogStreamReader(
-            connection_settings={"host": s.host, "port": s.port,
-                                 "user": s.user, "passwd": s.password},
+            connection_settings=self._binlog_settings("src"),
             server_id=int(self.hop.options.get("server_id", 4379)) + 1,
             resume_stream=True, blocking=False,
             log_file=ck.get("log_file"), log_pos=ck.get("log_pos"),
@@ -3182,7 +3847,7 @@ class MySQLEngine(Engine):
         end = end or {"log_file": ck.get("log_file"),
                       "log_pos": ck.get("log_pos")}
         if not touched and not nopk:
-            state.write_text(json.dumps(end))
+            durable.write_json(state, end)
             return [Result("delta", db, "ok",
                            "0 changes since last verified position")]
         res = []
@@ -3220,7 +3885,7 @@ class MySQLEngine(Engine):
             res.append(Result("delta", f"{db}.{t}", "skip",
                               "no pk, cannot delta-verify"))
         if clean:
-            state.write_text(json.dumps(end))
+            durable.write_json(state, end)
             note = "position advanced"
         else:
             note = "position NOT advanced, window replays next cycle"
@@ -3247,36 +3912,61 @@ class MySQLEngine(Engine):
         smaller than the source's is what a mover truncating past its LOB
         limit leaves behind, and the row counts agree throughout.
         """
-        ddb = self._d("dst", db)
+        from ..util import Probes
         try:
-            cols = [(r[0], r[1]) for r in self._q(
-                "src", "select table_name, column_name"
-                       " from information_schema.columns"
-                       " where table_schema = %s and data_type in ("
-                       + ", ".join(["%s"] * len(self.LOB_TYPES)) + ")"
-                       " order by table_name, column_name",
-                       (db, *self.LOB_TYPES))]
+            cols = self._deep_columns(db, self.LOB_TYPES)
             limit = int(self._q("dst", "select @@max_allowed_packet")[0][0])
         except Exception as e:
             return Result("deep", f"{db} lobs", "error",
                           "could not size the large columns:"
                           f" {str(e).splitlines()[-1][:90]}")
+        there = set(self._all_tables("dst", db))
+        probes = Probes("large columns", [f"{t}.{c}" for t, cs in
+                                          cols.items() for c in cs])
         findings = []
-        for table, column in cols:
-            q = "select coalesce(max(length(`{}`)), 0) from `{}`.`{}`"
+        for table, columns in cols.items():
+            # every large column of a table in one scan a side
+            exprs = ", ".join(f"coalesce(max(length({_qi(c)})), 0)"
+                              for c in columns)
             try:
-                src = int(self._q("src", q.format(column, db, table))[0][0])
-            except Exception:
+                src = self._q("src", f"select {exprs} from"
+                                     f" {self._qualified('src', db, table)}")[0]
+                dst = (self._q("dst", f"select {exprs} from"
+                                      f" {self._qualified('dst', db, table)}"
+                               )[0] if table in there
+                       else [None] * len(columns))
+            except Exception as e:  # noqa: BLE001 - named in the result
+                for c in columns:
+                    probes.failed(f"{table}.{c}", e)
                 continue
-            try:
-                dst = int(self._q("dst", q.format(column, ddb, table))[0][0])
-            except Exception:
-                dst = None
-            findings.append((table, column, src, dst, limit))
-        return self._lob_result(
+            for c, s, d in zip(columns, src, dst):
+                probes.done(f"{table}.{c}")
+                findings.append((table, c, int(s), None if d is None
+                                 else int(d), limit))
+        r = self._lob_result(
             db, findings, "server's max_allowed_packet",
             "raise the mover's LOB size limit above the biggest value, or"
             " move those tables with a path that does not truncate")
+        r.status, r.detail = probes.verdict(r.status, r.detail)
+        return r
+
+    def _deep_columns(self, db, data_types):
+        """{table: [column, ...]} of the source's tables in scope whose
+        columns are of `data_types`, in one statement: what a deep check
+        plans to read, every one of them - it read the first 30 and said
+        `ok` over the rest (audit 2026-10-01, LG2)."""
+        got = {}
+        scope = set(self._tables("src", db))
+        for t, c in self._q(
+                "src", "select table_name, column_name from"
+                       " information_schema.columns where table_schema = %s"
+                       " and data_type in ("
+                       + ", ".join(["%s"] * len(data_types)) + ")"
+                       " order by table_name, ordinal_position",
+                (db, *data_types)):
+            if str(t) in scope:
+                got.setdefault(str(t), []).append(str(c))
+        return got
 
     #: room around the largest row for the rest of its statement: its
     #: other columns, the INSERT text, and the small rows a loader packs in
@@ -3470,25 +4160,24 @@ class MySQLEngine(Engine):
                 if hit else super().why_it_stopped(message))
 
     def rows_present(self, db, tables):
-        ddb = self._d("dst", db)
         got = set()
         for name in tables:
-            _, _, tbl = name.rpartition(".")
             try:
-                if self._q("dst", f"select 1 from `{ddb}`.`{tbl}` limit 1"):
+                if self._q("dst", "select 1 from"
+                                  f" {self._qualified('dst', db, _leaf(name))}"
+                                  " limit 1"):
                     got.add(name)
             except Exception:
                 continue
         return got
 
     def moved_nothing(self, db):
-        """Which tables the source has rows in and the target does not."""
-        ddb = self._d("dst", db)
+        """Which tables the source has rows in and the target does not:
+        the tables a move carries (`_tables`) - it asked every table, the
+        ones the hop leaves alone and migkit's own too (audit 2026-10-01,
+        DU26)."""
         try:
-            names = [r[0] for r in self._q(
-                "src", "select table_name from information_schema.tables"
-                       " where table_schema = %s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
-                       " order by 1", (db,))]
+            names = self._tables("src", db)
             there = set(self._all_tables("dst", db))
         except Exception:
             return None
@@ -3529,7 +4218,7 @@ class MySQLEngine(Engine):
         done = 0
         for t in tables:
             try:
-                self._q("dst", f"analyze table `{ddb}`.`{t}`")
+                self._q("dst", f"analyze table {_qi(ddb)}.{_qi(t)}")
                 done += 1
             except Exception:
                 continue
@@ -3570,18 +4259,17 @@ class MySQLEngine(Engine):
                       " be guesswork")
 
     def _quote_ident(self, name):
-        return "`" + str(name).replace("`", "``") + "`"
+        return _qi(name)
 
     def _quote_literal(self, value):
-        """MySQL reads a backslash inside a string as an escape unless the
-        session sets NO_BACKSLASH_ESCAPES, which the default sql_mode does
-        not. Doubling the quote alone - correct everywhere else - would turn
-        a value holding `\\n` into a newline on the way in."""
-        return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
+        """`_ql`: a backslash doubled too, MySQL's escape inside a
+        string."""
+        return _ql(value)
 
     def _qualified(self, side, db, table):
-        return (self._quote_ident(self._d(side, db)) + "."
-                + self._quote_ident(table))
+        """`table` in the side's database `db` (the target's mapped), both
+        quoted (`_qi`)."""
+        return _qi(self._d(side, db)) + "." + _qi(table)
 
     def _scalar(self, side, db, sql):
         rows = self._q(side, sql)
@@ -3596,7 +4284,8 @@ class MySQLEngine(Engine):
         a zone that answers nothing would otherwise fingerprint the same as
         a zone with one fewer probe."""
         readings = ", ".join(
-            f"ifnull(convert_tz('{p}','UTC',Name),'?')" for p in self.TZ_PROBES)
+            f"ifnull(convert_tz({_ql(p)},'UTC',Name),'?')"
+            for p in self.TZ_PROBES)
         rows = self._q(side, "select Name, md5(concat_ws(','"
                              f", {readings})) from mysql.time_zone_name"
                              " order by Name")
@@ -3641,29 +4330,14 @@ class MySQLEngine(Engine):
         character" test, and the counting and the verdict are the base's."""
         findings, scanned = [], 0
         try:
-            cols = {}
-            place = ",".join(["%s"] * len(self.TEXT_TYPES))
-            for t, c in self._q("src",
-                                "select c.table_name, c.column_name"
-                                " from information_schema.columns c"
-                                " join information_schema.tables t"
-                                " on t.table_schema = c.table_schema"
-                                " and t.table_name = c.table_name"
-                                " where c.table_schema = %s"
-                                " and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
-                                " and c.table_name not like 'migkit%%'"
-                                f" and c.data_type in ({place})"
-                                " order by 1, 2",
-                                (db,) + self.TEXT_TYPES):
-                cols.setdefault(t, []).append(c)
+            cols = self._deep_columns(db, self.TEXT_TYPES)
             for table, columns in sorted(cols.items()):
-                quoted = ["`" + c.replace("`", "``") + "`" for c in columns]
+                quoted = [_qi(c) for c in columns]
                 where = " or ".join(f"length({q}) <> char_length({q})"
                                     for q in quoted)
                 rows = self._q("src",
                                f"select {', '.join(quoted)} from"
-                               f" `{db.replace('`', '``')}`."
-                               f"`{table.replace('`', '``')}`"
+                               f" {self._qualified('src', db, table)}"
                                f" where {where}"
                                f" limit {self.MOJIBAKE_SAMPLE}")
                 found, seen = self._mojibake_tally(table, columns, rows)
@@ -3701,7 +4375,7 @@ class MySQLEngine(Engine):
                                    " where c.table_schema = %s and"
                                    " t.table_type in ('BASE TABLE',"
                                    " 'SYSTEM VERSIONED')"
-                                   " and c.table_name not like 'migkit%%'"
+                                   f" and c.table_name not in {OWN_SQL}"
                                    f" and c.data_type in ({place})"
                                    " order by 1, 2",
                             (ddb,) + self.TEXT_TYPES):
@@ -4202,9 +4876,16 @@ class MySQLEngine(Engine):
         latest value)]) for the `datetime` columns an index leads - read
         by the index, so each is one probe (`zones`)."""
         name = self._d(side, db)
-        offset, now = self._q(side, "select timestampdiff(minute,"
-                                    " utc_timestamp(), now()),"
-                                    " utc_timestamp(6)")[0]
+        # in the server's own zone: every other session here is in UTC
+        # (`SESSION_ZONE`), where `now()` is the UTC clock
+        conn = self._connect(side, "zone")
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select timestampdiff(minute, utc_timestamp(),"
+                            " now()), utc_timestamp(6)")
+                offset, now = cur.fetchone()
+        finally:
+            conn.close()
         cols = self._q(side, "select s.table_name, s.column_name from"
                              " information_schema.statistics s join"
                              " information_schema.columns c on"
@@ -4243,8 +4924,9 @@ class MySQLEngine(Engine):
         # guardrails). Check the source tables that are about to be migrated.
         nopk = [r[0] for r in self._q("src",
                 "select t.table_name from information_schema.tables t"
-                " where t.table_schema=%s and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
-                " and t.table_name not like 'migkit%%'"
+                " where t.table_schema=%s and t.table_type in"
+                " ('BASE TABLE', 'SYSTEM VERSIONED')"
+                f" and t.table_name not in {OWN_SQL}"
                 " and not exists (select 1 from"
                 " information_schema.table_constraints tc"
                 " where tc.table_schema=t.table_schema"
@@ -4288,7 +4970,7 @@ class MySQLEngine(Engine):
                 " coalesce(character_set_name, ''),"
                 " coalesce(collation_name, ''), extra"
                 " from information_schema.columns where table_schema=%s"
-                " and table_name not like 'migkit%%' order by 1")
+                f" and table_name not in {OWN_SQL} order by 1")
         sc = {r[0]: r[1:] for r in self._q("src", colq, (db,))}
         dc = {r[0]: r[1:] for r in self._q("dst", colq, (ddb,))}
         drift = [f"{k}: src={sc[k]} dst={dc[k]}" for k in sorted(sc)
@@ -4315,7 +4997,7 @@ class MySQLEngine(Engine):
         from .. import verdict
         nq = ("select concat(table_name,'.',column_name), column_type"
               " from information_schema.columns"
-              " where table_schema=%s and table_name not like 'migkit%%'")
+              f" where table_schema=%s and table_name not in {OWN_SQL}")
         scn = dict(self._q("src", nq, (db,)))
         dcn = dict(self._q("dst", nq, (ddb,)))
         narrow = []
@@ -4327,130 +5009,15 @@ class MySQLEngine(Engine):
             if why:
                 narrow.append(f"{k}: {why}")
         res.append(verdict.narrowing_result(db, narrow))
-
-        # a constant per-row offset on a datetime/timestamp column is a tz
-        # conversion bug (mover applied a non-UTC session), not row corruption.
-        # Both sides read with time_zone pinned to +00:00, so a faithful copy
-        # compares as delta 0 and a systematic shift shows the same delta.
-        tcols = self._q("src",
-                        "select table_name, column_name"
-                        " from information_schema.columns where table_schema=%s"
-                        " and data_type in ('datetime','timestamp')"
-                        " and table_name not like 'migkit%%'", (db,))
-        shifts = []
-        for t, col in tcols[:10]:
-            pk = self._pk_cols(db, t)
-            if len(pk) != 1:
-                continue
-            p = pk[0]
-
-            def rows(side, dbn):
-                q = (f"select `{p}`, unix_timestamp(`{col}`)"
-                     f" from `{dbn}`.`{t}` where `{col}` is not null"
-                     f" order by `{p}` limit 200")
-                return {str(r[0]): r[1] for r in self._rows_utc(side, q)
-                        if r[1] is not None}
-            line = verdict.uniform_shift(f"{t}.{col}", rows("src", db),
-                                         rows("dst", ddb))
-            if line:
-                shifts.append(line)
-        res.append(verdict.timeshift_result(db, shifts))
-
-        # charset corruption: a text column downgraded from utf8mb4 to a
-        # narrower charset (utf8mb3/latin1) on the target truncates or drops
-        # 4-byte characters (emoji, astral CJK), and a lossy transcode leaves
-        # U+FFFD replacement characters - both silent.
-        csq = ("select table_name, column_name, character_set_name"
-               " from information_schema.columns where table_schema=%s"
-               " and character_set_name is not null"
-               " and table_name not like 'migkit%%'")
-        scs = {(r[0], r[1]): r[2] for r in self._q("src", csq, (db,))}
-        dcs = {(r[0], r[1]): r[2] for r in self._q("dst", csq, (ddb,))}
-        WIDTH = {"utf8mb4": 4, "utf8mb3": 3, "utf8": 3, "latin1": 1,
-                 "latin2": 1, "ascii": 1}
-        csbad = []
-        for k, s2 in sorted(scs.items()):
-            d2 = dcs.get(k)
-            if d2 and d2 != s2:
-                note = f"{k[0]}.{k[1]}: charset {s2} -> {d2}"
-                if WIDTH.get(d2, 9) < WIDTH.get(s2, 0):
-                    note += " (DOWNGRADE, drops/truncates multibyte chars)"
-                csbad.append(note)
-        tcols = self._q("src",
-                        "select distinct table_name, column_name"
-                        " from information_schema.columns where table_schema=%s"
-                        " and data_type in ('char','varchar','text','tinytext',"
-                        "'mediumtext','longtext') and table_name not like"
-                        " 'migkit%%'", (db,))
-        for t, col in tcols[:30]:
-            q = ("select coalesce(sum(char_length(convert(`{c}` using utf8mb4))"
-                 " - char_length(replace(convert(`{c}` using utf8mb4),"
-                 " _utf8mb4 0xEFBFBD, ''))),0) from `{d}`.`{t}`")
-            try:
-                sv = int(self._q("src", q.format(c=col, d=db, t=t))[0][0])
-                dv = int(self._q("dst", q.format(c=col, d=ddb, t=t))[0][0])
-            except Exception:
-                continue
-            if dv > sv:
-                csbad.append(f"{t}.{col}: {dv - sv} extra U+FFFD replacement"
-                             " chars on target")
-        if csbad:
-            res.append(Result("deep", f"{db} charset", "diff",
-                              "; ".join(csbad[:6]), "",
-                              "keep the target column utf8mb4 and re-load the"
-                              " affected rows over a utf8mb4 connection"))
-        else:
-            res.append(Result("deep", f"{db} charset", "ok",
-                              "text column charsets match, no replacement-char"
-                              " excess"))
+        res.append(self._deep_timeshift(db))
+        res.append(self._deep_charset(db, ddb))
 
         # partitioned tables (mysql): a missing partition sends rows to the
         # MAXVALUE catch-all, a changed method/expression reroutes them, and
         # a partition can arrive empty with the table's total plausible -
         # the counts and the data check read the table whole
         res.append(self._deep_partitions(db, ddb))
-
-        # generated/computed columns (mysql)
-        genq = ("select table_name, column_name, extra,"
-                " coalesce(generation_expression,'')"
-                " from information_schema.columns where table_schema=%s"
-                " and generation_expression <> '' and generation_expression"
-                " is not null and table_name not like 'migkit%%'")
-        sg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", genq, (db,))}
-        dg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", genq, (ddb,))}
-
-        def _n(e):
-            return re.sub(r"\s+", "", e).lower()
-        gbad = []
-        for k, (extra, expr) in sorted(sg.items()):
-            t, col = k
-            if k not in dg:
-                gbad.append(f"{t}.{col}: generated on source,"
-                            " plain/missing on target")
-                continue
-            if _n(expr) != _n(dg[k][1]):
-                gbad.append(f"{t}.{col}: generation expression differs")
-                continue
-            if "STORED" in (extra or "").upper():
-                try:
-                    n = self._q("dst", f"select count(*) from `{ddb}`.`{t}`"
-                                f" where not (`{col}` <=> ({dg[k][1]}))")[0][0]
-                    if n > 0:
-                        gbad.append(f"{t}.{col}: {n} rows where the stored"
-                                    " value != its expression")
-                except Exception:
-                    pass
-        for k in sorted(dg):
-            if k not in sg:
-                gbad.append(f"{k[0]}.{k[1]}: generated on target but plain"
-                            " on source")
-        res.append(Result("deep", f"{db} generated",
-                          "diff" if gbad else "ok",
-                          "; ".join(gbad[:6]) if gbad
-                          else (f"{len(sg)} generated columns match"
-                                if sg else "no generated columns"), "",
-                          "align the generation expression/storage and"
-                          " re-derive the column" if gbad else ""))
+        res.append(self._deep_generated(db, ddb))
 
         # collation unique-collapse (mysql): a unique/pk text column on a
         # case/accent-insensitive target collation collapses distinct source
@@ -4480,7 +5047,8 @@ class MySQLEngine(Engine):
             detail = f"{t}.{col}: unique-key collation src({scoll}) != dst({dcoll})"
             try:
                 n = self._q("src", f"select count(*) from (select 1 from"
-                            f" `{db}`.`{t}` group by `{col}` collate {dcoll}"
+                            f" {self._qualified('src', db, t)} group by"
+                            f" {_qi(col)} collate {_qi(dcoll)}"
                             f" having count(*) > 1) x")[0][0]
                 if n > 0:
                     detail += (f"; {n} source groups COLLAPSE to duplicates"
@@ -4516,11 +5084,11 @@ class MySQLEngine(Engine):
 
         def maxes(side):
             out = {}
-            sdb = self._d(side, db)
             for i in range(0, len(both), 200):
                 q = " union all ".join(
-                    f"select '{t}', coalesce(max(`{c}`), 0)"
-                    f" from `{sdb}`.`{t}`" for t, c in both[i:i + 200])
+                    f"select {_ql(t)}, coalesce(max({_qi(c)}), 0)"
+                    f" from {self._qualified(side, db, t)}"
+                    for t, c in both[i:i + 200])
                 out.update({r[0]: int(r[1]) for r in self._q(side, q)})
             return out
 
@@ -4553,6 +5121,167 @@ class MySQLEngine(Engine):
         res += self._deep_ownership(db, ddb)
         res += [r for r in (self.set_aside(db),) if r]
         return res
+
+    #: rows of a temporal column the time-shift check pairs on both sides
+    SHIFT_ROWS = 200
+
+    def _deep_timeshift(self, db):
+        """A constant per-row offset on a datetime or timestamp column is a
+        time zone conversion bug - a mover that applied a session in
+        another zone - not row corruption. Every connection here is in UTC
+        (`SESSION_ZONE`), so a faithful copy compares as delta 0 and a
+        systematic shift shows the same delta on every row. The first
+        `SHIFT_ROWS` rows of every such column, paired by the table's key;
+        a table with no key cannot pair its rows and is named. It read the
+        first ten columns, of tables with a one-column key, and dropped a
+        failed read (audit 2026-10-01, LG2), in sessions whose zone it set
+        and let fail silently (LG4)."""
+        from .. import rowtext, verdict
+        from ..util import Probes
+        cols = self._deep_columns(db, ("datetime", "timestamp"))
+        probes = Probes("date and time columns", [
+            f"{t}.{c}" for t, cs in cols.items() for c in cs])
+        shifts = []
+        for t, columns in sorted(cols.items()):
+            pks = self._pk_cols(db, t)
+            if not pks:
+                for c in columns:
+                    probes.failed(f"{t}.{c}", "no key to pair its rows by")
+                continue
+            key = rowtext.mysql_row(pks)
+            order = ", ".join(_qi(k) for k in pks)
+            for c in columns:
+                def rows(side):
+                    q = (f"select {key}, unix_timestamp({_qi(c)})"
+                         f" from {self._qualified(side, db, t)} where"
+                         f" {_qi(c)} is not null order by {order}"
+                         f" limit {self.SHIFT_ROWS}")
+                    return {str(r[0]): r[1] for r in self._q(side, q)
+                            if r[1] is not None}
+                with probes.reading(f"{t}.{c}"):
+                    line = verdict.uniform_shift(f"{t}.{c}", rows("src"),
+                                                 rows("dst"))
+                    if line:
+                        shifts.append(line)
+        r = verdict.timeshift_result(db, shifts)
+        r.status, r.detail = probes.verdict(r.status, r.detail)
+        return r
+
+    #: characters a character set holds, as bytes a character, to say
+    #: which change of one loses them
+    CHARSET_WIDTH = {"utf8mb4": 4, "utf8mb3": 3, "utf8": 3, "latin1": 1,
+                     "latin2": 1, "ascii": 1}
+
+    def _deep_charset(self, db, ddb):
+        """Charset corruption: a text column downgraded from utf8mb4 to a
+        narrower charset (utf8mb3/latin1) on the target truncates or drops
+        4-byte characters (emoji, astral CJK), and a lossy transcode leaves
+        U+FFFD replacement characters - both silent. Every text column of
+        every table in scope, each table in one scan a side; it read the
+        first 30 and dropped a failed read (audit 2026-10-01, LG2)."""
+        from ..util import Probes
+        csq = ("select table_name, column_name, character_set_name"
+               " from information_schema.columns where table_schema=%s"
+               " and character_set_name is not null"
+               f" and table_name not in {OWN_SQL}")
+        scs = {(r[0], r[1]): r[2] for r in self._q("src", csq, (db,))}
+        dcs = {(r[0], r[1]): r[2] for r in self._q("dst", csq, (ddb,))}
+        csbad = []
+        for k, s2 in sorted(scs.items()):
+            d2 = dcs.get(k)
+            if d2 and d2 != s2:
+                note = f"{k[0]}.{k[1]}: charset {s2} -> {d2}"
+                if self.CHARSET_WIDTH.get(d2, 9) < self.CHARSET_WIDTH.get(
+                        s2, 0):
+                    note += " (DOWNGRADE, drops/truncates multibyte chars)"
+                csbad.append(note)
+        cols = self._deep_columns(db, ("char", "varchar", "text", "tinytext",
+                                       "mediumtext", "longtext"))
+        there = set(self._all_tables("dst", db))
+        probes = Probes("text columns", [f"{t}.{c}" for t, cs in cols.items()
+                                         if t in there for c in cs])
+        for t, columns in sorted(cols.items()):
+            if t not in there:
+                continue
+            exprs = ", ".join(
+                f"coalesce(sum(char_length(convert({_qi(c)} using utf8mb4))"
+                f" - char_length(replace(convert({_qi(c)} using utf8mb4),"
+                " _utf8mb4 0xEFBFBD, ''))), 0)" for c in columns)
+            try:
+                sv = self._q("src", f"select {exprs} from"
+                                    f" {self._qualified('src', db, t)}")[0]
+                dv = self._q("dst", f"select {exprs} from"
+                                    f" {self._qualified('dst', db, t)}")[0]
+            except Exception as e:  # noqa: BLE001 - named in the result
+                for c in columns:
+                    probes.failed(f"{t}.{c}", e)
+                continue
+            for c, s, d in zip(columns, sv, dv):
+                probes.done(f"{t}.{c}")
+                if int(d) > int(s):
+                    csbad.append(f"{t}.{c}: {int(d) - int(s)} extra U+FFFD"
+                                 " replacement chars on target")
+        if csbad:
+            r = Result("deep", f"{db} charset", "diff",
+                       "; ".join(csbad[:6]), "",
+                       "keep the target column utf8mb4 and re-load the"
+                       " affected rows over a utf8mb4 connection")
+        else:
+            r = Result("deep", f"{db} charset", "ok",
+                       "text column charsets match, no replacement-char"
+                       " excess")
+        r.status, r.detail = probes.verdict(r.status, r.detail)
+        return r
+
+    def _deep_generated(self, db, ddb):
+        """Generated columns: the same expression on both sides, and every
+        stored one holding what its expression gives on the target. A
+        stored column whose rows could not be read is named; it was passed
+        over and the result said the columns match (audit 2026-10-01,
+        LG2)."""
+        from ..util import Probes
+        genq = ("select table_name, column_name, extra,"
+                " coalesce(generation_expression,'')"
+                " from information_schema.columns where table_schema=%s"
+                " and generation_expression <> '' and generation_expression"
+                f" is not null and table_name not in {OWN_SQL}")
+        sg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", genq, (db,))}
+        dg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", genq, (ddb,))}
+
+        def _n(e):
+            return re.sub(r"\s+", "", e).lower()
+        gbad = []
+        probes = Probes("stored generated columns")
+        for k, (extra, expr) in sorted(sg.items()):
+            t, col = k
+            if k not in dg:
+                gbad.append(f"{t}.{col}: generated on source,"
+                            " plain/missing on target")
+                continue
+            if _n(expr) != _n(dg[k][1]):
+                gbad.append(f"{t}.{col}: generation expression differs")
+                continue
+            if "STORED" in (extra or "").upper():
+                with probes.reading(f"{t}.{col}"):
+                    n = self._q("dst", "select count(*) from"
+                                       f" {self._qualified('dst', db, t)}"
+                                       f" where not ({_qi(col)} <=>"
+                                       f" ({dg[k][1]}))")[0][0]
+                    if n > 0:
+                        gbad.append(f"{t}.{col}: {n} rows where the stored"
+                                    " value != its expression")
+        for k in sorted(dg):
+            if k not in sg:
+                gbad.append(f"{k[0]}.{k[1]}: generated on target but plain"
+                            " on source")
+        status, detail = probes.verdict(
+            "diff" if gbad else "ok",
+            "; ".join(gbad[:6]) if gbad
+            else (f"{len(sg)} generated columns match" if sg
+                  else "no generated columns"))
+        return Result("deep", f"{db} generated", status, detail, "",
+                      "align the generation expression/storage and"
+                      " re-derive the column" if gbad else "")
 
     def _fk_orphans(self, db):
         """Rows on the target whose foreign key points at nothing: loads run
@@ -4804,12 +5533,41 @@ class MySQLEngine(Engine):
     TEXTY = ("char", "varchar", "text", "tinytext", "mediumtext", "longtext")
     FLOATY = ("float", "double")
 
-    def _text_columns(self, db, limit=30):
-        q = ("select table_name, column_name from information_schema.columns"
-             " where table_schema=%s and data_type in ("
-             + ",".join(["%s"] * len(self.TEXTY)) + ")"
-             " and table_name not like 'migkit%%' order by 1,2")
-        return self._q("src", q, (db,) + self.TEXTY)[:limit]
+    def _deep_scan(self, db, data_types, what, aggregates):
+        """{(table, column): (source's aggregates, target's)} for every
+        column of `data_types` in every table of the hop on both sides,
+        each table read in one scan a side (`aggregates(quoted column)` is
+        a column's list of aggregates), and the `Probes` of what was
+        planned and what could not be read - the readers it replaces took
+        the first 30 columns, one scan each, and dropped a failed read
+        (audit 2026-10-01, LG2)."""
+        from ..util import Probes
+        cols = self._deep_columns(db, data_types)
+        there = set(self._all_tables("dst", db))
+        probes = Probes(what, [f"{t}.{c}" for t, cs in cols.items()
+                               for c in cs])
+        got = {}
+        for t, columns in sorted(cols.items()):
+            if t not in there:
+                for c in columns:
+                    probes.failed(f"{t}.{c}", "not on the target")
+                continue
+            exprs = [a for c in columns for a in aggregates(_qi(c))]
+            each = len(exprs) // len(columns)
+            try:
+                sv = self._q("src", f"select {', '.join(exprs)} from"
+                                    f" {self._qualified('src', db, t)}")[0]
+                dv = self._q("dst", f"select {', '.join(exprs)} from"
+                                    f" {self._qualified('dst', db, t)}")[0]
+            except Exception as e:  # noqa: BLE001 - named in the result
+                for c in columns:
+                    probes.failed(f"{t}.{c}", e)
+                continue
+            for i, c in enumerate(columns):
+                probes.done(f"{t}.{c}")
+                got[(t, c)] = (sv[i * each:(i + 1) * each],
+                               dv[i * each:(i + 1) * each])
+        return got, probes
 
     def _deep_nullempty(self, db, ddb):
         """NULL and '' are different values that a mover happily swaps.
@@ -4817,50 +5575,45 @@ class MySQLEngine(Engine):
         Both sides still hold "something" in the column, so a row checksum
         can be equal on one engine's reading and not another's - and the
         application's `IS NULL` and `= ''` branches diverge. Comparing the
-        two counts per column is what catches it.
+        two counts per column is what catches it - for every text column
+        (`_deep_scan`).
         """
+        got, probes = self._deep_scan(
+            db, self.TEXTY, "text columns",
+            lambda c: (f"coalesce(sum({c} is null), 0)",
+                       f"coalesce(sum({c} = ''), 0)"))
         bad = []
-        for tbl, col in self._text_columns(db):
-            q = (f"select sum(`{col}` is null), sum(`{col}` = '')"
-                 f" from `%s`.`{tbl}`")
-            try:
-                sv = self._q("src", q % db)[0]
-                dv = self._q("dst", q % ddb)[0]
-            except Exception:
-                continue
+        for (tbl, col), (sv, dv) in sorted(got.items()):
             s = (int(sv[0] or 0), int(sv[1] or 0))
             d = (int(dv[0] or 0), int(dv[1] or 0))
             if s != d:
                 bad.append(f"{tbl}.{col}: src null/empty={s[0]}|{s[1]}"
                            f" dst={d[0]}|{d[1]}")
         if bad:
-            return [Result("deep", f"{db} nullempty", "diff",
-                           f"{len(bad)} text columns differ in NULL vs"
-                           " empty-string split (semantic flip): "
-                           + "; ".join(bad[:5]), "",
+            status, detail = probes.verdict(
+                "diff", f"{len(bad)} text columns differ in NULL vs"
+                        " empty-string split (semantic flip): "
+                        + "; ".join(bad[:5]))
+            return [Result("deep", f"{db} nullempty", status, detail, "",
                            "normalize with NULLIF(col,'') / COALESCE per"
                            " column intent; decide which side is canonical")]
-        return [Result("deep", f"{db} nullempty", "ok",
-                       "NULL vs empty-string consistent on text columns")]
+        status, detail = probes.verdict(
+            "ok", "NULL vs empty-string consistent on text columns")
+        return [Result("deep", f"{db} nullempty", status, detail)]
 
     def _deep_float(self, db, ddb):
         """FLOAT and DOUBLE are approximations, so a checksum over them is
         the wrong instrument: identical values can hash differently and real
         drift can hash the same. Compare the aggregate with a tolerance
-        instead, which is what the value actually supports."""
-        q = ("select table_name, column_name from information_schema.columns"
-             " where table_schema=%s and data_type in (%s, %s)"
-             " and table_name not like 'migkit%%' order by 1,2")
-        cols = self._q("src", q, (db,) + self.FLOATY)[:30]
+        instead, which is what the value actually supports - for every
+        float column (`_deep_scan`)."""
+        got, probes = self._deep_scan(
+            db, self.FLOATY, "float/double columns",
+            lambda c: (f"count({c})", f"coalesce(sum({c}), 0)",
+                       f"coalesce(max(abs({c})), 0)"))
         bad = []
-        for tbl, col in cols:
-            agg = (f"select count(`{col}`), coalesce(sum(`{col}`),0),"
-                   f" coalesce(max(abs(`{col}`)),0) from `%s`.`{tbl}`")
-            try:
-                sn, ss, smax = self._q("src", agg % db)[0]
-                dn, ds, dmax = self._q("dst", agg % ddb)[0]
-            except Exception:
-                continue
+        for (tbl, col), ((sn, ss, smax), (dn, ds, dmax)) in sorted(
+                got.items()):
             if int(sn or 0) != int(dn or 0):
                 bad.append(f"{tbl}.{col}: non-null count src={sn} dst={dn}")
                 continue
@@ -4871,14 +5624,17 @@ class MySQLEngine(Engine):
             if abs(ss - ds) > scale * 1e-9:
                 bad.append(f"{tbl}.{col}: sum src={ss!r} dst={ds!r}")
         if bad:
-            return [Result("deep", f"{db} float", "diff",
-                           f"{len(bad)} float/double columns drift beyond"
-                           " tolerance: " + "; ".join(bad[:5]), "",
+            status, detail = probes.verdict(
+                "diff", f"{len(bad)} float/double columns drift beyond"
+                        " tolerance: " + "; ".join(bad[:5]))
+            return [Result("deep", f"{db} float", status, detail, "",
                            "a mover that changed the column's precision will"
                            " do this; compare the column definitions first")]
-        return [Result("deep", f"{db} float", "ok",
-                       f"{len(cols)} float/double columns within tolerance"
-                       if cols else "no float/double columns")]
+        status, detail = probes.verdict(
+            "ok", f"{len(got)} float/double columns within tolerance"
+                  if probes.planned else "no float/double columns")
+        return [Result("deep", f"{db} float", status, detail)]
+
 
     def _deep_unenforced_checks(self, db, ddb):
         """MySQL's version of PostgreSQL's NOT VALID.
@@ -4894,7 +5650,7 @@ class MySQLEngine(Engine):
              "   on cc.constraint_schema = tc.constraint_schema"
              "  and cc.constraint_name = tc.constraint_name"
              " where tc.constraint_schema=%s and tc.constraint_type='CHECK'"
-             " and tc.table_name not like 'migkit%%'")
+             f" and tc.table_name not in {OWN_SQL}")
         try:
             src = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", q, (db,))}
             dst = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", q, (ddb,))}
@@ -4952,7 +5708,7 @@ class MySQLEngine(Engine):
         # comparing users that exist on one side only just restates the users
         # check; what is worth knowing here is whether the users that DO exist
         # on both sides carry the same rights on this database
-        on_target = getattr(self, "_grant_users", {}).get("dst", set())
+        on_target = self._privileges("dst")["accounts"]
         # a user present on the target is comparable even when it holds
         # nothing there yet - that is a total loss of its grants, and it used
         # to be reported as "the user does not exist on target", which was
@@ -4992,92 +5748,262 @@ class MySQLEngine(Engine):
                        f"{total} grants match on {len(shared)} users"
                        if shared else "no non-system user grants this database")]
 
-    def _grants_for_db(self, side, dbn):
-        """{user@host -> set(privileges)} granted ON this database.
+    #: seconds what one side's grant tables say is kept before it is read
+    #: again; a repair that grants reads it again at once
+    GRANTS_SECONDS = 60
 
-        Read through SHOW GRANTS because that is what `migkit users create`
-        replays when it builds the users, so the check and the repair agree on
-        what a grant is. information_schema.*_PRIVILEGES would be one query
-        instead of N, but it is filtered to what the connected account happens
-        to be able to see - the same trap the postgres side avoids by reading
-        relacl rather than information_schema.
-        """
-        import os
-        from ..users import MYSQL_SYS
-        # same knob the postgres side reads, so one setting covers both engines
-        ign = MYSQL_SYS | {r.strip() for r in os.environ.get(
-            "GRANTS_IGNORE_ROLES", "").split(",") if r.strip()}
-        try:
-            users = [(u, h) for u, h in self._q(
-                side, "select user, host from mysql.user")
-                if u not in ign and not u.startswith("AWS_")]
-        except Exception as e:
-            return {}, f"{type(e).__name__}: {str(e)[:70]}"
+    #: the privilege a column of `mysql.user` or `mysql.db` grants, where
+    #: its name does not say it (`Create_tmp_table_priv`)
+    _PRIV_COLUMNS = {"create_tmp_table": "CREATE TEMPORARY TABLES",
+                     "repl_slave": "REPLICATION SLAVE",
+                     "repl_client": "REPLICATION CLIENT",
+                     "show_db": "SHOW DATABASES"}
+    #: a word of `tables_priv`, `columns_priv` or `procs_priv`, where the
+    #: privilege a GRANT names is another (MariaDB's history rows)
+    _PRIV_WORDS = {"DELETE VERSIONING ROWS": "DELETE HISTORY"}
+    #: the grant option of a level, kept apart from its privileges: MySQL
+    #: holds it once for every privilege of the level
+    OPTION = "GRANT OPTION"
 
-        # `db`.* and `db`.`tbl`, with or without the backticks MySQL prints
-        # depending on version, and never `dbase` when we asked for `db`
-        pat = re.compile(r"\sON\s+`?" + re.escape(dbn) + r"`?\s*\.", re.I)
-        out = {}
-        # every account this side has, whether or not it holds anything on
-        # this database. Without it, a user that exists on the target but was
-        # granted nothing there is indistinguishable from one that is not
-        # there at all - and it used to be reported as the second.
-        seen = getattr(self, "_grant_users", None)
-        if seen is None:
-            seen = self._grant_users = {}
-        seen = seen.setdefault(side, set())
-        seen.clear()
-        store = getattr(self, "_grant_raw", None)
-        if store is None:
-            store = self._grant_raw = {}
-        raw = store.setdefault(side, {})
-        for u, h in users:
+    @classmethod
+    def _priv_of(cls, column):
+        """`Create_tmp_table_priv` -> `CREATE TEMPORARY TABLES`, `Grant_priv`
+        -> the level's grant option (`OPTION`)."""
+        base = str(column).lower()[:-len("_priv")]
+        if base == "grant":
+            return cls.OPTION
+        return cls._PRIV_COLUMNS.get(base, base.replace("_", " ").upper())
+
+    @classmethod
+    def _privs_in(cls, words):
+        """The privileges a `Table_priv`/`Column_priv`/`Proc_priv` set
+        holds, the grant option as `OPTION`."""
+        out = set()
+        for w in str(words or "").split(","):
+            w = w.strip().upper()
+            if w:
+                out.add(cls.OPTION if w == "GRANT"
+                        else cls._PRIV_WORDS.get(w, w))
+        return out
+
+    def _privileges(self, side, fresh=False):
+        """{"accounts", "roles", "items", "default", "error"} of one side,
+        read from the grant tables themselves - `mysql.user`, `db`,
+        `tables_priv`, `columns_priv`, `procs_priv`, `global_grants` and
+        the role edges and default roles (`role_edges` and
+        `default_roles`, MariaDB's `roles_mapping` and `default_role`) - in
+        one statement a table, and kept (`GRANTS_SECONDS`).
+
+        `items` is {account: {(level, database, object, privilege)}}: a
+        level of `global`, `db` (its database a pattern as the grant names
+        it), `table`, `column` (`table.column`), `routine` (`TYPE name`),
+        `role` (privilege `ROLE` or `ADMIN OPTION`); `default` is {account:
+        frozenset(role)}. The grants were read by `SHOW GRANTS` an account,
+        a database and a side at a time, each on a connection of its own,
+        and only a database's own were seen: a global grant, a role and its
+        default, a grant on `app\\_%.*` and a routine's were invisible
+        (audit 2026-10-01, SC10). System accounts and the ones
+        `GRANTS_IGNORE_ROLES` names are left out (`users.system_principal`,
+        the one list `users`, `assess` and these read)."""
+        import pymysql
+
+        from .. import envkeys
+        from ..users import system_principal
+        lock = self.__dict__.setdefault("_privs_lock", threading.Lock())
+        known = self.__dict__.setdefault("_privs_of", {})
+        with lock:
+            got = known.get(side)
+            if not fresh and got is not None and \
+                    time.monotonic() - got["at"] < self.GRANTS_SECONDS:
+                return got
+            ignore = set(envkeys.items("GRANTS_IGNORE_ROLES"))
+            got = {"at": time.monotonic(), "accounts": set(), "roles": set(),
+                   "items": {}, "default": {}, "error": ""}
+            mariadb = self._side_brand(side).name == "mariadb"
+
+            def rows(sql, absent_ok=False):
+                try:
+                    return [{str(k).lower(): v for k, v in r.items()}
+                            for r in self._q(side, sql, named=True)]
+                except pymysql.err.MySQLError as e:
+                    if absent_ok and e.args and e.args[0] in (1146, 1109):
+                        return []
+                    raise
+
+            def who(user, host, role=False):
+                return str(user) if role and not str(host) else \
+                    f"{user}@{host}"
+
+            def skipped(user):
+                # the server's own, the provider's, the operator's list, and
+                # the account migkit's own replica signs in with
+                return (system_principal("mysql", user) or str(user) in ignore
+                        or str(user) == self.REPL_USER)
+
+            def add(account, *item):
+                got["items"].setdefault(account, set()).add(item)
             try:
-                rows = self._q(side, "show grants for %s@%s", (u, h))
-            except Exception:
-                # a user that was dropped mid-scan, or one this account may not
-                # inspect: skip the user, do not fail the whole check
-                continue
-            keep = [r[0] for r in rows
-                    if pat.search(r[0]) and not r[0].startswith("GRANT PROXY")]
-            # `keep` already holds the statement text, so the canonical form
-            # is taken from the line - indexing it again would take its first
-            # character, which for a moment it did: every user's privilege set
-            # came out as {'G'}
-            who = f"{u}@{h}"
-            seen.add(who)
-            privs = {self._canon_grant(line, dbn) for line in keep}
-            if privs:
-                out[who] = privs
-                # the server's own text, kept so the repair replays exactly
-                # what it printed instead of reassembling a GRANT from the
-                # canonical form and getting the quoting subtly wrong
-                for line in keep:
-                    raw[(who, self._canon_grant(line, dbn))] = line
-        return out, ""
+                users = rows("select * from mysql.user")
+                db_rows = rows("select * from mysql.db")
+                tables = rows("select host, db, user, table_name, table_priv"
+                              " from mysql.tables_priv")
+                columns = rows("select host, db, user, table_name,"
+                               " column_name, column_priv from"
+                               " mysql.columns_priv")
+                procs = rows("select host, db, user, routine_name,"
+                             " routine_type, proc_priv from mysql.procs_priv")
+                dynamic = rows("select user, host, priv, with_grant_option"
+                               " from mysql.global_grants", absent_ok=True)
+                edges = rows("select * from mysql.role_edges",
+                             absent_ok=True) if not mariadb else []
+                defaults = rows("select * from mysql.default_roles",
+                                absent_ok=True) if not mariadb else []
+                mapping = rows("select * from mysql.roles_mapping",
+                               absent_ok=True) if mariadb else []
+            except pymysql.err.MySQLError as e:
+                got["error"] = f"{type(e).__name__}: {str(e)[:70]}"
+                known[side] = got
+                return got
+            for u in users:
+                if skipped(u["user"]):
+                    continue
+                role = str(u.get("is_role") or "N").upper() == "Y"
+                me = who(u["user"], u["host"], role)
+                got["accounts"].add(me)
+                if role:
+                    got["roles"].add(me)
+                for col, v in u.items():
+                    if col.endswith("_priv") and str(v).upper() == "Y":
+                        add(me, "global", "", "*.*", self._priv_of(col))
+                if mariadb and u.get("default_role"):
+                    got["default"][me] = frozenset({str(u["default_role"])})
+            for r in db_rows:
+                if skipped(r["user"]):
+                    continue
+                for col, v in r.items():
+                    if col.endswith("_priv") and str(v).upper() == "Y":
+                        add(who(r["user"], r["host"]), "db", str(r["db"]),
+                            "*", self._priv_of(col))
+            for r in tables:
+                if not skipped(r["user"]):
+                    for p in self._privs_in(r["table_priv"]):
+                        add(who(r["user"], r["host"]), "table", str(r["db"]),
+                            str(r["table_name"]), p)
+            for r in columns:
+                if not skipped(r["user"]):
+                    for p in self._privs_in(r["column_priv"]):
+                        add(who(r["user"], r["host"]), "column",
+                            str(r["db"]),
+                            f"{r['table_name']}.{r['column_name']}", p)
+            for r in procs:
+                if not skipped(r["user"]):
+                    for p in self._privs_in(r["proc_priv"]):
+                        add(who(r["user"], r["host"]), "routine",
+                            str(r["db"]),
+                            f"{str(r['routine_type']).upper()}"
+                            f" {r['routine_name']}", p)
+            for r in dynamic:
+                if not skipped(r["user"]):
+                    me = who(r["user"], r["host"])
+                    add(me, "global", "", "*.*", str(r["priv"]).upper())
+                    if str(r["with_grant_option"]).upper() == "Y":
+                        add(me, "global", "", "*.*",
+                            f"{str(r['priv']).upper()} {self.OPTION}")
+            for r in edges:
+                if skipped(r["to_user"]):
+                    continue
+                me = who(r["to_user"], r["to_host"])
+                role = who(r["from_user"], r["from_host"])
+                add(me, "role", "", role, "ROLE")
+                if str(r.get("with_admin_option")).upper() == "Y":
+                    add(me, "role", "", role, "ADMIN OPTION")
+            for r in mapping:
+                if skipped(r["user"]):
+                    continue
+                me = who(r["user"], r["host"], True)
+                add(me, "role", "", str(r["role"]), "ROLE")
+                if str(r.get("admin_option")).upper() == "Y":
+                    add(me, "role", "", str(r["role"]), "ADMIN OPTION")
+            for r in defaults:
+                if not skipped(r["user"]):
+                    me = who(r["user"], r["host"])
+                    got["default"][me] = got["default"].get(
+                        me, frozenset()) | {who(r["default_role_user"],
+                                                r["default_role_host"])}
+            known[side] = got
+            return got
 
     @staticmethod
-    def _canon_grant(text, dbn):
-        """Same grant, same string on both sides.
+    def _db_matches(pattern, name):
+        """Whether a database-level grant on `pattern` covers `name`: `_`
+        and `%` are wildcards there unless a backslash escapes them, as
+        the server reads them."""
+        rx = ""
+        i = 0
+        p = str(pattern)
+        while i < len(p):
+            ch = p[i]
+            if ch == "\\" and i + 1 < len(p):
+                rx += re.escape(p[i + 1])
+                i += 2
+                continue
+            rx += "." if ch == "_" else ".*" if ch == "%" else re.escape(ch)
+            i += 1
+        return re.fullmatch(rx, str(name), re.S) is not None
 
-        Two servers print the identical privilege set differently: spacing,
-        backtick style, and an IDENTIFIED BY tail on older versions. Without
-        this every user reads as a diff on a pair of servers that agree.
+    def _grant_said(self, item, dbn):
+        """One grant as a check compares and names it - `GRANT SELECT ON
+        <db>.* TO app@%`, the database's own name as `<db>`, so a hop that
+        maps it to another name on the target compares alike."""
+        level, gdb, obj, priv = item
+        where = "<db>" if gdb == dbn else gdb
+        if level == "global":
+            return f"GRANT {priv} ON *.*"
+        if level == "db":
+            return f"GRANT {priv} ON {where}.*"
+        if level == "table":
+            return f"GRANT {priv} ON {where}.{obj}"
+        if level == "column":
+            t, _, c = obj.partition(".")
+            return f"GRANT {priv} ({c}) ON {where}.{t}"
+        if level == "routine":
+            kind, _, name = obj.partition(" ")
+            return f"GRANT {priv} ON {kind} {where}.{name}"
+        return f"GRANT {obj}" + (" WITH ADMIN OPTION" if priv != "ROLE"
+                                 else "")
 
-        The database name is replaced by a marker because a hop may map the
-        database to a different name on the target - otherwise every single
-        grant would differ for the one reason we already know about.
+    def _grants_on(self, side, dbn):
+        """{account: {said: item}} of the grants that decide what an
+        account may do in database `dbn` on one side: the global ones,
+        the database's own and every pattern that covers it, its tables',
+        columns' and routines', and the account's roles and default
+        roles."""
+        got = self._privileges(side)
+        out = {}
+        for me, items in got["items"].items():
+            for item in items:
+                level, gdb = item[0], item[1]
+                if level in ("table", "column", "routine") and gdb != dbn:
+                    continue
+                if level == "db" and gdb != dbn and \
+                        not self._db_matches(gdb, dbn):
+                    continue
+                out.setdefault(me, {})[self._grant_said(item, dbn)] = item
+        for me, roles in got["default"].items():
+            for role in roles:
+                out.setdefault(me, {})[f"DEFAULT ROLE {role}"] = (
+                    "default", "", role, "DEFAULT")
+        return out
 
-        Deliberately NOT uppercased: on Linux MySQL table names are
-        case-sensitive, so folding case here would let CatalogProduct and
-        catalogproduct compare equal. SHOW GRANTS already prints privilege
-        keywords in upper case, so there is nothing left to normalise.
-        """
-        t = re.sub(r"\s+", " ", text.strip()).replace("`", "")
-        t = re.sub(r"\s+IDENTIFIED BY.*$", "", t, flags=re.I)
-        t = re.sub(r"(\sON\s+)" + re.escape(dbn) + r"(\s*\.)",
-                   r"\1<db>\2", t, flags=re.I)
-        return t.rstrip(";")
+    def _grants_for_db(self, side, dbn):
+        """({account: {grant as said}}, why it could not be read) for
+        database `dbn` on one side (`_grants_on`)."""
+        got = self._privileges(side)
+        if got["error"]:
+            return {}, got["error"]
+        return ({me: set(g) for me, g in self._grants_on(side, dbn).items()},
+                "")
+
 
     def _events(self, side, db):
         """{event: (time_zone, sql_mode, CREATE EVENT)} as the server shows
@@ -5174,7 +6100,7 @@ class MySQLEngine(Engine):
         q = ("select tc.table_name, tc.constraint_name, tc.enforced"
              " from information_schema.table_constraints tc"
              " where tc.constraint_schema=%s and tc.constraint_type='CHECK'"
-             " and tc.table_name not like 'migkit%%'")
+             f" and tc.table_name not in {OWN_SQL}")
         try:
             src = {(r[0], r[1]): str(r[2]).upper()
                    for r in self._q("src", q, (db,))}
@@ -5196,76 +6122,147 @@ class MySQLEngine(Engine):
                             " was not enforcing")
 
     def _grant_repair(self, db):
-        """Replay the grants the mover did not carry, with a REVOKE to undo.
+        """Grant what the source gives and the target lacks, with what
+        undoes each, statement by statement.
 
-        The statement replayed is the one the source server printed, with only
-        the database name swapped for the target's. Reassembling a GRANT from
-        the canonical comparison form would mean re-deriving the quoting, and
-        the quoting is exactly what differs between servers - which is why the
-        canonical form exists in the first place.
-
-        Users that exist on one side only are left alone: that is the users
-        check's finding, and `migkit users create` replays their whole grant
-        set. Granting to an account that does not exist would just fail.
-        """
+        Built from the grant tables (`_privileges`), each name quoted as a
+        name and each account as a string (`_qi`, `_ql`): the source's own
+        `SHOW GRANTS` text was replayed with the database's name swapped,
+        and the grants that text holds besides the database's - global,
+        role, default role - were never seen at all (audit 2026-10-01,
+        SC10). Users that exist on one side only are left alone: that is
+        the users check's finding, and `migkit users create` replays their
+        whole grant set. Granting to an account that does not exist would
+        just fail. A global grant or a role is the account's, not the
+        database's: planned once a run, by the first database whose check
+        finds it missing."""
         ddb = self._d("dst", db)
         src, serr = self._grants_for_db("src", db)
         dst, derr = self._grants_for_db("dst", ddb)
         if serr or derr:
             return None
-        raw = getattr(self, "_grant_raw", {}).get("src", {})
+        src_on = self._grants_on("src", db)
+        dst_on = self._grants_on("dst", ddb)
+        roles = self._privileges("dst")["roles"]
         # an account that exists on the target holding nothing on this
         # database is exactly the case worth repairing, and `dst` only lists
         # accounts that already hold something - so the target's account list
         # decides, not its grant list
-        on_target = getattr(self, "_grant_users", {}).get("dst", set())
+        on_target = self._privileges("dst")["accounts"]
+        planned = self.__dict__.setdefault("_account_grants_planned", set())
         stmts, undo, n = [], [], 0
         for who in sorted(set(src) & on_target):
+            have = set(dst_on.get(who, {}).values())
+            groups, defaults = {}, False
             for g in sorted(src[who] - dst.get(who, set())):
-                line = raw.get((who, g))
-                if not line:
+                item = src_on[who][g]
+                level, gdb, obj, priv = item
+                if level in ("global", "role", "default"):
+                    if (who, item) in planned:
+                        continue
+                    planned.add((who, item))
+                if level == "default":
+                    defaults = True
                     continue
-                fwd = self._retarget_grant(line, db, ddb)
-                stmts.append(fwd)
-                undo += self._revoke_for(fwd)
+                groups.setdefault((level, ddb if gdb == db else gdb, obj),
+                                  []).append(priv)
+                n += 1
+            for (level, gdb, obj), privs in sorted(groups.items()):
+                fwd, back = self._grant_sql(who, who in roles, level, gdb,
+                                            obj, privs, have)
+                stmts += fwd
+                undo += back
+            if defaults:
+                fwd, back = self._default_roles_sql(
+                    who, who in roles, src_on[who], dst_on.get(who, {}))
+                stmts += fwd
+                undo += back
                 n += 1
         if not stmts:
             return None
         return RepairAction(db, "grants", stmts, undo,
                             f"{n} grants the mover did not carry")
 
-    @staticmethod
-    def _retarget_grant(line, src_db, dst_db):
-        """The source's own GRANT, pointed at the target's database name."""
-        # the target's name quoted, and handed over as it is: a backslash
-        # or a back quote in it is the name's, never the pattern's
-        there = "`" + str(dst_db).replace("`", "``") + "`"
-        out = re.sub(r"(\sON\s+)`?" + re.escape(src_db) + r"`?(\s*\.)",
-                     lambda m: m.group(1) + there + m.group(2), line,
-                     flags=re.I)
-        return out.rstrip(";") + ";"
+    def _account_sql(self, who, role=False):
+        """An account as GRANT names it: `'app'@'%'`, a MariaDB role by its
+        name alone."""
+        if role and "@" not in who:
+            return _ql(who)
+        user, _, host = who.rpartition("@")
+        return f"{_ql(user)}@{_ql(host)}"
 
-    @staticmethod
-    def _revoke_for(grant):
-        """The statements that undo one GRANT.
+    def _default_roles_sql(self, who, role, src_items, dst_items):
+        """([SET DEFAULT ROLE as the source has it], [as the target had
+        it]): the statement sets the whole list, so its undo is the
+        target's whole list, NONE where it had none."""
+        mariadb = self._side_brand("dst").name == "mariadb"
+        to = self._account_sql(who, role)
 
-        `WITH GRANT OPTION` is revoked separately because MySQL will not take
-        it as part of the privilege list, and leaving it granted would undo
-        less than the forward statement did.
-        """
-        body = grant.rstrip(";")
-        extra = []
-        if re.search(r"\s+WITH\s+GRANT\s+OPTION\s*$", body, re.I):
-            body = re.sub(r"\s+WITH\s+GRANT\s+OPTION\s*$", "", body,
-                          flags=re.I)
-            extra.append(re.sub(r"^GRANT\s+.*?\s+ON\s", "GRANT OPTION ON ",
-                                body, flags=re.I)
-                         .replace(" TO ", " FROM ", 1)
-                         .replace("GRANT OPTION ON ", "REVOKE GRANT OPTION ON ",
-                                  1) + ";")
-        rev = re.sub(r"^GRANT\s", "REVOKE ", body, flags=re.I)
-        rev = rev.replace(" TO ", " FROM ", 1)
-        return [rev + ";"] + extra
+        def setting(names):
+            said = ", ".join(self._account_sql(r, "@" not in r)
+                             for r in sorted(names)) or "NONE"
+            return (f"SET DEFAULT ROLE {said} FOR {to};" if mariadb
+                    else f"SET DEFAULT ROLE {said} TO {to};")
+        return ([setting(i[2] for i in src_items.values()
+                         if i[0] == "default")],
+                [setting(i[2] for i in dst_items.values()
+                         if i[0] == "default")])
+
+    def _grant_sql(self, who, role, level, gdb, obj, privs, have):
+        """([statements], [what undoes them]) granting `privs` of one level
+        and object to `who` on the target, `gdb` the target's database (a
+        pattern kept as it is). `have` is what the target holds already:
+        a grant option given to what it had is undone by putting it back
+        without one, and nothing is revoked twice - an undo script stops
+        on the first statement that fails."""
+        to = self._account_sql(who, role)
+        opt = self.OPTION
+        if level == "role":
+            name = self._account_sql(obj, "@" not in obj)
+            admin = " WITH ADMIN OPTION" if "ADMIN OPTION" in privs else ""
+            if "ROLE" in privs:
+                return ([f"GRANT {name} TO {to}{admin};"],
+                        [f"REVOKE {name} FROM {to};"])
+            return ([f"GRANT {name} TO {to} WITH ADMIN OPTION;"],
+                    [f"REVOKE {name} FROM {to};", f"GRANT {name} TO {to};"])
+        dyn = sorted(p[:-len(f" {opt}")] for p in privs
+                     if p.endswith(f" {opt}"))
+        plain = sorted(p for p in privs if p != opt
+                       and not p.endswith(f" {opt}") and p not in dyn)
+        option = opt in privs
+        if level == "global":
+            on = "*.*"
+        elif level == "db":
+            on = f"{_qi(gdb)}.*"
+        elif level == "table":
+            on = f"{_qi(gdb)}.{_qi(obj)}"
+        elif level == "column":
+            t, _, c = obj.partition(".")
+            on = f"{_qi(gdb)}.{_qi(t)}"
+            plain = [f"{p} ({_qi(c)})" for p in plain]
+        else:
+            kind, _, name = obj.partition(" ")
+            on = f"{kind} {_qi(gdb)}.{_qi(name)}"
+        out, back = [], []
+        if plain:
+            out.append(f"GRANT {', '.join(plain)} ON {on} TO {to}"
+                       + (" WITH GRANT OPTION;" if option else ";"))
+            back.append(f"REVOKE {', '.join(plain)} ON {on} FROM {to};")
+        elif option:
+            # the option alone, given with what the target holds there
+            held = sorted(i[3] for i in have if i[:3] == (level, gdb, obj)
+                          and i[3] != opt and not i[3].endswith(f" {opt}"))
+            out.append(f"GRANT {', '.join(held) or 'USAGE'} ON {on} TO {to}"
+                       " WITH GRANT OPTION;")
+        if option:
+            back.append(f"REVOKE GRANT OPTION ON {on} FROM {to};")
+        for p in dyn:
+            out.append(f"GRANT {p} ON *.* TO {to} WITH GRANT OPTION;")
+            back.append(f"REVOKE {p} ON *.* FROM {to};")
+            if ("global", "", "*.*", p) in have:
+                back.append(f"GRANT {p} ON *.* TO {to};")
+        return out, back
+
 
     def repair_plan(self, db, kind):
         actions = []
@@ -5368,13 +6365,14 @@ class MySQLEngine(Engine):
 
     def _target_client(self, physical, sql):
         """Run a script on the target's database `physical` through the
-        client, which handles routine and trigger bodies (DELIMITER). The
-        password in the environment, not on the command line, where every
-        process listing on the machine could read it."""
-        tg = self.hop.target
-        return run(["mysql", "-h", tg.host, "-P", str(tg.port),
-                    "-u", tg.user, physical], input=sql,
-                   env={"MYSQL_PWD": tg.password})
+        client, which handles routine and trigger bodies (DELIMITER), with
+        the hop's TLS (`_client_argv`). Never sent twice: DDL commits as
+        it goes, so a script sent again after `Lost connection` applied its
+        first half again and failed on `Duplicate column`, hiding the cause
+        (audit 2026-10-01, W11) - only a failure to connect is tried
+        again."""
+        return run([*self._client_argv("mysql", "dst"), physical], input=sql,
+                   env=self._client_env("dst"), writes=True)
 
     def rehearse(self, db, action):
         """Run a schema fix and then its undo on a scratch copy of the
@@ -5402,20 +6400,19 @@ class MySQLEngine(Engine):
                                 " where schema_name = %s",
                          (self._d("dst", db),))
             self._q("dst", f"create database {q}"
-                           + (f" character set {cs[0][0]} collate {cs[0][1]}"
-                              if cs else ""))
+                           + (f" character set {_qi(cs[0][0])} collate"
+                              f" {_qi(cs[0][1])}" if cs else ""))
         except Exception as e:
             return True, ("the undo was not rehearsed: a scratch database"
                           " could not be made on the target ("
                           + str(e).strip().splitlines()[-1][:100] + ")")
         try:
             try:
-                ep = self.hop.target
-                copy = run(["mysqldump", "-h", ep.host, "-P", str(ep.port),
-                            "-u", ep.user, "--no-data", "--routines",
+                copy = run([*self._client_argv("mysqldump", "dst"),
+                            "--no-data", "--routines",
                             "--triggers", "--events", "--skip-comments",
                             "--column-statistics=0", self._d("dst", db)],
-                           env={"MYSQL_PWD": ep.password})
+                           env=self._client_env("dst"))
                 self._target_client(scratch, "set foreign_key_checks = 0;\n"
                                     + copy.stdout)
             except Exception as e:
@@ -5523,11 +6520,15 @@ class MySQLEngine(Engine):
             return
         if action.kind in ("schema", "grants", "constraints"):
             # mysql CLI handles routine/trigger bodies (DELIMITER) correctly
-            tg = self.hop.target
             ddl = "\n".join(action.statements) + "\n"
             if action.kind == "grants":
                 ddl += "flush privileges;\n"
-            self._target_client(self._d("dst", db), ddl)
+            try:
+                self._target_client(self._d("dst", db), ddl)
+            finally:
+                # what the target holds now is read again, not remembered
+                self.__dict__.pop("_privs_of", None)
+                self._forget_catalog("dst", db)
             return
         if action.kind != "rows":
             # the same trap the postgres side had: an unhandled kind used to
@@ -7216,19 +8217,12 @@ class MySQLEngine(Engine):
                 + (f" where {where}" if where else ""))
 
     def _client_tls(self, side):
-        """The endpoint's TLS options (`mysql_tls`) as the client's own
-        flags."""
-        o = (self.hop.source if side == "src" else self.hop.target
-             ).options or {}
-        if o.get("ssl_ca"):
-            out = [f"--ssl-ca={o['ssl_ca']}",
-                   "--ssl-mode=" + ("VERIFY_IDENTITY"
-                                    if o.get("ssl_verify_identity", True)
-                                    else "VERIFY_CA")]
-            out += [f"--{k.replace('_', '-')}={o[k]}"
-                    for k in ("ssl_cert", "ssl_key") if o.get(k)]
-            return out
-        return ["--ssl-mode=REQUIRED"] if o.get("ssl") else []
+        """The side's TLS as the client's and its dump's own flags
+        (`Endpoint.tls_forms`' `client`): the options, or where they say
+        nothing what asking the server found (`tls.auto`) - read from the
+        options alone, a certificate the server's verified by was not
+        checked by the client."""
+        return list(self._ep(side).tls_forms("mysql")["client"])
 
     def _pass_ctx(self, db, t, log):
         from . import my_pass
