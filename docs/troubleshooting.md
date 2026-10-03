@@ -1549,6 +1549,22 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
+* the row filter <...> is not SQL the source reads: <...>
+
+* the row filter <...> has no translation into the target's SQL: <...>
+
+* <...> is not a column - a document store is asked of its fields only
+
+* <...> is not a value a document store's query can hold - write it out as a literal
+
+* <...>: no document query says it - filter on comparisons, IN, BETWEEN, LIKE and IS NULL
+
+* <...>: IS takes NULL only here
+
+* IN over a subquery has no document query
+
+* <...>: the reference does not read it
+
 * <...>: no database to keep the machines' records in on the target
 
 * <...>: its machines have nowhere to agree on who writes - <...>. Keep the hop's run state in a bucket (state: {backend: s3}), or name a directory every machine sees (state: {shared: <path>})
