@@ -4297,17 +4297,30 @@ select json_build_object(
         what the schema comparers and the schema fix leave out beside the
         tables, so the fix never makes one on the target. Nothing for a hop
         that takes everything, which is read as it always was."""
+        return {self._split(n)
+                for kind, names in self.objects_left_out(side, db).items()
+                if kind in self.OWN_NAMED for n in names}
+
+    def objects_left_out(self, side, db):
+        """{kind: [name]} of a side's objects beside its tables that the
+        hop leaves out (`_object_left_out`), as the inventory names them:
+        views and materialized views, sequences, routines without their
+        arguments, and triggers as `schema.table.trigger`. What the
+        comparers and the schema fix leave out (`_objects_not_taken`), and
+        what the schema a move makes leaves out with them
+        (`movers._pg_schema`). Nothing for a hop that takes everything,
+        which is read as it always was."""
         from ..config import scoped
         if not scoped(self.hop):
-            return set()
+            return {}
         out = self._object_left_out(side, db)
-        got = set()
+        got = {}
         for line in self._psql(side, db, INVENTORY_SQL).splitlines():
             kind, _, name = line.partition("|")
-            if kind in self.OWN_NAMED and out(kind, name):
+            if kind in self.OWN_NAMED + ("trigger",) and out(kind, name):
                 if kind in ("function", "procedure"):
                     name = name.split("(", 1)[0]
-                got.add(self._split(name))
+                got.setdefault(kind, []).append(name)
         return got
 
     def check_objects(self, db):
@@ -4557,6 +4570,44 @@ select json_build_object(
             return False
         return self.in_scope(db, t)
 
+    def in_scope(self, db, table):
+        """`Engine.in_scope`, a table without its schema read in `public`
+        as `_split` reads it: `regclass` names a table on the search path
+        without one, and `orders` asked as itself missed an `include` of
+        `appdb.public.orders`. A partition is asked with its table's name
+        (`_ruled`)."""
+        return not self.hop.excluded(db, *self._ruled(db, table))
+
+    def _ruled(self, db, t):
+        """(schema, table) the hop's rules are asked about table `t` with:
+        its table's where it is a partition (`root_of`), the name
+        `exclude`, `include` and `mapping.where` are written in. Asked by
+        its own name, a partition of a table the hop leaves out was
+        compared with the target's own rows, and one of a filtered table
+        read whole. Asked only of a hop with such a rule
+        (`movers.rules_by_name`), and by its own name where the source
+        cannot be asked, as it always was."""
+        from ..movers import rules_by_name
+        if not rules_by_name(self.hop):
+            return self._split(t)
+        try:
+            return self.root_of("src", db, t)
+        except Exception:  # noqa: BLE001 - by its own name, then
+            return self._split(t)
+
+    def root_of(self, side, db, table):
+        """(schema, table) of the table at the top of `table`'s partitions
+        on a side, its own where it is none (`partition_roots`), however
+        either is quoted."""
+        roots = self.partition_roots(side, db)
+        got = self.__dict__.get("_split_roots")
+        if got is None or got[0] is not roots:
+            got = (roots, {self._split(a): self._split(b)
+                           for a, b in roots.items()})
+            self.__dict__["_split_roots"] = got
+        key = self._split(table)
+        return got[1].get(key, key)
+
     def _scoped(self, db, lines, sep="|"):
         """The lines of a listing - catalogue rows whose first field, up to
         `sep`, is the table they are about - that are of a table the hop
@@ -4782,7 +4833,8 @@ select json_build_object(
         disagree about which rows are in scope.
 
         Rows the filter excludes that are sitting on the target anyway are
-        a separate question, answered by `_outside_filter`.
+        a separate question, answered by `_outside_filter`. A partition's
+        filter is its table's (`_ruled`).
 
         Asked for the target (`side="dst"`), the table under the name the
         hop gives it there (`Hop.target_table_in`): the delta reads both
@@ -4790,7 +4842,7 @@ select json_build_object(
         source's name.
         """
         sch, tbl = self._split(t)
-        pred = (self.hop.row_filter(db, sch, tbl)
+        pred = (self.hop.row_filter(db, *self._ruled(db, t))
                 if hasattr(self.hop, "row_filter") else None)
         if side == "dst" and hasattr(self.hop, "target_table_in"):
             sch, tbl = split_table("postgres", self.hop.target_table_in(
@@ -4809,7 +4861,7 @@ select json_build_object(
         where the predicate is NULL is counted too.
         """
         sch, tbl = self._split(t)
-        pred = (self.hop.row_filter(db, sch, tbl)
+        pred = (self.hop.row_filter(db, *self._ruled(db, t))
                 if hasattr(self.hop, "row_filter") else None)
         if not pred:
             return None
@@ -6331,11 +6383,18 @@ select json_build_object(
         return got
 
     def moved_nothing(self, db):
-        """Which tables the source has rows in and the target does not."""
+        """Which tables the source has rows in and the target does not.
+
+        Each asked as the move carried it: a partition by its table's scope
+        and row filter (`_ruled`) - one of a table the hop leaves out, or
+        whose filter selects none of its rows, was said to have received
+        nothing - and a renamed table, or a partition of one, under the
+        name the hop gives it on the target, where it was looked for under
+        the name it no longer has."""
+        from .. import movers
         try:
             src = set(self._psql("src", db, self.USER_TABLES).splitlines())
-            dst = set(self._psql("dst", db,
-                                 self.USER_TABLES).splitlines())
+            dst = set(self.user_tables("dst", db, "all"))
         except Exception:
             return None
         empty = []
@@ -6343,13 +6402,25 @@ select json_build_object(
         # target does not have at all received nothing either, and asking
         # only about the shared ones passed a target with no tables
         for t in sorted(x for x in src if x):
+            if not self.in_scope(db, t):
+                continue
+            sch, tbl = self._ruled(db, t)
+            there = t
+            if movers._renamed(self.hop, db, [sch, tbl]):
+                there = ".".join(split_table(
+                    "postgres", self.hop.target_table_in(db, sch, tbl), sch))
             # through the same scope as every other check read: a table
             # whose row filter selects nothing is correctly empty
-            q = f"select 1 from {self._scope(db, t)} limit 1"
+            pred = self.hop.row_filter(db, sch, tbl)
+            where = f" where {pred}" if pred else ""
             try:
-                has_src = bool(self._psql("src", db, q).strip())
-                has_dst = t in dst and bool(self._psql(
-                    "dst", db, q).strip())
+                has_src = bool(self._psql(
+                    "src", db, f"select 1 from {self._qualified('src', db, t)}"
+                               f"{where} limit 1").strip())
+                has_dst = there in dst and bool(self._psql(
+                    "dst", db, "select 1 from"
+                               f" {self._qualified('dst', db, there)}"
+                               f"{where} limit 1").strip())
             except Exception:
                 return None
             if has_src and not has_dst:
@@ -10946,9 +11017,23 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             " and n.nspname not like '\\_\\_%' order by 1")
         # what the hop excludes is the target's, and another tool's
         # bookkeeping nobody's: the copier took both, and wrote over a
-        # table the target owns with the source's rows
-        got = [tuple(x.split("|")) for x in out.splitlines()
-               if x and not self.hop.excluded(db, *x.split("|"))]
+        # table the target owns with the source's rows. A partition is
+        # asked with its table's name, which the hop's rules are written
+        # in (`in_scope`, `_ruled`); one whose table the pair carries - its
+        # columns mapped, or renamed (`through_pair`) - goes as that table,
+        # once: the pair reads it through its table
+        got = {}
+        for x in out.splitlines():
+            if not x:
+                continue
+            s, t = x.split("|", 1)
+            if not self.in_scope(db, f"{s}.{t}"):
+                continue
+            root = self._ruled(db, f"{s}.{t}")
+            if root != (s, t) and self.through_pair(db, ".".join(root)):
+                s, t = root
+            got[(s, t)] = True
+        got = list(got)
         # an online schema change's working tables are not the
         # application's rows, and go when it swaps them in
         from .. import drift
@@ -12125,8 +12210,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         # The hop's row filter, applied on both ends: only the rows it
         # selects are read, and only the rows it selects are replaced. A
         # target row outside the filter is not this copy's to delete - the
-        # check reports it separately (`_outside_filter`).
-        rf = (self.hop.row_filter(db, sch, tbl)
+        # check reports it separately (`_outside_filter`). A partition's is
+        # its table's (`_ruled`): asked with its own name, it had none, and
+        # its rows were carried unfiltered
+        rf = (self.hop.row_filter(db, *self._ruled(db, f"{sch}.{tbl}"))
               if hasattr(self.hop, "row_filter") else None)
         if st.get("done") and self.recheck_done(db, key, st, log, rf):
             ck.save()

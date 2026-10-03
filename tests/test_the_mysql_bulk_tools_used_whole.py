@@ -354,10 +354,11 @@ def test_every_feature_has_a_state_and_a_reason():
 
 @needs_dump
 def test_every_option_the_table_says_is_used_is_in_a_command_line(tmp_path):
-    dump, load = movers._mydumper_commands(_hop(tmp_path), "appdb", 2,
-                                           tmp_path / "d", tmp_path / "c",
-                                           tmp_path / "o", logs=True,
-                                           compress=True)
+    # a hop that leaves something out, so its pattern is the dump's too
+    hop = _hop(tmp_path, exclude=["audit_*"])
+    dump, load = movers._mydumper_commands(
+        hop, "appdb", 2, tmp_path / "d", tmp_path / "c", tmp_path / "o",
+        logs=True, compress=True, regex=movers._mydumper_regex(hop, "appdb"))
     from migkit import tooluse
     for tool, argv in (("mydumper", dump), ("myloader", load)):
         flags = [(f, state) for (_, f), (state, _) in
