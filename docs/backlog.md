@@ -2750,8 +2750,8 @@ store). What was still nowhere:
   way (`waiting for handler commit`), or takes `Binlog_snapshot_*` where
   the server gives it; replaying from the start of the binlog file was
   tried and dropped - measured, it brought back rows from before a `DROP
-  DATABASE`. Still open: the wait needs `PROCESS` (without it nothing is
-  waited for, as before); MongoDB's resume token and MariaDB's/Percona's
+  DATABASE`. The wait needs `PROCESS`: without it the copy is refused,
+  saying the grant (done 2026-10-04, `sees_every_session`). Still open: MongoDB's resume token and MariaDB's/Percona's
   snapshot position are not measured here.
 * **Uniform time shift and type narrowing on MySQL.** #22 of the smart
   check work: the PostgreSQL deep checks for a constant per-row epoch

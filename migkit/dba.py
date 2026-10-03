@@ -549,6 +549,10 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
         out.append(_change(side, "read the binary log (replication)", ok,
                            "may" if ok else "may not", "replication_grants",
                            ctx))
+        ok = _has(privs, "*", "PROCESS")
+        out.append(_change(side, "see the commits under way (PROCESS)", ok,
+                           "may" if ok else "may not", "process_grant",
+                           ctx))
     _following(out[start:])
     return out
 
