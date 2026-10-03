@@ -73,13 +73,17 @@ def test_every_way_is_a_rung_with_one_scope_and_its_class_is_declared():
 def test_an_engine_migkit_does_not_hold_says_why():
     assert decide.cell("dynamodb", "writes held")[0] == decide.NOT_APPLICABLE
     assert "access policies" in freeze.not_held("dynamodb")
-    assert decide.cell("clickhouse", "writes held") == (decide.NOT_YET,
-                                                        "F2")
-    assert freeze.not_held("clickhouse") == "migkit holds no writes of it" \
-                                            " yet"
-    assert freeze.hold_for(Hop(name="x", engine="clickhouse",
-                               source=Endpoint(), target=Endpoint()),
-                           _Eng("clickhouse")).rungs() == ()
+    # a target kept by grants, whose source migkit cannot freeze: no
+    # session ends another's there
+    assert decide.cell("dsql", "writes held")[0] == decide.NOT_APPLICABLE
+    assert "no session ends another's" in freeze.not_held("dsql")
+    hop = Hop(name="x", engine="dsql", source=Endpoint(), target=Endpoint())
+    assert freeze.hold_for(hop, _Eng("dsql")).rungs() == ()
+    assert [r.name for r in freeze.hold_for(hop, _Eng("dsql"),
+                                            "dst").keep_rungs()] == [
+        "pgw_grants"]
+    # an engine nobody declared falls to the gap's item, never to a way
+    assert decide.WAYS["writes held"]["*"] == (decide.NOT_YET, "F2")
 
 
 def test_the_whole_server_goes_first_where_it_is_all_the_hops(
@@ -120,6 +124,7 @@ def test_redis_holds_the_server_or_refuses_the_accounts(tmp_path,
                                                         monkeypatch):
     hop = _hop(tmp_path, "redis")
     _facts(monkeypatch, freeze.RedisHold, version=(7, 2), acl=True,
+           **{"one server": True},
            **{"stream back": False})
     assert freeze.choose(hop, _Eng("redis"), ["0"]).rung.name == \
         "redis_pause"
@@ -127,6 +132,7 @@ def test_redis_holds_the_server_or_refuses_the_accounts(tmp_path,
         == "redis_accounts"
     # a stream back applies on the old source as writes: not held there
     _facts(monkeypatch, freeze.RedisHold, version=(7, 2), acl=True,
+           **{"one server": True},
            **{"stream back": True})
     got = freeze.choose(hop, _Eng("redis"), ["0"])
     assert got.rung.name == "redis_accounts" and "stream back" in \
@@ -134,12 +140,14 @@ def test_redis_holds_the_server_or_refuses_the_accounts(tmp_path,
     # 6.0: neither - holding writes alone needs 6.2, reading an account's
     # refusal back 7.0
     _facts(monkeypatch, freeze.RedisHold, version=(6, 0), acl=True,
+           **{"one server": True},
            **{"stream back": False})
     got = freeze.choose(hop, _Eng("redis"), ["0"])
     assert got.rung is None and "6.2" in got.reason and "7.0" in \
         got.reason, got
     # neither lets migkit write a mark: a drain by one finds no way
     _facts(monkeypatch, freeze.RedisHold, version=(7, 2), acl=True,
+           **{"one server": True},
            **{"stream back": False})
     assert freeze.choose(hop, _Eng("redis"), ["0"],
                          need=(freeze.OURS,)).rung is None

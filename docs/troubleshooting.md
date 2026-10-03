@@ -237,8 +237,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the copy stopped: <...> <...> | <...>Nothing past the last finished table is marked as moved. The commands that ran are in the run's commands.log.
 
-* protect_target is set, and keeping the application from writing to the target is not available for <...> hops yet - nothing has been copied. Remove the option to move without it.
-
 * <...>: a seed from a copy of the source's pages cannot be held to the number of the machine that holds the hop, so it is not run with standby on. Seed it from one machine with standby off, then turn standby on for the change stream (--mode cdc). Nothing was written
 
 * moving and then following a <...> source is not set up on this machine; migkit doctor says what is missing
@@ -594,6 +592,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...> of the application's sessions could not be ended - migkit's account may not end them
 
 * the <...> is not held by migkit here: <...>
+
+* <...>: protect_target is set, and <...> - nothing has been copied. Remove the option to move without it.
 
 * the provider made read_only 1, and the server still reads it off
 
